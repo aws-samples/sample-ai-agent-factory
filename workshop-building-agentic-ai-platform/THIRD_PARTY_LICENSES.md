@@ -12,9 +12,9 @@ Installed into participant environments via `requirements.txt` under each module
 |---|---|---|---|
 | `boto3` | `==1.42.87` | Apache-2.0 | https://github.com/boto/boto3 |
 | `botocore` | transitive from boto3 | Apache-2.0 | https://github.com/boto/botocore |
-| `requests` | `==2.32.4` | Apache-2.0 | https://github.com/psf/requests |
-| `pydantic` | `==2.7.2` | MIT | https://github.com/pydantic/pydantic |
-| `litellm` | `==1.83.0` | MIT | https://github.com/BerriAI/litellm |
+| `requests` | `==2.33.0` | Apache-2.0 | https://github.com/psf/requests |
+| `pydantic` | `==2.10.6` | MIT | https://github.com/pydantic/pydantic |
+| `litellm` | `==1.84.0` | MIT | https://github.com/BerriAI/litellm |
 | `strands-agents[litellm]` | `==0.1.5` (Modules 2–3 venv/IDE); `==1.32.0` (Module 4 FAST agent pattern, matching FAST v0.4.1) | Apache-2.0 | https://github.com/strands-agents/sdk-python |
 | `openai` | `==2.8.0` (Module 2 step-4 SDK demo) | Apache-2.0 | https://github.com/openai/openai-python |
 | `httpx` | `==0.27.0` | BSD-3-Clause | https://github.com/encode/httpx |

@@ -1,9 +1,12 @@
 # Pinned to exact tested versions for supply-chain reproducibility.
 boto3==1.42.87
-requests==2.32.4
-# pydantic 2.9.2 is the first 2.x that ships a pydantic-core with prebuilt
-# cp313 wheels; 2.7.2 forced a source build that fails on Python 3.13 (the
-# workshop interpreter) because its bundled PyO3 maxes out at 3.12.
-pydantic==2.9.2
-litellm==1.83.0
+# requests 2.33.0 fixes the insecure temp-file reuse in extract_zipped_paths.
+requests==2.33.0
+# pydantic 2.10.6: 2.9.x lacked a prebuilt cp313 pydantic-core wheel pre-2.9.2,
+# and litellm 1.84.0 requires pydantic >= 2.10.0. 2.10.6 ships cp313 wheels.
+pydantic==2.10.6
+# litellm 1.84.0 patches the auth-bypass (host-header injection), SQL injection
+# in proxy key verification, SSTI, MCP stdio command execution, and the
+# custom-code guardrail sandbox escape (GHSA advisories, < 1.84.0).
+litellm==1.84.0
 strands-agents[litellm]==0.1.5

@@ -15,10 +15,13 @@ Parameters:
   # floating tags like main-stable / 16) for supply-chain reproducibility.
   LiteLLMImageTag:
     Type: String
-    # v1.83.14-stable patches CVE-2026-47101 / CVE-2026-47102 / CVE-2026-40217
-    # (CVSS 9.9 privilege-escalation + RCE) present in the earlier 1.83.x stable
-    # images. Pinned to a specific release for supply-chain reproducibility.
-    Default: v1.83.14-stable
+    # v1.84.0-stable is the first release that patches the full set of LiteLLM
+    # advisories affecting < 1.84.0: auth bypass via host-header injection, SQL
+    # injection in proxy API-key verification, SSTI in /prompts/test, command
+    # execution via MCP stdio test endpoints, and the custom-code guardrail
+    # sandbox escape (plus the earlier CVE-2026-47101/47102/40217 priv-esc/RCE).
+    # Pinned to a specific release for supply-chain reproducibility.
+    Default: v1.84.0-stable
     Description: >
       Tag for the LiteLLM Docker image
       (docker.litellm.ai/berriai/litellm-database). Pinned to a specific
