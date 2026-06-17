@@ -1,0 +1,428 @@
+# LiteLLM Proxy Configuration
+# This file defines the models, guardrails, and settings for the LLM Gateway.
+# It is loaded by the LiteLLM proxy at startup.
+#
+# All models use the Bedrock Converse API via IAM task role auth.
+# Participants must enable model access in Amazon Bedrock > Model Access
+# before using each model.
+
+model_list:
+  # ─────────────────────────────────────────────────────────
+  # Anthropic Claude
+  # ─────────────────────────────────────────────────────────
+
+  # Claude 4.6 (latest generation)
+  - model_name: claude-opus-4.6
+    litellm_params:
+      model: bedrock/us.anthropic.claude-opus-4-6-v1
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: claude-sonnet-4.6
+    litellm_params:
+      model: bedrock/us.anthropic.claude-sonnet-4-6
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # Claude 4.5
+  - model_name: claude-opus-4.5
+    litellm_params:
+      model: bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: claude-sonnet-4.5
+    litellm_params:
+      model: bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: claude-haiku-4.5
+    litellm_params:
+      model: bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # Claude 4.1
+  - model_name: claude-opus-4.1
+    litellm_params:
+      model: bedrock/us.anthropic.claude-opus-4-1-20250805-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # Claude 4
+  - model_name: claude-sonnet-4
+    litellm_params:
+      model: bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # Claude 3.5
+  - model_name: claude-3.5-haiku
+    litellm_params:
+      model: bedrock/us.anthropic.claude-3-5-haiku-20241022-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # Convenience aliases (point to latest)
+  - model_name: claude-opus
+    litellm_params:
+      model: bedrock/us.anthropic.claude-opus-4-6-v1
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: claude-sonnet
+    litellm_params:
+      model: bedrock/us.anthropic.claude-sonnet-4-6
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: claude-haiku
+    litellm_params:
+      model: bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # ─────────────────────────────────────────────────────────
+  # Amazon Nova
+  # ─────────────────────────────────────────────────────────
+  - model_name: nova-premier
+    litellm_params:
+      model: bedrock/us.amazon.nova-premier-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: nova-pro
+    litellm_params:
+      model: bedrock/us.amazon.nova-pro-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: nova-lite
+    litellm_params:
+      model: bedrock/us.amazon.nova-lite-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: nova-sonic
+    litellm_params:
+      model: bedrock/us.amazon.nova-sonic-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # Nova 2 generation
+  - model_name: nova-2-lite
+    litellm_params:
+      model: bedrock/us.amazon.nova-2-lite-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: nova-2-sonic
+    litellm_params:
+      model: bedrock/us.amazon.nova-2-sonic-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # ─────────────────────────────────────────────────────────
+  # Amazon Titan
+  # ─────────────────────────────────────────────────────────
+  - model_name: titan-text-premier
+    litellm_params:
+      model: bedrock/amazon.titan-text-premier-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # titan-text-express-v1 and titan-text-lite-v1 are end-of-life — removed
+
+  # ─────────────────────────────────────────────────────────
+  # Meta Llama
+  # ─────────────────────────────────────────────────────────
+
+  # Llama 4
+  - model_name: llama4-scout
+    litellm_params:
+      model: bedrock/us.meta.llama4-scout-17b-instruct-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: llama4-maverick
+    litellm_params:
+      model: bedrock/us.meta.llama4-maverick-17b-instruct-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # Llama 3.3
+  - model_name: llama3.3-70b
+    litellm_params:
+      model: bedrock/us.meta.llama3-3-70b-instruct-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # Llama 3.2
+  - model_name: llama3.2-90b
+    litellm_params:
+      model: bedrock/us.meta.llama3-2-90b-instruct-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: llama3.2-11b
+    litellm_params:
+      model: bedrock/us.meta.llama3-2-11b-instruct-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: llama3.2-3b
+    litellm_params:
+      model: bedrock/us.meta.llama3-2-3b-instruct-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: llama3.2-1b
+    litellm_params:
+      model: bedrock/us.meta.llama3-2-1b-instruct-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # Llama 3.1
+  - model_name: llama3.1-405b
+    litellm_params:
+      model: bedrock/us.meta.llama3-1-405b-instruct-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: llama3.1-70b
+    litellm_params:
+      model: bedrock/us.meta.llama3-1-70b-instruct-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: llama3.1-8b
+    litellm_params:
+      model: bedrock/us.meta.llama3-1-8b-instruct-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # Llama 3
+  - model_name: llama3-70b
+    litellm_params:
+      model: bedrock/us.meta.llama3-70b-instruct-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: llama3-8b
+    litellm_params:
+      model: bedrock/us.meta.llama3-8b-instruct-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # ─────────────────────────────────────────────────────────
+  # Mistral AI
+  # ─────────────────────────────────────────────────────────
+  - model_name: mistral-large-3
+    litellm_params:
+      model: bedrock/us.mistral.mistral-large-3-675b-instruct
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: devstral-2
+    litellm_params:
+      model: bedrock/us.mistral.devstral-2-123b
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: magistral-small
+    litellm_params:
+      model: bedrock/us.mistral.magistral-small-2509
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: ministral-14b
+    litellm_params:
+      model: bedrock/us.mistral.ministral-3-14b-instruct
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: ministral-8b
+    litellm_params:
+      model: bedrock/us.mistral.ministral-3-8b-instruct
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: ministral-3b
+    litellm_params:
+      model: bedrock/us.mistral.ministral-3-3b-instruct
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: mistral-large
+    litellm_params:
+      model: bedrock/us.mistral.mistral-large-2407-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: mistral-small
+    litellm_params:
+      model: bedrock/us.mistral.mistral-small-2402-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: mixtral-8x7b
+    litellm_params:
+      model: bedrock/us.mistral.mixtral-8x7b-instruct-v0:1
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: mistral-7b
+    litellm_params:
+      model: bedrock/us.mistral.mistral-7b-instruct-v0:2
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # ─────────────────────────────────────────────────────────
+  # Cohere
+  # ─────────────────────────────────────────────────────────
+  - model_name: cohere-command-r-plus
+    litellm_params:
+      model: bedrock/cohere.command-r-plus-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: cohere-command-r
+    litellm_params:
+      model: bedrock/cohere.command-r-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # ─────────────────────────────────────────────────────────
+  # AI21 Labs
+  # ─────────────────────────────────────────────────────────
+  - model_name: jamba-1.5-large
+    litellm_params:
+      model: bedrock/ai21.jamba-1-5-large-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: jamba-1.5-mini
+    litellm_params:
+      model: bedrock/ai21.jamba-1-5-mini-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # ─────────────────────────────────────────────────────────
+  # DeepSeek
+  # ─────────────────────────────────────────────────────────
+  - model_name: deepseek-r1
+    litellm_params:
+      model: bedrock/us.deepseek.r1-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: deepseek-v3
+    litellm_params:
+      model: bedrock/us.deepseek.v3-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: deepseek-v3.2
+    litellm_params:
+      model: bedrock/us.deepseek.v3.2
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # ─────────────────────────────────────────────────────────
+  # Writer
+  # ─────────────────────────────────────────────────────────
+  - model_name: palmyra-x5
+    litellm_params:
+      model: bedrock/writer.palmyra-x5-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: palmyra-x4
+    litellm_params:
+      model: bedrock/writer.palmyra-x4-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # ─────────────────────────────────────────────────────────
+  # Google (Gemma)
+  # ─────────────────────────────────────────────────────────
+  - model_name: gemma-3-27b
+    litellm_params:
+      model: bedrock/google.gemma-3-27b-it
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: gemma-3-12b
+    litellm_params:
+      model: bedrock/google.gemma-3-12b-it
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: gemma-3-4b
+    litellm_params:
+      model: bedrock/google.gemma-3-4b-it
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # ─────────────────────────────────────────────────────────
+  # NVIDIA (Nemotron)
+  # ─────────────────────────────────────────────────────────
+  - model_name: nemotron-nano-30b
+    litellm_params:
+      model: bedrock/nvidia.nemotron-nano-3-30b
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: nemotron-nano-12b
+    litellm_params:
+      model: bedrock/nvidia.nemotron-nano-12b-v2
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: nemotron-nano-9b
+    litellm_params:
+      model: bedrock/nvidia.nemotron-nano-9b-v2
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # ─────────────────────────────────────────────────────────
+  # Qwen
+  # ─────────────────────────────────────────────────────────
+  - model_name: qwen3-coder-480b
+    litellm_params:
+      model: bedrock/qwen.qwen3-coder-480b-a35b-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: qwen3-235b
+    litellm_params:
+      model: bedrock/qwen.qwen3-235b-a22b-2507-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: qwen3-32b
+    litellm_params:
+      model: bedrock/qwen.qwen3-32b-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: qwen3-coder-30b
+    litellm_params:
+      model: bedrock/qwen.qwen3-coder-30b-a3b-v1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # ─────────────────────────────────────────────────────────
+  # MiniMax
+  # ─────────────────────────────────────────────────────────
+  - model_name: minimax-m2.1
+    litellm_params:
+      model: bedrock/minimax.minimax-m2.1
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: minimax-m2
+    litellm_params:
+      model: bedrock/minimax.minimax-m2
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # ─────────────────────────────────────────────────────────
+  # Moonshot / Kimi
+  # ─────────────────────────────────────────────────────────
+  - model_name: kimi-k2-thinking
+    litellm_params:
+      model: bedrock/moonshot.kimi-k2-thinking
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: kimi-k2.5
+    litellm_params:
+      model: bedrock/moonshotai.kimi-k2.5
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # ─────────────────────────────────────────────────────────
+  # Zhipu AI (GLM)
+  # ─────────────────────────────────────────────────────────
+  - model_name: glm-4.7
+    litellm_params:
+      model: bedrock/zai.glm-4.7
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: glm-4.7-flash
+    litellm_params:
+      model: bedrock/zai.glm-4.7-flash
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  # ─────────────────────────────────────────────────────────
+  # OpenAI (open-source models on Bedrock)
+  # ─────────────────────────────────────────────────────────
+  - model_name: gpt-oss-120b
+    litellm_params:
+      model: bedrock/openai.gpt-oss-120b-1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+  - model_name: gpt-oss-20b
+    litellm_params:
+      model: bedrock/openai.gpt-oss-20b-1:0
+      aws_region_name: os.environ/AWS_DEFAULT_REGION
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY  # upstream LiteLLM field name (not renamable); this is the proxy admin key
+
+litellm_settings:
+  cache: true
+  num_retries: 2
+  request_timeout: 60
+  drop_params: true
+
+# Guardrails are configured in Step 5 of the workshop.
+# Uncomment after creating a Bedrock Guardrail:
+#
+# guardrails:
+#   - guardrail_name: workshop-content-filter
+#     litellm_params:
+#       guardrail: bedrock
+#       mode: during_call
+#       guardrailIdentifier: os.environ/BEDROCK_GUARDRAIL_ID
+#       guardrailVersion: DRAFT
+#       aws_region_name: os.environ/AWS_DEFAULT_REGION

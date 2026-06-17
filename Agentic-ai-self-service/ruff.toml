@@ -1,0 +1,11 @@
+line-length = 120
+
+[lint]
+select = ["E", "F"]
+ignore = ["E501"]
+
+[lint.per-file-ignores]
+"backend/src/app/models/workflow.py" = ["E402"]
+"backend/src/app/routers/workflows.py" = ["E402"]
+"backend/src/app/services/code_generator.py" = ["E402"]
+"backend/tests/*" = ["E402"]

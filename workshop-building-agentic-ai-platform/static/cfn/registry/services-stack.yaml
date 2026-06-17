@@ -1,0 +1,1958 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  MCP Gateway Registry - Services Stack (Consolidated)
+  Creates all 8 ECS task definitions, services, auto scaling, and CloudWatch log groups.
+  Uses !ImportValue to reference outputs from network, data, and compute stacks.
+  Deploys to the region specified by AWS::Region. Allowed deploy regions are
+  controlled by contentspec.yaml regionConfiguration.deployableRegions
+  (parameter-driven, region-agnostic), not hardcoded in this template.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: mcp-gateway
+    Description: Name prefix for all resources (must match network/data/compute stacks)
+
+  # Container Image Repositories (ECR URIs constructed dynamically using AWS::AccountId and AWS::Region)
+  RegistryImageRepo:
+    Type: String
+    Default: 'mcp-gateway-registry'
+    Description: ECR repository name for Registry service
+
+  RegistryImageTag:
+    Type: String
+    Default: 'latest'
+    Description: Image tag for Registry service
+
+  AuthServerImageRepo:
+    Type: String
+    Default: 'mcp-gateway-auth-server'
+    Description: ECR repository name for Auth Server
+
+  AuthServerImageTag:
+    Type: String
+    Default: 'latest'
+    Description: Image tag for Auth Server
+
+  CurrentTimeImageRepo:
+    Type: String
+    Default: 'mcp-gateway-currenttime'
+    Description: ECR repository name for CurrentTime MCP server
+
+  CurrentTimeImageTag:
+    Type: String
+    Default: 'latest'
+    Description: Image tag for CurrentTime MCP server
+
+  McpgwImageRepo:
+    Type: String
+    Default: 'mcp-gateway-mcpgw'
+    Description: ECR repository name for MCPGW MCP server
+
+  McpgwImageTag:
+    Type: String
+    Default: 'latest'
+    Description: Image tag for MCPGW MCP server
+
+  RealServerFakeToolsImageRepo:
+    Type: String
+    Default: 'mcp-gateway-realserverfaketools'
+    Description: ECR repository name for RealServerFakeTools MCP server
+
+  RealServerFakeToolsImageTag:
+    Type: String
+    Default: 'latest'
+    Description: Image tag for RealServerFakeTools MCP server
+
+  ServiceCpu:
+    Type: String
+    Default: '1024'
+    Description: CPU units for main services (Auth, Registry)
+
+  ServiceMemory:
+    Type: String
+    Default: '2048'
+    Description: Memory (MB) for main services (Auth, Registry)
+
+  EmbeddingsProvider:
+    Type: String
+    Default: 'sentence-transformers'
+    AllowedValues:
+      - 'sentence-transformers'
+      - 'litellm'
+    Description: Embeddings provider (sentence-transformers for local, litellm for API-based)
+
+  EmbeddingsModelName:
+    Type: String
+    Default: 'all-MiniLM-L6-v2'
+    Description: Name of the embeddings model
+
+  EmbeddingsModelDimensions:
+    Type: Number
+    Default: 384
+    Description: Dimension of the embeddings model (384 for MiniLM, 1536 for OpenAI)
+
+  EmbeddingsAwsRegion:
+    Type: String
+    Default: ''
+    Description: >
+      AWS region for Bedrock embeddings (only used with litellm provider).
+      Leave empty to use the stack's deploy region (AWS::Region).
+
+  # Session Cookie Security (matching Terraform v1.0.7)
+  SessionCookieSecure:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Enable secure flag on session cookies (HTTPS-only)
+
+  SessionCookieDomain:
+    Type: String
+    Default: ''
+    Description: Domain for session cookies (leave empty for single-domain deployments)
+
+  # Security Scanning Configuration (v1.0.9+)
+  SecurityScanEnabled:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Enable security scanning for MCP servers during registration
+
+  SecurityScanOnRegistration:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Automatically scan servers when they are registered
+
+  SecurityBlockUnsafeServers:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Block (disable) servers that fail security scans
+
+  SecurityAnalyzers:
+    Type: String
+    Default: 'yara'
+    Description: Comma-separated analyzers for security scanning (yara, llm, api). YARA requires no API key.
+
+  SecurityScanTimeout:
+    Type: Number
+    Default: 60
+    Description: Security scan timeout in seconds
+
+  SecurityAddPendingTag:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Add security-pending tag to servers that fail security scan
+
+  # Auto Scaling Configuration
+  EnableAutoScaling:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Enable auto scaling for ECS services
+
+  MinCapacity:
+    Type: Number
+    Default: 1
+    Description: Minimum number of tasks
+
+  MaxCapacity:
+    Type: Number
+    Default: 4
+    Description: Maximum number of tasks
+
+  TargetCpuUtilization:
+    Type: Number
+    Default: 70
+    Description: Target CPU utilization percentage
+
+  TargetMemoryUtilization:
+    Type: Number
+    Default: 80
+    Description: Target memory utilization percentage
+
+  # Monitoring Configuration (matching Terraform monitoring.tf)
+  EnableMonitoring:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Enable CloudWatch monitoring alarms
+
+  AlarmEmail:
+    Type: String
+    Default: ''
+    Description: Email address for CloudWatch alarm notifications (leave empty to disable SNS)
+
+  # Observability Configuration (Amazon Managed Service for Prometheus + ADOT + Grafana + Metrics Service)
+  EnableObservability:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Enable full observability stack (Grafana OSS, metrics-service, ADOT).
+      When enabled, deploys Grafana with dashboards and metrics collection.
+      REQUIRES observability-stack to be deployed first for Prometheus exports.
+
+  AMPRemoteWriteEndpoint:
+    Type: String
+    Default: ''
+    Description: >
+      Amazon Managed Prometheus remote write endpoint.
+      Format: https://aps-workspaces.<region>.amazonaws.com/workspaces/<workspace-id>/api/v1/remote_write
+
+  PrometheusWorkspaceArn:
+    Type: String
+    Default: ''
+    Description: >
+      ARN of the Amazon Managed Prometheus workspace (for Grafana IAM policy).
+      Pass from observability-stack output when EnableObservability is true.
+
+  # Grafana Configuration (custom ECR image with dashboards pre-loaded)
+  GrafanaImageRepo:
+    Type: String
+    Default: 'mcp-gateway-grafana'
+    Description: ECR repository name for Grafana (with dashboards baked in)
+
+  GrafanaImageTag:
+    Type: String
+    Default: 'v1.0.16'
+    Description: >-
+      Image tag for Grafana (currently unused — the task definition pins
+      mcpgateway/grafana:v1.0.16 directly; kept for template compatibility).
+
+  # Metrics Service Configuration
+  MetricsServiceImageRepo:
+    Type: String
+    Default: 'mcp-gateway-metrics-service'
+    Description: ECR repository name for metrics-service
+
+  MetricsServiceImageTag:
+    Type: String
+    Default: 'latest'
+    Description: Image tag for metrics-service
+
+  MetricsApiKey:
+    Type: String
+    NoEcho: true
+    Description: >
+      Shared API key for metrics collection. Generate your own unique key (e.g. via
+      `openssl rand -hex 32`). Used by registry/auth-server to send metrics and by
+      metrics-service for authentication.
+
+  CognitoUserPoolId:
+    Type: String
+    Default: ''
+    Description: Cognito User Pool ID (leave empty to use ImportValue)
+
+  CognitoWebAppClientId:
+    Type: String
+    Default: ''
+    Description: Cognito web app client ID (leave empty to use ImportValue)
+
+  CognitoDomain:
+    Type: String
+    Default: ''
+    Description: Cognito hosted UI domain (leave empty to use ImportValue)
+
+
+Conditions:
+  EnableAutoScalingCondition: !Equals [!Ref EnableAutoScaling, 'true']
+  EnableMonitoringCondition: !Equals [!Ref EnableMonitoring, 'true']
+  EnableObservabilityCondition: !Equals [!Ref EnableObservability, 'true']
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
+  CreateSnsTopicCondition: !And
+    - !Condition EnableMonitoringCondition
+    - !Condition HasAlarmEmail
+  # When EmbeddingsAwsRegion is left empty, fall back to the deploy region
+  # (AWS::Region) so Bedrock embeddings work region-agnostically.
+  HasEmbeddingsAwsRegion: !Not [!Equals [!Ref EmbeddingsAwsRegion, '']]
+
+Resources:
+
+  #============================================================================
+  # CloudWatch Log Groups
+  # Workshop log groups rely on CloudWatch Logs' default server-side
+  # encryption; a customer-managed KMS CMK (CKV_AWS_158) is out of scope for
+  # this ephemeral workshop — see per-resource checkov skips below.
+  #============================================================================
+  RegistryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: "Workshop log groups rely on CloudWatch Logs' default server-side encryption; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+    Properties:
+      LogGroupName: !Sub /ecs/${EnvironmentName}-registry
+      RetentionInDays: 30
+
+  AuthServerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: "Workshop log groups rely on CloudWatch Logs' default server-side encryption; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+    Properties:
+      LogGroupName: !Sub /ecs/${EnvironmentName}-auth-server
+      RetentionInDays: 30
+
+  CurrentTimeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: "Workshop log groups rely on CloudWatch Logs' default server-side encryption; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+    Properties:
+      LogGroupName: !Sub /ecs/${EnvironmentName}-currenttime
+      RetentionInDays: 30
+
+  McpgwLogGroup:
+    Type: AWS::Logs::LogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: "Workshop log groups rely on CloudWatch Logs' default server-side encryption; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+    Properties:
+      LogGroupName: !Sub /ecs/${EnvironmentName}-mcpgw
+      RetentionInDays: 30
+
+  RealServerFakeToolsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: "Workshop log groups rely on CloudWatch Logs' default server-side encryption; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+    Properties:
+      LogGroupName: !Sub /ecs/${EnvironmentName}-realserverfaketools
+      RetentionInDays: 30
+
+  GrafanaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: EnableObservabilityCondition
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: "Workshop log groups rely on CloudWatch Logs' default server-side encryption; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+    Properties:
+      LogGroupName: !Sub /ecs/${EnvironmentName}-grafana
+      RetentionInDays: 7
+
+  MetricsServiceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: EnableObservabilityCondition
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: "Workshop log groups rely on CloudWatch Logs' default server-side encryption; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+    Properties:
+      LogGroupName: !Sub /ecs/${EnvironmentName}-metrics-service
+      RetentionInDays: 7
+
+
+  #============================================================================
+  # Task Definition: Auth Server
+  # Uses DocumentDB for scopes storage (mongodb-ce backend)
+  #============================================================================
+  AuthServerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${EnvironmentName}-auth-server
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref ServiceCpu
+      Memory: !Ref ServiceMemory
+      ExecutionRoleArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-EcsTaskExecutionRoleArn
+      TaskRoleArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-EcsTaskRoleArn
+      ContainerDefinitions:
+        - Name: auth-server
+          Image: 'mcpgateway/auth-server:v1.0.16'
+          Essential: true
+          PortMappings:
+            - Name: auth-server
+              ContainerPort: 8888
+              Protocol: tcp
+          Environment:
+            - Name: REGISTRY_URL
+              Value: !ImportValue
+                Fn::Sub: ${EnvironmentName}-RegistryUrl
+            - Name: AUTH_SERVER_URL
+              Value: http://auth-server:8888
+            - Name: AUTH_SERVER_EXTERNAL_URL
+              Value: !ImportValue
+                Fn::Sub: ${EnvironmentName}-MainCloudFrontUrl
+            - Name: AUTH_PROVIDER
+              Value: cognito
+            - Name: COGNITO_ENABLED
+              Value: 'true'
+            - Name: COGNITO_USER_POOL_ID
+              Value: !ImportValue
+                Fn::Sub: ${EnvironmentName}-CognitoUserPoolId
+            - Name: COGNITO_CLIENT_ID
+              Value: !ImportValue
+                Fn::Sub: ${EnvironmentName}-CognitoWebAppClientId
+            - Name: COGNITO_DOMAIN
+              Value: !ImportValue
+                Fn::Sub: ${EnvironmentName}-CognitoDomain
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            # DocumentDB Configuration (matching Terraform)
+            - Name: STORAGE_BACKEND
+              Value: documentdb
+            - Name: DOCUMENTDB_HOST
+              Value: !ImportValue
+                Fn::Sub: ${EnvironmentName}-DocumentDBClusterEndpoint
+            - Name: DOCUMENTDB_PORT
+              Value: '27017'
+            - Name: DOCUMENTDB_DATABASE
+              Value: mcp_registry
+            - Name: DOCUMENTDB_NAMESPACE
+              Value: default
+            - Name: DOCUMENTDB_USE_TLS
+              Value: 'true'
+            - Name: DOCUMENTDB_USE_IAM
+              Value: 'false'
+            - Name: DOCUMENTDB_TLS_CA_FILE
+              Value: /app/global-bundle.pem
+            # Metrics Service Configuration
+            - Name: METRICS_SERVICE_URL
+              Value: 'http://metrics-service:8890'
+            - Name: METRICS_API_KEY
+              Value: !Ref MetricsApiKey
+            # v1.0.16 Feature Configuration
+            - Name: DEPLOYMENT_MODE
+              Value: with-gateway
+            - Name: REGISTRY_MODE
+              Value: full
+            - Name: REGISTRY_ID
+              Value: !Ref EnvironmentName
+            - Name: AUDIT_LOG_ENABLED
+              Value: 'true'
+            - Name: AUDIT_LOG_MONGODB_TTL_DAYS
+              Value: '7'
+            - Name: OAUTH_STORE_TOKENS_IN_SESSION
+              Value: 'false'
+            - Name: REGISTRY_STATIC_TOKEN_AUTH_ENABLED
+              Value: 'true'
+            - Name: MAX_TOKENS_PER_USER_PER_HOUR
+              Value: '100'
+            # Federation Configuration (disabled defaults; Anthropic public registry needs no auth)
+            - Name: FEDERATION_STATIC_TOKEN_AUTH_ENABLED
+              Value: 'false'
+            - Name: FEDERATION_STATIC_TOKEN
+              Value: ''
+          Secrets:
+            - Name: SECRET_KEY
+              ValueFrom: !Sub
+                - '${SecretArn}:secret_key::'
+                - SecretArn: !ImportValue
+                    Fn::Sub: ${EnvironmentName}-SecretKeySecretArn
+            - Name: FEDERATION_ENCRYPTION_KEY
+              ValueFrom: !ImportValue
+                Fn::Sub: ${EnvironmentName}-FederationEncryptionKeySecretArn
+            - Name: ADMIN_PASSWORD
+              ValueFrom: !Sub
+                - '${SecretArn}:admin_password::'
+                - SecretArn: !ImportValue
+                    Fn::Sub: ${EnvironmentName}-AdminPasswordSecretArn
+            - Name: EMBEDDINGS_API_KEY
+              ValueFrom: !ImportValue
+                Fn::Sub: ${EnvironmentName}-EmbeddingsApiKeySecretArn
+            - Name: DOCUMENTDB_USERNAME
+              ValueFrom: !Sub
+                - '${SecretArn}:username::'
+                - SecretArn: !ImportValue
+                    Fn::Sub: ${EnvironmentName}-DocumentDBCredentialsSecretArn
+            - Name: DOCUMENTDB_PASSWORD
+              ValueFrom: !Sub
+                - '${SecretArn}:password::'
+                - SecretArn: !ImportValue
+                    Fn::Sub: ${EnvironmentName}-DocumentDBCredentialsSecretArn
+            - Name: COGNITO_CLIENT_SECRET
+              ValueFrom: !Sub
+                - '${SecretArn}:client_secret::'
+                - SecretArn: !ImportValue
+                    Fn::Sub: ${EnvironmentName}-CognitoWebAppClientSecretArn
+            - Name: REGISTRY_API_TOKEN
+              ValueFrom: !Sub
+                - '${SecretArn}:api_token::'
+                - SecretArn: !ImportValue
+                    Fn::Sub: ${EnvironmentName}-RegistryApiTokenSecretArn
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref AuthServerLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8888/health || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-registry
+
+
+  #============================================================================
+  # Task Definition: Keycloak (Matching Terraform keycloak-ecs.tf exactly)
+  #============================================================================
+  CurrentTimeTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${EnvironmentName}-currenttime
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '512'
+      Memory: '1024'
+      ExecutionRoleArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-EcsTaskExecutionRoleArn
+      TaskRoleArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-EcsTaskRoleArn
+      ContainerDefinitions:
+        - Name: currenttime-server
+          Image: 'mcpgateway/currenttime-server:v1.0.16'
+          Essential: true
+          PortMappings:
+            - Name: currenttime
+              ContainerPort: 8000
+              Protocol: tcp
+          Environment:
+            - Name: PORT
+              Value: '8000'
+            - Name: MCP_TRANSPORT
+              Value: streamable-http
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CurrentTimeLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - nc -z localhost 8000 || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-currenttime
+
+
+  #============================================================================
+  # Task Definition: MCPGW MCP Server
+  #============================================================================
+  McpgwTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${EnvironmentName}-mcpgw
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '512'
+      Memory: '1024'
+      ExecutionRoleArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-EcsTaskExecutionRoleArn
+      TaskRoleArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-EcsTaskRoleArn
+      ContainerDefinitions:
+        - Name: mcpgw-server
+          Image: 'mcpgateway/mcpgw-server:v1.0.16'
+          Essential: true
+          PortMappings:
+            - Name: mcpgw
+              ContainerPort: 8003
+              Protocol: tcp
+          Environment:
+            - Name: PORT
+              Value: '8003'
+            - Name: REGISTRY_BASE_URL
+              Value: http://registry:80
+            - Name: REGISTRY_USERNAME
+              Value: admin
+          Secrets:
+            - Name: REGISTRY_PASSWORD
+              ValueFrom: !Sub
+                - '${SecretArn}:admin_password::'
+                - SecretArn: !ImportValue
+                    Fn::Sub: ${EnvironmentName}-AdminPasswordSecretArn
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref McpgwLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - nc -z localhost 8003 || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-mcpgw
+
+  #============================================================================
+  # Task Definition: RealServerFakeTools MCP Server
+  #============================================================================
+  RealServerFakeToolsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${EnvironmentName}-realserverfaketools
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '512'
+      Memory: '1024'
+      ExecutionRoleArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-EcsTaskExecutionRoleArn
+      TaskRoleArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-EcsTaskRoleArn
+      ContainerDefinitions:
+        - Name: realserverfaketools-server
+          Image: 'mcpgateway/realserverfaketools-server:v1.0.16'
+          Essential: true
+          PortMappings:
+            - Name: realserverfaketools
+              ContainerPort: 8002
+              Protocol: tcp
+          Environment:
+            - Name: PORT
+              Value: '8002'
+            - Name: MCP_TRANSPORT
+              Value: streamable-http
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref RealServerFakeToolsLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - nc -z localhost 8002 || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-realserverfaketools
+
+  #============================================================================
+  # Task Definition: Flight Booking Agent
+  #============================================================================
+  AuthServerService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub ${EnvironmentName}-auth-server
+      Cluster: !ImportValue
+        Fn::Sub: ${EnvironmentName}-MainEcsClusterArn
+      TaskDefinition: !Ref AuthServerTaskDefinition
+      DesiredCount: !Ref MinCapacity
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: false
+        MaximumPercent: 200
+        MinimumHealthyPercent: 0
+      LaunchType: FARGATE
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !ImportValue
+              Fn::Sub: ${EnvironmentName}-EcsTasksSG
+          Subnets: !Split
+            - ','
+            - !ImportValue
+              Fn::Sub: ${EnvironmentName}-PrivateSubnets
+      LoadBalancers:
+        - ContainerName: auth-server
+          ContainerPort: 8888
+          TargetGroupArn: !ImportValue
+            Fn::Sub: ${EnvironmentName}-AuthTargetGroupArn
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !ImportValue
+          Fn::Sub: ${EnvironmentName}-ServiceDiscoveryNamespaceArn
+        Services:
+          - PortName: auth-server
+            DiscoveryName: auth-server
+            ClientAliases:
+              - Port: 8888
+                DnsName: auth-server
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-auth-server
+
+  RegistryTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${EnvironmentName}-registry
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref ServiceCpu
+      Memory: !Ref ServiceMemory
+      ExecutionRoleArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-EcsTaskExecutionRoleArn
+      TaskRoleArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-EcsTaskRoleArn
+      ContainerDefinitions:
+        - Name: registry
+          Image: 'mcpgateway/registry:v1.0.16'
+          Essential: true
+          PortMappings:
+            - Name: http
+              ContainerPort: 80
+              Protocol: tcp
+            - Name: https
+              ContainerPort: 443
+              Protocol: tcp
+            - Name: registry
+              ContainerPort: 7860
+              Protocol: tcp
+          Environment:
+            - Name: GATEWAY_ADDITIONAL_SERVER_NAMES
+              Value: !ImportValue
+                Fn::Sub: ${EnvironmentName}-MainCloudFrontDomain
+            - Name: EC2_PUBLIC_DNS
+              Value: !ImportValue
+                Fn::Sub: ${EnvironmentName}-MainCloudFrontDomain
+            - Name: AUTH_SERVER_URL
+              Value: http://auth-server:8888
+            - Name: AUTH_SERVER_EXTERNAL_URL
+              Value: !ImportValue
+                Fn::Sub: ${EnvironmentName}-MainCloudFrontUrl
+            - Name: AUTH_PROVIDER
+              Value: cognito
+            - Name: COGNITO_ENABLED
+              Value: 'true'
+            - Name: COGNITO_USER_POOL_ID
+              Value: !ImportValue
+                Fn::Sub: ${EnvironmentName}-CognitoUserPoolId
+            - Name: COGNITO_CLIENT_ID
+              Value: !ImportValue
+                Fn::Sub: ${EnvironmentName}-CognitoWebAppClientId
+            - Name: COGNITO_DOMAIN
+              Value: !ImportValue
+                Fn::Sub: ${EnvironmentName}-CognitoDomain
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: HEALTH_CHECK_INTERVAL_SECONDS
+              Value: '30'
+            - Name: EMBEDDINGS_PROVIDER
+              Value: !Ref EmbeddingsProvider
+            - Name: EMBEDDINGS_MODEL_NAME
+              Value: !Ref EmbeddingsModelName
+            - Name: EMBEDDINGS_MODEL_DIMENSIONS
+              Value: !Ref EmbeddingsModelDimensions
+            - Name: EMBEDDINGS_AWS_REGION
+              Value: !If [HasEmbeddingsAwsRegion, !Ref EmbeddingsAwsRegion, !Ref 'AWS::Region']
+            - Name: SESSION_COOKIE_SECURE
+              Value: !Ref SessionCookieSecure
+            - Name: SESSION_COOKIE_DOMAIN
+              Value: !Ref SessionCookieDomain
+            # Security Scanning Configuration (v1.0.9+)
+            - Name: SECURITY_SCAN_ENABLED
+              Value: !Ref SecurityScanEnabled
+            - Name: SECURITY_SCAN_ON_REGISTRATION
+              Value: !Ref SecurityScanOnRegistration
+            - Name: SECURITY_BLOCK_UNSAFE_SERVERS
+              Value: !Ref SecurityBlockUnsafeServers
+            - Name: SECURITY_ANALYZERS
+              Value: !Ref SecurityAnalyzers
+            - Name: SECURITY_SCAN_TIMEOUT
+              Value: !Ref SecurityScanTimeout
+            - Name: SECURITY_ADD_PENDING_TAG
+              Value: !Ref SecurityAddPendingTag
+            # DocumentDB Configuration (matching Terraform)
+            - Name: STORAGE_BACKEND
+              Value: documentdb
+            - Name: DOCUMENTDB_HOST
+              Value: !ImportValue
+                Fn::Sub: ${EnvironmentName}-DocumentDBClusterEndpoint
+            - Name: DOCUMENTDB_PORT
+              Value: '27017'
+            - Name: DOCUMENTDB_DATABASE
+              Value: mcp_registry
+            - Name: DOCUMENTDB_NAMESPACE
+              Value: default
+            - Name: DOCUMENTDB_USE_TLS
+              Value: 'true'
+            - Name: DOCUMENTDB_USE_IAM
+              Value: 'false'
+            - Name: DOCUMENTDB_TLS_CA_FILE
+              Value: /app/global-bundle.pem
+            # Metrics Service Configuration
+            - Name: METRICS_SERVICE_URL
+              Value: 'http://metrics-service:8890'
+            - Name: METRICS_API_KEY
+              Value: !Ref MetricsApiKey
+            # v1.0.16 Feature Configuration
+            - Name: DEPLOYMENT_MODE
+              Value: with-gateway
+            - Name: REGISTRY_MODE
+              Value: full
+            - Name: REGISTRY_ID
+              Value: !Ref EnvironmentName
+            - Name: AUDIT_LOG_ENABLED
+              Value: 'true'
+            - Name: AUDIT_LOG_MONGODB_TTL_DAYS
+              Value: '7'
+            - Name: OAUTH_STORE_TOKENS_IN_SESSION
+              Value: 'false'
+            - Name: REGISTRY_STATIC_TOKEN_AUTH_ENABLED
+              Value: 'false'
+            - Name: REGISTRY_API_TOKEN
+              Value: ''
+            - Name: MAX_TOKENS_PER_USER_PER_HOUR
+              Value: '100'
+            # Federation Configuration (disabled defaults; Anthropic public registry needs no auth)
+            - Name: FEDERATION_STATIC_TOKEN_AUTH_ENABLED
+              Value: 'false'
+            - Name: FEDERATION_STATIC_TOKEN
+              Value: ''
+          Secrets:
+            - Name: SECRET_KEY
+              ValueFrom: !Sub
+                - '${SecretArn}:secret_key::'
+                - SecretArn: !ImportValue
+                    Fn::Sub: ${EnvironmentName}-SecretKeySecretArn
+            - Name: FEDERATION_ENCRYPTION_KEY
+              ValueFrom: !ImportValue
+                Fn::Sub: ${EnvironmentName}-FederationEncryptionKeySecretArn
+            - Name: ADMIN_PASSWORD
+              ValueFrom: !Sub
+                - '${SecretArn}:admin_password::'
+                - SecretArn: !ImportValue
+                    Fn::Sub: ${EnvironmentName}-AdminPasswordSecretArn
+            - Name: EMBEDDINGS_API_KEY
+              ValueFrom: !ImportValue
+                Fn::Sub: ${EnvironmentName}-EmbeddingsApiKeySecretArn
+            - Name: DOCUMENTDB_USERNAME
+              ValueFrom: !Sub
+                - '${SecretArn}:username::'
+                - SecretArn: !ImportValue
+                    Fn::Sub: ${EnvironmentName}-DocumentDBCredentialsSecretArn
+            - Name: DOCUMENTDB_PASSWORD
+              ValueFrom: !Sub
+                - '${SecretArn}:password::'
+                - SecretArn: !ImportValue
+                    Fn::Sub: ${EnvironmentName}-DocumentDBCredentialsSecretArn
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref RegistryLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:7860/health || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-registry
+
+
+  #============================================================================
+  # Task Definition: Keycloak (Matching Terraform keycloak-ecs.tf exactly)
+  #============================================================================
+
+  # Registry Service
+  RegistryService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - McpgwService
+      - CurrentTimeService
+      - RealServerFakeToolsService
+      - AuthServerService
+    Properties:
+      ServiceName: !Sub ${EnvironmentName}-registry
+      Cluster: !ImportValue
+        Fn::Sub: ${EnvironmentName}-MainEcsClusterArn
+      TaskDefinition: !Ref RegistryTaskDefinition
+      DesiredCount: !Ref MinCapacity
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: false
+        MaximumPercent: 200
+        MinimumHealthyPercent: 0
+      LaunchType: FARGATE
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !ImportValue
+              Fn::Sub: ${EnvironmentName}-EcsTasksSG
+          Subnets: !Split
+            - ','
+            - !ImportValue
+              Fn::Sub: ${EnvironmentName}-PrivateSubnets
+      LoadBalancers:
+        - ContainerName: registry
+          ContainerPort: 80
+          TargetGroupArn: !ImportValue
+            Fn::Sub: ${EnvironmentName}-RegistryTargetGroupArn
+        - ContainerName: registry
+          ContainerPort: 7860
+          TargetGroupArn: !ImportValue
+            Fn::Sub: ${EnvironmentName}-GradioTargetGroupArn
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !ImportValue
+          Fn::Sub: ${EnvironmentName}-ServiceDiscoveryNamespaceArn
+        Services:
+          - PortName: http
+            DiscoveryName: registry
+            ClientAliases:
+              - Port: 80
+                DnsName: registry
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-registry
+
+  # Keycloak Service
+  CurrentTimeService:
+    Type: AWS::ECS::Service
+    DependsOn: AuthServerService
+    Properties:
+      ServiceName: !Sub ${EnvironmentName}-currenttime
+      Cluster: !ImportValue
+        Fn::Sub: ${EnvironmentName}-MainEcsClusterArn
+      TaskDefinition: !Ref CurrentTimeTaskDefinition
+      DesiredCount: !Ref MinCapacity
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: false
+        MaximumPercent: 200
+        MinimumHealthyPercent: 0
+      LaunchType: FARGATE
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !ImportValue
+              Fn::Sub: ${EnvironmentName}-McpServersSG
+          Subnets: !Split
+            - ','
+            - !ImportValue
+              Fn::Sub: ${EnvironmentName}-PrivateSubnets
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !ImportValue
+          Fn::Sub: ${EnvironmentName}-ServiceDiscoveryNamespaceArn
+        Services:
+          - PortName: currenttime
+            DiscoveryName: currenttime-server
+            ClientAliases:
+              - Port: 8000
+                DnsName: currenttime-server
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-currenttime
+
+  # MCPGW MCP Server Service
+  McpgwService:
+    Type: AWS::ECS::Service
+    DependsOn: AuthServerService
+    Properties:
+      ServiceName: !Sub ${EnvironmentName}-mcpgw
+      Cluster: !ImportValue
+        Fn::Sub: ${EnvironmentName}-MainEcsClusterArn
+      TaskDefinition: !Ref McpgwTaskDefinition
+      DesiredCount: !Ref MinCapacity
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: false
+        MaximumPercent: 200
+        MinimumHealthyPercent: 0
+      LaunchType: FARGATE
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !ImportValue
+              Fn::Sub: ${EnvironmentName}-McpServersSG
+          Subnets: !Split
+            - ','
+            - !ImportValue
+              Fn::Sub: ${EnvironmentName}-PrivateSubnets
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !ImportValue
+          Fn::Sub: ${EnvironmentName}-ServiceDiscoveryNamespaceArn
+        Services:
+          - PortName: mcpgw
+            DiscoveryName: mcpgw-server
+            ClientAliases:
+              - Port: 8003
+                DnsName: mcpgw-server
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-mcpgw
+
+  # RealServerFakeTools MCP Server Service
+  RealServerFakeToolsService:
+    Type: AWS::ECS::Service
+    DependsOn: AuthServerService
+    Properties:
+      ServiceName: !Sub ${EnvironmentName}-realserverfaketools
+      Cluster: !ImportValue
+        Fn::Sub: ${EnvironmentName}-MainEcsClusterArn
+      TaskDefinition: !Ref RealServerFakeToolsTaskDefinition
+      DesiredCount: !Ref MinCapacity
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: false
+        MaximumPercent: 200
+        MinimumHealthyPercent: 0
+      LaunchType: FARGATE
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !ImportValue
+              Fn::Sub: ${EnvironmentName}-McpServersSG
+          Subnets: !Split
+            - ','
+            - !ImportValue
+              Fn::Sub: ${EnvironmentName}-PrivateSubnets
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !ImportValue
+          Fn::Sub: ${EnvironmentName}-ServiceDiscoveryNamespaceArn
+        Services:
+          - PortName: realserverfaketools
+            DiscoveryName: realserverfaketools-server
+            ClientAliases:
+              - Port: 8002
+                DnsName: realserverfaketools-server
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-realserverfaketools
+
+  # Flight Booking Agent Service
+  AuthServerScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: EnableAutoScalingCondition
+    Properties:
+      MaxCapacity: !Ref MaxCapacity
+      MinCapacity: !Ref MinCapacity
+      ResourceId: !Sub service/${EnvironmentName}-ecs-cluster/${EnvironmentName}-auth-server
+      RoleARN: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+    DependsOn: AuthServerService
+
+  AuthServerCpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: EnableAutoScalingCondition
+    Properties:
+      PolicyName: !Sub ${EnvironmentName}-auth-server-cpu
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AuthServerScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref TargetCpuUtilization
+
+  AuthServerMemoryScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: EnableAutoScalingCondition
+    Properties:
+      PolicyName: !Sub ${EnvironmentName}-auth-server-memory
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AuthServerScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: !Ref TargetMemoryUtilization
+
+  # Registry Auto Scaling
+  RegistryScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: EnableAutoScalingCondition
+    Properties:
+      MaxCapacity: !Ref MaxCapacity
+      MinCapacity: !Ref MinCapacity
+      ResourceId: !Sub service/${EnvironmentName}-ecs-cluster/${EnvironmentName}-registry
+      RoleARN: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+    DependsOn: RegistryService
+
+  RegistryCpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: EnableAutoScalingCondition
+    Properties:
+      PolicyName: !Sub ${EnvironmentName}-registry-cpu
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref RegistryScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref TargetCpuUtilization
+
+  RegistryMemoryScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: EnableAutoScalingCondition
+    Properties:
+      PolicyName: !Sub ${EnvironmentName}-registry-memory
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref RegistryScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: !Ref TargetMemoryUtilization
+
+  # Keycloak Auto Scaling (matching Terraform keycloak-ecs.tf)
+  CurrentTimeScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: EnableAutoScalingCondition
+    Properties:
+      MaxCapacity: !Ref MaxCapacity
+      MinCapacity: !Ref MinCapacity
+      ResourceId: !Sub service/${EnvironmentName}-ecs-cluster/${EnvironmentName}-currenttime
+      RoleARN: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+    DependsOn: CurrentTimeService
+
+  CurrentTimeCpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: EnableAutoScalingCondition
+    Properties:
+      PolicyName: !Sub ${EnvironmentName}-currenttime-cpu
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref CurrentTimeScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref TargetCpuUtilization
+
+  # MCPGW Auto Scaling
+  McpgwScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: EnableAutoScalingCondition
+    Properties:
+      MaxCapacity: !Ref MaxCapacity
+      MinCapacity: !Ref MinCapacity
+      ResourceId: !Sub service/${EnvironmentName}-ecs-cluster/${EnvironmentName}-mcpgw
+      RoleARN: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+    DependsOn: McpgwService
+
+  McpgwCpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: EnableAutoScalingCondition
+    Properties:
+      PolicyName: !Sub ${EnvironmentName}-mcpgw-cpu
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref McpgwScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref TargetCpuUtilization
+
+  # RealServerFakeTools Auto Scaling
+  RealServerFakeToolsScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: EnableAutoScalingCondition
+    Properties:
+      MaxCapacity: !Ref MaxCapacity
+      MinCapacity: !Ref MinCapacity
+      ResourceId: !Sub service/${EnvironmentName}-ecs-cluster/${EnvironmentName}-realserverfaketools
+      RoleARN: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+    DependsOn: RealServerFakeToolsService
+
+  RealServerFakeToolsCpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: EnableAutoScalingCondition
+    Properties:
+      PolicyName: !Sub ${EnvironmentName}-realserverfaketools-cpu
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref RealServerFakeToolsScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref TargetCpuUtilization
+
+  # Flight Booking Agent Auto Scaling
+  AlarmSnsTopic:
+    Type: AWS::SNS::Topic
+    Condition: CreateSnsTopicCondition
+    Properties:
+      TopicName: !Sub ${EnvironmentName}-alarms
+      # Server-side encryption with the AWS-managed SNS key (zero cost).
+      # NOTE: the aws/sns managed key's policy does not grant
+      # cloudwatch.amazonaws.com — if you wire CloudWatch alarm actions to
+      # this topic in production, use a customer-managed CMK whose key policy
+      # allows the CloudWatch service principal.
+      KmsMasterKeyId: alias/aws/sns
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-alarms
+
+  AlarmSnsSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: CreateSnsTopicCondition
+    Properties:
+      TopicArn: !Ref AlarmSnsTopic
+      Protocol: email
+      Endpoint: !Ref AlarmEmail
+
+  # ECS Service CPU Alarms
+  AuthCpuHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoringCondition
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-auth-cpu-high
+      AlarmDescription: Auth service CPU utilization is too high
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Sub ${EnvironmentName}-ecs-cluster
+        - Name: ServiceName
+          Value: !Sub ${EnvironmentName}-auth-server
+      AlarmActions: !If
+        - CreateSnsTopicCondition
+        - [!Ref AlarmSnsTopic]
+        - []
+
+  RegistryCpuHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoringCondition
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-registry-cpu-high
+      AlarmDescription: Registry service CPU utilization is too high
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Sub ${EnvironmentName}-ecs-cluster
+        - Name: ServiceName
+          Value: !Sub ${EnvironmentName}-registry
+      AlarmActions: !If
+        - CreateSnsTopicCondition
+        - [!Ref AlarmSnsTopic]
+        - []
+
+  # ECS Service Memory Alarms
+  AuthMemoryHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoringCondition
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-auth-memory-high
+      AlarmDescription: Auth service memory utilization is too high
+      MetricName: MemoryUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Sub ${EnvironmentName}-ecs-cluster
+        - Name: ServiceName
+          Value: !Sub ${EnvironmentName}-auth-server
+      AlarmActions: !If
+        - CreateSnsTopicCondition
+        - [!Ref AlarmSnsTopic]
+        - []
+
+  RegistryMemoryHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoringCondition
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-registry-memory-high
+      AlarmDescription: Registry service memory utilization is too high
+      MetricName: MemoryUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Sub ${EnvironmentName}-ecs-cluster
+        - Name: ServiceName
+          Value: !Sub ${EnvironmentName}-registry
+      AlarmActions: !If
+        - CreateSnsTopicCondition
+        - [!Ref AlarmSnsTopic]
+        - []
+
+  # ALB Target Health Alarm
+  AlbUnhealthyTargetsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoringCondition
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-alb-unhealthy-targets
+      AlarmDescription: ALB has unhealthy targets
+      MetricName: UnHealthyHostCount
+      Namespace: AWS/ApplicationELB
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Select
+            - 1
+            - !Split
+              - 'loadbalancer/'
+              - !ImportValue
+                Fn::Sub: ${EnvironmentName}-MainAlbArn
+      AlarmActions: !If
+        - CreateSnsTopicCondition
+        - [!Ref AlarmSnsTopic]
+        - []
+
+  # ALB 5XX Error Rate Alarm
+  Alb5xxErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoringCondition
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-alb-5xx-errors
+      AlarmDescription: ALB is receiving too many 5XX errors
+      MetricName: HTTPCode_Target_5XX_Count
+      Namespace: AWS/ApplicationELB
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Select
+            - 1
+            - !Split
+              - 'loadbalancer/'
+              - !ImportValue
+                Fn::Sub: ${EnvironmentName}-MainAlbArn
+      AlarmActions: !If
+        - CreateSnsTopicCondition
+        - [!Ref AlarmSnsTopic]
+        - []
+      TreatMissingData: notBreaching
+
+  # ALB Response Time Alarm
+  AlbResponseTimeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoringCondition
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-alb-response-time
+      AlarmDescription: ALB response time is too high
+      MetricName: TargetResponseTime
+      Namespace: AWS/ApplicationELB
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Select
+            - 1
+            - !Split
+              - 'loadbalancer/'
+              - !ImportValue
+                Fn::Sub: ${EnvironmentName}-MainAlbArn
+      AlarmActions: !If
+        - CreateSnsTopicCondition
+        - [!Ref AlarmSnsTopic]
+        - []
+
+  #============================================================================
+  # Keycloak Realm Initialization (Lambda Custom Resource)
+  #============================================================================
+
+  # IAM Role for Keycloak Init Lambda
+  DocumentDBInitTrigger:
+    Type: Custom::DocumentDBInit
+    DependsOn:
+      - RegistryService
+    Properties:
+      ServiceToken: !ImportValue
+        Fn::Sub: ${EnvironmentName}-DocumentDBInitLambdaArn
+      # ECS configuration for running init task
+      EcsClusterName: !Sub ${EnvironmentName}-ecs-cluster
+      TaskFamily: !Sub ${EnvironmentName}-registry
+      ContainerName: registry
+      Subnets: !Join
+        - ','
+        - - !ImportValue
+              Fn::Sub: ${EnvironmentName}-PrivateSubnet1
+          - !ImportValue
+              Fn::Sub: ${EnvironmentName}-PrivateSubnet2
+      SecurityGroups: !ImportValue
+        Fn::Sub: ${EnvironmentName}-EcsTasksSG
+      # Force re-run on stack updates
+      Version: '1.5'
+
+  #============================================================================
+  # ADOT Collector Log Group (sidecar in metrics-service task)
+  #============================================================================
+  ADOTCollectorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: EnableObservabilityCondition
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: "Workshop log groups rely on CloudWatch Logs' default server-side encryption; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+    Properties:
+      LogGroupName: !Sub '/ecs/${EnvironmentName}/adot-collector'
+      RetentionInDays: 7
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-adot-collector'
+
+  #============================================================================
+  # Grafana OSS (Uses public image grafana/grafana, no custom ECR build)
+  # Provides dashboards for MCP Analytics and AWS Infrastructure monitoring
+  #============================================================================
+
+  GrafanaTaskRole:
+    Type: AWS::IAM::Role
+    Condition: EnableObservabilityCondition
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-grafana-task-role-${AWS::Region}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GrafanaAMPAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aps:QueryMetrics
+                  - aps:GetSeries
+                  - aps:GetLabels
+                  - aps:GetMetricMetadata
+                Resource: !Ref PrometheusWorkspaceArn
+        - PolicyName: GrafanaCloudWatchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarmsForMetric
+                  - cloudwatch:DescribeAlarmHistory
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:ListMetrics
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:GetInsightRuleReport
+                  - logs:DescribeLogGroups
+                  - logs:GetLogGroupFields
+                  - logs:StartQuery
+                  - logs:StopQuery
+                  - logs:GetQueryResults
+                  - logs:GetLogEvents
+                  - ec2:DescribeTags
+                  - ec2:DescribeInstances
+                  - ec2:DescribeRegions
+                  - tag:GetResources
+                # These read-only CloudWatch, Logs describe, and EC2 describe actions
+                # do not support resource-level permissions per AWS documentation.
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-grafana-task-role'
+
+  GrafanaTaskDefinition:
+    # GrafanaAdminPasswordSecretArn is resolved via !ImportValue; CloudFormation
+    # only evaluates !ImportValue after the exporting stack (data-stack) is fully
+    # deployed. The parent workshop-registry-stack.yaml orders network → data →
+    # compute → services, so data-stack (secret producer) always finishes before
+    # this task definition is evaluated. No explicit DependsOn is required.
+    Type: AWS::ECS::TaskDefinition
+    Condition: EnableObservabilityCondition
+    Properties:
+      Family: !Sub '${EnvironmentName}-grafana'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '512'
+      Memory: '1024'
+      ExecutionRoleArn: !ImportValue
+        Fn::Sub: '${EnvironmentName}-EcsTaskExecutionRoleArn'
+      TaskRoleArn: !Ref GrafanaTaskRole
+      ContainerDefinitions:
+        - Name: grafana
+          # Custom ECR image with dashboards and datasources pre-loaded
+          Image: 'mcpgateway/grafana:v1.0.16'
+          Essential: true
+          PortMappings:
+            - Name: grafana-http
+              ContainerPort: 3000
+              Protocol: tcp
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: AWS_DEFAULT_REGION
+              Value: !Ref AWS::Region
+            # Enable AWS SDK config loading for credential discovery
+            - Name: AWS_SDK_LOAD_CONFIG
+              Value: '1'
+            # Enable SigV4 authentication for AWS datasources (required for AMP)
+            - Name: GF_AUTH_SIGV4_AUTH_ENABLED
+              Value: 'true'
+            # AMP endpoint for Prometheus datasource (auto-configured)
+            - Name: AMP_ENDPOINT
+              Value: !ImportValue
+                Fn::Sub: '${EnvironmentName}-PrometheusQueryEndpoint'
+            # Server configuration for CloudFront path-based routing
+            - Name: GF_SERVER_ROOT_URL
+              Value: '%(protocol)s://%(domain)s/grafana/'
+            - Name: GF_SERVER_SERVE_FROM_SUB_PATH
+              Value: 'true'
+            # Authentication - password-protected access (v1.0.16 security hardening)
+            - Name: GF_AUTH_ANONYMOUS_ENABLED
+              Value: 'false'
+            - Name: GF_AUTH_DISABLE_LOGIN_FORM
+              Value: 'false'
+            - Name: GF_USERS_ALLOW_SIGN_UP
+              Value: 'false'
+            # Embedding settings
+            - Name: GF_SECURITY_ALLOW_EMBEDDING
+              Value: 'true'
+            # AWS auth provider for SigV4 datasources (ec2_iam_role uses ECS task credentials)
+            - Name: GF_AWS_ALLOWED_AUTH_PROVIDERS
+              Value: 'default,ec2_iam_role'
+            # Logging
+            - Name: GF_LOG_MODE
+              Value: 'console'
+            - Name: GF_LOG_LEVEL
+              Value: 'info'
+            # Performance settings
+            - Name: GF_DASHBOARDS_MIN_REFRESH_INTERVAL
+              Value: '10s'
+          Secrets:
+            - Name: GF_SECURITY_ADMIN_PASSWORD
+              ValueFrom: !Sub
+                - '${SecretArn}:grafana_admin_password::'
+                - SecretArn: !ImportValue
+                    Fn::Sub: ${EnvironmentName}-GrafanaAdminPasswordSecretArn
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref GrafanaLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: grafana
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - wget -q --spider http://localhost:3000/api/health || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-grafana'
+
+  GrafanaTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: EnableObservabilityCondition
+    Properties:
+      Name: !Sub '${EnvironmentName}-grafana-tg'
+      Port: 3000
+      Protocol: HTTP
+      VpcId: !ImportValue
+        Fn::Sub: '${EnvironmentName}-VpcId'
+      TargetType: ip
+      HealthCheckPath: /api/health
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-grafana-tg'
+
+  GrafanaListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: EnableObservabilityCondition
+    DependsOn: GrafanaTargetGroup
+    Properties:
+      ListenerArn: !ImportValue
+        Fn::Sub: '${EnvironmentName}-MainAlbHttpListenerArn'
+      Priority: 15
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - '/grafana/*'
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref GrafanaTargetGroup
+
+  GrafanaService:
+    Type: AWS::ECS::Service
+    Condition: EnableObservabilityCondition
+    DependsOn: GrafanaListenerRule
+    Properties:
+      ServiceName: !Sub '${EnvironmentName}-grafana'
+      Cluster: !ImportValue
+        Fn::Sub: '${EnvironmentName}-MainEcsClusterArn'
+      TaskDefinition: !Ref GrafanaTaskDefinition
+      DesiredCount: 1
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: false
+        MaximumPercent: 200
+        MinimumHealthyPercent: 0
+      LaunchType: FARGATE
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !ImportValue
+                Fn::Sub: '${EnvironmentName}-GrafanaSG'
+          Subnets: !Split
+            - ','
+            - !ImportValue
+                Fn::Sub: '${EnvironmentName}-PrivateSubnets'
+      LoadBalancers:
+        - ContainerName: grafana
+          ContainerPort: 3000
+          TargetGroupArn: !Ref GrafanaTargetGroup
+      HealthCheckGracePeriodSeconds: 120
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !ImportValue
+          Fn::Sub: ${EnvironmentName}-ServiceDiscoveryNamespaceArn
+        Services:
+          - PortName: grafana-http
+            DiscoveryName: grafana
+            ClientAliases:
+              - Port: 3000
+                DnsName: grafana
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-grafana'
+
+  #============================================================================
+  # Metrics Service for MCP Analytics
+  # Collects and aggregates metrics from registry and auth-server
+  #============================================================================
+
+  MetricsServiceTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Condition: EnableObservabilityCondition
+    Properties:
+      Family: !Sub '${EnvironmentName}-metrics-service'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '512'
+      Memory: '1024'
+      ExecutionRoleArn: !ImportValue
+        Fn::Sub: '${EnvironmentName}-EcsTaskExecutionRoleArn'
+      TaskRoleArn: !ImportValue
+        Fn::Sub: '${EnvironmentName}-EcsTaskRoleArn'
+      ContainerDefinitions:
+        - Name: metrics-service
+          Image: 'mcpgateway/metrics-service:v1.0.16'
+          Essential: true
+          PortMappings:
+            - Name: metrics-api
+              ContainerPort: 8890
+              Protocol: tcp
+            - Name: metrics-prometheus
+              ContainerPort: 9465
+              Protocol: tcp
+          Environment:
+            - Name: METRICS_SERVICE_HOST
+              Value: '0.0.0.0'
+            - Name: METRICS_SERVICE_PORT
+              Value: '8890'
+            - Name: OTEL_SERVICE_NAME
+              Value: 'mcp-metrics-service'
+            - Name: OTEL_PROMETHEUS_ENABLED
+              Value: 'true'
+            - Name: OTEL_PROMETHEUS_PORT
+              Value: '9465'
+            - Name: METRICS_RATE_LIMIT
+              Value: '5000'
+            - Name: HISTOGRAM_BUCKET_BOUNDARIES
+              Value: '0.005,0.01,0.025,0.05,0.1,0.25,0.5,1.0,2.5,5.0,10.0,30.0,60.0,120.0,300.0'
+            - Name: SQLITE_DB_PATH
+              Value: '/tmp/metrics.db'
+            # API keys for authentication - must match METRICS_API_KEY_* pattern for auto-registration
+            # The setup_preshared_api_keys() function registers keys from METRICS_API_KEY_<SERVICE> env vars
+            - Name: METRICS_API_KEY_REGISTRY
+              Value: !Ref MetricsApiKey
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref MetricsServiceLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: metrics
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8890/health || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+        - Name: adot-collector
+          # Pinned to a specific release (supply-chain hygiene — never use a
+          # mutable :latest tag in a published sample). v0.43.3 supports the
+          # sigv4auth extension, prometheus receiver, and prometheusremotewrite
+          # exporter used in AOT_CONFIG_CONTENT below.
+          Image: public.ecr.aws/aws-observability/aws-otel-collector:v0.43.3
+          Essential: false
+          DependsOn:
+            - ContainerName: metrics-service
+              Condition: HEALTHY
+          Command:
+            - '--config=env:AOT_CONFIG_CONTENT'
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: AOT_CONFIG_CONTENT
+              Value: !Sub
+                - |
+                  extensions:
+                    sigv4auth:
+                      region: ${AWS::Region}
+                      service: aps
+                  receivers:
+                    prometheus:
+                      config:
+                        global:
+                          scrape_interval: 15s
+                          scrape_timeout: 10s
+                        scrape_configs:
+                          - job_name: 'metrics-service'
+                            static_configs:
+                              - targets:
+                                  - 'localhost:9465'
+                                labels:
+                                  environment: '${EnvironmentName}'
+                                  service: 'metrics-service'
+                  processors:
+                    batch:
+                      timeout: 10s
+                      send_batch_size: 1000
+                    resource:
+                      attributes:
+                        - key: environment
+                          value: '${EnvironmentName}'
+                          action: upsert
+                  exporters:
+                    prometheusremotewrite:
+                      endpoint: '${AMPEndpoint}'
+                      auth:
+                        authenticator: sigv4auth
+                      resource_to_telemetry_conversion:
+                        enabled: true
+                  service:
+                    extensions: [sigv4auth]
+                    pipelines:
+                      metrics:
+                        receivers: [prometheus]
+                        processors: [batch, resource]
+                        exporters: [prometheusremotewrite]
+                - AMPEndpoint: !Ref AMPRemoteWriteEndpoint
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ADOTCollectorLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: adot
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-metrics-service'
+
+  MetricsServiceEcsService:
+    Type: AWS::ECS::Service
+    Condition: EnableObservabilityCondition
+    Properties:
+      ServiceName: !Sub '${EnvironmentName}-metrics-service'
+      Cluster: !ImportValue
+        Fn::Sub: '${EnvironmentName}-MainEcsClusterArn'
+      TaskDefinition: !Ref MetricsServiceTaskDefinition
+      DesiredCount: 1
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: false
+        MaximumPercent: 200
+        MinimumHealthyPercent: 0
+      LaunchType: FARGATE
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !ImportValue
+                Fn::Sub: '${EnvironmentName}-MetricsServiceSG'
+          Subnets: !Split
+            - ','
+            - !ImportValue
+                Fn::Sub: '${EnvironmentName}-PrivateSubnets'
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !ImportValue
+          Fn::Sub: ${EnvironmentName}-ServiceDiscoveryNamespaceArn
+        Services:
+          - PortName: metrics-api
+            DiscoveryName: metrics-service
+            ClientAliases:
+              - Port: 8890
+                DnsName: metrics-service
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-metrics-service'
+
+#============================================================================
+# Outputs
+#============================================================================
+Outputs:
+  AuthServerServiceArn:
+    Description: Auth Server ECS Service ARN
+    Value: !Ref AuthServerService
+    Export:
+      Name: !Sub ${EnvironmentName}-AuthServerServiceArn
+
+  RegistryServiceArn:
+    Description: Registry ECS Service ARN
+    Value: !Ref RegistryService
+    Export:
+      Name: !Sub ${EnvironmentName}-RegistryServiceArn
+
+  CurrentTimeServiceArn:
+    Description: CurrentTime MCP Server ECS Service ARN
+    Value: !Ref CurrentTimeService
+    Export:
+      Name: !Sub ${EnvironmentName}-CurrentTimeServiceArn
+
+  McpgwServiceArn:
+    Description: MCPGW MCP Server ECS Service ARN
+    Value: !Ref McpgwService
+    Export:
+      Name: !Sub ${EnvironmentName}-McpgwServiceArn
+
+  RealServerFakeToolsServiceArn:
+    Description: RealServerFakeTools MCP Server ECS Service ARN
+    Value: !Ref RealServerFakeToolsService
+    Export:
+      Name: !Sub ${EnvironmentName}-RealServerFakeToolsServiceArn
+
+  AlarmSnsTopicArn:
+    Condition: CreateSnsTopicCondition
+    Description: SNS Topic ARN for CloudWatch Alarms
+    Value: !Ref AlarmSnsTopic
+    Export:
+      Name: !Sub ${EnvironmentName}-AlarmSnsTopicArn
+
+  # Observability Outputs (Grafana, Metrics Service)
+  GrafanaServiceArn:
+    Condition: EnableObservabilityCondition
+    Description: Grafana OSS ECS Service ARN
+    Value: !Ref GrafanaService
+    Export:
+      Name: !Sub ${EnvironmentName}-GrafanaServiceArn
+
+  GrafanaTargetGroupArn:
+    Condition: EnableObservabilityCondition
+    Description: Grafana OSS Target Group ARN (for CloudFront integration)
+    Value: !Ref GrafanaTargetGroup
+    Export:
+      Name: !Sub ${EnvironmentName}-GrafanaTargetGroupArn
+
+  MetricsServiceServiceArn:
+    Condition: EnableObservabilityCondition
+    Description: Metrics Service ECS Service ARN
+    Value: !Ref MetricsServiceEcsService
+    Export:
+      Name: !Sub ${EnvironmentName}-MetricsServiceServiceArn
+
+  MetricsServiceEndpoint:
+    Condition: EnableObservabilityCondition
+    Description: Metrics service internal endpoint (for METRICS_SERVICE_URL env var)
+    Value: 'http://metrics-service:8890'
+    Export:
+      Name: !Sub ${EnvironmentName}-MetricsServiceEndpoint
+
+  MetricsServicePrometheusEndpoint:
+    Condition: EnableObservabilityCondition
+    Description: Metrics service Prometheus endpoint (ADOT sidecar scrapes localhost:9465)
+    Value: 'localhost:9465'
+    Export:
+      Name: !Sub ${EnvironmentName}-MetricsServicePrometheusEndpoint

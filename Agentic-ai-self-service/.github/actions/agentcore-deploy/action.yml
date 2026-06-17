@@ -1,0 +1,51 @@
+name: "AgentCore Flows Deploy"
+description: >
+  Deploy a workflow JSON definition to the AgentCore Flows platform by calling
+  the existing POST /api/deploy endpoint. A thin client of the deploy data
+  plane — it does not create AWS resources itself.
+
+# SECURITY / PREREQUISITE:
+#   jwt_token MUST be a short-lived Cognito ACCESS token for a user authorized to
+#   deploy, supplied from a GitHub Actions secret (never hard-coded). Cognito
+#   access tokens are short-lived, so this action is best paired with a
+#   token-minting step earlier in the job (e.g. a Cognito USER_PASSWORD_AUTH or
+#   client-credentials exchange) that writes the token to the step env. Minting
+#   that token is intentionally out of scope for this action (Gap 3D). The
+#   wrapper script never echoes the token.
+#
+#   The caller is responsible for `actions/checkout` so that workflow_json_path
+#   resolves inside the checked-out repo before this action runs.
+
+inputs:
+  api_url:
+    description: "Base URL of the AgentCore Flows API (e.g. https://abc.execute-api.us-east-1.amazonaws.com)."
+    required: true
+  jwt_token:
+    description: "Cognito access token (Bearer) for a deploy-authorized user. Pass a GitHub Actions secret."
+    required: true
+  workflow_json_path:
+    description: "Path (relative to the checked-out repo) of the workflow JSON to deploy."
+    required: true
+  region:
+    description: "AWS region hint forwarded to the deploy request body. Optional."
+    required: false
+    default: "us-east-1"
+  poll_timeout:
+    description: "Seconds to poll the deployment status before giving up. Optional."
+    required: false
+    default: "600"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Deploy workflow via AgentCore Flows API
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api_url }}
+        JWT_TOKEN: ${{ inputs.jwt_token }}
+        WORKFLOW_JSON_PATH: ${{ inputs.workflow_json_path }}
+        AWS_REGION: ${{ inputs.region }}
+        POLL_TIMEOUT: ${{ inputs.poll_timeout }}
+      # Invoke the vendored wrapper via the action's own path so the script
+      # ships with the action regardless of the caller's repo layout.
+      run: bash "${{ github.action_path }}/../../../scripts/agentcore-deploy.sh"

@@ -1,0 +1,719 @@
+# Amazon Bedrock Models - Complete List (Early 2026)
+# Compatible with LiteLLM bedrock/ provider
+# Updated: March 2026
+
+model_list:
+  # ============================================================================
+  # ANTHROPIC CLAUDE MODELS
+  # All Claude models support Converse API and tool calling
+  # ============================================================================
+
+  # Claude 4.6 Generation (Latest - March 2026)
+  - model_name: claude-opus-4-6
+    litellm_params:
+      model: bedrock/anthropic.claude-opus-4-6-v1
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+      context_window: 1000000  # 1M tokens
+      max_output_tokens: 128000
+
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: bedrock/anthropic.claude-sonnet-4-6
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+      context_window: 1000000  # 1M tokens
+      max_output_tokens: 64000
+
+  - model_name: claude-haiku-4-5
+    litellm_params:
+      model: bedrock/anthropic.claude-haiku-4-5-20251001-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+      context_window: 200000  # 200k tokens
+      max_output_tokens: 64000
+
+  # Claude 4.5 Generation
+  - model_name: claude-sonnet-4-5
+    litellm_params:
+      model: bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+      context_window: 1000000  # 1M tokens (with beta header)
+      max_output_tokens: 64000
+
+  - model_name: claude-opus-4-5
+    litellm_params:
+      model: bedrock/anthropic.claude-opus-4-5-20251101-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+      context_window: 200000
+      max_output_tokens: 64000
+
+  # Claude 4.1 Generation
+  - model_name: claude-opus-4-1
+    litellm_params:
+      model: bedrock/anthropic.claude-opus-4-1-20250805-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+      context_window: 200000
+      max_output_tokens: 32000
+
+  # Claude 4.0 Generation
+  - model_name: claude-sonnet-4
+    litellm_params:
+      model: bedrock/anthropic.claude-sonnet-4-20250514-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+      context_window: 1000000  # 1M tokens (with beta header)
+      max_output_tokens: 64000
+
+  # Claude 3.5 Generation
+  - model_name: claude-3-5-haiku
+    litellm_params:
+      model: bedrock/anthropic.claude-3-5-haiku-20241022-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false  # No vision support
+      supports_converse_api: true
+      context_window: 200000
+
+  # ============================================================================
+  # AMAZON NOVA MODELS
+  # Latest generation Amazon models with multimodal capabilities
+  # ============================================================================
+
+  # Nova 2 Generation (Text)
+  - model_name: nova-2-sonic
+    litellm_params:
+      model: bedrock/amazon.nova-2-sonic-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+      supports_s3_links: true
+
+  - model_name: nova-2-lite
+    litellm_params:
+      model: bedrock/amazon.nova-2-lite-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+      supports_s3_links: true
+      context_window: 1000000  # 1M tokens
+
+  # Nova 1 Generation (Text)
+  - model_name: nova-premier
+    litellm_params:
+      model: bedrock/amazon.nova-premier-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+      supports_s3_links: true
+
+  - model_name: nova-pro
+    litellm_params:
+      model: bedrock/amazon.nova-pro-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+      supports_s3_links: true
+      context_window: 300000
+
+  - model_name: nova-lite
+    litellm_params:
+      model: bedrock/amazon.nova-lite-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+      supports_s3_links: true
+      context_window: 300000
+
+  - model_name: nova-sonic
+    litellm_params:
+      model: bedrock/amazon.nova-sonic-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+      supports_s3_links: true
+
+  # Nova Image/Video Generation (Do NOT support Converse API)
+  - model_name: nova-canvas
+    litellm_params:
+      model: bedrock/amazon.nova-canvas-v1:0
+    model_info:
+      mode: image_generation
+      supports_converse_api: false
+
+  - model_name: nova-reel
+    litellm_params:
+      model: bedrock/amazon.nova-reel-v1:0
+    model_info:
+      mode: video_generation
+      supports_converse_api: false
+
+  - model_name: nova-reel-v1-1
+    litellm_params:
+      model: bedrock/amazon.nova-reel-v1:1
+    model_info:
+      mode: video_generation
+      supports_converse_api: false
+
+  # ============================================================================
+  # AMAZON TITAN MODELS
+  # Amazon's foundation models for text and embeddings
+  # ============================================================================
+
+  - model_name: titan-text-premier
+    litellm_params:
+      model: bedrock/amazon.titan-text-premier-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: false
+      supports_converse_api: true
+      context_window: 42000
+
+  # Amazon Titan Text Express v1 and Titan Text Lite v1 remain generally
+  # available on Bedrock (https://aws.amazon.com/bedrock/amazon-models/titan/).
+  # We exclude them from the workshop's active model list because the
+  # workshop biases toward more capable instruction-following models (Claude
+  # Sonnet, Nova). Re-enable them below if cost-optimized text generation is
+  # a teaching point.
+  # - model_name: titan-text-express
+  #   litellm_params:
+  #     model: bedrock/amazon.titan-text-express-v1
+  # - model_name: titan-text-lite
+  #   litellm_params:
+  #     model: bedrock/amazon.titan-text-lite-v1
+
+  - model_name: titan-text-large
+    litellm_params:
+      model: bedrock/amazon.titan-tg1-large
+    model_info:
+      mode: chat
+      supports_function_calling: false
+      supports_converse_api: true
+
+  # Titan Embeddings (Do NOT support Converse API)
+  - model_name: titan-embed-text-v2
+    litellm_params:
+      model: bedrock/amazon.titan-embed-text-v2:0
+    model_info:
+      mode: embedding
+      supports_converse_api: false
+      output_dimensions: 1024
+
+  - model_name: titan-embed-text-v1
+    litellm_params:
+      model: bedrock/amazon.titan-embed-text-v1
+    model_info:
+      mode: embedding
+      supports_converse_api: false
+      output_dimensions: 1536
+
+  - model_name: titan-embed-image-v1
+    litellm_params:
+      model: bedrock/amazon.titan-embed-image-v1
+    model_info:
+      mode: embedding
+      supports_converse_api: false
+      supports_vision: true
+
+  # Titan Image Generation (Does NOT support Converse API)
+  - model_name: titan-image-generator-v2
+    litellm_params:
+      model: bedrock/amazon.titan-image-generator-v2:0
+    model_info:
+      mode: image_generation
+      supports_converse_api: false
+
+  # ============================================================================
+  # META LLAMA MODELS
+  # Open-source models from Meta
+  # ============================================================================
+
+  # Llama 4 Generation (Latest)
+  - model_name: llama-4-scout-17b
+    litellm_params:
+      model: bedrock/meta.llama4-scout-17b-instruct-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+
+  - model_name: llama-4-maverick-17b
+    litellm_params:
+      model: bedrock/meta.llama4-maverick-17b-instruct-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+
+  # Llama 3.3 Generation
+  - model_name: llama-3-3-70b
+    litellm_params:
+      model: bedrock/meta.llama3-3-70b-instruct-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  # Llama 3.2 Generation
+  - model_name: llama-3-2-90b
+    litellm_params:
+      model: bedrock/meta.llama3-2-90b-instruct-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+
+  - model_name: llama-3-2-11b
+    litellm_params:
+      model: bedrock/meta.llama3-2-11b-instruct-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+
+  - model_name: llama-3-2-3b
+    litellm_params:
+      model: bedrock/meta.llama3-2-3b-instruct-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: false
+      supports_vision: false
+      supports_converse_api: true
+
+  - model_name: llama-3-2-1b
+    litellm_params:
+      model: bedrock/meta.llama3-2-1b-instruct-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: false
+      supports_vision: false
+      supports_converse_api: true
+
+  # Llama 3.1 Generation
+  - model_name: llama-3-1-405b
+    litellm_params:
+      model: bedrock/meta.llama3-1-405b-instruct-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  - model_name: llama-3-1-70b
+    litellm_params:
+      model: bedrock/meta.llama3-1-70b-instruct-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  - model_name: llama-3-1-8b
+    litellm_params:
+      model: bedrock/meta.llama3-1-8b-instruct-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  # Llama 3.0 Generation
+  - model_name: llama-3-70b
+    litellm_params:
+      model: bedrock/meta.llama3-70b-instruct-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: false
+      supports_converse_api: true
+
+  - model_name: llama-3-8b
+    litellm_params:
+      model: bedrock/meta.llama3-8b-instruct-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: false
+      supports_converse_api: true
+
+  # ============================================================================
+  # MISTRAL AI MODELS
+  # High-performance European AI models
+  # ============================================================================
+
+  # Latest Mistral Models (Early 2026)
+  - model_name: mistral-large-3
+    litellm_params:
+      model: bedrock/mistral.mistral-large-3-675b-instruct
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  - model_name: devstral-2-123b
+    litellm_params:
+      model: bedrock/mistral.devstral-2-123b
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  - model_name: magistral-small-2509
+    litellm_params:
+      model: bedrock/mistral.magistral-small-2509
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  - model_name: pixtral-large-2502
+    litellm_params:
+      model: bedrock/mistral.pixtral-large-2502-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_vision: true
+      supports_converse_api: true
+
+  # Ministral Models
+  - model_name: ministral-3-14b
+    litellm_params:
+      model: bedrock/mistral.ministral-3-14b-instruct
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  - model_name: ministral-3-8b
+    litellm_params:
+      model: bedrock/mistral.ministral-3-8b-instruct
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  - model_name: ministral-3-3b
+    litellm_params:
+      model: bedrock/mistral.ministral-3-3b-instruct
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  # Voxtral Models (Audio/Speech)
+  - model_name: voxtral-small-24b
+    litellm_params:
+      model: bedrock/mistral.voxtral-small-24b-2507
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_audio: true
+      supports_converse_api: true
+
+  - model_name: voxtral-mini-3b
+    litellm_params:
+      model: bedrock/mistral.voxtral-mini-3b-2507
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_audio: true
+      supports_converse_api: true
+
+  # Mistral 2024 Models
+  - model_name: mistral-large-2407
+    litellm_params:
+      model: bedrock/mistral.mistral-large-2407-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  - model_name: mistral-large-2402
+    litellm_params:
+      model: bedrock/mistral.mistral-large-2402-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  - model_name: mistral-small-2402
+    litellm_params:
+      model: bedrock/mistral.mistral-small-2402-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  - model_name: mixtral-8x7b
+    litellm_params:
+      model: bedrock/mistral.mixtral-8x7b-instruct-v0:1
+    model_info:
+      mode: chat
+      supports_function_calling: false
+      supports_converse_api: true
+
+  - model_name: mistral-7b
+    litellm_params:
+      model: bedrock/mistral.mistral-7b-instruct-v0:2
+    model_info:
+      mode: chat
+      supports_function_calling: false
+      supports_converse_api: true
+
+  # ============================================================================
+  # COHERE MODELS
+  # Models for search and generation
+  # ============================================================================
+
+  - model_name: command-r-plus
+    litellm_params:
+      model: bedrock/cohere.command-r-plus-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  - model_name: command-r
+    litellm_params:
+      model: bedrock/cohere.command-r-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  - model_name: command-text-v14
+    litellm_params:
+      model: bedrock/cohere.command-text-v14
+    model_info:
+      mode: completion
+      supports_function_calling: false
+      supports_converse_api: false
+      note: "Text-only, no chat support"
+
+  # Cohere Embeddings (Do NOT support Converse API)
+  - model_name: cohere-embed-v4
+    litellm_params:
+      model: bedrock/cohere.embed-v4:0
+    model_info:
+      mode: embedding
+      supports_converse_api: false
+
+  - model_name: cohere-embed-multilingual-v3
+    litellm_params:
+      model: bedrock/cohere.embed-multilingual-v3
+    model_info:
+      mode: embedding
+      supports_converse_api: false
+
+  - model_name: cohere-embed-english-v3
+    litellm_params:
+      model: bedrock/cohere.embed-english-v3
+    model_info:
+      mode: embedding
+      supports_converse_api: false
+
+  # Cohere Rerank (Does NOT support Converse API)
+  - model_name: cohere-rerank-v3-5
+    litellm_params:
+      model: bedrock/cohere.rerank-v3-5:0
+    model_info:
+      mode: rerank
+      supports_converse_api: false
+
+  # ============================================================================
+  # AI21 LABS MODELS
+  # ============================================================================
+
+  - model_name: jamba-1-5-large
+    litellm_params:
+      model: bedrock/ai21.jamba-1-5-large-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+      supports_document_chat: true
+
+  - model_name: jamba-1-5-mini
+    litellm_params:
+      model: bedrock/ai21.jamba-1-5-mini-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+      supports_document_chat: true
+
+  - model_name: jamba-instruct
+    litellm_params:
+      model: bedrock/ai21.jamba-instruct-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: false
+      supports_converse_api: true
+
+  - model_name: j2-ultra
+    litellm_params:
+      model: bedrock/ai21.j2-ultra-v1
+    model_info:
+      mode: completion
+      supports_function_calling: false
+      supports_converse_api: false
+      note: "Text-only, no chat support"
+
+  - model_name: j2-mid
+    litellm_params:
+      model: bedrock/ai21.j2-mid-v1
+    model_info:
+      mode: completion
+      supports_function_calling: false
+      supports_converse_api: false
+      note: "Text-only, no chat support"
+
+  # ============================================================================
+  # STABILITY AI MODELS
+  # Image generation and manipulation models (NO Converse API support)
+  # ============================================================================
+
+  - model_name: stable-diffusion-3-5-large
+    litellm_params:
+      model: bedrock/stability.sd3-5-large-v1:0
+    model_info:
+      mode: image_generation
+      supports_converse_api: false
+
+  - model_name: stable-image-ultra
+    litellm_params:
+      model: bedrock/stability.stable-image-ultra-v1:1
+    model_info:
+      mode: image_generation
+      supports_converse_api: false
+
+  - model_name: stable-image-core
+    litellm_params:
+      model: bedrock/stability.stable-image-core-v1:1
+    model_info:
+      mode: image_generation
+      supports_converse_api: false
+
+  # ============================================================================
+  # OTHER PROVIDERS
+  # ============================================================================
+
+  # DeepSeek
+  - model_name: deepseek-r1
+    litellm_params:
+      model: bedrock/us.deepseek.r1-v1:0
+    model_info:
+      mode: chat
+      supports_function_calling: false
+      supports_converse_api: true
+
+  # Writer
+  - model_name: palmyra-x5
+    litellm_params:
+      model: bedrock/writer.palmyra-x5
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  - model_name: palmyra-x4
+    litellm_params:
+      model: bedrock/writer.palmyra-x4
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      supports_converse_api: true
+
+  # TwelveLabs (Video Understanding)
+  - model_name: twelvelabs-pegasus-1-2
+    litellm_params:
+      model: bedrock/us.twelvelabs.pegasus-1-2-v1:0
+    model_info:
+      mode: multimodal
+      supports_video: true
+      supports_converse_api: false
+
+  # Amazon Rerank (Does NOT support Converse API)
+  - model_name: amazon-rerank-v1
+    litellm_params:
+      model: bedrock/amazon.rerank-v1:0
+    model_info:
+      mode: rerank
+      supports_converse_api: false
+
+  # Nova Multimodal Embeddings (Does NOT support Converse API)
+  - model_name: nova-2-multimodal-embeddings
+    litellm_params:
+      model: bedrock/amazon.nova-2-multimodal-embeddings-v1:0
+    model_info:
+      mode: embedding
+      supports_converse_api: false
+      supports_multimodal: true
+
+# ============================================================================
+# USAGE NOTES
+# ============================================================================
+#
+# 1. CONVERSE API SUPPORT:
+#    - Most text/chat models support Converse API (best for tool calling)
+#    - Embedding, rerank, and image generation models DO NOT support Converse API
+#    - Use supports_converse_api: true to identify compatible models
+#
+# 2. TOOL CALLING / FUNCTION CALLING:
+#    - Claude 3+, Nova, Llama 3.1+, Mistral Large, Cohere Command R, Jamba 1.5
+#    - Check supports_function_calling: true
+#
+# 3. VISION SUPPORT:
+#    - Claude 3+ (except 3.5 Haiku), Nova, Llama 3.2/4, Pixtral
+#    - Check supports_vision: true
+#
+# 4. LITELLM ROUTING:
+#    - Use bedrock/ prefix for default routing
+#    - Use bedrock/converse/ for explicit Converse API routing
+#    - LiteLLM automatically selects the best API route
+#
+# 5. REGIONAL AVAILABILITY:
+#    - Check AWS Bedrock console for model availability in your region
+#    - Some models may require requesting access
+#
+# 6. PRICING:
+#    - See AWS Bedrock pricing page for current rates
+#    - Pricing varies by model and region
+#
+# ============================================================================

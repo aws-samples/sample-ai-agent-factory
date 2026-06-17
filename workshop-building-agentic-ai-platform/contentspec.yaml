@@ -1,0 +1,170 @@
+# We only support version 2.0.
+version: 2.0
+
+# Default locale code of the content ,formatted as languageCode-countryCode.
+defaultLocaleCode: en-US
+
+# A list of all of the supported locale codes, formatted as languageCode-countryCode.
+localeCodes:
+  - en-US
+
+# A dictionary of arbitrary parameters that can be referenced in the workshop guide
+# using the params directive.
+params:
+  workshopTitle: "Building an Enterprise Agentic AI Platform on Amazon Bedrock AgentCore"
+  estimatedDuration: "1.5-4 hours"
+
+# List of links to display in the workshop guide. Will be rendered on the left hand side navigation menu.
+additionalLinks:
+  - title: Amazon Bedrock AgentCore Documentation
+    link: https://docs.aws.amazon.com/bedrock/latest/userguide/agentcore.html
+  - title: Amazon Bedrock Agents Documentation
+    link: https://docs.aws.amazon.com/bedrock/latest/userguide/agents.html
+  - title: Model Context Protocol Specification
+    link: https://modelcontextprotocol.io/specification
+
+awsAccountConfig:
+
+  # A list of valid account sources that are compatible for this content.
+  accountSources:
+    - workshop_studio
+    - customer_provided
+
+  # Service-linked roles required by the workshop infrastructure.
+  # Declared here so Workshop Studio creates them idempotently during account
+  # provisioning — prevents "Role already exists" failures in recycled accounts.
+  serviceLinkedRoles:
+    - ecs.amazonaws.com
+    - ecs.application-autoscaling.amazonaws.com
+
+  # The following configuration is specific to the ParticipantRole's scoped permissions.
+  participantRole:
+
+    # List of paths to files containing valid IAM policies that are to be attached to the account's ParticipantRole.
+    #
+    # SECURITY — WORKSHOP-SCOPED, NOT PRODUCTION. These policies intentionally
+    # keep broad permissions (some Resource:"*") so learners can create and
+    # destroy workshop resources in a dedicated, disposable sandbox account.
+    # Scoping is by resource NAME PREFIX (workshop-*) with the ARN region field
+    # always "*" — the policies are region-agnostic; the region lock lives ONLY
+    # in regionConfiguration.deployableRegions below (IAM JSON cannot reference
+    # parameters). Resource:"*" is retained only where AWS mandates it (List*/
+    # Get*, account-level Bedrock/AgentCore, VPC creates without resource-level
+    # ARN support). The real boundary: (1) disposable account per participant,
+    # (2) deployableRegions, (3) the Workshop Studio SCP — self-hosted has no
+    # SCP; the equivalent is static/cfn/self-service-scp.json (see the
+    # self-service setup page). Each file must stay <= 6,144 chars minified
+    # (IAM managed-policy quota): if a file overflows, move statements into a
+    # new file and add it to this list rather than trimming Sids.
+    iamPolicies:
+      - static/cfn/workshop-iam-policy-core.json
+      - static/cfn/workshop-iam-policy-core-2.json
+      - static/cfn/workshop-iam-policy-infra.json
+      - static/cfn/workshop-iam-policy-network.json
+
+    # List of valid IAM managed policies to be attached to the account's ParticipantRole.
+    managedPolicies:
+      - "arn:aws:iam::aws:policy/IAMReadOnlyAccess"
+
+    # List of valid trusted principals to be referenced in the ParticipantRole's trust policy
+    trustedPrincipals:
+      service:
+        - lambda.amazonaws.com
+        - bedrock.amazonaws.com
+        - bedrock-agentcore.amazonaws.com
+        - cloudformation.amazonaws.com
+
+  # Enable EC2 KeyPair for CloudShell access
+  ec2KeyPair: false
+
+  # Defines a set of accessible and deployable regions for events leveraging this content.
+  regionConfiguration:
+
+    minAccessibleRegions: 1
+    maxAccessibleRegions: 1
+
+    # Supported-region allow-list (the single, parameter-driven region guard).
+    # Default/baseline region is us-west-2. Limited to the regions where the full
+    # stack works end to end: Bedrock cross-region inference profiles AND the
+    # Amazon Bedrock AgentCore Registry control plane are both GA. AgentCore
+    # Registry returns "Internal server error" in eu-central-1 and ap-southeast-1
+    # (verified 2026-06-15), which breaks Modules 3b/4, so those are excluded.
+    deployableRegions:
+      recommended:
+        - us-west-2
+        - us-east-1
+        - eu-west-1
+
+infrastructure:
+
+  # CloudFormation templates for workshop infrastructure
+  cloudformationTemplates:
+
+    - templateLocation: static/cfn/llm-gateway/workshop-llm-gateway-stack.yaml
+      label: workshop-llm-gateway-stack
+      tags:
+        - key: Workshop
+          value: AgentCore-Platform
+        - key: Module
+          value: LLM-Gateway
+
+    - templateLocation: static/cfn/registry/workshop-registry-stack.yaml
+      label: workshop-registry-stack
+      tags:
+        - key: Workshop
+          value: AgentCore-Platform
+        - key: Environment
+          value: Workshop
+      parameters:
+        - templateParameter: EnvironmentName
+          defaultValue: "workshop"
+        - templateParameter: DocumentDBPassword
+          # Leave empty — data-stack auto-generates a random password via
+          # Secrets Manager when this value is blank.
+          defaultValue: ""
+        - templateParameter: TemplateS3Bucket
+          defaultValue: "{{.AssetsBucketName}}"
+        - templateParameter: TemplateS3Prefix
+          defaultValue: "{{.AssetsBucketPrefix}}cfn/registry/"
+
+    - templateLocation: static/cfn/tools-gateway/workshop-tools-gateway-stack.yaml
+      label: workshop-tools-gateway-stack
+      tags:
+        - key: Workshop
+          value: AgentCore-Platform
+        - key: Module
+          value: Tools-Gateway
+      parameters:
+        - templateParameter: EnvironmentName
+          defaultValue: "workshop"
+
+    - templateLocation: static/cfn/agentcore/workshop-agentcore-stack.yaml
+      label: workshop-agentcore-stack
+      tags:
+        - key: Workshop
+          value: AgentCore-Platform
+        - key: Module
+          value: AgentCore
+      parameters:
+        - templateParameter: EnvironmentName
+          defaultValue: "workshop"
+
+    - templateLocation: static/cfn/code-editor.yaml
+      label: code-editor
+      participantVisibleStackOutputs:
+        - URL
+        - IdePassword
+      tags:
+        - key: Workshop
+          value: AgentCore-Platform
+        - key: Component
+          value: IDE
+      parameters:
+        - templateParameter: InstanceType
+          defaultValue: "t4g.xlarge"
+        - templateParameter: HomeFolder
+          defaultValue: "/workshop"
+        - templateParameter: WorkshopAssetsBucket
+          defaultValue: "{{.AssetsBucketName}}"
+        - templateParameter: WorkshopAssetsPrefix
+          defaultValue: "{{.AssetsBucketPrefix}}"

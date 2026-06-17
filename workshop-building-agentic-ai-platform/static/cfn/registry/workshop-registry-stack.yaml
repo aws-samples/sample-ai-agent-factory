@@ -1,0 +1,543 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  MCP Gateway Registry - Main Stack (Parent Orchestration)
+  Orchestrates all nested stacks for complete MCP Gateway Registry deployment.
+  Deploys to the region specified by AWS::Region. The set of allowed deploy
+  regions is controlled by contentspec.yaml regionConfiguration.deployableRegions
+  (parameter-driven, region-agnostic), not hardcoded in this template.
+
+Parameters:
+  # Upstream Version Tracking
+  UpstreamVersion:
+    Type: String
+    Default: 'v1.0.16'
+    Description: >
+      Upstream mcp-gateway-registry version this deployment is based on.
+      Used for display purposes in the registry console. Image tags default
+      to 'latest' unless explicitly overridden via *ImageTag parameters.
+    AllowedPattern: '^v?[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?$|^latest$'
+    ConstraintDescription: Must be a semantic version (e.g., v1.0.16, 1.0.16) or 'latest'
+
+  # Build Trigger - increment to force CodeBuild rebuild
+  EnvironmentName:
+    Type: String
+    Default: workshop
+    Description: >
+      Name prefix for all resources and CFN exports. Must match the
+      EnvironmentName used by the Tools Gateway and AgentCore stacks
+      (default "workshop") so their !ImportValue lookups resolve.
+      Note: this diverges from the upstream mcp-gateway-registry project,
+      which defaults to "mcp-gateway"; the workshop-specific default is
+      "workshop" to align with the rest of the platform stacks.
+
+  # Network Configuration
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for VPC
+
+  IngressCidrBlocks:
+    Type: String
+    Default: 10.0.0.0/8
+    Description: >
+      CIDR blocks for ALB access. Replace with your corporate CIDR.
+      Workshop Studio deployments may use 0.0.0.0/0 with SCP protections.
+
+  # Domain Configuration
+  BaseDomain:
+    Type: String
+    Default: ''
+    Description: Base domain for regional URLs (leave empty to skip DNS/certs)
+
+  HostedZoneId:
+    Type: String
+    Default: ''
+    Description: Route53 Hosted Zone ID (leave empty to skip DNS/certs)
+
+  UseRegionalDomains:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Use region-based domain names
+
+  # Database Credentials
+  DocumentDBUsername:
+    Type: String
+    Default: docdbadmin
+    Description: DocumentDB admin username
+    NoEcho: true
+
+  DocumentDBPassword:
+    Type: String
+    Default: ''
+    Description: >
+      DocumentDB admin password (min 8 characters). If empty, auto-generated
+      via Secrets Manager in the data stack. NEVER commit a real password here.
+    NoEcho: true
+
+  # DocumentDB Instance Configuration
+  DocumentDBInstanceClass:
+    Type: String
+    Default: db.t3.medium
+    Description: DocumentDB instance class (db.t3.medium = 2 vCPU, 4 GB RAM)
+    AllowedValues:
+      - db.t3.medium
+      - db.r5.large
+      - db.r5.xlarge
+      - db.r5.2xlarge
+
+  # Aurora Serverless Scaling
+  RegistryImageRepo:
+    Type: String
+    Default: 'mcp-gateway-registry'
+    Description: ECR repository name for Registry service
+
+  RegistryImageTag:
+    Type: String
+    Default: ''
+    Description: Image tag for Registry service (defaults to 'latest' if empty)
+
+  AuthServerImageRepo:
+    Type: String
+    Default: 'mcp-gateway-auth-server'
+    Description: ECR repository name for Auth Server
+
+  AuthServerImageTag:
+    Type: String
+    Default: ''
+    Description: Image tag for Auth Server (defaults to 'latest' if empty)
+
+  CurrentTimeImageRepo:
+    Type: String
+    Default: 'mcp-gateway-currenttime'
+    Description: ECR repository name for CurrentTime MCP server
+
+  CurrentTimeImageTag:
+    Type: String
+    Default: ''
+    Description: Image tag for CurrentTime MCP server (defaults to 'latest' if empty)
+
+  McpgwImageRepo:
+    Type: String
+    Default: 'mcp-gateway-mcpgw'
+    Description: ECR repository name for MCPGW MCP server
+
+  McpgwImageTag:
+    Type: String
+    Default: ''
+    Description: Image tag for MCPGW MCP server (defaults to 'latest' if empty)
+
+  RealServerFakeToolsImageRepo:
+    Type: String
+    Default: 'mcp-gateway-realserverfaketools'
+    Description: ECR repository name for RealServerFakeTools MCP server
+
+  RealServerFakeToolsImageTag:
+    Type: String
+    Default: ''
+    Description: Image tag for RealServerFakeTools MCP server (defaults to 'latest' if empty)
+
+  ServiceCpu:
+    Type: String
+    Default: '512'
+    Description: CPU units for main services
+
+  ServiceMemory:
+    Type: String
+    Default: '1024'
+    Description: Memory (MB) for main services
+
+  EnableAutoScaling:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Enable auto scaling for ECS services
+
+  MinCapacity:
+    Type: Number
+    Default: 1
+    Description: Minimum number of tasks
+
+  MaxCapacity:
+    Type: Number
+    Default: 4
+    Description: Maximum number of tasks
+
+  TargetCpuUtilization:
+    Type: Number
+    Default: 70
+    Description: Target CPU utilization percentage
+
+  TargetMemoryUtilization:
+    Type: Number
+    Default: 80
+    Description: Target memory utilization percentage
+
+  # Keycloak Configuration
+  EmbeddingsProvider:
+    Type: String
+    Default: 'sentence-transformers'
+    AllowedValues:
+      - 'sentence-transformers'
+      - 'litellm'
+    Description: Embeddings provider (sentence-transformers for local, litellm for API-based)
+
+  EmbeddingsModelName:
+    Type: String
+    Default: 'all-MiniLM-L6-v2'
+    Description: Name of the embeddings model
+
+  EmbeddingsModelDimensions:
+    Type: Number
+    Default: 384
+    Description: Dimension of the embeddings model (384 for MiniLM, 1536 for OpenAI)
+
+  EmbeddingsAwsRegion:
+    Type: String
+    Default: ''
+    Description: >
+      AWS region for Bedrock embeddings (only used with litellm provider).
+      Leave empty to use the stack's deploy region (AWS::Region); the
+      services nested stack resolves an empty value to AWS::Region.
+
+  # Session Cookie Security (matching Terraform v1.0.7)
+  SessionCookieSecure:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Enable secure flag on session cookies (HTTPS-only)
+
+  SessionCookieDomain:
+    Type: String
+    Default: ''
+    Description: Domain for session cookies (leave empty for single-domain deployments)
+
+  # Security Scanning Configuration (v1.0.9+)
+  SecurityScanEnabled:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Enable security scanning for MCP servers during registration
+
+  SecurityScanOnRegistration:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Automatically scan servers when they are registered
+
+  SecurityBlockUnsafeServers:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Block (disable) servers that fail security scans
+
+  SecurityAnalyzers:
+    Type: String
+    Default: 'yara'
+    Description: Comma-separated analyzers for security scanning (yara, llm, api). YARA requires no API key.
+
+  SecurityScanTimeout:
+    Type: Number
+    Default: 60
+    Description: Security scan timeout in seconds
+
+  SecurityAddPendingTag:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Add security-pending tag to servers that fail security scan
+
+  # Observability Configuration (ADOT + Amazon Managed Service for Prometheus + Grafana + Metrics Service)
+  # NOTE: Set to 'false' by default because observability-stack must be deployed
+  # BEFORE services-stack for ImportValue references to resolve.
+  # Deploy observability-stack separately first, then set to 'true' on stack update.
+  EnableObservability:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: >
+      Enable full observability stack (Grafana OSS, metrics-service, ADOT collector).
+      When enabled, deploys Grafana dashboards for MCP Analytics and AWS Infrastructure monitoring.
+
+  AMPRemoteWriteEndpoint:
+    Type: String
+    Default: ''
+    Description: >
+      Amazon Managed Prometheus remote write endpoint. If empty, auto-uses endpoint from compute-stack.
+      Format: https://aps-workspaces.<region>.amazonaws.com/workspaces/<workspace-id>/api/v1/remote_write
+
+  GrafanaImageRepo:
+    Type: String
+    Default: 'mcp-gateway-grafana'
+    Description: ECR repository name for Grafana (with dashboards baked in from cloudformation/aws-ecs/grafana/)
+
+  GrafanaImageTag:
+    Type: String
+    Default: ''
+    Description: Image tag for Grafana (defaults to 'latest' if empty)
+
+  MetricsServiceImageRepo:
+    Type: String
+    Default: 'mcp-gateway-metrics-service'
+    Description: ECR repository name for metrics-service
+
+  MetricsServiceImageTag:
+    Type: String
+    Default: ''
+    Description: Image tag for metrics-service (defaults to 'latest' if empty)
+
+  # Template S3 Location (for nested stacks)
+  # NOTE: TemplateS3Prefix must include trailing slash (e.g., "path/to/templates/")
+  # This convention allows direct copy to Workshop Studio which injects prefix with trailing slash
+  TemplateS3Bucket:
+    Type: String
+    Default: 'your_template_bucket_here'
+    Description: S3 bucket containing nested stack templates
+
+  TemplateS3Prefix:
+    Type: String
+    Default: 'your_template_prefix_here/'
+    Description: S3 prefix for nested stack templates (must include trailing slash)
+
+  # Workshop Studio replicates static assets (container build context, nested
+  # templates) to a region-specific S3 bucket whose name is not predictable.
+  # Workshop Studio injects the correct per-region bucket via the contentspec
+  # parameter default "{{.AssetsBucketName}}". This replaces the previously
+  # hardcoded, closed WssAssetsBuckets region map and makes the stack work in
+  # ANY region Workshop Studio replicates assets to. If left empty, the value
+  # falls back to TemplateS3Bucket (also fed from {{.AssetsBucketName}}).
+  AssetsBucketName:
+    Type: String
+    Default: ''
+    Description: >
+      Workshop Studio assets S3 bucket name (set to "{{.AssetsBucketName}}" in
+      contentspec.yaml). Leave empty to reuse TemplateS3Bucket.
+
+Conditions:
+  # Image tag conditions - use UpstreamVersion as default when individual tags are empty
+  UseDefaultRegistryTag: !Equals [!Ref RegistryImageTag, '']
+  UseDefaultAuthServerTag: !Equals [!Ref AuthServerImageTag, '']
+  UseDefaultCurrentTimeTag: !Equals [!Ref CurrentTimeImageTag, '']
+  UseDefaultMcpgwTag: !Equals [!Ref McpgwImageTag, '']
+  UseDefaultRealServerFakeToolsTag: !Equals [!Ref RealServerFakeToolsImageTag, '']
+  UseDefaultMetricsServiceTag: !Equals [!Ref MetricsServiceImageTag, '']
+  UseDefaultGrafanaTag: !Equals [!Ref GrafanaImageTag, '']
+  # Reuse TemplateS3Bucket as the assets bucket when AssetsBucketName is empty.
+  HasAssetsBucketName: !Not [!Equals [!Ref AssetsBucketName, '']]
+
+Resources:
+
+  #============================================================================
+  # Network Stack
+  # Approx. 160 sec to deploy
+  #============================================================================
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3Bucket}.s3.${AWS::Region}.amazonaws.com/${TemplateS3Prefix}network-stack.yaml'
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        VpcCidr: !Ref VpcCidr
+        IngressCidrBlocks: !Ref IngressCidrBlocks
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-network
+
+  #============================================================================
+  # Data Stack
+  # Approx. 1200 sec to deploy (includes DocumentDB cluster creation)
+  #============================================================================
+  DataStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3Bucket}.s3.${AWS::Region}.amazonaws.com/${TemplateS3Prefix}data-stack.yaml'
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        VpcCidr: !Ref VpcCidr
+        PrivateSubnet1: !GetAtt NetworkStack.Outputs.PrivateSubnet1
+        PrivateSubnet2: !GetAtt NetworkStack.Outputs.PrivateSubnet2
+        PrivateSubnet3: !GetAtt NetworkStack.Outputs.PrivateSubnet3
+        DocumentDBUsername: !Ref DocumentDBUsername
+        DocumentDBPassword: !Ref DocumentDBPassword
+        DocumentDBInstanceClass: !Ref DocumentDBInstanceClass
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-data
+
+  #============================================================================
+  # Compute Stack
+  # Approx. 700 sec to deploy
+  #============================================================================
+  ComputeStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: DataStack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3Bucket}.s3.${AWS::Region}.amazonaws.com/${TemplateS3Prefix}compute-stack.yaml'
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        BaseDomain: !Ref BaseDomain
+        HostedZoneId: !Ref HostedZoneId
+        UseRegionalDomains: !Ref UseRegionalDomains
+        UpstreamVersion: !Ref UpstreamVersion
+        # Build the container-assets URL from the Workshop Studio assets bucket
+        # parameter + the deploy region + the region-derived S3 URL suffix
+        # (AWS::URLSuffix => amazonaws.com / amazonaws.com.cn). The asset base
+        # prefix is TemplateS3Prefix with the trailing "cfn/registry/" removed
+        # (i.e. the {{.AssetsBucketPrefix}} WSS injects), so this tracks
+        # whatever per-region bucket/prefix Workshop Studio assigns.
+        ContainerAssetsS3Url: !Sub
+          - 'https://${Bucket}.s3.${AWS::Region}.${AWS::URLSuffix}/${AssetPrefix}containers'
+          - Bucket: !If [HasAssetsBucketName, !Ref AssetsBucketName, !Ref TemplateS3Bucket]
+            AssetPrefix: !Select [0, !Split ['cfn/registry/', !Ref TemplateS3Prefix]]
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-compute
+
+  #============================================================================
+  # Services Stack
+  # Approx. 1500 sec to deploy
+  # Note: Services stack uses ImportValue for cross-stack references
+  # Only passing parameters that are defined in services-stack.yaml
+  #============================================================================
+  ServicesStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: ComputeStack
+    Properties:
+      TimeoutInMinutes: 45
+      TemplateURL: !Sub 'https://${TemplateS3Bucket}.s3.${AWS::Region}.amazonaws.com/${TemplateS3Prefix}services-stack.yaml'
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        RegistryImageRepo: !Ref RegistryImageRepo
+        RegistryImageTag: !If [UseDefaultRegistryTag, 'latest', !Ref RegistryImageTag]
+        AuthServerImageRepo: !Ref AuthServerImageRepo
+        AuthServerImageTag: !If [UseDefaultAuthServerTag, 'latest', !Ref AuthServerImageTag]
+        CurrentTimeImageRepo: !Ref CurrentTimeImageRepo
+        CurrentTimeImageTag: !If [UseDefaultCurrentTimeTag, 'latest', !Ref CurrentTimeImageTag]
+        McpgwImageRepo: !Ref McpgwImageRepo
+        McpgwImageTag: !If [UseDefaultMcpgwTag, 'latest', !Ref McpgwImageTag]
+        RealServerFakeToolsImageRepo: !Ref RealServerFakeToolsImageRepo
+        RealServerFakeToolsImageTag: !If [UseDefaultRealServerFakeToolsTag, 'latest', !Ref RealServerFakeToolsImageTag]
+        # Resolve the auto-generated metrics API key (created in data-stack) at
+        # deploy time and pass it to the services stack's NoEcho parameter. No
+        # key literal lives in source.
+        MetricsApiKey: !Sub
+          - '{{resolve:secretsmanager:${SecretArn}:SecretString}}'
+          - SecretArn: !GetAtt DataStack.Outputs.MetricsApiKeySecretArn
+        ServiceCpu: !Ref ServiceCpu
+        ServiceMemory: !Ref ServiceMemory
+        EnableAutoScaling: !Ref EnableAutoScaling
+        MinCapacity: !Ref MinCapacity
+        MaxCapacity: !Ref MaxCapacity
+        TargetCpuUtilization: !Ref TargetCpuUtilization
+        TargetMemoryUtilization: !Ref TargetMemoryUtilization
+        EmbeddingsProvider: !Ref EmbeddingsProvider
+        EmbeddingsModelName: !Ref EmbeddingsModelName
+        EmbeddingsModelDimensions: !Ref EmbeddingsModelDimensions
+        EmbeddingsAwsRegion: !Ref EmbeddingsAwsRegion
+        SessionCookieSecure: !Ref SessionCookieSecure
+        SessionCookieDomain: !Ref SessionCookieDomain
+        SecurityScanEnabled: !Ref SecurityScanEnabled
+        SecurityScanOnRegistration: !Ref SecurityScanOnRegistration
+        SecurityBlockUnsafeServers: !Ref SecurityBlockUnsafeServers
+        SecurityAnalyzers: !Ref SecurityAnalyzers
+        SecurityScanTimeout: !Ref SecurityScanTimeout
+        SecurityAddPendingTag: !Ref SecurityAddPendingTag
+        # Observability Configuration
+        # NOTE: Deploy observability-stack separately first, then pass its outputs here
+        # and set EnableObservability to 'true' on stack update.
+        EnableObservability: !Ref EnableObservability
+        AMPRemoteWriteEndpoint: !Ref AMPRemoteWriteEndpoint
+        PrometheusWorkspaceArn: ''
+        GrafanaImageRepo: !Ref GrafanaImageRepo
+        GrafanaImageTag: !If [UseDefaultGrafanaTag, 'latest', !Ref GrafanaImageTag]
+        MetricsServiceImageRepo: !Ref MetricsServiceImageRepo
+        MetricsServiceImageTag: !If [UseDefaultMetricsServiceTag, 'latest', !Ref MetricsServiceImageTag]
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-services
+
+  #============================================================================
+  # Workshop Tools Stack
+  # Deploys last — service network-health + MCP registration Lambdas
+  #============================================================================
+  WorkshopToolsStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: ServicesStack
+    Properties:
+      TemplateURL: !Sub 'https://${TemplateS3Bucket}.s3.${AWS::Region}.amazonaws.com/${TemplateS3Prefix}workshop-tools-stack.yaml'
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        RegistryUrl: !GetAtt ComputeStack.Outputs.MainCloudFrontUrl
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-workshop-tools
+
+#============================================================================
+# Outputs
+#============================================================================
+Outputs:
+  # URL Outputs (CloudFront HTTPS)
+  MCPGatewayUrl:
+    Description: MCP Gateway URL (HTTPS via CloudFront)
+    Value: !GetAtt ComputeStack.Outputs.MainCloudFrontUrl
+
+  CognitoUserPoolId:
+    Description: Cognito User Pool ID
+    Value: !GetAtt DataStack.Outputs.CognitoUserPoolId
+
+  CognitoLoginUrl:
+    Description: Cognito hosted UI login URL
+    Value: !Sub
+      - 'https://${Domain}/login?client_id=${ClientId}&response_type=code&scope=email+openid+profile&redirect_uri=${RedirectUri}'
+      - Domain: !GetAtt DataStack.Outputs.CognitoDomain
+        ClientId: !GetAtt DataStack.Outputs.CognitoWebAppClientId
+        RedirectUri: !Sub 'https://${ComputeStack.Outputs.MainCloudFrontUrl}/oauth2/callback/cognito'
+
+
+  GrafanaUrl:
+    Description: Grafana Dashboard URL (HTTPS via CloudFront, login required)
+    Value: !Sub '${ComputeStack.Outputs.MainCloudFrontUrl}/grafana/dashboards/f/mcp-gateway/?orgId=1'
+
+  # Admin Credentials (SSM/Secrets Manager Console URLs)
+  MCPGatewayAdminPassword:
+    Description: Secrets Manager console URL for MCP Gateway Admin Password
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/secretsmanager/secret?name=${EnvironmentName}-admin-password&region=${AWS::Region}'
+
+  GrafanaAdminPassword:
+    Description: Secrets Manager console URL for Grafana Admin Password
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/secretsmanager/secret?name=${EnvironmentName}-grafana-admin-password&region=${AWS::Region}'
+
+  # Code Editor IDE is deployed by the standalone static/cfn/code-editor.yaml
+  # stack (declared in contentspec.yaml). Its URL output is surfaced directly
+  # to participants via Workshop Studio's participantVisibleStackOutputs.
+
+  # Workshop Exports — stable names used by Modules 2, 3, 4, and 5
+  # NOTE: Most exports are already created by nested stacks (data-stack, compute-stack).
+  # Only add exports here for values NOT already exported by nested stacks.
+
+  AdminPassword:
+    Description: Admin password secret name
+    Value: !Sub ${EnvironmentName}-admin-password
+
+  # Version Tracking
+  UpstreamVersion:
+    Description: Upstream mcp-gateway-registry version this deployment is based on
+    Value: !Ref UpstreamVersion
+    Export:
+      Name: !Sub ${EnvironmentName}-upstream-version
+
+
+

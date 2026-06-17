@@ -1,0 +1,16 @@
+{
+  "_comment": "Replace IngressCidrBlocks with your corporate CIDR. Use 0.0.0.0/0 only in Workshop Studio with SCP protections.",
+  "Parameters": {
+    "EnvironmentName": "workshop",
+    "VpcCidr": "10.0.0.0/16",
+    "IngressCidrBlocks": "10.0.0.0/8",
+    "BaseDomain": "",
+    "HostedZoneId": "",
+    "UseRegionalDomains": "false",
+    "KeycloakDatabaseUsername": "keycloak",
+    "KeycloakDatabasePassword": "CHANGE_ME_DB_PASSWORD",
+    "KeycloakAdminPassword": "CHANGE_ME_ADMIN_PASSWORD",
+    "DocumentDBUsername": "admin",
+    "DocumentDBPassword": "CHANGE_ME_DOCDB_PASSWORD"
+  }
+}

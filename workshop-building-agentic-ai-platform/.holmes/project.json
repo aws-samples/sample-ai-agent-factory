@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "projectId": "724ed9d4-5dcf-4aaa-90db-fc2b7a739375",
+  "projectName": "building-agentic-ai-platform source+cfn (awslabs OSS readiness)",
+  "createdAt": "2026-06-10T10:47:51.474Z",
+  "updatedAt": "2026-06-10T10:47:52.468Z",
+  "stage": "prod",
+  "region": "us-east-1",
+  "lastScan": {
+    "scanId": "9b055be8-010d-419a-818e-6356ea767781",
+    "scanName": "building-agentic-ai-platform source+cfn (awslabs OSS readiness) 2026-06-10 11:47",
+    "startedAt": "2026-06-10T10:47:52Z"
+  }
+}

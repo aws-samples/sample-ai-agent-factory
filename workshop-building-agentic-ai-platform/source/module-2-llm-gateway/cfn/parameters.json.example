@@ -1,0 +1,14 @@
+[
+  {
+    "ParameterKey": "LiteLLMImageTag",
+    "ParameterValue": "v1.83.3-stable"
+  },
+  {
+    "ParameterKey": "PostgresImageTag",
+    "ParameterValue": "16.6"
+  },
+  {
+    "ParameterKey": "AdminKey",
+    "ParameterValue": ""
+  }
+]

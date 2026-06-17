@@ -1,0 +1,982 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  MCP Gateway Registry - Observability Stack
+  Deploys Amazon Managed Prometheus (AMP) and Amazon Managed Grafana (AMG)
+  for metrics collection and visualization. Includes ADOT configuration for ECS.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: mcp-gateway
+    Description: Name prefix for all resources
+
+  # SSO Configuration for Grafana
+  SSOAdminUserArn:
+    Type: String
+    Default: ''
+    Description: >
+      ARN of IAM Identity Center user to grant Grafana admin access.
+      Format: arn:aws:identitystore::ACCOUNT_ID:user/USER_ID
+      Leave empty to skip SSO configuration (Grafana will use IAM auth).
+
+  # Optional: Existing VPC for private access
+  VpcId:
+    Type: String
+    Default: ''
+    Description: VPC ID for private VPC endpoint access (optional)
+
+  PrivateSubnetIds:
+    Type: String
+    Default: ''
+    Description: Comma-separated private subnet IDs for VPC endpoints (optional)
+
+  # Retention Settings
+  PrometheusRetentionDays:
+    Type: Number
+    Default: 30
+    Description: Number of days to retain metrics in Prometheus
+    MinValue: 1
+    MaxValue: 365
+
+  # Alert Configuration
+  EnableAlerts:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Enable default alerting rules for MCP Gateway
+
+  # Grafana Configuration (AMG - requires SSO)
+  EnableGrafana:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: >
+      Enable Amazon Managed Grafana deployment.
+      Requires IAM Identity Center (SSO) to be configured in the account.
+      Set to false to deploy only AMP and CloudWatch dashboard.
+
+  # Grafana OSS Configuration (ECS-based, no SSO required)
+  EnableGrafanaOSS:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: >
+      Enable Grafana OSS deployment on ECS.
+      Does not require SSO - uses anonymous access for workshop.
+
+  GrafanaOSSImageUri:
+    Type: String
+    Default: ''
+    Description: ECR URI for Grafana OSS container image
+
+  ECSClusterArn:
+    Type: String
+    Default: ''
+    Description: ARN of existing ECS cluster for Grafana OSS
+
+  PrivateSubnetIdsList:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: List of private subnet IDs for Grafana ECS service
+
+  ALBListenerArn:
+    Type: String
+    Default: ''
+    Description: ARN of ALB HTTPS listener for Grafana
+
+  VpcIdForGrafana:
+    Type: String
+    Default: ''
+    Description: VPC ID for Grafana security group
+
+  ALBSecurityGroupId:
+    Type: String
+    Default: ''
+    Description: Security group ID of the ALB
+
+  # Metrics Service Configuration
+  EnableMetricsService:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: >
+      Enable metrics-service deployment for collecting application metrics.
+      Required for MCP analytics dashboards to show data.
+
+  MetricsServiceImageUri:
+    Type: String
+    Default: ''
+    Description: ECR URI for metrics-service container image
+
+  MetricsApiKey:
+    Type: String
+    NoEcho: true
+    Description: >
+      Shared API key for metrics collection. Generate your own unique key
+      (e.g. via `openssl rand -hex 32`).
+
+  ServiceDiscoveryNamespaceId:
+    Type: String
+    Default: ''
+    Description: Cloud Map namespace ID for service discovery
+
+  EcsTasksSecurityGroupId:
+    Type: String
+    Default: ''
+    Description: Security group ID for ECS tasks (for metrics-service ingress)
+
+Conditions:
+  HasSSOUser: !Not [!Equals [!Ref SSOAdminUserArn, '']]
+  DeployGrafana: !And
+    - !Equals [!Ref EnableGrafana, 'true']
+    - !Not [!Equals [!Ref SSOAdminUserArn, '']]
+  DeployGrafanaOSS: !And
+    - !Equals [!Ref EnableGrafanaOSS, 'true']
+    - !Not [!Equals [!Ref GrafanaOSSImageUri, '']]
+    - !Not [!Equals [!Ref ECSClusterArn, '']]
+  DeployMetricsService: !And
+    - !Equals [!Ref EnableMetricsService, 'true']
+    - !Not [!Equals [!Ref MetricsServiceImageUri, '']]
+    - !Not [!Equals [!Ref ECSClusterArn, '']]
+    - !Not [!Equals [!Ref ServiceDiscoveryNamespaceId, '']]
+  HasVpcConfig: !And
+    - !Not [!Equals [!Ref VpcId, '']]
+    - !Not [!Equals [!Ref PrivateSubnetIds, '']]
+  EnableAlerting: !Equals [!Ref EnableAlerts, 'true']
+
+Resources:
+  # ============================================================================
+  # Amazon Managed Service for Prometheus
+  # ============================================================================
+
+  PrometheusWorkspace:
+    Type: AWS::APS::Workspace
+    Properties:
+      Alias: !Sub '${EnvironmentName}-prometheus'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-prometheus'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # NOTE: AWS::APS::AlertManagerDefinition is not supported in CloudFormation
+  # Alert Manager must be configured via AWS CLI or Console after deployment:
+  #   aws amp create-alert-manager-definition \
+  #     --workspace-id <WORKSPACE_ID> \
+  #     --data <BASE64_ENCODED_CONFIG> \
+  #     --region us-west-2
+
+  # Rule Groups Namespace for MCP Gateway Alerts
+  PrometheusRuleGroup:
+    Type: AWS::APS::RuleGroupsNamespace
+    Condition: EnableAlerting
+    Properties:
+      Workspace: !GetAtt PrometheusWorkspace.Arn
+      Name: mcp-gateway-alerts
+      Data: !Sub |
+        groups:
+          - name: mcp-gateway
+            interval: 60s
+            rules:
+              - alert: MCPGatewayHighErrorRate
+                expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.05
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  summary: High error rate in MCP Gateway
+                  description: Error rate is above 5% for 5 minutes
+              - alert: MCPRegistryDown
+                expr: up{job="mcp-registry"} == 0
+                for: 2m
+                labels:
+                  severity: critical
+                annotations:
+                  summary: MCP Registry is down
+                  description: MCP Registry service has been down for 2 minutes
+              - alert: MCPGatewayHighLatency
+                expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) > 2
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  summary: High latency in MCP Gateway
+                  description: 95th percentile latency is above 2 seconds
+
+  # ============================================================================
+  # Amazon Managed Grafana (AMG)
+  # ============================================================================
+
+  GrafanaWorkspace:
+    Type: AWS::Grafana::Workspace
+    Condition: DeployGrafana
+    Properties:
+      Name: !Sub '${EnvironmentName}-grafana'
+      Description: Grafana workspace for MCP Gateway Registry monitoring
+      AccountAccessType: CURRENT_ACCOUNT
+      AuthenticationProviders:
+        - !If
+          - HasSSOUser
+          - AWS_SSO
+          - SAML
+      PermissionType: SERVICE_MANAGED
+      DataSources:
+        - PROMETHEUS
+        - CLOUDWATCH
+      NotificationDestinations:
+        - SNS
+      RoleArn: !GetAtt GrafanaWorkspaceRole.Arn
+      GrafanaVersion: '10.4'
+      PluginAdminEnabled: true
+
+  # Grafana Workspace IAM Role
+  GrafanaWorkspaceRole:
+    Type: AWS::IAM::Role
+    Condition: DeployGrafana
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-grafana-role-${AWS::Region}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: grafana.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              StringLike:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:grafana:${AWS::Region}:${AWS::AccountId}:/workspaces/*'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonPrometheusQueryAccess'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/CloudWatchReadOnlyAccess'
+      Policies:
+        - PolicyName: PrometheusAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aps:QueryMetrics
+                  - aps:GetSeries
+                  - aps:GetLabels
+                  - aps:GetMetricMetadata
+                Resource: !GetAtt PrometheusWorkspace.Arn
+
+  # ============================================================================
+  # IAM Role for ECS Tasks to Write Metrics
+  # ============================================================================
+
+  PrometheusRemoteWriteRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-prometheus-write-role-${AWS::Region}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PrometheusRemoteWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aps:RemoteWrite
+                Resource: !GetAtt PrometheusWorkspace.Arn
+
+  # Policy for existing ECS Task Role to assume the remote write role
+  PrometheusWritePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${EnvironmentName}-prometheus-write-policy-${AWS::Region}'
+      Description: Policy allowing ECS tasks to write metrics to AMP
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - aps:RemoteWrite
+              - aps:GetLabels
+              - aps:GetSeries
+              - aps:GetMetricMetadata
+            Resource: !GetAtt PrometheusWorkspace.Arn
+
+  # ============================================================================
+  # SNS Topic for Alerts (optional)
+  # ============================================================================
+
+  AlertSNSTopic:
+    Type: AWS::SNS::Topic
+    Condition: EnableAlerting
+    Properties:
+      TopicName: !Sub '${EnvironmentName}-alerts'
+      DisplayName: MCP Gateway Alerts
+      # Server-side encryption with the AWS-managed SNS key (zero cost).
+      # NOTE: the aws/sns managed key's policy does not grant AWS service
+      # principals (e.g. cloudwatch.amazonaws.com); if you later publish to
+      # this topic from CloudWatch alarms or AMP alert manager in production,
+      # use a customer-managed CMK that grants the publishing service.
+      KmsMasterKeyId: alias/aws/sns
+
+  # ============================================================================
+  # CloudWatch Dashboard for Quick Overview
+  # ============================================================================
+
+  MCPGatewayDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${EnvironmentName}-overview'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 24,
+              "height": 1,
+              "properties": {
+                "markdown": "# MCP Gateway Registry - Observability Dashboard\n**Prometheus Workspace:** [Open AMP Console](https://${AWS::Region}.console.aws.amazon.com/prometheus/home?region=${AWS::Region}#/workspaces/${PrometheusWorkspace}/overview)"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 1,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "title": "ECS Service CPU Utilization",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["AWS/ECS", "CPUUtilization", "ClusterName", "${EnvironmentName}-ecs-cluster", "ServiceName", "${EnvironmentName}-registry", {"label": "Registry"}],
+                  ["...", "${EnvironmentName}-auth-server", {"label": "Auth Server"}]
+                ],
+                "region": "${AWS::Region}",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8,
+              "y": 1,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "title": "ECS Service Memory Utilization",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["AWS/ECS", "MemoryUtilization", "ClusterName", "${EnvironmentName}-ecs-cluster", "ServiceName", "${EnvironmentName}-registry", {"label": "Registry"}],
+                  ["...", "${EnvironmentName}-auth-server", {"label": "Auth Server"}]
+                ],
+                "region": "${AWS::Region}",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16,
+              "y": 1,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "title": "ALB Request Count",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${EnvironmentName}-alb", {"stat": "Sum", "label": "Total Requests"}]
+                ],
+                "region": "${AWS::Region}",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 7,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "ALB Target Response Time",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${EnvironmentName}-alb", {"stat": "Average", "label": "Avg Response Time"}],
+                  ["...", {"stat": "p95", "label": "p95 Response Time"}]
+                ],
+                "region": "${AWS::Region}",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 7,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "ALB HTTP Response Codes",
+                "view": "timeSeries",
+                "stacked": true,
+                "metrics": [
+                  ["AWS/ApplicationELB", "HTTPCode_Target_2XX_Count", "LoadBalancer", "${EnvironmentName}-alb", {"stat": "Sum", "label": "2XX", "color": "#2ca02c"}],
+                  [".", "HTTPCode_Target_4XX_Count", ".", ".", {"stat": "Sum", "label": "4XX", "color": "#ff7f0e"}],
+                  [".", "HTTPCode_Target_5XX_Count", ".", ".", {"stat": "Sum", "label": "5XX", "color": "#d62728"}]
+                ],
+                "region": "${AWS::Region}",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 13,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "title": "DocumentDB Connections",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["AWS/DocDB", "DatabaseConnections", "DBClusterIdentifier", "${EnvironmentName}-docdb", {"stat": "Average"}]
+                ],
+                "region": "${AWS::Region}",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8,
+              "y": 13,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "title": "DocumentDB Connections",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["AWS/DocDB", "DatabaseConnections", "DBClusterIdentifier", "${EnvironmentName}-registry", {"stat": "Average", "label": "Connections"}]
+                ],
+                "region": "${AWS::Region}",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16,
+              "y": 13,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "title": "Aurora Serverless ACU",
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  ["AWS/RDS", "ServerlessDatabaseCapacity", "DBClusterIdentifier", "${EnvironmentName}-keycloak-db", {"stat": "Average", "label": "ACU"}]
+                ],
+                "region": "${AWS::Region}",
+                "period": 60
+              }
+            }
+          ]
+        }
+
+  # ============================================================================
+  # Metrics Service on ECS (Required for MCP Analytics)
+  # ============================================================================
+
+  MetricsServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: DeployMetricsService
+    Properties:
+      GroupDescription: Security group for metrics-service ECS task
+      GroupName: !Sub '${EnvironmentName}-metrics-service-sg'
+      VpcId: !Ref VpcIdForGrafana
+      SecurityGroupIngress:
+        # Allow metrics API access from ECS tasks (registry, auth-server)
+        - IpProtocol: tcp
+          FromPort: 8890
+          ToPort: 8890
+          SourceSecurityGroupId: !Ref EcsTasksSecurityGroupId
+          Description: Allow metrics API from ECS tasks
+        # Allow Prometheus scraping from ADOT (if deployed in same security group)
+        - IpProtocol: tcp
+          FromPort: 9465
+          ToPort: 9465
+          SourceSecurityGroupId: !Ref EcsTasksSecurityGroupId
+          Description: Allow Prometheus scraping from ADOT
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-metrics-service-sg'
+
+  MetricsServiceTaskRole:
+    Type: AWS::IAM::Role
+    Condition: DeployMetricsService
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-metrics-service-task-role-${AWS::Region}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      # No special permissions needed - metrics-service is stateless
+
+  MetricsServiceExecutionRole:
+    Type: AWS::IAM::Role
+    Condition: DeployMetricsService
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-metrics-service-exec-role-${AWS::Region}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+
+  MetricsServiceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: DeployMetricsService
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: "Workshop log groups rely on CloudWatch Logs' default server-side encryption; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+    Properties:
+      LogGroupName: !Sub '/ecs/${EnvironmentName}/metrics-service'
+      RetentionInDays: 7
+
+  MetricsServiceTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Condition: DeployMetricsService
+    Properties:
+      Family: !Sub '${EnvironmentName}-metrics-service'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '256'
+      Memory: '512'
+      ExecutionRoleArn: !GetAtt MetricsServiceExecutionRole.Arn
+      TaskRoleArn: !GetAtt MetricsServiceTaskRole.Arn
+      ContainerDefinitions:
+        - Name: metrics-service
+          Image: !Ref MetricsServiceImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8890
+              Protocol: tcp
+            - ContainerPort: 9465
+              Protocol: tcp
+          Environment:
+            - Name: METRICS_SERVICE_HOST
+              Value: '0.0.0.0'
+            - Name: METRICS_SERVICE_PORT
+              Value: '8890'
+            - Name: OTEL_SERVICE_NAME
+              Value: 'mcp-metrics-service'
+            - Name: OTEL_PROMETHEUS_ENABLED
+              Value: 'true'
+            - Name: OTEL_PROMETHEUS_PORT
+              Value: '9465'
+            - Name: METRICS_RATE_LIMIT
+              Value: '5000'
+            - Name: SQLITE_DB_PATH
+              Value: '/tmp/metrics.db'
+            # Pre-shared API keys for services (auto-registered at startup)
+            - Name: METRICS_API_KEY_REGISTRY
+              Value: !Ref MetricsApiKey
+            - Name: METRICS_API_KEY_AUTH
+              Value: !Ref MetricsApiKey
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref MetricsServiceLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: metrics
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8890/health || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+
+  MetricsServiceDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Condition: DeployMetricsService
+    Properties:
+      Name: metrics-service
+      NamespaceId: !Ref ServiceDiscoveryNamespaceId
+      Description: DNS service discovery for metrics-service
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 10
+        RoutingPolicy: MULTIVALUE
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-metrics-service-discovery'
+
+  MetricsServiceEcsService:
+    # ServiceRegistries uses !GetAtt MetricsServiceDiscovery.Arn, which creates
+    # an implicit CloudFormation dependency. An explicit DependsOn is redundant
+    # here because CloudFormation automatically orders !GetAtt producers before
+    # their consumers.
+    Type: AWS::ECS::Service
+    Condition: DeployMetricsService
+    Properties:
+      ServiceName: !Sub '${EnvironmentName}-metrics-service'
+      Cluster: !Ref ECSClusterArn
+      TaskDefinition: !Ref MetricsServiceTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref PrivateSubnetIdsList
+          SecurityGroups:
+            - !Ref MetricsServiceSecurityGroup
+      ServiceRegistries:
+        - RegistryArn: !GetAtt MetricsServiceDiscovery.Arn
+      HealthCheckGracePeriodSeconds: 60
+
+  # ============================================================================
+  # Grafana OSS on ECS (Alternative to AMG - no SSO required)
+  # ============================================================================
+
+  GrafanaOSSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: DeployGrafanaOSS
+    Properties:
+      GroupDescription: Security group for Grafana OSS ECS service
+      GroupName: !Sub '${EnvironmentName}-grafana-oss-sg'
+      VpcId: !Ref VpcIdForGrafana
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !Ref ALBSecurityGroupId
+          Description: Allow traffic from ALB
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-grafana-oss-sg'
+
+  # Allow ALB to send traffic to Grafana on port 3000
+  ALBEgressToGrafana:
+    Type: AWS::EC2::SecurityGroupEgress
+    Condition: DeployGrafanaOSS
+    Properties:
+      GroupId: !Ref ALBSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 3000
+      ToPort: 3000
+      DestinationSecurityGroupId: !Ref GrafanaOSSSecurityGroup
+      Description: Allow ALB to reach Grafana OSS
+
+  GrafanaOSSTaskRole:
+    Type: AWS::IAM::Role
+    Condition: DeployGrafanaOSS
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-grafana-oss-task-role-${AWS::Region}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GrafanaAMPAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aps:QueryMetrics
+                  - aps:GetSeries
+                  - aps:GetLabels
+                  - aps:GetMetricMetadata
+                Resource: !GetAtt PrometheusWorkspace.Arn
+        - PolicyName: GrafanaCloudWatchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarmsForMetric
+                  - cloudwatch:DescribeAlarmHistory
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:ListMetrics
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:GetInsightRuleReport
+                  - logs:DescribeLogGroups
+                  - logs:GetLogGroupFields
+                  - logs:StartQuery
+                  - logs:StopQuery
+                  - logs:GetQueryResults
+                  - logs:GetLogEvents
+                  - ec2:DescribeTags
+                  - ec2:DescribeInstances
+                  - ec2:DescribeRegions
+                  - tag:GetResources
+                Resource: '*'
+
+  GrafanaOSSExecutionRole:
+    Type: AWS::IAM::Role
+    Condition: DeployGrafanaOSS
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-grafana-oss-exec-role-${AWS::Region}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+
+  GrafanaOSSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: DeployGrafanaOSS
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: "Workshop log groups rely on CloudWatch Logs' default server-side encryption; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+    Properties:
+      LogGroupName: !Sub '/ecs/${EnvironmentName}/grafana-oss'
+      RetentionInDays: 7
+
+  GrafanaOSSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Condition: DeployGrafanaOSS
+    Properties:
+      Family: !Sub '${EnvironmentName}-grafana-oss'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '512'
+      Memory: '1024'
+      ExecutionRoleArn: !GetAtt GrafanaOSSExecutionRole.Arn
+      TaskRoleArn: !GetAtt GrafanaOSSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: grafana
+          Image: !Ref GrafanaOSSImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 3000
+              Protocol: tcp
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: AMP_ENDPOINT
+              Value: !Sub
+                - 'https://aps-workspaces.${AWS::Region}.amazonaws.com/workspaces/${WorkspaceId}'
+                - WorkspaceId: !GetAtt PrometheusWorkspace.WorkspaceId
+            - Name: GF_SERVER_ROOT_URL
+              Value: '%(protocol)s://%(domain)s/grafana/'
+            - Name: GF_SERVER_SERVE_FROM_SUB_PATH
+              Value: 'true'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref GrafanaOSSLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: grafana
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - wget -q --spider http://localhost:3000/api/health || exit 1
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+
+  GrafanaOSSTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: DeployGrafanaOSS
+    Properties:
+      Name: !Sub '${EnvironmentName}-grafana-tg'
+      Port: 3000
+      Protocol: HTTP
+      VpcId: !Ref VpcIdForGrafana
+      TargetType: ip
+      HealthCheckPath: /api/health
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+
+  GrafanaOSSListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: DeployGrafanaOSS
+    Properties:
+      ListenerArn: !Ref ALBListenerArn
+      Priority: 15
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - '/grafana/*'
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref GrafanaOSSTargetGroup
+
+  GrafanaOSSService:
+    Type: AWS::ECS::Service
+    Condition: DeployGrafanaOSS
+    DependsOn: GrafanaOSSListenerRule
+    Properties:
+      ServiceName: !Sub '${EnvironmentName}-grafana-oss'
+      Cluster: !Ref ECSClusterArn
+      TaskDefinition: !Ref GrafanaOSSTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref PrivateSubnetIdsList
+          SecurityGroups:
+            - !Ref GrafanaOSSSecurityGroup
+      LoadBalancers:
+        - ContainerName: grafana
+          ContainerPort: 3000
+          TargetGroupArn: !Ref GrafanaOSSTargetGroup
+      HealthCheckGracePeriodSeconds: 120
+
+Outputs:
+  PrometheusWorkspaceId:
+    Description: Amazon Managed Prometheus Workspace ID
+    # Note: !Ref returns ARN, use !GetAtt WorkspaceId to get just the ID
+    Value: !GetAtt PrometheusWorkspace.WorkspaceId
+    Export:
+      Name: !Sub '${EnvironmentName}-PrometheusWorkspaceId'
+
+  PrometheusWorkspaceArn:
+    Description: Amazon Managed Prometheus Workspace ARN
+    Value: !GetAtt PrometheusWorkspace.Arn
+    Export:
+      Name: !Sub '${EnvironmentName}-PrometheusWorkspaceArn'
+
+  PrometheusEndpoint:
+    Description: Prometheus remote write endpoint
+    # Use WorkspaceId (not Ref which returns ARN) to construct correct endpoint URL
+    Value: !Sub
+      - 'https://aps-workspaces.${AWS::Region}.amazonaws.com/workspaces/${WorkspaceId}/api/v1/remote_write'
+      - WorkspaceId: !GetAtt PrometheusWorkspace.WorkspaceId
+    Export:
+      Name: !Sub '${EnvironmentName}-PrometheusEndpoint'
+
+  PrometheusQueryEndpoint:
+    Description: Prometheus query endpoint
+    Value: !Sub
+      - 'https://aps-workspaces.${AWS::Region}.amazonaws.com/workspaces/${WorkspaceId}'
+      - WorkspaceId: !GetAtt PrometheusWorkspace.WorkspaceId
+    Export:
+      Name: !Sub '${EnvironmentName}-PrometheusQueryEndpoint'
+
+  GrafanaWorkspaceId:
+    Condition: DeployGrafana
+    Description: Amazon Managed Grafana Workspace ID
+    Value: !Ref GrafanaWorkspace
+    Export:
+      Name: !Sub '${EnvironmentName}-GrafanaWorkspaceId'
+
+  GrafanaWorkspaceEndpoint:
+    Condition: DeployGrafana
+    Description: Amazon Managed Grafana Workspace URL (requires SSO)
+    Value: !GetAtt GrafanaWorkspace.Endpoint
+    Export:
+      Name: !Sub '${EnvironmentName}-GrafanaManagedEndpoint'
+
+  PrometheusRemoteWriteRoleArn:
+    Description: IAM Role ARN for ECS tasks to write to Prometheus
+    Value: !GetAtt PrometheusRemoteWriteRole.Arn
+    Export:
+      Name: !Sub '${EnvironmentName}-PrometheusRemoteWriteRoleArn'
+
+  PrometheusWritePolicyArn:
+    Description: IAM Policy ARN for Prometheus write access
+    Value: !Ref PrometheusWritePolicy
+    Export:
+      Name: !Sub '${EnvironmentName}-PrometheusWritePolicyArn'
+
+  AlertSNSTopicArn:
+    Condition: EnableAlerting
+    Description: SNS Topic ARN for alerts
+    Value: !Ref AlertSNSTopic
+    Export:
+      Name: !Sub '${EnvironmentName}-AlertSNSTopicArn'
+
+  CloudWatchDashboardName:
+    Description: CloudWatch Dashboard name
+    Value: !Sub '${EnvironmentName}-overview'
+    Export:
+      Name: !Sub '${EnvironmentName}-CloudWatchDashboard'
+
+  GrafanaOSSEndpoint:
+    Condition: DeployGrafanaOSS
+    Description: Grafana OSS endpoint path (access via CloudFront /grafana/)
+    Value: '/grafana/'
+    Export:
+      Name: !Sub '${EnvironmentName}-GrafanaEndpoint'
+
+  GrafanaOSSServiceName:
+    Condition: DeployGrafanaOSS
+    Description: Grafana OSS ECS Service name
+    Value: !Sub '${EnvironmentName}-grafana-oss'
+    Export:
+      Name: !Sub '${EnvironmentName}-GrafanaOSSService'
+
+  GrafanaOSSTargetGroupArn:
+    Condition: DeployGrafanaOSS
+    Description: Grafana OSS Target Group ARN (for CloudFront integration)
+    Value: !Ref GrafanaOSSTargetGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-GrafanaOSSTargetGroup'
+
+  MetricsServiceEndpoint:
+    Condition: DeployMetricsService
+    Description: Metrics service internal endpoint (for METRICS_SERVICE_URL)
+    Value: !Sub 'http://metrics-service.${EnvironmentName}.local:8890'
+    Export:
+      Name: !Sub '${EnvironmentName}-MetricsServiceEndpoint'
+
+  MetricsServicePrometheusEndpoint:
+    Condition: DeployMetricsService
+    Description: Metrics service Prometheus endpoint (for ADOT scraping)
+    Value: !Sub 'metrics-service.${EnvironmentName}.local:9465'
+    Export:
+      Name: !Sub '${EnvironmentName}-MetricsServicePrometheusEndpoint'
+
+  MetricsServiceSecurityGroupId:
+    Condition: DeployMetricsService
+    Description: Metrics service security group ID
+    Value: !Ref MetricsServiceSecurityGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-MetricsServiceSecurityGroupId'
