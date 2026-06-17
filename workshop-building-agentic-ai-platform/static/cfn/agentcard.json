@@ -1,0 +1,32 @@
+{
+  "name": "workshop-travel-agent",
+  "description": "Plans trips by searching flights and hotels, comparing options, and recommending itineraries",
+  "url": "https://placeholder.agentcore.example.com/a2a",
+  "version": "1.0.0",
+  "tags": ["workshop", "travel", "agentcore", "strands"],
+  "visibility": "public",
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false
+  },
+  "skills": [
+    {
+      "id": "plan_trip",
+      "name": "Plan Trip",
+      "description": "Plans a complete trip with flights and hotels for given dates and destinations",
+      "tags": ["travel", "planning"]
+    },
+    {
+      "id": "search_flights",
+      "name": "Search Flights",
+      "description": "Searches available flights between two cities on a given date",
+      "tags": ["flights", "search"]
+    },
+    {
+      "id": "search_hotels",
+      "name": "Search Hotels",
+      "description": "Searches available hotels in a city for given dates and budget",
+      "tags": ["hotels", "search"]
+    }
+  ]
+}

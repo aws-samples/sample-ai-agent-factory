@@ -1,0 +1,850 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  MCP Gateway Registry - Workshop Tools Stack
+  Runs service network health checks and auto-registers MCP servers, A2A
+  agents, virtual servers, and agent skills after the registry is ready.
+  (Code Editor IDE moved to the standalone static/cfn/code-editor.yaml stack.)
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: mcp-gateway
+    Description: Environment name prefix for all resources (used for naming Lambdas, CloudWatch log groups, and tags).
+
+  RegistryUrl:
+    Type: String
+    Description: Public MCP Gateway URL (CloudFront HTTPS)
+
+Resources:
+
+  #============================================================================
+  # SERVICE NETWORK HEALTH CHECK
+  # Validates ECS Service Connect networking is operational by polling the
+  # built-in airegistry-tools server (auto-registered on startup) until it
+  # reports discovered tools. This confirms the registry container can reach
+  # backend MCP servers via Service Connect hostname resolution.
+  #============================================================================
+  #============================================================================
+  # Registry Restart Lambda - restarts registry so it picks up mcpgw Service Connect DNS
+  #============================================================================
+  #============================================================================
+  # Registry Restart Lambda - restarts registry so it picks up mcpgw Service Connect DNS
+  #============================================================================
+  ServiceNetworkHealthLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-svc-network-health-role-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SecretsManagerRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: ${EnvironmentName}-RegistryApiTokenSecretArn
+
+
+  ServiceNetworkHealthLambda:
+    Type: AWS::Lambda::Function
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_116
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_117
+            comment: "Inline workshop Lambda; reaches the registry via its public CloudFront URL and AWS control-plane APIs only, no VPC-bound resources"
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-svc-network-health
+      Description: >-
+        Validate Service Connect networking by checking airegistry-tools
+        has discovered tools (confirms registry can reach backend MCP servers)
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt ServiceNetworkHealthLambdaRole.Arn
+      Timeout: 900
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          """
+          Service Network Health Check Lambda.
+          Polls the registry API for airegistry-tools tool discovery as a
+          proxy for Service Connect readiness. Triggers refresh to retry
+          health checks when tools are not yet discovered.
+          """
+          import json
+          import urllib.request
+          import urllib.parse
+          import urllib.error
+          import ssl
+          import boto3
+          import cfnresponse
+          import time
+
+          def get_m2m_token(cognito_token_url, client_id, client_secret):
+              """Get M2M access token from Cognito."""
+              url = cognito_token_url
+              data = urllib.parse.urlencode({
+                  'grant_type': 'client_credentials',
+                  'client_id': client_id,
+                  'client_secret': client_secret
+              }).encode('utf-8')
+              req = urllib.request.Request(url, data=data, method='POST')
+              req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+              ctx = ssl.create_default_context()
+              with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
+                  result = json.loads(response.read().decode('utf-8'))
+                  return result.get('access_token')
+
+          def get_server_tools(registry_url, token, server_path):
+              """Get the current tool list for a server."""
+              path = server_path.strip('/')
+              import time as _time
+              url = f"{registry_url}/api/servers/tools/{path}?_t={int(_time.time())}"
+              req = urllib.request.Request(url, method='GET')
+              req.add_header('Authorization', f'Bearer {token}')
+              req.add_header('Cache-Control', 'no-cache, no-store')
+              req.add_header('Pragma', 'no-cache')
+              ctx = ssl.create_default_context()
+              try:
+                  with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
+                      result = json.loads(response.read().decode('utf-8'))
+                      if isinstance(result, dict):
+                          return result.get('tools', [])
+                      elif isinstance(result, list):
+                          return result
+                      return []
+              except Exception as e:
+                  print(f"  get_server_tools error: {e}")
+                  return []
+
+          def handler(event, context):
+              """CloudFormation Custom Resource handler."""
+              print(f"Event: RequestType={event.get('RequestType')}, ResourceType={event.get('ResourceType')}, LogicalResourceId={event.get('LogicalResourceId')}")
+              request_type = event.get('RequestType')
+
+              if request_type == 'Delete':
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  return
+
+              properties = event.get('ResourceProperties', {})
+              registry_url = properties.get('RegistryUrl')
+              canary_path = '/airegistry-tools/'
+              max_wait = 900  # 15 minutes
+
+              try:
+                  # Get static API token (bypasses Cognito M2M aud claim issue)
+                  api_token_arn = properties.get('ApiTokenSecretArn')
+                  secrets = boto3.client('secretsmanager')
+                  api_token_secret = json.loads(
+                      secrets.get_secret_value(SecretId=api_token_arn)['SecretString']
+                  )
+                  token = api_token_secret.get('api_token', '')
+
+                  if not token:
+                      raise Exception("API token not found in secret")
+
+                  print(f"Got static API token")
+                  print(f"Polling {canary_path} for tool discovery...")
+                  start = time.time()
+                  attempt = 0
+                  while time.time() - start < max_wait:
+                      attempt += 1
+                      tools = get_server_tools(registry_url, token, canary_path)
+                      if len(tools) > 0:
+                          elapsed = int(time.time() - start)
+                          print(f"Service Connect healthy: {canary_path} has {len(tools)} tools ({elapsed}s)")
+                          cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                              'ToolCount': len(tools),
+                              'ElapsedSeconds': elapsed
+                          })
+                          return
+                      print(f"  Attempt {attempt}: no tools yet, waiting for registry reconciliation...")
+                      time.sleep(5)
+
+                  raise Exception(
+                      f"Service Connect health check failed: {canary_path} has no "
+                      f"tools after {int(max_wait)}s. Backend MCP servers may not be reachable via Service Connect."
+                  )
+              except Exception as e:
+                  print(f"Error: {type(e).__name__}: {str(e)[:200]}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {
+                      'Error': str(e)
+                  })
+
+
+  ServiceNetworkHealthCheck:
+    Type: Custom::ServiceNetworkHealth
+    Properties:
+      ServiceToken: !GetAtt ServiceNetworkHealthLambda.Arn
+      ServiceTimeout: 960
+      RegistryUrl: !Ref RegistryUrl
+      ApiTokenSecretArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-RegistryApiTokenSecretArn
+      Version: '1.0'
+
+  #============================================================================
+  # MCP SERVER AND AGENT AUTO-REGISTRATION
+  # Registers MCP servers, A2A agents, virtual servers, and skills.
+  # Runs after ServiceNetworkHealthCheck confirms Service Connect is working.
+  #============================================================================
+
+  MCPRegistrationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-mcp-registration-lambda-role-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: MCPRegistrationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: ${EnvironmentName}-RegistryApiTokenSecretArn
+              - Effect: Allow
+                Action:
+                  - cognito-idp:UpdateUserPoolClient
+                # Narrowed to the specific User Pool ID this Lambda updates
+                # (see MCPRegistrationLambda below — UserPoolId is passed as a
+                # CustomResourceProperty resolved from this same import).
+                Resource:
+                  - !Sub
+                    - "arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${PoolId}"
+                    - PoolId: !ImportValue
+                        Fn::Sub: ${EnvironmentName}-CognitoUserPoolId
+
+  MCPRegistrationLambda:
+    Type: AWS::Lambda::Function
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_116
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_117
+            comment: "Inline workshop Lambda; reaches the registry via its public CloudFront URL and AWS control-plane APIs only, no VPC-bound resources"
+          - id: CKV_AWS_173
+            comment: "Environment variables hold only non-secret configuration (LOG_LEVEL); a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-mcp-registration
+      Description: Auto-register MCP servers, A2A agents, virtual servers, and skills
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt MCPRegistrationLambdaRole.Arn
+      Timeout: 600
+      MemorySize: 256
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+      Code:
+        ZipFile: |
+          """
+          Lambda function to auto-register MCP servers, A2A agents, virtual
+          servers, and agent skills. Used as a CloudFormation Custom Resource.
+          Runs after ServiceNetworkHealthCheck confirms Service Connect works.
+          """
+          import json
+          import urllib.request
+          import urllib.parse
+          import urllib.error
+          import ssl
+          import boto3
+          import cfnresponse
+          import time
+
+          # MCP Servers to register (form data fields for /api/servers/register)
+          # Note: /mcpgw/ (MCP Gateway Tools) is NOT registered here because
+          # it is redundant with the built-in /airegistry-tools/ server which
+          # is auto-registered on startup and points to the same backend.
+          MCP_SERVERS = [
+              {
+                  'name': 'Current Time API',
+                  'description': 'A simple API that returns the current server time in various formats.',
+                  'path': '/currenttime/',
+                  'proxy_pass_url': 'http://currenttime-server:8000/',
+                  'tags': 'time,timezone,datetime,api,utility',
+                  'num_tools': '1',
+                  'is_python': 'true',
+                  'license': 'MIT-0'
+              },
+          ]
+
+          # Servers to register but leave disabled (workshop participants enable these)
+          DISABLED_SERVERS = [
+              {
+                  'name': 'Real Server Fake Tools',
+                  'description': 'A collection of fake tools with interesting names for testing.',
+                  'path': '/realserverfaketools/',
+                  'proxy_pass_url': 'http://realserverfaketools-server:8002/',
+                  'tags': 'demo,fake,tools,testing',
+                  'num_tools': '6',
+                  'is_python': 'true',
+                  'license': 'MIT'
+              }
+          ]
+
+          # Virtual MCP Servers to register (aggregates tools from multiple backends)
+          VIRTUAL_SERVERS = [
+              {
+                  'server_name': 'Dev Tools',
+                  'path': '/virtual/dev-tools',
+                  'description': 'A curated set of developer utilities combining time lookups and intelligent tool discovery from across the registry.',
+                  'tool_mappings': [
+                      {
+                          'tool_name': 'current_time_by_timezone',
+                          'backend_server_path': '/currenttime/',
+                      },
+                      {
+                          'tool_name': 'intelligent_tool_finder',
+                          'backend_server_path': '/airegistry-tools/',
+                      },
+                  ],
+                  'tags': ['developer', 'utility', 'curated'],
+              }
+          ]
+
+          # Agent Skills to register (SKILL.md-based capabilities)
+          AGENT_SKILLS = [
+              {
+                  'name': 'frontend-design',
+                  'description': 'Create distinctive frontend interfaces with high design quality suitable for workshop demonstrations.',
+                  'skill_md_url': 'https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/frontend-design/SKILL.md',
+                  'tags': ['design', 'frontend', 'ui'],
+              },
+              {
+                  'name': 'canvas-design',
+                  'description': 'Create beautiful visual art in .png and .pdf documents using design philosophy.',
+                  'skill_md_url': 'https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/canvas-design/SKILL.md',
+                  'tags': ['design', 'canvas', 'art'],
+              }
+          ]
+
+          # A2A Agents to register (url is set at runtime in handler using registry_url)
+          A2A_AGENTS = [
+              {
+                  'name': 'workshop-order-processing-agent',
+                  'path': '/workshop-order-processing-agent',
+                  'description': 'Specialist agent for order creation, status tracking, and cancellation workflows. Demonstrates A2A protocol agent card registration.',
+                  'version': '1.0.0',
+                  'tags': ['workshop', 'orders', 'a2a', 'agentcore'],
+                  'capabilities': ['order-create', 'order-status', 'order-cancel'],
+                  'visibility': 'public',
+              },
+          ]
+
+          def get_m2m_token(cognito_token_url, client_id, client_secret):
+              """Get M2M access token from Cognito."""
+              url = cognito_token_url
+              data = urllib.parse.urlencode({
+                  'grant_type': 'client_credentials',
+                  'client_id': client_id,
+                  'client_secret': client_secret
+              }).encode('utf-8')
+              req = urllib.request.Request(url, data=data, method='POST')
+              req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+              ctx = ssl.create_default_context()
+              with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
+                  result = json.loads(response.read().decode('utf-8'))
+                  return result.get('access_token')
+
+          def wait_for_registry(registry_url, max_wait=60):
+              """Wait for the registry to be healthy."""
+              start = time.time()
+              while time.time() - start < max_wait:
+                  try:
+                      req = urllib.request.Request(f"{registry_url}/health", method='GET')
+                      ctx = ssl.create_default_context()
+                      with urllib.request.urlopen(req, context=ctx, timeout=10) as response:
+                          if response.status == 200:
+                              print("  Registry is healthy")
+                              return True
+                  except Exception:
+                      pass
+                  print("  Waiting for registry...")
+                  time.sleep(5)
+              raise Exception(f"Registry not healthy after {max_wait}s")
+
+          def api_request_form(url, token, form_data, max_retries=5):
+              """Make authenticated POST request with form data to Registry API."""
+              encoded_data = urllib.parse.urlencode(form_data).encode('utf-8')
+              ctx = ssl.create_default_context()
+              last_error = None
+
+              for attempt in range(max_retries):
+                  req = urllib.request.Request(url, data=encoded_data, method='POST')
+                  req.add_header('Authorization', f'Bearer {token}')
+                  req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+                  try:
+                      with urllib.request.urlopen(req, context=ctx, timeout=60) as response:
+                          if response.status in [200, 201, 204]:
+                              try:
+                                  return json.loads(response.read().decode('utf-8'))
+                              except:
+                                  return {'success': True}
+                          return {'success': True}
+                  except urllib.error.HTTPError as e:
+                      if e.code == 409:
+                          return {'exists': True, 'success': False}
+                      if e.code in [400, 404, 422]:
+                          body = e.read().decode('utf-8')
+                          if 'already' in body.lower() or 'exists' in body.lower():
+                              return {'exists': True, 'success': False}
+                          print(f"API error {e.code}: {body}")
+                          return {'success': False, 'error': body}
+                      if e.code in [500, 502, 503, 504]:
+                          last_error = e
+                          wait_time = 2 ** attempt
+                          print(f"    Transient error {e.code}, retry {attempt + 1}/{max_retries} in {wait_time}s...")
+                          time.sleep(wait_time)
+                          continue
+                      raise
+                  except (urllib.error.URLError, TimeoutError) as e:
+                      last_error = e
+                      wait_time = 2 ** attempt
+                      print(f"    Connection error, retry {attempt + 1}/{max_retries} in {wait_time}s: {str(e)}")
+                      time.sleep(wait_time)
+                      continue
+
+              if last_error:
+                  raise last_error
+              raise Exception(f"Request failed after {max_retries} attempts")
+
+          def delete_server(registry_url, token, server_path):
+              """Delete a server from the registry by path."""
+              url = f"{registry_url}/api/servers/remove"
+              data = urllib.parse.urlencode({'path': server_path}).encode('utf-8')
+              req = urllib.request.Request(url, data=data, method='POST')
+              req.add_header('Authorization', f'Bearer {token}')
+              req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+              ctx = ssl.create_default_context()
+              try:
+                  with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
+                      print(f"    Deleted existing server: {server_path}")
+                      return True
+              except urllib.error.HTTPError as e:
+                  if e.code == 404:
+                      return True
+                  print(f"    Delete failed ({e.code}): {e.read().decode('utf-8')}")
+                  return False
+              except Exception as e:
+                  print(f"    Delete error: {str(e)}")
+                  return False
+
+          def delete_virtual_server(registry_url, token, vs_path):
+              """Delete a virtual server from the registry by path."""
+              url = f"{registry_url}/api/virtual-servers/{vs_path.lstrip('/')}"
+              req = urllib.request.Request(url, method='DELETE')
+              req.add_header('Authorization', f'Bearer {token}')
+              ctx = ssl.create_default_context()
+              try:
+                  with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
+                      print(f"    Deleted existing virtual server: {vs_path}")
+                      return True
+              except urllib.error.HTTPError as e:
+                  if e.code == 404:
+                      return True
+                  print(f"    Delete failed ({e.code}): {e.read().decode('utf-8')}")
+                  return False
+              except Exception as e:
+                  print(f"    Delete error: {str(e)}")
+                  return False
+
+          def delete_agent(registry_url, token, agent_path):
+              """Delete an agent from the registry by path."""
+              url = f"{registry_url}/api/agents/{agent_path.lstrip('/')}"
+              req = urllib.request.Request(url, method='DELETE')
+              req.add_header('Authorization', f'Bearer {token}')
+              ctx = ssl.create_default_context()
+              try:
+                  with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
+                      print(f"    Deleted existing agent: {agent_path}")
+                      return True
+              except urllib.error.HTTPError as e:
+                  if e.code in [404, 204]:
+                      return True
+                  print(f"    Delete failed ({e.code}): {e.read().decode('utf-8')}")
+                  return False
+              except Exception as e:
+                  print(f"    Delete error: {str(e)}")
+                  return False
+
+          def delete_skill(registry_url, token, skill_path):
+              """Delete a skill from the registry by path."""
+              url = f"{registry_url}/api/skills/{skill_path.lstrip('/')}"
+              req = urllib.request.Request(url, method='DELETE')
+              req.add_header('Authorization', f'Bearer {token}')
+              ctx = ssl.create_default_context()
+              try:
+                  with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
+                      print(f"    Deleted existing skill: {skill_path}")
+                      return True
+              except urllib.error.HTTPError as e:
+                  if e.code == 404:
+                      return True
+                  print(f"    Delete failed ({e.code}): {e.read().decode('utf-8')}")
+                  return False
+              except Exception as e:
+                  print(f"    Delete error: {str(e)}")
+                  return False
+
+          def api_request_json(url, token, json_data, max_retries=5):
+              """Make authenticated POST request with JSON data to Registry API."""
+              ctx = ssl.create_default_context()
+              data = json.dumps(json_data).encode('utf-8')
+              last_error = None
+
+              for attempt in range(max_retries):
+                  req = urllib.request.Request(url, method='POST')
+                  req.add_header('Authorization', f'Bearer {token}')
+                  req.add_header('Content-Type', 'application/json')
+                  req.data = data
+                  try:
+                      with urllib.request.urlopen(req, context=ctx, timeout=60) as response:
+                          if response.status in [200, 201, 204]:
+                              try:
+                                  return json.loads(response.read().decode('utf-8'))
+                              except:
+                                  return {'success': True}
+                          return {'success': True}
+                  except urllib.error.HTTPError as e:
+                      if e.code == 409:
+                          return {'exists': True, 'success': False}
+                      if e.code in [400, 404, 422]:
+                          body = e.read().decode('utf-8')
+                          if 'already' in body.lower() or 'exists' in body.lower():
+                              return {'exists': True, 'success': False}
+                          print(f"API error {e.code}: {body}")
+                          return {'success': False, 'error': body}
+                      if e.code in [500, 502, 503, 504]:
+                          last_error = e
+                          wait_time = 2 ** attempt
+                          print(f"    Transient error {e.code}, retry {attempt + 1}/{max_retries} in {wait_time}s...")
+                          time.sleep(wait_time)
+                          continue
+                      raise
+                  except (urllib.error.URLError, TimeoutError) as e:
+                      last_error = e
+                      wait_time = 2 ** attempt
+                      print(f"    Connection error, retry {attempt + 1}/{max_retries} in {wait_time}s: {str(e)}")
+                      time.sleep(wait_time)
+                      continue
+
+              if last_error:
+                  raise last_error
+              raise Exception(f"Request failed after {max_retries} attempts")
+
+          def handler(event, context):
+              """CloudFormation Custom Resource handler."""
+              print(f"Event: RequestType={event.get('RequestType')}, ResourceType={event.get('ResourceType')}, LogicalResourceId={event.get('LogicalResourceId')}")
+              request_type = event.get('RequestType')
+              properties = event.get('ResourceProperties', {})
+              registry_url = properties.get('RegistryUrl')
+              api_token_arn = properties.get('ApiTokenSecretArn')
+
+              if request_type == 'Delete':
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  return
+
+              try:
+                  # Step 1: Get static API token
+                  secrets = boto3.client('secretsmanager')
+                  api_token_secret = json.loads(
+                      secrets.get_secret_value(SecretId=api_token_arn)['SecretString']
+                  )
+                  token = api_token_secret.get('api_token', '')
+                  if not token:
+                      raise Exception("API token not found in secret")
+                  print("Got static API token")
+
+                  # Step 2: Wait for registry health
+                  print("Waiting for registry to be healthy...")
+                  wait_for_registry(registry_url)
+
+                  # Step 3: Warm-up delay
+                  print("Warm-up delay (10s)...")
+                  time.sleep(10)
+
+                  # Step 4: Register MCP Servers (form data, delete-then-create upsert)
+                  print("Registering MCP Servers...")
+                  servers_registered = 0
+                  for server in MCP_SERVERS:
+                      server_data = server.copy()
+                      print(f"  Registering: {server_data['name']}")
+                      delete_server(registry_url, token, server_data['path'])
+                      result = api_request_form(
+                          f"{registry_url}/api/servers/register",
+                          token,
+                          server_data
+                      )
+                      # exists = our timed-out attempt already succeeded (we deleted first)
+                      if result.get('success') or result.get('path') or result.get('exists'):
+                          print(f"    OK")
+                          servers_registered += 1
+                      else:
+                          print(f"    Failed: {result}")
+                      # Toggle ON — newly registered servers default to disabled
+                      print(f"    Toggling ON: {server_data['path']}")
+                      try:
+                          toggle_data = urllib.parse.urlencode({
+                              'path': server_data['path'],
+                              'new_state': 'true'
+                          }).encode('utf-8')
+                          req = urllib.request.Request(
+                              f"{registry_url}/api/servers/toggle",
+                              data=toggle_data, method='POST'
+                          )
+                          req.add_header('Authorization', f'Bearer {token}')
+                          req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+                          ctx = ssl.create_default_context()
+                          with urllib.request.urlopen(req, context=ctx, timeout=120) as resp:
+                              result = json.loads(resp.read().decode('utf-8'))
+                              print(f"    Toggled ON: status={result.get('status')}, tools={result.get('num_tools')}")
+                      except Exception as e:
+                          print(f"    Toggle ON failed: {e}")
+
+                  # Step 5: Register disabled servers + toggle OFF
+                  print("Registering disabled servers...")
+                  for server in DISABLED_SERVERS:
+                      server_data = server.copy()
+                      print(f"  Registering (disabled): {server_data['name']}")
+                      delete_server(registry_url, token, server_data['path'])
+                      result = api_request_form(
+                          f"{registry_url}/api/servers/register",
+                          token,
+                          server_data
+                      )
+                      if result.get('success') or result.get('path') or result.get('exists'):
+                          print(f"    OK (created)")
+                      else:
+                          print(f"    Failed: {result}")
+                      # Toggle OFF — workshop participants enable these manually
+                      print(f"    Toggling OFF: {server_data['path']}")
+                      try:
+                          toggle_data = urllib.parse.urlencode({
+                              'path': server_data['path'],
+                              'new_state': 'false'
+                          }).encode('utf-8')
+                          req = urllib.request.Request(
+                              f"{registry_url}/api/servers/toggle",
+                              data=toggle_data, method='POST'
+                          )
+                          req.add_header('Authorization', f'Bearer {token}')
+                          req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+                          ctx = ssl.create_default_context()
+                          with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+                              print(f"    Toggled OFF")
+                      except Exception as e:
+                          print(f"    Toggle OFF failed: {e}")
+
+                  # Step 6: Register all A2A Agents first, then enable them
+                  print("Registering A2A Agents...")
+                  agents_registered = 0
+                  registered_agent_paths = []
+                  for agent in A2A_AGENTS:
+                      agent_data = agent.copy()
+                      if 'url' not in agent_data:
+                          agent_data['url'] = f"{registry_url}/api/agents{agent_data['path']}"
+                      print(f"  Registering: {agent_data['name']}")
+                      delete_agent(registry_url, token, agent_data['path'])
+                      result = api_request_json(
+                          f"{registry_url}/api/agents/register?skip_validation=true",
+                          token,
+                          agent_data
+                      )
+                      # exists = our timed-out attempt already succeeded (we deleted first)
+                      if result.get('success') or result.get('agent') or result.get('path') or result.get('exists') or result.get('message'):
+                          print(f"    OK")
+                          agents_registered += 1
+                          registered_agent_paths.append(agent_data['path'])
+                      else:
+                          print(f"    Failed: {result}")
+
+                  # Enable agents after all are registered (avoids state
+                  # persistence races between register → enable → delete cycles)
+                  print("Enabling registered agents...")
+                  for agent_path in registered_agent_paths:
+                      try:
+                          url = f"{registry_url}/api/agents{agent_path}/toggle?enabled=true"
+                          req = urllib.request.Request(url, data=b'', method='POST')
+                          req.add_header('Authorization', f'Bearer {token}')
+                          ctx = ssl.create_default_context()
+                          with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+                              result = json.loads(resp.read().decode('utf-8'))
+                              if result.get('is_enabled'):
+                                  print(f"    Enabled {agent_path}")
+                              else:
+                                  print(f"    Enable response for {agent_path}: {result}")
+                      except Exception as e:
+                          print(f"    Enable failed for {agent_path}: {e}")
+
+                  # Step 7: Register Virtual Servers (JSON, retry loop for tool discovery)
+                  print("Registering Virtual MCP Servers...")
+                  virtual_servers_registered = 0
+                  for vs in VIRTUAL_SERVERS:
+                      vs_data = vs.copy()
+                      print(f"  Registering: {vs_data['server_name']}")
+                      delete_virtual_server(registry_url, token, vs_data['path'])
+                      vs_created = False
+                      for vs_attempt in range(6):
+                          result = api_request_json(
+                              f"{registry_url}/api/virtual-servers",
+                              token,
+                              vs_data
+                          )
+                          if result.get('success') or result.get('path') or result.get('exists'):
+                              print(f"    OK")
+                              vs_created = True
+                              virtual_servers_registered += 1
+                              break
+                          else:
+                              error_str = str(result.get('error', ''))
+                              if 'not found' in error_str.lower() and 'available tools' in error_str.lower():
+                                  wait = 10 * (vs_attempt + 1)
+                                  print(f"    Tool discovery incomplete, retry {vs_attempt + 1}/6 in {wait}s...")
+                                  time.sleep(wait)
+                                  continue
+                              print(f"    Failed: {result}")
+                              break
+
+                      if vs_created:
+                          vs_path = vs_data['path'].lstrip('/')
+                          print(f"    Enabling virtual server: {vs_data['path']}")
+                          try:
+                              toggle_result = api_request_json(
+                                  f"{registry_url}/api/virtual-servers/{vs_path}/toggle",
+                                  token,
+                                  {'enabled': True}
+                              )
+                              if toggle_result.get('is_enabled') is True or toggle_result.get('path'):
+                                  print(f"    Enabled")
+                              else:
+                                  print(f"    Enable failed: {toggle_result}")
+                          except Exception as toggle_err:
+                              print(f"    Enable error (non-fatal): {toggle_err}")
+
+                  # Step 8: Register Skills (JSON, non-fatal, max_retries=2)
+                  print("Registering Agent Skills...")
+                  skills_registered = 0
+                  for skill in AGENT_SKILLS:
+                      skill_data = skill.copy()
+                      skill_name = skill_data['name']
+                      print(f"  Registering: {skill_name}")
+                      try:
+                          delete_skill(registry_url, token, skill_name)
+                          result = api_request_json(
+                              f"{registry_url}/api/skills",
+                              token,
+                              skill_data,
+                              max_retries=2
+                          )
+                          if result.get('path') or result.get('exists'):
+                              print(f"    OK")
+                              skills_registered += 1
+                          else:
+                              print(f"    Failed: {result}")
+                              continue
+                      except Exception as reg_err:
+                          print(f"    Registration error (non-fatal): {reg_err}")
+                          continue
+
+                      print(f"    Enabling skill: {skill_name}")
+                      try:
+                          toggle_result = api_request_json(
+                              f"{registry_url}/api/skills/{skill_name}/toggle",
+                              token,
+                              {'enabled': True},
+                              max_retries=2
+                          )
+                          if toggle_result.get('is_enabled') is True or toggle_result.get('path'):
+                              print(f"    Enabled")
+                          else:
+                              print(f"    Enable failed (non-fatal): {toggle_result}")
+                      except Exception as toggle_err:
+                          print(f"    Enable error (non-fatal): {toggle_err}")
+
+                  # Step 9: Update Cognito callback URL to actual CloudFront URL
+                  cognito_user_pool_id = properties.get('CognitoUserPoolId')
+                  cognito_web_app_client_id = properties.get('CognitoWebAppClientId')
+                  if cognito_user_pool_id and cognito_web_app_client_id and registry_url:
+                      try:
+                          cognito = boto3.client('cognito-idp')
+                          cognito.update_user_pool_client(
+                              UserPoolId=cognito_user_pool_id,
+                              ClientId=cognito_web_app_client_id,
+                              CallbackURLs=[f"{registry_url}/oauth2/callback/cognito"],
+                              LogoutURLs=[registry_url],
+                              AllowedOAuthFlows=['code'],
+                              AllowedOAuthScopes=['openid', 'email', 'profile', 'aws.cognito.signin.user.admin'],
+                              AllowedOAuthFlowsUserPoolClient=True,
+                              SupportedIdentityProviders=['COGNITO']
+                          )
+                          print(f"Updated Cognito callback URL to {registry_url}/oauth2/callback/cognito")
+                      except Exception as cognito_err:
+                          print(f"  Cognito callback update error (non-fatal): {cognito_err}")
+
+                  # Step 10: Report results
+                  print(f"Registration complete: {servers_registered} servers, {agents_registered} agents, {virtual_servers_registered} virtual servers, {skills_registered} skills")
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                      'ServersRegistered': servers_registered,
+                      'AgentsRegistered': agents_registered,
+                      'VirtualServersRegistered': virtual_servers_registered,
+                      'SkillsRegistered': skills_registered
+                  })
+
+              except Exception as e:
+                  print(f"Error: {type(e).__name__}: {str(e)[:200]}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {
+                      'Error': str(e)
+                  })
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-mcp-registration
+
+  MCPServerRegistration:
+    Type: Custom::MCPServerRegistration
+    DependsOn:
+      - ServiceNetworkHealthCheck
+    Properties:
+      ServiceToken: !GetAtt MCPRegistrationLambda.Arn
+      ServiceTimeout: 660
+      RegistryUrl: !Ref RegistryUrl
+      ApiTokenSecretArn: !ImportValue
+        Fn::Sub: ${EnvironmentName}-RegistryApiTokenSecretArn
+      EnvironmentName: !Ref EnvironmentName
+      CognitoUserPoolId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-CognitoUserPoolId
+      CognitoWebAppClientId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-CognitoWebAppClientId
+      # v3.4: Fix agent registration — use url (not endpoint), add visibility=public,
+      #   skip_validation=true (Function URL requires IAM auth), treat 'message' as success.
+      Version: '3.4'
+
+

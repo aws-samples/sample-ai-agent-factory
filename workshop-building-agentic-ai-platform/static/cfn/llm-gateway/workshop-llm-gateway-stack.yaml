@@ -1,0 +1,734 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  LLM Gateway — Module 2 of the Enterprise Agentic AI Platform workshop.
+  Deploys LiteLLM Proxy on ECS Fargate with a PostgreSQL sidecar,
+  internal ALB, API Gateway (HTTPS), EFS for data persistence, and an
+  IAM task role for Amazon Bedrock (including Bedrock Guardrails).
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+  # Container image tags are pinned to specific released versions (instead of
+  # floating tags like main-stable / 16) for supply-chain reproducibility.
+  LiteLLMImageTag:
+    Type: String
+    # v1.83.14-stable patches CVE-2026-47101 / CVE-2026-47102 / CVE-2026-40217
+    # (CVSS 9.9 privilege-escalation + RCE) present in the earlier 1.83.x stable
+    # images. Pinned to a specific release for supply-chain reproducibility.
+    Default: v1.83.14-stable
+    Description: >
+      Tag for the LiteLLM Docker image
+      (docker.litellm.ai/berriai/litellm-database). Pinned to a specific
+      release for supply-chain reproducibility.
+
+  PostgresImageTag:
+    Type: String
+    # 16.7 patches CVE-2026-2003 / CVE-2026-2006 (info disclosure + arbitrary
+    # code execution from missing multibyte-length validation) present in 16.6.
+    Default: '16.7'
+    Description: >
+      PostgreSQL Docker image tag (use Debian-based, not Alpine, for EFS uid
+      compatibility). Pinned to a specific minor version for supply-chain
+      reproducibility.
+
+  AdminKey:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: >
+      LiteLLM admin key (must start with sk-). If empty, auto-generated
+      via Secrets Manager.
+
+# ---------------------------------------------------------------------------
+# Conditions
+# ---------------------------------------------------------------------------
+Conditions:
+  GenerateAdminKey: !Equals [!Ref AdminKey, '']
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+Resources:
+
+  # =========================================================================
+  # Networking
+  # =========================================================================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.2.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpc'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-igw'
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.2.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-1'
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.2.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-2'
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.2.3.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-1'
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.2.4.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-2'
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: IGWAttachment
+    Properties:
+      Domain: vpc
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-nat'
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-rt'
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateSubnet1RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # =========================================================================
+  # Security Groups
+  # =========================================================================
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP from VPC (API Gateway VPC Link) to internal ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.2.0.0/16
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-alb-sg'
+
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow traffic from ALB to ECS
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 4000
+          ToPort: 4000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ecs-sg'
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow NFS from ECS to EFS
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref ECSSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-efs-sg'
+
+  # =========================================================================
+  # Secrets Manager
+  # =========================================================================
+  AdminKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_149
+            comment: "Workshop secrets use the AWS-managed Secrets Manager key; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+    Condition: GenerateAdminKey
+    Properties:
+      Name: !Sub '${AWS::StackName}-admin-key'
+      Description: LiteLLM admin key (raw value — consumers must prepend sk- prefix)
+      GenerateSecretString:
+        ExcludePunctuation: true
+        PasswordLength: 32
+        IncludeSpace: false
+
+  PostgresPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_149
+            comment: "Workshop secrets use the AWS-managed Secrets Manager key; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+    Properties:
+      Name: !Sub '${AWS::StackName}-postgres-password'
+      Description: PostgreSQL password for LiteLLM
+      GenerateSecretString:
+        ExcludePunctuation: true
+        PasswordLength: 24
+
+  # =========================================================================
+  # EFS — PostgreSQL data persistence
+  # =========================================================================
+  FileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-efs'
+
+  EFSMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref FileSystem
+      PosixUser:
+        Uid: '999'
+        Gid: '999'
+      RootDirectory:
+        Path: /postgres-data
+        CreationInfo:
+          OwnerUid: '999'
+          OwnerGid: '999'
+          Permissions: '700'
+
+  # =========================================================================
+  # IAM Roles
+  # =========================================================================
+  ECSExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-ecs-exec-role-${AWS::Region}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretsManagerRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref PostgresPasswordSecret
+                  - !If
+                    - GenerateAdminKey
+                    - !Ref AdminKeySecret
+                    - !Ref AWS::NoValue
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: >
+              The BedrockAccess policy grants `aws-marketplace:Subscribe` and
+              `aws-marketplace:ViewSubscriptions` with Resource '*' because the
+              AWS Marketplace API does not support resource-level ARNs — there
+              is no way to narrow the resource. The action is required on a
+              fresh account for LiteLLM to complete the one-time subscription
+              handshake for Marketplace-served Bedrock models (e.g. Claude 4.x
+              Sonnet). A Condition like aws:CalledVia: bedrock.amazonaws.com
+              would not apply here because LiteLLM calls Marketplace directly
+              from the ECS task, not via Bedrock. The real permission boundary
+              is the Workshop Studio SCP on the sandbox account (self-hosted:
+              dedicated disposable account + optional
+              static/cfn/self-service-scp.json).
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-ecs-task-role-${AWS::Region}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
+                  # Region wildcard so cross-region inference profiles for ANY
+                  # geo (us./eu./apac.) AND the geo-less global. profiles are
+                  # invocable regardless of the region this stack deploys to.
+                  # Account-scoped (inference profiles are account resources).
+                  - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*'
+              - Effect: Allow
+                Action:
+                  - bedrock:ListFoundationModels
+                  - bedrock:GetFoundationModel
+                Resource: '*'
+              # First-time invocation of Marketplace-served Bedrock models
+              # (e.g., Claude 4.x Sonnet) requires these actions so LiteLLM
+              # can complete the one-time subscription handshake account-wide.
+              # AWS Marketplace does not support resource-level ARNs.
+              - Effect: Allow
+                Action:
+                  - aws-marketplace:Subscribe
+                  - aws-marketplace:ViewSubscriptions
+                Resource: '*'
+        - PolicyName: BedrockGuardrails
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:ApplyGuardrail
+                  - bedrock:GetGuardrail
+                  - bedrock:ListGuardrails
+                  - bedrock:CreateGuardrail
+                  - bedrock:UpdateGuardrail
+                  - bedrock:DeleteGuardrail
+                  - bedrock:CreateGuardrailVersion
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:guardrail/*'
+
+  # =========================================================================
+  # ECS Cluster, Task Definition, Service
+  # =========================================================================
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}-cluster'
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${AWS::StackName}'
+      RetentionInDays: 7
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}-task'
+      Cpu: '2048'
+      Memory: '4096'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      Volumes:
+        - Name: efs-postgres
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref FileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref EFSAccessPoint
+              # EFS access controlled by security groups + access point uid/gid enforcement.
+              # IAM auth requires additional task role permissions and EFS resource policy.
+              IAM: DISABLED
+      ContainerDefinitions:
+        # --- LiteLLM Proxy ---
+        - Name: litellm
+          Image: !Sub 'docker.litellm.ai/berriai/litellm-database:${LiteLLMImageTag}'
+          Essential: true
+          PortMappings:
+            - ContainerPort: 4000
+              Protocol: tcp
+          Environment:
+            # DATABASE_URL uses resolve: because ECS Secrets only inject individual
+            # secret values, not formatted connection strings. The password is from
+            # a Secrets Manager secret that is not human-visible in the task definition.
+            - Name: DATABASE_URL
+              Value: !Sub 'postgresql://litellm:{{resolve:secretsmanager:${PostgresPasswordSecret}}}@localhost:5432/litellm'
+            - Name: LITELLM_MASTER_KEY
+              # Note: LITELLM_MASTER_KEY is the upstream LiteLLM env var name; our wrapper uses ADMIN_KEY terminology
+              Value: !If
+                - GenerateAdminKey
+                - !Sub 'sk-{{resolve:secretsmanager:${AdminKeySecret}}}'
+                - !Ref AdminKey
+            - Name: LITELLM_SALT_KEY
+              Value: !Sub '{{resolve:secretsmanager:${PostgresPasswordSecret}}}'
+            - Name: AWS_DEFAULT_REGION
+              Value: !Ref AWS::Region
+            - Name: STORE_MODEL_IN_DB
+              Value: 'True'
+          DependsOn:
+            - ContainerName: postgres
+              Condition: HEALTHY
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: litellm
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              # http:// is intentional: this probe never leaves the container
+              # (localhost loopback inside the Fargate task).
+              - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')\" || exit 1"
+            Interval: 30
+            Timeout: 5
+            Retries: 5
+            StartPeriod: 120
+
+        # --- PostgreSQL Sidecar ---
+        # EFS Access Points enforce uid/gid 999 (postgres user in Debian
+        # images). EFS does NOT support chown, but docker-entrypoint.sh
+        # only calls chown when running as root.
+        # Fix: run the container as uid 999 (User directive) so the
+        # entrypoint's chown block is skipped. chmod 700 ensures PGDATA
+        # has the permissions initdb requires.
+        - Name: postgres
+          Image: !Sub 'postgres:${PostgresImageTag}'
+          Essential: true
+          User: '999:999'
+          PortMappings:
+            - ContainerPort: 5432
+              Protocol: tcp
+          EntryPoint:
+            - 'bash'
+            - '-c'
+          Command:
+            - |
+              chmod 700 /var/lib/postgresql/data 2>/dev/null || true
+              exec docker-entrypoint.sh postgres
+          Environment:
+            - Name: POSTGRES_USER
+              Value: litellm
+            - Name: POSTGRES_DB
+              Value: litellm
+            - Name: PGDATA
+              Value: /var/lib/postgresql/data
+          Secrets:
+            - Name: POSTGRES_PASSWORD
+              ValueFrom: !Ref PostgresPasswordSecret
+          MountPoints:
+            - SourceVolume: efs-postgres
+              ContainerPath: /var/lib/postgresql/data
+              ReadOnly: false
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: postgres
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - 'pg_isready -U litellm || exit 1'
+            Interval: 10
+            Timeout: 5
+            Retries: 5
+            StartPeriod: 30
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ALBListenerHTTP
+      - EFSMountTarget1
+      - EFSMountTarget2
+    Properties:
+      ServiceName: !Sub '${AWS::StackName}-service'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      PlatformVersion: '1.4.0'
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+      LoadBalancers:
+        - ContainerName: litellm
+          ContainerPort: 4000
+          TargetGroupArn: !Ref TargetGroup
+
+  # =========================================================================
+  # Application Load Balancer
+  # =========================================================================
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${AWS::StackName}-alb'
+      Scheme: internal
+      Type: application
+      Subnets:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-alb'
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${AWS::StackName}-tg'
+      Port: 4000
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: ip
+      HealthCheckPath: /health/liveliness
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  ALBListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_103
+            comment: "TLS-version finding does not apply: this is an internal HTTP listener. The ALB is internal-only and fronted by API Gateway (HTTPS, TLS 1.2+), which terminates TLS upstream; the API Gateway -> ALB leg is VPC-internal east-west traffic. An HTTPS listener would require a custom domain + ACM certificate not available in the workshop."
+          - id: CKV_AWS_2
+            comment: "ALB is internal-only behind API Gateway (HTTPS); TLS terminates upstream at API Gateway. An HTTPS listener requires a custom domain + ACM certificate not available in the workshop."
+      cfn_nag:
+        rules_to_suppress:
+          - id: W55
+            reason: >
+              HTTP listener on the ALB is intentional. The ALB is internal to
+              the VPC; the public entry point is API Gateway (HTTPS) in front
+              of it. TLS is terminated at API Gateway; the API Gateway → ALB
+              leg is VPC-internal east-west traffic. Adding HTTPS on the ALB
+              itself would require an ACM certificate, which Workshop Studio
+              accounts do not provide (no custom domain).
+          - id: W56
+            reason: >
+              No SslPolicy configured because this is an HTTP listener — see
+              W55. No TLS policy applies.
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # =========================================================================
+  # API Gateway — HTTPS front door for the internal ALB
+  # =========================================================================
+  VpcLink:
+    Type: AWS::ApiGatewayV2::VpcLink
+    Properties:
+      Name: !Sub '${AWS::StackName}-vpclink'
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref ALBSecurityGroup
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${AWS::StackName}-api'
+      ProtocolType: HTTP
+
+  HttpApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationUri: !Ref ALBListenerHTTP
+      IntegrationMethod: ANY
+      ConnectionType: VPC_LINK
+      ConnectionId: !Ref VpcLink
+      PayloadFormatVersion: '1.0'
+
+  HttpApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: '$default'
+      Target: !Sub 'integrations/${HttpApiIntegration}'
+
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: '$default'
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 100
+        ThrottlingRateLimit: 50
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+Outputs:
+  ProxyUrl:
+    Description: LiteLLM Proxy URL (HTTPS via API Gateway)
+    Value: !GetAtt HttpApi.ApiEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-ProxyUrl'
+
+  ApiGatewayId:
+    Description: API Gateway HTTP API ID
+    Value: !Ref HttpApi
+
+  ALBDnsName:
+    Description: Internal ALB DNS name (not publicly accessible)
+    Value: !GetAtt ALB.DNSName
+    Export:
+      Name: !Sub '${AWS::StackName}-ALBDnsName'
+
+  # Note: LITELLM_MASTER_KEY is the upstream LiteLLM env var name; our wrapper uses ADMIN_KEY terminology
+  AdminKeySecretArn:
+    Condition: GenerateAdminKey
+    Description: Secrets Manager ARN for the LiteLLM admin key
+    Value: !Ref AdminKeySecret
+
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VpcId'
+
+  PrivateSubnetIds:
+    Description: Private subnet IDs (comma-separated)
+    Value: !Join [',', [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateSubnetIds'
+
+  ECSClusterName:
+    Description: ECS Cluster name
+    Value: !Ref ECSCluster
+
+  ECSServiceName:
+    Description: ECS Service name
+    Value: !GetAtt Service.Name

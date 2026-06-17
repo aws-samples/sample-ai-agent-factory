@@ -1,0 +1,1458 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  MCP Gateway Registry - Data Stack (Consolidated)
+  Creates DocumentDB, Cognito User Pool, Secrets Manager, SSM Parameters, and KMS.
+  Matches terraform/aws-ecs/documentdb.tf, secrets.tf and keycloak-database.tf
+  Deploys to the region specified by AWS::Region (this workshop locks this to us-west-2 via contentspec.yaml).
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: mcp-gateway
+    Description: Name prefix for all resources (must match network stack)
+
+  # Network references (passed from the parent stack or imported via ImportValue)
+  VpcId:
+    Type: String
+    Default: ''
+    Description: VPC ID (leave empty to use ImportValue)
+
+  VpcCidr:
+    Type: String
+    Default: ''
+    Description: VPC CIDR block (leave empty to use ImportValue)
+
+  PrivateSubnet1:
+    Type: String
+    Default: ''
+    Description: Private Subnet 1 ID (leave empty to use ImportValue)
+
+  PrivateSubnet2:
+    Type: String
+    Default: ''
+    Description: Private Subnet 2 ID (leave empty to use ImportValue)
+
+  PrivateSubnet3:
+    Type: String
+    Default: ''
+    Description: Private Subnet 3 ID (leave empty to use ImportValue)
+
+  DatabaseSecurityGroupId:
+    Type: String
+    Default: ''
+    Description: Database Security Group ID (leave empty to use ImportValue)
+
+  # Keycloak Database credentials (NoEcho for security)
+  DocumentDBUsername:
+    Type: String
+    Default: docdbadmin
+    Description: DocumentDB admin username
+    NoEcho: true
+
+  DocumentDBPassword:
+    Type: String
+    Default: ''
+    Description: >
+      DocumentDB admin password (min 8 characters). If empty, auto-generated
+      via Secrets Manager. NEVER commit a real password here.
+    NoEcho: true
+
+  # DocumentDB instance configuration
+  DocumentDBInstanceClass:
+    Type: String
+    Default: db.t3.medium
+    Description: DocumentDB instance class (db.t3.medium = 2 vCPU, 4 GB RAM)
+    AllowedValues:
+      - db.t3.medium
+      - db.r5.large
+      - db.r5.xlarge
+      - db.r5.2xlarge
+
+  # Aurora Serverless scaling
+Conditions:
+  UseVpcIdParam: !Not [!Equals [!Ref VpcId, '']]
+  UsePrivateSubnet1Param: !Not [!Equals [!Ref PrivateSubnet1, '']]
+  UsePrivateSubnet2Param: !Not [!Equals [!Ref PrivateSubnet2, '']]
+  UsePrivateSubnet3Param: !Not [!Equals [!Ref PrivateSubnet3, '']]
+  UseDatabaseSgParam: !Not [!Equals [!Ref DatabaseSecurityGroupId, '']]
+  GenerateDocDBPassword: !Equals [!Ref DocumentDBPassword, '']
+
+Resources:
+
+  #============================================================================
+  # KMS Keys for Encryption
+  #============================================================================
+
+  # KMS Key for RDS (Aurora/Keycloak) Encryption
+  DocumentDBKmsKey:
+    Type: AWS::KMS::Key
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: F76
+            reason: >
+              Inside an AWS::KMS::Key KeyPolicy, `Resource: '*'` means "this
+              key" — it is self-referential and cannot be replaced with an
+              explicit ARN without creating a circular CloudFormation
+              dependency (the key's ARN is not known until the key exists).
+              Granting `kms:*` to the account root principal is the
+              AWS-documented default pattern for keys managed inside a single
+              account; it is required so that IAM-granted KMS permissions on
+              downstream consumers (DocumentDB, Secrets Manager, Lambdas) can
+              take effect. The Workshop Studio SCP on the sandbox account is
+              the real permission boundary (self-hosted: dedicated disposable
+              account + optional static/cfn/self-service-scp.json).
+    Properties:
+      Description: KMS key for DocumentDB cluster encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'  # In a KMS key policy, '*' means "this key" (self-referential — see Metadata above)
+          # Consumer (DocumentDB) statements are scoped to the minimum data-key
+          # operations: Encrypt/Decrypt/ReEncrypt*/GenerateDataKey*/DescribeKey
+          # (+ CreateGrant below, restricted to AWS-resource grants). No kms:*
+          # is granted to service principals.
+          - Sid: Allow DocumentDB to use the key
+            Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'  # In a KMS key policy, '*' means "this key"
+          - Sid: Allow DocumentDB to create grants for AWS resources
+            Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action: kms:CreateGrant
+            Resource: '*'  # In a KMS key policy, '*' means "this key"
+            Condition:
+              Bool:
+                # Grants may only be created on behalf of an AWS service
+                # integrated with KMS (the documented least-privilege pattern).
+                kms:GrantIsForAWSResource: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-documentdb-kms
+        - Key: Component
+          Value: documentdb
+
+  DocumentDBKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${EnvironmentName}-documentdb
+      TargetKeyId: !Ref DocumentDBKmsKey
+
+  #============================================================================
+  # DocumentDB Security Group
+  #============================================================================
+  DocumentDBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${EnvironmentName}-documentdb-sg
+      GroupDescription: Security group for DocumentDB Cluster
+      VpcId: !If
+        - UseVpcIdParam
+        - !Ref VpcId
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-documentdb-sg
+        - Key: Component
+          Value: documentdb
+
+  # Ingress from ECS Tasks (Registry and Auth services share EcsTasksSG)
+  DocumentDBIngressFromEcsTasks:
+    # No explicit DependsOn is needed:
+    #   - DocumentDBSecurityGroup is in this stack; !Ref creates an implicit dependency.
+    #   - EcsTasksSG is imported from the network-stack; CloudFormation resolves
+    #     !ImportValue only after the exporting stack has successfully deployed,
+    #     and the parent workshop-registry-stack.yaml orders the nested stacks so
+    #     network-stack finishes before data-stack begins. There is no intra-stack
+    #     or cross-stack race on this resource.
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DocumentDBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 27017
+      ToPort: 27017
+      SourceSecurityGroupId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-EcsTasksSG
+      Description: Allow MongoDB protocol from ECS tasks (Registry, Auth) to DocumentDB
+
+  # Egress rules
+  DocumentDBEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref DocumentDBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 27017
+      ToPort: 27017
+      CidrIp: !If
+        - UseVpcIdParam
+        - !Ref VpcCidr
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-VpcCidr
+      Description: Allow DocumentDB response traffic within VPC only
+
+  # HTTPS egress for DocumentDBInitLambda (reaches Secrets Manager, ECS, STS via NAT)
+  DocumentDBSGHttpsEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_382
+            comment: "DocumentDBInitLambda (attached to this SG) calls Secrets Manager/ECS/STS regional endpoints via NAT; HTTPS-only egress to 0.0.0.0/0 is required for the workshop. Restrict egress to VPC endpoints + specific CIDRs in production."
+    Properties:
+      GroupId: !Ref DocumentDBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: 0.0.0.0/0
+      Description: Allow HTTPS for Lambda to reach AWS APIs via NAT Gateway
+
+  # ECS Tasks -> DocumentDB egress rule
+  EcsTasksToDocumentDBEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-EcsTasksSG
+      IpProtocol: tcp
+      FromPort: 27017
+      ToPort: 27017
+      DestinationSecurityGroupId: !Ref DocumentDBSecurityGroup
+      Description: Allow ECS tasks to connect to DocumentDB
+
+  #============================================================================
+  # DocumentDB Cluster
+  #============================================================================
+
+  # DocumentDB Subnet Group
+  DocumentDBSubnetGroup:
+    Type: AWS::DocDB::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub ${EnvironmentName}-documentdb-subnet-group
+      DBSubnetGroupDescription: Subnet group for MCP Gateway Registry DocumentDB cluster
+      SubnetIds:
+        - !If
+          - UsePrivateSubnet1Param
+          - !Ref PrivateSubnet1
+          - !ImportValue
+            Fn::Sub: ${EnvironmentName}-PrivateSubnet1
+        - !If
+          - UsePrivateSubnet2Param
+          - !Ref PrivateSubnet2
+          - !ImportValue
+            Fn::Sub: ${EnvironmentName}-PrivateSubnet2
+        - !If
+          - UsePrivateSubnet3Param
+          - !Ref PrivateSubnet3
+          - !ImportValue
+            Fn::Sub: ${EnvironmentName}-PrivateSubnet3
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-documentdb-subnet-group
+        - Key: Component
+          Value: documentdb
+
+  # DocumentDB Cluster Parameter Group
+  DocumentDBClusterParameterGroup:
+    Type: AWS::DocDB::DBClusterParameterGroup
+    Properties:
+      Name: !Sub ${EnvironmentName}-documentdb-params
+      Family: docdb5.0
+      Description: DocumentDB cluster parameter group for MCP Gateway Registry
+      Parameters:
+        tls: enabled
+        audit_logs: enabled
+        ttl_monitor: enabled
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-documentdb-params
+        - Key: Component
+          Value: documentdb
+
+  # DocumentDB Cluster
+  DocumentDBCluster:
+    Type: AWS::DocDB::DBCluster
+    # Workshop: DeletionPolicy=Delete for easy teardown. Production: use Snapshot.
+    DeletionPolicy: Delete
+    DependsOn: DocumentDBCredentialsSecret
+    Properties:
+      DBClusterIdentifier: !Sub ${EnvironmentName}-registry
+      EngineVersion: '5.0.0'
+      MasterUsername: !Ref DocumentDBUsername
+      MasterUserPassword: !If
+        - GenerateDocDBPassword
+        - !Sub '{{resolve:secretsmanager:${DocumentDBAutoPassword}:SecretString:password}}'
+        - !Ref DocumentDBPassword
+      DBSubnetGroupName: !Ref DocumentDBSubnetGroup
+      DBClusterParameterGroupName: !Ref DocumentDBClusterParameterGroup
+      VpcSecurityGroupIds:
+        - !Ref DocumentDBSecurityGroup
+      Port: 27017
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: 02:00-04:00
+      PreferredMaintenanceWindow: sun:04:00-sun:05:00
+      StorageEncrypted: true
+      KmsKeyId: !GetAtt DocumentDBKmsKey.Arn
+      # Workshop: false for easy teardown. Production: set to true.
+      DeletionProtection: false
+      EnableCloudwatchLogsExports:
+        - audit
+        - profiler
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-registry-docdb
+        - Key: Component
+          Value: documentdb
+        - Key: Service
+          Value: mcp-gateway-registry
+
+  # DocumentDB Primary Instance
+  DocumentDBInstance:
+    Type: AWS::DocDB::DBInstance
+    # Workshop: DeletionPolicy=Delete for easy teardown. Production: use Snapshot.
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub ${EnvironmentName}-registry-primary
+      DBClusterIdentifier: !Ref DocumentDBCluster
+      DBInstanceClass: !Ref DocumentDBInstanceClass
+      AutoMinorVersionUpgrade: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-registry-primary
+        - Key: Component
+          Value: documentdb
+        - Key: Role
+          Value: primary
+
+  #============================================================================
+  # Secrets Manager Secrets
+  #============================================================================
+
+  # DocumentDB credentials secret
+  # Auto-generated password secret (used when DocumentDBPassword parameter is empty)
+  DocumentDBAutoPassword:
+    Type: AWS::SecretsManager::Secret
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_149
+            comment: "Workshop secrets use the AWS-managed Secrets Manager key; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+          - id: CKV2_AWS_57
+            comment: "Workshop secrets live only for the lifetime of the disposable workshop account; automatic rotation (rotation Lambda + schedule) is out of scope. Enable rotation in production."
+    Condition: GenerateDocDBPassword
+    Properties:
+      Name: !Sub ${EnvironmentName}/documentdb/auto-password
+      Description: Auto-generated DocumentDB admin password
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${DocumentDBUsername}"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  DocumentDBCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_149
+            comment: "Workshop secrets use the AWS-managed Secrets Manager key; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+          - id: CKV2_AWS_57
+            comment: "Workshop secrets live only for the lifetime of the disposable workshop account; automatic rotation (rotation Lambda + schedule) is out of scope. Enable rotation in production."
+    Properties:
+      Name: !Sub ${EnvironmentName}/documentdb/credentials
+      Description: DocumentDB Cluster admin credentials
+      SecretString: !If
+        - GenerateDocDBPassword
+        - !Sub
+          - |
+            {
+              "username": "${DocumentDBUsername}",
+              "password": "${AutoPass}",
+              "engine": "docdb"
+            }
+          - AutoPass: !Sub '{{resolve:secretsmanager:${DocumentDBAutoPassword}:SecretString:password}}'
+        - !Sub |
+            {
+              "username": "${DocumentDBUsername}",
+              "password": "${DocumentDBPassword}",
+              "engine": "docdb"
+            }
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-documentdb-credentials
+        - Key: Component
+          Value: documentdb
+
+  # Keycloak Database credentials secret
+  SecretKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_149
+            comment: "Workshop secrets use the AWS-managed Secrets Manager key; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+          - id: CKV2_AWS_57
+            comment: "Workshop secrets live only for the lifetime of the disposable workshop account; automatic rotation (rotation Lambda + schedule) is out of scope. Enable rotation in production."
+    Properties:
+      Name: !Sub ${EnvironmentName}-secret-key
+      Description: Secret key for MCP Gateway Registry
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: secret_key
+        PasswordLength: 64
+        ExcludeCharacters: '"@/\'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-secret-key
+
+  # Federation encryption key (Fernet-compatible; used to encrypt peer tokens before storage)
+  FederationEncryptionKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_149
+            comment: "Workshop secrets use the AWS-managed Secrets Manager key; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+          - id: CKV2_AWS_57
+            comment: "Workshop secrets live only for the lifetime of the disposable workshop account; automatic rotation (rotation Lambda + schedule) is out of scope. Enable rotation in production."
+    Properties:
+      Name: !Sub ${EnvironmentName}-federation-encryption-key
+      Description: Encryption key for federation peer tokens (auto-generated)
+      GenerateSecretString:
+        PasswordLength: 64
+        ExcludePunctuation: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-federation-encryption-key
+
+  # Metrics API key secret (auto-generated). Shared between auth-server/registry
+  # (senders) and metrics-service (authenticator) inside the services stack. Was
+  # previously a hardcoded literal; auto-generated here so no key lives in source.
+  MetricsApiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_149
+            comment: "Workshop secrets use the AWS-managed Secrets Manager key; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+          - id: CKV2_AWS_57
+            comment: "Workshop secrets live only for the lifetime of the disposable workshop account; automatic rotation (rotation Lambda + schedule) is out of scope. Enable rotation in production."
+    Properties:
+      Name: !Sub ${EnvironmentName}-metrics-api-key
+      Description: Shared metrics API key for registry/auth-server <-> metrics-service (auto-generated)
+      GenerateSecretString:
+        PasswordLength: 64
+        ExcludePunctuation: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-metrics-api-key
+
+  # Admin password secret
+  AdminPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_149
+            comment: "Workshop secrets use the AWS-managed Secrets Manager key; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+          - id: CKV2_AWS_57
+            comment: "Workshop secrets live only for the lifetime of the disposable workshop account; automatic rotation (rotation Lambda + schedule) is out of scope. Enable rotation in production."
+    Properties:
+      Name: !Sub ${EnvironmentName}-admin-password
+      Description: Admin password for MCP Gateway Registry
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: admin_password
+        PasswordLength: 32
+        RequireEachIncludedType: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-admin-password
+
+  # Grafana admin password secret
+  GrafanaAdminPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_149
+            comment: "Workshop secrets use the AWS-managed Secrets Manager key; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+          - id: CKV2_AWS_57
+            comment: "Workshop secrets live only for the lifetime of the disposable workshop account; automatic rotation (rotation Lambda + schedule) is out of scope. Enable rotation in production."
+    Properties:
+      Name: !Sub ${EnvironmentName}-grafana-admin-password
+      Description: Grafana admin password for MCP Gateway observability dashboard
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: grafana_admin_password
+        PasswordLength: 32
+        RequireEachIncludedType: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-grafana-admin-password
+
+  # Keycloak client secret (placeholder, updated by init script)
+  EmbeddingsApiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_149
+            comment: "Workshop secrets use the AWS-managed Secrets Manager key; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+          - id: CKV2_AWS_57
+            comment: "Workshop secrets live only for the lifetime of the disposable workshop account; automatic rotation (rotation Lambda + schedule) is out of scope. Enable rotation in production."
+    Properties:
+      Name: !Sub ${EnvironmentName}-embeddings-api-key
+      Description: API key for embeddings provider (only used with litellm provider)
+      SecretString: 'not-configured-using-local-embeddings'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-embeddings-api-key
+
+  #============================================================================
+  # Aurora Serverless v2 Database (for Keycloak)
+  #============================================================================
+
+  # DB Subnet Group
+  SsmSecureStringLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-ssm-securestring-role-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SsmSecureStringPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+              - Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:DeleteParameter
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:AddTagsToResource
+                  - ssm:RemoveTagsFromResource
+                  - ssm:ListTagsForResource
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/keycloak/*
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/*
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-ssm-securestring-role
+
+
+  SsmSecureStringLambda:
+    Type: AWS::Lambda::Function
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_116
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_117
+            comment: "Inline workshop Lambda; calls only AWS control-plane APIs, no VPC-bound resources"
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-ssm-securestring
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt SsmSecureStringLambdaRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+          # SPDX-License-Identifier: Apache-2.0
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              # Log request type only — event may contain secret values in ResourceProperties
+              print(f"RequestType: {event.get('RequestType')}, LogicalResourceId: {event.get('LogicalResourceId')}")
+              ssm = boto3.client('ssm')
+
+              try:
+                  name = event['ResourceProperties']['Name']
+
+                  if event['RequestType'] == 'Delete':
+                      try:
+                          ssm.delete_parameter(Name=name)
+                          print(f"Deleted parameter: {name}")
+                      except ssm.exceptions.ParameterNotFound:
+                          print(f"Parameter not found (already deleted): {name}")
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+
+                  # Create or Update
+                  value = event['ResourceProperties']['Value']
+                  description = event['ResourceProperties'].get('Description', '')
+                  tags = event['ResourceProperties'].get('Tags', [])
+
+                  ssm.put_parameter(
+                      Name=name,
+                      Value=value,
+                      Type='SecureString',
+                      Description=description,
+                      Overwrite=True
+                  )
+                  print(f"Created/Updated SecureString parameter: {name}")
+
+                  # Add tags if provided
+                  if tags:
+                      ssm.add_tags_to_resource(
+                          ResourceType='Parameter',
+                          ResourceId=name,
+                          Tags=tags
+                      )
+
+                  # Return the ARN
+                  region = context.invoked_function_arn.split(':')[3]
+                  account = context.invoked_function_arn.split(':')[4]
+                  arn = f"arn:aws:ssm:{region}:{account}:parameter{name}"
+
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Arn': arn})
+
+              except Exception as e:
+                  # Log the exception type only — the message may echo the
+                  # SecureString parameter value passed in ResourceProperties
+                  print(f"Error: {type(e).__name__}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': type(e).__name__})
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-ssm-securestring
+
+  # Keycloak SSM Parameters
+
+  SsmDocumentDBEndpoint:
+    Type: Custom::SsmSecureString
+    DependsOn:
+      - SsmSecureStringLambda
+      - DocumentDBCluster
+    Properties:
+      ServiceToken: !GetAtt SsmSecureStringLambda.Arn
+      Name: !Sub /${EnvironmentName}/documentdb/endpoint
+      Value: !GetAtt DocumentDBCluster.Endpoint
+      Description: DocumentDB Cluster endpoint
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-documentdb-endpoint
+        - Key: Component
+          Value: documentdb
+
+  SsmDocumentDBReaderEndpoint:
+    Type: Custom::SsmSecureString
+    DependsOn:
+      - SsmSecureStringLambda
+      - DocumentDBCluster
+    Properties:
+      ServiceToken: !GetAtt SsmSecureStringLambda.Arn
+      Name: !Sub /${EnvironmentName}/documentdb/reader_endpoint
+      Value: !GetAtt DocumentDBCluster.ReadEndpoint
+      Description: DocumentDB Cluster reader endpoint
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-documentdb-reader-endpoint
+        - Key: Component
+          Value: documentdb
+
+  SsmDocumentDBConnectionString:
+    Type: Custom::SsmSecureString
+    DependsOn:
+      - SsmSecureStringLambda
+      - DocumentDBCluster
+    Properties:
+      ServiceToken: !GetAtt SsmSecureStringLambda.Arn
+      Name: !Sub /${EnvironmentName}/documentdb/connection_string
+      Value: !Sub >-
+        mongodb://${DocumentDBUsername}:${DocumentDBPassword}@${DocumentDBCluster.Endpoint}:27017/?authMechanism=SCRAM-SHA-1&authSource=admin&tls=true&tlsCAFile=global-bundle.pem&replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false
+      Description: DocumentDB Cluster connection string
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-documentdb-connection-string
+        - Key: Component
+          Value: documentdb
+
+  #============================================================================
+  # DocumentDB Initialization Lambda
+  # Creates indexes and loads registry-admins scope into DocumentDB
+  # This is the CloudFormation equivalent of Terraform's run-documentdb-init.sh
+  #============================================================================
+  DocumentDBInitLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-documentdb-init-role-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: DocumentDBInitPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DocumentDBCredentialsSecret
+              - Effect: Allow
+                Action:
+                  - ecs:RunTask
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/${EnvironmentName}-*
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeTasks
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task/${EnvironmentName}-*/*
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  # Must match role names defined in compute-stack.yaml
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${EnvironmentName}-task-execution-${AWS::Region}
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${EnvironmentName}-task-role-${AWS::Region}
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-documentdb-init-role
+
+  # Lambda Layer for pymongo (DocumentDB driver)
+  # Note: In production, you would create this layer with pymongo installed
+  # For now, we use the boto3 layer and make HTTP calls to a sidecar or use ECS task
+
+  DocumentDBInitLambda:
+    # Cross-stack references (ECS cluster, task family) are resolved at runtime
+    # via the Lambda's event payload (CustomResource properties passed by the
+    # parent stack). No CloudFormation-time DependsOn is needed on ECS resources
+    # because the Lambda is invoked by the parent workshop-registry-stack AFTER
+    # compute-stack completes — the ordering is enforced at the parent level.
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - DocumentDBInstance
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_116
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_173
+            comment: "Environment variables hold only non-secret connection metadata (endpoint, port, secret ARN — not the secret value); a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-documentdb-init
+      Description: Initialize DocumentDB collections, indexes, and registry-admins scope
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt DocumentDBInitLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref DocumentDBSecurityGroup
+        SubnetIds:
+          - !If
+            - UsePrivateSubnet1Param
+            - !Ref PrivateSubnet1
+            - !ImportValue
+              Fn::Sub: ${EnvironmentName}-PrivateSubnet1
+      Environment:
+        Variables:
+          DOCUMENTDB_HOST: !GetAtt DocumentDBCluster.Endpoint
+          DOCUMENTDB_PORT: '27017'
+          DOCUMENTDB_DATABASE: mcp_registry
+          DOCUMENTDB_NAMESPACE: default
+          DOCUMENTDB_SECRET_ARN: !Ref DocumentDBCredentialsSecret
+      Code:
+        ZipFile: |
+          # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+          # SPDX-License-Identifier: Apache-2.0
+          """
+          DocumentDB Initialization Lambda for MCP Gateway Registry.
+
+          This Lambda initializes DocumentDB by triggering an ECS task that runs
+          the init-documentdb-indexes.py script. Lambda cannot directly connect to
+          DocumentDB with pymongo due to layer size limits, so we delegate to ECS.
+
+          The ECS task will:
+          1. Create all required collections with indexes
+          2. Load the registry-admins scope into mcp_scopes_default collection
+          """
+          import json
+          import boto3
+          import cfnresponse
+          import os
+          import time
+
+          def handler(event, context):
+              # Log request type only — event ResourceProperties may contain DB passwords
+              print(f"RequestType: {event.get('RequestType')}, LogicalResourceId: {event.get('LogicalResourceId')}")
+
+              request_type = event.get('RequestType')
+              properties = event.get('ResourceProperties', {})
+
+              # For Delete, just return success
+              if request_type == 'Delete':
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                      'Message': 'Delete request - no action needed'
+                  })
+                  return
+
+              try:
+                  ecs = boto3.client('ecs')
+
+                  # Get ECS configuration from properties
+                  cluster_name = properties.get('EcsClusterName')
+                  task_family = properties.get('TaskFamily', 'mcp-gateway-registry')
+                  container_name = properties.get('ContainerName', 'registry')
+                  subnets = properties.get('Subnets', '').split(',')
+                  security_groups = properties.get('SecurityGroups', '').split(',')
+
+                  # Get DocumentDB connection info
+                  docdb_host = os.environ.get('DOCUMENTDB_HOST')
+                  docdb_port = os.environ.get('DOCUMENTDB_PORT', '27017')
+                  docdb_database = os.environ.get('DOCUMENTDB_DATABASE', 'mcp_registry')
+                  docdb_namespace = os.environ.get('DOCUMENTDB_NAMESPACE', 'default')
+                  secret_arn = os.environ.get('DOCUMENTDB_SECRET_ARN')
+
+                  # Get credentials from Secrets Manager
+                  secrets = boto3.client('secretsmanager')
+                  secret_response = secrets.get_secret_value(SecretId=secret_arn)
+                  credentials = json.loads(secret_response['SecretString'])
+                  docdb_username = credentials.get('username')
+                  docdb_password = credentials.get('password')
+
+                  print(f"Starting DocumentDB init ECS task...")
+                  print(f"  Cluster: {cluster_name}")
+                  print(f"  Task Family: {task_family}")
+                  print(f"  DocumentDB Host: {docdb_host}")
+
+                  # Build the init command
+                  # Script is base64-encoded to avoid shell/Python escaping issues with $ operator
+                  init_command = (
+                      "source /app/.venv/bin/activate && "
+                      "cd /app/scripts && "
+                      "python init-documentdb-indexes.py && "
+                      "python3 -c \"import base64; exec(base64.b64decode('aW1wb3J0IGFzeW5jaW8sIG1vdG9yLm1vdG9yX2FzeW5jaW8sIG9zCmFzeW5jIGRlZiBtYWluKCk6CiAgICBoID0gb3MuZW52aXJvblsnRE9DVU1FTlREQl9IT1NUJ10KICAgIHUgPSBvcy5lbnZpcm9uWydET0NVTUVOVERCX1VTRVJOQU1FJ10KICAgIHAgPSBvcy5lbnZpcm9uWydET0NVTUVOVERCX1BBU1NXT1JEJ10KICAgIHVyaSA9ICdtb25nb2RiOi8ve306e31Ae306MjcwMTcvP3Rscz10cnVlJnRsc0FsbG93SW52YWxpZENlcnRpZmljYXRlcz10cnVlJnJlcGxpY2FTZXQ9cnMwJnJlYWRQcmVmZXJlbmNlPXNlY29uZGFyeVByZWZlcnJlZCZyZXRyeVdyaXRlcz1mYWxzZScuZm9ybWF0KHUsIHAsIGgpCiAgICBjID0gbW90b3IubW90b3JfYXN5bmNpby5Bc3luY0lPTW90b3JDbGllbnQodXJpLCBzZXJ2ZXJTZWxlY3Rpb25UaW1lb3V0TVM9MTAwMDApCiAgICBvcCA9IHsnJGFkZFRvU2V0Jzogeydncm91cF9tYXBwaW5ncyc6ICdtY3AtcmVnaXN0cnktYWRtaW4nfX0KICAgIHIgPSBhd2FpdCBjWydtY3BfcmVnaXN0cnknXVsnbWNwX3Njb3Blc19kZWZhdWx0J10udXBkYXRlX29uZSh7J19pZCc6ICdyZWdpc3RyeS1hZG1pbnMnfSwgb3ApCiAgICBwcmludCgnQ29nbml0byBncm91cCBtYXBwaW5nIGFkZGVkLCBtb2RpZmllZDonLCByLm1vZGlmaWVkX2NvdW50KQogICAgYy5jbG9zZSgpCmFzeW5jaW8ucnVuKG1haW4oKSkK').decode())\""
+                  )
+
+                  # Run the ECS task
+                  response = ecs.run_task(
+                      cluster=cluster_name,
+                      taskDefinition=task_family,
+                      launchType='FARGATE',
+                      networkConfiguration={
+                          'awsvpcConfiguration': {
+                              'subnets': subnets,
+                              'securityGroups': security_groups,
+                              'assignPublicIp': 'DISABLED'
+                          }
+                      },
+                      overrides={
+                          'containerOverrides': [{
+                              'name': container_name,
+                              'command': ['/bin/bash', '-c', init_command],
+                              'environment': [
+                                  {'name': 'RUN_INIT_SCRIPTS', 'value': 'true'},
+                                  {'name': 'DOCUMENTDB_HOST', 'value': docdb_host},
+                                  {'name': 'DOCUMENTDB_PORT', 'value': docdb_port},
+                                  {'name': 'DOCUMENTDB_USERNAME', 'value': docdb_username},
+                                  {'name': 'DOCUMENTDB_PASSWORD', 'value': docdb_password},
+                                  {'name': 'DOCUMENTDB_DATABASE', 'value': docdb_database},
+                                  {'name': 'DOCUMENTDB_NAMESPACE', 'value': docdb_namespace},
+                                  {'name': 'DOCUMENTDB_USE_TLS', 'value': 'true'},
+                                  {'name': 'DOCUMENTDB_USE_IAM', 'value': 'false'},
+                                  {'name': 'DOCUMENTDB_TLS_CA_FILE', 'value': '/app/global-bundle.pem'},
+                                  {'name': 'STORAGE_BACKEND', 'value': 'documentdb'},
+                                  {'name': 'AUDIT_LOG_MONGODB_TTL_DAYS', 'value': '7'}
+                              ]
+                          }]
+                      }
+                  )
+
+                  if not response.get('tasks'):
+                      failures = response.get('failures', [])
+                      raise Exception(f"Failed to start ECS task: {failures}")
+
+                  task_arn = response['tasks'][0]['taskArn']
+                  task_id = task_arn.split('/')[-1]
+                  print(f"Started ECS task: {task_id}")
+
+                  # Wait for task to complete (with timeout)
+                  max_wait_seconds = 180
+                  wait_interval = 10
+                  elapsed = 0
+
+                  while elapsed < max_wait_seconds:
+                      time.sleep(wait_interval)
+                      elapsed += wait_interval
+
+                      describe_response = ecs.describe_tasks(
+                          cluster=cluster_name,
+                          tasks=[task_arn]
+                      )
+
+                      if describe_response['tasks']:
+                          task = describe_response['tasks'][0]
+                          status = task.get('lastStatus', 'UNKNOWN')
+                          print(f"Task status: {status} (elapsed: {elapsed}s)")
+
+                          if status == 'STOPPED':
+                              # Check exit code
+                              containers = task.get('containers', [])
+                              if containers:
+                                  exit_code = containers[0].get('exitCode')
+                                  if exit_code == 0:
+                                      print("DocumentDB initialization completed successfully!")
+                                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                                          'TaskId': task_id,
+                                          'Status': 'SUCCESS',
+                                          'Message': 'DocumentDB indexes and registry-admins scope created'
+                                      })
+                                      return
+                                  else:
+                                      raise Exception(f"ECS task failed with exit code: {exit_code}")
+                              break
+
+                  # If we get here, task didn't complete in time
+                  print(f"Warning: Task still running after {max_wait_seconds}s, returning success anyway")
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                      'TaskId': task_id,
+                      'Status': 'PENDING',
+                      'Message': 'DocumentDB init task started but not yet completed'
+                  })
+
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  # Don't fail the stack on init errors - the init can be run manually
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                      'Status': 'WARNING',
+                      'Error': str(e),
+                      'Message': 'DocumentDB init failed but stack creation continues. Run init manually.'
+                  })
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-documentdb-init
+        - Key: Component
+          Value: documentdb
+
+  # Note: The DocumentDBInitTrigger custom resource is defined in services-stack.yaml
+  # after the Registry ECS service is created, since it needs to run an ECS task
+  # using the registry task definition.
+
+#============================================================================
+# Outputs
+#============================================================================
+  #============================================================================
+  # Cognito Admin User Initialisation Lambda
+  #============================================================================
+
+  CognitoInitLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-cognito-init-role-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CognitoAndSecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminAddUserToGroup
+                  - cognito-idp:AdminSetUserPassword
+                  - cognito-idp:DescribeUserPoolClient
+                Resource: !GetAtt CognitoUserPool.Arn
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:UpdateSecret
+                Resource:
+                  - !Ref AdminPasswordSecret
+                  - !Ref CognitoM2MClientSecret
+                  - !Ref CognitoWebAppClientSecret
+
+  CognitoInitLambda:
+    Type: AWS::Lambda::Function
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_116
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_117
+            comment: "Inline workshop Lambda; calls only AWS control-plane APIs, no VPC-bound resources"
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-cognito-init
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt CognitoInitLambdaRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3, json, urllib.request, urllib.parse
+
+          def send_response(event, context, status, reason=''):
+              body = json.dumps({'Status': status, 'Reason': reason,
+                                 'PhysicalResourceId': 'cognito-init',
+                                 'StackId': event['StackId'],
+                                 'RequestId': event['RequestId'],
+                                 'LogicalResourceId': event['LogicalResourceId']})
+              req = urllib.request.Request(event['ResponseURL'],
+                                           data=body.encode(),
+                                           headers={'Content-Type': ''}, method='PUT')
+              urllib.request.urlopen(req)
+
+          def handler(event, context):
+              if event['RequestType'] == 'Delete':
+                  try:
+                      send_response(event, context, 'SUCCESS')
+                  except Exception:
+                      pass
+                  return
+              try:
+                  props = event['ResourceProperties']
+                  pool_id = props['UserPoolId']
+                  group_name = props['AdminGroupName']
+                  secret_arn = props['AdminPasswordSecretArn']
+
+                  sm = boto3.client('secretsmanager')
+                  secret = json.loads(sm.get_secret_value(SecretId=secret_arn)['SecretString'])
+                  password = secret.get('admin_password', secret.get('password', ''))
+
+                  idp = boto3.client('cognito-idp')
+
+                  # Create admin user (suppress welcome email)
+                  try:
+                      idp.admin_create_user(
+                          UserPoolId=pool_id,
+                          Username='admin',
+                          TemporaryPassword=password,
+                          MessageAction='SUPPRESS',
+                          UserAttributes=[{'Name': 'email', 'Value': 'admin@example.com'},
+                                          {'Name': 'email_verified', 'Value': 'true'}]
+                      )
+                      # Set permanent password so no forced reset
+                      idp.admin_set_user_password(
+                          UserPoolId=pool_id, Username='admin',
+                          Password=password, Permanent=True
+                      )
+                      print('Admin user created')
+                  except idp.exceptions.UsernameExistsException:
+                      print('Admin user already exists')
+
+                  # Add to admin group
+                  idp.admin_add_user_to_group(
+                      UserPoolId=pool_id, Username='admin', GroupName=group_name
+                  )
+                  print(f'Admin added to {group_name}')
+
+                  # Retrieve and store M2M client secret
+                  m2m_client_id = props.get('M2MClientId')
+                  m2m_secret_arn = props.get('M2MClientSecretArn')
+                  if m2m_client_id and m2m_secret_arn:
+                      try:
+                          resp = idp.describe_user_pool_client(
+                              UserPoolId=pool_id, ClientId=m2m_client_id
+                          )
+                          client_secret = resp['UserPoolClient'].get('ClientSecret', '')
+                          token_url = f"https://{props.get('CognitoDomain')}/oauth2/token"
+                          sm.update_secret(
+                              SecretId=m2m_secret_arn,
+                              SecretString=json.dumps({
+                                  'client_id': m2m_client_id,
+                                  'client_secret': client_secret,
+                                  'token_url': token_url
+                              })
+                          )
+                          # Log a generic confirmation only — never log secret values
+                          print('Stored M2M client configuration')
+                      except Exception as e:
+                          print(f'Warning: could not store M2M configuration: {type(e).__name__}')
+
+                  # Retrieve and store web app client secret for auth-server OAuth2 flow
+                  web_client_id = props.get('WebAppClientId')
+                  web_secret_arn = props.get('WebAppClientSecretArn')
+                  if web_client_id and web_secret_arn:
+                      try:
+                          resp = idp.describe_user_pool_client(
+                              UserPoolId=pool_id, ClientId=web_client_id
+                          )
+                          web_client_secret = resp['UserPoolClient'].get('ClientSecret', '')
+                          sm.update_secret(
+                              SecretId=web_secret_arn,
+                              SecretString=json.dumps({
+                                  'client_id': web_client_id,
+                                  'client_secret': web_client_secret
+                              })
+                          )
+                          # Log a generic confirmation only — never log secret values
+                          print('Stored web app client configuration')
+                      except Exception as e:
+                          print(f'Warning: could not store web app configuration: {type(e).__name__}')
+
+                  send_response(event, context, 'SUCCESS')
+              except Exception as e:
+                  # Log the exception type only — the exception message may echo
+                  # event fragments (e.g. secret ARNs / resource properties)
+                  print(f'Error: {type(e).__name__}')
+                  send_response(event, context, 'FAILED', str(e))
+
+  CognitoAdminInit:
+    Type: Custom::CognitoInit
+    DependsOn:
+      - CognitoAdminGroup
+      - AdminPasswordSecret
+      - CognitoM2MClient
+      - CognitoM2MClientSecret
+      - CognitoWebAppClient
+      - CognitoWebAppClientSecret
+    Properties:
+      ServiceToken: !GetAtt CognitoInitLambda.Arn
+      UserPoolId: !Ref CognitoUserPool
+      AdminGroupName: mcp-registry-admin
+      AdminPasswordSecretArn: !Ref AdminPasswordSecret
+      M2MClientId: !Ref CognitoM2MClient
+      M2MClientSecretArn: !Ref CognitoM2MClientSecret
+      WebAppClientId: !Ref CognitoWebAppClient
+      WebAppClientSecretArn: !Ref CognitoWebAppClientSecret
+      CognitoDomain: !Sub ${EnvironmentName}-mcp-registry-${AWS::AccountId}
+      Version: '1.2'
+
+
+
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${EnvironmentName}-user-pool
+      UsernameConfiguration:
+        CaseSensitive: false
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      AdminCreateUserConfig:
+        # Workshop: false allows self-registration for easy testing.
+        # Production: set to true and manage users via admin API.
+        AllowAdminCreateUserOnly: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+      UserPoolTags:
+        Name: !Sub ${EnvironmentName}-user-pool
+
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub ${EnvironmentName}-mcp-registry-${AWS::AccountId}
+      UserPoolId: !Ref CognitoUserPool
+
+  CognitoResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      Identifier: mcp-servers-unrestricted
+      Name: MCP Servers
+      Scopes:
+        - ScopeName: read
+          ScopeDescription: Read access to all MCP servers
+        - ScopeName: execute
+          ScopeDescription: Execute access to all MCP servers
+
+  # Web app client (human users via browser)
+  CognitoWebAppClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: CognitoResourceServer
+    Properties:
+      ClientName: !Sub ${EnvironmentName}-web-client
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: true
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+        - aws.cognito.signin.user.admin
+      AllowedOAuthFlowsUserPoolClient: true
+      CallbackURLs:
+        - http://localhost/oauth2/callback/cognito
+      SupportedIdentityProviders:
+        - COGNITO
+
+  # M2M client (agents using client credentials)
+  CognitoM2MClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: CognitoResourceServer
+    Properties:
+      ClientName: !Sub ${EnvironmentName}-m2m-client
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: true
+      ExplicitAuthFlows: []
+      AllowedOAuthFlows:
+        - client_credentials
+      AllowedOAuthScopes:
+        - mcp-servers-unrestricted/read
+        - mcp-servers-unrestricted/execute
+      AllowedOAuthFlowsUserPoolClient: true
+      SupportedIdentityProviders:
+        - COGNITO
+
+  # Admin user group
+  CognitoAdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: mcp-registry-admin
+      UserPoolId: !Ref CognitoUserPool
+      Description: MCP Registry administrators
+
+  # Static API token for auth-server bypass (used by health check Lambda)
+  RegistryApiTokenSecret:
+    Type: AWS::SecretsManager::Secret
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_149
+            comment: "Workshop secrets use the AWS-managed Secrets Manager key; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+          - id: CKV2_AWS_57
+            comment: "Workshop secrets live only for the lifetime of the disposable workshop account; automatic rotation (rotation Lambda + schedule) is out of scope. Enable rotation in production."
+    Properties:
+      Name: !Sub ${EnvironmentName}-registry-api-token
+      Description: Static API token for registry API access (bypasses Cognito JWT validation)
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: api_token
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-registry-api-token
+
+
+  # Store Cognito M2M credentials in Secrets Manager for use by services
+  CognitoM2MClientSecret:
+    Type: AWS::SecretsManager::Secret
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_149
+            comment: "Workshop secrets use the AWS-managed Secrets Manager key; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+          - id: CKV2_AWS_57
+            comment: "Workshop secrets live only for the lifetime of the disposable workshop account; automatic rotation (rotation Lambda + schedule) is out of scope. Enable rotation in production."
+    DependsOn: CognitoM2MClient
+    Properties:
+      Name: !Sub ${EnvironmentName}-cognito-m2m-secret
+      Description: Cognito M2M client credentials for agent authentication
+      SecretString: !Sub
+        - '{"client_id":"${ClientId}","token_url":"https://${EnvironmentName}-mcp-registry-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com/oauth2/token"}'
+        - ClientId: !Ref CognitoM2MClient
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-cognito-m2m-secret
+
+  # Store Cognito web app client secret for auth-server browser OAuth2 flow
+  CognitoWebAppClientSecret:
+    Type: AWS::SecretsManager::Secret
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_149
+            comment: "Workshop secrets use the AWS-managed Secrets Manager key; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+          - id: CKV2_AWS_57
+            comment: "Workshop secrets live only for the lifetime of the disposable workshop account; automatic rotation (rotation Lambda + schedule) is out of scope. Enable rotation in production."
+    DependsOn: CognitoWebAppClient
+    Properties:
+      Name: !Sub ${EnvironmentName}-cognito-web-client-secret
+      Description: Cognito web app client secret for browser OAuth2 flow
+      SecretString: !Sub
+        - '{"client_id":"${ClientId}"}'
+        - ClientId: !Ref CognitoWebAppClient
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-cognito-web-client-secret
+
+
+Outputs:
+
+  # Cognito Outputs
+  CognitoUserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref CognitoUserPool
+    Export:
+      Name: !Sub ${EnvironmentName}-CognitoUserPoolId
+
+  CognitoUserPoolArn:
+    Description: Cognito User Pool ARN
+    Value: !GetAtt CognitoUserPool.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-CognitoUserPoolArn
+
+  CognitoWebAppClientId:
+    Description: Cognito web app client ID
+    Value: !Ref CognitoWebAppClient
+    Export:
+      Name: !Sub ${EnvironmentName}-CognitoWebAppClientId
+
+  CognitoM2MClientId:
+    Description: Cognito M2M client ID
+    Value: !Ref CognitoM2MClient
+    Export:
+      Name: !Sub ${EnvironmentName}-CognitoM2MClientId
+
+  CognitoM2MClientSecretArn:
+    Description: Cognito M2M client secret ARN
+    Value: !Ref CognitoM2MClientSecret
+    Export:
+      Name: !Sub ${EnvironmentName}-CognitoM2MClientSecretArn
+
+  CognitoWebAppClientSecretArn:
+    Description: Cognito web app client secret ARN
+    Value: !Ref CognitoWebAppClientSecret
+    Export:
+      Name: !Sub ${EnvironmentName}-CognitoWebAppClientSecretArn
+
+  MetricsApiKeySecretArn:
+    Description: Auto-generated metrics API key secret ARN
+    Value: !Ref MetricsApiKeySecret
+    Export:
+      Name: !Sub ${EnvironmentName}-MetricsApiKeySecretArn
+
+  CognitoDomain:
+    Description: Cognito domain prefix (auth-server appends .auth.REGION.amazoncognito.com)
+    Value: !Sub ${EnvironmentName}-mcp-registry-${AWS::AccountId}
+    Export:
+      Name: !Sub ${EnvironmentName}-CognitoDomain
+
+  RegistryApiTokenSecretArn:
+    Description: Registry static API token secret ARN
+    Value: !Ref RegistryApiTokenSecret
+    Export:
+      Name: !Sub ${EnvironmentName}-RegistryApiTokenSecretArn
+
+  CognitoTokenUrl:
+    Description: Cognito token endpoint URL
+    Value: !Sub https://${EnvironmentName}-mcp-registry-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com/oauth2/token
+    Export:
+      Name: !Sub ${EnvironmentName}-CognitoTokenUrl
+
+  # DocumentDB Outputs
+  DocumentDBClusterEndpoint:
+    Description: DocumentDB cluster endpoint
+    Value: !GetAtt DocumentDBCluster.Endpoint
+    Export:
+      Name: !Sub ${EnvironmentName}-DocumentDBClusterEndpoint
+
+  DocumentDBClusterPort:
+    Description: DocumentDB cluster port
+    Value: !GetAtt DocumentDBCluster.Port
+    Export:
+      Name: !Sub ${EnvironmentName}-DocumentDBClusterPort
+
+  DocumentDBClusterReadEndpoint:
+    Description: DocumentDB cluster reader endpoint
+    Value: !GetAtt DocumentDBCluster.ReadEndpoint
+    Export:
+      Name: !Sub ${EnvironmentName}-DocumentDBClusterReadEndpoint
+
+  DocumentDBSecurityGroupId:
+    Description: DocumentDB security group ID
+    Value: !Ref DocumentDBSecurityGroup
+    Export:
+      Name: !Sub ${EnvironmentName}-DocumentDBSecurityGroupId
+
+  DocumentDBCredentialsSecretArn:
+    Description: DocumentDB credentials secret ARN
+    Value: !Ref DocumentDBCredentialsSecret
+    Export:
+      Name: !Sub ${EnvironmentName}-DocumentDBCredentialsSecretArn
+
+  DocumentDBInitLambdaArn:
+    Description: DocumentDB initialization Lambda ARN
+    Value: !GetAtt DocumentDBInitLambda.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-DocumentDBInitLambdaArn
+
+  # Aurora (Keycloak) Database Outputs
+  SecretKeySecretArn:
+    Description: Application secret key ARN
+    Value: !Ref SecretKeySecret
+    Export:
+      Name: !Sub ${EnvironmentName}-SecretKeySecretArn
+
+  AdminPasswordSecretArn:
+    Description: Admin password secret ARN
+    Value: !Ref AdminPasswordSecret
+    Export:
+      Name: !Sub ${EnvironmentName}-AdminPasswordSecretArn
+
+  GrafanaAdminPasswordSecretArn:
+    Description: Grafana admin password secret ARN
+    Value: !Ref GrafanaAdminPasswordSecret
+    Export:
+      Name: !Sub ${EnvironmentName}-GrafanaAdminPasswordSecretArn
+
+  FederationEncryptionKeySecretArn:
+    Description: Federation encryption key secret ARN
+    Value: !Ref FederationEncryptionKeySecret
+    Export:
+      Name: !Sub ${EnvironmentName}-FederationEncryptionKeySecretArn
+
+  EmbeddingsApiKeySecretArn:
+    Description: Embeddings API key secret ARN (for litellm provider)
+    Value: !Ref EmbeddingsApiKeySecret
+    Export:
+      Name: !Sub ${EnvironmentName}-EmbeddingsApiKeySecretArn
+
+  # SSM Parameter Outputs (for Keycloak - matching Terraform)
+  DocumentDBKmsKeyArn:
+    Description: DocumentDB KMS key ARN
+    Value: !GetAtt DocumentDBKmsKey.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-DocumentDBKmsKeyArn

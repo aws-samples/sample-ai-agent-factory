@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Centralized Observability Dashboard for the Agentic AI Platform.
+  Aggregates metrics from the LLM Gateway (Module 2) and Tools Gateway
+  (Module 4) into a single CloudWatch Dashboard.
+
+Parameters:
+  LLMGatewayStackName:
+    Type: String
+    Default: llm-gateway
+    Description: CloudFormation stack name for the LLM Gateway (Module 2).
+
+  LLMGatewayECSClusterName:
+    Type: String
+    Default: llm-gateway-cluster
+    Description: ECS cluster name for the LLM Gateway.
+
+  LLMGatewayECSServiceName:
+    Type: String
+    Default: llm-gateway-service
+    Description: ECS service name for the LLM Gateway.
+
+  LLMGatewayALBName:
+    Type: String
+    Default: llm-gateway-alb
+    Description: ALB name for the LLM Gateway.
+
+  ToolsGatewayApiFunctionName:
+    Type: String
+    Default: tools-gateway-api
+    Description: Lambda function name for the Tools Gateway API.
+
+  ToolsGatewaySyncFunctionName:
+    Type: String
+    Default: tools-gateway-sync
+    Description: Lambda function name for the Tools Gateway Sync.
+
+  ToolsGatewayRequestInterceptorName:
+    Type: String
+    Default: tools-gateway-request-interceptor
+    Description: Lambda function name for the request interceptor.
+
+  ToolsGatewayResponseInterceptorName:
+    Type: String
+    Default: tools-gateway-response-interceptor
+    Description: Lambda function name for the response interceptor.
+
+  ToolsRegistryTableName:
+    Type: String
+    Default: tools-registry
+    Description: DynamoDB table name for the tools registry.
+
+  ToolsAuditTableName:
+    Type: String
+    Default: tools-audit-log
+    Description: DynamoDB table name for the audit log.
+
+Resources:
+  PlatformDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: agentic-platform-overview
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "text",
+              "x": 0, "y": 0, "width": 24, "height": 2,
+              "properties": {
+                "markdown": "# Agentic AI Platform — Observability Dashboard\n**LLM Gateway** (Module 2) + **Tools Gateway** (Module 4) — unified metrics across the platform.\n\n[LiteLLM Admin UI](http://${LLMGatewayALBName}/ui) *(internal ALB — HTTP is acceptable ONLY because this load balancer is internal-only with no public route; **production deployments must use HTTPS with an ACM certificate and never expose an HTTP ALB publicly**)* | [CloudWatch Logs: LLM Gateway](/cloudwatch/home#logsV2:log-groups/log-group/$252Fecs$252F${LLMGatewayStackName})"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 2, "width": 12, "height": 6,
+              "properties": {
+                "title": "LLM Gateway: ECS Service Metrics",
+                "metrics": [
+                  ["AWS/ECS", "CPUUtilization", "ClusterName", "${LLMGatewayECSClusterName}", "ServiceName", "${LLMGatewayECSServiceName}", {"label": "CPU %", "stat": "Average"}],
+                  ["AWS/ECS", "MemoryUtilization", "ClusterName", "${LLMGatewayECSClusterName}", "ServiceName", "${LLMGatewayECSServiceName}", {"label": "Memory %", "stat": "Average"}]
+                ],
+                "period": 60,
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stacked": false,
+                "yAxis": {"left": {"min": 0, "max": 100}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 2, "width": 12, "height": 6,
+              "properties": {
+                "title": "LLM Gateway: ALB Request Metrics",
+                "metrics": [
+                  ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${LLMGatewayALBName}", {"label": "Requests", "stat": "Sum"}],
+                  ["AWS/ApplicationELB", "HTTPCode_Target_2XX_Count", "LoadBalancer", "${LLMGatewayALBName}", {"label": "2xx", "stat": "Sum"}],
+                  ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", "${LLMGatewayALBName}", {"label": "5xx", "stat": "Sum"}]
+                ],
+                "period": 60,
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stacked": false
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 8, "width": 12, "height": 6,
+              "properties": {
+                "title": "Tools Gateway: Lambda Invocations",
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${ToolsGatewayApiFunctionName}", {"label": "API", "stat": "Sum"}],
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${ToolsGatewaySyncFunctionName}", {"label": "Sync", "stat": "Sum"}],
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${ToolsGatewayRequestInterceptorName}", {"label": "Req Interceptor", "stat": "Sum"}],
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${ToolsGatewayResponseInterceptorName}", {"label": "Resp Interceptor", "stat": "Sum"}]
+                ],
+                "period": 60,
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stacked": true
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 8, "width": 12, "height": 6,
+              "properties": {
+                "title": "Tools Gateway: Lambda Errors & Duration",
+                "metrics": [
+                  ["AWS/Lambda", "Errors", "FunctionName", "${ToolsGatewayApiFunctionName}", {"label": "API Errors", "stat": "Sum"}],
+                  ["AWS/Lambda", "Errors", "FunctionName", "${ToolsGatewaySyncFunctionName}", {"label": "Sync Errors", "stat": "Sum"}],
+                  ["AWS/Lambda", "Duration", "FunctionName", "${ToolsGatewayApiFunctionName}", {"label": "API Duration (ms)", "stat": "Average", "yAxis": "right"}]
+                ],
+                "period": 60,
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stacked": false,
+                "yAxis": {"right": {"label": "ms"}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 14, "width": 12, "height": 6,
+              "properties": {
+                "title": "Tools Gateway: DynamoDB Throughput",
+                "metrics": [
+                  ["AWS/DynamoDB", "ConsumedReadCapacityUnits", "TableName", "${ToolsRegistryTableName}", {"label": "Registry Reads", "stat": "Sum"}],
+                  ["AWS/DynamoDB", "ConsumedWriteCapacityUnits", "TableName", "${ToolsRegistryTableName}", {"label": "Registry Writes", "stat": "Sum"}],
+                  ["AWS/DynamoDB", "ConsumedReadCapacityUnits", "TableName", "${ToolsAuditTableName}", {"label": "Audit Reads", "stat": "Sum"}],
+                  ["AWS/DynamoDB", "ConsumedWriteCapacityUnits", "TableName", "${ToolsAuditTableName}", {"label": "Audit Writes", "stat": "Sum"}]
+                ],
+                "period": 60,
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stacked": false
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 14, "width": 12, "height": 6,
+              "properties": {
+                "title": "Platform: Error Rate Comparison",
+                "metrics": [
+                  [{"expression": "METRICS(\"m1\")/METRICS(\"m2\")*100", "label": "LLM Gateway Error %", "id": "e1"}],
+                  ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", "${LLMGatewayALBName}", {"id": "m1", "stat": "Sum", "visible": false}],
+                  ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${LLMGatewayALBName}", {"id": "m2", "stat": "Sum", "visible": false}],
+                  [{"expression": "METRICS(\"m3\")/METRICS(\"m4\")*100", "label": "Tools Gateway Error %", "id": "e2"}],
+                  ["AWS/Lambda", "Errors", "FunctionName", "${ToolsGatewayApiFunctionName}", {"id": "m3", "stat": "Sum", "visible": false}],
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${ToolsGatewayApiFunctionName}", {"id": "m4", "stat": "Sum", "visible": false}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stacked": false,
+                "yAxis": {"left": {"label": "%", "min": 0}}
+              }
+            }
+          ]
+        }
+
+Outputs:
+  DashboardName:
+    Description: CloudWatch Dashboard name
+    Value: agentic-platform-overview
+
+  DashboardUrl:
+    Description: Direct link to the CloudWatch Dashboard
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards/dashboard/agentic-platform-overview'

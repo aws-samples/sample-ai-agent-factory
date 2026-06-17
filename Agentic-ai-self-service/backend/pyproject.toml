@@ -1,0 +1,42 @@
+[project]
+name = "agentcore-workflow-backend"
+version = "0.1.0"
+description = "Backend for AgentCore Visual Workflow Platform"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "pydantic>=2.10.0",
+    "boto3>=1.35.0",
+    "uvicorn>=0.32.0",
+    "python-dotenv>=1.0.0",
+    "mangum>=0.19.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "hypothesis>=6.115.0",
+    "httpx>=0.28.0",
+    "moto[dynamodb]>=5.0.0",
+    "requests>=2.31.0",
+]
+deploy = [
+    "bedrock-agentcore-starter-toolkit",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+markers = [
+    "integration: marks tests that perform real AWS API calls (deselect with '-m \"not integration\"')",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/app"]

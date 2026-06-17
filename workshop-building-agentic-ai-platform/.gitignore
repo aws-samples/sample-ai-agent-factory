@@ -1,0 +1,20 @@
+assets/*
+!assets/README.md
+.venv/
+__pycache__/
+*.pyc
+cdk.out/
+.pytest_cache/
+.claude/
+.toolkit-mdrc
+*.egg-info/
+
+# State files may contain API keys, secrets, and account IDs
+**/.state.json
+.DS_Store
+kiro-workshop-content-session-*.md
+.ipynb_checkpoints/
+
+# Holmes security-review reports (internal artifacts — never ship to the public repo)
+HOLMES-CONSOLIDATED-REPORT.json
+holmes-report-*.json

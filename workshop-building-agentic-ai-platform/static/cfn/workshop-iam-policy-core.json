@@ -1,0 +1,296 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BedrockReadAndInvoke",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
+        "bedrock:ListFoundationModels",
+        "bedrock:GetFoundationModel",
+        "bedrock:GetFoundationModelAvailability",
+        "bedrock:ListInferenceProfiles",
+        "bedrock:GetInferenceProfile",
+        "bedrock:PutUseCaseForModelAccess",
+        "bedrock:GetUseCaseForModelAccess",
+        "bedrock:PutFoundationModelEntitlement",
+        "bedrock:ListGuardrails",
+        "bedrock:ListTagsForResource",
+        "bedrock:GetModelInvocationLoggingConfiguration",
+        "bedrock:PutModelInvocationLoggingConfiguration",
+        "aws-marketplace:Subscribe",
+        "aws-marketplace:ViewSubscriptions"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "BedrockGuardrailWrite",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:ApplyGuardrail",
+        "bedrock:CreateGuardrail",
+        "bedrock:UpdateGuardrail",
+        "bedrock:DeleteGuardrail",
+        "bedrock:GetGuardrail",
+        "bedrock:CreateGuardrailVersion",
+        "bedrock:TagResource",
+        "bedrock:UntagResource"
+      ],
+      "Resource": "arn:aws:bedrock:*:*:guardrail/*"
+    },
+    {
+      "Sid": "ACRegistryWrite",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:CreateRegistry",
+        "bedrock-agentcore:DeleteRegistry",
+        "bedrock-agentcore:CreateRegistryRecord",
+        "bedrock-agentcore:UpdateRegistryRecord",
+        "bedrock-agentcore:DeleteRegistryRecord",
+        "bedrock-agentcore:SubmitRegistryRecordForApproval",
+        "bedrock-agentcore:UpdateRegistryRecordStatus"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ACRegistryRead",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:GetRegistry",
+        "bedrock-agentcore:ListRegistries",
+        "bedrock-agentcore:GetRegistryRecord",
+        "bedrock-agentcore:ListRegistryRecords",
+        "bedrock-agentcore:SearchRegistryRecords",
+        "bedrock-agentcore:ListActors"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ACGatewayWrite",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:CreateGateway",
+        "bedrock-agentcore:UpdateGateway",
+        "bedrock-agentcore:DeleteGateway",
+        "bedrock-agentcore:CreateGatewayTarget",
+        "bedrock-agentcore:DeleteGatewayTarget",
+        "bedrock-agentcore:SynchronizeGatewayTargets",
+        "bedrock-agentcore:PutResourcePolicy"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ACGatewayRead",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:GetGateway",
+        "bedrock-agentcore:ListGateways",
+        "bedrock-agentcore:GetGatewayTarget",
+        "bedrock-agentcore:ListGatewayTargets"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ACIdentityWrite",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:CreateWorkloadIdentity",
+        "bedrock-agentcore:DeleteWorkloadIdentity",
+        "bedrock-agentcore:UpdateWorkloadIdentity",
+        "bedrock-agentcore:CreateOauth2CredentialProvider",
+        "bedrock-agentcore:DeleteOauth2CredentialProvider",
+        "bedrock-agentcore:AuthorizeAction",
+        "bedrock-agentcore:CreateTokenVault",
+        "bedrock-agentcore:SetTokenVaultCMK"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ACIdentityRead",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:GetWorkloadIdentity",
+        "bedrock-agentcore:ListWorkloadIdentities",
+        "bedrock-agentcore:GetWorkloadAccessToken",
+        "bedrock-agentcore:GetResourceOauth2Token",
+        "bedrock-agentcore:GetOauth2CredentialProvider",
+        "bedrock-agentcore:ListOauth2CredentialProviders",
+        "bedrock-agentcore:GetTokenVault"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ACPolicyWrite",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:CreatePolicyEngine",
+        "bedrock-agentcore:DeletePolicyEngine",
+        "bedrock-agentcore:CreatePolicy",
+        "bedrock-agentcore:UpdatePolicy",
+        "bedrock-agentcore:DeletePolicy",
+        "bedrock-agentcore:ManageResourceScopedPolicy"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ACPolicyRead",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:GetPolicyEngine",
+        "bedrock-agentcore:ListPolicyEngines",
+        "bedrock-agentcore:GetPolicy",
+        "bedrock-agentcore:ListPolicies"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ACEvents",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:ListEvents"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Lambda",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction",
+        "lambda:DeleteFunction",
+        "lambda:GetFunction",
+        "lambda:GetFunctionConfiguration",
+        "lambda:InvokeFunction",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration",
+        "lambda:AddPermission",
+        "lambda:RemovePermission",
+        "lambda:GetPolicy",
+        "lambda:CreateEventSourceMapping",
+        "lambda:DeleteEventSourceMapping",
+        "lambda:GetEventSourceMapping"
+      ],
+      "Resource": [
+        "arn:aws:lambda:*:*:function:workshop-*",
+        "arn:aws:lambda:*:*:function:ac-*",
+        "arn:aws:lambda:*:*:function:agentcore-*"
+      ]
+    },
+    {
+      "Sid": "LambdaList",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:ListFunctions",
+        "lambda:ListEventSourceMappings"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3Access",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:DeleteBucketPolicy",
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketPolicy",
+        "s3:PutBucketPolicy",
+        "s3:GetObjectAcl",
+        "s3:PutObjectAcl",
+        "s3:GetBucketAcl"
+      ],
+      "Resource": [
+        "arn:aws:s3:::workshop-*",
+        "arn:aws:s3:::workshop-*/*",
+        "arn:aws:s3:::fast-*",
+        "arn:aws:s3:::fast-*/*",
+        "arn:aws:s3:::cdk-*",
+        "arn:aws:s3:::cdk-*/*"
+      ]
+    },
+    {
+      "Sid": "S3List",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListAllMyBuckets"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "STSAssume",
+      "Effect": "Allow",
+      "Action": [
+        "sts:AssumeRole"
+      ],
+      "Resource": "arn:aws:iam::*:role/workshop-*"
+    },
+    {
+      "Sid": "STSReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SSM",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+        "ssm:GetParametersByPath"
+      ],
+      "Resource": "arn:aws:ssm:*:*:parameter/workshop*"
+    },
+    {
+      "Sid": "EB",
+      "Effect": "Allow",
+      "Action": [
+        "events:PutRule",
+        "events:DeleteRule",
+        "events:DescribeRule",
+        "events:EnableRule",
+        "events:DisableRule",
+        "events:PutTargets",
+        "events:RemoveTargets",
+        "events:ListTargetsByRule",
+        "events:ListTagsForResource",
+        "events:TagResource"
+      ],
+      "Resource": [
+        "arn:aws:events:*:*:rule/workshop-*",
+        "arn:aws:events:*:*:rule/ac-*",
+        "arn:aws:events:*:*:rule/agentcore-*"
+      ]
+    },
+    {
+      "Sid": "EBList",
+      "Effect": "Allow",
+      "Action": [
+        "events:ListRules"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SM",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:TagResource"
+      ],
+      "Resource": [
+        "arn:aws:secretsmanager:*:*:secret:workshop*",
+        "arn:aws:secretsmanager:*:*:secret:bedrock-agentcore-identity*"
+      ]
+    }
+  ]
+}

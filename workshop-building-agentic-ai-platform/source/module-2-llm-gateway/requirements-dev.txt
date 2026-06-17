@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest==8.4.2
+responses==0.25.3
+cfn-lint==1.21.2

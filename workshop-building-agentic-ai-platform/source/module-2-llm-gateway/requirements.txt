@@ -1,0 +1,9 @@
+# Pinned to exact tested versions for supply-chain reproducibility.
+boto3==1.42.87
+requests==2.32.4
+# pydantic 2.9.2 is the first 2.x that ships a pydantic-core with prebuilt
+# cp313 wheels; 2.7.2 forced a source build that fails on Python 3.13 (the
+# workshop interpreter) because its bundled PyO3 maxes out at 3.12.
+pydantic==2.9.2
+litellm==1.83.0
+strands-agents[litellm]==0.1.5

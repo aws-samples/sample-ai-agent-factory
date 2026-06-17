@@ -1,0 +1,850 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  MCP Gateway Registry - Compute Stack (Consolidated) Creates ECS clusters, ALBs, target groups, listeners, ACM certificates (optional), Route53 records (optional), ECR, and IAM roles. Deploys to the region specified by AWS::Region (this workshop locks this to us-west-2 via contentspec.yaml).
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: mcp-gateway
+    Description: Name prefix for all resources (must match network/data stacks)
+
+  # Network references (passed from the parent stack or imported via ImportValue)
+  VpcId:
+    Type: String
+    Default: ''
+    Description: VPC ID (leave empty to use ImportValue)
+
+  PublicSubnets:
+    Type: String
+    Default: ''
+    Description: Comma-separated public subnet IDs (leave empty to use ImportValue)
+
+  PrivateSubnets:
+    Type: String
+    Default: ''
+    Description: Comma-separated private subnet IDs (leave empty to use ImportValue)
+
+  MainAlbSecurityGroupId:
+    Type: String
+    Default: ''
+    Description: Main ALB Security Group ID (leave empty to use ImportValue)
+
+  EcsTasksSecurityGroupId:
+    Type: String
+    Default: ''
+    Description: ECS Tasks Security Group ID (leave empty to use ImportValue)
+
+  AdminPasswordSecretArn:
+    Type: String
+    Default: ''
+    Description: Admin Password Secret ARN (leave empty to use ImportValue)
+
+  SecretKeySecretArn:
+    Type: String
+    Default: ''
+    Description: Secret Key Secret ARN (leave empty to use ImportValue)
+
+  BaseDomain:
+    Type: String
+    Default: ''
+    Description: Base domain for regional URLs (leave empty to skip DNS/certs)
+
+  HostedZoneId:
+    Type: String
+    Default: ''
+    Description: Route53 Hosted Zone ID (leave empty to skip DNS/certs)
+
+  UseRegionalDomains:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Use region-based domain names
+
+  ContainerAssetsS3Url:
+    Type: String
+    Default: ''
+    Description: S3 URL base for pre-built container image tarballs (kept for future use)
+
+  UpstreamVersion:
+    Type: String
+    Default: 'v1.0.16'
+    Description: Version tag for container images (e.g., v1.0.16, latest)
+
+Conditions:
+  UseRegionalDomainsCondition: !Equals
+    - !Ref UseRegionalDomains
+    - 'true'
+  HasDnsConfig: !And
+    - !Not
+      - !Equals
+        - !Ref BaseDomain
+        - ''
+    - !Not
+      - !Equals
+        - !Ref HostedZoneId
+        - ''
+  UseVpcIdParam: !Not [!Equals [!Ref VpcId, '']]
+  UsePublicSubnetsParam: !Not [!Equals [!Ref PublicSubnets, '']]
+  UsePrivateSubnetsParam: !Not [!Equals [!Ref PrivateSubnets, '']]
+  UseMainAlbSgParam: !Not [!Equals [!Ref MainAlbSecurityGroupId, '']]
+  UseEcsTasksSgParam: !Not [!Equals [!Ref EcsTasksSecurityGroupId, '']]
+
+Resources:
+  #============================================================================
+  # ECS Service-Linked Role (Custom Resource)
+  # Required for fresh AWS accounts that have never used ECS
+  # Uses a Lambda to create the role and gracefully handle "already exists"
+  #============================================================================
+  EcsServiceLinkedRoleLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-ecs-slr-lambda-role-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CreateServiceLinkedRole
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                # AWS API requires '*' as the resource for CreateServiceLinkedRole.
+                # The Condition below restricts the action to ECS's service-linked
+                # role only — this is the sole SLR this Lambda is expected to
+                # create. Satisfies Checkov CKV_AWS_109 (IAM permissions management
+                # must have constraints).
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: ecs.amazonaws.com
+              - Effect: Allow
+                Action:
+                  - iam:GetRole
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS
+
+  EcsServiceLinkedRoleLambda:
+    Type: AWS::Lambda::Function
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_116
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_117
+            comment: "Inline workshop Lambda; calls only AWS control-plane APIs, no VPC-bound resources"
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-ensure-ecs-slr
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      Role: !GetAtt EcsServiceLinkedRoleLambdaRole.Arn
+      Code:
+        ZipFile: |
+          # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+          # SPDX-License-Identifier: Apache-2.0
+          import boto3
+          import cfnresponse
+          import time
+          def handler(event, context):
+              if event['RequestType'] == 'Delete':
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  return
+              try:
+                  iam = boto3.client('iam')
+                  role_created = False
+                  try:
+                      iam.create_service_linked_role(AWSServiceName='ecs.amazonaws.com')
+                      print('Created ECS service-linked role')
+                      role_created = True
+                  except iam.exceptions.InvalidInputException as e:
+                      if 'has been taken' in str(e):
+                          print('ECS service-linked role already exists')
+                      else:
+                          raise
+                  # Wait for IAM propagation if role was just created
+                  if role_created:
+                      print('Waiting 15 seconds for IAM role propagation...')
+                      time.sleep(15)
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Status': 'Role ensured'})
+              except Exception as e:
+                  print(f'Error: {e}')
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+
+  EnsureEcsServiceLinkedRole:
+    Type: Custom::EnsureEcsServiceLinkedRole
+    Properties:
+      ServiceToken: !GetAtt EcsServiceLinkedRoleLambda.Arn
+
+  MainEcsCluster:
+    Type: AWS::ECS::Cluster
+    DependsOn: EnsureEcsServiceLinkedRole
+    Properties:
+      ClusterName: !Sub ${EnvironmentName}-ecs-cluster
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      # Enable Service Connect at cluster level (matches Terraform)
+      # Injects Envoy sidecar into every task for bare hostname resolution
+      # (e.g. "mcpgw-server:8003") without requiring Cloud Map FQDNs
+      ServiceConnectDefaults:
+        Namespace: !GetAtt ServiceDiscoveryNamespace.Arn
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+          Base: 1
+      Configuration:
+        ExecuteCommandConfiguration:
+          Logging: OVERRIDE
+          LogConfiguration:
+            CloudWatchLogGroupName: !Ref EcsClusterLogGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-ecs-cluster
+
+  EcsClusterLogGroup:
+    Type: AWS::Logs::LogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: "Workshop log groups rely on CloudWatch Logs' default server-side encryption; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
+    Properties:
+      LogGroupName: !Sub /aws/ecs/${EnvironmentName}
+      RetentionInDays: 30
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-ecs-logs
+
+  #============================================================================
+  # Amazon Managed Service for Prometheus Workspace
+  # Provides metrics storage and querying for MCP Gateway observability
+  #============================================================================
+  PrometheusWorkspace:
+    Type: AWS::APS::Workspace
+    Properties:
+      Alias: !Sub '${EnvironmentName}-prometheus'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-prometheus'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # Prometheus Rule Group for MCP Gateway Alerts
+  PrometheusRuleGroup:
+    Type: AWS::APS::RuleGroupsNamespace
+    Properties:
+      Workspace: !GetAtt PrometheusWorkspace.Arn
+      Name: mcp-gateway-alerts
+      Data: !Sub |
+        groups:
+          - name: mcp-gateway
+            interval: 60s
+            rules:
+              - alert: MCPGatewayHighErrorRate
+                expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.05
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  summary: High error rate in MCP Gateway
+                  description: Error rate is above 5% for 5 minutes
+              - alert: MCPRegistryDown
+                expr: up{job="mcp-registry"} == 0
+                for: 2m
+                labels:
+                  severity: critical
+                annotations:
+                  summary: MCP Registry is down
+                  description: MCP Registry service has been down for 2 minutes
+              - alert: MCPGatewayHighLatency
+                expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) > 2
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  summary: High latency in MCP Gateway
+                  description: 95th percentile latency is above 2 seconds
+
+  ServiceDiscoveryNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: !Sub ${EnvironmentName}.local
+      Description: Service discovery namespace for MCP Gateway Registry
+      Vpc: !ImportValue
+        Fn::Sub: ${EnvironmentName}-VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-namespace
+
+  # NOTE: Cloud Map DNS-type discovery services removed in favor of Service Connect
+  # Service Connect (configured on each ECS service) creates HTTP-type Cloud Map
+  # services automatically and handles bare hostname resolution via Envoy sidecar.
+  # The ServiceDiscoveryNamespace is still needed as the Service Connect namespace.
+
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-task-execution-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: ${EnvironmentName}-SecretKeySecretArn
+                  - !ImportValue
+                    Fn::Sub: ${EnvironmentName}-AdminPasswordSecretArn
+                  - !ImportValue
+                    Fn::Sub: ${EnvironmentName}-EmbeddingsApiKeySecretArn
+                  - !ImportValue
+                    Fn::Sub: ${EnvironmentName}-FederationEncryptionKeySecretArn
+                  - !ImportValue
+                    Fn::Sub: ${EnvironmentName}-GrafanaAdminPasswordSecretArn
+                  - !ImportValue
+                    Fn::Sub: ${EnvironmentName}-DocumentDBCredentialsSecretArn
+                  - !ImportValue
+                    Fn::Sub: ${EnvironmentName}-CognitoWebAppClientSecretArn
+                  - !ImportValue
+                    Fn::Sub: ${EnvironmentName}-CognitoM2MClientSecretArn
+                  - !ImportValue
+                    Fn::Sub: ${EnvironmentName}-RegistryApiTokenSecretArn
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/keycloak/*
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/*
+        - PolicyName: EcsExecLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/ecs/${EnvironmentName}*
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-task-execution
+
+  EcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-task-role-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EcsExec
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'  # ssmmessages actions do not support resource-level permissions
+        - PolicyName: AMPRemoteWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - aps:RemoteWrite
+                  - aps:GetSeries
+                  - aps:GetLabels
+                  - aps:GetMetricMetadata
+                Resource: !Sub 'arn:${AWS::Partition}:aps:${AWS::Region}:${AWS::AccountId}:workspace/*'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-task-role
+
+  RegistryCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Condition: HasDnsConfig
+    Properties:
+      DomainName: !If
+        - UseRegionalDomainsCondition
+        - !Sub registry.${AWS::Region}.${BaseDomain}
+        - !Sub registry.${BaseDomain}
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !If
+            - UseRegionalDomainsCondition
+            - !Sub registry.${AWS::Region}.${BaseDomain}
+            - !Sub registry.${BaseDomain}
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-registry-cert
+
+  MainAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_91
+            comment: "ALB access logging requires a dedicated S3 logging bucket; out of scope for the ephemeral workshop. Enable access logging in production."
+    Properties:
+      Name: !Sub ${EnvironmentName}-alb
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-MainAlbSG
+      Subnets: !Split
+        - ','
+        - !ImportValue
+          Fn::Sub: ${EnvironmentName}-PublicSubnets
+      LoadBalancerAttributes:
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: 'true'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-alb
+
+  RegistryTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${EnvironmentName}-registry-tg
+      Port: 80
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-VpcId
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckPort: '80'
+      HealthCheckProtocol: HTTP
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      Matcher:
+        HttpCode: '200'
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '5'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-registry-tg
+
+  AuthTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${EnvironmentName}-auth-tg
+      Port: 8888
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-VpcId
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      Matcher:
+        HttpCode: '200'
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '5'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-auth-tg
+
+  GradioTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${EnvironmentName}-gradio-tg
+      Port: 7860
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-VpcId
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      Matcher:
+        HttpCode: '200'
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '5'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-gradio-tg
+
+  # ALB HTTP listeners: CloudFront enforces HTTPS for all viewer traffic
+  # (redirect-to-https). ALB uses HTTP because no ACM certificate is available
+  # without Route53/custom domains.
+  MainAlbHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_103
+            comment: "ALB is a CloudFront origin; TLS terminates at CloudFront. An HTTPS listener requires a custom domain + ACM certificate not available in the workshop — never use http-only in production; use ACM + HTTPS origins."
+          - id: CKV_AWS_2
+            comment: "ALB is a CloudFront origin; TLS terminates at CloudFront. HTTPS listener requires a domain + ACM cert not available in the workshop — never use http-only in production; use ACM + HTTPS origins."
+      cfn_nag:
+        rules_to_suppress:
+          - id: W55
+            reason: >
+              CloudFront (MainCloudFrontDistribution) terminates TLS for viewer
+              traffic and forwards to this ALB over HTTP on the internal VPC
+              network. Adding HTTPS on the ALB itself would require an ACM
+              certificate, which Workshop Studio accounts do not provide
+              without a custom domain.
+          - id: W56
+            reason: >
+              No SslPolicy configured because this is an HTTP listener — see
+              W55.
+    Properties:
+      LoadBalancerArn: !Ref MainAlb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref RegistryTargetGroup
+
+  MainAlbHttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasDnsConfig
+    Properties:
+      LoadBalancerArn: !Ref MainAlb
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref RegistryCertificate
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref RegistryTargetGroup
+
+  MainAlbAuthListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_103
+            comment: "ALB is a CloudFront origin; TLS terminates at CloudFront. An HTTPS listener requires a custom domain + ACM certificate not available in the workshop — never use http-only in production; use ACM + HTTPS origins."
+          - id: CKV_AWS_2
+            comment: "ALB is a CloudFront origin; TLS terminates at CloudFront. HTTPS listener requires a domain + ACM cert not available in the workshop — never use http-only in production; use ACM + HTTPS origins."
+      cfn_nag:
+        rules_to_suppress:
+          - id: W55
+            reason: >
+              Keycloak auth-server listener — accessed via CloudFront for the
+              OAuth2 callback and direct VPC-internal access during
+              ServiceConnect probes. HTTPS requires an ACM certificate not
+              available in Workshop Studio accounts without a custom domain.
+          - id: W56
+            reason: No SslPolicy on HTTP listener — see W55.
+    Properties:
+      LoadBalancerArn: !Ref MainAlb
+      Port: 8888
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AuthTargetGroup
+
+  MainAlbGradioListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_103
+            comment: "ALB is a CloudFront origin; TLS terminates at CloudFront. An HTTPS listener requires a custom domain + ACM certificate not available in the workshop — never use http-only in production; use ACM + HTTPS origins."
+          - id: CKV_AWS_2
+            comment: "ALB is a CloudFront origin; TLS terminates at CloudFront. HTTPS listener requires a domain + ACM cert not available in the workshop — never use http-only in production; use ACM + HTTPS origins."
+      cfn_nag:
+        rules_to_suppress:
+          - id: W55
+            reason: >
+              Gradio admin UI listener — participant-facing over CloudFront
+              (which terminates TLS). ALB-leg HTTPS requires an ACM certificate
+              not available in Workshop Studio without a custom domain.
+          - id: W56
+            reason: No SslPolicy on HTTP listener — see W55.
+    Properties:
+      LoadBalancerArn: !Ref MainAlb
+      Port: 7860
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref GradioTargetGroup
+
+  RegistryDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasDnsConfig
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - UseRegionalDomainsCondition
+        - !Sub registry.${AWS::Region}.${BaseDomain}
+        - !Sub registry.${BaseDomain}
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt MainAlb.DNSName
+        HostedZoneId: !GetAtt MainAlb.CanonicalHostedZoneID
+        EvaluateTargetHealth: true
+
+  MainCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_174
+            comment: "CloudFront uses the default certificate; minimum TLS 1.2 is not enforceable without a custom domain/ACM cert. Workshop sample — never use http-only in production; use ACM + HTTPS origins."
+          - id: CKV_AWS_86
+            comment: "CloudFront access logging requires an S3 logging bucket; out of scope for the ephemeral workshop distribution. Enable access logging in production."
+          - id: CKV_AWS_68
+            comment: "AWS WAF adds cost and rule management out of scope for the ephemeral workshop distribution. Attach a WAF web ACL in production."
+    Properties:
+      DistributionConfig:
+        Comment: !Sub ${EnvironmentName} Main ALB HTTPS Distribution (Registry)
+        Enabled: true
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: MainAlbOrigin
+            DomainName: !GetAtt MainAlb.DNSName
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              # WORKSHOP LIMITATION: http-only because no ACM cert is available
+              # without a custom domain in Workshop Studio accounts — never use
+              # http-only in production; use ACM + HTTPS origins
+              # (OriginProtocolPolicy: https-only with a custom domain + ACM cert
+              # on the ALB).
+              OriginProtocolPolicy: http-only
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 5
+            OriginCustomHeaders:
+              - HeaderName: X-Forwarded-Proto
+                HeaderValue: https
+              # Custom header for reliable HTTPS detection in auth-server
+              # ALB overwrites X-Forwarded-Proto, but won't touch this custom header
+              - HeaderName: X-Cloudfront-Forwarded-Proto
+                HeaderValue: https
+        # Path-based routing for Grafana (deployed via observability-stack)
+        CacheBehaviors:
+          - PathPattern: /grafana/*
+            TargetOriginId: MainAlbOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - POST
+              - PATCH
+              - DELETE
+            CachedMethods:
+              - GET
+              - HEAD
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3  # AllViewer
+            Compress: true
+        DefaultCacheBehavior:
+          TargetOriginId: MainAlbOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          CachedMethods:
+            - GET
+            - HEAD
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3  # AllViewer
+          Compress: true
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+          # MinimumProtocolVersion is set to TLSv1.2_2021 to satisfy Checkov
+          # CKV_AWS_174. When CloudFrontDefaultCertificate=true, CloudFront
+          # pins the actual floor to TLSv1 for the default *.cloudfront.net
+          # cert regardless of this value — true TLS 1.2 enforcement would
+          # require an ACM cert bound via Aliases (not available in Workshop
+          # Studio accounts without a custom domain). Modern browsers still
+          # negotiate TLSv1.2+ with CloudFront by default.
+          MinimumProtocolVersion: TLSv1.2_2021
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-main-cloudfront
+
+  #============================================================================
+  # CloudFront Distribution for Keycloak HTTPS (no custom domain required)
+  # Provides HTTPS via *.cloudfront.net certificate when Route53 is not available
+  #============================================================================
+Outputs:
+  MainEcsClusterArn:
+    Description: Main ECS Cluster ARN
+    Value: !GetAtt MainEcsCluster.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-MainEcsClusterArn
+
+  MainEcsClusterName:
+    Description: Main ECS Cluster Name
+    Value: !Ref MainEcsCluster
+    Export:
+      Name: !Sub ${EnvironmentName}-MainEcsClusterName
+
+  ServiceDiscoveryNamespaceArn:
+    Description: Service Discovery Namespace ARN
+    Value: !GetAtt ServiceDiscoveryNamespace.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-ServiceDiscoveryNamespaceArn
+
+  ServiceDiscoveryNamespaceId:
+    Description: Service Discovery Namespace ID
+    Value: !Ref ServiceDiscoveryNamespace
+    Export:
+      Name: !Sub ${EnvironmentName}-ServiceDiscoveryNamespaceId
+
+  EcsTaskExecutionRoleArn:
+    Description: ECS Task Execution Role ARN
+    Value: !GetAtt EcsTaskExecutionRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-EcsTaskExecutionRoleArn
+
+  EcsTaskRoleArn:
+    Description: ECS Task Role ARN
+    Value: !GetAtt EcsTaskRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-EcsTaskRoleArn
+
+  MainAlbDnsName:
+    Description: Main ALB DNS Name
+    Value: !GetAtt MainAlb.DNSName
+    Export:
+      Name: !Sub ${EnvironmentName}-MainAlbDnsName
+
+  MainAlbArn:
+    Description: Main ALB ARN
+    Value: !Ref MainAlb
+    Export:
+      Name: !Sub ${EnvironmentName}-MainAlbArn
+
+  MainAlbHttpListenerArn:
+    Description: Main ALB HTTP Listener ARN (port 80)
+    Value: !Ref MainAlbHttpListener
+    Export:
+      Name: !Sub ${EnvironmentName}-MainAlbHttpListenerArn
+
+  RegistryTargetGroupArn:
+    Description: Registry Target Group ARN
+    Value: !Ref RegistryTargetGroup
+    Export:
+      Name: !Sub ${EnvironmentName}-RegistryTargetGroupArn
+
+  AuthTargetGroupArn:
+    Description: Auth Target Group ARN
+    Value: !Ref AuthTargetGroup
+    Export:
+      Name: !Sub ${EnvironmentName}-AuthTargetGroupArn
+
+  GradioTargetGroupArn:
+    Description: Gradio Target Group ARN
+    Value: !Ref GradioTargetGroup
+    Export:
+      Name: !Sub ${EnvironmentName}-GradioTargetGroupArn
+
+  RegistryUrl:
+    Description: Registry URL (DNS name if configured, otherwise CloudFront HTTPS)
+    Value: !If
+      - HasDnsConfig
+      - !If
+        - UseRegionalDomainsCondition
+        - !Sub https://registry.${AWS::Region}.${BaseDomain}
+        - !Sub https://registry.${BaseDomain}
+      - !Sub https://${MainCloudFrontDistribution.DomainName}
+    Export:
+      Name: !Sub ${EnvironmentName}-RegistryUrl
+
+  MainCloudFrontUrl:
+    Description: Main ALB HTTPS URL via CloudFront (always HTTPS)
+    Value: !Sub https://${MainCloudFrontDistribution.DomainName}
+    Export:
+      Name: !Sub ${EnvironmentName}-MainCloudFrontUrl
+
+  MainCloudFrontDomain:
+    Description: CloudFront domain name for Main ALB HTTPS access
+    Value: !GetAtt MainCloudFrontDistribution.DomainName
+    Export:
+      Name: !Sub ${EnvironmentName}-MainCloudFrontDomain
+
+  PrometheusWorkspaceId:
+    Description: Amazon Managed Prometheus Workspace ID
+    # Note: !Ref returns ARN, use !GetAtt WorkspaceId to get just the ID
+    Value: !GetAtt PrometheusWorkspace.WorkspaceId
+    Export:
+      Name: !Sub ${EnvironmentName}-PrometheusWorkspaceId
+
+  PrometheusWorkspaceArn:
+    Description: Amazon Managed Prometheus Workspace ARN
+    Value: !GetAtt PrometheusWorkspace.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-PrometheusWorkspaceArn
+
+  PrometheusRemoteWriteEndpoint:
+    Description: Prometheus remote write endpoint for ADOT collector
+    # Use WorkspaceId (not Ref which returns ARN) to construct correct endpoint URL
+    Value: !Sub
+      - 'https://aps-workspaces.${AWS::Region}.amazonaws.com/workspaces/${WorkspaceId}/api/v1/remote_write'
+      - WorkspaceId: !GetAtt PrometheusWorkspace.WorkspaceId
+    Export:
+      Name: !Sub ${EnvironmentName}-PrometheusRemoteWriteEndpoint
+
+  PrometheusQueryEndpoint:
+    Description: Prometheus query endpoint for Grafana
+    Value: !Sub
+      - 'https://aps-workspaces.${AWS::Region}.amazonaws.com/workspaces/${WorkspaceId}'
+      - WorkspaceId: !GetAtt PrometheusWorkspace.WorkspaceId
+    Export:
+      Name: !Sub ${EnvironmentName}-PrometheusQueryEndpoint

@@ -1,0 +1,581 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  MCP Gateway Registry - Network Stack (Consolidated)
+  Creates VPC, subnets, Regional NAT Gateway, security groups, and VPC endpoints.
+  Uses AWS Regional NAT Gateway for simplified HA and cost savings.
+  Deploys to the region specified by AWS::Region (this workshop locks this to us-west-2 via contentspec.yaml).
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: mcp-gateway
+    Description: Name prefix for all resources
+
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for VPC (matches Terraform default)
+
+  IngressCidrBlocks:
+    Type: String
+    Default: 10.0.0.0/8
+    Description: >
+      CIDR blocks for ALB access. Replace with your corporate CIDR.
+      Workshop Studio deployments may use 0.0.0.0/0 with SCP protections.
+
+Resources:
+  #============================================================================
+  # VPC
+  #============================================================================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-vpc
+
+  #============================================================================
+  # Internet Gateway
+  #============================================================================
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-igw
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  #============================================================================
+  # Public Subnets (3 AZs) - /24 subnets (10.0.48.0/24, 10.0.49.0/24, 10.0.50.0/24)
+  # Matches Terraform: cidrsubnet(var.vpc_cidr, 8, k + 48)
+  #============================================================================
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.48.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-public-1
+        - Key: subnet-type
+          Value: public
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.49.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-public-2
+        - Key: subnet-type
+          Value: public
+
+  PublicSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [2, !GetAZs '']
+      CidrBlock: 10.0.50.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-public-3
+        - Key: subnet-type
+          Value: public
+
+  #============================================================================
+  # Private Subnets (3 AZs) - /20 subnets (10.0.0.0/20, 10.0.16.0/20, 10.0.32.0/20)
+  # Matches Terraform: cidrsubnet(var.vpc_cidr, 4, k)
+  #============================================================================
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.0.0/20
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-private-1
+        - Key: subnet-type
+          Value: private
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.16.0/20
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-private-2
+        - Key: subnet-type
+          Value: private
+
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [2, !GetAZs '']
+      CidrBlock: 10.0.32.0/20
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-private-3
+        - Key: subnet-type
+          Value: private
+
+  #============================================================================
+  # Regional NAT Gateway (single VPC-wide NAT with automatic HA)
+  # Uses AWS Regional NAT Gateway feature for simplified management and cost savings
+  # - Automatic multi-AZ expansion based on workload
+  # - No public subnet required
+  # - Automatic IP management
+  #============================================================================
+  RegionalNatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: InternetGatewayAttachment
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W999
+            reason: >
+              Uses AWS NAT Gateway's `AvailabilityMode: regional` feature
+              which manages multi-AZ failover automatically without requiring
+              a SubnetId. This is a newer NAT Gateway configuration that some
+              scanners and older CloudFormation linters incorrectly flag as
+              "missing SubnetId". The resource deploys successfully in
+              us-west-2 (the workshop's target region) and has been verified
+              across multiple deploy/teardown cycles. See
+              https://docs.aws.amazon.com/AmazonVPC/latest/UserGuide/vpc-nat-gateway.html
+    Properties:
+      VpcId: !Ref VPC
+      ConnectivityType: public
+      AvailabilityMode: regional
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-nat-regional
+
+  #============================================================================
+  # Route Tables
+  #============================================================================
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-public-rt
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PublicSubnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet3
+
+  # Single shared private route table for all AZs (uses Regional NAT Gateway)
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-private-rt
+
+  DefaultPrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref RegionalNatGateway
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+  PrivateSubnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet3
+
+  #============================================================================
+  # Security Groups
+  #============================================================================
+  
+  # VPC Endpoints Security Group
+  MainAlbSG:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_260
+            comment: "ALB SG ports 80/443 accept 0.0.0.0/0 as the public CloudFront origin (CloudFront edge IPs are outside the VPC CIDR)."
+      cfn_nag:
+        rules_to_suppress:
+          - id: W9
+            reason: >
+              Ports 80/443 accept 0.0.0.0/0 because Workshop Studio accounts
+              cannot reliably use the AWS-managed CloudFront origin-facing
+              prefix list (`com.amazonaws.global.cloudfront.origin-facing`)
+              in security-group ingress rules — the prefix-list ID varies
+              per partition/region and is not always available in sandbox
+              accounts (observed as a `MainAlbSG CREATE_FAILED` in a
+              us-west-2 sandbox account). The ALB
+              is fronted by CloudFront (MainCloudFrontDistribution) which
+              terminates TLS; the ALB itself is a best-effort public origin.
+              Compensating control is the Workshop Studio SCP on the
+              sandbox account (self-hosted: dedicated disposable account +
+              optional static/cfn/self-service-scp.json).
+          - id: W2
+            reason: Same rationale as W9 above.
+    Properties:
+      GroupName: !Sub ${EnvironmentName}-main-alb
+      GroupDescription: Security group for main ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        # Ports 80/443 must accept 0.0.0.0/0: the public CloudFront distribution
+        # (MainCloudFrontDistribution) reaches this internet-facing ALB from edge
+        # IPs that are NOT inside the VPC CIDR. Narrowing these to IngressCidrBlocks
+        # (10.0.0.0/8) blackholes CloudFront -> 504s. CloudFront terminates TLS; the
+        # ALB is a best-effort public origin guarded by the Workshop Studio SCP.
+        # See the cfn_nag W9/W2 suppression above.
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP from CloudFront origin-facing edges (fronted by CloudFront)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS from CloudFront origin-facing edges (fronted by CloudFront)
+        # Ports 8888/7860 are accessed directly (not via CloudFront) and stay
+        # scoped to the allowed CIDRs.
+        - IpProtocol: tcp
+          FromPort: 8888
+          ToPort: 8888
+          CidrIp: !Ref IngressCidrBlocks
+          Description: Auth server port (direct access, not CloudFront-fronted)
+        - IpProtocol: tcp
+          FromPort: 7860
+          ToPort: 7860
+          CidrIp: !Ref IngressCidrBlocks
+          Description: Gradio port (direct access, not CloudFront-fronted)
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-main-alb
+
+  # Keycloak ALB Security Group
+  EcsTasksSG:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_382
+            comment: "ECS tasks pull container images from public ECR/Docker Hub and call AWS APIs via NAT; open egress is required for the workshop. Restrict egress to VPC endpoints + specific CIDRs in production."
+    Properties:
+      GroupName: !Sub ${EnvironmentName}-ecs-tasks
+      GroupDescription: Security group for ECS tasks
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-ecs-tasks
+
+  EcsTasksIngressFromAlb:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EcsTasksSG
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: !Ref MainAlbSG
+      Description: HTTP from ALB
+
+  EcsTasksIngressFromAlb443:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EcsTasksSG
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref MainAlbSG
+      Description: HTTPS from ALB
+
+  EcsTasksIngressFromAlb7860:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EcsTasksSG
+      IpProtocol: tcp
+      FromPort: 7860
+      ToPort: 7860
+      SourceSecurityGroupId: !Ref MainAlbSG
+      Description: Gradio from ALB
+
+  EcsTasksIngressFromAlb8888:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EcsTasksSG
+      IpProtocol: tcp
+      FromPort: 8888
+      ToPort: 8888
+      SourceSecurityGroupId: !Ref MainAlbSG
+      Description: Auth server from ALB
+
+  # Self-referencing rule: Allow all ECS tasks to communicate with each other
+  # Required for inter-service communication (Registry <-> Auth, MCP servers, etc.)
+  EcsTasksIngressFromSelf:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EcsTasksSG
+      IpProtocol: '-1'
+      SourceSecurityGroupId: !Ref EcsTasksSG
+      Description: Allow all traffic between ECS tasks in same security group
+
+  # Keycloak ECS Security Group
+  MainAlbEgressToEcs:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref MainAlbSG
+      IpProtocol: '-1'
+      DestinationSecurityGroupId: !Ref EcsTasksSG
+      Description: All traffic to ECS tasks
+
+  McpServersSG:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_382
+            comment: "MCP server tasks pull container images from public ECR/Docker Hub and call AWS APIs via NAT; open egress is required for the workshop. Restrict egress to VPC endpoints + specific CIDRs in production."
+    Properties:
+      GroupName: !Sub ${EnvironmentName}-mcp-servers
+      GroupDescription: Security group for MCP server tasks
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-mcp-servers
+
+  # Allow ECS tasks to communicate with MCP servers
+  McpServersIngressFromEcs:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref McpServersSG
+      IpProtocol: tcp
+      FromPort: 8000
+      ToPort: 9001
+      SourceSecurityGroupId: !Ref EcsTasksSG
+      Description: MCP ports from ECS tasks
+
+  #============================================================================
+  # Observability Security Groups (Grafana OSS, Metrics Service)
+  #============================================================================
+
+  # Grafana OSS Security Group - allows traffic from ALB on port 3000
+  GrafanaSG:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_382
+            comment: "Grafana queries AMP and CloudWatch endpoints via NAT; open egress is required for the workshop. Restrict egress to VPC endpoints + specific CIDRs in production."
+    Properties:
+      GroupName: !Sub ${EnvironmentName}-grafana
+      GroupDescription: Security group for Grafana OSS ECS service
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !Ref MainAlbSG
+          Description: Grafana UI from ALB
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound (for AMP queries, CloudWatch)
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-grafana
+
+  # Allow ALB to route to Grafana on port 3000
+  MainAlbEgressToGrafana:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref MainAlbSG
+      IpProtocol: tcp
+      FromPort: 3000
+      ToPort: 3000
+      DestinationSecurityGroupId: !Ref GrafanaSG
+      Description: ALB to Grafana
+
+  # Metrics Service Security Group - allows traffic from ECS tasks and ADOT scraping
+  MetricsServiceSG:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_382
+            comment: "metrics-service writes to the AMP remote-write endpoint via NAT; open egress is required for the workshop. Restrict egress to VPC endpoints + specific CIDRs in production."
+    Properties:
+      GroupName: !Sub ${EnvironmentName}-metrics-service
+      GroupDescription: Security group for metrics-service ECS task
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        # Allow metrics API access from ECS tasks (registry, auth-server)
+        - IpProtocol: tcp
+          FromPort: 8890
+          ToPort: 8890
+          SourceSecurityGroupId: !Ref EcsTasksSG
+          Description: Metrics API from ECS tasks
+        # Allow Prometheus scraping from ADOT (also in EcsTasksSG)
+        - IpProtocol: tcp
+          FromPort: 9465
+          ToPort: 9465
+          SourceSecurityGroupId: !Ref EcsTasksSG
+          Description: Prometheus scraping from ADOT
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-metrics-service
+
+  #============================================================================
+  # VPC Endpoints
+  #============================================================================
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+
+#============================================================================
+# Outputs
+#============================================================================
+Outputs:
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${EnvironmentName}-VpcId
+
+  VpcCidr:
+    Description: VPC CIDR block
+    Value: !Ref VpcCidr
+    Export:
+      Name: !Sub ${EnvironmentName}-VpcCidr
+
+  PublicSubnets:
+    Description: Public subnet IDs
+    Value: !Join [',', [!Ref PublicSubnet1, !Ref PublicSubnet2, !Ref PublicSubnet3]]
+    Export:
+      Name: !Sub ${EnvironmentName}-PublicSubnets
+
+  PrivateSubnets:
+    Description: Private subnet IDs
+    Value: !Join [',', [!Ref PrivateSubnet1, !Ref PrivateSubnet2, !Ref PrivateSubnet3]]
+    Export:
+      Name: !Sub ${EnvironmentName}-PrivateSubnets
+
+  PrivateSubnet1:
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub ${EnvironmentName}-PrivateSubnet1
+
+  PrivateSubnet2:
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub ${EnvironmentName}-PrivateSubnet2
+
+  PrivateSubnet3:
+    Value: !Ref PrivateSubnet3
+    Export:
+      Name: !Sub ${EnvironmentName}-PrivateSubnet3
+
+  MainAlbSecurityGroupId:
+    Description: Main ALB Security Group ID
+    Value: !Ref MainAlbSG
+    Export:
+      Name: !Sub ${EnvironmentName}-MainAlbSG
+
+
+  EcsTasksSecurityGroupId:
+    Description: ECS Tasks Security Group ID
+    Value: !Ref EcsTasksSG
+    Export:
+      Name: !Sub ${EnvironmentName}-EcsTasksSG
+
+
+
+  McpServersSecurityGroupId:
+    Description: MCP Servers Security Group ID
+    Value: !Ref McpServersSG
+    Export:
+      Name: !Sub ${EnvironmentName}-McpServersSG
+
+  GrafanaSecurityGroupId:
+    Description: Grafana OSS Security Group ID
+    Value: !Ref GrafanaSG
+    Export:
+      Name: !Sub ${EnvironmentName}-GrafanaSG
+
+  MetricsServiceSecurityGroupId:
+    Description: Metrics Service Security Group ID
+    Value: !Ref MetricsServiceSG
+    Export:
+      Name: !Sub ${EnvironmentName}-MetricsServiceSG
+

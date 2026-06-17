@@ -1,0 +1,1793 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Module 4: AgentCore Gateway — Tools Gateway Stack.
+  Provisions the governed Path B alongside Module 3's NGINX-based Path A.
+  Creates Lambda functions, IAM roles, EventBridge schedule, and Cognito groups.
+  All identity imports come from Module 3's CFN exports (EnvironmentName=workshop).
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: workshop
+    Description: >
+      Environment name prefix — must match Module 3's EnvironmentName so
+      Fn::ImportValue references resolve correctly.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Environment
+        Parameters:
+          - EnvironmentName
+
+Resources:
+
+  #============================================================================
+  # Cognito Groups (extend Module 3's User Pool)
+  #============================================================================
+
+  GatewayAdminsGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: gateway-admins
+      UserPoolId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-CognitoUserPoolId
+      Description: AgentCore Gateway administrators
+
+  GatewayDevelopersGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: gateway-developers
+      UserPoolId: !ImportValue
+        Fn::Sub: ${EnvironmentName}-CognitoUserPoolId
+      Description: AgentCore Gateway developers
+
+  #============================================================================
+  # AgentCore Gateway IAM Role
+  # Assumed by bedrock-agentcore service to invoke Lambda tool targets
+  #============================================================================
+
+  AgentCoreGatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'workshop-agentcore-gateway-role-${AWS::Region}'
+      Description: Role assumed by AgentCore Gateway for tool dispatch
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - bedrock.amazonaws.com
+                - bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambdaTools
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:workshop-*
+                  - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:agentcore-*
+      Tags:
+        - Key: Name
+          Value: agentcore-gateway-role
+        - Key: Module
+          Value: tools-gateway
+
+  #============================================================================
+  # Sync Lambda — reads Registry API, creates AgentCore Gateway targets
+  #============================================================================
+
+  SyncLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-agentcore-sync-role-${AWS::Region}
+      Description: Execution role for the Registry-to-Gateway sync Lambda - reads Registry API secrets, creates AgentCore Gateway targets, writes CloudWatch logs.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SyncLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SecretsManagerRead
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${EnvironmentName}-*
+                  - !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${EnvironmentName}/*
+              # Read-only: inspect existing gateway targets before syncing.
+              # Scoped to gateway/* in this account/region; the gateway ID is
+              # created at runtime by create_gateway.py so it cannot be
+              # inlined here.
+              - Sid: AgentCoreGatewayTargetsRead
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:GetGatewayTarget
+                  - bedrock-agentcore:ListGatewayTargets
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*
+              # Write: target lifecycle, same runtime-generated-ID scoping.
+              - Sid: AgentCoreGatewayTargetsWrite
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:CreateGatewayTarget
+                  - bedrock-agentcore:DeleteGatewayTarget
+                  - bedrock-agentcore:SynchronizeGatewayTargets
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-agentcore-sync-role
+
+  SyncLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    # Workshop: Delete on teardown. Production: use Retain.
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/agentcore-gateway-sync
+      RetentionInDays: 7
+
+  SyncLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: SyncLambdaLogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_116
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_117
+            comment: "Inline workshop Lambda; calls AWS APIs and the public Registry endpoint, no VPC-bound resources"
+    Properties:
+      FunctionName: agentcore-gateway-sync
+      Description: Syncs MCP servers from Registry API to AgentCore Gateway targets
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt SyncLambdaRole.Arn
+      MemorySize: 256
+      Timeout: 120
+      Environment:
+        Variables:
+          REGISTRY_URL: !ImportValue
+            Fn::Sub: ${EnvironmentName}-RegistryUrl
+          M2M_SECRET_NAME: !Sub ${EnvironmentName}-registry-api-token
+          GATEWAY_ID: ''  # Set after create_gateway.py runs
+          CLOUDFRONT_URL: !ImportValue
+            Fn::Sub: ${EnvironmentName}-MainCloudFrontUrl
+          SYNC_FILTER_TAGS: ''
+          LOG_LEVEL: INFO
+      Code:
+        ZipFile: |
+          # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+          # SPDX-License-Identifier: Apache-2.0
+          """Sync Lambda: Registry API -> AgentCore Gateway targets.
+
+          This single-file Lambda merges sync_lambda.py, registry_client.py, and
+          gateway_sync.py into one ZipFile-compatible module for CloudFormation.
+          """
+          import base64
+          import json
+          import logging
+          import os
+          import re
+          import ssl
+          import time
+          from urllib.parse import quote
+          from urllib.request import Request, urlopen
+
+          import boto3
+          from botocore.exceptions import ClientError
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
+
+          GATEWAY_ID = os.environ.get("GATEWAY_ID", "")
+          REGISTRY_URL = os.environ.get("REGISTRY_URL", "")
+          M2M_SECRET_NAME = os.environ.get("M2M_SECRET_NAME", "")
+          CLOUDFRONT_URL = os.environ.get("CLOUDFRONT_URL", "")
+          # AWS_REGION is always set by the Lambda runtime; AWS_DEFAULT_REGION
+          # is the documented fallback. No region literal needed.
+          AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "")
+          SYNC_FILTER_TAGS = [
+              t.strip() for t in os.environ.get("SYNC_FILTER_TAGS", "").split(",") if t.strip()
+          ]
+
+          _TOKEN_BUFFER_SECONDS = 60
+          _TIMEOUT = 30
+
+          # URL patterns that should never be used as gateway targets
+          _BLOCKED_URL_PATTERNS = [
+              r"^https?://localhost", r"^https?://127\.", r"^https?://0\.0\.0\.0",
+              r"^https?://169\.254\.", r"^https?://10\.",
+              r"^https?://172\.(1[6-9]|2[0-9]|3[01])\.",
+              r"^https?://192\.168\.", r"^https?://\[?::1\]?",
+              r"^https?://\[?fd[0-9a-f]{2}:", r"^https?://\[?fe80:",
+          ]
+
+          # ── Registry Client ──
+
+          def _http(method, url, headers, data=None):
+              req = Request(url, data=data, headers=headers, method=method)
+              ctx = ssl.create_default_context()
+              with urlopen(req, timeout=_TIMEOUT, context=ctx) as resp:
+                  body = json.loads(resp.read())
+                  return resp.status, body
+
+          def _build_cognito_token_url(creds, region):
+              token_url = creds.get("token_url", "")
+              if token_url and ".amazoncognito.com" in token_url:
+                  return token_url
+              cognito_domain = creds.get("cognito_domain", "")
+              if not cognito_domain:
+                  raise ValueError("No token_url or cognito_domain in credentials")
+              if ".amazoncognito.com" in cognito_domain:
+                  if not cognito_domain.startswith("https://"):
+                      cognito_domain = f"https://{cognito_domain}"
+                  return f"{cognito_domain}/oauth2/token"
+              prefix = cognito_domain.replace("https://", "").replace("http://", "")
+              return f"https://{prefix}.auth.{region}.amazoncognito.com/oauth2/token"
+
+          class RegistryClient:
+              def __init__(self, registry_url, m2m_secret_name, region=AWS_REGION):
+                  self.registry_url = registry_url.rstrip("/")
+                  self._m2m_secret_name = m2m_secret_name
+                  self._region = region
+                  self._token = None
+                  self._token_expiry = 0
+                  self._creds = None
+
+              def _load_credentials(self):
+                  if self._creds is None:
+                      sm = boto3.client("secretsmanager", region_name=self._region)
+                      secret = sm.get_secret_value(SecretId=self._m2m_secret_name)
+                      self._creds = json.loads(secret["SecretString"])
+                  return self._creds
+
+              def _get_token(self):
+                  now = time.time()
+                  if self._token and now < self._token_expiry:
+                      return self._token
+                  creds = self._load_credentials()
+                  if creds.get("api_token"):
+                      self._token = creds["api_token"]
+                      self._token_expiry = now + 86400
+                      return self._token
+                  token_url = _build_cognito_token_url(creds, self._region)
+                  client_id = creds["client_id"]
+                  client_secret = creds["client_secret"]
+                  scopes = creds.get("scopes", "")
+                  basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+                  body = f"grant_type=client_credentials&scope={quote(scopes)}".encode()
+                  req = Request(token_url, data=body, method="POST")
+                  req.add_header("Content-Type", "application/x-www-form-urlencoded")
+                  req.add_header("Authorization", f"Basic {basic}")
+                  ctx = ssl.create_default_context()
+                  with urlopen(req, timeout=10, context=ctx) as resp:
+                      data = json.loads(resp.read())
+                  self._token = data["access_token"]
+                  expires_in = data.get("expires_in", 3600)
+                  self._token_expiry = now + expires_in - _TOKEN_BUFFER_SECONDS
+                  return self._token
+
+              def _headers(self):
+                  return {"Authorization": f"Bearer {self._get_token()}"}
+
+              def list_servers(self):
+                  _, data = _http("GET", f"{self.registry_url}/api/servers", self._headers())
+                  if isinstance(data, list):
+                      return data
+                  return data.get("servers", data.get("items", []))
+
+          # ── Gateway Sync Service ──
+
+          class GatewaySyncService:
+              def __init__(self, region=AWS_REGION):
+                  self._client = boto3.client("bedrock-agentcore-control", region_name=region)
+                  self._region = region
+
+              def build_target_config(self, server):
+                  proxy_url = server.get("proxy_pass_url", "")
+                  tags = server.get("tags", [])
+                  if isinstance(tags, str):
+                      tags = [t.strip() for t in tags.split(",")]
+                  tool_list = server.get("tool_list", [])
+                  if isinstance(tool_list, str):
+                      try:
+                          tool_list = json.loads(tool_list)
+                      except (json.JSONDecodeError, TypeError):
+                          tool_list = []
+                  name = server.get("display_name") or server.get("server_name") or server.get("name", "")
+                  if proxy_url.startswith("lambda://"):
+                      lambda_arn = proxy_url.replace("lambda://", "")
+                      if not lambda_arn.startswith("arn:aws:lambda:"):
+                          raise ValueError(f"Invalid Lambda ARN: {lambda_arn}")
+                      def _sanitize_schema(schema):
+                          if not isinstance(schema, dict):
+                              return {"type": "object"}
+                          return {k: v for k, v in schema.items() if k not in ("$schema", "additionalProperties", "$id", "$comment")}
+                      normalized_tools = []
+                      for t in (tool_list or [{"name": name}]):
+                          normalized_tools.append({
+                              "name": t.get("name", name),
+                              "description": t.get("description", f"Tool from {name}"),
+                              "inputSchema": _sanitize_schema(t.get("inputSchema", {"type": "object"})),
+                          })
+                      if not normalized_tools:
+                          normalized_tools = [{"name": name, "description": f"Tool provided by {name}", "inputSchema": {"type": "object"}}]
+                      return {
+                          "name": name,
+                          "targetConfiguration": {"mcp": {"lambda": {"lambdaArn": lambda_arn, "toolSchema": {"inlinePayload": normalized_tools}}}},
+                          "credentialProviderConfigurations": [{"credentialProviderType": "GATEWAY_IAM_ROLE"}],
+                      }
+                  if proxy_url.startswith("http://") or proxy_url.startswith("https://"):
+                      for pattern in _BLOCKED_URL_PATTERNS:
+                          if re.match(pattern, proxy_url, re.IGNORECASE):
+                              raise ValueError(f"Blocked URL pattern: {proxy_url}")
+                      return {
+                          "name": name,
+                          "targetConfiguration": {"mcp": {"mcpServer": {"endpoint": proxy_url}}},
+                          "credentialProviderConfigurations": [{"credentialProviderType": "GATEWAY_IAM_ROLE"}],
+                      }
+                  return None
+
+              def create_target(self, gateway_id, target_config):
+                  name = target_config.get("name", "unknown")
+                  try:
+                      resp = self._client.create_gateway_target(
+                          gatewayIdentifier=gateway_id,
+                          name=f"tg-{name}",
+                          **{k: v for k, v in target_config.items() if k != "name"},
+                      )
+                      target_id = resp["targetId"]
+                      logger.info("Created target %s for %s", target_id, name)
+                      return target_id
+                  except ClientError as e:
+                      code = e.response["Error"]["Code"]
+                      if code == "ConflictException":
+                          logger.info("Target %s already exists, skipping", name)
+                          return "existing"
+                      logger.error("Failed to create target for %s: %s", name, e)
+                      return None
+                  except Exception as e:
+                      logger.error("Failed to create target for %s: %s", name, e)
+                      return None
+
+              def list_targets(self, gateway_id):
+                  try:
+                      resp = self._client.list_gateway_targets(gatewayIdentifier=gateway_id)
+                      return resp.get("items", [])
+                  except ClientError as e:
+                      logger.error("Failed to list targets: %s", e)
+                      return []
+
+          # ── Handler ──
+
+          def handler(event, context):
+              if not GATEWAY_ID:
+                  logger.warning("GATEWAY_ID not set -- skipping sync")
+                  return {"synced": 0, "created": 0, "skipped": 0, "errors": 0}
+              if not REGISTRY_URL or not M2M_SECRET_NAME:
+                  logger.error("REGISTRY_URL or M2M_SECRET_NAME not set")
+                  return {"synced": 0, "created": 0, "skipped": 0, "errors": 0}
+
+              registry = RegistryClient(REGISTRY_URL, M2M_SECRET_NAME, AWS_REGION)
+              sync_svc = GatewaySyncService(region=AWS_REGION)
+
+              try:
+                  servers = registry.list_servers()
+                  logger.info("Fetched %d servers from Registry", len(servers))
+              except Exception as e:
+                  logger.error("Failed to fetch servers from Registry: %s", e)
+                  return {"synced": 0, "created": 0, "skipped": 0, "errors": 1}
+
+              existing_targets = sync_svc.list_targets(GATEWAY_ID)
+              existing_names = {t.get("name", "") for t in existing_targets}
+              logger.info("Found %d existing targets", len(existing_names))
+
+              created = 0
+              skipped = 0
+              filtered = 0
+              errors = 0
+
+              for server in servers:
+                  name = server.get("display_name") or server.get("server_name") or server.get("name", "")
+                  target_name = f"tg-{name}"
+                  if target_name in existing_names:
+                      skipped += 1
+                      continue
+
+                  proxy_url = server.get("proxy_pass_url", "")
+
+                  if SYNC_FILTER_TAGS:
+                      server_tags = server.get("tags", [])
+                      if isinstance(server_tags, str):
+                          server_tags = [t.strip() for t in server_tags.split(",")]
+                      if not any(tag in SYNC_FILTER_TAGS for tag in server_tags):
+                          filtered += 1
+                          continue
+
+                  try:
+                      if proxy_url.startswith("lambda://"):
+                          config = sync_svc.build_target_config(server)
+                      else:
+                          skipped += 1
+                          continue
+                      if config is None:
+                          skipped += 1
+                          continue
+                      result = sync_svc.create_target(GATEWAY_ID, config)
+                      if result:
+                          created += 1
+                      else:
+                          errors += 1
+                  except ValueError as e:
+                      logger.warning("Invalid target config for %s: %s", name, e)
+                      skipped += 1
+                  except Exception as e:
+                      logger.error("Error processing server %s: %s", name, e)
+                      errors += 1
+
+              logger.info(
+                  "Sync complete: %d created, %d skipped, %d filtered, %d errors (from %d servers)",
+                  created, skipped, filtered, errors, len(servers),
+              )
+              return {"synced": len(servers), "created": created, "skipped": skipped, "filtered": filtered, "errors": errors}
+      Tags:
+        - Key: Name
+          Value: agentcore-gateway-sync
+        - Key: Module
+          Value: tools-gateway
+
+  #============================================================================
+  # Demo Tool Lambda — search-knowledge-base
+  #============================================================================
+
+  DemoToolLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-demo-tool-role-${AWS::Region}
+      Description: Execution role for the demo search-knowledge-base Lambda tool invoked by AgentCore Gateway.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-demo-tool-role
+
+  DemoToolLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/workshop-search-knowledge-base
+      RetentionInDays: 7
+
+  DemoToolLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: DemoToolLogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_116
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_117
+            comment: "Inline workshop Lambda; serves mock data only, no VPC-bound resources"
+    Properties:
+      FunctionName: workshop-search-knowledge-base
+      Description: Demo MCP tool — simple keyword search over sample knowledge base
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt DemoToolLambdaRole.Arn
+      MemorySize: 128
+      Timeout: 10
+      Code:
+        ZipFile: |
+          # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+          # SPDX-License-Identifier: Apache-2.0
+          """Demo MCP tool Lambda: search-knowledge-base.
+
+          AgentCore Gateway invokes Lambda targets with:
+            event   = tool arguments (flat dict, e.g. {"query": "..."})
+            context.client_context.custom["bedrockAgentCoreToolName"] = "{target}___{tool}"
+          Return value is wrapped by the Gateway into an MCP content block.
+          """
+          import json
+          import logging
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel("INFO")
+
+          _KNOWLEDGE_BASE = [
+              {"title": "Return Policy",
+               "content": "Items can be returned within 30 days of purchase with original receipt. Electronics must be unopened. Clothing can be tried on but must have tags attached.",
+               "tags": ["returns", "policy", "refund"]},
+              {"title": "Shipping Information",
+               "content": "Standard shipping takes 5-7 business days. Express shipping takes 1-2 business days. Free shipping on orders over $50. International shipping available to select countries.",
+               "tags": ["shipping", "delivery", "international"]},
+              {"title": "Product Warranty",
+               "content": "All electronics come with a 1-year manufacturer warranty. Extended warranty available for purchase. Warranty covers defects in materials and workmanship.",
+               "tags": ["warranty", "electronics", "coverage"]},
+              {"title": "Account Management",
+               "content": "Customers can manage their account at account.example.com. Password resets are available via email. Two-factor authentication is recommended for all accounts.",
+               "tags": ["account", "security", "password"]},
+          ]
+
+          TOOL_DEFINITION = {
+              "name": "search-knowledge-base",
+              "description": "Search the enterprise knowledge base for relevant information. Returns matching documents based on keyword relevance.",
+              "inputSchema": {
+                  "type": "object",
+                  "properties": {
+                      "query": {"type": "string", "description": "Search query (keywords or natural language)"},
+                      "max_results": {"type": "integer", "description": "Maximum number of results to return (default: 3)", "default": 3},
+                  },
+                  "required": ["query"],
+              },
+          }
+
+          def _search(query, max_results=3):
+              query_lower = query.lower()
+              scored = []
+              for entry in _KNOWLEDGE_BASE:
+                  score = 0
+                  for word in query_lower.split():
+                      if word in entry["title"].lower():
+                          score += 2
+                      if word in entry["content"].lower():
+                          score += 1
+                      if word in " ".join(entry["tags"]):
+                          score += 3
+                  if score > 0:
+                      scored.append((score, entry))
+              scored.sort(key=lambda x: x[0], reverse=True)
+              return [e for _, e in scored[:max_results]]
+
+          def _tool_name_from_context(context):
+              try:
+                  raw = (context.client_context.custom or {}).get("bedrockAgentCoreToolName", "")
+              except AttributeError:
+                  raw = ""
+              return raw.split("___")[-1] if raw else ""
+
+          def _exec(tool_name, arguments):
+              """Structured result — Gateway JSON-encodes this into content[].text."""
+              if tool_name != "search-knowledge-base":
+                  return {"error": f"Unknown tool: {tool_name}"}
+              query = arguments.get("query", "")
+              if not query:
+                  return {"error": "Missing required parameter: query"}
+              results = _search(query, arguments.get("max_results", 3))
+              return {"query": query, "count": len(results), "results": results}
+
+          def _format_text(result):
+              """Human-readable text for the direct MCP path (tools/call)."""
+              if not isinstance(result, dict) or "results" not in result:
+                  return json.dumps(result, indent=2)
+              results = result["results"]
+              query = result.get("query", "")
+              if not results:
+                  return f"No results found for '{query}'."
+              parts = [f"Found {len(results)} result(s) for '{query}':\n"]
+              for i, r in enumerate(results, 1):
+                  parts.append(f"{i}. **{r['title']}**\n   {r['content']}\n")
+              return "\n".join(parts)
+
+          def handler(event, context):
+              # Path 1: Gateway invocation — tool name in client_context, args are the event
+              gw_tool = _tool_name_from_context(context)
+              if gw_tool:
+                  arguments = event if isinstance(event, dict) else {}
+                  return _exec(gw_tool, arguments)
+
+              # Path 2: direct MCP JSON-RPC invocation (tools/list or tools/call)
+              body = event
+              if isinstance(body, str):
+                  body = json.loads(body)
+              if isinstance(body, dict) and "mcp" in body and "gatewayRequest" in body.get("mcp", {}):
+                  body = body["mcp"]["gatewayRequest"].get("body", {})
+                  if isinstance(body, str):
+                      body = json.loads(body)
+              if not isinstance(body, dict):
+                  body = {}
+              method = body.get("method", "")
+              req_id = body.get("id", 1)
+              if method == "tools/list":
+                  return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": [TOOL_DEFINITION]}}
+              if method == "tools/call":
+                  params = body.get("params", {})
+                  result = _exec(params.get("name", ""), params.get("arguments", {}))
+                  return {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": _format_text(result)}]}}
+              return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"Method not found: {method}"}}
+      Tags:
+        - Key: Name
+          Value: workshop-search-knowledge-base
+        - Key: Module
+          Value: tools-gateway
+
+  # NOTE on LAMBDA_FUNCTION_PUBLIC_ACCESS_PROHIBITED (cfn-guard): every
+  # AWS::Lambda::Permission in this template is non-public by construction —
+  # each one either (a) grants a specific AWS service principal
+  # (bedrock.amazonaws.com / bedrock-agentcore.amazonaws.com /
+  # events.amazonaws.com) AND pins SourceArn to an ARN in this account, or
+  # (b) grants only this account's ID as the principal with
+  # FunctionUrlAuthType: AWS_IAM (Function URL permissions). No cross-account
+  # or anonymous invocation is possible. The cfn-guard rule mis-compares
+  # service-principal permissions against the layer-permission rule shape;
+  # these findings are false positives for service-principal + SourceArn
+  # (or account-principal + AWS_IAM) permissions.
+
+  # Allow AgentCore Gateway role to invoke the demo tool
+  DemoToolGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DemoToolLambda
+      Action: lambda:InvokeFunction
+      Principal: bedrock.amazonaws.com
+      SourceArn: !GetAtt AgentCoreGatewayRole.Arn
+
+  DemoToolGatewayInvokePermission2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DemoToolLambda
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*
+
+  # Allow AgentCore Gateway role to invoke Flights MCP Lambda
+  FlightsMcpGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FlightsMcpLambda
+      Action: lambda:InvokeFunction
+      Principal: bedrock.amazonaws.com
+      SourceArn: !GetAtt AgentCoreGatewayRole.Arn
+
+  FlightsMcpGatewayInvokePermission2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FlightsMcpLambda
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*
+
+  # Allow AgentCore Gateway role to invoke Hotels MCP Lambda
+  HotelsMcpGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HotelsMcpLambda
+      Action: lambda:InvokeFunction
+      Principal: bedrock.amazonaws.com
+      SourceArn: !GetAtt AgentCoreGatewayRole.Arn
+
+  HotelsMcpGatewayInvokePermission2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HotelsMcpLambda
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*
+
+  #============================================================================
+  # Product Info Tool Lambda — workshop-product-info-tool
+  #============================================================================
+
+  ProductInfoToolLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-product-info-tool-role-${AWS::Region}
+      Description: Execution role for the product-info Lambda tool invoked by AgentCore Gateway.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-product-info-tool-role
+
+  ProductInfoToolLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/workshop-product-info-tool
+      RetentionInDays: 7
+
+  ProductInfoToolLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: ProductInfoToolLogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_116
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_117
+            comment: "Inline workshop Lambda; serves mock data only, no VPC-bound resources"
+    Properties:
+      FunctionName: workshop-product-info-tool
+      Description: MCP-compatible Lambda returning product details by ID
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt ProductInfoToolLambdaRole.Arn
+      MemorySize: 128
+      Timeout: 10
+      Code:
+        ZipFile: |
+          # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+          # SPDX-License-Identifier: Apache-2.0
+          """MCP-compatible Lambda: workshop-product-info-tool."""
+          import json
+          import logging
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel("INFO")
+
+          PRODUCTS = {
+              "PROD-001": {"product_id": "PROD-001", "name": "Enterprise AI Platform License", "description": "Annual license for the Enterprise Agentic AI Platform, includes all modules.", "price": 49999.99, "currency": "USD", "stock_level": 500, "category": "Software"},
+              "PROD-002": {"product_id": "PROD-002", "name": "GPU Compute Credits (1000 hours)", "description": "Pre-paid GPU compute credits for model training and inference workloads.", "price": 2500.00, "currency": "USD", "stock_level": 10000, "category": "Compute"},
+              "PROD-003": {"product_id": "PROD-003", "name": "Professional Services - Platform Setup", "description": "Expert-led deployment and configuration of the agentic AI platform.", "price": 15000.00, "currency": "USD", "stock_level": 20, "category": "Services"},
+              "PROD-004": {"product_id": "PROD-004", "name": "Data Connector Pack", "description": "Pre-built connectors for S3, RDS, DynamoDB, and OpenSearch data sources.", "price": 999.99, "currency": "USD", "stock_level": 1000, "category": "Software"},
+          }
+
+          TOOL_DEFINITION = {
+              "name": "get_product_info",
+              "description": "Returns product details for a given product ID including name, description, price, and stock level.",
+              "inputSchema": {
+                  "type": "object",
+                  "properties": {"product_id": {"type": "string", "description": "The product identifier (e.g., PROD-001)"}},
+                  "required": ["product_id"],
+              },
+          }
+
+          def _tool_name_from_context(context):
+              try:
+                  raw = (context.client_context.custom or {}).get("bedrockAgentCoreToolName", "")
+              except AttributeError:
+                  raw = ""
+              return raw.split("___")[-1] if raw else ""
+
+          def _exec(tool_name, arguments):
+              if tool_name != "get_product_info":
+                  return {"error": f"Unknown tool: {tool_name}"}
+              product_id = arguments.get("product_id", "")
+              product = PRODUCTS.get(product_id)
+              if product is None:
+                  return {"error": f"Product '{product_id}' not found. Available: {', '.join(PRODUCTS.keys())}"}
+              return product
+
+          def handler(event, context):
+              # Gateway invocation — tool name in client_context, args are the event
+              gw_tool = _tool_name_from_context(context)
+              if gw_tool:
+                  arguments = event if isinstance(event, dict) else {}
+                  return _exec(gw_tool, arguments)
+
+              # Direct MCP JSON-RPC invocation
+              body = event
+              if isinstance(body, str):
+                  body = json.loads(body)
+              if isinstance(body, dict) and "mcp" in body and "gatewayRequest" in body.get("mcp", {}):
+                  body = body["mcp"]["gatewayRequest"].get("body", {})
+                  if isinstance(body, str):
+                      body = json.loads(body)
+              if not isinstance(body, dict):
+                  body = {}
+              method = body.get("method", "")
+              request_id = body.get("id", 1)
+              if method == "tools/list":
+                  return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": [TOOL_DEFINITION]}}
+              if method == "tools/call":
+                  params = body.get("params", {})
+                  result = _exec(params.get("name", ""), params.get("arguments", {}))
+                  text = result if isinstance(result, str) else json.dumps(result, indent=2)
+                  return {"jsonrpc": "2.0", "id": request_id, "result": {"content": [{"type": "text", "text": text}]}}
+              return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": f"Method not supported: {method}"}}
+      Tags:
+        - Key: Name
+          Value: workshop-product-info-tool
+        - Key: Module
+          Value: tools-gateway
+
+  ProductInfoToolGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ProductInfoToolLambda
+      Action: lambda:InvokeFunction
+      Principal: bedrock.amazonaws.com
+      SourceArn: !GetAtt AgentCoreGatewayRole.Arn
+
+  ProductInfoToolGatewayInvokePermission2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ProductInfoToolLambda
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*
+
+  ProductInfoToolFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !Ref ProductInfoToolLambda
+      AuthType: AWS_IAM
+
+  ProductInfoToolFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ProductInfoToolLambda
+      Action: lambda:InvokeFunctionUrl
+      Principal: !Sub '${AWS::AccountId}'
+      FunctionUrlAuthType: AWS_IAM
+
+  #============================================================================
+  # Order Processing Agent Lambda — workshop-order-processing-agent
+  #============================================================================
+
+  OrderProcessingAgentLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/workshop-order-processing-agent
+      RetentionInDays: 7
+
+  OrderProcessingAgentLambda:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - OrderProcessingAgentLogGroup
+      - ProductInfoToolLambdaRole
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_116
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_117
+            comment: "Inline workshop Lambda; serves mock data only, no VPC-bound resources"
+    Properties:
+      FunctionName: workshop-order-processing-agent
+      Description: A2A-compatible Lambda simulating an order processing agent
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt ProductInfoToolLambdaRole.Arn
+      MemorySize: 128
+      Timeout: 10
+      Code:
+        ZipFile: |
+          import json, logging, uuid
+          from datetime import datetime
+          logger = logging.getLogger(__name__)
+          logger.setLevel("INFO")
+          ORDERS = {}
+          AGENT_CARD = {
+              "name": "Order Processing Agent",
+              "description": "Specialist agent for order creation, status checks, and cancellations",
+              "url": "",
+              "version": "1.0.0",
+              "capabilities": {"streaming": False, "pushNotifications": False},
+              "skills": [
+                  {"id": "create_order", "name": "Create Order", "description": "Creates a new order for a given product and quantity"},
+                  {"id": "check_order_status", "name": "Check Order Status", "description": "Returns the current status of an order by order ID"},
+                  {"id": "cancel_order", "name": "Cancel Order", "description": "Cancels an existing order if it has not yet shipped"},
+              ],
+          }
+          def _handle_skill(skill_id, params):
+              if skill_id == "create_order":
+                  order_id = f"ORD-{uuid.uuid4().hex[:8].upper()}"
+                  order = {"order_id": order_id, "product_id": params.get("product_id", "PROD-001"), "quantity": params.get("quantity", 1), "status": "confirmed", "created_at": datetime.utcnow().isoformat()}
+                  ORDERS[order_id] = order
+                  return order
+              elif skill_id == "check_order_status":
+                  oid = params.get("order_id", "")
+                  return ORDERS.get(oid, {"order_id": oid, "status": "not_found"})
+              elif skill_id == "cancel_order":
+                  oid = params.get("order_id", "")
+                  if oid in ORDERS and ORDERS[oid]["status"] != "shipped":
+                      ORDERS[oid]["status"] = "cancelled"
+                      return ORDERS[oid]
+                  return {"order_id": oid, "status": "not_found_or_shipped"}
+              return {"error": f"Unknown skill: {skill_id}"}
+          def handler(event, context):
+              method = event.get("requestContext", {}).get("http", {}).get("method", "")
+              path = event.get("rawPath", "/")
+              if method == "GET" and "agent.json" in path:
+                  return {"statusCode": 200, "headers": {"Content-Type": "application/json"}, "body": json.dumps(AGENT_CARD)}
+              body = json.loads(event.get("body", "{}")) if isinstance(event.get("body"), str) else event.get("body", {})
+              skill_id = body.get("skill_id", body.get("params", {}).get("skill_id", ""))
+              params = body.get("params", body.get("arguments", {}))
+              result = _handle_skill(skill_id, params)
+              return {"statusCode": 200, "headers": {"Content-Type": "application/json"}, "body": json.dumps(result)}
+      Tags:
+        - Key: Name
+          Value: workshop-order-processing-agent
+        - Key: Module
+          Value: tools-gateway
+
+  OrderProcessingAgentFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !Ref OrderProcessingAgentLambda
+      AuthType: AWS_IAM
+
+  OrderProcessingAgentFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref OrderProcessingAgentLambda
+      Action: lambda:InvokeFunctionUrl
+      Principal: !Sub '${AWS::AccountId}'
+      FunctionUrlAuthType: AWS_IAM
+
+  #============================================================================
+  # Flights MCP Lambda — workshop-flights-mcp
+  #============================================================================
+
+  FlightsMcpLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-flights-mcp-role-${AWS::Region}
+      Description: Execution role for the workshop-flights-mcp Lambda, a demo MCP server invoked by AgentCore Gateway.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  FlightsMcpLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/workshop-flights-mcp
+      RetentionInDays: 7
+
+  FlightsMcpLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: FlightsMcpLogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_116
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_117
+            comment: "Inline workshop Lambda; serves mock data only, no VPC-bound resources"
+    Properties:
+      FunctionName: workshop-flights-mcp
+      Description: MCP-compatible Lambda providing flight search tools with mock data
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt FlightsMcpLambdaRole.Arn
+      MemorySize: 128
+      Timeout: 10
+      Code:
+        ZipFile: |
+          import json, logging
+          logger = logging.getLogger(__name__)
+          logger.setLevel("INFO")
+          FLIGHTS = json.loads('[{"flight_id":"FL-001","airline":"Japan Airlines","flight_number":"JL 512","origin":"SFO","destination":"TYO","departure_time":"2026-09-15T10:30:00","arrival_time":"2026-09-16T14:45:00","price":850.0,"currency":"USD","seats_available":42},{"flight_id":"FL-002","airline":"United Airlines","flight_number":"UA 837","origin":"SFO","destination":"TYO","departure_time":"2026-09-15T14:00:00","arrival_time":"2026-09-16T18:30:00","price":920.0,"currency":"USD","seats_available":15},{"flight_id":"FL-003","airline":"ANA","flight_number":"NH 107","origin":"SFO","destination":"TYO","departure_time":"2026-09-15T23:55:00","arrival_time":"2026-09-17T05:10:00","price":780.0,"currency":"USD","seats_available":67},{"flight_id":"FL-004","airline":"Delta Air Lines","flight_number":"DL 275","origin":"SFO","destination":"TYO","departure_time":"2026-09-15T11:45:00","arrival_time":"2026-09-16T16:00:00","price":1100.0,"currency":"USD","seats_available":8},{"flight_id":"FL-005","airline":"Singapore Airlines","flight_number":"SQ 1","origin":"SFO","destination":"SIN","departure_time":"2026-09-15T01:05:00","arrival_time":"2026-09-16T09:30:00","price":1200.0,"currency":"USD","seats_available":23},{"flight_id":"FL-006","airline":"Cathay Pacific","flight_number":"CX 879","origin":"SFO","destination":"HKG","departure_time":"2026-09-15T13:15:00","arrival_time":"2026-09-16T19:45:00","price":950.0,"currency":"USD","seats_available":31},{"flight_id":"FL-007","airline":"British Airways","flight_number":"BA 286","origin":"LAX","destination":"LHR","departure_time":"2026-09-15T21:40:00","arrival_time":"2026-09-16T16:15:00","price":890.0,"currency":"USD","seats_available":55},{"flight_id":"FL-008","airline":"Qantas","flight_number":"QF 12","origin":"LAX","destination":"SYD","departure_time":"2026-09-15T22:30:00","arrival_time":"2026-09-17T08:45:00","price":1350.0,"currency":"USD","seats_available":19},{"flight_id":"FL-009","airline":"Korean Air","flight_number":"KE 18","origin":"LAX","destination":"ICN","departure_time":"2026-09-15T12:00:00","arrival_time":"2026-09-16T17:30:00","price":820.0,"currency":"USD","seats_available":44},{"flight_id":"FL-010","airline":"Thai Airways","flight_number":"TG 795","origin":"LAX","destination":"BKK","departure_time":"2026-09-15T23:50:00","arrival_time":"2026-09-17T06:20:00","price":760.0,"currency":"USD","seats_available":38},{"flight_id":"FL-011","airline":"Air France","flight_number":"AF 65","origin":"JFK","destination":"CDG","departure_time":"2026-09-15T18:00:00","arrival_time":"2026-09-16T07:30:00","price":680.0,"currency":"USD","seats_available":72},{"flight_id":"FL-012","airline":"Lufthansa","flight_number":"LH 401","origin":"JFK","destination":"FRA","departure_time":"2026-09-15T17:30:00","arrival_time":"2026-09-16T07:15:00","price":720.0,"currency":"USD","seats_available":29},{"flight_id":"FL-013","airline":"Emirates","flight_number":"EK 202","origin":"JFK","destination":"DXB","departure_time":"2026-09-15T23:15:00","arrival_time":"2026-09-16T19:45:00","price":1050.0,"currency":"USD","seats_available":51},{"flight_id":"FL-014","airline":"Swiss International","flight_number":"LX 23","origin":"JFK","destination":"ZRH","departure_time":"2026-09-15T20:45:00","arrival_time":"2026-09-16T10:30:00","price":750.0,"currency":"USD","seats_available":33},{"flight_id":"FL-015","airline":"Japan Airlines","flight_number":"JL 514","origin":"SFO","destination":"TYO","departure_time":"2026-09-16T10:30:00","arrival_time":"2026-09-17T14:45:00","price":870.0,"currency":"USD","seats_available":38},{"flight_id":"FL-016","airline":"ANA","flight_number":"NH 109","origin":"SFO","destination":"TYO","departure_time":"2026-09-17T23:55:00","arrival_time":"2026-09-19T05:10:00","price":800.0,"currency":"USD","seats_available":52},{"flight_id":"FL-017","airline":"British Airways","flight_number":"BA 288","origin":"LAX","destination":"LHR","departure_time":"2026-09-16T21:40:00","arrival_time":"2026-09-17T16:15:00","price":910.0,"currency":"USD","seats_available":41},{"flight_id":"FL-018","airline":"Air France","flight_number":"AF 67","origin":"JFK","destination":"CDG","departure_time":"2026-09-16T18:00:00","arrival_time":"2026-09-17T07:30:00","price":700.0,"currency":"USD","seats_available":65},{"flight_id":"FL-019","airline":"Emirates","flight_number":"EK 204","origin":"JFK","destination":"DXB","departure_time":"2026-09-17T23:15:00","arrival_time":"2026-09-18T19:45:00","price":1080.0,"currency":"USD","seats_available":47},{"flight_id":"FL-020","airline":"Qantas","flight_number":"QF 14","origin":"LAX","destination":"SYD","departure_time":"2026-09-17T22:30:00","arrival_time":"2026-09-19T08:45:00","price":1400.0,"currency":"USD","seats_available":12}]')
+          TOOLS = [
+              {"name": "search_flights", "description": "Search flights by origin, destination, and departure date.", "inputSchema": {"type": "object", "properties": {"origin": {"type": "string", "description": "IATA airport code (e.g. SFO)"}, "destination": {"type": "string", "description": "IATA airport code (e.g. TYO)"}, "date": {"type": "string", "description": "Date prefix (e.g. 2026-09-15)"}, "max_results": {"type": "integer", "description": "Max results (default 5)"}}, "required": ["origin", "destination", "date"]}},
+              {"name": "get_flight_details", "description": "Get full details of a flight by ID.", "inputSchema": {"type": "object", "properties": {"flight_id": {"type": "string", "description": "Flight ID (e.g. FL-001)"}}, "required": ["flight_id"]}},
+              {"name": "search_flights_by_budget", "description": "Search flights filtered by max price.", "inputSchema": {"type": "object", "properties": {"origin": {"type": "string"}, "destination": {"type": "string"}, "date": {"type": "string"}, "max_price": {"type": "number", "description": "Maximum ticket price"}}, "required": ["origin", "destination", "date", "max_price"]}},
+          ]
+          # Alias common airport codes to the codes used in the mock dataset so
+          # the agent can say "NRT" or "HND" and still match the "TYO" data.
+          AIRPORT_ALIASES = {
+              "NRT": "TYO", "HND": "TYO", "TYO": "TYO",
+              "LGA": "JFK", "EWR": "JFK", "JFK": "JFK",
+              "ICN": "ICN", "GMP": "ICN",
+              "CDG": "CDG", "ORY": "CDG",
+              "LHR": "LHR", "LGW": "LHR", "STN": "LHR",
+              "HKG": "HKG", "SIN": "SIN", "BKK": "BKK",
+              "DXB": "DXB", "DOH": "DXB",
+              "SFO": "SFO", "LAX": "LAX", "SYD": "SYD", "FRA": "FRA", "ZRH": "ZRH",
+          }
+          def _normalize(code):
+              if not code:
+                  return ""
+              return AIRPORT_ALIASES.get(code.upper(), code.upper())
+          def _exec(name, args):
+              if name == "search_flights":
+                  origin = _normalize(args.get("origin",""))
+                  dest = _normalize(args.get("destination",""))
+                  date = args.get("date","") or args.get("departure_date","") or ""
+                  r = [f for f in FLIGHTS if f["origin"].upper() == origin and f["destination"].upper() == dest and (not date or f["departure_time"].startswith(date))]
+                  return r[:args.get("max_results", 5)]
+              if name == "get_flight_details":
+                  return next((f for f in FLIGHTS if f["flight_id"] == args.get("flight_id")), {"error": "Not found"})
+              if name == "search_flights_by_budget":
+                  max_price = args.get("max_price")
+                  if max_price is None or max_price <= 0:
+                      return {"error": "max_price must be a positive number"}
+                  origin = _normalize(args.get("origin",""))
+                  dest = _normalize(args.get("destination",""))
+                  date = args.get("date","") or args.get("departure_date","") or ""
+                  r = [f for f in FLIGHTS if f["origin"].upper() == origin and f["destination"].upper() == dest and (not date or f["departure_time"].startswith(date)) and f["price"] <= max_price]
+                  return r
+              return {"error": f"Unknown tool: {name}"}
+          def _tool_name_from_context(context):
+              try:
+                  raw = (context.client_context.custom or {}).get("bedrockAgentCoreToolName", "")
+              except AttributeError:
+                  raw = ""
+              return raw.split("___")[-1] if raw else ""
+          def handler(event, context):
+              # Gateway invocation — tool name in client_context, args are the event
+              gw_tool = _tool_name_from_context(context)
+              if gw_tool:
+                  arguments = event if isinstance(event, dict) else {}
+                  return _exec(gw_tool, arguments)
+              # Direct MCP JSON-RPC invocation (tools/list or tools/call)
+              body = event
+              if isinstance(body, str):
+                  body = json.loads(body)
+              if isinstance(body, dict) and "mcp" in body and "gatewayRequest" in body.get("mcp", {}):
+                  body = body["mcp"]["gatewayRequest"].get("body", {})
+                  if isinstance(body, str):
+                      body = json.loads(body)
+              if not isinstance(body, dict):
+                  body = {}
+              method = body.get("method", "")
+              rid = body.get("id", 1)
+              if method == "tools/list":
+                  return {"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOLS}}
+              if method == "tools/call":
+                  p = body.get("params", {})
+                  result = _exec(p.get("name", ""), p.get("arguments", {}))
+                  return {"jsonrpc": "2.0", "id": rid, "result": {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}}
+              return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"Unsupported: {method}"}}
+      Tags:
+        - Key: Name
+          Value: workshop-flights-mcp
+        - Key: Module
+          Value: tools-gateway
+
+  FlightsMcpFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !Ref FlightsMcpLambda
+      AuthType: AWS_IAM
+
+  FlightsMcpFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FlightsMcpLambda
+      Action: lambda:InvokeFunctionUrl
+      Principal: !Sub '${AWS::AccountId}'
+      FunctionUrlAuthType: AWS_IAM
+
+  #============================================================================
+  # Hotels MCP Lambda — workshop-hotels-mcp
+  #============================================================================
+
+  HotelsMcpLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-hotels-mcp-role-${AWS::Region}
+      Description: Execution role for the workshop-hotels-mcp Lambda, a demo MCP server invoked by AgentCore Gateway.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  HotelsMcpLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/workshop-hotels-mcp
+      RetentionInDays: 7
+
+  HotelsMcpLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: HotelsMcpLogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_116
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_117
+            comment: "Inline workshop Lambda; serves mock data only, no VPC-bound resources"
+    Properties:
+      FunctionName: workshop-hotels-mcp
+      Description: MCP-compatible Lambda providing hotel search tools with mock data
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt HotelsMcpLambdaRole.Arn
+      MemorySize: 128
+      Timeout: 10
+      Code:
+        ZipFile: |
+          import json, logging
+          logger = logging.getLogger(__name__)
+          logger.setLevel("INFO")
+          HOTELS = json.loads('[{"hotel_id":"HTL-001","name":"Tokyo Grand Hotel","city":"Tokyo","country":"Japan","star_rating":5,"price_per_night":320.0,"currency":"USD","amenities":["wifi","pool","spa","restaurant","gym"],"room_types":["standard","deluxe","suite"],"description":"Luxury hotel in the heart of Shinjuku with panoramic city views"},{"hotel_id":"HTL-002","name":"Sakura Inn Tokyo","city":"Tokyo","country":"Japan","star_rating":3,"price_per_night":120.0,"currency":"USD","amenities":["wifi","restaurant"],"room_types":["standard","deluxe"],"description":"Cozy budget-friendly hotel near Asakusa temple district"},{"hotel_id":"HTL-003","name":"Tokyo Bay Resort","city":"Tokyo","country":"Japan","star_rating":4,"price_per_night":250.0,"currency":"USD","amenities":["wifi","pool","restaurant","gym"],"room_types":["standard","deluxe","suite"],"description":"Waterfront resort with views of Tokyo Bay and Rainbow Bridge"},{"hotel_id":"HTL-004","name":"The London Mayfair","city":"London","country":"UK","star_rating":5,"price_per_night":450.0,"currency":"USD","amenities":["wifi","spa","restaurant","gym","concierge"],"room_types":["standard","deluxe","suite","penthouse"],"description":"Elegant five-star hotel in the heart of Mayfair"},{"hotel_id":"HTL-005","name":"Camden Town Hotel","city":"London","country":"UK","star_rating":3,"price_per_night":95.0,"currency":"USD","amenities":["wifi","restaurant"],"room_types":["standard","deluxe"],"description":"Trendy hotel in vibrant Camden with easy tube access"},{"hotel_id":"HTL-006","name":"Paris Le Marais","city":"Paris","country":"France","star_rating":4,"price_per_night":280.0,"currency":"USD","amenities":["wifi","restaurant","bar","gym"],"room_types":["standard","deluxe","suite"],"description":"Boutique hotel in the historic Le Marais district"},{"hotel_id":"HTL-007","name":"Hotel Montmartre","city":"Paris","country":"France","star_rating":3,"price_per_night":150.0,"currency":"USD","amenities":["wifi","restaurant"],"room_types":["standard","deluxe"],"description":"Charming hotel near Sacre-Coeur with Parisian atmosphere"},{"hotel_id":"HTL-008","name":"Sydney Harbour Grand","city":"Sydney","country":"Australia","star_rating":5,"price_per_night":380.0,"currency":"USD","amenities":["wifi","pool","spa","restaurant","gym"],"room_types":["standard","deluxe","suite"],"description":"Luxury hotel overlooking Sydney Harbour and the Opera House"},{"hotel_id":"HTL-009","name":"Bondi Beach Hotel","city":"Sydney","country":"Australia","star_rating":3,"price_per_night":130.0,"currency":"USD","amenities":["wifi","pool","restaurant"],"room_types":["standard","deluxe"],"description":"Beachfront hotel steps from iconic Bondi Beach"},{"hotel_id":"HTL-010","name":"Dubai Marina Palace","city":"Dubai","country":"UAE","star_rating":5,"price_per_night":500.0,"currency":"USD","amenities":["wifi","pool","spa","restaurant","gym","beach"],"room_types":["deluxe","suite","penthouse"],"description":"Ultra-luxury hotel in Dubai Marina with private beach"},{"hotel_id":"HTL-011","name":"Seoul Gangnam Tower","city":"Seoul","country":"South Korea","star_rating":4,"price_per_night":200.0,"currency":"USD","amenities":["wifi","restaurant","gym","spa"],"room_types":["standard","deluxe","suite"],"description":"Modern hotel in the upscale Gangnam district"},{"hotel_id":"HTL-012","name":"Singapore Marina Bay","city":"Singapore","country":"Singapore","star_rating":5,"price_per_night":420.0,"currency":"USD","amenities":["wifi","pool","spa","restaurant","gym","infinity_pool"],"room_types":["deluxe","suite","penthouse"],"description":"Iconic hotel with rooftop infinity pool overlooking the city"},{"hotel_id":"HTL-013","name":"Bangkok Riverside","city":"Bangkok","country":"Thailand","star_rating":4,"price_per_night":110.0,"currency":"USD","amenities":["wifi","pool","spa","restaurant"],"room_types":["standard","deluxe","suite"],"description":"Riverside hotel with traditional Thai hospitality"},{"hotel_id":"HTL-014","name":"Frankfurt Business Hotel","city":"Frankfurt","country":"Germany","star_rating":4,"price_per_night":180.0,"currency":"USD","amenities":["wifi","restaurant","gym","conference"],"room_types":["standard","deluxe"],"description":"Business hotel near the financial district and Messe"},{"hotel_id":"HTL-015","name":"Zurich Lake View","city":"Zurich","country":"Switzerland","star_rating":4,"price_per_night":350.0,"currency":"USD","amenities":["wifi","restaurant","spa","gym"],"room_types":["standard","deluxe","suite"],"description":"Elegant hotel with stunning views of Lake Zurich and the Alps"}]')
+          TOOLS = [
+              {"name": "search_hotels", "description": "Search hotels by city, check-in/out dates, and guests.", "inputSchema": {"type": "object", "properties": {"city": {"type": "string", "description": "City name (e.g. Tokyo)"}, "checkin_date": {"type": "string", "description": "Check-in date (e.g. 2026-09-15)"}, "checkout_date": {"type": "string", "description": "Check-out date (e.g. 2026-09-18)"}, "guests": {"type": "integer", "description": "Number of guests"}, "max_results": {"type": "integer", "description": "Max results (default 5)"}}, "required": ["city", "checkin_date", "checkout_date", "guests"]}},
+              {"name": "get_hotel_details", "description": "Get full details of a hotel by ID.", "inputSchema": {"type": "object", "properties": {"hotel_id": {"type": "string", "description": "Hotel ID (e.g. HTL-001)"}}, "required": ["hotel_id"]}},
+              {"name": "search_hotels_by_budget", "description": "Search hotels filtered by max price per night.", "inputSchema": {"type": "object", "properties": {"city": {"type": "string"}, "checkin_date": {"type": "string"}, "checkout_date": {"type": "string"}, "max_price_per_night": {"type": "number", "description": "Max price per night"}}, "required": ["city", "checkin_date", "checkout_date", "max_price_per_night"]}},
+          ]
+          # Alias common city names / airport codes to cities in the mock
+          # dataset so the agent can say "NYC" or "TYO" and still hit data.
+          CITY_ALIASES = {
+              "tyo": "tokyo", "nrt": "tokyo", "hnd": "tokyo", "japan": "tokyo",
+              "lon": "london", "lhr": "london", "uk": "london",
+              "par": "paris", "cdg": "paris", "france": "paris",
+              "syd": "sydney", "australia": "sydney",
+              "dxb": "dubai", "uae": "dubai",
+              "sel": "seoul", "icn": "seoul", "korea": "seoul",
+              "sin": "singapore",
+              "bkk": "bangkok", "thailand": "bangkok",
+              "fra": "frankfurt", "germany": "frankfurt",
+              "zrh": "zurich", "switzerland": "zurich",
+          }
+          def _normalize_city(city):
+              if not city:
+                  return ""
+              c = city.strip().lower()
+              return CITY_ALIASES.get(c, c)
+          def _exec(name, args):
+              # Accept both arg-name forms (the CFN ToolSchema for the Module 3b
+              # AgentCore gateway uses check_in/check_out; the module-4a tools
+              # gateway uses checkin_date/checkout_date - support both).
+              city = _normalize_city(args.get("city",""))
+              checkin = args.get("checkin_date") or args.get("check_in") or ""
+              checkout = args.get("checkout_date") or args.get("check_out") or ""
+              if name == "search_hotels":
+                  r = [h for h in HOTELS if h["city"].lower() == city]
+                  return r[:args.get("max_results", 5)]
+              if name == "get_hotel_details":
+                  return next((h for h in HOTELS if h["hotel_id"] == args.get("hotel_id")), {"error": "Not found"})
+              if name == "search_hotels_by_budget":
+                  max_price = args.get("max_price_per_night") or args.get("max_price")
+                  if max_price is None or max_price <= 0:
+                      return {"error": "max_price_per_night must be a positive number"}
+                  r = [h for h in HOTELS if h["city"].lower() == city and h["price_per_night"] <= max_price]
+                  return r
+              return {"error": f"Unknown tool: {name}"}
+          def _tool_name_from_context(context):
+              try:
+                  raw = (context.client_context.custom or {}).get("bedrockAgentCoreToolName", "")
+              except AttributeError:
+                  raw = ""
+              return raw.split("___")[-1] if raw else ""
+          def handler(event, context):
+              # Gateway invocation — tool name in client_context, args are the event
+              gw_tool = _tool_name_from_context(context)
+              if gw_tool:
+                  arguments = event if isinstance(event, dict) else {}
+                  return _exec(gw_tool, arguments)
+              # Direct MCP JSON-RPC invocation (tools/list or tools/call)
+              body = event
+              if isinstance(body, str):
+                  body = json.loads(body)
+              if isinstance(body, dict) and "mcp" in body and "gatewayRequest" in body.get("mcp", {}):
+                  body = body["mcp"]["gatewayRequest"].get("body", {})
+                  if isinstance(body, str):
+                      body = json.loads(body)
+              if not isinstance(body, dict):
+                  body = {}
+              method = body.get("method", "")
+              rid = body.get("id", 1)
+              if method == "tools/list":
+                  return {"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOLS}}
+              if method == "tools/call":
+                  p = body.get("params", {})
+                  result = _exec(p.get("name", ""), p.get("arguments", {}))
+                  return {"jsonrpc": "2.0", "id": rid, "result": {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}}
+              return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"Unsupported: {method}"}}
+      Tags:
+        - Key: Name
+          Value: workshop-hotels-mcp
+        - Key: Module
+          Value: tools-gateway
+
+  HotelsMcpFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !Ref HotelsMcpLambda
+      AuthType: AWS_IAM
+
+  HotelsMcpFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HotelsMcpLambda
+      Action: lambda:InvokeFunctionUrl
+      Principal: !Sub '${AWS::AccountId}'
+      FunctionUrlAuthType: AWS_IAM
+
+  #============================================================================
+  # Request Interceptor Lambda
+  #============================================================================
+
+  RequestInterceptorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-request-interceptor-role-${AWS::Region}
+      Description: Execution role for the AgentCore Gateway request interceptor Lambda - enforces Cedar policies on incoming tool calls.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-request-interceptor-role
+
+  RequestInterceptorLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/agentcore-gateway-request-interceptor
+      RetentionInDays: 7
+
+  RequestInterceptorLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: RequestInterceptorLogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_116
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_117
+            comment: "Inline workshop Lambda; calls only AWS control-plane APIs, no VPC-bound resources"
+    Properties:
+      FunctionName: agentcore-gateway-request-interceptor
+      Description: Audit logging + group-based access control for tool invocations
+      Runtime: python3.12
+      Handler: index.request_interceptor_handler
+      Role: !GetAtt RequestInterceptorRole.Arn
+      MemorySize: 256
+      Timeout: 10
+      Environment:
+        Variables:
+          AUDIT_TABLE_NAME: ''  # Optional: set to DynamoDB table name for audit
+          TOOL_ACCESS_POLICY: ''  # JSON: {"group": ["tool-pattern", ...]}
+          LOG_LEVEL: INFO
+      Code:
+        ZipFile: |
+          # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+          # SPDX-License-Identifier: Apache-2.0
+          """AgentCore Gateway interceptor Lambda handlers."""
+          import base64
+          import fnmatch
+          import json
+          import logging
+          import os
+          import uuid
+          from datetime import datetime, timezone
+
+          import boto3
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
+
+          AUDIT_TABLE_NAME = os.environ.get("AUDIT_TABLE_NAME", "")
+          # AWS_REGION is always set by the Lambda runtime; AWS_DEFAULT_REGION
+          # is the documented fallback. No region literal needed.
+          AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "")
+          BEDROCK_GUARDRAIL_ID = os.environ.get("BEDROCK_GUARDRAIL_ID", "")
+          BEDROCK_GUARDRAIL_VERSION = os.environ.get("BEDROCK_GUARDRAIL_VERSION", "DRAFT")
+          TOOL_ACCESS_POLICY = os.environ.get("TOOL_ACCESS_POLICY", "")
+
+          _INTERNAL_FIELDS = {"gatewayTargetId", "embedding", "securityScanResult", "healthCheckMessage", "lastHealthCheck", "createdBy"}
+
+          def _decode_jwt_payload(token):
+              try:
+                  parts = token.split(".")
+                  if len(parts) < 2:
+                      return {}
+                  payload = parts[1]
+                  payload += "=" * (4 - len(payload) % 4)
+                  decoded = base64.urlsafe_b64decode(payload)
+                  return json.loads(decoded)
+              except Exception:
+                  return {}
+
+          def _extract_actor(headers):
+              auth = headers.get("Authorization", headers.get("authorization", ""))
+              if not auth.startswith("Bearer "):
+                  return "unknown"
+              claims = _decode_jwt_payload(auth[7:])
+              return claims.get("sub", claims.get("client_id", "unknown"))
+
+          def _extract_caller_groups(headers):
+              auth = headers.get("Authorization", headers.get("authorization", ""))
+              if not auth.startswith("Bearer "):
+                  return []
+              claims = _decode_jwt_payload(auth[7:])
+              groups = claims.get("cognito:groups", [])
+              return groups if isinstance(groups, list) else []
+
+          def _load_access_policy():
+              if not TOOL_ACCESS_POLICY:
+                  return {}
+              try:
+                  policy = json.loads(TOOL_ACCESS_POLICY)
+                  return policy if isinstance(policy, dict) else {}
+              except (json.JSONDecodeError, TypeError):
+                  logger.warning("Invalid TOOL_ACCESS_POLICY, allowing all access")
+                  return {}
+
+          def _is_tool_allowed(tool_name, caller_groups, policy):
+              if not policy:
+                  return True
+              for group in caller_groups:
+                  for pattern in policy.get(group, []):
+                      if fnmatch.fnmatch(tool_name, pattern):
+                          return True
+              if not caller_groups:
+                  for pattern in policy.get("_default", []):
+                      if fnmatch.fnmatch(tool_name, pattern):
+                          return True
+              return False
+
+          def _extract_request(event):
+              if "mcp" in event and "gatewayRequest" in event.get("mcp", {}):
+                  req = event["mcp"]["gatewayRequest"]
+                  return req.get("headers", {}), req.get("body", {})
+              return event.get("headers", {}), event.get("body", {})
+
+          def _extract_response(event):
+              if "mcp" in event and "gatewayResponse" in event.get("mcp", {}):
+                  resp = event["mcp"]["gatewayResponse"]
+                  return resp.get("headers", {}), resp.get("body", {})
+              return event.get("headers", {}), event.get("body", {})
+
+          def _parse_body(body):
+              if isinstance(body, str):
+                  try:
+                      return json.loads(body)
+                  except (json.JSONDecodeError, TypeError):
+                      return {}
+              if isinstance(body, dict):
+                  return body
+              return {}
+
+          def request_interceptor_handler(event, context):
+              headers, raw_body = _extract_request(event)
+              body = _parse_body(raw_body)
+              method = body.get("method", "")
+              policy = _load_access_policy()
+              if method in ("tools/call", "tools/list"):
+                  actor = _extract_actor(headers)
+                  tool_name = body.get("params", {}).get("name", "") if method == "tools/call" else ""
+                  request_id = getattr(context, "aws_request_id", str(uuid.uuid4()))
+                  audit_entry = {
+                      "audit": True,
+                      "request_id": request_id,
+                      "method": method,
+                      "tool_name": tool_name,
+                      "client_id": actor,
+                      "timestamp": datetime.now(timezone.utc).isoformat(),
+                  }
+                  logger.info(json.dumps(audit_entry))
+                  if AUDIT_TABLE_NAME:
+                      try:
+                          dynamo = boto3.resource("dynamodb", region_name=AWS_REGION)
+                          table = dynamo.Table(AUDIT_TABLE_NAME)
+                          table.put_item(Item={
+                              "toolId": f"gateway:{tool_name}" if tool_name else "gateway:list",
+                              "eventId": str(uuid.uuid4()),
+                              "action": "GATEWAY_TOOLS_CALL" if method == "tools/call" else "GATEWAY_TOOLS_LIST",
+                              "actor": actor, "timestamp": audit_entry["timestamp"],
+                              "method": method, "toolName": tool_name,
+                          })
+                      except Exception as e:
+                          logger.warning("Audit log write failed (non-fatal): %s", type(e).__name__)
+              if method == "tools/call" and policy:
+                  tool_name = body.get("params", {}).get("name", "")
+                  caller_groups = _extract_caller_groups(headers)
+                  if not _is_tool_allowed(tool_name, caller_groups, policy):
+                      logger.warning("Access denied: groups=%s tool=%s", caller_groups, tool_name)
+                      return {
+                          "interceptorOutputVersion": "1.0",
+                          "mcp": {"transformedGatewayRequest": {"headers": headers, "body": {
+                              "jsonrpc": "2.0", "id": body.get("id", ""),
+                              "error": {"code": -32600, "message": f"Access denied: your team does not have permission to call '{tool_name}'"},
+                          }}},
+                      }
+              return {"interceptorOutputVersion": "1.0", "mcp": {"transformedGatewayRequest": {"headers": headers, "body": body}}}
+      Tags:
+        - Key: Name
+          Value: agentcore-gateway-request-interceptor
+        - Key: Module
+          Value: tools-gateway
+
+  RequestInterceptorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RequestInterceptorLambda
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*
+
+  #============================================================================
+  # Response Interceptor Lambda
+  #============================================================================
+
+  ResponseInterceptorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-response-interceptor-role-${AWS::Region}
+      Description: Execution role for the AgentCore Gateway response interceptor Lambda - applies Bedrock Guardrails to outbound tool results.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockGuardrails
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Scoped to guardrail/* in this account/region (not '*'): the
+              # guardrail ID is created by participants in notebook 6, so the
+              # wildcard is on the runtime-generated ID segment only.
+              - Sid: ApplyGuardrailOnly
+                Effect: Allow
+                Action:
+                  - bedrock:ApplyGuardrail
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:guardrail/*
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-response-interceptor-role
+
+  ResponseInterceptorLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/agentcore-gateway-response-interceptor
+      RetentionInDays: 7
+
+  ResponseInterceptorLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: ResponseInterceptorLogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_116
+            comment: "Inline workshop Lambda; reserved concurrency, DLQ, and VPC attachment add operational complexity without changing the threat model in a disposable workshop account"
+          - id: CKV_AWS_117
+            comment: "Inline workshop Lambda; calls only AWS control-plane APIs, no VPC-bound resources"
+    Properties:
+      FunctionName: agentcore-gateway-response-interceptor
+      Description: Field sanitization + Bedrock Guardrails on tool output
+      Runtime: python3.12
+      Handler: index.response_interceptor_handler
+      Role: !GetAtt ResponseInterceptorRole.Arn
+      MemorySize: 256
+      Timeout: 10
+      Environment:
+        Variables:
+          BEDROCK_GUARDRAIL_ID: ''  # Set in notebook 6
+          BEDROCK_GUARDRAIL_VERSION: DRAFT
+          TOOL_ACCESS_POLICY: ''  # JSON: {"group": ["tool-pattern", ...]}
+          LOG_LEVEL: INFO
+      Code:
+        ZipFile: |
+          # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+          # SPDX-License-Identifier: Apache-2.0
+          """AgentCore Gateway response interceptor."""
+          import base64
+          import fnmatch
+          import json
+          import logging
+          import os
+
+          import boto3
+
+          logger = logging.getLogger(__name__)
+
+          BEDROCK_GUARDRAIL_ID = os.environ.get("BEDROCK_GUARDRAIL_ID", "")
+          BEDROCK_GUARDRAIL_VERSION = os.environ.get("BEDROCK_GUARDRAIL_VERSION", "DRAFT")
+          TOOL_ACCESS_POLICY = os.environ.get("TOOL_ACCESS_POLICY", "")
+          # AWS_REGION is always set by the Lambda runtime; AWS_DEFAULT_REGION
+          # is the documented fallback. No region literal needed.
+          AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "")
+
+          _INTERNAL_FIELDS = {"gatewayTargetId", "embedding", "securityScanResult", "healthCheckMessage", "lastHealthCheck", "createdBy"}
+
+          def _decode_jwt_payload(token):
+              try:
+                  parts = token.split(".")
+                  if len(parts) < 2:
+                      return {}
+                  payload = parts[1]
+                  payload += "=" * (4 - len(payload) % 4)
+                  return json.loads(base64.urlsafe_b64decode(payload))
+              except Exception:
+                  return {}
+
+          def _extract_caller_groups(headers):
+              auth = headers.get("Authorization", headers.get("authorization", ""))
+              if not auth.startswith("Bearer "):
+                  return []
+              claims = _decode_jwt_payload(auth[7:])
+              groups = claims.get("cognito:groups", [])
+              return groups if isinstance(groups, list) else []
+
+          def _load_access_policy():
+              if not TOOL_ACCESS_POLICY:
+                  return {}
+              try:
+                  policy = json.loads(TOOL_ACCESS_POLICY)
+                  return policy if isinstance(policy, dict) else {}
+              except (json.JSONDecodeError, TypeError):
+                  return {}
+
+          def _is_tool_allowed(tool_name, caller_groups, policy):
+              if not policy:
+                  return True
+              for group in caller_groups:
+                  for pattern in policy.get(group, []):
+                      if fnmatch.fnmatch(tool_name, pattern):
+                          return True
+              return False
+
+          def _extract_response(event):
+              if "mcp" in event and "gatewayResponse" in event.get("mcp", {}):
+                  resp = event["mcp"]["gatewayResponse"]
+                  return resp.get("headers", {}), resp.get("body", {})
+              return event.get("headers", {}), event.get("body", {})
+
+          def _parse_body(body):
+              if isinstance(body, str):
+                  try:
+                      return json.loads(body)
+                  except (json.JSONDecodeError, TypeError):
+                      return {}
+              return body if isinstance(body, dict) else {}
+
+          def response_interceptor_handler(event, context):
+              headers, raw_body = _extract_response(event)
+              body = _parse_body(raw_body)
+
+              req_headers = {}
+              if "mcp" in event and "gatewayRequest" in event.get("mcp", {}):
+                  req_headers = event["mcp"]["gatewayRequest"].get("headers", {})
+
+              policy = _load_access_policy()
+              caller_groups = _extract_caller_groups(req_headers)
+
+              result = body.get("result", {})
+              if isinstance(result, dict) and "tools" in result:
+                  tools = result["tools"]
+                  if policy and req_headers:
+                      tools = [t for t in tools if _is_tool_allowed(t.get("name", ""), caller_groups, policy)]
+                      result["tools"] = tools
+                  for tool in tools:
+                      for field in _INTERNAL_FIELDS:
+                          tool.pop(field, None)
+
+              if BEDROCK_GUARDRAIL_ID and isinstance(result, dict) and "content" in result:
+                  content_items = result.get("content", [])
+                  text_parts = [item.get("text", "") for item in content_items if isinstance(item, dict) and item.get("type") == "text"]
+                  if text_parts:
+                      combined_text = "\n".join(text_parts)
+                      try:
+                          bedrock = boto3.client("bedrock-runtime", region_name=AWS_REGION)
+                          guardrail_resp = bedrock.apply_guardrail(
+                              guardrailIdentifier=BEDROCK_GUARDRAIL_ID,
+                              guardrailVersion=BEDROCK_GUARDRAIL_VERSION,
+                              source="OUTPUT",
+                              content=[{"text": {"text": combined_text}}],
+                          )
+                          if guardrail_resp.get("action") == "GUARDRAIL_INTERVENED":
+                              blocked_text = guardrail_resp["outputs"][0]["text"]
+                              for item in content_items:
+                                  if isinstance(item, dict) and item.get("type") == "text":
+                                      item["text"] = blocked_text
+                      except Exception as e:
+                          logger.warning("Guardrail check failed (fail-open): %s", e)
+                          try:
+                              cw = boto3.client("cloudwatch", region_name=AWS_REGION)
+                              cw.put_metric_data(Namespace="AgentCoreGateway", MetricData=[{"MetricName": "GuardrailFailure", "Value": 1, "Unit": "Count"}])
+                          except Exception:
+                              pass
+
+              return {"interceptorOutputVersion": "1.0", "mcp": {"transformedGatewayResponse": {"statusCode": 200, "headers": headers, "body": body}}}
+      Tags:
+        - Key: Name
+          Value: agentcore-gateway-response-interceptor
+        - Key: Module
+          Value: tools-gateway
+
+  ResponseInterceptorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ResponseInterceptorLambda
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*
+
+  #============================================================================
+  # EventBridge Schedule — triggers Sync Lambda every 5 minutes
+  #============================================================================
+
+  SyncScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: agentcore-gateway-sync-schedule
+      Description: Triggers Registry-to-Gateway sync every 5 minutes
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SyncLambda.Arn
+          Id: SyncLambdaTarget
+
+  SyncSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SyncLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SyncScheduleRule.Arn
+
+#============================================================================
+# Outputs
+#============================================================================
+Outputs:
+
+  GatewayRoleArn:
+    Description: IAM Role ARN for AgentCore Gateway
+    Value: !GetAtt AgentCoreGatewayRole.Arn
+    Export:
+      Name: agentcore-gateway-RoleArn
+
+  SyncLambdaArn:
+    Description: Sync Lambda ARN
+    Value: !GetAtt SyncLambda.Arn
+    Export:
+      Name: agentcore-gateway-SyncLambdaArn
+
+  SyncLambdaName:
+    Description: Sync Lambda function name
+    Value: !Ref SyncLambda
+    Export:
+      Name: agentcore-gateway-SyncLambdaName
+
+  GatewayIdSsmParam:
+    Description: SSM parameter name where create_gateway.py stores the Gateway ID
+    Value: !Sub /agentcore-gateway/${EnvironmentName}/gateway-id
+
+  RequestInterceptorArn:
+    Description: Request Interceptor Lambda ARN
+    Value: !GetAtt RequestInterceptorLambda.Arn
+    Export:
+      Name: agentcore-gateway-RequestInterceptorArn
+
+  ResponseInterceptorArn:
+    Description: Response Interceptor Lambda ARN
+    Value: !GetAtt ResponseInterceptorLambda.Arn
+    Export:
+      Name: agentcore-gateway-ResponseInterceptorArn
+
+  DemoToolLambdaArn:
+    Description: Demo search-knowledge-base Lambda ARN
+    Value: !GetAtt DemoToolLambda.Arn
+    Export:
+      Name: agentcore-gateway-DemoToolLambdaArn
+
+  ProductInfoToolArn:
+    Description: Product info tool Lambda ARN (used by Module 3)
+    Value: !GetAtt ProductInfoToolLambda.Arn
+    Export:
+      Name: agentcore-gateway-ProductInfoToolArn
+
+  # Shared Lambda ARN exports (consumed by AgentCore stack for Gateway targets)
+  FlightsMcpLambdaArn:
+    Description: Flights MCP Lambda ARN (shared with AgentCore stack)
+    Value: !GetAtt FlightsMcpLambda.Arn
+    Export:
+      Name: workshop-FlightsMcpLambdaArn
+
+  HotelsMcpLambdaArn:
+    Description: Hotels MCP Lambda ARN (shared with AgentCore stack)
+    Value: !GetAtt HotelsMcpLambda.Arn
+    Export:
+      Name: workshop-HotelsMcpLambdaArn
+
+  OrderProcessingAgentLambdaArn:
+    Description: Order Processing Agent Lambda ARN (shared with AgentCore stack)
+    Value: !GetAtt OrderProcessingAgentLambda.Arn
+    Export:
+      Name: workshop-OrderProcessingAgentLambdaArn
+
+  ProductInfoToolFunctionUrl:
+    Description: Product info tool Lambda Function URL (used by Module 3 registration)
+    Value: !GetAtt ProductInfoToolFunctionUrl.FunctionUrl
+
+  OrderAgentEndpoint:
+    Description: Order processing agent Lambda Function URL (used by Module 3 A2A registration)
+    Value: !GetAtt OrderProcessingAgentFunctionUrl.FunctionUrl
+
+  FlightsMcpFunctionUrl:
+    Description: Flights MCP Lambda Function URL (used by Module 3 registration)
+    Value: !GetAtt FlightsMcpFunctionUrl.FunctionUrl
+    Export:
+      Name: workshop-FlightsMcpFunctionUrl
+
+  HotelsMcpFunctionUrl:
+    Description: Hotels MCP Lambda Function URL (used by Module 3 registration)
+    Value: !GetAtt HotelsMcpFunctionUrl.FunctionUrl
+    Export:
+      Name: workshop-HotelsMcpFunctionUrl
+
+  # Convenience outputs: re-export Module 3 values so participants can read
+  # all configuration from a single stack. cfn-lint W6001 is expected here.
+  CognitoUserPoolId:
+    Description: Cognito User Pool ID (from Module 3)
+    Value: !ImportValue
+      Fn::Sub: ${EnvironmentName}-CognitoUserPoolId
+
+  CognitoDomain:
+    Description: Cognito domain (from Module 3)
+    Value: !ImportValue
+      Fn::Sub: ${EnvironmentName}-CognitoDomain
+
+  RegistryUrl:
+    Description: Registry URL (from Module 3)
+    Value: !ImportValue
+      Fn::Sub: ${EnvironmentName}-RegistryUrl
+
+  CloudFrontUrl:
+    Description: CloudFront URL (from Module 3)
+    Value: !ImportValue
+      Fn::Sub: ${EnvironmentName}-MainCloudFrontUrl
+
+  M2MClientId:
+    Description: Cognito M2M Client ID (from Module 3)
+    Value: !ImportValue
+      Fn::Sub: ${EnvironmentName}-CognitoM2MClientId
