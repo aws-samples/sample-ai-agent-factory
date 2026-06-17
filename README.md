@@ -1,7 +1,7 @@
 # Sample AI Agent Factory
 
 A curated collection of end-to-end samples for building, governing, and operating
-**agentic AI on AWS** — anchored on Amazon Bedrock and Amazon Bedrock AgentCore.
+**Agentic AI on AWS** — anchored on Amazon Bedrock and Amazon Bedrock AgentCore.
 
 ## Our vision
 
@@ -49,26 +49,6 @@ plus enterprise capabilities like agent versioning & rollback, Cedar policy enfo
 evaluation, cost analytics, a two-persona agent registry, and CloudFormation / Python export.
 See [`Agentic-ai-self-service/README.md`](Agentic-ai-self-service/README.md).
 
-## How they fit together
-
-```
-                ┌─────────────────────────────────────────────┐
-   build the    │   workshop-building-agentic-ai-platform/     │
-   foundation   │   governed models · tool/agent registry ·    │
-                │   security controls · observability          │
-                └───────────────────────┬─────────────────────┘
-                                         │  shared, governed platform
-                                         ▼
-                ┌─────────────────────────────────────────────┐
-   build the    │   Agentic-ai-self-service/                   │
-   agents       │   visual canvas → deploy → test → operate    │
-                └─────────────────────────────────────────────┘
-```
-
-Read the workshop to understand *why* and *how* an enterprise foundation is assembled; use the
-low-code/no-code platform to *build and ship* agents on AgentCore quickly. You can explore either
-independently — they don't require each other to run — but together they tell the full
-factory story.
 
 ## Getting started
 
