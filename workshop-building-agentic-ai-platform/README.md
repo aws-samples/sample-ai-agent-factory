@@ -98,8 +98,8 @@ works identically.
 ### Quick start (self-paced)
 
 ```bash
-git clone https://github.com/awslabs/agentic-ai-platform.git
-cd agentic-ai-platform/workshop-agentic-ai-platform-agentcore
+git clone https://github.com/aws-samples/sample-ai-agent-factory.git
+cd sample-ai-agent-factory/workshop-building-agentic-ai-platform
 
 # Set a supported region (default us-west-2; see Prerequisites above)
 aws configure set region us-west-2   # or us-east-1, eu-west-1
@@ -158,7 +158,7 @@ that otherwise blocks VPC deletion).
 ## Repository structure
 
 ```
-workshop-agentic-ai-platform-agentcore/   # inside the awslabs/agentic-ai-platform repository
+workshop-building-agentic-ai-platform/   # inside the aws-samples/sample-ai-agent-factory repository
 ├── content/                      # Workshop markdown (Workshop Studio builds from here)
 │   ├── index.en.md               # Landing page
 │   ├── introduction/             # Intro + getting-started (aws-event + self-service paths)

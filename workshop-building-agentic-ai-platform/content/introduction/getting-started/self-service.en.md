@@ -50,10 +50,10 @@ We recommend running this in a **dedicated AWS account** you can tear down after
 
 The deploying principal needs permission to create that infrastructure (CloudFormation, EC2/VPC, ECS, Lambda, IAM roles, Secrets Manager, DocumentDB/RDS, Cognito, Bedrock, AgentCore, CloudFront, and more). Attach the **scoped deploy policies** included in this repository:
 
-- [`static/cfn/self-service-deploy-policy-1.json`](https://github.com/awslabs/agentic-ai-platform/blob/main/workshop-agentic-ai-platform-agentcore/static/cfn/self-service-deploy-policy-1.json)
-- [`static/cfn/self-service-deploy-policy-2.json`](https://github.com/awslabs/agentic-ai-platform/blob/main/workshop-agentic-ai-platform-agentcore/static/cfn/self-service-deploy-policy-2.json)
-- [`static/cfn/self-service-deploy-policy-3.json`](https://github.com/awslabs/agentic-ai-platform/blob/main/workshop-agentic-ai-platform-agentcore/static/cfn/self-service-deploy-policy-3.json)
-- [`static/cfn/self-service-deploy-policy-4.json`](https://github.com/awslabs/agentic-ai-platform/blob/main/workshop-agentic-ai-platform-agentcore/static/cfn/self-service-deploy-policy-4.json)
+- [`static/cfn/self-service-deploy-policy-1.json`](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/workshop-building-agentic-ai-platform/static/cfn/self-service-deploy-policy-1.json)
+- [`static/cfn/self-service-deploy-policy-2.json`](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/workshop-building-agentic-ai-platform/static/cfn/self-service-deploy-policy-2.json)
+- [`static/cfn/self-service-deploy-policy-3.json`](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/workshop-building-agentic-ai-platform/static/cfn/self-service-deploy-policy-3.json)
+- [`static/cfn/self-service-deploy-policy-4.json`](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/workshop-building-agentic-ai-platform/static/cfn/self-service-deploy-policy-4.json)
 
 They grant only the **explicit actions the workshop stacks actually use** (no `service:*` wildcards), with every regional statement restricted to the validated regions via an `aws:RequestedRegion` condition. The action list is split across four files because it exceeds a single IAM managed policy's 6,144-character limit. Create each as a customer-managed policy and attach all four to the user or role that runs the deploy:
 
@@ -69,7 +69,7 @@ done
 
 ::alert[Prefer not to manage four policies? `AdministratorAccess` on the deploying principal also works for a dedicated workshop account — the scoped policies are the least-privilege option for accounts where that matters.]{type="info"}
 
-::alert[If your account is part of an AWS Organization and you want an extra guardrail, you can apply [`static/cfn/self-service-scp.json`](https://github.com/awslabs/agentic-ai-platform/blob/main/workshop-agentic-ai-platform-agentcore/static/cfn/self-service-scp.json) as a Service Control Policy — it restricts the account to the validated regions and blocks account/billing changes. This is optional hardening, not required to run the workshop.]{type="info"}
+::alert[If your account is part of an AWS Organization and you want an extra guardrail, you can apply [`static/cfn/self-service-scp.json`](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/workshop-building-agentic-ai-platform/static/cfn/self-service-scp.json) as a Service Control Policy — it restricts the account to the validated regions and blocks account/billing changes. This is optional hardening, not required to run the workshop.]{type="info"}
 
 ::alert[The deploy provisions a Code Editor IDE on an EC2 instance with a scoped instance role (it mirrors the workshop's permission set plus the CDK actions Module 4 needs). This is the environment you run module commands from — another reason to use a dedicated, disposable account and tear it down when finished.]{type="warning"}
 
@@ -78,11 +78,11 @@ done
 ## Clone the Workshop Repository
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
-git clone https://github.com/awslabs/agentic-ai-platform.git
-cd agentic-ai-platform/workshop-agentic-ai-platform-agentcore
+git clone https://github.com/aws-samples/sample-ai-agent-factory.git
+cd sample-ai-agent-factory/workshop-building-agentic-ai-platform
 :::
 
-::alert[The public `awslabs` repository URL above (`https://github.com/awslabs/agentic-ai-platform`, directory `workshop-agentic-ai-platform-agentcore`) is a placeholder until the workshop is published. If you received this content as a repository or archive, use that copy: `cd` into its root (the directory containing `deploy-cfn.sh` and `contentspec.yaml`) and continue.]{type="info"}
+::alert[The workshop lives in the public `aws-samples` repository above (`https://github.com/aws-samples/sample-ai-agent-factory`, directory `workshop-building-agentic-ai-platform`). If you received this content as a different repository copy or an archive, use that copy: `cd` into its root (the directory containing `deploy-cfn.sh` and `contentspec.yaml`) and continue.]{type="info"}
 
 ## Deploy the Platform
 
