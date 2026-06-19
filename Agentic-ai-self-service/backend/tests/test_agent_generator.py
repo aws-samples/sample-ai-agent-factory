@@ -130,6 +130,115 @@ def test_rejects_edge_referencing_unknown_suffix():
     assert "ghost" in err
 
 
+def _tool_node(suffix, tool_id="duckduckgo_search", is_custom=False, input_schema=None):
+    cfg = {
+        "name": tool_id,
+        "toolId": tool_id,
+        "description": "A tool.",
+        "enabled": True,
+        "isCustom": is_custom,
+    }
+    if input_schema is not None:
+        cfg["inputSchema"] = input_schema
+    return {
+        "idSuffix": suffix,
+        "type": "tool",
+        "label": tool_id,
+        "position": {"x": 250, "y": 100},
+        "configuration": cfg,
+    }
+
+
+def _gateway_node(suffix="gw"):
+    return {
+        "idSuffix": suffix,
+        "type": "gateway",
+        "label": "Gateway",
+        "position": {"x": 500, "y": 100},
+        "configuration": {"name": "Gateway", "tools": [], "auth": "cognito"},
+    }
+
+
+def test_rejects_tool_connected_directly_to_runtime():
+    """The reported bug: tool -> runtime edge ('Cannot connect tool to runtime')."""
+    spec = {
+        "nodes": [_runtime_node("rt"), _gateway_node("gw"), _tool_node("t1")],
+        "edges": [
+            {"sourceIdSuffix": "gw", "targetIdSuffix": "rt", "connectionType": "data"},
+            {"sourceIdSuffix": "t1", "targetIdSuffix": "rt", "connectionType": "data"},
+        ],
+    }
+    err = _validate_spec(spec)
+    assert err is not None
+    assert "Cannot connect tool to runtime" in err or "directly to the runtime" in err
+
+
+def test_rejects_tool_without_gateway():
+    spec = {
+        "nodes": [_runtime_node("rt"), _tool_node("t1")],
+        "edges": [
+            {"sourceIdSuffix": "t1", "targetIdSuffix": "rt", "connectionType": "data"},
+        ],
+    }
+    err = _validate_spec(spec)
+    assert err is not None
+    assert "gateway" in err
+
+
+def test_rejects_tool_with_no_edge_to_gateway():
+    spec = {
+        "nodes": [_runtime_node("rt"), _gateway_node("gw"), _tool_node("t1")],
+        "edges": [
+            {"sourceIdSuffix": "gw", "targetIdSuffix": "rt", "connectionType": "data"},
+            # t1 is orphaned — no edge to the gateway
+        ],
+    }
+    err = _validate_spec(spec)
+    assert err is not None
+    assert "t1" in err
+
+
+def test_rejects_gateway_without_edge_to_runtime():
+    spec = {
+        "nodes": [_runtime_node("rt"), _gateway_node("gw"), _tool_node("t1")],
+        "edges": [
+            {"sourceIdSuffix": "t1", "targetIdSuffix": "gw", "connectionType": "data"},
+            # gateway never reaches the runtime
+        ],
+    }
+    err = _validate_spec(spec)
+    assert err is not None
+    # The gateway is a support node, so it must reach the runtime.
+    assert "gw" in err and "runtime" in err
+
+
+def test_canonical_tool_gateway_runtime_spec_passes():
+    """The correct shape: tool -> gateway -> runtime."""
+    spec = {
+        "nodes": [
+            _runtime_node("rt"),
+            _gateway_node("gw"),
+            _tool_node("t1", tool_id="duckduckgo_search"),
+            _tool_node(
+                "t2",
+                tool_id="create_jira_ticket",
+                is_custom=True,
+                input_schema={
+                    "type": "object",
+                    "properties": {"summary": {"type": "string"}},
+                    "required": ["summary"],
+                },
+            ),
+        ],
+        "edges": [
+            {"sourceIdSuffix": "gw", "targetIdSuffix": "rt", "connectionType": "data"},
+            {"sourceIdSuffix": "t1", "targetIdSuffix": "gw", "connectionType": "data"},
+            {"sourceIdSuffix": "t2", "targetIdSuffix": "gw", "connectionType": "data"},
+        ],
+    }
+    assert _validate_spec(spec) is None
+
+
 def test_full_spec_with_memory_and_guardrails_passes():
     spec = {
         "nodes": [

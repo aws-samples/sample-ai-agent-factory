@@ -102,10 +102,18 @@ GENERATION_PROMPT = """Generate an AgentCore canvas spec from the conversation. 
 # RULES
 
 - The runtime node MUST come first in the `nodes` array.
-- Every non-runtime node MUST have an edge from itself to the runtime
-  (`source` = the support node, `target` = the runtime). `connectionType`
-  is "data" for tool-like nodes and "control" for guardrails / observability /
-  evaluation.
+- Most non-runtime nodes (memory, guardrails, evaluation, observability) MUST
+  have an edge from themselves to the runtime (`source` = the support node,
+  `target` = the runtime). `connectionType` is "data" for tool-like nodes and
+  "control" for guardrails / observability / evaluation.
+- TOOL WIRING (critical — `tool` nodes may NOT connect to the runtime directly):
+  tools attach to a gateway, and the gateway attaches to the runtime. So whenever
+  you emit ANY `tool` node you MUST also emit exactly one `gateway` node and wire:
+      * one edge `gateway -> runtime` (`connectionType` "data"), and
+      * one edge per tool `tool -> gateway` (`connectionType` "data").
+  The canonical shape is `tool -> gateway -> runtime`. Never emit a
+  `tool -> runtime` edge (the canvas rejects it: "Cannot connect tool to runtime"),
+  and never emit a `tool` node without a `gateway` node.
 - Use position offsets so nodes don't overlap: runtime at (500, 300),
   support nodes laid out in a circle around it (e.g. (250, 100), (750, 100),
   (250, 500), (750, 500)).
@@ -267,11 +275,44 @@ def _validate_spec(spec: dict) -> Optional[str]:
         if src not in valid_suffixes or tgt not in valid_suffixes:
             return f"edge {src}->{tgt} references unknown suffix"
 
-    # Every non-runtime node should have an edge into the runtime.
+    # Tool nodes wire through a gateway, NOT straight to the runtime — the canvas
+    # connection matrix only permits `tool -> gateway` (a `tool -> runtime` edge
+    # fails with "Cannot connect tool to runtime"). Every other support node
+    # (memory, guardrails, ...) edges directly to the runtime.
+    tool_suffixes = {n.get("idSuffix") for n in nodes if n.get("type") == "tool"}
+    gateway_suffixes = {n.get("idSuffix") for n in nodes if n.get("type") == "gateway"}
+
+    if tool_suffixes and not gateway_suffixes:
+        return (
+            "tool nodes require a gateway node — tools attach to a gateway, not the "
+            "runtime. Add a 'gateway' node, wire each tool 'tool -> gateway', and "
+            "wire 'gateway -> runtime'."
+        )
+
+    # No tool may connect directly to the runtime.
+    for e in edges:
+        if e.get("sourceIdSuffix") in tool_suffixes and e.get("targetIdSuffix") == runtime_suffix:
+            return (
+                f"tool node '{e.get('sourceIdSuffix')}' connects directly to the runtime "
+                "(invalid: 'Cannot connect tool to runtime'). Wire it to the gateway "
+                "instead ('tool -> gateway'), and wire 'gateway -> runtime'."
+            )
+
+    # Each support node must reach the runtime by the right route: tools via a
+    # gateway, everything else (and the gateway itself) straight to the runtime.
     for n in nodes:
         s = n.get("idSuffix")
         if s == runtime_suffix:
             continue
+        if s in tool_suffixes:
+            if not any(
+                e.get("sourceIdSuffix") == s and e.get("targetIdSuffix") in gateway_suffixes
+                for e in edges
+            ):
+                return f"tool node '{s}' has no edge to a gateway ('tool -> gateway')"
+            continue
+        # The gateway is a non-tool support node, so this also enforces the
+        # required `gateway -> runtime` edge.
         if not any(e.get("sourceIdSuffix") == s and e.get("targetIdSuffix") == runtime_suffix for e in edges):
             return f"non-runtime node '{s}' has no edge to runtime '{runtime_suffix}'"
 
