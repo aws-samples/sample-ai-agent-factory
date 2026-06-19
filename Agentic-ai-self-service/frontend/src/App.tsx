@@ -16,6 +16,7 @@ import { TemplateGallery } from './components/templates';
 import { MemoryConfigurationModal } from './components/modals/MemoryConfigurationModal';
 import { PolicyConfigurationModal } from './components/modals/PolicyConfigurationModal';
 import { KnowledgeBaseConfigModal } from './components/modals/KnowledgeBaseConfigModal';
+import { ToolConfigModal } from './components/modals/ToolConfigModal';
 import { GuardrailsConfigurationModal } from './components/modals/GuardrailsConfigurationModal';
 import { ObservabilityConfigurationModal } from './components/modals/ObservabilityConfigurationModal';
 import { EvaluationConfigurationModal, type EvaluationNodeConfig } from './components/modals/EvaluationConfigurationModal';
@@ -756,6 +757,17 @@ function App() {
           onClose={handleCloseConfig}
           onSave={(config) => handleSaveConfig(config)}
           initialConfig={configModal.initialConfig as Partial<KnowledgeBaseToolConfig>}
+        />
+      )}
+
+      {/* Built-in / custom tools (non-knowledge-base) — without this the
+          Configure action on a custom tool node opened no modal at all. */}
+      {configModal.componentType === 'tool' && !(configModal.initialConfig as unknown as Record<string, unknown>)?.isKnowledgeBase && (
+        <ToolConfigModal
+          isOpen={configModal.isOpen}
+          onClose={handleCloseConfig}
+          onSave={(config) => handleSaveConfig(config)}
+          initialConfig={configModal.initialConfig as Partial<ToolConfiguration>}
         />
       )}
 

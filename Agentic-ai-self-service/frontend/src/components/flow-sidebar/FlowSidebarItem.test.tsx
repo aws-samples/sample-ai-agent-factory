@@ -38,7 +38,7 @@ const flowSummaryArb: fc.Arbitrary<FlowSummary> = fc.record({
 // ============================================================================
 
 type OnOpenFn = (id: string) => void;
-type OnRenameFn = (id: string, currentName: string) => void;
+type OnRenameFn = (id: string, currentName: string, newName: string) => void;
 type OnDeleteFn = (id: string) => void;
 
 function renderItem(
@@ -121,11 +121,11 @@ describe('Property: active flow has distinct styling', () => {
 
 
 // ============================================================================
-// Test: Pen icon triggers onRename
+// Test: Pen icon starts inline rename
 // Validates: Requirements 5.1
 // ============================================================================
 
-describe('Test: pen icon triggers onRename', () => {
+describe('Test: pen icon starts inline rename', () => {
   let onRename: ReturnType<typeof vi.fn<OnRenameFn>>;
   const flow: FlowSummary = {
     id: 'test-id-123',
@@ -139,12 +139,51 @@ describe('Test: pen icon triggers onRename', () => {
     onRename = vi.fn<OnRenameFn>();
   });
 
-  it('should call onRename with (flow.id, flow.name) when edit button is clicked', () => {
+  it('reveals an inline edit input (not a prompt) when the edit button is clicked', () => {
+    renderItem(flow, { onRename });
+
+    // The pen only enters edit mode — it does not fire onRename by itself.
+    expect(screen.queryByTestId('flow-sidebar-item-rename-input')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('flow-sidebar-item-edit'));
+
+    const input = screen.getByTestId('flow-sidebar-item-rename-input') as HTMLInputElement;
+    expect(input).toBeInTheDocument();
+    expect(input.value).toBe(flow.name);
+    expect(onRename).not.toHaveBeenCalled();
+  });
+
+  it('calls onRename with (id, currentName, newName) when the edit is confirmed', () => {
     renderItem(flow, { onRename });
 
     fireEvent.click(screen.getByTestId('flow-sidebar-item-edit'));
+    const input = screen.getByTestId('flow-sidebar-item-rename-input');
+    fireEvent.change(input, { target: { value: 'Renamed Flow' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
     expect(onRename).toHaveBeenCalledOnce();
-    expect(onRename).toHaveBeenCalledWith(flow.id, flow.name);
+    expect(onRename).toHaveBeenCalledWith(flow.id, flow.name, 'Renamed Flow');
+  });
+
+  it('does not call onRename when the name is unchanged', () => {
+    renderItem(flow, { onRename });
+
+    fireEvent.click(screen.getByTestId('flow-sidebar-item-edit'));
+    const input = screen.getByTestId('flow-sidebar-item-rename-input');
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(onRename).not.toHaveBeenCalled();
+  });
+
+  it('cancels the rename on Escape without calling onRename', () => {
+    renderItem(flow, { onRename });
+
+    fireEvent.click(screen.getByTestId('flow-sidebar-item-edit'));
+    const input = screen.getByTestId('flow-sidebar-item-rename-input');
+    fireEvent.change(input, { target: { value: 'Discarded' } });
+    fireEvent.keyDown(input, { key: 'Escape' });
+
+    expect(onRename).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('flow-sidebar-item-rename-input')).not.toBeInTheDocument();
   });
 });
 

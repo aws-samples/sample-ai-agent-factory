@@ -165,13 +165,18 @@ describe('Property 1: Node Creation at Drop Position', () => {
     );
   });
 
-  it('created node starts unselected with pending validation', () => {
+  it('created node starts unselected with the correct initial validation status', () => {
+    // Pre-configured components need no config modal, so they land 'valid';
+    // everything else lands 'pending' until configured. (KB tools — which are
+    // also 'pending' — are exercised separately since they need a toolId.)
+    const PRECONFIGURED: AgentCoreComponentType[] = ['code_interpreter', 'browser', 'observability'];
     fc.assert(
       fc.property(componentTypeArb, positionArb, (componentType, position) => {
         const node = createNodeFromDrop(componentType, position);
 
         expect(node.selected).toBe(false);
-        expect(node.data.validationStatus).toBe('pending');
+        const expected = PRECONFIGURED.includes(componentType) ? 'valid' : 'pending';
+        expect(node.data.validationStatus).toBe(expected);
       }),
       { numRuns: 100 }
     );
