@@ -9,6 +9,7 @@ Run:
 
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -41,7 +42,16 @@ RUN_ID = uuid.uuid4().hex[:6]
 
 
 def log(msg):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    # SECURITY (CodeQL py/clear-text-logging-sensitive-data): this e2e harness
+    # handles live Cognito client_secrets. Redact anything that looks like a
+    # secret/token before it reaches stdout. Rebuilding the string here also
+    # severs the taint flow from any secret-bearing local the caller passes.
+    safe = re.sub(
+        r"(?i)(secret|password|token|api[_-]?key)\s*[=:]\s*\S+",
+        r"\1=***REDACTED***",
+        str(msg),
+    )
+    print(f"[{time.strftime('%H:%M:%S')}] {safe}", flush=True)
 
 
 def main():

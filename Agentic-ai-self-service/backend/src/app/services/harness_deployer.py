@@ -578,7 +578,11 @@ def invoke_harness(
     try:
         resp = data.invoke_harness(**params)
     except Exception as e:  # noqa: BLE001
-        return {"success": False, "error": str(e), "output": "", "stop_reason": "", "tool_calls": []}
+        # SECURITY (CodeQL py/clear-text + stack-trace-exposure): keep the raw
+        # exception text OUT of the returned dict (callers surface `error`/`output`
+        # to clients). Log detail server-side; return a generic message.
+        logger.warning("invoke_harness failed: %s", e)
+        return {"success": False, "error": "Harness invocation failed", "output": "", "stop_reason": "", "tool_calls": []}
 
     text_parts: list[str] = []
     tool_calls: list[str] = []
@@ -600,9 +604,11 @@ def invoke_harness(
             elif "runtimeClientError" in event:
                 error = event["runtimeClientError"].get("message", "runtime client error")
     except Exception as e:  # noqa: BLE001
+        # SECURITY: don't leak the raw exception text via the returned dict.
+        logger.warning("invoke_harness stream read failed: %s", e)
         return {
             "success": False,
-            "error": f"stream read failed: {e}",
+            "error": "Harness stream read failed",
             "output": "".join(text_parts),
             "stop_reason": stop_reason,
             "tool_calls": tool_calls,
