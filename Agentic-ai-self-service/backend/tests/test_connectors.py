@@ -515,7 +515,10 @@ def test_catalog_connector_spec_fetched_against_spec_host_not_api_host():
 
     # The spec was fetched from the GitHub raw host...
     assert captured["url"] == CONNECTOR_CATALOG["asana"]["spec_url"]
-    assert "raw.githubusercontent.com" in captured["url"]
+    # Compare the parsed HOST exactly (not a substring check, which CodeQL flags
+    # as py/incomplete-url-substring-sanitization).
+    from urllib.parse import urlparse as _urlparse
+    assert _urlparse(captured["url"]).hostname == "raw.githubusercontent.com"
     # ...and validated against the SPEC-host allowlist, NOT the API allowlist.
     assert captured["allowlist"] == ["raw.githubusercontent.com"]
     assert "app.asana.com" not in (captured["allowlist"] or [])

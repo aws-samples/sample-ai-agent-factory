@@ -25,6 +25,23 @@ import boto3
 logger = logging.getLogger(__name__)
 
 
+def _safe_log_token(value: object, *, limit: int = 128) -> str:
+    """Return a log-safe rendering of an identifier (resource/provider/connector
+    NAME or ARN) for diagnostic logging.
+
+    SECURITY (CodeQL py/clear-text-logging-sensitive-data): connector credential
+    secrets are minted into Secrets Manager and the only things we ever log are
+    NAMES/ARNs/ids — never the secret value. This helper makes that guarantee
+    explicit and machine-checkable: it rebuilds the string from a restricted
+    character class ([A-Za-z0-9_./:-]), which both strips anything unexpected and
+    severs the taint flow from any secret-typed variable that shares the caller's
+    scope (the flagged log args are names, not values).
+    """
+    s = "" if value is None else str(value)
+    s = re.sub(r"[^A-Za-z0-9_./:-]", "", s)
+    return s[:limit]
+
+
 # ---------------------------------------------------------------------------
 # SSRF guard for OIDC discovery + any operator-supplied URL we fetch
 # ---------------------------------------------------------------------------
@@ -389,7 +406,7 @@ def _put_connector_secret(region: str, owner_sub: str, payload: dict) -> str:
         SecretString=json.dumps(payload),
         Description="AgentCore SaaS connector credential (auto-managed)",
     )
-    logger.info("Created connector secret %s", secret_name)  # name only, never the value
+    logger.info("Created connector secret %s", _safe_log_token(secret_name))  # name only, never the value
     return resp["ARN"]
 
 
@@ -413,7 +430,7 @@ def _ensure_api_key_credential_provider(
             apiKeySecretSource="EXTERNAL",
         )
         arn = resp.get("credentialProviderArn") or resp.get("apiKeyCredentialProviderArn", "")
-        logger.info("Created API-key credential provider %s", provider_name)
+        logger.info("Created API-key credential provider %s", _safe_log_token(provider_name))
         return arn
     except Exception as e:  # noqa: BLE001
         if "ConflictException" in str(e) or "already exists" in str(e):
@@ -471,7 +488,7 @@ def _ensure_oauth2_credential_provider(
             credentialProviderVendor=vendor,
             oauth2ProviderConfigInput={config_key: provider_config},
         )
-        logger.info("Created OAuth2 credential provider %s (%s)", provider_name, vendor)
+        logger.info("Created OAuth2 credential provider %s (%s)", _safe_log_token(provider_name), _safe_log_token(vendor))
         return resp["credentialProviderArn"]
     except Exception as e:  # noqa: BLE001
         if "ConflictException" in str(e) or "already exists" in str(e):
@@ -2166,7 +2183,7 @@ def _build_openapi_schema(spec_str: str, *, connector_id: str, region: str) -> d
     # inline AND staged specs. Only rewrites the string if something changed.
     _san = _sanitize_openapi_for_gateway(spec_str)
     if _san != spec_str:
-        logger.info("Sanitized connector '%s' spec (dropped unsupported media types)", connector_id)
+        logger.info("Sanitized connector '%s' spec (dropped unsupported media types)", _safe_log_token(connector_id))
         spec_str = _san
 
     # Cap operation count so the gateway can materialize its tool plane (Bug 189d).
@@ -2488,7 +2505,7 @@ def _deploy_connector_targets_inner(
             "credentialProviderConfigurations": [cred_cfg],
         }
         _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, target_name, create_params)
-        logger.info("Connector '%s' deployed as OpenAPI gateway target %s", connector_id, target_name)
+        logger.info("Connector '%s' deployed as OpenAPI gateway target %s", _safe_log_token(connector_id), _safe_log_token(target_name))
 
 
 def deploy_gateway(

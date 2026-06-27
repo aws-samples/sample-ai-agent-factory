@@ -351,12 +351,15 @@ class DeploymentStateStore:
                     ":empty": [],
                 },
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # SECURITY (CodeQL py/clear-text-logging-sensitive-data): log only the
+            # resource TYPE and the exception CLASS — never the resource dict or a
+            # full traceback, which could carry a secret-bearing local in frame.
             logger.warning(
-                "record_resource failed for %s (non-fatal): %s",
+                "record_resource failed for %s (non-fatal): type=%s err=%s",
                 deployment_id,
-                resource.get("type"),
-                exc_info=True,
+                str(resource.get("type")),
+                type(exc).__name__,
             )
 
     def update_status(
