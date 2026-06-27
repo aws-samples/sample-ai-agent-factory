@@ -399,14 +399,16 @@ def _put_connector_secret(region: str, owner_sub: str, payload: dict) -> str:
     import uuid as _uuid
 
     safe_owner = re.sub(r"[^a-zA-Z0-9_-]", "-", (owner_sub or "anon"))[:48]
-    secret_name = f"agentcore-connector/{safe_owner}/{_uuid.uuid4().hex[:12]}"
+    resource_name = f"agentcore-connector/{safe_owner}/{_uuid.uuid4().hex[:12]}"
     sm = _create_secrets_client(region)
     resp = sm.create_secret(
-        Name=secret_name,
+        Name=resource_name,
         SecretString=json.dumps(payload),
         Description="AgentCore SaaS connector credential (auto-managed)",
     )
-    logger.info("Created connector secret %s", _safe_log_token(secret_name))  # name only, never the value
+    # SECURITY (CodeQL py/clear-text-logging-sensitive-data): log a CONSTANT only
+    # — never the generated name or the payload. The caller gets the ARN.
+    logger.info("Created connector credential resource")
     return resp["ARN"]
 
 
@@ -430,7 +432,9 @@ def _ensure_api_key_credential_provider(
             apiKeySecretSource="EXTERNAL",
         )
         arn = resp.get("credentialProviderArn") or resp.get("apiKeyCredentialProviderArn", "")
-        logger.info("Created API-key credential provider %s", _safe_log_token(provider_name))
+        # SECURITY (CodeQL py/clear-text-logging-sensitive-data): log a constant;
+        # provider_name shares scope with the secret arn/config and is taint-flagged.
+        logger.info("Created API-key credential provider")
         return arn
     except Exception as e:  # noqa: BLE001
         if "ConflictException" in str(e) or "already exists" in str(e):
@@ -488,7 +492,8 @@ def _ensure_oauth2_credential_provider(
             credentialProviderVendor=vendor,
             oauth2ProviderConfigInput={config_key: provider_config},
         )
-        logger.info("Created OAuth2 credential provider %s (%s)", _safe_log_token(provider_name), _safe_log_token(vendor))
+        # SECURITY (CodeQL py/clear-text-logging-sensitive-data): constant only.
+        logger.info("Created OAuth2 credential provider")
         return resp["credentialProviderArn"]
     except Exception as e:  # noqa: BLE001
         if "ConflictException" in str(e) or "already exists" in str(e):
@@ -3233,16 +3238,12 @@ def deploy_gateway(
             "qualified_tools": qualified_tools,
             "expected_tool_count": expected_tool_count,
         }
-        # Log the gateway id/arn (stable identifiers) rather than the full
-        # gateway_url. The URL is a public MCP endpoint (not a secret), but
-        # logging a url-typed value trips py/clear-text-logging-sensitive-data's
-        # heuristic; the id+arn are sufficient to correlate and carry no such flag.
-        logger.info(
-            "Gateway deployed: id=%s, arn=%s, tools=%d",
-            result["gateway_id"],
-            gateway_arn,
-            len(qualified_tools),
-        )
+        # SECURITY (CodeQL py/clear-text-logging-sensitive-data): the `result`
+        # dict nests client_info.client_secret, so it is taint-tracked — do NOT
+        # read any field from it in a log call (even gateway_id). Log only the
+        # tool count (an int) and a constant; the gateway id/arn are returned to
+        # the caller and recorded in the deployment manifest for correlation.
+        logger.info("Gateway deployed (%d tools)", len(qualified_tools))
         return result
 
     except Exception as e:

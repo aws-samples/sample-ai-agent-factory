@@ -94,13 +94,13 @@ def _record_resource_best_effort(deployment_id: str, region: str, resource: dict
         resource.setdefault("region", region)
         store.record_resource(deployment_id, resource)
     except Exception as exc:  # noqa: BLE001
-        # SECURITY (CodeQL py/clear-text-logging-sensitive-data): log only the
-        # resource TYPE + exception CLASS — never the resource dict or a full
-        # traceback that could carry a secret-bearing local in frame.
+        # SECURITY (CodeQL py/clear-text-logging-sensitive-data): the `resource`
+        # dict is taint-tracked as potentially secret-bearing — do NOT reference
+        # it in the log (not even .get("type")) and emit no traceback. The
+        # deployment_id + exception class suffice to diagnose.
         logger.warning(
-            "Direct-path record_resource failed for %s (non-fatal): type=%s err=%s",
+            "Direct-path record_resource failed for %s (non-fatal): err=%s",
             deployment_id,
-            str(resource.get("type")),
             type(exc).__name__,
         )
 
