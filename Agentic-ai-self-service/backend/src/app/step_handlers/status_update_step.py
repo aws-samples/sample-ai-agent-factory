@@ -84,6 +84,14 @@ def handler(event: dict, context) -> dict:
         knowledge_base_result = event.get("knowledge_base_result") or {}
         guardrails_result = event.get("guardrails_result") or {}
         mcp_server_runtime_id = event.get("mcp_server_runtime_id")
+        # Phase B — HARNESS mode. The harness_step puts harness_id/harness_arn/
+        # deployment_mode on the event INSTEAD of runtime_id/runtime_arn. Persist
+        # them so the DELETE / test-runtime handlers can route to harness_deployer
+        # (and find the ARN to invoke). deployment_mode is also written at create
+        # time in deployment_handler, but we re-affirm it here for completeness.
+        harness_id = event.get("harness_id")
+        harness_arn = event.get("harness_arn")
+        deployment_mode = event.get("deployment_mode")
 
         if error_details:
             # Save partial results so delete handler can clean up
@@ -100,6 +108,9 @@ def handler(event: dict, context) -> dict:
                 knowledge_base_result=knowledge_base_result if knowledge_base_result else None,
                 guardrails_result=guardrails_result if guardrails_result else None,
                 mcp_server_runtime_id=mcp_server_runtime_id,
+                harness_id=harness_id,
+                harness_arn=harness_arn,
+                deployment_mode=deployment_mode,
             )
             # Best-effort: flip the AgentVersion row to failed so version
             # history reflects the partial deploy.
@@ -140,6 +151,9 @@ def handler(event: dict, context) -> dict:
             memory_result=memory_result if memory_result else None,
             knowledge_base_result=knowledge_base_result if knowledge_base_result else None,
             mcp_server_runtime_id=mcp_server_runtime_id,
+            harness_id=harness_id,
+            harness_arn=harness_arn,
+            deployment_mode=deployment_mode,
         )
 
         # Phase 1 Gap 1A — flip the AgentVersion row to succeeded and update

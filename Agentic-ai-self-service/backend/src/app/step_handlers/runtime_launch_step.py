@@ -14,7 +14,10 @@ import boto3
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.observability_dashboard import put_dashboard_for_runtime
-from app.services.runtime_deployer import wait_for_runtime_ready
+from app.services.runtime_deployer import (
+    wait_for_default_endpoint_ready,
+    wait_for_runtime_ready,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,29 +52,33 @@ def handler(event: dict, context) -> dict:
 
         agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
 
+        # Manifest: re-record the runtime for generic teardown (idempotent with
+        # runtime_configure_step; covers any caller that reaches launch without
+        # the configure manifest write). Best-effort: never fails the deploy.
+        store.record_resource(
+            deployment_id,
+            {"type": "agent_runtime", "id": runtime_id, "region": region},
+        )
+
         result = wait_for_runtime_ready(agentcore_ctrl, runtime_id, timeout=540)
 
         if not result.get("success"):
             raise RuntimeError(f"Runtime launch failed: {result.get('error', 'unknown')}")
 
-        # Get runtime endpoint ARN
-        endpoint_url = ""
-        try:
-            endpoints = agentcore_ctrl.list_agent_runtime_endpoints(agentRuntimeId=runtime_id)
-            for ep in endpoints.get("runtimeEndpoints", []):
-                ep_arn = ep.get("agentRuntimeEndpointArn", "")
-                ep_status = ep.get("status", "")
-                if ep_arn and ep_status == "READY":
-                    endpoint_url = ep_arn
-                    break
-                elif ep_arn:
-                    endpoint_url = ep_arn  # Use any available endpoint
-        except Exception as ep_err:
-            logger.warning("Could not list runtime endpoints: %s", ep_err)
-
-        # If no endpoint URL found, construct the runtime ARN as the endpoint
-        if not endpoint_url:
-            endpoint_url = result.get("arn", "")
+        # Bug 166: the runtime being READY is NOT enough to invoke — the DEFAULT
+        # endpoint qualifier the data plane invokes against is provisioned
+        # asynchronously and can lag the runtime's own READY. Gate on the
+        # endpoint here so a deploy never reports success while the agent is
+        # still uninvokable (the old code silently fell back to the bare runtime
+        # ARN, which surfaced to users as "Runtime not found." on first invoke).
+        ep_result = wait_for_default_endpoint_ready(
+            agentcore_ctrl, runtime_id, timeout=180
+        )
+        if not ep_result.get("success"):
+            raise RuntimeError(
+                f"Runtime launch failed: {ep_result.get('error', 'DEFAULT endpoint not READY')}"
+            )
+        endpoint_url = ep_result.get("endpoint_arn") or result.get("arn", "")
 
         # Phase 1 Gap 1D — every successful runtime gets a CloudWatch
         # dashboard with widgets for invocations / latency / tokens / errors

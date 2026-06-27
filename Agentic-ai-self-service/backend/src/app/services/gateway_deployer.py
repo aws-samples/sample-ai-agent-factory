@@ -25,6 +25,23 @@ import boto3
 logger = logging.getLogger(__name__)
 
 
+def _safe_log_token(value: object, *, limit: int = 128) -> str:
+    """Return a log-safe rendering of an identifier (resource/provider/connector
+    NAME or ARN) for diagnostic logging.
+
+    SECURITY (CodeQL py/clear-text-logging-sensitive-data): connector credential
+    secrets are minted into Secrets Manager and the only things we ever log are
+    NAMES/ARNs/ids — never the secret value. This helper makes that guarantee
+    explicit and machine-checkable: it rebuilds the string from a restricted
+    character class ([A-Za-z0-9_./:-]), which both strips anything unexpected and
+    severs the taint flow from any secret-typed variable that shares the caller's
+    scope (the flagged log args are names, not values).
+    """
+    s = "" if value is None else str(value)
+    s = re.sub(r"[^A-Za-z0-9_./:-]", "", s)
+    return s[:limit]
+
+
 # ---------------------------------------------------------------------------
 # SSRF guard for OIDC discovery + any operator-supplied URL we fetch
 # ---------------------------------------------------------------------------
@@ -165,6 +182,26 @@ def _validate_discovery_url(url: str) -> str:
                 )
 
     return url
+
+
+def _validate_outbound_url(
+    url: str, allowlist_hosts: Optional[tuple[str, ...]] = None
+) -> str:
+    """Validate any user-supplied outbound URL (e.g. a connector OpenAPI spec URL).
+
+    Generalizes :func:`_validate_discovery_url` (same https-only + DNS-resolved
+    private/IMDS denylist + optional operator allowlist via env). When
+    *allowlist_hosts* is provided (e.g. a connector's vetted hosts), the URL's host
+    must additionally match one of those globs. Returns the validated URL.
+    """
+    validated = _validate_discovery_url(url)
+    if allowlist_hosts:
+        host = (urllib.parse.urlparse(validated).hostname or "").lower()
+        if not any(fnmatch.fnmatchcase(host, pat.lower()) for pat in allowlist_hosts):
+            raise _DiscoveryUrlBlocked(
+                f"Connector spec host '{host}' is not in the connector allowlist {list(allowlist_hosts)}"
+            )
+    return validated
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +368,143 @@ def _create_agentcore_client(region: str):
     return boto3.client("bedrock-agentcore", region_name=region)
 
 
+def _create_secrets_client(region: str):
+    return boto3.client("secretsmanager", region_name=region)
+
+
+# ---------------------------------------------------------------------------
+# Connector credentials: Secrets Manager + AgentCore credential providers
+# ---------------------------------------------------------------------------
+#
+# SaaS connectors authenticate outbound calls via an AgentCore credential
+# provider (API key or OAuth2 client-credentials). The raw secret is stored ONCE
+# in our own Secrets Manager secret (owner-scoped name) and the provider is
+# created with apiKeySecretSource/clientSecretSource="EXTERNAL" referencing that
+# secret — so the raw value never lands in DynamoDB, canvas JSON, or logs.
+
+# Provider names are derived from the connector + deployment so teardown can find
+# them. AgentCore provider names must match ^[a-zA-Z0-9_-]+$ and are <=64 chars.
+def _sanitize_provider_name(raw: str) -> str:
+    name = re.sub(r"[^a-zA-Z0-9_-]", "-", raw)[:64]
+    return name or "connector-cred"
+
+
+def _put_connector_secret(region: str, owner_sub: str, payload: dict) -> str:
+    """Create a Secrets Manager secret holding a connector credential payload.
+
+    Name pattern: ``agentcore-connector/{safe_owner}/{uuid}``. *payload* is a JSON
+    object such as ``{"apiKey": "..."}`` or ``{"clientSecret": "..."}``. Returns the
+    secret ARN. The raw value is never logged.
+    """
+    import uuid as _uuid
+
+    safe_owner = re.sub(r"[^a-zA-Z0-9_-]", "-", (owner_sub or "anon"))[:48]
+    resource_name = f"agentcore-connector/{safe_owner}/{_uuid.uuid4().hex[:12]}"
+    sm = _create_secrets_client(region)
+    resp = sm.create_secret(
+        Name=resource_name,
+        SecretString=json.dumps(payload),
+        Description="AgentCore SaaS connector credential (auto-managed)",
+    )
+    # SECURITY (CodeQL py/clear-text-logging-sensitive-data): log a CONSTANT only
+    # — never the generated name or the payload. The caller gets the ARN.
+    logger.info("Created connector credential resource")
+    return resp["ARN"]
+
+
+def _ensure_api_key_credential_provider(
+    agentcore_ctrl,
+    name: str,
+    *,
+    secret_arn: str,
+    json_key: str = "apiKey",
+) -> str:
+    """Create (or reuse) an API-key credential provider backed by our own secret.
+
+    Returns the credential provider ARN. Idempotent: on conflict the existing
+    provider is looked up and its ARN returned.
+    """
+    provider_name = _sanitize_provider_name(name)
+    try:
+        resp = agentcore_ctrl.create_api_key_credential_provider(
+            name=provider_name,
+            apiKeySecretConfig={"secretId": secret_arn, "jsonKey": json_key},
+            apiKeySecretSource="EXTERNAL",
+        )
+        arn = resp.get("credentialProviderArn") or resp.get("apiKeyCredentialProviderArn", "")
+        # SECURITY (CodeQL py/clear-text-logging-sensitive-data): log a constant;
+        # provider_name shares scope with the secret arn/config and is taint-flagged.
+        logger.info("Created API-key credential provider")
+        return arn
+    except Exception as e:  # noqa: BLE001
+        if "ConflictException" in str(e) or "already exists" in str(e):
+            try:
+                got = agentcore_ctrl.get_api_key_credential_provider(name=provider_name)
+                return got.get("credentialProviderArn") or got.get("apiKeyCredentialProviderArn", "")
+            except Exception:  # noqa: BLE001
+                pass
+        raise
+
+
+def _ensure_oauth2_credential_provider(
+    agentcore_ctrl,
+    name: str,
+    *,
+    vendor: str,
+    client_id: str,
+    client_secret_arn: str,
+    json_key: str = "clientSecret",
+    discovery_url: Optional[str] = None,
+) -> str:
+    """Create (or reuse) an OAuth2 credential provider for a connector.
+
+    *vendor* is an AgentCore vendor enum (e.g. ``AtlassianOauth2``,
+    ``GithubOauth2``, or ``CustomOauth2``). For branded vendors the config key is
+    derived as ``{vendorLower}ProviderConfig``; for ``CustomOauth2`` a
+    ``discovery_url`` is required. The client secret is referenced from our own
+    Secrets Manager secret (``clientSecretSource="EXTERNAL"``). Returns the
+    credential provider ARN. Idempotent on conflict.
+    """
+    from app.services.connectors import vendor_config_key
+
+    provider_name = _sanitize_provider_name(name)
+    config_key = vendor_config_key(vendor)
+
+    if vendor == "CustomOauth2":
+        if not discovery_url:
+            raise ValueError("CustomOauth2 connector requires a discovery_url")
+        provider_config = {
+            "oauthDiscovery": {"discoveryUrl": discovery_url},
+            "clientId": client_id,
+            "clientSecretConfig": {"secretId": client_secret_arn, "jsonKey": json_key},
+            "clientSecretSource": "EXTERNAL",
+        }
+    else:
+        provider_config = {
+            "clientId": client_id,
+            "clientSecretConfig": {"secretId": client_secret_arn, "jsonKey": json_key},
+            "clientSecretSource": "EXTERNAL",
+        }
+
+    try:
+        resp = agentcore_ctrl.create_oauth2_credential_provider(
+            name=provider_name,
+            credentialProviderVendor=vendor,
+            oauth2ProviderConfigInput={config_key: provider_config},
+        )
+        # SECURITY (CodeQL py/clear-text-logging-sensitive-data): constant only.
+        logger.info("Created OAuth2 credential provider")
+        return resp["credentialProviderArn"]
+    except Exception as e:  # noqa: BLE001
+        if "ConflictException" in str(e) or "already exists" in str(e):
+            try:
+                got = agentcore_ctrl.get_oauth2_credential_provider(name=provider_name)
+                return got.get("credentialProviderArn", "")
+            except Exception:  # noqa: BLE001
+                pass
+        raise
+
+
 # ---------------------------------------------------------------------------
 # Lambda code constants (embedded Lambda source for gateway targets)
 # ---------------------------------------------------------------------------
@@ -457,6 +631,13 @@ import urllib.parse
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0"
 WMO_CODES = {0:"Clear sky",1:"Mainly clear",2:"Partly cloudy",3:"Overcast",45:"Foggy",48:"Rime fog",51:"Light drizzle",53:"Moderate drizzle",55:"Dense drizzle",61:"Slight rain",63:"Moderate rain",65:"Heavy rain",71:"Slight snow",73:"Moderate snow",75:"Heavy snow",80:"Slight rain showers",81:"Moderate rain showers",82:"Violent rain showers",95:"Thunderstorm",96:"Thunderstorm with hail",99:"Thunderstorm with heavy hail"}
 
+class ToolUnavailable(Exception):
+    # Raised when an external dependency (web/api) can't be reached after retries.
+    # The dispatcher turns this into a STRUCTURED {"error":"tool_unavailable",...}
+    # body so the agent (and tests) can distinguish "the tool failed" from
+    # "the tool ran and found nothing".
+    pass
+
 def _http_get(url, timeout=10, retries=2):
     last_err = None
     for attempt in range(retries + 1):
@@ -468,7 +649,7 @@ def _http_get(url, timeout=10, retries=2):
             last_err = e
             if attempt < retries:
                 time.sleep(1 * (attempt + 1))
-    raise last_err
+    raise ToolUnavailable(str(last_err))
 
 def _do_duckduckgo_search(query):
     url = "https://api.duckduckgo.com/?" + urllib.parse.urlencode({"q": query, "format": "json", "no_html": "1"})
@@ -617,6 +798,10 @@ def lambda_handler(event, context):
             return {"statusCode": 200, "body": _do_process_refund(event)}
         else:
             return {"statusCode": 200, "body": json.dumps({"error": f"Unknown tool: {tool_name}"})}
+    except ToolUnavailable as e:
+        # External dependency unreachable after retries — return a STRUCTURED
+        # error so the agent + tests can tell "tool failed" from "no results".
+        return {"statusCode": 200, "body": json.dumps({"error": "tool_unavailable", "detail": str(e), "tool": tool_name})}
     except Exception as e:
         return {"statusCode": 200, "body": json.dumps({"error": str(e)})}
 """
@@ -829,15 +1014,33 @@ def create_knowledge_base_lambda(
         )
         lambda_arn = resp["FunctionArn"]
         if gateway_role_arn:
-            try:
-                lambda_client.add_permission(
-                    FunctionName=fn_name,
-                    StatementId="AllowAgentCoreInvoke",
-                    Action="lambda:InvokeFunction",
-                    Principal=gateway_role_arn,
-                )
-            except lambda_client.exceptions.ResourceConflictException:
-                pass
+            # Bug 168: prune dangling-principal statements left by deleted gateway
+            # roles before adding ours — a policy with an orphaned principal makes
+            # AddPermission reject every call ("invalid principal").
+            _prune_orphaned_lambda_permissions(lambda_client, fn_name)
+            # IAM propagation race (Bug 149): retry on invalid-principal until the
+            # freshly-created gateway role is resolvable by lambda:AddPermission.
+            _last = None
+            for _att in range(8):
+                try:
+                    lambda_client.add_permission(
+                        FunctionName=fn_name,
+                        StatementId="AllowAgentCoreInvoke",
+                        Action="lambda:InvokeFunction",
+                        Principal=gateway_role_arn,
+                    )
+                    _last = None
+                    break
+                except lambda_client.exceptions.ResourceConflictException:
+                    _last = None
+                    break
+                except lambda_client.exceptions.InvalidParameterValueException as e:
+                    if "principal" not in str(e).lower():
+                        raise
+                    _last = e
+                    time.sleep(8)
+            if _last is not None:
+                raise _last
     except lambda_client.exceptions.ResourceConflictException:
         # Update existing
         lambda_client.update_function_code(FunctionName=fn_name, ZipFile=zip_bytes)
@@ -939,6 +1142,80 @@ def _ensure_lambda_role(iam_client, role_name: str, description: str) -> str:
     return role_arn
 
 
+def _wait_lambda_updatable(lambda_client, function_name: str, timeout: int = 90) -> None:
+    """Block until *function_name* is in a state that accepts an update.
+
+    A Lambda mid-create/mid-update has State=Pending or LastUpdateStatus=InProgress;
+    update_function_code/configuration then throws ResourceConflictException. We
+    poll until State=Active AND LastUpdateStatus != InProgress so concurrent
+    gateway deploys serialize cleanly on the shared singleton tool Lambda.
+    """
+    import time as _t
+
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        try:
+            cfg = lambda_client.get_function(FunctionName=function_name)["Configuration"]
+        except Exception:  # noqa: BLE001
+            return
+        state = cfg.get("State", "Active")
+        last = cfg.get("LastUpdateStatus", "Successful")
+        if state == "Active" and last != "InProgress":
+            return
+        _t.sleep(3)
+
+
+def _prune_orphaned_lambda_permissions(lambda_client, function_name: str) -> int:
+    """Remove resource-policy statements whose principal IAM role is gone (Bug 168).
+
+    A shared tool Lambda accumulates one statement per gateway role. When a prior
+    gateway's role is deleted on teardown, its statement lingers with a dangling
+    principal. A policy holding a dangling principal makes lambda:AddPermission
+    reject EVERY subsequent call with "The provided principal was invalid" — which
+    bricks all future gateway deploys that reuse this Lambda. We read the policy,
+    and for each ``AllowAgentCoreInvoke-<role>`` statement whose role no longer
+    exists in IAM, remove that statement. Returns the number pruned. Best-effort:
+    any error is swallowed (the caller still attempts its add + retry).
+    """
+    try:
+        pol_raw = lambda_client.get_policy(FunctionName=function_name).get("Policy")
+    except Exception:  # noqa: BLE001 — no policy yet / NotFound: nothing to prune
+        return 0
+    try:
+        statements = json.loads(pol_raw).get("Statement", []) or []
+    except Exception:  # noqa: BLE001
+        return 0
+
+    iam = _create_iam_client()
+    pruned = 0
+    for st in statements:
+        sid = st.get("Sid") or ""
+        # Only touch the per-gateway-role invoke grants we manage.
+        if not sid.startswith("AllowAgentCoreInvoke-"):
+            continue
+        role_name = sid[len("AllowAgentCoreInvoke-"):]
+        if not role_name:
+            continue
+        try:
+            iam.get_role(RoleName=role_name)
+            continue  # role still exists — keep the statement
+        except Exception as e:  # noqa: BLE001
+            if "NoSuchEntity" not in str(e) and "NotFound" not in str(e):
+                # Unknown IAM error — don't risk removing a valid grant.
+                continue
+        # Role is gone: remove the dangling statement.
+        try:
+            lambda_client.remove_permission(FunctionName=function_name, StatementId=sid)
+            pruned += 1
+            logger.info(
+                "Pruned orphaned invoke permission %s from %s (role deleted)",
+                sid, function_name,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    return pruned
+
+
 def _create_or_update_lambda(
     lambda_client,
     function_name: str,
@@ -978,26 +1255,74 @@ def _create_or_update_lambda(
         )
         lambda_arn = resp["FunctionArn"]
     except lambda_client.exceptions.ResourceConflictException:
-        lambda_client.update_function_code(FunctionName=function_name, ZipFile=zip_bytes)
+        # The shared singleton tool Lambda (AgentCoreDynamicTools etc.) already
+        # exists. Concurrent deploys race here: if ANOTHER deploy is mid-update the
+        # function is in Pending/InProgress and update_function_code throws
+        # ResourceConflictException ("resource ... is currently in the following
+        # state: Pending"). Wait for it to settle, then retry the update. Verified
+        # live: two parallel gateway deploys collided on AgentCoreDynamicTools.
+        _wait_lambda_updatable(lambda_client, function_name)
+        for _attempt in range(8):
+            try:
+                lambda_client.update_function_code(FunctionName=function_name, ZipFile=zip_bytes)
+                break
+            except lambda_client.exceptions.ResourceConflictException:
+                _wait_lambda_updatable(lambda_client, function_name)
+                time.sleep(3)
         resp = lambda_client.get_function(FunctionName=function_name)
         lambda_arn = resp["Configuration"]["FunctionArn"]
 
     # ALWAYS grant the invoking gateway role (idempotent, per-role StatementId) so
     # a shared Lambda reused by a NEW gateway still authorizes that gateway.
     if gateway_role_arn:
+        # Bug 168 (caught live 2026-06-25): this tool Lambda is SHARED by name
+        # across deployments and accumulates one resource-policy statement per
+        # gateway role. When a prior gateway's role is later DELETED (teardown),
+        # its statement is left behind referencing a now-deleted role — AWS
+        # stores it as an orphaned unique principal id (AROA...). A resource
+        # policy carrying a dangling principal makes lambda:AddPermission reject
+        # EVERY subsequent call with "The provided principal was invalid" (even a
+        # valid account/role/service principal — proven live on a fresh fn the
+        # same call succeeds). So before adding our statement, PRUNE any existing
+        # statement whose principal role no longer exists. This unbricks the
+        # shared Lambda's policy under create/delete churn (the real cause of
+        # "no tool targets could be deployed", mis-attributed to Bug 149).
+        _prune_orphaned_lambda_permissions(lambda_client, function_name)
         # StatementId must be unique per principal + match ^[A-Za-z0-9-_]+$.
         role_name = gateway_role_arn.rsplit("/", 1)[-1]
         stmt_id = re.sub(r"[^A-Za-z0-9_-]", "-", f"AllowAgentCoreInvoke-{role_name}")[:100]
-        try:
-            lambda_client.add_permission(
-                FunctionName=function_name,
-                StatementId=stmt_id,
-                Action="lambda:InvokeFunction",
-                Principal=gateway_role_arn,
-            )
-            logger.info("Granted %s invoke on %s", role_name, function_name)
-        except lambda_client.exceptions.ResourceConflictException:
-            pass  # this gateway role is already permitted — fine
+        # IAM propagation race (Bug 149): a freshly-created gateway role may not yet
+        # be visible to lambda:AddPermission, which validates the principal exists and
+        # rejects with InvalidParameterValueException "The provided principal was
+        # invalid." The fixed 10s post-create sleep is variable and often
+        # insufficient under create/delete churn (this passed early in a run then
+        # began failing). Retry with backoff so the principal becomes resolvable.
+        last_exc = None
+        for attempt in range(8):
+            try:
+                lambda_client.add_permission(
+                    FunctionName=function_name,
+                    StatementId=stmt_id,
+                    Action="lambda:InvokeFunction",
+                    Principal=gateway_role_arn,
+                )
+                logger.info("Granted %s invoke on %s", role_name, function_name)
+                last_exc = None
+                break
+            except lambda_client.exceptions.ResourceConflictException:
+                last_exc = None
+                break  # this gateway role is already permitted — fine
+            except lambda_client.exceptions.InvalidParameterValueException as e:
+                if "principal" not in str(e).lower():
+                    raise
+                last_exc = e
+                logger.warning(
+                    "add_permission principal not yet propagated (attempt %d/8): %s",
+                    attempt + 1, str(e)[:160],
+                )
+                time.sleep(8)
+        if last_exc is not None:
+            raise last_exc
 
     for _ in range(30):
         fn = lambda_client.get_function(FunctionName=function_name)
@@ -1307,6 +1632,57 @@ def _count_served_tools(gateway_url: str, client_info: dict) -> int:
         return -1
 
 
+def _qualified_tools_from_served(gateway_url: str, client_info: dict) -> list:
+    """Return the gateway's served tool names from a live MCP tools/list probe.
+
+    Used for connector (OpenAPI) targets, whose tools are crawled rather than
+    declared inline — the control plane reports 0 configured tools, so the served
+    plane is the only source of the fully-qualified action names.
+    """
+    import urllib3
+
+    try:
+        import certifi
+        http = urllib3.PoolManager(ca_certs=certifi.where())
+    except ImportError:
+        http = urllib3.PoolManager()
+    try:
+        token = get_cognito_token(client_info)
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+        resp = http.request(
+            "POST", gateway_url, body=body,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+            timeout=20.0,
+        )
+        if resp.status != 200:
+            return []
+        text = resp.data.decode()
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if line.startswith("{"):
+                try:
+                    obj = json.loads(line)
+                    tools = obj.get("result", {}).get("tools")
+                    if tools is not None:
+                        return [t.get("name") for t in tools if t.get("name")]
+                except Exception:  # noqa: BLE001
+                    continue
+        try:
+            tools = json.loads(text).get("result", {}).get("tools", [])
+            return [t.get("name") for t in tools if t.get("name")]
+        except Exception:  # noqa: BLE001
+            return []
+    except Exception as e:  # noqa: BLE001
+        logger.info("qualified-tools probe error: %s", str(e)[:120])
+        return []
+
+
 def _wait_for_gateway_to_serve_tools(
     gateway_url: str, client_info: dict, expected: int, timeout: int = 90
 ) -> int:
@@ -1534,6 +1910,609 @@ def _build_gateway_role_policy() -> dict:
     }
 
 
+def _fetch_openapi_spec(spec_url: str, allowlist_hosts: Optional[list] = None) -> str:
+    """Fetch a connector's OpenAPI spec from *spec_url* and return it as a string.
+
+    The URL is validated (https-only, private/IMDS denylist, connector allowlist)
+    before any network call. Caller passes the result to the Gateway target as
+    ``openApiSchema.inlinePayload``.
+    """
+    import urllib.request
+
+    validated = _validate_outbound_url(
+        spec_url, tuple(allowlist_hosts) if allowlist_hosts else None
+    )
+    req = urllib.request.Request(validated, headers={"Accept": "application/json, application/yaml, text/yaml"})
+    with urllib.request.urlopen(req, timeout=30) as resp:  # nosemgrep: dynamic-urllib-use-detected -- URL validated by _validate_outbound_url (https + IP denylist + host allowlist)
+        return resp.read().decode("utf-8", errors="replace")
+
+
+# AgentCore CreateGatewayTarget caps the inline openApiSchema payload (the API
+# rejects very large inline specs). Real SaaS specs blow past it (GitHub ~12MB,
+# Asana ~3MB, Slack ~1.2MB), so anything over this threshold is staged to S3 and
+# referenced via openApiSchema.s3.uri instead of inlinePayload. 100KB is a safe,
+# conservative inline ceiling.
+_MAX_INLINE_SPEC_BYTES = 100 * 1024
+# AgentCore ALSO caps the S3-staged spec object at 10 MB ("The provided S3 object
+# exceeds the maximum allowed size of 10 MB"). GitHub's published OpenAPI is ~12.5
+# MB (all variants > 10 MB), so staging alone isn't enough — we slim the spec
+# (drop description/examples/docs, which the gateway crawler doesn't need to emit
+# tools) when it approaches the cap. Keep a safety margin below 10 MB.
+_MAX_S3_SPEC_BYTES = 10 * 1024 * 1024
+_S3_SPEC_SLIM_TARGET = int(9.5 * 1024 * 1024)
+
+
+def _slim_openapi_spec(spec_str: str) -> str:
+    """Strip non-essential, size-heavy fields from an OpenAPI spec so it fits the
+    AgentCore 10 MB target-spec cap, WITHOUT dropping any operations/tools AND
+    WITHOUT producing an invalid spec.
+
+    Removes ``example``, ``examples``, ``externalDocs`` and vendor ``x-*``
+    extensions recursively — pure documentation/samples the gateway crawler does
+    not need to expose operations as tools.
+
+    Bug 185b (caught live): an earlier version also stripped ``description``,
+    which broke validation because the OpenAPI spec REQUIRES ``description`` on
+    Response Objects (``components.responses.*`` / ``responses.<code>``). The
+    gateway rejected the slimmed GitHub spec with "attribute
+    components.responses.<x>.description is missing" and served 0 tools. So
+    descriptions are now PRESERVED. On GitHub this still drops ~12.5MB -> ~4.6MB,
+    comfortably under the cap. Best-effort: returns the original on parse failure.
+    """
+    try:
+        spec = json.loads(spec_str)
+    except Exception:  # noqa: BLE001
+        return spec_str
+
+    def _is_x_ext(key: str) -> bool:
+        return isinstance(key, str) and key.startswith("x-")
+
+    _DROP = {"example", "examples", "externalDocs"}
+
+    def prune(node):
+        if isinstance(node, dict):
+            out = {}
+            for k, v in node.items():
+                if k in _DROP or _is_x_ext(k):
+                    continue
+                out[k] = prune(v)
+            return out
+        if isinstance(node, list):
+            return [prune(i) for i in node]
+        return node
+
+    slimmed = prune(spec)
+    return json.dumps(slimmed, separators=(",", ":"))
+
+
+# AgentCore's gateway OpenAPI crawler only accepts these request/response media
+# types; any other (GitHub uses application/scim+json, application/vnd.github.*,
+# text/html, application/octet-stream, ...) is rejected with "MediaType <x> is not
+# supported in response" -> the target fails validation and serves 0 tools.
+_GATEWAY_SUPPORTED_MEDIA_TYPES = {
+    "application/json",
+    "application/xml",
+    "multipart/form-data",
+    "application/x-www-form-urlencoded",
+}
+
+
+def _sanitize_openapi_for_gateway(spec_str: str) -> str:
+    """Drop ``content`` media types the AgentCore gateway does not support, so a
+    real-world SaaS spec (GitHub) validates instead of failing with 100+
+    "MediaType ... is not supported" errors and serving 0 tools (Bug 189b).
+
+    Only prunes the *media-type keys* inside ``content`` objects (request bodies +
+    responses); operations, parameters, and schemas are untouched. A ``content``
+    that becomes empty is removed entirely (a Response with no content is valid;
+    it still needs its required ``description``, which is left intact). Best-effort:
+    returns the original on parse failure.
+    """
+    try:
+        spec = json.loads(spec_str)
+    except Exception:  # noqa: BLE001
+        return spec_str
+
+    changed = False
+
+    def walk(node):
+        nonlocal changed
+        if isinstance(node, dict):
+            out = {}
+            for k, v in node.items():
+                if k == "content" and isinstance(v, dict):
+                    kept = {
+                        mt: walk(mv)
+                        for mt, mv in v.items()
+                        if mt in _GATEWAY_SUPPORTED_MEDIA_TYPES
+                    }
+                    if len(kept) != len(v):
+                        changed = True
+                    # Drop an empty content map so the parent (response/requestBody)
+                    # stays valid without unsupported-only content.
+                    if kept:
+                        out[k] = kept
+                    continue
+                out[k] = walk(v)
+            # A requestBody REQUIRES `content`; if sanitizing removed all of its
+            # media types the requestBody is now invalid ("requestBody.content is
+            # missing"). Signal removal so the operation drops the whole
+            # requestBody (the operation stays valid — body just becomes optional).
+            if "requestBody" in out and isinstance(out["requestBody"], dict) \
+                    and "content" not in out["requestBody"]:
+                del out["requestBody"]
+                changed = True
+            return out
+        if isinstance(node, list):
+            return [walk(i) for i in node]
+        return node
+
+    result = walk(spec)
+
+    # Bug 189c — the gateway crawler also rejects operations whose request/response
+    # SCHEMAS use ``oneOf`` ("schema with oneOf is currently not supported"). These
+    # can't be auto-rewritten without changing semantics, so DROP just those
+    # operations (GitHub: ~30 of 1194) rather than failing the whole connector. The
+    # vast majority of operations remain usable.
+    paths = result.get("paths")
+    if isinstance(paths, dict):
+        _METHODS = {"get", "post", "put", "delete", "patch", "head", "options", "trace"}
+
+        def _uses_oneof(node) -> bool:
+            if isinstance(node, dict):
+                if "oneOf" in node:
+                    return True
+                return any(_uses_oneof(v) for v in node.values())
+            if isinstance(node, list):
+                return any(_uses_oneof(i) for i in node)
+            return False
+
+        dropped_ops = 0
+        for path, item in list(paths.items()):
+            if not isinstance(item, dict):
+                continue
+            for method in list(item.keys()):
+                if method.lower() in _METHODS and _uses_oneof(item[method]):
+                    del item[method]
+                    dropped_ops += 1
+                    changed = True
+            # Remove a path that has no operations left.
+            if not any(m.lower() in _METHODS for m in item):
+                del paths[path]
+        if dropped_ops:
+            logger.info("Dropped %d operation(s) using unsupported 'oneOf' schemas", dropped_ops)
+
+        # Bug 191 — the gateway derives each tool name as
+        # ``<target>___<operationId>`` and Bedrock Converse requires tool names to
+        # match ``[a-zA-Z0-9_-]+`` and be <= 64 chars. GitHub's operationIds ALL
+        # contain '/' (e.g. "meta/root", "actions/get-...-for-enterprise") and
+        # many exceed the budget, so EVERY invoke fails with a ValidationException
+        # ("toolSpec.name failed to satisfy constraint"). Rewrite each operationId
+        # to a compliant, de-duplicated slug (<=44 chars, leaving room for the
+        # ~16-char target prefix + 4 padding under the 64 cap).
+        _seen_ids: set = set()
+        _OPID_MAX = 44
+
+        def _slug(op_id: str) -> str:
+            s = re.sub(r"[^a-zA-Z0-9_-]", "_", op_id)
+            if len(s) > _OPID_MAX:
+                s = s[:_OPID_MAX]
+            base = s or "op"
+            cand = base
+            i = 1
+            while cand in _seen_ids:
+                suffix = f"_{i}"
+                cand = base[: _OPID_MAX - len(suffix)] + suffix
+                i += 1
+            _seen_ids.add(cand)
+            return cand
+
+        renamed = 0
+        for path, item in paths.items():
+            if not isinstance(item, dict):
+                continue
+            for method, op in item.items():
+                if method.lower() in _METHODS and isinstance(op, dict):
+                    oid = op.get("operationId")
+                    if isinstance(oid, str):
+                        new_oid = _slug(oid)
+                        if new_oid != oid:
+                            op["operationId"] = new_oid
+                            renamed += 1
+                            changed = True
+        if renamed:
+            logger.info("Rewrote %d operationId(s) to satisfy Bedrock tool-name constraints", renamed)
+
+    # Only re-serialize when we actually dropped something — otherwise return the
+    # original string verbatim (preserves formatting + avoids needless rewrites).
+    if not changed:
+        return spec_str
+    return json.dumps(result, separators=(",", ":"))
+
+
+# The gateway tool-plane cannot materialize an unbounded number of operations: a
+# very large OpenAPI target (GitHub ~1145 ops) syncs 0 tools and the deploy fails
+# the "serves N tools" gate. Cap the operation count so the gateway can actually
+# serve a usable subset. The agent further narrows this to MAX_GATEWAY_TOOLS at
+# invoke time; this cap is the gateway-side ceiling. Override via
+# MAX_CONNECTOR_OPERATIONS.
+_MAX_CONNECTOR_OPERATIONS = int(os.environ.get("MAX_CONNECTOR_OPERATIONS", "80"))
+
+
+def _cap_openapi_operations(spec_str: str, *, max_ops: int) -> str:
+    """Keep at most *max_ops* operations in an OpenAPI spec (deterministic by path
+    then method), pruning the rest so the gateway can materialize its tool plane.
+
+    Components/schemas are left intact (operations may $ref them). Best-effort:
+    returns the original on parse failure or when already under the cap.
+    """
+    try:
+        spec = json.loads(spec_str)
+    except Exception:  # noqa: BLE001
+        return spec_str
+    paths = spec.get("paths")
+    if not isinstance(paths, dict):
+        return spec_str
+    _METHODS = ("get", "post", "put", "delete", "patch", "head", "options", "trace")
+    total = sum(1 for _p, item in paths.items() if isinstance(item, dict)
+                for m in item if m.lower() in _METHODS)
+    if total <= max_ops:
+        return spec_str
+    kept = 0
+    new_paths: dict = {}
+    for path in sorted(paths.keys()):
+        item = paths[path]
+        if not isinstance(item, dict):
+            continue
+        new_item = {}
+        for key, val in item.items():
+            if key.lower() in _METHODS:
+                if kept < max_ops:
+                    new_item[key] = val
+                    kept += 1
+                # else drop this operation
+            else:
+                new_item[key] = val  # path-level params, etc.
+        # only keep the path if it retained >=1 operation
+        if any(k.lower() in _METHODS for k in new_item):
+            new_paths[path] = new_item
+    spec["paths"] = new_paths
+    logger.info("Capped connector spec operations %d -> %d (gateway tool-plane limit)", total, kept)
+    return json.dumps(spec, separators=(",", ":"))
+
+
+def _build_openapi_schema(spec_str: str, *, connector_id: str, region: str) -> dict:
+    """Return the gateway ``openApiSchema`` block, inlining small specs and
+    staging large ones to the artifacts S3 bucket (``s3.uri``)."""
+    # Always strip media types the gateway can't crawl (Bug 189b) — applies to
+    # inline AND staged specs. Only rewrites the string if something changed.
+    _san = _sanitize_openapi_for_gateway(spec_str)
+    if _san != spec_str:
+        logger.info("Sanitized connector '%s' spec (dropped unsupported media types)", _safe_log_token(connector_id))
+        spec_str = _san
+
+    # Cap operation count so the gateway can materialize its tool plane (Bug 189d).
+    _capped = _cap_openapi_operations(spec_str, max_ops=_MAX_CONNECTOR_OPERATIONS)
+    if _capped != spec_str:
+        spec_str = _capped
+
+    if len(spec_str.encode("utf-8")) <= _MAX_INLINE_SPEC_BYTES:
+        return {"inlinePayload": spec_str}
+
+    # Slim oversized specs so the S3 object fits AgentCore's 10 MB target cap.
+    if len(spec_str.encode("utf-8")) > _S3_SPEC_SLIM_TARGET:
+        slim = _slim_openapi_spec(spec_str)
+        before, after = len(spec_str.encode("utf-8")), len(slim.encode("utf-8"))
+        if after < before:
+            logger.info(
+                "Slimmed connector '%s' spec %d -> %d bytes to fit the 10 MB cap",
+                connector_id, before, after,
+            )
+            spec_str = slim
+
+    bucket = os.environ.get("ARTIFACTS_BUCKET_NAME", "")
+    if not bucket:
+        # No artifacts bucket wired (e.g. unit context) — fall back to inline and
+        # let the API surface the size error rather than silently dropping tools.
+        logger.warning(
+            "Spec for connector '%s' is %d bytes (>inline cap) but ARTIFACTS_BUCKET_NAME "
+            "is unset; falling back to inlinePayload (may fail).",
+            connector_id, len(spec_str),
+        )
+        return {"inlinePayload": spec_str}
+
+    import uuid as _uuid
+
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "-", connector_id or "generic")[:32]
+    key = f"connector-specs/{safe}/{_uuid.uuid4().hex[:12]}.json"
+    boto3.client("s3", region_name=region).put_object(
+        Bucket=bucket, Key=key, Body=spec_str.encode("utf-8"),
+        ContentType="application/json",
+    )
+    account_id = os.environ.get("AWS_ACCOUNT_ID", "")
+    s3_block: dict = {"uri": f"s3://{bucket}/{key}"}
+    if account_id:
+        s3_block["bucketOwnerAccountId"] = account_id
+    logger.info(
+        "Staged connector '%s' spec (%d bytes) to s3://%s/%s", connector_id, len(spec_str), bucket, key
+    )
+    return {"s3": s3_block}
+
+
+def _delete_connector_credential_provider(agentcore_ctrl, entry: str) -> tuple[bool, str]:
+    """Delete one connector credential provider. Returns (deleted, message).
+
+    *entry* is "TYPE:name" (TYPE in {API_KEY, OAUTH}) for providers created by the
+    current code, or a bare "name" for older persisted records. The TYPE prefix is
+    REQUIRED for correctness: delete_oauth2_credential_provider on an API_KEY
+    provider returns success WITHOUT deleting it (verified live), so a bare name is
+    handled by trying a deleter and VERIFYING the provider is actually gone before
+    declaring success.
+    """
+    if ":" in entry:
+        ptype, name = entry.split(":", 1)
+    else:
+        ptype, name = "", entry
+
+    def _is_gone(get_fn) -> bool:
+        try:
+            get_fn(name=name)
+            return False
+        except Exception as e:  # noqa: BLE001
+            return "ResourceNotFound" in str(e) or "NotFound" in str(e)
+
+    if ptype == "API_KEY":
+        try:
+            agentcore_ctrl.delete_api_key_credential_provider(name=name)
+            return True, f"API_KEY credential provider {name} deleted"
+        except Exception as e:  # noqa: BLE001
+            if "ResourceNotFound" in str(e) or "NotFound" in str(e):
+                return True, f"Credential provider {name} already gone"
+            return False, f"API_KEY provider {name} delete error: {e}"
+    if ptype == "OAUTH":
+        try:
+            agentcore_ctrl.delete_oauth2_credential_provider(name=name)
+            return True, f"OAUTH credential provider {name} deleted"
+        except Exception as e:  # noqa: BLE001
+            if "ResourceNotFound" in str(e) or "NotFound" in str(e):
+                return True, f"Credential provider {name} already gone"
+            return False, f"OAUTH provider {name} delete error: {e}"
+
+    # Untyped (legacy): try BOTH, but verify the matching get reports gone.
+    for deleter, getter in (
+        ("delete_api_key_credential_provider", "get_api_key_credential_provider"),
+        ("delete_oauth2_credential_provider", "get_oauth2_credential_provider"),
+    ):
+        try:
+            getattr(agentcore_ctrl, deleter)(name=name)
+        except Exception as e:  # noqa: BLE001
+            if "ResourceNotFound" in str(e) or "NotFound" in str(e):
+                continue
+        # Verify the provider of THIS type is actually gone.
+        if _is_gone(getattr(agentcore_ctrl, getter)):
+            return True, f"Credential provider {name} deleted"
+    return False, f"Credential provider {name} could not be confirmed deleted"
+
+
+def _deploy_connector_targets(
+    agentcore_ctrl,
+    gateway_id: str,
+    region: str,
+    connectors: list[dict],
+    owner_sub: str = "",
+) -> dict:
+    """Deploy SaaS connectors as OpenAPI Gateway targets with credential providers.
+
+    Each connector dict carries: connector_id, auth_method
+    ("api_key"|"oauth2_cc"), EITHER secret_arn (already minted) OR secret_value
+    (raw — minted here and never returned), spec_url/spec_inline, scopes,
+    credential_location/parameter_name/prefix, oauth_vendor, discovery_url.
+
+    Returns {"credential_provider_names": [...], "secret_arns": [...]} so teardown
+    can delete everything created here. On a mid-loop failure, partial resources
+    are rolled back (best-effort) before re-raising.
+    """
+    created_providers: list[str] = []
+    created_secrets: list[str] = []
+    created_spec_s3_uris: list[str] = []
+
+    def _rollback_partial() -> None:
+        """Best-effort delete of providers/secrets/specs created before a mid-loop failure.
+
+        On a failed connector deploy the gateway_result is never persisted, so the
+        caller cannot tear these down later — roll back here to avoid orphaning a
+        credential provider or a Secrets Manager secret holding a raw credential.
+        """
+        for entry in created_providers:
+            _delete_connector_credential_provider(agentcore_ctrl, entry)
+        if created_secrets:
+            sm = _create_secrets_client(region)
+            for sarn in created_secrets:
+                try:
+                    sm.delete_secret(SecretId=sarn, ForceDeleteWithoutRecovery=True)
+                except Exception:  # noqa: BLE001
+                    pass
+        for uri in created_spec_s3_uris:
+            _delete_spec_s3_object(uri, region)
+
+    try:
+        _deploy_connector_targets_inner(
+            agentcore_ctrl, gateway_id, region, connectors, owner_sub,
+            created_providers, created_secrets, created_spec_s3_uris,
+        )
+    except Exception:
+        logger.error("Connector deploy failed mid-loop; rolling back partial resources")
+        _rollback_partial()
+        raise
+
+    return {
+        "credential_provider_names": created_providers,
+        "secret_arns": created_secrets,
+        "spec_s3_uris": created_spec_s3_uris,
+    }
+
+
+def _delete_spec_s3_object(uri: str, region: str) -> None:
+    """Best-effort delete of an s3://bucket/key connector-spec object."""
+    if not uri.startswith("s3://"):
+        return
+    try:
+        rest = uri[len("s3://"):]
+        bucket, _, key = rest.partition("/")
+        if bucket and key:
+            boto3.client("s3", region_name=region).delete_object(Bucket=bucket, Key=key)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _deploy_connector_targets_inner(
+    agentcore_ctrl,
+    gateway_id: str,
+    region: str,
+    connectors: list[dict],
+    owner_sub: str,
+    created_providers: list,
+    created_secrets: list,
+    created_spec_s3_uris: list,
+) -> None:
+    """Per-connector deploy loop. Accumulates created provider names + secret ARNs
+    into the caller's lists so a mid-loop failure can be rolled back."""
+    from app.services.connectors import (
+        AUTH_API_KEY,
+        AUTH_OAUTH2_CC,
+        get_connector,
+        oauth_vendor_for,
+    )
+
+    for idx, conn in enumerate(connectors or []):
+        connector_id = conn.get("connector_id") or conn.get("connectorId") or ""
+        auth_method = conn.get("auth_method") or conn.get("authMethod") or AUTH_API_KEY
+        catalog = get_connector(connector_id) or {}
+
+        # Resolve the spec: explicit inline > explicit url > catalog default url.
+        spec_inline = conn.get("spec_inline") or conn.get("specContent")
+        spec_url = conn.get("spec_url") or conn.get("specUrl") or catalog.get("spec_url")
+        # The SPEC-FETCH allowlist is the host the OpenAPI doc is downloaded from
+        # (e.g. raw.githubusercontent.com), which is DIFFERENT from the API host
+        # allowlist (catalog['allowlist_hosts'], e.g. app.asana.com). Use the
+        # catalog's spec_host_allowlist when present; for a catalog DEFAULT spec_url
+        # (vendor-vetted by us) fall back to that URL's own host so the built-in
+        # connectors always fetch. A user-supplied custom spec_url with no
+        # spec_host_allowlist is still SSRF-guarded (https + private-IP denylist via
+        # _validate_outbound_url) even with no host allowlist.
+        from urllib.parse import urlparse as _urlparse
+        spec_allowlist = conn.get("spec_host_allowlist") or catalog.get("spec_host_allowlist")
+        if not spec_allowlist and spec_url and spec_url == catalog.get("spec_url"):
+            _h = _urlparse(spec_url).hostname
+            spec_allowlist = [_h] if _h else None
+        if not spec_inline:
+            if not spec_url:
+                raise RuntimeError(
+                    f"Connector '{connector_id}' has no OpenAPI spec (provide spec_url or spec_inline)"
+                )
+            spec_inline = _fetch_openapi_spec(spec_url, spec_allowlist)
+
+        # Mint the secret here if the caller passed a raw value (direct-deploy path);
+        # the SFN path mints earlier and passes secret_arn. Never echo the raw value.
+        secret_arn = conn.get("secret_arn") or conn.get("secretArn") or ""
+        raw_secret = conn.get("secret_value") or conn.get("secretValue")
+        if not secret_arn and raw_secret:
+            payload_key = "clientSecret" if auth_method == AUTH_OAUTH2_CC else "apiKey"
+            secret_arn = _put_connector_secret(region, owner_sub, {payload_key: raw_secret})
+        # Track every secret this connector CONSUMES (minted here OR supplied by the
+        # SFN path) so teardown deletes it. Without this the SFN-minted secret holding
+        # the raw API key / OAuth client secret would be orphaned on delete.
+        if secret_arn and secret_arn not in created_secrets:
+            created_secrets.append(secret_arn)
+
+        safe_conn = re.sub(r"[^a-zA-Z0-9-]", "-", connector_id or "generic")[:24]
+        provider_name = f"acc-{safe_conn}-{idx}"
+        target_name = f"conn-{safe_conn}-{idx}"[:48]
+        # Record the provider as "TYPE:name" so teardown calls the CORRECT deleter.
+        # (Verified live: delete_oauth2_credential_provider on an API_KEY provider
+        # returns success WITHOUT deleting it — trial-and-error delete silently
+        # orphans the provider. The type prefix removes the guesswork.)
+        provider_type = "OAUTH" if auth_method == AUTH_OAUTH2_CC else "API_KEY"
+
+        if auth_method == AUTH_OAUTH2_CC:
+            vendor = (
+                conn.get("oauth_vendor")
+                or conn.get("oauthVendor")
+                or oauth_vendor_for(connector_id)
+                or "CustomOauth2"
+            )
+            discovery_url = conn.get("discovery_url") or conn.get("discoveryUrl")
+            provider_arn = _ensure_oauth2_credential_provider(
+                agentcore_ctrl,
+                provider_name,
+                vendor=vendor,
+                client_id=conn.get("client_id") or conn.get("clientId") or "",
+                client_secret_arn=secret_arn,
+                discovery_url=discovery_url,
+            )
+            cred_cfg = {
+                "credentialProviderType": "OAUTH",
+                "credentialProvider": {
+                    "oauthCredentialProvider": {
+                        "providerArn": provider_arn,
+                        "scopes": conn.get("scopes") or catalog.get("default_scopes") or [],
+                        "grantType": "CLIENT_CREDENTIALS",
+                    }
+                },
+            }
+        else:  # API_KEY
+            if not secret_arn:
+                raise RuntimeError(
+                    f"Connector '{connector_id}' api_key auth requires a secret_arn or secret_value"
+                )
+            provider_arn = _ensure_api_key_credential_provider(
+                agentcore_ctrl, provider_name, secret_arn=secret_arn
+            )
+            cred_cfg = {
+                "credentialProviderType": "API_KEY",
+                "credentialProvider": {
+                    "apiKeyCredentialProvider": {
+                        "providerArn": provider_arn,
+                        "credentialParameterName": conn.get("credential_parameter_name")
+                        or conn.get("credentialParameterName")
+                        or catalog.get("credential_parameter_name")
+                        or "Authorization",
+                        "credentialLocation": conn.get("credential_location")
+                        or conn.get("credentialLocation")
+                        or catalog.get("credential_location")
+                        or "HEADER",
+                    }
+                },
+            }
+            prefix = (
+                conn.get("credential_prefix")
+                if conn.get("credential_prefix") is not None
+                else (conn.get("credentialPrefix")
+                      if conn.get("credentialPrefix") is not None
+                      else catalog.get("credential_prefix"))
+            )
+            if prefix:
+                cred_cfg["credentialProvider"]["apiKeyCredentialProvider"]["credentialPrefix"] = prefix
+
+        created_providers.append(f"{provider_type}:{provider_name}")
+
+        openapi_schema = _build_openapi_schema(
+            spec_inline, connector_id=connector_id or "generic", region=region
+        )
+        # If the spec was staged to S3, remember the key so teardown deletes it.
+        _s3_uri = openapi_schema.get("s3", {}).get("uri", "")
+        if _s3_uri:
+            created_spec_s3_uris.append(_s3_uri)
+        create_params = {
+            "gatewayIdentifier": gateway_id,
+            "name": target_name,
+            "targetConfiguration": {"mcp": {"openApiSchema": openapi_schema}},
+            "credentialProviderConfigurations": [cred_cfg],
+        }
+        _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, target_name, create_params)
+        logger.info("Connector '%s' deployed as OpenAPI gateway target %s", _safe_log_token(connector_id), _safe_log_token(target_name))
+
+
 def deploy_gateway(
     gateway_config: dict,
     region: str,
@@ -1546,6 +2525,8 @@ def deploy_gateway(
     knowledge_base_result: Optional[dict] = None,
     deployment_id: Optional[str] = None,
     gateway_retry: int = 0,
+    connectors: Optional[list[dict]] = None,
+    owner_sub: str = "",
 ) -> dict:
     """Deploy a Gateway using pure boto3 APIs.
 
@@ -1564,6 +2545,7 @@ def deploy_gateway(
     try:
         gateway_tools = gateway_tools or []
         custom_tools = custom_tools or []
+        connectors = connectors or []
         agentcore_ctrl = _create_agentcore_control_client(region)
         cognito_client = _create_cognito_client(region)
 
@@ -2013,13 +2995,33 @@ def deploy_gateway(
             except Exception as kb_err:
                 logger.error("Failed to deploy KB tool: %s", kb_err)
 
-        # Step 5: Synchronize NON-LAMBDA targets (OpenAPI / external MCP) for
-        # semantic discovery. Bug 134: synchronize_gateway_targets REQUIRES a
-        # targetIdList (the old call omitted it → silent failure) AND rejects
-        # LAMBDA targets ("Target type LAMBDA is not supported for
-        # synchronization") — Lambda targets serve their inline tools directly.
-        # So only sync targets that actually need crawling.
-        if gateway_config.get("semanticSearchEnabled"):
+        # Step 4c: Deploy SaaS connectors as OpenAPI gateway targets (with their
+        # API-key / OAuth2 credential providers). Capture provider + secret refs so
+        # teardown can delete them.
+        connector_credential_providers: list[str] = []
+        connector_secret_arns: list[str] = []
+        connector_spec_s3_uris: list[str] = []
+        if connectors:
+            conn_result = _deploy_connector_targets(
+                agentcore_ctrl,
+                gateway["gatewayId"],
+                region,
+                connectors,
+                owner_sub=owner_sub,
+            )
+            connector_credential_providers = conn_result["credential_provider_names"]
+            connector_secret_arns = conn_result["secret_arns"]
+            connector_spec_s3_uris = conn_result.get("spec_s3_uris", [])
+
+        # Step 5: Synchronize NON-LAMBDA targets (OpenAPI / external MCP) so their
+        # tools are crawled into the servable MCP plane. Bug 134:
+        # synchronize_gateway_targets REQUIRES a targetIdList (the old call omitted
+        # it → silent failure) AND rejects LAMBDA targets ("Target type LAMBDA is
+        # not supported for synchronization") — Lambda targets serve their inline
+        # tools directly. Connector (OpenAPI) targets MUST be crawled regardless of
+        # the semantic-search toggle, so we always sync the non-lambda set whenever
+        # any crawled target exists (or semantic search was explicitly requested).
+        if connectors or mcp_server_runtime_arn or gateway_config.get("semanticSearchEnabled"):
             try:
                 _sync_ids = []
                 for _t in _get_targets_from_response(
@@ -2088,6 +3090,76 @@ def deploy_gateway(
         gateway_url = gateway.get("gatewayUrl", "")
         client_info = cognito_response["client_info"]
 
+        # Connectors (OpenAPI targets) declare NO inline tools and CANNOT be synced
+        # (verified live: SynchronizeGatewayTargets rejects OPEN_API_SCHEMA), so
+        # _resolve_gateway_tool_actions reports expected_tool_count==0 for them even
+        # though the gateway crawls the spec and DOES serve operations. The
+        # control-plane is silent here, so the authoritative readiness signal is the
+        # live MCP tools/list probe. Require the connector gateway to serve >=1 tool;
+        # fail closed otherwise (never ship a connector gateway that serves nothing).
+        if connectors and expected_tool_count == 0:
+            served = _wait_for_gateway_to_serve_tools(
+                gateway_url, client_info, expected=1, timeout=120
+            )
+            if served < 1:
+                # Surface the REAL reason: a FAILED OpenAPI target carries an
+                # actionable statusReason (e.g. "Invalid OpenAPI schema: ...items
+                # is missing"). Without this the user only sees the generic
+                # "0 tools" message and can't fix their spec. (Verified live: an
+                # array schema missing `items` FAILs the target silently.)
+                target_reasons = []
+                try:
+                    for _t in _get_targets_from_response(
+                        agentcore_ctrl.list_gateway_targets(gatewayIdentifier=gateway["gatewayId"])
+                    ):
+                        _tid = _t.get("targetId") or _t.get("gatewayTargetId")
+                        if not _tid:
+                            continue
+                        _d = agentcore_ctrl.get_gateway_target(
+                            gatewayIdentifier=gateway["gatewayId"], targetId=_tid
+                        )
+                        if (_d.get("status") or "").upper() == "FAILED":
+                            _r = _d.get("statusReasons") or _d.get("statusReason") or "unknown"
+                            target_reasons.append(f"{_tid}: {_r}")
+                except Exception:  # noqa: BLE001
+                    pass
+                detail = (
+                    f" Target failure(s): {target_reasons}" if target_reasons
+                    else " No target reported FAILED — likely the AgentCore empty-tool-plane "
+                    "provisioning flake (retry the deploy)."
+                )
+                # Tear down the dead gateway (targets + gateway + cred providers +
+                # secrets) before aborting. Otherwise the same-named gateway lingers
+                # and the NEXT deploy reuses the broken one (verified live: a stuck
+                # conn-github-gw was reused across runs and kept serving 0 tools).
+                try:
+                    _abort_cfg = {
+                        "gateway_id": gateway["gatewayId"],
+                        "client_info": client_info,
+                        "connector_credential_providers": connector_credential_providers,
+                        "connector_secret_arns": connector_secret_arns,
+                        "connector_spec_s3_uris": connector_spec_s3_uris,
+                    }
+                    cleanup_gateway_resources("connector-abort", region, _abort_cfg)
+                except Exception as _ce:  # noqa: BLE001
+                    logger.warning("Abort-cleanup of dead connector gateway failed: %s", str(_ce)[:120])
+                return {
+                    "success": False,
+                    "error": (
+                        f"Gateway {gateway['gatewayId']} serves 0 tools over MCP after "
+                        f"deploying connector OpenAPI target(s)." + detail
+                    ),
+                    "connector_credential_providers": connector_credential_providers,
+                    "connector_secret_arns": connector_secret_arns,
+                    "connector_spec_s3_uris": connector_spec_s3_uris,
+                }
+            # Backfill qualified_tools from the live plane so the policy step (if any)
+            # has the connector's tool actions.
+            qualified_tools = _qualified_tools_from_served(gateway_url, client_info)
+            logger.warning(
+                "Connector gateway %s serves %d tool(s) over MCP", gateway["gatewayId"], served
+            )
+
         # Bug 134 (THE stability fix): a Lambda gateway target can be status=READY
         # with a full inline schema yet the gateway's MCP plane serves an EMPTY
         # tool list — a confirmed AgentCore service-side provisioning flake with
@@ -2154,22 +3226,24 @@ def deploy_gateway(
             "custom_tool_lambdas": custom_tool_lambdas,
             "custom_tool_roles": custom_tool_roles,
             "kb_lambda_name": kb_lambda_name,
+            # Connector teardown refs: AgentCore credential providers + Secrets
+            # Manager secrets + staged OpenAPI spec S3 objects created for SaaS
+            # connectors on this gateway.
+            "connector_credential_providers": connector_credential_providers,
+            "connector_secret_arns": connector_secret_arns,
+            "connector_spec_s3_uris": connector_spec_s3_uris,
             # Fully-qualified tool action names for Cedar policy generation, plus
             # how many tools the gateway CONFIGURED so the policy step can
             # fail-closed on a partial (synced < configured) tool plane.
             "qualified_tools": qualified_tools,
             "expected_tool_count": expected_tool_count,
         }
-        # Log the gateway id/arn (stable identifiers) rather than the full
-        # gateway_url. The URL is a public MCP endpoint (not a secret), but
-        # logging a url-typed value trips py/clear-text-logging-sensitive-data's
-        # heuristic; the id+arn are sufficient to correlate and carry no such flag.
-        logger.info(
-            "Gateway deployed: id=%s, arn=%s, tools=%d",
-            result["gateway_id"],
-            gateway_arn,
-            len(qualified_tools),
-        )
+        # SECURITY (CodeQL py/clear-text-logging-sensitive-data): the `result`
+        # dict nests client_info.client_secret, so it is taint-tracked — do NOT
+        # read any field from it in a log call (even gateway_id). Log only the
+        # tool count (an int) and a constant; the gateway id/arn are returned to
+        # the caller and recorded in the deployment manifest for correlation.
+        logger.info("Gateway deployed (%d tools)", len(qualified_tools))
         return result
 
     except Exception as e:
@@ -2280,5 +3354,34 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: Opti
         except Exception as e:
             if "NoSuchEntity" not in str(e):
                 cleanup_log.append(f"IAM role cleanup error for {role_name}: {e}")
+
+    # Delete SaaS connector credential providers (API-key OR OAuth2 — try both,
+    # since the stored name doesn't record the type). Non-fatal per item.
+    connector_providers = gateway_config.get("connector_credential_providers", [])
+    if connector_providers:
+        try:
+            agentcore_ctrl = agentcore_ctrl  # reuse if defined above
+        except NameError:  # pragma: no cover
+            agentcore_ctrl = _create_agentcore_control_client(region)
+        for provider_entry in connector_providers:
+            _ok, _msg = _delete_connector_credential_provider(agentcore_ctrl, provider_entry)
+            cleanup_log.append(_msg)
+
+    # Delete connector secrets from Secrets Manager (force, no recovery window).
+    connector_secret_arns = gateway_config.get("connector_secret_arns", [])
+    if connector_secret_arns:
+        sm_client = _create_secrets_client(region)
+        for secret_arn in connector_secret_arns:
+            try:
+                sm_client.delete_secret(SecretId=secret_arn, ForceDeleteWithoutRecovery=True)
+                cleanup_log.append(f"Connector secret {secret_arn} deleted")
+            except Exception as e:  # noqa: BLE001
+                if "ResourceNotFound" not in str(e):
+                    cleanup_log.append(f"Connector secret delete error: {e}")
+
+    # Delete staged OpenAPI spec objects (large connector specs routed to S3).
+    for uri in gateway_config.get("connector_spec_s3_uris", []):
+        _delete_spec_s3_object(uri, region)
+        cleanup_log.append(f"Connector spec object {uri} deleted")
 
     return cleanup_log

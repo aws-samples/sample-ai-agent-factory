@@ -37,6 +37,14 @@ def _build_model_arn(region: str, model_id: str) -> str:
     return f"arn:aws:bedrock:{region}::foundation-model/{model_id}"
 
 
+def _get_account_id() -> str:
+    """Resolve the current AWS account id (for constructing ARNs)."""
+    try:
+        return boto3.client("sts").get_caller_identity()["Account"]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _create_kb_role(iam_client, role_name: str, kb_config: dict) -> str:
     """Create an IAM role for the Knowledge Base with required permissions."""
     trust_policy = {
@@ -129,7 +137,10 @@ def _create_kb_role(iam_client, role_name: str, kb_config: dict) -> str:
                 "s3vectors:DeleteVectors",
                 "s3vectors:DescribeVectorBucket",
                 "s3vectors:DescribeIndex",
+                "s3vectors:GetIndex",
                 "s3vectors:GetVectorBucket",
+                "s3vectors:GetVectorBucketPolicy",
+                "s3vectors:PutVectorBucketPolicy",
                 "s3vectors:ListIndexes",
                 "s3vectors:ListVectorBuckets",
             ],
@@ -303,6 +314,21 @@ def _build_storage_config(kb_config: dict) -> dict:
 def _build_data_source_config(kb_config: dict) -> tuple[dict, str | None]:
     """Build data source configuration. Returns (ds_config, credentials_secret_arn)."""
     data_source_type = kb_config.get("dataSourceType", "s3")
+    vector_store_type = kb_config.get("vectorStoreType", "s3_vectors")
+
+    # Bug 186 — AWS rejects a WEB (web_crawler) data source on any vector store
+    # other than OpenSearch Serverless ("WEB data source is currently only
+    # supported for knowledge bases created with an Amazon OpenSearch Serverless
+    # vector database"). The platform defaults to s3_vectors, so this combo fails
+    # at CreateDataSource with a raw ValidationException. Reject it EARLY with an
+    # actionable message instead of surfacing the opaque AWS error mid-deploy.
+    if data_source_type == "web_crawler" and vector_store_type != "opensearch_serverless":
+        raise ValueError(
+            "Web Crawler data source requires the OpenSearch Serverless vector store "
+            f"(got vectorStoreType='{vector_store_type}'). Either set "
+            "vectorStoreType='opensearch_serverless', or use an S3 data source with "
+            "the default s3_vectors store."
+        )
 
     if data_source_type == "s3":
         s3_uri = kb_config.get("s3BucketUri", "")
@@ -436,6 +462,7 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
     deployment_id = event.get("deployment_id", "")
     region = _get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1"))
 
+    store = None
     try:
         store = _get_deployment_store()
         store.update_step(deployment_id, DeploymentStepName.KNOWLEDGE_BASE, DeploymentStatusEnum.IN_PROGRESS)
@@ -481,36 +508,79 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
         role_name = f"AgentCoreKBRole-{deployment_id[:8]}"
         role_arn = _create_kb_role(iam_client, role_name, kb_config)
         logger.warning("KB role created: %s", role_arn)
+        # Manifest: record the KB exec role for generic teardown. Best-effort.
+        if store is not None:
+            store.record_resource(
+                deployment_id,
+                {"type": "iam_role", "name": role_name, "region": region},
+            )
 
         # Step 2: Check if KB already exists (idempotency for SFN retries)
         kb_id = _find_existing_kb(bedrock_agent, kb_name)
         if kb_id:
             logger.warning("Found existing KB with name %s: %s (reusing)", kb_name, kb_id)
         else:
-            # If user provided an explicit S3 Vectors bucket, ensure the index
-            # exists before calling CreateKnowledgeBase — Bedrock requires the
-            # index to pre-exist and returns "The specified index could not
-            # be found" otherwise. See tasks/lessons.md Bug 88.
+            # S3 Vectors requires the vector bucket AND index to pre-exist before
+            # CreateKnowledgeBase. Bedrock does NOT auto-provision an S3 Vectors
+            # bucket from a bare {"s3VectorsConfiguration":{"indexName": ...}}
+            # storage config — instead it rejects the create with the misleading
+            # `ValidationException: Bedrock Knowledge Base was unable to assume
+            # the given role` (the role/perms are fine; the storage target just
+            # doesn't exist). So when the user did NOT supply an explicit bucket
+            # ARN we self-provision a vector bucket + index here and pin the ARN
+            # into kb_config so _build_storage_config emits an explicit
+            # vectorBucketArn. See tasks/lessons.md Bug 145.
+            #
+            # Index name MUST match the default used by _build_storage_config
+            # ("bedrock-knowledge-base-default-index") or retrieval misses.
             if kb_config.get("vectorStoreType", "s3_vectors") == "s3_vectors":
                 vec_arn = kb_config.get("s3VectorsBucketArn", "")
-                vec_idx = kb_config.get("s3VectorsIndexName") or "default-index"
-                if vec_arn:
-                    vec_bucket_name = vec_arn.rsplit("/", 1)[-1]
+                vec_idx = (
+                    kb_config.get("s3VectorsIndexName")
+                    or "bedrock-knowledge-base-default-index"
+                )
+                kb_config["s3VectorsIndexName"] = vec_idx
+                s3v = boto3.client("s3vectors", region_name=region)
+                if not vec_arn:
+                    # Auto-managed mode: create our own vector bucket. Bucket
+                    # names: 3-63 chars, lowercase alphanum + hyphen.
+                    vec_bucket_name = f"agentcore-kbvec-{deployment_id[:12]}"
                     try:
-                        s3v = boto3.client("s3vectors", region_name=region)
-                        existing = s3v.list_indexes(vectorBucketName=vec_bucket_name).get("indexes", [])
-                        if not any(ix.get("indexName") == vec_idx for ix in existing):
-                            logger.warning("Auto-creating missing S3 Vectors index '%s' on bucket %s", vec_idx, vec_bucket_name)
-                            # Titan Embed Text v2 default = 1024 dims, cosine
-                            s3v.create_index(
-                                vectorBucketName=vec_bucket_name,
-                                indexName=vec_idx,
-                                dataType="float32",
-                                dimension=1024,
-                                distanceMetric="cosine",
-                            )
-                    except Exception as ix_err:
-                        logger.warning("S3 Vectors index pre-check/create skipped: %s", ix_err)
+                        s3v.create_vector_bucket(vectorBucketName=vec_bucket_name)
+                        logger.warning("Auto-created S3 Vectors bucket %s", vec_bucket_name)
+                    except Exception as vb_err:
+                        # AlreadyExists on SFN retry is fine.
+                        logger.warning("create_vector_bucket: %s", str(vb_err)[:200])
+                    try:
+                        desc = s3v.get_vector_bucket(vectorBucketName=vec_bucket_name)
+                        vec_arn = desc.get("vectorBucket", {}).get("vectorBucketArn", "")
+                    except Exception:
+                        vec_arn = ""
+                    if not vec_arn:
+                        vec_arn = f"arn:aws:s3vectors:{region}:{_get_account_id()}:bucket/{vec_bucket_name}"
+                    kb_config["s3VectorsBucketArn"] = vec_arn
+                    # Record for teardown.
+                    if store is not None:
+                        store.record_resource(
+                            deployment_id,
+                            {"type": "s3_vectors_bucket", "name": vec_bucket_name, "region": region},
+                        )
+                else:
+                    vec_bucket_name = vec_arn.rsplit("/", 1)[-1]
+                # Ensure the index exists (Titan Embed Text v2 = 1024 dims, cosine).
+                try:
+                    existing = s3v.list_indexes(vectorBucketName=vec_bucket_name).get("indexes", [])
+                    if not any(ix.get("indexName") == vec_idx for ix in existing):
+                        logger.warning("Auto-creating S3 Vectors index '%s' on bucket %s", vec_idx, vec_bucket_name)
+                        s3v.create_index(
+                            vectorBucketName=vec_bucket_name,
+                            indexName=vec_idx,
+                            dataType="float32",
+                            dimension=1024,
+                            distanceMetric="cosine",
+                        )
+                except Exception as ix_err:
+                    logger.warning("S3 Vectors index pre-check/create skipped: %s", ix_err)
 
             storage_config = _build_storage_config(kb_config)
             vector_kb_config: dict = {
@@ -566,6 +636,18 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
                 raise last_err if last_err else RuntimeError("create_knowledge_base failed")
             kb_id = kb_resp["knowledgeBase"]["knowledgeBaseId"]
             logger.warning("Knowledge Base created: %s", kb_id)
+            # Manifest: record the KB FIRST (Bug 167). Teardown must delete the
+            # KnowledgeBase (and wait for it to reach a terminal deleted state)
+            # BEFORE its backing S3 Vectors bucket + exec role — deleting a KB
+            # with dataDeletionPolicy=DELETE makes Bedrock reach into the vector
+            # store using the role, so both must OUTLIVE the KB delete. The
+            # manifest delete is priority-ordered (knowledge_base before
+            # s3_vectors_bucket/iam_role) in deployment_handler.
+            if store is not None:
+                store.record_resource(
+                    deployment_id,
+                    {"type": "knowledge_base", "id": kb_id, "region": region},
+                )
 
         # Step 3: Wait for KB to become ACTIVE
         _wait_for_kb_active(bedrock_agent, kb_id)

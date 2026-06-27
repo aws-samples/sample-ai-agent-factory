@@ -16,7 +16,7 @@ export interface PaletteItem {
   label: string;
   description: string;
   icon: string;
-  category: 'compute' | 'integration' | 'security' | 'tools';
+  category: 'compute' | 'integration' | 'security' | 'tools' | 'connectors';
   toolId?: string;
 }
 
@@ -177,6 +177,58 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     category: 'tools',
     toolId: 'knowledge_base',
   },
+  // ── Connectors (Phase A — SaaS) ─────────────────────────────────────────
+  // Connector nodes reuse the `tool` component type. Their toolId is prefixed
+  // with "connector:" so App.tsx dispatches the ConnectorConfigModal and the
+  // deploy extraction routes them into the `connectors` payload (not gatewayTools).
+  {
+    type: 'tool',
+    label: 'Jira',
+    description: 'Atlassian Jira — create and search issues via the gateway',
+    icon: '🟦',
+    category: 'connectors',
+    toolId: 'connector:jira',
+  },
+  {
+    type: 'tool',
+    label: 'Asana',
+    description: 'Asana tasks and projects (API key only)',
+    icon: '🅰️',
+    category: 'connectors',
+    toolId: 'connector:asana',
+  },
+  {
+    type: 'tool',
+    label: 'Slack',
+    description: 'Post messages and read channels via Slack',
+    icon: '💬',
+    category: 'connectors',
+    toolId: 'connector:slack',
+  },
+  {
+    type: 'tool',
+    label: 'GitHub',
+    description: 'Issues, pull requests, and repos via GitHub',
+    icon: '🐙',
+    category: 'connectors',
+    toolId: 'connector:github',
+  },
+  {
+    type: 'tool',
+    label: 'Salesforce',
+    description: 'Leads, accounts, and SOQL via Salesforce',
+    icon: '☁️',
+    category: 'connectors',
+    toolId: 'connector:salesforce',
+  },
+  {
+    type: 'tool',
+    label: 'OpenAPI / MCP Connector',
+    description: 'Bring any OpenAPI spec or MCP server as a gateway target',
+    icon: '🧩',
+    category: 'connectors',
+    toolId: 'connector:generic_openapi',
+  },
 ];
 
 // ============================================================================
@@ -188,6 +240,7 @@ const CATEGORIES = [
   { id: 'integration', label: 'Integration', icon: '🔗' },
   { id: 'security', label: 'Security', icon: '🔒' },
   { id: 'tools', label: 'Tools', icon: '🧰' },
+  { id: 'connectors', label: 'Connectors', icon: '🧩' },
 ] as const;
 
 // ============================================================================
@@ -267,7 +320,7 @@ export function ComponentPalette({
   onOpenRegistry,
 }: ComponentPaletteProps) {
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(
-    new Set(['compute', 'integration', 'security', 'tools'])
+    new Set(['compute', 'integration', 'security', 'tools', 'connectors'])
   );
 
   // Filter items based on search query
@@ -289,6 +342,7 @@ export function ComponentPalette({
       integration: [],
       security: [],
       tools: [],
+      connectors: [],
     };
 
     for (const item of filteredItems) {

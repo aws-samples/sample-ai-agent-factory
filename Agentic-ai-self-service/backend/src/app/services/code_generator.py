@@ -519,18 +519,23 @@ def get_full_tools_list(client):
     prompt to fall back on, defeating the wiring proof gate.
     """
     import logging as _gw_log
+    import os as _gw_os
     _gw_logger = _gw_log.getLogger("agentcore.gateway")
+    _max_tools = int(_gw_os.environ.get("MAX_GATEWAY_TOOLS", "20"))
     more_tools = True
     tools = []
     pagination_token = None
     while more_tools:
         tmp_tools = client.list_tools_sync(pagination_token=pagination_token)
         tools.extend(tmp_tools)
-        if tmp_tools.pagination_token is None:
+        if len(tools) >= _max_tools or tmp_tools.pagination_token is None:
             more_tools = False
         else:
             pagination_token = tmp_tools.pagination_token
     _gw_logger.warning("Gateway MCPClient discovered %d tools from %s", len(tools), GATEWAY_URL)
+    if len(tools) > _max_tools:
+        _gw_logger.warning("Capping %d gateway tools to %d to fit the model context window (MAX_GATEWAY_TOOLS)", len(tools), _max_tools)
+        tools = tools[:_max_tools]
     return tools
 
 
@@ -1110,18 +1115,23 @@ def get_full_tools_list(client):
     the MCP client lifecycle and can recreate the session between attempts.
     """
     import logging as _gw_log
+    import os as _gw_os
     _gw_logger = _gw_log.getLogger("agentcore.gateway")
+    _max_tools = int(_gw_os.environ.get("MAX_GATEWAY_TOOLS", "20"))
     more_tools = True
     tools = []
     pagination_token = None
     while more_tools:
         tmp_tools = client.list_tools_sync(pagination_token=pagination_token)
         tools.extend(tmp_tools)
-        if tmp_tools.pagination_token is None:
+        if len(tools) >= _max_tools or tmp_tools.pagination_token is None:
             more_tools = False
         else:
             pagination_token = tmp_tools.pagination_token
     _gw_logger.warning("Gateway MCPClient discovered %d tools from %s", len(tools), GATEWAY_URL)
+    if len(tools) > _max_tools:
+        _gw_logger.warning("Capping %d gateway tools to %d to fit the model context window (MAX_GATEWAY_TOOLS)", len(tools), _max_tools)
+        tools = tools[:_max_tools]
     return tools
 
 

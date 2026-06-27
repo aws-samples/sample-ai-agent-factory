@@ -206,6 +206,24 @@ def handler(event: dict, context) -> dict:
             env_vars=env_vars if env_vars else None,
         )
 
+        # Manifest: record the runtime for generic teardown right after create
+        # succeeds (runtime_launch's readiness wait can be killed mid-poll,
+        # otherwise leaking the runtime). Best-effort: never fails the deploy.
+        store.record_resource(
+            deployment_id,
+            {"type": "agent_runtime", "id": runtime_result["runtime_id"], "region": region},
+        )
+        # Per-deploy exec role minted by iam_step (mode == 'per_agent'); skip the
+        # Bug-60 shared role, which is reused across every runtime in the stack.
+        shared_role_arn = _get_env("SHARED_RUNTIME_ROLE_ARN", "")
+        if role_arn and role_arn != shared_role_arn:
+            role_name = role_arn.rsplit("/", 1)[-1]
+            if role_name and not role_name.endswith("-shared"):
+                store.record_resource(
+                    deployment_id,
+                    {"type": "iam_role", "name": role_name, "region": region},
+                )
+
         return {
             **event,
             "runtime_id": runtime_result["runtime_id"],

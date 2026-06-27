@@ -17,6 +17,7 @@ import app.services._otel_platform  # noqa: F401
 import logging
 import os
 import re
+import time
 
 import boto3
 
@@ -28,10 +29,66 @@ from app.services.runtime_deployer import (
     create_runtime_iam_role,
     sanitize_runtime_name,
     upload_code_to_s3,
+    wait_for_default_endpoint_ready,
     wait_for_runtime_ready,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _prewarm_mcp_runtime(region: str, runtime_arn: str, attempts: int = 4) -> bool:
+    """Force the MCP server runtime container to fully initialize (Bug 171).
+
+    The Gateway's MCP-target tool-discovery probe has a hard ~30s init ceiling on
+    the AgentCore side; a cold MCP container (loading the strands-mcp bundle)
+    exceeds it on first contact, so the target lands FAILED ("Runtime
+    initialization time exceeded ... 30s") and the gateway serves 0 tools. We
+    cannot change that probe limit, so we send a real MCP request HERE first —
+    once the container is warm, the gateway's later probe completes well under
+    30s. We POST a JSON-RPC ``initialize`` (the MCP handshake) to the runtime's
+    data-plane endpoint via boto3 invoke_agent_runtime; a slow first call is
+    EXPECTED (that's the cold start we're paying down), so we use a long read
+    timeout and retry a few times until one returns promptly. Returns True once a
+    call succeeds. Best-effort — never raises to the caller.
+    """
+    import json as _json
+
+    from botocore.config import Config as _Cfg
+
+    data = boto3.client(
+        "bedrock-agentcore",
+        region_name=region,
+        config=_Cfg(read_timeout=120, connect_timeout=10, retries={"max_attempts": 0}),
+    )
+    handshake = _json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "agentcore-flows-prewarm", "version": "1.0"},
+            },
+        }
+    )
+    for i in range(attempts):
+        try:
+            data.invoke_agent_runtime(
+                agentRuntimeArn=runtime_arn,
+                payload=handshake,
+                contentType="application/json",
+                accept="application/json, text/event-stream",
+            )
+            logger.info("MCP runtime pre-warm succeeded on attempt %d", i + 1)
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.info(
+                "MCP runtime pre-warm attempt %d/%d still warming: %s",
+                i + 1, attempts, str(e)[:160],
+            )
+            time.sleep(5)
+    return False
 
 
 def _get_env(name: str, default: str = "") -> str:
@@ -81,14 +138,21 @@ def handler(event: dict, context) -> dict:
         if bucket:
             s3_client = boto3.client("s3", region_name=region)
 
-            # Download strands-mcp.zip bundle (includes mcp package with FastMCP)
+            # Bug 171: prefer the LEAN mcp-only bundle (mcp + bedrock-agentcore +
+            # boto3, NO strands/otel). The generated MCP server only imports
+            # FastMCP, and the heavy strands-mcp.zip made the container cold-start
+            # blow past the Gateway's 30s tool-discovery probe (target FAILED, 0
+            # tools). Fall back to strands-mcp.zip if the lean bundle isn't present
+            # (older deploys).
             deps_bundle = None
-            try:
-                resp = s3_client.get_object(Bucket=bucket, Key="agentcore-deps/strands-mcp.zip")
-                deps_bundle = resp["Body"].read()
-                logger.info("Downloaded strands-mcp.zip bundle (%d bytes)", len(deps_bundle))
-            except Exception as e:
-                logger.warning("Failed to download deps bundle: %s", e)
+            for _key in ("agentcore-deps/mcp-lean.zip", "agentcore-deps/strands-mcp.zip"):
+                try:
+                    resp = s3_client.get_object(Bucket=bucket, Key=_key)
+                    deps_bundle = resp["Body"].read()
+                    logger.info("Downloaded MCP deps bundle %s (%d bytes)", _key, len(deps_bundle))
+                    break
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("MCP deps bundle %s unavailable: %s", _key, str(e)[:120])
 
             upload_code_to_s3(
                 s3_client,
@@ -110,14 +174,20 @@ def handler(event: dict, context) -> dict:
         # Role name must start with "AgentCore" so the step Lambda's
         # iam:CreateRole resource scope (arn:aws:iam::*:role/AgentCore*)
         # in platform_stack.py matches. See tasks/lessons.md Bug 71.
+        mcp_role_name = f"AgentCoreMCP-{sanitize_runtime_name(mcp_name)}"
         mcp_role_arn = create_runtime_iam_role(
             iam_client,
-            f"AgentCoreMCP-{sanitize_runtime_name(mcp_name)}",
+            mcp_role_name,
             account_id,
             region,
             [],  # MCP server doesn't need extra tool permissions
         )
         logger.info("Created MCP server IAM role: %s", mcp_role_arn)
+        # Manifest: record the MCP exec role for generic teardown.
+        store.record_resource(
+            deployment_id,
+            {"type": "iam_role", "name": mcp_role_name, "region": region},
+        )
 
         # 4. Create Cognito pool for gateway-to-MCP-server OAuth auth
         gateway_name = event.get("gateway_config", {}).get("name", "mcp-gw")
@@ -143,6 +213,11 @@ def handler(event: dict, context) -> dict:
         )
         pool_id = pool_resp["UserPool"]["Id"]
         logger.info("Created MCP Cognito pool: %s", pool_id)
+        # Manifest: record the MCP Cognito user pool for generic teardown.
+        store.record_resource(
+            deployment_id,
+            {"type": "cognito_user_pool", "id": pool_id, "region": region},
+        )
 
         try:
             cognito.create_resource_server(
@@ -198,6 +273,12 @@ def handler(event: dict, context) -> dict:
         )
         mcp_runtime_id = mcp_runtime_result["runtime_id"]
         logger.info("Created MCP server runtime: %s", mcp_runtime_id)
+        # Manifest: record the MCP server runtime for generic teardown right
+        # after create (the readiness wait below can be killed mid-poll).
+        store.record_resource(
+            deployment_id,
+            {"type": "agent_runtime", "id": mcp_runtime_id, "region": region},
+        )
 
         # 6. Wait for MCP server runtime to be ready
         mcp_launch = wait_for_runtime_ready(agentcore_ctrl, mcp_runtime_id, timeout=300)
@@ -205,8 +286,28 @@ def handler(event: dict, context) -> dict:
             raise RuntimeError(f"MCP Server Runtime failed to become ready: {mcp_launch.get('error', 'unknown')}")
         logger.info("MCP Server Runtime is READY: %s", mcp_runtime_id)
 
-        # 7. Return runtime ARN + OAuth credentials for gateway step
+        # 6a. Gate on the DEFAULT endpoint too (Bug 166) — control-plane READY
+        # does not mean the data-plane endpoint is invokable yet.
+        ep = wait_for_default_endpoint_ready(agentcore_ctrl, mcp_runtime_id, timeout=180)
+        if not ep.get("success"):
+            logger.warning("MCP DEFAULT endpoint not READY: %s", ep.get("error"))
+
+        # 6b. PRE-WARM the MCP runtime (Bug 171). The Gateway's MCP target
+        # discovery probe ("fetch tools") has a HARD 30s init ceiling on the
+        # AgentCore side; a COLD MCP container (loading the strands-mcp bundle)
+        # blows past it on first contact, so the target lands FAILED with
+        # "Runtime initialization time exceeded ... 30s" and the gateway serves 0
+        # tools. We can't change the 30s probe limit, so we warm the container
+        # FIRST by sending a real MCP request, so the gateway's probe hits an
+        # already-initialized runtime. Best-effort: a warmup error is logged but
+        # never fails the deploy (the gateway-target retry still applies).
         mcp_server_runtime_arn = mcp_runtime_result.get("arn", "")
+        try:
+            _prewarm_mcp_runtime(region, mcp_server_runtime_arn)
+        except Exception as warm_exc:  # noqa: BLE001
+            logger.warning("MCP runtime pre-warm skipped: %s", str(warm_exc)[:200])
+
+        # 7. Return runtime ARN + OAuth credentials for gateway step
         logger.info("MCP Server Runtime ARN: %s", mcp_server_runtime_arn)
 
         return {

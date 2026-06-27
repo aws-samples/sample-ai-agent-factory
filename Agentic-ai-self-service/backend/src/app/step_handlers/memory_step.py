@@ -21,6 +21,7 @@ import boto3
 
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services.deployment_state_store import DeploymentStateStore
+from app.services.naming import sanitize_agentcore_name
 
 logger = logging.getLogger(__name__)
 
@@ -142,11 +143,20 @@ def _find_memory_by_name(client, memory_name: str, retries: int = 2) -> str | No
 
 
 def _wait_for_memory_ready(client, memory_id: str, timeout: int = 120) -> dict:
-    """Poll until memory is ACTIVE/READY or timeout."""
+    """Poll until memory is ACTIVE/READY or timeout.
+
+    Bug 156: control-plane get_memory reporting ACTIVE LEADS the data-plane
+    CreateEvent path the agent uses to write conversation turns — the first
+    invocation right after deploy can still hit "Memory status is not active,
+    unable to process CreateEvent" (observed live in the free-form kitchen-sink
+    flow; the agent degraded gracefully with "Could not save to memory"). After
+    the status flips ACTIVE we add a short settle so the data plane catches up.
+    """
     for _ in range(timeout // 5):
         resp = client.get_memory(memoryId=memory_id)
         status = resp.get("status", "")
         if status in ("ACTIVE", "READY"):
+            time.sleep(10)  # data-plane CreateEvent settle margin
             return resp
         if "FAILED" in status:
             raise RuntimeError(f"Memory entered {status}")
@@ -164,7 +174,16 @@ def handler(event: dict, context) -> dict:
         memory_config = event.get("memory_config") or {}
         region = _get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1"))
 
-        memory_name = memory_config.get("name", "AgentCoreMemory")
+        # AgentCore CreateMemory enforces name regex [a-zA-Z][a-zA-Z0-9_]{0,47}
+        # (letters/digits/UNDERSCORE only, start with a letter, <=48 chars). The
+        # canvas lets a user type any free-form memory name (e.g. "custom-mem" or
+        # "My Memory"), which would otherwise hard-fail the deploy at CreateMemory
+        # with a ValidationException. Sanitize: non-allowed chars -> underscore,
+        # ensure a leading letter, cap length. (Bug 155, caught in free-form test.)
+        raw_memory_name = memory_config.get("name", "AgentCoreMemory") or "AgentCoreMemory"
+        memory_name = sanitize_agentcore_name(
+            raw_memory_name, style="underscore", prefix="mem", fallback="AgentCoreMemory"
+        )
         enabled = memory_config.get("enabled", True)
 
         if not enabled:
@@ -226,6 +245,11 @@ def handler(event: dict, context) -> dict:
                     ),
                 )
                 time.sleep(10)
+                # Manifest: record the memory exec role for generic teardown.
+                store.record_resource(
+                    deployment_id,
+                    {"type": "iam_role", "name": memory_role_name, "region": region},
+                )
             except iam_client.exceptions.EntityAlreadyExistsException:
                 memory_role_arn = iam_client.get_role(RoleName=memory_role_name)["Role"]["Arn"]
 
@@ -331,6 +355,14 @@ def handler(event: dict, context) -> dict:
                     f"Memory '{memory_name}' was created but ID could not be extracted. "
                     f"Check CloudWatch logs for create_memory response keys."
                 )
+
+            # Manifest: record the memory resource for generic teardown right
+            # after create succeeds (before the readiness wait, which can be
+            # killed mid-poll and otherwise leak the memory).
+            store.record_resource(
+                deployment_id,
+                {"type": "memory", "id": memory_id, "region": region},
+            )
 
             # Wait for memory to be ready
             _wait_for_memory_ready(agentcore_ctrl, memory_id)
