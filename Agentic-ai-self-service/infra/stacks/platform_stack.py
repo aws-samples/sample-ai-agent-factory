@@ -126,6 +126,13 @@ class PlatformStack(cdk.Stack):
         self.user_pool, self.user_pool_client = self._create_cognito()
         self.api = self._create_api_gateway()
 
+        # --- Streaming test Lambda + Function URL (Bug 157) ---
+        # API Gateway HTTP API has a hard 30s integration cap; tool-heavy agents
+        # (>30s) time out at the transport. A Lambda Function URL with
+        # InvokeMode=RESPONSE_STREAM lets long invokes stream past 30s. Created
+        # after Cognito so it can verify the same pool/client JWT in-handler.
+        self.stream_lambda, self.stream_function_url = self._create_stream_lambda()
+
         # --- S3 + CloudFront + WAF ---
         self.web_acl = self._create_waf_web_acl()
         # NOTE: We previously attempted a regional WAF on the API Gateway stage
@@ -1036,6 +1043,13 @@ class PlatformStack(cdk.Stack):
                     "bedrock:DeleteDataSource",
                     "bedrock:GetDataSource",
                     "bedrock:ListDataSources",
+                    # Guardrail cleanup on runtime delete. The manifest delete path
+                    # (and the legacy guardrails_result fallback) run in THIS
+                    # Lambda and call DeleteGuardrail — without it the guardrail
+                    # orphans with AccessDenied (Bug 165, caught live: the guardrail
+                    # step role had Delete but the deployment/delete role did not).
+                    "bedrock:GetGuardrail",
+                    "bedrock:DeleteGuardrail",
                     # Explicit AgentCore actions used by the deployment Lambda:
                     # /api/test-runtime invokes; /api/runtime/{id} DELETE
                     # cascades through Get/Delete on runtime + endpoint +
@@ -1059,7 +1073,20 @@ class PlatformStack(cdk.Stack):
                     "bedrock-agentcore:CreateGatewayTarget",
                     "bedrock-agentcore:DeleteGatewayTarget",
                     "bedrock-agentcore:ListGatewayTargets",
+                    "bedrock-agentcore:GetGatewayTarget",
+                    "bedrock-agentcore:UpdateGatewayTarget",  # Bug 171 retry parity
+                    # Phase A SaaS connectors: the direct-deploy path (services/
+                    # deployment.py -> deploy_gateway / cleanup_gateway_resources)
+                    # syncs targets and mints/reads/deletes BOTH api-key and
+                    # oauth2 credential providers — Bug 9 parity with the SFN
+                    # gateway step. Get* used by cleanup to confirm existence.
+                    "bedrock-agentcore:SynchronizeGatewayTargets",
+                    "bedrock-agentcore:CreateApiKeyCredentialProvider",
+                    "bedrock-agentcore:GetApiKeyCredentialProvider",
+                    "bedrock-agentcore:DeleteApiKeyCredentialProvider",
+                    "bedrock-agentcore:ListApiKeyCredentialProviders",
                     "bedrock-agentcore:CreateOauth2CredentialProvider",
+                    "bedrock-agentcore:GetOauth2CredentialProvider",
                     "bedrock-agentcore:DeleteOauth2CredentialProvider",
                     "bedrock-agentcore:ListOauth2CredentialProviders",
                     "bedrock-agentcore:CreateMemory",
@@ -1094,6 +1121,34 @@ class PlatformStack(cdk.Stack):
                     # cascade-deletes orphaned eval configs to avoid PII /
                     # billing residue under deleted runtimes. See Bug 123.
                     "bedrock-agentcore:DeleteOnlineEvaluationConfig",
+                    # Phase B — AgentCore Harness (parallel deploy path).
+                    # The deployment Lambda owns the direct-deploy path
+                    # (services/deployment.py, Bug-9 parity with the SFN
+                    # harness step) plus test (InvokeHarness, DATA plane —
+                    # same action prefix, Bug 43) and delete (destroy_harness)
+                    # for deployment_mode=="harness". NO harness-endpoint verbs
+                    # exist.
+                    "bedrock-agentcore:CreateHarness",
+                    "bedrock-agentcore:GetHarness",
+                    "bedrock-agentcore:ListHarnesses",
+                    "bedrock-agentcore:UpdateHarness",
+                    "bedrock-agentcore:DeleteHarness",
+                    "bedrock-agentcore:InvokeHarness",
+                    # Bug 167 (caught live 2026-06-25): the KB step now
+                    # self-provisions an S3 Vectors bucket+index (Bug 145), so
+                    # the manifest delete path in THIS Lambda must be able to
+                    # tear it down. Without these the s3_vectors_bucket cleanup
+                    # fails AccessDenied -> orphaned vector bucket + delete
+                    # returns success=False. Mirrors the KB step role's create
+                    # verbs with the matching delete/list verbs.
+                    "s3vectors:ListVectorBuckets",
+                    "s3vectors:GetVectorBucket",
+                    "s3vectors:DescribeVectorBucket",
+                    "s3vectors:DeleteVectorBucket",
+                    "s3vectors:ListIndexes",
+                    "s3vectors:GetIndex",
+                    "s3vectors:DescribeIndex",
+                    "s3vectors:DeleteIndex",
                 ],
                 resources=["*"],
             )
@@ -1159,6 +1214,13 @@ class PlatformStack(cdk.Stack):
                     "iam:ListAttachedRolePolicies",
                     "iam:ListRolePolicies",
                     "iam:DeleteRolePolicy",
+                    # Phase B — the direct-deploy harness path
+                    # (create_harness_iam_role) builds the AgentCoreHarness-*
+                    # exec role with an inline policy + tag, then destroy_harness
+                    # tears it down. PutRolePolicy/TagRole round out the verbs the
+                    # existing CreateRole/Delete* already grant on AgentCore*.
+                    "iam:PutRolePolicy",
+                    "iam:TagRole",
                 ],
                 resources=[f"arn:aws:iam::{self.account}:role/AgentCore*"],
             )
@@ -1205,7 +1267,14 @@ class PlatformStack(cdk.Stack):
                     "lambda:InvokeFunction",
                     "lambda:DeleteFunction",
                 ],
-                resources=[f"arn:aws:lambda:{self.region}:{self.account}:function:AgentCore*"],
+                resources=[
+                    f"arn:aws:lambda:{self.region}:{self.account}:function:AgentCore*",
+                    # Bug 175: the MCP-server path's intercept lambda is named
+                    # "MCPServerRuntime" (no AgentCore prefix), so deleting an
+                    # MCP-server flow failed lambda:DeleteFunction with AccessDenied
+                    # and orphaned the function. Cover the MCP lambda names too.
+                    f"arn:aws:lambda:{self.region}:{self.account}:function:MCPServer*",
+                ],
             )
         )
         # S3 artifacts bucket: read/write for CFN template generation
@@ -1223,10 +1292,41 @@ class PlatformStack(cdk.Stack):
                     "secretsmanager:GetSecretValue",
                     "secretsmanager:PutSecretValue",
                     "secretsmanager:DeleteSecret",
+                    "secretsmanager:DescribeSecret",
                 ],
                 resources=[
                     f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:agentcore-trigger/*",
+                    # Phase A SaaS connectors: the direct-deploy path (services/
+                    # deployment.py -> deploy_gateway / cleanup_gateway_resources)
+                    # mints/reads/deletes connector credential secrets under the
+                    # agentcore-connector/ prefix — Bug 9 parity with the SFN
+                    # gateway step. Secrets live ONLY here — never in canvas
+                    # JSON, DDB, or logs.
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:agentcore-connector/*",
+                    # Bug 184 — TEARDOWN parity for the harness->gateway outbound
+                    # OAuth2 credential provider. handle_delete_runtime (this
+                    # role) calls delete_oauth2_credential_provider, which
+                    # cascade-deletes the provider's backing client_secret. That
+                    # secret lives under the bedrock-agentcore-* identity
+                    # namespace (NOT agentcore-connector/ — see Bug 83), so
+                    # without DeleteSecret here the teardown leaks the secret with
+                    # "not authorized to perform: secretsmanager:DeleteSecret"
+                    # and the provider delete fails. The gateway/harness STEP role
+                    # already grants this prefix; the delete role must match.
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:bedrock-agentcore-*",
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:AgentCore*",
                 ],
+            )
+        )
+        # ListSecrets does not support resource-level scoping (must be on `*`).
+        # The connector deploy/cleanup paths enumerate connector secrets by
+        # prefix to reconcile orphans. Separate minimal statement so the
+        # wildcard is visible and isolated; the per-role AwsSolutions-IAM5
+        # suppression already covers it.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["secretsmanager:ListSecrets"],
+                resources=["*"],
             )
         )
 
@@ -1298,6 +1398,155 @@ class PlatformStack(cdk.Stack):
         )
         return fn
 
+    def _create_stream_lambda(self) -> tuple:
+        """Create the response-streaming test Lambda + its Function URL (Bug 157).
+
+        The API Gateway HTTP API integration has a hard 30s timeout, so
+        tool-heavy agents (>30s) time out at the transport even though the
+        agent finishes server-side. A Lambda Function URL with
+        InvokeMode=RESPONSE_STREAM lets ``src/app/stream_handler.lambda_handler``
+        emit SSE chunks incrementally and keep the connection open well past
+        30s. The same SSE wire format the API-GW path uses is reused so the
+        existing frontend SSE parser works unchanged.
+
+        SECURITY: Function URLs cannot attach a Cognito JWT authorizer the way
+        the HTTP API does, so the URL uses auth_type=NONE and the handler
+        verifies the Cognito *access* token itself (issuer + client_id +
+        signature against the pool JWKS) before any invoke — see
+        stream_handler._verify_cognito_token. This is NOT an unauthenticated
+        invoke endpoint.
+        """
+        role = iam.Role(
+            self,
+            "StreamLambdaRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole"),
+            ],
+        )
+        # Read deployment records (runtime_id GSI + scan fallback) for ARN
+        # resolution + tenant-isolation checks. Read-only is sufficient — the
+        # stream path never mutates state.
+        self.deployments_table.grant_read_data(role)
+        # SSM read (config loader reads /agentcore-workflow/{env}/* like the
+        # other Lambdas).
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
+                resources=[f"arn:aws:ssm:{self.region}:{self.account}:parameter/agentcore-workflow/{self._env}/*"],
+            )
+        )
+        # Same data-plane invoke perms as the deployment Lambda's test path:
+        # InvokeAgentRuntime (RUNTIME mode) + InvokeHarness (Phase B HARNESS
+        # mode) + Bedrock model + STS for ARN construction. AgentCore uses one
+        # `bedrock-agentcore:` prefix for control + data plane (Bug 43); these
+        # are the invoke-only verbs (NO create/delete here — this Lambda only
+        # tests, it never provisions or tears down).
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                    "bedrock-agentcore:InvokeAgentRuntime",
+                    "bedrock-agentcore:InvokeHarness",
+                    "bedrock-agentcore:GetAgentRuntime",
+                    "bedrock-agentcore:GetHarness",
+                ],
+                resources=["*"],
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["sts:GetCallerIdentity"],
+                resources=["*"],
+            )
+        )
+
+        fn = _lambda.Function(
+            self,
+            "StreamLambda",
+            function_name=f"{self._project}-{self._env}-stream",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="src/app/stream_handler.lambda_handler",
+            code=self.backend_code,
+            memory_size=512,
+            # Generous timeout so tool-heavy agents can run well past the 30s
+            # API Gateway cap. Function URLs support response streaming up to
+            # ~15 min; the boto read timeout in the handler is bounded below it.
+            timeout=Duration.minutes(15),
+            role=role,
+            tracing=_lambda.Tracing.ACTIVE,
+            environment={
+                "DEPLOYMENTS_TABLE_NAME": self.deployments_table.table_name,
+                "DEPLOYMENT_TABLE_NAME": self.deployments_table.table_name,
+                "ENVIRONMENT": self._env,
+                "APP_AWS_REGION": self.region,
+                "POWERTOOLS_SERVICE_NAME": "stream",
+                "PYTHONPATH": "/var/task/src:/var/task:/var/task/lib",
+                # In-handler Cognito JWT verification config (same pool/client as
+                # the API-GW HttpJwtAuthorizer). stream_handler verifies the
+                # access token's issuer + client_id + signature before invoking.
+                "COGNITO_USER_POOL_ID": self.user_pool.user_pool_id,
+                "COGNITO_CLIENT_ID": self.user_pool_client.user_pool_client_id,
+                "COGNITO_REGION": self.region,
+            },
+            log_group=logs.LogGroup(
+                self,
+                "StreamLambdaLogGroup",
+                log_group_name=f"/aws/lambda/{self._project}-{self._env}-stream",
+                retention=logs.RetentionDays.ONE_MONTH,
+                removal_policy=RemovalPolicy.DESTROY,
+            ),
+        )
+        self._apply_platform_otel(fn, "stream")
+
+        # Function URL with RESPONSE_STREAM invoke mode. auth_type=NONE because
+        # the handler authenticates the Cognito JWT itself (Function URLs can't
+        # use the HTTP API's JWT authorizer). CORS mirrors the API GW config so
+        # the browser can call it directly with the Authorization header.
+        # SECURITY (Palisade/Epoxy finding 19a210be + account SCP): a public
+        # auth_type=NONE Function URL is a WORLD-ACCESSIBLE Lambda. Amazon's
+        # Palisade detector flags it and Epoxy auto-scopes the Principal back to
+        # the account — i.e. public Lambda URLs are forbidden in this org, and a
+        # signed admin SigV4 call to the URL is also SCP-blocked. So the Function
+        # URL uses AWS_IAM (SigV4) auth: no world access, fully compliant. The
+        # endpoint is provisioned but NOT yet wired to the browser — calling it
+        # from the SPA needs SigV4-signed requests via a Cognito Identity Pool
+        # (the app currently only has a User Pool / JWT). Tracked as future work;
+        # the >30s test path falls back to the documented 30s sync limit until an
+        # Identity Pool is added. The in-handler Cognito-JWT verify
+        # (stream_handler._verify_cognito_token, unit-tested) remains as
+        # defence-in-depth on top of the IAM gate.
+        fn_url = fn.add_function_url(
+            auth_type=_lambda.FunctionUrlAuthType.AWS_IAM,
+            invoke_mode=_lambda.InvokeMode.RESPONSE_STREAM,
+            cors=_lambda.FunctionUrlCorsOptions(
+                allowed_origins=["*"],
+                allowed_methods=[_lambda.HttpMethod.POST, _lambda.HttpMethod.GET],
+                allowed_headers=["Content-Type", "Authorization"],
+                max_age=Duration.minutes(5),
+            ),
+        )
+
+        # Discovery: CfnOutput (read by deploy.sh -> VITE_STREAM_URL) + SSM param
+        # so the frontend build can find the URL the same way it finds the API
+        # GW URL and Cognito IDs.
+        CfnOutput(
+            self,
+            "TestRuntimeStreamUrl",
+            value=fn_url.url,
+            description="Lambda Function URL (RESPONSE_STREAM) for >30s runtime tests",
+        )
+        ssm.StringParameter(
+            self,
+            "TestRuntimeStreamUrlParam",
+            parameter_name=f"/agentcore-workflow/{self._env}/test-runtime-stream-url",
+            string_value=fn_url.url,
+            description="Lambda Function URL for streaming runtime tests (Bug 157)",
+        )
+
+        return fn, fn_url
+
     def _create_step_role(self, step_name: str) -> iam.Role:
         """Create a dedicated IAM role for a step Lambda (1:1 relationship).
 
@@ -1356,7 +1605,7 @@ class PlatformStack(cdk.Stack):
         # evaluation creates AgentCoreEval-* role for the AgentCore evaluation
         # engine — same drift-across-paths shape as Bug 45/71/77; see
         # tasks/lessons.md Bug 118 (Phase 1 Gap 1C).
-        if step_name in {"iam", "mcp_server", "gateway", "knowledge_base", "memory", "evaluation"}:
+        if step_name in {"iam", "mcp_server", "gateway", "knowledge_base", "memory", "evaluation", "harness"}:
             role.add_to_policy(iam.PolicyStatement(
                 actions=[
                     "iam:CreateRole", "iam:AttachRolePolicy", "iam:PutRolePolicy", "iam:GetRole",
@@ -1402,6 +1651,19 @@ class PlatformStack(cdk.Stack):
                 conditions={"StringEquals": {"iam:PassedToService": "bedrock-agentcore.amazonaws.com"}},
             ))
 
+        # Phase B — the harness step PASSES the harness exec role to AgentCore
+        # via CreateHarness (mirrors runtime_configure's CreateAgentRuntime
+        # PassRole, Bug 49). Per-harness roles follow the AgentCoreHarness-*
+        # convention (get_shared_or_new_harness_role); the optional shared
+        # harness role, if added, also matches this prefix. Defence-in-depth:
+        # the role may only ever be passed to AgentCore.
+        if step_name == "harness":
+            role.add_to_policy(iam.PolicyStatement(
+                actions=["iam:PassRole"],
+                resources=[f"arn:aws:iam::{self.account}:role/AgentCoreHarness-*"],
+                conditions={"StringEquals": {"iam:PassedToService": "bedrock-agentcore.amazonaws.com"}},
+            ))
+
         # gateway / mcp_server / codegen / knowledge_base create user Lambdas
         # (custom tools, MCP servers, KB transformer Lambdas).
         if step_name in {"gateway", "mcp_server", "codegen", "knowledge_base"}:
@@ -1436,19 +1698,53 @@ class PlatformStack(cdk.Stack):
                 resources=[f"arn:aws:cognito-idp:{self.region}:{self.account}:userpool/*"],
             ))
             # gateway also stores the OAuth2 client_secret in Secrets Manager.
+            # Phase A SaaS connectors: the gateway step also mints/reads/deletes
+            # connector credential secrets under the agentcore-connector/ prefix
+            # (raw API keys + OAuth2 client_secrets that back the credential
+            # providers). DescribeSecret is used by the cleanup path to confirm
+            # existence before delete. Secrets live ONLY here — never in canvas
+            # JSON, DDB, or logs.
             role.add_to_policy(iam.PolicyStatement(
                 actions=[
                     "secretsmanager:CreateSecret", "secretsmanager:DeleteSecret",
                     "secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue",
-                    "secretsmanager:TagResource",
+                    "secretsmanager:DescribeSecret", "secretsmanager:TagResource",
                 ],
                 resources=[
                     f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:AgentCore*",
                     f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:agentcore-*",
+                    # Phase A SaaS connector credential secrets.
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:agentcore-connector/*",
                     # CreateOauth2CredentialProvider writes its client_secret
                     # under the bedrock-agentcore-identity!default/oauth2/<n>
                     # Secrets Manager namespace, not the platform's prefix.
                     # See tasks/lessons.md Bug 83.
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:bedrock-agentcore-*",
+                ],
+            ))
+            # ListSecrets does not support resource-level scoping (must be on
+            # `*`). The connector deploy/cleanup paths enumerate connector
+            # secrets by prefix to reconcile orphans. Kept as a separate minimal
+            # statement so the wildcard is visible and isolated. The existing
+            # per-role AwsSolutions-IAM5 suppression covers this wildcard.
+            role.add_to_policy(iam.PolicyStatement(
+                actions=["secretsmanager:ListSecrets"],
+                resources=["*"],
+            ))
+
+        # Bug 150 — the harness step registers an OAuth2 credential provider for a
+        # connected gateway; CreateOauth2CredentialProvider writes its client_secret
+        # under the bedrock-agentcore-identity! Secrets Manager namespace, so the
+        # harness step role needs to write/read/delete there (mirrors the gateway
+        # step's secret perms, minus the Cognito + connector-secret scope it doesn't use).
+        if step_name == "harness":
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "secretsmanager:CreateSecret", "secretsmanager:DeleteSecret",
+                    "secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue",
+                    "secretsmanager:DescribeSecret", "secretsmanager:TagResource",
+                ],
+                resources=[
                     f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:bedrock-agentcore-*",
                 ],
             ))
@@ -1512,6 +1808,13 @@ class PlatformStack(cdk.Stack):
                 "bedrock-agentcore:CreateAgentRuntimeEndpoint",
                 "bedrock-agentcore:CreateWorkloadIdentity",
                 "bedrock-agentcore:DeleteWorkloadIdentity",
+                # Bug 171: the step pre-warms the MCP runtime (sends an MCP
+                # initialize) so the Gateway's 30s tool-discovery probe hits a
+                # warm container instead of timing out on cold start. Needs the
+                # data-plane invoke verb on its own runtime.
+                "bedrock-agentcore:InvokeAgentRuntime",
+                "bedrock-agentcore:GetAgentRuntimeEndpoint",
+                "bedrock-agentcore:ListAgentRuntimeEndpoints",
             ],
             "gateway": [
                 "bedrock-agentcore:CreateGateway",
@@ -1527,9 +1830,23 @@ class PlatformStack(cdk.Stack):
                 # synced tool action names for schema-valid Cedar.
                 "bedrock-agentcore:GetGatewayTarget",
                 "bedrock-agentcore:SynchronizeGatewayTargets",
+                # Bug 171: when an MCP target lands FAILED (cold-start probe), the
+                # gateway step RETRIES it via UpdateGatewayTarget. Without this the
+                # retry path itself 403s and the target can never recover.
+                "bedrock-agentcore:UpdateGatewayTarget",
                 "bedrock-agentcore:CreateOauth2CredentialProvider",
+                "bedrock-agentcore:GetOauth2CredentialProvider",
                 "bedrock-agentcore:DeleteOauth2CredentialProvider",
                 "bedrock-agentcore:ListOauth2CredentialProviders",
+                # Phase A SaaS connectors: the gateway step now mints API-key
+                # credential providers (Jira/Asana/GitHub/Slack/Salesforce/
+                # generic OpenAPI) in addition to OAuth2 ones, and the cleanup
+                # path deletes them. Same provisioning shape as the OAuth2 verbs
+                # above (token-vault + workload-identity creation still apply).
+                "bedrock-agentcore:CreateApiKeyCredentialProvider",
+                "bedrock-agentcore:GetApiKeyCredentialProvider",
+                "bedrock-agentcore:DeleteApiKeyCredentialProvider",
+                "bedrock-agentcore:ListApiKeyCredentialProviders",
                 # CreateOauth2CredentialProvider transparently provisions a
                 # token vault under the account's identity directory if one
                 # doesn't exist. Without these, mcp-server-gateway-target
@@ -1549,6 +1866,25 @@ class PlatformStack(cdk.Stack):
                 "bedrock-agentcore:GetWorkloadIdentity",
                 "bedrock-agentcore:DeleteWorkloadIdentity",
                 "bedrock-agentcore:ListWorkloadIdentities",
+                # Bug 169 (caught live 2026-06-25): an MCP-server-as-gateway-target
+                # with an OAUTH credential provider makes the gateway service mint
+                # a workload access token to call the MCP runtime. Setting up that
+                # target validates the caller can GetWorkloadAccessToken — without
+                # it the TARGET lands in FAILED ("not authorized to perform
+                # bedrock-agentcore:GetWorkloadAccessToken on ... workload-identity/
+                # <gw>"), the gateway serves 0 tools, and the agent 500s at init.
+                # (Mis-attributed to a wiring/endpoint bug; it is purely IAM.)
+                "bedrock-agentcore:GetWorkloadAccessToken",
+                "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
+                "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
+                # Bug 169 (cont.): wiring the MCP target's OAUTH credential
+                # provider also reads the oauth2 token (and, for api-key targets,
+                # the api key) from the token vault during setup/validation. Both
+                # surface as the same "OAuth setup ... not authorized to perform
+                # bedrock-agentcore:GetResourceOauth2Token on .../token-vault/
+                # default/oauth2credentialprovider/<name>" 403 → target FAILED.
+                "bedrock-agentcore:GetResourceOauth2Token",
+                "bedrock-agentcore:GetResourceApiKey",
             ],
             "memory": [
                 "bedrock-agentcore:CreateMemory",
@@ -1653,6 +1989,69 @@ class PlatformStack(cdk.Stack):
                 "bedrock-agentcore:UpdateAgentRuntimeEndpoint",
                 "bedrock-agentcore:DeleteAgentRuntimeEndpoint",
             ],
+            # Phase B — AgentCore Harness lifecycle. The harness step creates
+            # the harness and polls it to READY; InvokeHarness is included so
+            # Bug-9 parity holds if the step ever smoke-tests. NO harness-
+            # endpoint verbs exist. InvokeHarness is
+            # served by the SAME bedrock-agentcore: action prefix even though it
+            # is on the DATA plane (mirrors InvokeAgentRuntime, Bug 43).
+            "harness": [
+                "bedrock-agentcore:CreateHarness",
+                "bedrock-agentcore:GetHarness",
+                "bedrock-agentcore:ListHarnesses",
+                "bedrock-agentcore:UpdateHarness",
+                "bedrock-agentcore:DeleteHarness",
+                "bedrock-agentcore:InvokeHarness",
+                # Bug 151 (caught live): a Harness is implemented ON TOP OF an
+                # AgentCore Runtime — CreateHarness internally calls
+                # CreateAgentRuntime (and get/update/delete mirror it), so the
+                # harness step role MUST also hold the AgentRuntime lifecycle
+                # verbs or CreateHarness fails with AccessDenied on
+                # bedrock-agentcore:CreateAgentRuntime (resource runtime/*).
+                "bedrock-agentcore:CreateAgentRuntime",
+                "bedrock-agentcore:GetAgentRuntime",
+                "bedrock-agentcore:UpdateAgentRuntime",
+                "bedrock-agentcore:DeleteAgentRuntime",
+                "bedrock-agentcore:ListAgentRuntimes",
+                "bedrock-agentcore:CreateAgentRuntimeEndpoint",
+                "bedrock-agentcore:GetAgentRuntimeEndpoint",
+                "bedrock-agentcore:DeleteAgentRuntimeEndpoint",
+                # CreateHarness transparently provisions a workload-identity
+                # record under the harness's identity directory (same shape as
+                # CreateAgentRuntime / CreateGateway, Bug 53/65).
+                "bedrock-agentcore:CreateWorkloadIdentity",
+                "bedrock-agentcore:GetWorkloadIdentity",
+                "bedrock-agentcore:DeleteWorkloadIdentity",
+                "bedrock-agentcore:ListWorkloadIdentities",
+                # Bug 150 — when a gateway is connected, the harness step registers
+                # an OAuth2 credential provider (ensure_gateway_outbound_provider)
+                # so the harness can authenticate outbound to the CUSTOM_JWT
+                # gateway. Without these the harness step gets AccessDenied
+                # creating that provider on the SFN path.
+                "bedrock-agentcore:CreateOauth2CredentialProvider",
+                "bedrock-agentcore:GetOauth2CredentialProvider",
+                "bedrock-agentcore:DeleteOauth2CredentialProvider",
+                "bedrock-agentcore:ListOauth2CredentialProviders",
+                # Bug 153 (caught live): the FIRST CreateOauth2CredentialProvider in
+                # an account/region implicitly provisions the default token-vault,
+                # so the caller needs CreateTokenVault/GetTokenVault or it fails with
+                # AccessDenied on bedrock-agentcore:CreateTokenVault
+                # (token-vault/default). Idempotent once the vault exists.
+                "bedrock-agentcore:CreateTokenVault",
+                "bedrock-agentcore:GetTokenVault",
+                # Bug 152 (caught live): CreateHarness ALWAYS auto-provisions a
+                # default AgentCore Memory for the harness session (even a "bare"
+                # harness with no memory configured). The CALLER (this step role)
+                # must hold the Memory lifecycle verbs or the harness lands in
+                # CREATE_FAILED with "Memory operation failed: not authorized to
+                # perform: bedrock-agentcore:CreateMemory". Delete cascades on
+                # DeleteHarness, but grant Delete/Get too for completeness.
+                "bedrock-agentcore:CreateMemory",
+                "bedrock-agentcore:GetMemory",
+                "bedrock-agentcore:ListMemories",
+                "bedrock-agentcore:UpdateMemory",
+                "bedrock-agentcore:DeleteMemory",
+            ],
         }
         if step_name in agentcore_steps:
             role.add_to_policy(iam.PolicyStatement(
@@ -1745,7 +2144,12 @@ class PlatformStack(cdk.Stack):
             "policy": {
                 "handler": "src/app/step_handlers/policy_step.handler",
                 "memory": 512,
-                "timeout": 120,
+                # Bug 177: a freshly-created policy engine takes minutes to become
+                # truly ACTIVE for policy creation (create_policy 409s "engine is
+                # CREATING" / validates "Insufficient permissions to call gateway"
+                # until it converges). The step waits for the engine + retries the
+                # policy create across that window, so it needs a generous budget.
+                "timeout": 300,
             },
             "knowledge_base": {
                 "handler": "src/app/step_handlers/knowledge_base_step.handler",
@@ -1756,6 +2160,16 @@ class PlatformStack(cdk.Stack):
                 "handler": "src/app/step_handlers/guardrails_step.handler",
                 "memory": 512,
                 "timeout": 120,
+            },
+            # Phase B — AgentCore Harness (parallel authoring/deploy path).
+            # Builds the harness exec role, calls CreateHarness, then polls
+            # wait_for_harness_ready (up to 600s service-side); the 300s Lambda
+            # budget covers role creation + create + a partial ready poll, with
+            # the SFN task timeout matched below.
+            "harness": {
+                "handler": "src/app/step_handlers/harness_step.handler",
+                "memory": 512,
+                "timeout": 300,
             },
         }
 
@@ -1916,7 +2330,9 @@ class PlatformStack(cdk.Stack):
         policy_step = self._create_step_task(
             "CreatePolicy",
             self.step_lambdas["policy"],
-            timeout_seconds=120,
+            # Bug 177: matched to the 300s Lambda budget — the policy engine's
+            # CREATING->ACTIVE convergence + policy-create retry can take minutes.
+            timeout_seconds=300,
             result_path="$",
         )
         policy_step.add_retry(**self._retry_kwargs())
@@ -1944,6 +2360,18 @@ class PlatformStack(cdk.Stack):
         )
         runtime_launch.add_retry(**self._retry_kwargs())
         runtime_launch.add_catch(**self._catch_kwargs(failure_handler))
+
+        # Phase B — AgentCore Harness deploy task (parallel to the codegen →
+        # iam → configure → launch Runtime path). Matches the SFN task timeout
+        # to the Lambda budget (300s). Shares the same retry/catch wrappers.
+        harness_step = self._create_step_task(
+            "DeployHarness",
+            self.step_lambdas["harness"],
+            timeout_seconds=300,
+            result_path="$",
+        )
+        harness_step.add_retry(**self._retry_kwargs())
+        harness_step.add_catch(**self._catch_kwargs(failure_handler))
 
         evaluation_step = self._create_step_task(
             "CreateEvaluation",
@@ -2024,16 +2452,37 @@ class PlatformStack(cdk.Stack):
         skip_memory.next(sfn.Choice(self, "HasPolicy?").when(has_policy, policy_step).otherwise(skip_policy))
         policy_step.next(skip_policy)
 
-        # → codegen → iam → configure → launch
-        skip_policy.next(codegen)
+        # → harness vs. runtime deploy-mode choice.
+        # Phase B: deployment_mode=="harness" diverts to the AgentCore Harness
+        # task (no codegen / no per-runtime IAM / no runtime configure+launch),
+        # then rejoins the shared tail at the evaluation choice — so the SAME
+        # status_update (and optional auth) steps still run, keeping connectors+
+        # memory parity in BOTH modes. The default (Visual Canvas) Runtime path
+        # is unchanged: absent/any-other deployment_mode falls through to codegen.
+        # Both branches converge on `post_deploy_choice` so each task's .next()
+        # is wired exactly once (CDK requirement).
+        post_deploy_choice = sfn.Choice(self, "HasEvaluation?").when(
+            has_evaluation, evaluation_step
+        ).otherwise(skip_evaluation)
+
+        is_harness_mode = sfn.Condition.string_equals("$.deployment_mode", "harness")
+        skip_policy.next(
+            sfn.Choice(self, "IsHarnessMode?")
+            .when(is_harness_mode, harness_step)
+            .otherwise(codegen)
+        )
+
+        # Default Runtime path (UNCHANGED): codegen → iam → configure → launch
         codegen.next(iam_step)
         iam_step.next(runtime_configure)
         runtime_configure.next(runtime_launch)
+        runtime_launch.next(post_deploy_choice)
 
-        # → evaluation choice
-        runtime_launch.next(
-            sfn.Choice(self, "HasEvaluation?").when(has_evaluation, evaluation_step).otherwise(skip_evaluation)
-        )
+        # Harness path rejoins the shared tail at the evaluation choice, exactly
+        # where runtime_launch would continue — so status_update still runs.
+        harness_step.next(post_deploy_choice)
+
+        # → evaluation choice (shared tail)
         evaluation_step.next(skip_evaluation)
 
         # → auth choice (only when gateway was deployed)
@@ -2787,9 +3236,12 @@ class PlatformStack(cdk.Stack):
                     content_security_policy=(
                         "default-src 'self'; "
                         "script-src 'self'; "
-                        "style-src 'self' 'unsafe-inline'; "
+                        # fonts.googleapis.com serves the Barlow/Instrument Serif
+                        # @font-face stylesheet (MotionSites reskin); the actual
+                        # woff2 files come from fonts.gstatic.com (font-src below).
+                        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
                         "img-src 'self' data: https:; "
-                        "font-src 'self' data:; "
+                        "font-src 'self' data: https://fonts.gstatic.com; "
                         f"connect-src 'self' https://*.amazoncognito.com https://cognito-idp.{self.region}.amazonaws.com; "
                         "frame-ancestors 'none'; "
                         "object-src 'none'; "
@@ -2954,6 +3406,10 @@ class PlatformStack(cdk.Stack):
         ]
         _suppress(self.workflow_lambda.role, iam_reasons)
         _suppress(self.deployment_lambda.role, iam_reasons)
+        # Bug 157 — streaming test Lambda role: same invoke-on-* wildcards as the
+        # deployment Lambda's test path (InvokeAgentRuntime/InvokeHarness).
+        if hasattr(self, "stream_lambda"):
+            _suppress(self.stream_lambda.role, iam_reasons)
         for fn in self.step_lambdas.values():
             _suppress(fn.role, iam_reasons)
         # Shared AgentCore runtime exec role: needs bedrock:* and
@@ -2985,6 +3441,8 @@ class PlatformStack(cdk.Stack):
         ]
         _suppress(self.workflow_lambda, l1_reasons)
         _suppress(self.deployment_lambda, l1_reasons)
+        if hasattr(self, "stream_lambda"):
+            _suppress(self.stream_lambda, l1_reasons)
         for fn in self.step_lambdas.values():
             _suppress(fn, l1_reasons)
 

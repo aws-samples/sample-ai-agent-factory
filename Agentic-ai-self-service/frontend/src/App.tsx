@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { signOut } from 'aws-amplify/auth';
 import WorkflowCanvas from './components/canvas/WorkflowCanvas';
 import { ComponentPalette } from './components/palette/ComponentPalette';
@@ -11,12 +11,14 @@ import { ActiveDeploymentBanner } from './components/deploy/ActiveDeploymentBann
 import type { ActiveDeployment } from './components/deploy/ActiveDeploymentBanner';
 import { ToolGeneratorPanel } from './components/ai/ToolGeneratorPanel';
 import { AgentGeneratorPanel } from './components/ai/AgentGeneratorPanel';
+import { HarnessAuthoring } from './components/harness/HarnessAuthoring';
 import type { GeneratedCanvasSpec } from './services/api';
 import { TemplateGallery } from './components/templates';
 import { MemoryConfigurationModal } from './components/modals/MemoryConfigurationModal';
 import { PolicyConfigurationModal } from './components/modals/PolicyConfigurationModal';
 import { KnowledgeBaseConfigModal } from './components/modals/KnowledgeBaseConfigModal';
 import { ToolConfigModal } from './components/modals/ToolConfigModal';
+import { ConnectorConfigModal } from './components/modals/ConnectorConfigModal';
 import { GuardrailsConfigurationModal } from './components/modals/GuardrailsConfigurationModal';
 import { ObservabilityConfigurationModal } from './components/modals/ObservabilityConfigurationModal';
 import { EvaluationConfigurationModal, type EvaluationNodeConfig } from './components/modals/EvaluationConfigurationModal';
@@ -29,7 +31,9 @@ import { useAutoSave } from './hooks/useAutoSave';
 import { instantiateTemplate } from './utils/templates';
 import type { AgentCoreComponentType } from './types/workflow';
 import type { WorkflowTemplate } from './types/templates';
-import type { RuntimeConfiguration, GatewayConfiguration, IdentityConfiguration, MemoryConfiguration, PolicyConfiguration, GuardrailsConfiguration, ObservabilityConfiguration, ComponentConfiguration, ToolConfiguration, KnowledgeBaseToolConfig, A2AConfiguration } from './types/components';
+import type { RuntimeConfiguration, GatewayConfiguration, IdentityConfiguration, MemoryConfiguration, PolicyConfiguration, GuardrailsConfiguration, ObservabilityConfiguration, ComponentConfiguration, ToolConfiguration, KnowledgeBaseToolConfig, A2AConfiguration, ConnectorConfiguration } from './types/components';
+import { CONNECTOR_TOOL_PREFIX } from './types/components';
+import type { DeployConnector } from './components/deploy/DeployPanel';
 import type { GeneratedTool } from './services/api';
 import './App.css';
 
@@ -40,6 +44,17 @@ function App() {
   // Audit issue #8: surface auto-save errors via a toast so users can see
   // when their work has stopped persisting.
   const { lastSaveError, clearLastSaveError } = useAutoSave(activeFlowId);
+
+  // Phase B — authoring mode. "visual" (default) renders the existing
+  // canvas + palette + deploy UI UNCHANGED. "harness" swaps in the additive
+  // form-based AgentCore Harness authoring path.
+  const [authoringMode, setAuthoringMode] = useState<'visual' | 'harness'>('visual');
+  // Bug 193 — connector secrets are stripped from the persisted node config (so
+  // they never reach canvas JSON / DDB), but the deploy payload still needs the
+  // raw value to mint the Secrets Manager secret. Hold it HERE: an in-memory,
+  // never-persisted map keyed by nodeId, written at config-save and read when the
+  // deploy payload's connectors[] is built. Cleared on a fresh canvas load.
+  const connectorSecretsRef = useRef<Record<string, string>>({});
 
   const [paletteCollapsed, setPaletteCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -138,7 +153,7 @@ function App() {
 
   // Get connected tools, gateway config, identity config, custom tools, and MCP server config
   const getConnectedToolsAndGateway = useCallback(() => {
-    if (!deployableNodeId) return { tools: [], gatewayConfig: null, gatewayTools: [], identityConfig: null, customTools: [], memoryConfig: null, evaluationConfig: null, policyConfig: null, guardrailsConfig: null, observabilityConfig: null, mcpServerConfig: null, knowledgeBaseConfig: null, a2aConfig: null };
+    if (!deployableNodeId) return { tools: [], gatewayConfig: null, gatewayTools: [], identityConfig: null, customTools: [], connectors: [] as DeployConnector[], memoryConfig: null, evaluationConfig: null, policyConfig: null, guardrailsConfig: null, observabilityConfig: null, mcpServerConfig: null, knowledgeBaseConfig: null, a2aConfig: null };
     const connectedTools: string[] = [];
     const gatewayTools: string[] = [];
     let gatewayConfig = null;
@@ -198,6 +213,10 @@ function App() {
 
     // Find tool nodes and MCP Server Runtime nodes connected to the gateway
     const customTools: Array<{ toolName: string; displayName: string; description: string; lambdaCode: string; inputSchema: Record<string, unknown> }> = [];
+    // Phase A — SaaS connectors. A connector is a `tool`-typed node whose
+    // toolId is "connector:<id>". They wire through the gateway like tools but
+    // are emitted as a separate `connectors` array (snake_case, see below).
+    const connectors: DeployConnector[] = [];
     let knowledgeBaseConfig: Record<string, unknown> | null = null;
     const mcpServerTools: string[] = [];
     if (gatewayNodeId) {
@@ -208,8 +227,29 @@ function App() {
           if (otherNodeId === deployableNodeId) return;
           const otherNode = nodes.find(n => n.id === otherNodeId);
           if (otherNode?.data.componentType === 'tool') {
-            const toolConfig = otherNode.data.configuration as { toolId?: string; isCustom?: boolean; isKnowledgeBase?: boolean; lambdaCode?: string; inputSchema?: Record<string, unknown>; displayName?: string; description?: string } | undefined;
-            if (toolConfig?.toolId === 'knowledge_base' && toolConfig?.isKnowledgeBase) {
+            const toolConfig = otherNode.data.configuration as { toolId?: string; isCustom?: boolean; isKnowledgeBase?: boolean; isConnector?: boolean; lambdaCode?: string; inputSchema?: Record<string, unknown>; displayName?: string; description?: string } | undefined;
+            if (toolConfig?.isConnector || toolConfig?.toolId?.startsWith(CONNECTOR_TOOL_PREFIX)) {
+              const c = toolConfig as unknown as ConnectorConfiguration;
+              const isOauth = c.authMethod === 'oauth2_cc';
+              connectors.push({
+                connector_id: c.connectorId || (c.toolId || '').slice(CONNECTOR_TOOL_PREFIX.length),
+                auth_method: c.authMethod,
+                // Transient — minted into Secrets Manager backend-side, then dropped.
+                // Read from the in-memory secrets map (the persisted node has the
+                // raw value stripped for security); fall back to any inline value.
+                secret_value: connectorSecretsRef.current[otherNodeId] || c.secretValue || undefined,
+                secret_arn: c.secretArn || undefined,
+                spec_url: c.specUrl || undefined,
+                spec_inline: c.specContent || undefined,
+                scopes: isOauth ? (c.scopes || []) : undefined,
+                client_id: isOauth ? (c.clientId || undefined) : undefined,
+                oauth_vendor: isOauth ? (c.oauthVendor || undefined) : undefined,
+                discovery_url: isOauth ? (c.discoveryUrl || undefined) : undefined,
+                credential_location: !isOauth ? (c.credentialLocation || undefined) : undefined,
+                credential_parameter_name: !isOauth ? (c.credentialParameterName || undefined) : undefined,
+                credential_prefix: !isOauth ? (c.credentialPrefix || undefined) : undefined,
+              });
+            } else if (toolConfig?.toolId === 'knowledge_base' && toolConfig?.isKnowledgeBase) {
               knowledgeBaseConfig = toolConfig as unknown as Record<string, unknown>;
             } else if (toolConfig?.toolId && !toolConfig?.isCustom) {
               gatewayTools.push(toolConfig.toolId);
@@ -260,10 +300,10 @@ function App() {
       });
     }
 
-    return { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig, a2aConfig };
+    return { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig, a2aConfig };
   }, [deployableNodeId, edges, nodes]);
 
-  const { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig, a2aConfig } = getConnectedToolsAndGateway();
+  const { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig, a2aConfig } = getConnectedToolsAndGateway();
 
   // Handle pending node creation - open modal when node appears
   useEffect(() => {
@@ -307,10 +347,12 @@ function App() {
     }
   }, [nodes]);
 
-  // Handle node creation from drop - set pending to open modal when node appears
-  // Tool nodes come pre-configured, so skip the modal for them
-  const handleNodeCreate = useCallback((componentType: AgentCoreComponentType, position: { x: number; y: number }) => {
-    if (componentType === 'tool') return;
+  // Handle node creation from drop - set pending to open modal when node appears.
+  // Built-in / custom tool nodes come pre-configured, so skip the modal for them.
+  // Connector tool nodes need credentials before deploy, so they DO open a modal
+  // (the pending effect resolves the new node and dispatches ConnectorConfigModal).
+  const handleNodeCreate = useCallback((componentType: AgentCoreComponentType, position: { x: number; y: number }, toolId?: string | null) => {
+    if (componentType === 'tool' && !toolId?.startsWith(CONNECTOR_TOOL_PREFIX)) return;
     setPendingNodeConfig({ componentType, position });
   }, []);
 
@@ -319,10 +361,22 @@ function App() {
     setConfigModal({ isOpen: false, nodeId: null, componentType: null });
   }, []);
 
-  // Save configuration and run validation
+  // Save configuration and run validation.
+  // SECURITY: connector secrets are transient. The raw `secretValue` is stripped
+  // before the node is persisted so it never reaches the canvas JSON / DDB —
+  // only Secrets Manager holds it (backend mints from the deploy payload). The
+  // node keeps just `configured` + non-secret fields.
   const handleSaveConfig = useCallback((config: ComponentConfiguration) => {
     if (configModal.nodeId) {
-      updateNodeConfiguration(configModal.nodeId, config);
+      const persisted = { ...config } as ComponentConfiguration & { secretValue?: string };
+      // Capture the transient secret into the in-memory map (keyed by nodeId)
+      // BEFORE stripping it from the persisted node — the deploy payload reads it
+      // back from here so the backend can mint the Secrets Manager secret.
+      if (persisted.secretValue) {
+        connectorSecretsRef.current[configModal.nodeId] = persisted.secretValue;
+      }
+      if ('secretValue' in persisted) delete persisted.secretValue;
+      updateNodeConfiguration(configModal.nodeId, persisted);
       // Run validation after config update
       setTimeout(() => runValidation(), 10);
     }
@@ -331,6 +385,8 @@ function App() {
 
   // Handle template selection
   const handleSelectTemplate = useCallback((template: WorkflowTemplate) => {
+    // New canvas content => drop any transient connector secrets from the old one.
+    connectorSecretsRef.current = {};
     const { nodes: templateNodes, edges: templateEdges } = instantiateTemplate(template);
     loadTemplate(templateNodes, templateEdges, template.id);
   }, [loadTemplate]);
@@ -406,6 +462,56 @@ function App() {
   // Check if we have a valid runtime to deploy
   const canDeploy = deployableConfig && deployableConfig.name && deployableConfig.systemPrompt;
 
+  // Phase B — segmented authoring-mode toggle, shared by both modes' top nav.
+  // MotionSites: glass badge with refined transitions.
+  const authoringToggle = (
+    <div className="flex items-center gap-0.5 p-0.5 bg-white/10 backdrop-blur-sm rounded-md" role="tablist" aria-label="Authoring mode">
+      <button
+        role="tab"
+        aria-selected={authoringMode === 'visual'}
+        onClick={() => setAuthoringMode('visual')}
+        className={`px-2.5 py-1 rounded text-xs font-medium transition-colors duration-200 ${
+          authoringMode === 'visual' ? 'bg-white text-[#232f3e]' : 'text-white/70 hover:text-white hover:bg-white/10'
+        }`}
+        style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
+      >
+        Visual Canvas
+      </button>
+      <button
+        role="tab"
+        aria-selected={authoringMode === 'harness'}
+        onClick={() => setAuthoringMode('harness')}
+        className={`px-2.5 py-1 rounded text-xs font-medium transition-colors duration-200 ${
+          authoringMode === 'harness' ? 'bg-white text-[#232f3e]' : 'text-white/70 hover:text-white hover:bg-white/10'
+        }`}
+        style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
+      >
+        Harness
+      </button>
+    </div>
+  );
+
+  // Harness mode swaps in the additive form-based authoring path. The visual
+  // canvas (palette + canvas + deploy) below is rendered UNCHANGED otherwise.
+  if (authoringMode === 'harness') {
+    return (
+      <div className="w-screen h-screen flex flex-col bg-[#f2f3f3]">
+        <div className="h-12 bg-[#232f3e] flex items-center gap-4 px-4 z-20 border-b border-white/10 flex-shrink-0">
+          <div className="flex items-center gap-2.5">
+            <div className="w-7 h-7 rounded-md bg-[#ff9900] flex items-center justify-center">
+              <svg className="w-4 h-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+              </svg>
+            </div>
+            <span className="font-semibold text-white text-sm tracking-tight">AgentCore Flows</span>
+          </div>
+          {authoringToggle}
+        </div>
+        <HarnessAuthoring />
+      </div>
+    );
+  }
+
   return (
     <div className="w-screen h-screen flex bg-[#f2f3f3]">
       <ComponentPalette
@@ -437,14 +543,16 @@ function App() {
             </span>
             <div className="h-5 w-px bg-white/20" />
             <div className="flex items-center gap-2 text-xs text-white/60">
-              <span className="px-2 py-0.5 bg-white/10 rounded font-medium">{nodes.length} node{nodes.length !== 1 ? 's' : ''}</span>
+              <span className="px-2 py-0.5 backdrop-blur-sm rounded font-light" style={{ backgroundColor: 'rgba(255, 255, 255, 0.1)' }}>{nodes.length} node{nodes.length !== 1 ? 's' : ''}</span>
             </div>
+            <div className="h-5 w-px bg-white/20" />
+            {authoringToggle}
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Status indicator */}
+            {/* Status indicator - MotionSites glass badge */}
             {deployableConfig && (
-              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-emerald-500/15 text-emerald-300 rounded-md text-xs font-medium border border-emerald-500/20">
+              <div className="flex items-center gap-1.5 px-2.5 py-1 backdrop-blur-sm rounded-md text-xs font-medium border transition-colors duration-200" style={{ backgroundColor: 'rgba(16, 185, 129, 0.15)', color: 'rgb(110, 231, 183)', borderColor: 'rgba(16, 185, 129, 0.3)' }}>
                 <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
                 Ready
               </div>
@@ -453,7 +561,8 @@ function App() {
             {/* Phase 2 Gap 2A — Registry (browse/clone agents) */}
             <button
               onClick={() => setShowRegistry(true)}
-              className="px-3 py-1.5 rounded-md text-sm text-white/70 hover:text-white hover:bg-white/10 transition-all duration-150 flex items-center gap-1.5"
+              className="px-3 py-1.5 rounded-md text-sm text-white/70 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
+              style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
               title="Browse the agent registry"
               aria-label="Browse agent registry"
             >
@@ -465,7 +574,8 @@ function App() {
             {/* Phase 2 Gap 2D — HITL approvals inbox */}
             <button
               onClick={() => setShowHitlInbox(true)}
-              className="px-3 py-1.5 rounded-md text-sm text-white/70 hover:text-white hover:bg-white/10 transition-all duration-150 flex items-center gap-1.5"
+              className="px-3 py-1.5 rounded-md text-sm text-white/70 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
+              style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
               title="Human-in-the-loop approvals"
               aria-label="Human-in-the-loop approvals inbox"
             >
@@ -475,18 +585,20 @@ function App() {
               Approvals
             </button>
 
-            {/* Deploy Button */}
+            {/* Deploy Button - MotionSites off-white CTA with rounded-[2px] */}
             <button
               onClick={() => setShowDeployPanel(true)}
               disabled={!canDeploy}
               className={`
-                px-4 py-1.5 rounded-md font-semibold transition-all duration-200 flex items-center gap-2 text-sm
+                px-4 py-1.5 font-medium transition-all duration-200 flex items-center gap-2 text-sm
                 ${canDeploy
-                  ? 'bg-[#ff9900] text-[#232f3e] hover:bg-[#ec7211] hover:scale-105 active:scale-95'
+                  ? 'text-[#171717] hover:scale-[1.01] active:scale-95'
                   : 'bg-white/10 text-white/30 cursor-not-allowed'}
               `}
               style={{
-                boxShadow: canDeploy ? '0 1px 2px rgba(0, 0, 0, 0.2), 0 2px 4px rgba(255, 153, 0, 0.3)' : 'none',
+                backgroundColor: canDeploy ? '#f8f8f8' : undefined,
+                borderRadius: '2px',
+                boxShadow: canDeploy ? '0 1px 2px rgba(0, 0, 0, 0.2)' : 'none',
                 transitionTimingFunction: 'var(--ease-out-quint)',
               }}
               title={!canDeploy ? 'Configure a Runtime node first' : 'Deploy to AgentCore'}
@@ -499,7 +611,8 @@ function App() {
             </button>
             <button
               onClick={() => signOut()}
-              className="px-3 py-1.5 rounded-md text-sm text-white/60 hover:text-white hover:bg-white/10 transition-all duration-150"
+              className="px-3 py-1.5 rounded-md text-sm text-white/60 hover:text-white hover:bg-white/10 transition-colors duration-200"
+              style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
               title="Sign out"
               aria-label="Sign out"
             >
@@ -573,11 +686,20 @@ function App() {
             </div>
           )}
 
-          {/* Selected Node Info Card */}
+          {/* Selected Node Info Card - MotionSites hover:scale */}
           {selectedNode && (
             <div
-              className="absolute bottom-4 left-4 z-30 bg-white rounded-xl border border-[#e9ebed] p-4 min-w-[240px]"
-              style={{ boxShadow: 'var(--shadow-md)' }}
+              className="absolute bottom-4 left-4 z-30 bg-white rounded-xl border border-[#e9ebed] p-4 min-w-[240px] transition-transform duration-200"
+              style={{
+                boxShadow: 'var(--shadow-md)',
+                transitionTimingFunction: 'var(--ease-out-quint)',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = 'scale(1.01)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = 'scale(1)';
+              }}
             >
               <div className="flex items-start gap-3">
                 <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-[#232f3e] to-[#16191f] flex items-center justify-center text-white text-base flex-shrink-0 shadow-sm">
@@ -590,17 +712,17 @@ function App() {
                    selectedNode.data.componentType === 'tool' ? '🔧' : '🔑'}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="font-semibold text-[#16191f] text-sm truncate tracking-tight">
+                  <div className="font-medium text-[#16191f] text-sm truncate tracking-tight">
                     {selectedNode.data.label || selectedNode.data.componentType}
                   </div>
-                  <div className="text-xs text-[#5f6b7a] capitalize mt-1 font-medium">
+                  <div className="text-xs text-[#5f6b7a] capitalize mt-1 font-light">
                     {selectedNode.data.componentType.replace(/_/g, ' ')}
                   </div>
                 </div>
               </div>
               <button
                 onClick={() => handleOpenConfig(selectedNode.id)}
-                className="mt-3 w-full py-2 px-3 text-sm text-[#0972d3] hover:bg-[#0972d3]/8 active:bg-[#0972d3]/12 rounded-lg transition-all duration-150 font-semibold flex items-center justify-center gap-2 border border-[#0972d3]/25 hover:border-[#0972d3]/40"
+                className="mt-3 w-full py-2 px-3 text-sm text-[#0972d3] hover:bg-[#0972d3]/8 active:bg-[#0972d3]/12 rounded-lg transition-colors duration-200 font-medium flex items-center justify-center gap-2 border border-[#0972d3]/25 hover:border-[#0972d3]/40"
                 style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
                 aria-label={`Configure ${selectedNode.data.label || selectedNode.data.componentType}`}
               >
@@ -613,37 +735,80 @@ function App() {
             </div>
           )}
 
-          {/* Help hint when no nodes */}
+          {/* Help hint when no nodes - MotionSites empty state with glass badge */}
           {nodes.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="text-center max-w-sm px-4">
-                <div
-                  className="w-16 h-16 mx-auto mb-5 rounded-2xl bg-gradient-to-br from-[#232f3e] to-[#16191f] flex items-center justify-center shadow-lg"
-                  style={{ boxShadow: '0 4px 12px rgba(35, 47, 62, 0.2)' }}
-                >
-                  <svg className="w-8 h-8 text-[#ff9900]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-                  </svg>
+              <div className="text-center max-w-xl px-4">
+                {/* Glass badge */}
+                <div className="inline-flex mb-6">
+                  <div
+                    className="rounded-full px-1.5 py-1.5 backdrop-blur-sm"
+                    style={{ backgroundColor: 'rgba(0, 0, 0, 0.05)' }}
+                  >
+                    <div
+                      className="rounded-full px-3 py-1 text-sm font-medium tracking-tight"
+                      style={{
+                        backgroundColor: 'rgba(255, 255, 255, 0.95)',
+                        color: '#171717',
+                      }}
+                    >
+                      Visual Workflow Builder
+                    </div>
+                  </div>
                 </div>
-                <h3 className="text-lg font-semibold text-[#16191f] mb-2 tracking-tight">Build your agent workflow</h3>
-                <p className="text-sm text-[#5f6b7a] mb-5 leading-relaxed">
+
+                {/* Headline - Instrument Serif italic + Barlow light */}
+                <h3
+                  className="text-3xl sm:text-4xl md:text-5xl mb-3 leading-tight text-[#16191f]"
+                  style={{
+                    fontFamily: 'var(--font-accent)',
+                    fontStyle: 'italic',
+                    fontWeight: 400,
+                  }}
+                >
+                  Build Your First Agent
+                </h3>
+                <p
+                  className="text-base sm:text-lg mb-8 font-light tracking-tight leading-relaxed"
+                  style={{ color: 'rgba(23, 23, 23, 0.65)' }}
+                >
                   Drag components from the sidebar, start with a template, or let AI generate an agent for you.
                 </p>
-                <div className="flex gap-2 justify-center">
+
+                {/* CTAs - MotionSites rounded-[2px] */}
+                <div className="flex gap-3 justify-center">
                   <button
                     onClick={() => setShowTemplateGallery(true)}
-                    className="pointer-events-auto px-5 py-2.5 bg-[#0972d3] text-white rounded-lg text-sm font-semibold hover:bg-[#0961b9] transition-all duration-150 shadow-sm hover:shadow-md active:scale-95"
+                    className="pointer-events-auto px-5 py-2.5 text-sm font-medium transition-all duration-200 active:scale-95"
                     style={{
-                      boxShadow: '0 1px 2px rgba(0, 0, 0, 0.1), 0 2px 4px rgba(9, 114, 211, 0.2)',
+                      backgroundColor: '#f8f8f8',
+                      color: '#171717',
+                      borderRadius: '2px',
+                      boxShadow: '0 1px 2px rgba(0, 0, 0, 0.1)',
                       transitionTimingFunction: 'var(--ease-out-quint)',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.transform = 'scale(1.01)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.transform = 'scale(1)';
                     }}
                   >
                     Browse Templates
                   </button>
                   <button
                     onClick={() => setShowAgentGenerator(true)}
-                    className="pointer-events-auto px-5 py-2.5 bg-white text-[#0972d3] rounded-lg text-sm font-semibold hover:bg-gray-50 transition-all duration-150 border border-[#0972d3]/25 hover:border-[#0972d3]/40 active:scale-95"
-                    style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
+                    className="pointer-events-auto px-5 py-2.5 bg-white text-[#0972d3] text-sm font-medium transition-all duration-200 border border-[#0972d3]/25 hover:border-[#0972d3]/40 active:scale-95"
+                    style={{
+                      borderRadius: '2px',
+                      transitionTimingFunction: 'var(--ease-out-quint)',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.transform = 'scale(1.01)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.transform = 'scale(1)';
+                    }}
                   >
                     Generate with AI
                   </button>
@@ -664,6 +829,7 @@ function App() {
         templateId={activeTemplateId}
         identityConfig={identityConfig}
         customTools={customTools}
+        connectors={connectors}
         memoryConfig={memoryConfig}
         evaluationConfig={evaluationConfig}
         policyConfig={policyConfig}
@@ -751,25 +917,45 @@ function App() {
         />
       )}
 
-      {configModal.componentType === 'tool' && !!(configModal.initialConfig as unknown as Record<string, unknown>)?.isKnowledgeBase && (
-        <KnowledgeBaseConfigModal
-          isOpen={configModal.isOpen}
-          onClose={handleCloseConfig}
-          onSave={(config) => handleSaveConfig(config)}
-          initialConfig={configModal.initialConfig as Partial<KnowledgeBaseToolConfig>}
-        />
-      )}
-
-      {/* Built-in / custom tools (non-knowledge-base) — without this the
-          Configure action on a custom tool node opened no modal at all. */}
-      {configModal.componentType === 'tool' && !(configModal.initialConfig as unknown as Record<string, unknown>)?.isKnowledgeBase && (
-        <ToolConfigModal
-          isOpen={configModal.isOpen}
-          onClose={handleCloseConfig}
-          onSave={(config) => handleSaveConfig(config)}
-          initialConfig={configModal.initialConfig as Partial<ToolConfiguration>}
-        />
-      )}
+      {(() => {
+        // Tool-typed nodes fan out to three modals by config shape:
+        //   connector (toolId "connector:*" / isConnector) -> ConnectorConfigModal
+        //   knowledge base (isKnowledgeBase)               -> KnowledgeBaseConfigModal
+        //   everything else (built-in / custom tools)      -> ToolConfigModal
+        if (configModal.componentType !== 'tool') return null;
+        const cfg = configModal.initialConfig as unknown as Record<string, unknown> | undefined;
+        const isConnector =
+          !!cfg?.isConnector ||
+          (typeof cfg?.toolId === 'string' && (cfg.toolId as string).startsWith(CONNECTOR_TOOL_PREFIX));
+        if (isConnector) {
+          return (
+            <ConnectorConfigModal
+              isOpen={configModal.isOpen}
+              onClose={handleCloseConfig}
+              onSave={(config) => handleSaveConfig(config)}
+              initialConfig={configModal.initialConfig as Partial<ConnectorConfiguration>}
+            />
+          );
+        }
+        if (cfg?.isKnowledgeBase) {
+          return (
+            <KnowledgeBaseConfigModal
+              isOpen={configModal.isOpen}
+              onClose={handleCloseConfig}
+              onSave={(config) => handleSaveConfig(config)}
+              initialConfig={configModal.initialConfig as Partial<KnowledgeBaseToolConfig>}
+            />
+          );
+        }
+        return (
+          <ToolConfigModal
+            isOpen={configModal.isOpen}
+            onClose={handleCloseConfig}
+            onSave={(config) => handleSaveConfig(config)}
+            initialConfig={configModal.initialConfig as Partial<ToolConfiguration>}
+          />
+        );
+      })()}
 
       {configModal.componentType === 'a2a' && (
         <A2AConfigurationModal

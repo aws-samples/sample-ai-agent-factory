@@ -9,15 +9,15 @@ const needsAuth = !!import.meta.env.VITE_COGNITO_USER_POOL_ID;
 
 async function render() {
   if (needsAuth) {
-    const { Authenticator } = await import('@aws-amplify/ui-react');
     await import('@aws-amplify/ui-react/styles.css');
+    const { AuthWrapper } = await import('./components/auth/AuthWrapper');
 
     createRoot(document.getElementById('root')!).render(
       <StrictMode>
         <ErrorBoundary>
-          <Authenticator hideSignUp={true}>
-            {() => <App />}
-          </Authenticator>
+          <AuthWrapper>
+            <App />
+          </AuthWrapper>
         </ErrorBoundary>
       </StrictMode>,
     );

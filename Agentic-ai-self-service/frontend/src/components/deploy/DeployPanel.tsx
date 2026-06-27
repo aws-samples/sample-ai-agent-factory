@@ -43,6 +43,25 @@ export interface CustomToolData {
   inputSchema: Record<string, unknown>;
 }
 
+// Phase A — SaaS connector deploy entry. snake_case keys match the backend
+// DeployRequest connectors[] schema. secret_value
+// is transient (minted into Secrets Manager backend-side, never persisted).
+export interface DeployConnector {
+  connector_id: string;
+  auth_method: 'api_key' | 'oauth2_cc';
+  secret_value?: string;
+  secret_arn?: string;
+  spec_url?: string;
+  spec_inline?: string;
+  scopes?: string[];
+  client_id?: string;
+  oauth_vendor?: string;
+  discovery_url?: string;
+  credential_location?: 'HEADER' | 'QUERY_PARAMETER';
+  credential_parameter_name?: string;
+  credential_prefix?: string;
+}
+
 export interface DeployPanelProps {
   config: RuntimeConfiguration | null;
   nodeId: string | null;
@@ -52,6 +71,7 @@ export interface DeployPanelProps {
   templateId?: string | null;
   identityConfig?: IdentityConfiguration | null;
   customTools?: CustomToolData[];
+  connectors?: DeployConnector[];
   memoryConfig?: Record<string, unknown> | null;
   evaluationConfig?: Record<string, unknown> | null;
   policyConfig?: Record<string, unknown> | null;
@@ -60,6 +80,11 @@ export interface DeployPanelProps {
   knowledgeBaseConfig?: Record<string, unknown> | null;
   observabilityConfig?: Record<string, unknown> | null;
   a2aConfig?: Record<string, unknown> | null;
+  // Phase B — authoring/deploy path. "runtime" (default/omitted) keeps the
+  // unchanged visual-canvas Runtime path; "harness" routes the SAME deploy
+  // payload through the additive AgentCore Harness path (deployment_mode is
+  // forwarded so it reaches both the SFN and direct-deploy branches, Bug 9).
+  deploymentMode?: 'runtime' | 'harness';
   isVisible: boolean;
   onClose: () => void;
   restoredDeployment?: {
@@ -94,7 +119,7 @@ const STEP_ORDER = [
   'evaluation', 'auth', 'status_update',
 ];
 
-export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig, gatewayTools = [], templateId, identityConfig, customTools = [], memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, observabilityConfig, a2aConfig, isVisible, onClose, restoredDeployment }: DeployPanelProps) {
+export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig, gatewayTools = [], templateId, identityConfig, customTools = [], connectors = [], memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, observabilityConfig, a2aConfig, deploymentMode = 'runtime', isVisible, onClose, restoredDeployment }: DeployPanelProps) {
   // ============================================================
   // State Hooks
   // (Audit #14: deploy state, chat state, refs, memoized template)
@@ -195,6 +220,13 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          // Phase B — forward the authoring/deploy path. "runtime" is the
+          // default; "harness" routes the same payload through the additive
+          // AgentCore Harness path. Sent on BOTH camelCase + snake_case so it
+          // reaches the SFN and direct-deploy branches regardless of which the
+          // backend reads (Bug 9 parity).
+          deployment_mode: deploymentMode,
+          deploymentMode,
           nodeId, config: fullConfig, connectedTools, gatewayConfig, gatewayTools, templateId,
           identityConfig: (identityConfig?.oauth2Config || identityConfig?.mode === 'per_agent') ? {
             mode: identityConfig?.mode ?? 'shared',
@@ -206,6 +238,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
             audience: identityConfig?.oauth2Config?.audience || undefined,
           } : undefined,
           customTools: customTools.length > 0 ? customTools : undefined,
+          connectors: connectors.length > 0 ? connectors : undefined,
           memoryConfig: memoryConfig || undefined,
           evaluationConfig: evaluationConfig || undefined,
           policyConfig: policyConfig || undefined,
@@ -356,7 +389,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
         message,
       });
     }
-  }, [config, nodeId, connectedTools, gatewayConfig, gatewayTools, templateId, identityConfig, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, warmupRuntime, resetAllExecutionStates, setNodeExecutionStateByType]);
+  }, [config, nodeId, deploymentMode, connectedTools, gatewayConfig, gatewayTools, templateId, identityConfig, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, warmupRuntime, resetAllExecutionStates, setNodeExecutionStateByType]);
 
   // ============================================================
   // CFN Download UI
@@ -402,6 +435,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
             audience: identityConfig?.oauth2Config?.audience || undefined,
           } : undefined,
           customTools: customTools.length > 0 ? customTools : undefined,
+          connectors: connectors.length > 0 ? connectors : undefined,
           memoryConfig: memoryConfig || undefined,
           evaluationConfig: evaluationConfig || undefined,
           policyConfig: policyConfig || undefined,
@@ -444,7 +478,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
     } finally {
       setIsExportingPython(false);
     }
-  }, [config, nodeId, connectedTools, gatewayConfig, gatewayTools, templateId, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, observabilityConfig, a2aConfig, identityConfig]);
+  }, [config, nodeId, connectedTools, gatewayConfig, gatewayTools, templateId, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, observabilityConfig, a2aConfig, identityConfig]);
 
   const handleDownloadCfn = useCallback(async () => {
     if (!config || !nodeId) return;
@@ -475,6 +509,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
             audience: identityConfig?.oauth2Config?.audience || undefined,
           } : undefined,
           customTools: customTools.length > 0 ? customTools : undefined,
+          connectors: connectors.length > 0 ? connectors : undefined,
           memoryConfig: memoryConfig || undefined,
           evaluationConfig: evaluationConfig || undefined,
           policyConfig: policyConfig || undefined,
@@ -519,7 +554,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
     } finally {
       setIsDownloadingCfn(false);
     }
-  }, [config, nodeId, connectedTools, gatewayConfig, gatewayTools, templateId, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, identityConfig]);
+  }, [config, nodeId, connectedTools, gatewayConfig, gatewayTools, templateId, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, identityConfig]);
 
   // Gap 2A — publish the deployed agent's canvas as a reusable registry blueprint.
   // This closes the deploy -> registry -> Browse -> Clone-to-canvas loop: the
@@ -858,7 +893,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
             </div>
             <div>
               <h3 className="font-semibold text-white text-sm">Deploy & Test</h3>
-              <p className="text-[11px] text-white/50">AgentCore Runtime</p>
+              <p className="text-[11px] text-white/50">{deploymentMode === 'harness' ? 'AgentCore Harness' : 'AgentCore Runtime'}</p>
             </div>
           </div>
           <button
@@ -1028,6 +1063,20 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
                   </div>
                   <div className="text-xs text-purple-600">
                     A FastMCP server <strong>{(mcpServerConfig as Record<string, string>).name || 'MCP Server'}</strong> will be deployed as an AgentCore Runtime and connected as a Gateway target.
+                  </div>
+                </div>
+              )}
+
+              {/* Connectors (Phase A — SaaS) */}
+              {connectors.length > 0 && (
+                <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-4">
+                  <div className="text-xs font-medium text-indigo-700 mb-2">Connectors</div>
+                  <div className="flex flex-wrap gap-2">
+                    {connectors.map((c) => (
+                      <span key={c.connector_id} className="px-2.5 py-1 bg-indigo-100 text-indigo-700 rounded-full text-xs font-medium flex items-center gap-1">
+                        🧩 {c.connector_id} · {c.auth_method === 'oauth2_cc' ? 'OAuth' : 'API key'}
+                      </span>
+                    ))}
                   </div>
                 </div>
               )}

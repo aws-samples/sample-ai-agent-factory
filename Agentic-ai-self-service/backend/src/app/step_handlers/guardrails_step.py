@@ -270,6 +270,24 @@ def handler(event: dict, context) -> dict:
             if rx:
                 create_params.setdefault("sensitiveInformationPolicyConfig", {}).update(rx)
 
+        # Fail FAST with a clear message if no actual policy was configured.
+        # AWS CreateGuardrail rejects a guardrail with zero policies
+        # ("Guardrail must have at least one policy") ~30s into the deploy; a
+        # free-form user who drags a Guardrails node but leaves every filter
+        # empty hits exactly that. Surface it here as an actionable error
+        # (verified live in the free-form matrix).
+        _policy_keys = (
+            "contentPolicyConfig", "sensitiveInformationPolicyConfig",
+            "topicPolicyConfig", "wordPolicyConfig", "contextualGroundingPolicyConfig",
+        )
+        if not any(k in create_params for k in _policy_keys):
+            raise ValueError(
+                "Guardrail has no policies configured. Add at least one of: content "
+                "filters, denied topics, PII/sensitive-info filters, word filters, or "
+                "contextual grounding — an empty guardrail guards nothing and AWS "
+                "rejects it."
+            )
+
         # Bug 82: idempotent upsert. A prior partial run can leave a
         # guardrail with this name behind; create_guardrail then fails with
         # ResourceAlreadyExistsException. Look up the existing guardrail by
@@ -280,7 +298,16 @@ def handler(event: dict, context) -> dict:
             resp = bedrock.create_guardrail(**create_params)
             guardrail_id = resp["guardrailId"]
             _LOG("Created guardrail: %s", guardrail_id)
-        except bedrock.exceptions.ResourceAlreadyExistsException:
+        except Exception as _ce:  # noqa: BLE001
+            # Bedrock has NO ResourceAlreadyExistsException — a duplicate guardrail
+            # name surfaces as ConflictException / ResourceInUseException (verified
+            # live: referencing the nonexistent attribute itself crashed the step).
+            # Match on the error code, and re-raise anything that isn't a name clash.
+            _code = getattr(getattr(_ce, "response", {}), "get", lambda *_: {})("Error", {}).get("Code", "") \
+                if hasattr(_ce, "response") else ""
+            if _code not in ("ConflictException", "ResourceInUseException") and \
+               "already" not in str(_ce).lower() and "conflict" not in str(_ce).lower():
+                raise
             existing_id = _find_guardrail_id_by_name(bedrock, name)
             if existing_id:
                 _LOG("Guardrail name %s already exists (id=%s); updating in place", name, existing_id)
@@ -297,6 +324,13 @@ def handler(event: dict, context) -> dict:
                 resp = bedrock.create_guardrail(**create_params)
                 guardrail_id = resp["guardrailId"]
                 _LOG("Created guardrail with fallback name %s: %s", fallback_name, guardrail_id)
+
+        # Manifest: record the flow-created guardrail immediately (before the
+        # READY poll, which can be killed mid-flight) so teardown never orphans it.
+        if guardrail_id:
+            store.record_resource(
+                deployment_id, {"type": "guardrail", "id": guardrail_id, "region": region}
+            )
 
         # Wait for guardrail to be READY
         for attempt in range(24):  # 120s max

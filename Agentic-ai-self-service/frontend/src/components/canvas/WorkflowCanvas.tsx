@@ -102,7 +102,7 @@ export interface WorkflowCanvasProps {
   onViewportChange?: (viewport: Viewport) => void;
   onNodeDelete?: (nodeId: string) => void;
   onEdgeDelete?: (edgeId: string) => void;
-  onNodeCreate?: (componentType: AgentCoreComponentType, position: { x: number; y: number }) => void;
+  onNodeCreate?: (componentType: AgentCoreComponentType, position: { x: number; y: number }, toolId?: string | null) => void;
   onNodeDoubleClick?: (nodeId: string) => void;
   readOnly?: boolean;
 }
@@ -367,8 +367,8 @@ export function WorkflowCanvas({
       const newNode = createNodeFromDrop(componentType, position, toolId);
       addNode(newNode);
 
-      // Notify parent
-      onNodeCreate?.(componentType, position);
+      // Notify parent (pass toolId so connector tool nodes can open their modal)
+      onNodeCreate?.(componentType, position, toolId);
 
       // Reset drag state
       setDragState(initialDragState);
