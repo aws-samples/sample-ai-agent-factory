@@ -119,3 +119,10 @@ backend/lib/
 .envrc
 *tmp*
 package-lock.json
+
+# Local-only test/visibility artifacts — never commit (contains live tokens, scratch state)
+tasks/matrix-tester/
+docs/decks/
+
+# Holmes local scan metadata
+.holmes/

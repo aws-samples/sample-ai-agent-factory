@@ -327,6 +327,42 @@ class DeploymentStateStore:
             status.value,
         )
 
+    def record_resource(self, deployment_id: str, resource: dict) -> None:
+        """Atomically append one created sub-resource to ``created_resources``.
+
+        Each *resource* is a small dict the delete path can act on, e.g.
+        ``{"type": "memory", "id": "mem-123", "region": "us-east-1"}`` or
+        ``{"type": "iam_role", "name": "AgentCoreMemory-foo"}``. Uses DynamoDB
+        ``list_append`` + ``if_not_exists`` so PARALLEL step handlers appending
+        concurrently never clobber each other's entries. Best-effort: a failure
+        here must not fail the deploy (the resource still exists; teardown also
+        has the *_result fallbacks), so callers should not let this raise.
+        """
+        try:
+            _update_item(
+                self._table,
+                key={"deployment_id": deployment_id},
+                update_expr=(
+                    "SET created_resources = "
+                    "list_append(if_not_exists(created_resources, :empty), :r)"
+                ),
+                expr_values={
+                    ":r": [_convert_floats_to_decimals(resource)],
+                    ":empty": [],
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            # SECURITY (CodeQL py/clear-text-logging-sensitive-data): the
+            # `resource` dict is taint-tracked as potentially secret-bearing, so
+            # do NOT reference it in the log at all (not even .get("type")), and
+            # don't emit a traceback. deployment_id + exception class is enough to
+            # diagnose; full detail is available via the DDB write failure itself.
+            logger.warning(
+                "record_resource failed for %s (non-fatal): err=%s",
+                deployment_id,
+                type(exc).__name__,
+            )
+
     def update_status(
         self,
         deployment_id: str,
@@ -343,6 +379,9 @@ class DeploymentStateStore:
         knowledge_base_result: Optional[dict] = None,
         guardrails_result: Optional[dict] = None,
         mcp_server_runtime_id: Optional[str] = None,
+        harness_id: Optional[str] = None,
+        harness_arn: Optional[str] = None,
+        deployment_mode: Optional[str] = None,
         error_details: Optional[str] = None,
     ) -> None:
         """Update the status and optional output fields of a deployment.
@@ -357,6 +396,9 @@ class DeploymentStateStore:
             runtime_endpoint: Deployed runtime endpoint URL.
             runtime_id: Deployed runtime identifier.
             gateway_url: Deployed gateway URL (if applicable).
+            harness_id: Deployed AgentCore Harness id (Phase B harness mode).
+            harness_arn: Deployed AgentCore Harness ARN (Phase B harness mode).
+            deployment_mode: Authoring path ("runtime" | "harness").
             error_details: Error description (if failed).
         """
         existing = self.get(deployment_id)
@@ -419,6 +461,18 @@ class DeploymentStateStore:
         if mcp_server_runtime_id is not None:
             set_parts.append("mcp_server_runtime_id = :mcp_server_runtime_id")
             expr_values[":mcp_server_runtime_id"] = mcp_server_runtime_id
+
+        if harness_id is not None:
+            set_parts.append("harness_id = :harness_id")
+            expr_values[":harness_id"] = harness_id
+
+        if harness_arn is not None:
+            set_parts.append("harness_arn = :harness_arn")
+            expr_values[":harness_arn"] = harness_arn
+
+        if deployment_mode is not None:
+            set_parts.append("deployment_mode = :deployment_mode")
+            expr_values[":deployment_mode"] = deployment_mode
 
         if error_details is not None:
             set_parts.append("error_details = :error_details")

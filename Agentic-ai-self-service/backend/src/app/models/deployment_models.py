@@ -9,7 +9,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .components import ConnectorConfig
 
 
 # Bedrock models published between October 2025 and May 2026 — the policy
@@ -132,6 +134,7 @@ class DeploymentStepName(str, Enum):
     POLICY = "policy"
     RUNTIME_CONFIGURE = "runtime_configure"
     RUNTIME_LAUNCH = "runtime_launch"
+    HARNESS = "harness"
     EVALUATION = "evaluation"
     AUTH = "auth"
     STATUS_UPDATE = "status_update"
@@ -167,6 +170,13 @@ class DeploymentState(BaseModel):
     mcp_server_runtime_id: Optional[str] = None
     memory_result: Optional[dict] = None  # Memory deployment result for cleanup
     runtime_arn: Optional[str] = None  # Full ARN of the deployed runtime
+    # Phase B — AgentCore Harness (parallel authoring path). When
+    # ``deployment_mode == "harness"`` the runtime_*/codegen fields are unused
+    # and the harness id/arn below identify the deployed managed harness so the
+    # delete/test paths can route to harness_deployer instead of runtime ops.
+    harness_id: Optional[str] = None
+    harness_arn: Optional[str] = None
+    deployment_mode: Optional[str] = None  # "runtime" (default) | "harness"
     error_details: Optional[str] = None
     ttl: Optional[int] = None  # Unix epoch for DynamoDB TTL (30 days from started_at)
     # Phase 1 Gap 1A — versioning. Every deploy mints a sortable version_id.
@@ -182,6 +192,14 @@ class DeploymentState(BaseModel):
     # (the user-facing friendly name). Stored explicitly so the delete path
     # can resolve it without reconstructing the suffix.
     agentcore_runtime_name: Optional[str] = None
+    # Generic teardown manifest: every deploy step appends the sub-resources it
+    # creates here as {"type","id","region",...optional}. The delete path iterates
+    # this to tear down EVERY created resource generically, instead of relying on
+    # per-component *_result fields that a success-only step may never persist
+    # (the root cause of orphan Bugs 154/158). Additive + idempotent: each entry
+    # carries enough to delete it; the type-dispatched deleter no-ops on unknown
+    # types so older records (no manifest) still fall back to *_result cleanup.
+    created_resources: Optional[list[dict]] = None
 
 
 # ============================================================================
@@ -226,6 +244,29 @@ class RuntimeConfig(BaseModel):
     # Multi-agent pattern
     multi_agent_pattern: str = Field(alias="multiAgentPattern", default="none")
     multi_agent_config: Optional[dict] = Field(alias="multiAgentConfig", default=None)
+
+    @field_validator("name")
+    @classmethod
+    def _normalize_runtime_name(cls, v: str) -> str:
+        """Shift-left the AgentCore runtime-name regex to the API boundary.
+
+        The runtime name is later fed to ``sanitize_runtime_name`` (underscore
+        style ``[a-zA-Z][a-zA-Z0-9_]{0,47}``) before CreateAgentRuntime. We
+        NORMALIZE here (preferred over a hard 422) so a fixable name like
+        "My Agent" never blocks a deploy, while a name that sanitizes to empty
+        is rejected with a clear error. Matches the ConnectorConfig validator
+        style (normalize-or-422 at the boundary).
+        """
+        from app.services.naming import is_valid_agentcore_name, sanitize_agentcore_name
+
+        if v is None or not str(v).strip():
+            raise ValueError("runtime name must not be empty")
+        if is_valid_agentcore_name(v, style="underscore"):
+            return v
+        normalized = sanitize_agentcore_name(v, style="underscore", prefix="agent")
+        if not normalized:
+            raise ValueError(f"runtime name '{v}' cannot be normalized to a valid AgentCore name")
+        return normalized
 
     @model_validator(mode="after")
     def _check_model_id(self) -> "RuntimeConfig":
@@ -359,12 +400,22 @@ class DeployRequest(BaseModel):
 
     node_id: str = Field(alias="nodeId", max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
     config: RuntimeConfig
+    # Phase B — selects the authoring/deploy path. "runtime" (default) keeps the
+    # existing visual-canvas code-generated AgentCore Runtime UNCHANGED; "harness"
+    # declares a managed AgentCore Harness instead (no codegen / S3 / runtime).
+    deployment_mode: Optional[Literal["runtime", "harness"]] = Field(
+        alias="deploymentMode", default="runtime"
+    )
     connected_tools: Optional[list] = Field(alias="connectedTools", default=None, max_length=20)
     gateway_config: Optional[dict] = Field(alias="gatewayConfig", default=None)
     gateway_tools: Optional[list] = Field(alias="gatewayTools", default=None, max_length=20)
     template_id: Optional[str] = Field(alias="templateId", default=None, max_length=128)
     identity_config: Optional[IdentityConfig] = Field(alias="identityConfig", default=None)
     custom_tools: Optional[list[CustomToolDefinition]] = Field(alias="customTools", default=None)
+    # SaaS connectors (Phase A) — deployed as Gateway OpenAPI targets. Each
+    # entry's secret_value is write-only (minted into Secrets Manager in the
+    # gateway step, then dropped); only secret_arn is ever persisted.
+    connectors: Optional[list[ConnectorConfig]] = Field(default=None, max_length=20)
     memory_config: Optional[dict] = Field(alias="memoryConfig", default=None)
     evaluation_config: Optional[dict] = Field(alias="evaluationConfig", default=None)
     policy_config: Optional[dict] = Field(alias="policyConfig", default=None)

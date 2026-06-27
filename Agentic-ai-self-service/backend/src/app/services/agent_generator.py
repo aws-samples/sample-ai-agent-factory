@@ -462,6 +462,9 @@ def generate_canvas(
                 f"attempts. Last error: {validation_error}"
             ),
         }
-    except Exception as exc:
+    except Exception:
+        # SECURITY (CodeQL py/stack-trace-exposure): the caller surfaces this
+        # `error` to the client, so log the detail server-side and return a
+        # generic message instead of the raw exception text.
         logger.exception("agent_generator failed")
-        return {"success": False, "error": str(exc)}
+        return {"success": False, "error": "Agent generation failed. Please try again."}

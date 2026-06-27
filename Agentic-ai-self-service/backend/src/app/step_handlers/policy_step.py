@@ -35,17 +35,61 @@ def _get_deployment_store() -> DeploymentStateStore:
     )
 
 
-def _wait_for_policy_engine(client, engine_id: str, timeout: int = 60) -> dict:
-    """Poll until policy engine is ACTIVE/READY or timeout."""
+def _wait_for_policy_engine(client, engine_id: str, timeout: int = 180) -> dict:
+    """Poll until policy engine is ACTIVE/READY or timeout.
+
+    Bug 177: a freshly-created policy engine reports a status of CREATING for up
+    to a couple of minutes, and create_policy against it 409s ("Policy engine is
+    CREATING, please wait till it is ACTIVE") or yields a misleading CREATE_FAILED
+    "Insufficient permissions to call gateway" until it truly converges. The old
+    60s budget was too short, so the wait fell through and every policy create
+    failed → ENFORCE always degraded to LOG_ONLY. Wait up to 180s for genuine
+    ACTIVE. The caller additionally retries the create across the residual window.
+    """
+    last = ""
     for _ in range(timeout // 5):
         resp = client.get_policy_engine(policyEngineId=engine_id)
         status = resp.get("status", "")
+        last = status
         if status in ("ACTIVE", "READY"):
             return resp
         if "FAILED" in status:
             raise RuntimeError(f"Policy engine entered {status}")
         time.sleep(5)
-    raise RuntimeError(f"Policy engine {engine_id} did not become ACTIVE in {timeout}s")
+    raise RuntimeError(
+        f"Policy engine {engine_id} did not become ACTIVE in {timeout}s (last: {last})"
+    )
+
+
+def _create_policy_when_engine_ready(client, engine_id, name, description, statement,
+                                     attempts=6, backoff=10):
+    """create_policy with retry on the engine-still-CREATING window (Bug 177).
+
+    Even after get_policy_engine reports ACTIVE, the FIRST create_policy can 409
+    "Policy engine is CREATING, please wait till it is ACTIVE" for a residual
+    window. Retry the CREATE (not just poll the result) on that ConflictException
+    so the engine fully converges. Returns the create_policy response.
+    """
+    last = None
+    for i in range(attempts):
+        try:
+            return client.create_policy(
+                policyEngineId=engine_id, name=name, description=description,
+                definition={"cedar": {"statement": statement}},
+            )
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if ("ConflictException" in msg and "CREATING" in msg) or "is CREATING" in msg:
+                last = e
+                logger.warning(
+                    "policy engine still CREATING on create (attempt %d/%d) — waiting",
+                    i + 1, attempts,
+                )
+                time.sleep(backoff * (i + 1))
+                continue
+            raise
+    if last:
+        raise last
 
 
 def _read_gateway_tool_actions(agentcore_ctrl, gateway_id: str) -> list:
@@ -93,17 +137,21 @@ def _cedar_action_ref(action: str, target_names: list) -> str:
     Accepts: a full Cedar ref (passed through), an already-prefixed name
     ("Target___tool"), or a bare tool name (prefixed with the first known target).
     """
+    # Bug 176: ALWAYS use the `action in [...]` list form, never singleton
+    # `action == "X"` — AgentCore's policy analysis rejects a singleton action
+    # permit on a gateway resource as "Overly Permissive" (CREATE_FAILED), but
+    # accepts the list form even for one action. Verified live against the engine.
     if not action or action == "*":
         return "action"
     if "::" in action:
-        return f"action == {action}"
+        return f"action in [{action}]"
     if "___" in action:  # already target-prefixed
-        return f'action == AgentCore::Action::"{action}"'
+        return f'action in [AgentCore::Action::"{action}"]'
     # bare tool name -> prefix with each known target (Cedar `in [...]` over variants)
     if target_names:
         refs = ", ".join(f'AgentCore::Action::"{t}___{action}"' for t in target_names)
-        return f"action in [{refs}]" if len(target_names) > 1 else f"action == {refs}"
-    return f'action == AgentCore::Action::"{action}"'
+        return f"action in [{refs}]"
+    return f'action in [AgentCore::Action::"{action}"]'
 
 
 def _rules_to_cedar_policies(
@@ -270,6 +318,14 @@ def handler(event: dict, context) -> dict:
             engine_arn = resp.get("policyEngineArn", "")
             logger.info("Created policy engine: %s", engine_id)
 
+            # Manifest: record immediately after create (before the ACTIVE poll,
+            # which can be killed mid-flight) so teardown never orphans the engine.
+            if engine_id:
+                store.record_resource(
+                    deployment_id,
+                    {"type": "policy_engine", "id": engine_id, "region": region},
+                )
+
             # Wait for it to be ready
             _wait_for_policy_engine(agentcore_ctrl, engine_id)
 
@@ -317,10 +373,18 @@ def handler(event: dict, context) -> dict:
             permitted = [q for q in qualified_tools if q not in forbidden]
             if permitted:
                 action_list = ", ".join(f'AgentCore::Action::"{q}"' for q in permitted)
-                action_head = (
-                    f"action in [{action_list}]" if len(permitted) > 1
-                    else f"action == {action_list}"
-                )
+                # Bug 176 (root cause of the Cedar ENFORCE failure — was wrongly
+                # degraded to LOG_ONLY by Bug 170): AgentCore's policy analysis
+                # rejects a SINGLETON `action == AgentCore::Action::"X"` permit on
+                # a gateway resource as "Overly Permissive: will allow every
+                # request" (CREATE_FAILED), but ACCEPTS the list form
+                # `action in [AgentCore::Action::"X"]` — even for ONE tool. Proven
+                # live against the engine (== → CREATE_FAILED; in [..] → ACTIVE),
+                # and the service's own StartPolicyGeneration emits the == form yet
+                # flags it ALLOW_ALL. So ALWAYS use the `action in [...]` list form;
+                # ENFORCE then validates and actually enforces (forbidden tools are
+                # denied by omission under AgentCore default-deny).
+                action_head = f"action in [{action_list}]"
                 desc = "Bug 134: permit the principal to discover + call the allowed tools"
                 if forbidden:
                     desc += f" (denied by omission, default-deny: {sorted(forbidden)})"
@@ -354,15 +418,24 @@ def handler(event: dict, context) -> dict:
             # and the runtime saw 0 tools (default-deny). Prefix every policy name
             # with the gateway-unique engine name so names never collide across
             # gateways, while staying stable within a single engine's idempotent retry.
-            pol_name = f"{engine_name}_{base_name}"[:128]
+            # CreatePolicy /name is constrained to a short length (verified live:
+            # a 51-char name was rejected; the limit is well under our old [:128]
+            # cap). Build a UNIQUE-but-SHORT name: keep the full base_name (the
+            # semantic part, e.g. allow_permitted_tools) and prefix with a bounded
+            # slice of the engine name for cross-gateway uniqueness, capping the
+            # whole thing at 48 chars to stay within the service limit.
+            _eng_prefix = engine_name[:max(0, 48 - len(base_name) - 1)]
+            pol_name = (f"{_eng_prefix}_{base_name}" if _eng_prefix else base_name)[:48]
             try:
-                cp = agentcore_ctrl.create_policy(
-                    policyEngineId=engine_id,
-                    name=pol_name,
-                    description=pol.get("description", ""),
-                    definition={"cedar": {"statement": pol.get("statement", "permit(principal, action, resource);")}},
+                cp = _create_policy_when_engine_ready(
+                    agentcore_ctrl, engine_id, pol_name,
+                    pol.get("description", ""),
+                    pol.get("statement", "permit(principal, action, resource);"),
                 )
-                logger.info("Created policy: %s", pol_name)
+                # Bug 177 diagnostics: log the EXACT Cedar statement so a
+                # CREATE_FAILED reason can be matched to what we emitted (the
+                # statement is config-derived, not a secret).
+                logger.warning("Created policy: %s | stmt=%s", pol_name, pol.get("statement", "")[:300])
                 created_count += 1
                 pid = cp.get("policyId")
                 if pid:
@@ -407,40 +480,116 @@ def handler(event: dict, context) -> dict:
         # and FAIL the deploy if any did not reach ACTIVE — otherwise we'd attach an
         # engine in ENFORCE that silently denies the tool plane (the original bug).
         is_enforce = policy_config.get("mode", "ENFORCE") == "ENFORCE"
+        # Bug 170: when an auto-generated ENFORCE policy fails Cedar validation
+        # (e.g. the engine's analysis reports "Insufficient permissions to call
+        # gateway" — it wants a gateway-level call action whose exact schema is
+        # not reliably known across AgentCore versions), DEGRADE GRACEFULLY to
+        # LOG_ONLY instead of failing the whole deployment. A flow that deploys in
+        # LOG_ONLY (policies still created + evaluated + logged to CloudWatch, and
+        # the tool plane WORKS) is strictly better for the customer than a deploy
+        # that hard-fails. We surface the downgrade clearly in policy_result.
+        downgrade_to_log_only = False
+        downgrade_reason = ""
         if is_enforce and created_policy_ids:
             import time as _t
-            failed = []
-            for pol_name, pid in created_policy_ids:
-                status = "CREATING"
+
+            def _await_policy(pid):
+                """Poll a policy to a terminal state; return (status, reason)."""
                 for _ in range(20):
                     try:
                         d = agentcore_ctrl.get_policy(policyEngineId=engine_id, policyId=pid)
-                        status = d.get("status", "")
-                        if status in ("ACTIVE", "CREATE_FAILED", "FAILED"):
-                            if status != "ACTIVE":
-                                failed.append((pol_name, str(d.get("statusReasons") or d.get("statusReason") or "")[:200]))
-                            break
+                        s = d.get("status", "")
+                        if s in ("ACTIVE", "CREATE_FAILED", "FAILED"):
+                            return s, str(d.get("statusReasons") or d.get("statusReason") or "")[:200]
                     except Exception:  # noqa: BLE001
                         pass
                     _t.sleep(3)
+                return "CREATING", "timeout"
+
+            # Bug 177: a brand-new policy engine's FIRST policy create can end
+            # CREATE_FAILED "Insufficient permissions to call gateway with ID ..."
+            # purely from engine<->gateway eventual consistency — the IDENTICAL
+            # statement validates ACTIVE seconds later (proven live: same engine,
+            # same `action in [...]` permit, CREATE_FAILED then ACTIVE on retry).
+            # So before degrading to LOG_ONLY, RETRY each transiently-failed policy
+            # (delete + recreate with backoff). Only a persistent failure degrades.
+            _TRANSIENT = (
+                "insufficient permissions to call gateway",
+                "is creating",
+                "please wait till it is active",
+            )
+            name_to_stmt = {}
+            for pol in policies:
+                _bn = re.sub(r"[^A-Za-z0-9_]", "_", pol.get("name", "default_policy"))
+                _ep = engine_name[:max(0, 48 - len(_bn) - 1)]
+                name_to_stmt[(f"{_ep}_{_bn}" if _ep else _bn)[:48]] = pol
+            failed = []
+            for pol_name, pid in list(created_policy_ids):
+                status, reason = _await_policy(pid)
+                # Retry transient engine/gateway-consistency failures. The engine's
+                # CREATING->ACTIVE convergence can take a couple of minutes, so use
+                # a longer budget: 6 attempts × 20s = up to 2 min (within the 300s
+                # step timeout). Each retry deletes + recreates the policy.
+                attempt = 0
+                while (status != "ACTIVE"
+                       and any(t in reason.lower() for t in _TRANSIENT)
+                       and attempt < 6):
+                    attempt += 1
+                    logger.warning(
+                        "Policy %s CREATE_FAILED (transient, attempt %d/6): %s — recreating",
+                        pol_name, attempt, reason,
+                    )
+                    try:
+                        agentcore_ctrl.delete_policy(policyEngineId=engine_id, policyId=pid)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _t.sleep(20)  # steady 20s waits for engine convergence
+                    pol = name_to_stmt.get(pol_name, {})
+                    try:
+                        cp2 = _create_policy_when_engine_ready(
+                            agentcore_ctrl, engine_id, pol_name,
+                            pol.get("description", ""), pol.get("statement", ""),
+                        )
+                        pid = cp2.get("policyId") or pid
+                        status, reason = _await_policy(pid)
+                    except Exception as ce:  # noqa: BLE001
+                        reason = str(ce)[:200]
+                if status != "ACTIVE":
+                    failed.append((pol_name, reason))
             if failed:
-                raise RuntimeError(
-                    "Cedar policy validation failed in ENFORCE mode (would deny the "
-                    "tool plane): " + "; ".join(f"{n}: {r}" for n, r in failed)
+                downgrade_to_log_only = True
+                downgrade_reason = (
+                    "Cedar ENFORCE validation failed (" +
+                    "; ".join(f"{n}: {r}" for n, r in failed) +
+                    ") — attaching engine in LOG_ONLY so the tool plane stays "
+                    "functional while policies are still evaluated + logged."
                 )
+                logger.warning(downgrade_reason)
+                # Drop the CREATE_FAILED policies so the engine holds only ACTIVE
+                # ones (LOG_ONLY tolerates an empty/partial set; it never denies).
+                for pol_name, pid in created_policy_ids:
+                    try:
+                        d = agentcore_ctrl.get_policy(policyEngineId=engine_id, policyId=pid)
+                        if d.get("status") != "ACTIVE":
+                            agentcore_ctrl.delete_policy(policyEngineId=engine_id, policyId=pid)
+                    except Exception:  # noqa: BLE001
+                        pass
 
         if is_enforce and created_count == 0:
-            raise RuntimeError(
-                "ENFORCE mode requested but no Cedar policies were created — "
-                "the gateway would deny all tools. Aborting."
+            # Nothing valid to enforce — same graceful degrade rather than abort.
+            downgrade_to_log_only = True
+            downgrade_reason = downgrade_reason or (
+                "No ENFORCE Cedar policies could be created for this gateway — "
+                "attaching engine in LOG_ONLY (audit-only) so tools still work."
             )
+            logger.warning(downgrade_reason)
 
         # Bug 137 backstop (authoritative): before attaching in ENFORCE, confirm the
         # engine ACTUALLY HOLDS >=1 ACTIVE policy by reading it back from the service.
         # created_count is a client-side intent counter; this checks ground truth and
         # catches ANY path (name collision, async drop, eventual-consistency) that
         # would otherwise ship an empty deny-all engine that serves 0 tools at runtime.
-        if is_enforce:
+        if is_enforce and not downgrade_to_log_only:
             active_on_engine = 0
             for _attempt in range(10):
                 try:
@@ -453,22 +602,28 @@ def handler(event: dict, context) -> dict:
                     logger.warning("list_policies backstop attempt failed: %s", le)
                 time.sleep(3)
             if active_on_engine == 0:
-                raise RuntimeError(
-                    f"ENFORCE engine {engine_id} holds 0 ACTIVE policies after creation "
-                    "— it would deny ALL tools (default-deny). Refusing to attach a "
-                    "deny-all engine. This is the Bug 137 empty-engine trap."
+                # Empty ENFORCE engine would deny ALL tools — degrade to LOG_ONLY
+                # (Bug 170) rather than abort the deploy (was the Bug 137 trap).
+                downgrade_to_log_only = True
+                downgrade_reason = downgrade_reason or (
+                    f"ENFORCE engine {engine_id} holds 0 ACTIVE policies — would "
+                    "deny ALL tools; attaching in LOG_ONLY so the tool plane works."
                 )
-            logger.info("Engine %s holds %d ACTIVE policies — safe to attach in ENFORCE",
-                        engine_id, active_on_engine)
+                logger.warning(downgrade_reason)
+            else:
+                logger.info("Engine %s holds %d ACTIVE policies — safe to attach in ENFORCE",
+                            engine_id, active_on_engine)
 
         # Attach policy engine to gateway.
-        # Bug 134 (proper fix): ENFORCE now works because the baseline permit +
-        # schema-correct principal/action let the principal discover + call tools
-        # while forbid rules still block. So ENFORCE is the default (real
-        # enforcement). LOG_ONLY remains available for audit-only dry-runs.
+        # ENFORCE is the requested default (real enforcement). When the auto-built
+        # ENFORCE policy can't validate against the gateway's Cedar schema we fall
+        # back to LOG_ONLY (Bug 170) so the deploy still succeeds with a working
+        # tool plane + audited policies, rather than hard-failing.
         mode = policy_config.get("mode", "ENFORCE")
         if mode not in ("LOG_ONLY", "ENFORCE"):
             mode = "ENFORCE"
+        if downgrade_to_log_only:
+            mode = "LOG_ONLY"
         # Get current gateway config to preserve existing fields
         gw_detail = agentcore_ctrl.get_gateway(gatewayIdentifier=gateway_id)
 
@@ -505,6 +660,31 @@ def handler(event: dict, context) -> dict:
                 break
             time.sleep(5)
 
+        # Bug 178 (lazy ENFORCE promotion): when ENFORCE was requested but we
+        # attached LOG_ONLY because the gateway's policy-authorization plane had
+        # not yet converged (~3-5 min after tool-sync — confirmed live + matches
+        # the AWS policy workshop's separate-lifecycle model), record everything
+        # needed to PROMOTE to ENFORCE later. The test/status endpoints call
+        # services.policy_promoter.try_promote_to_enforce() when the agent is first
+        # used (minutes later), which idempotently re-creates the now-valid policy
+        # and flips the engine to ENFORCE. Carries the intended Cedar statements so
+        # the promoter doesn't have to recompute them.
+        enforce_pending = None
+        if downgrade_to_log_only and policy_config.get("mode", "ENFORCE") == "ENFORCE":
+            _plist = []
+            for pol in policies:
+                _bn = re.sub(r"[^A-Za-z0-9_]", "_", pol.get("name", "default_policy"))
+                _ep = engine_name[:max(0, 48 - len(_bn) - 1)]
+                _pn = (f"{_ep}_{_bn}" if _ep else _bn)[:48]
+                _plist.append({"name": _pn, "statement": pol.get("statement", ""),
+                               "description": pol.get("description", "")})
+            enforce_pending = {
+                "engine_id": engine_id,
+                "gateway_id": gateway_id,
+                "gateway_arn": gateway_arn,
+                "policies": _plist,
+            }
+
         return {
             **event,
             "policy_result": {
@@ -513,6 +693,15 @@ def handler(event: dict, context) -> dict:
                 "engine_arn": engine_arn,
                 "engine_name": engine_name,
                 "mode": mode,
+                # Bug 170: when ENFORCE was requested but couldn't validate, the
+                # engine is attached in LOG_ONLY and we report the downgrade so the
+                # UI/caller can show "policy auditing only" instead of silently
+                # implying full enforcement.
+                "requested_mode": policy_config.get("mode", "ENFORCE"),
+                "downgraded_to_log_only": downgrade_to_log_only,
+                "downgrade_reason": downgrade_reason or None,
+                # Bug 178: lazy-promotion context (None unless a downgrade happened).
+                "enforce_pending": enforce_pending,
             },
         }
 

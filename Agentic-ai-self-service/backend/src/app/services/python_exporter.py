@@ -57,16 +57,42 @@ def _observability_enabled(config: RuntimeConfig, connected_tools: list) -> bool
     )
 
 
+# Minimum-version floors for the packages we ship in the export (Holmes
+# supply-chain finding). We deliberately use ">=" floors rather than exact "=="
+# pins: the platform itself ships rolling bundles, so a hard pin here would drift
+# from the real tested environment and mislead. A floor still prevents pip from
+# silently resolving to an ancient/yanked release while leaving forward
+# compatibility. Packages not listed here fall back to a bare name; the generated
+# header tells the user to pin exact versions before a production build.
+_MIN_VERSIONS = {
+    "bedrock-agentcore": "0.1.0",
+    "boto3": "1.35.0",
+    "strands-agents": "0.1.0",
+    "strands-agents-tools": "0.1.0",
+    "aws-opentelemetry-distro": "0.8.0",
+}
+
+_REQUIREMENTS_HEADER = (
+    "# Dependencies for this exported agent. Versions use '>=' floors, not exact\n"
+    "# pins — review and PIN exact, tested versions (e.g. 'boto3==<ver>') before a\n"
+    "# production build for reproducible, supply-chain-safe installs.\n"
+)
+
+
+def _pin(pkg: str) -> str:
+    floor = _MIN_VERSIONS.get(pkg)
+    return f"{pkg}>={floor}" if floor else pkg
+
+
 def build_requirements(config: RuntimeConfig, connected_tools=None) -> str:
     """Build a real requirements.txt body for the given config.
 
     Starts from PROVIDER_PACKAGES[config.model_provider] (space-separated
     package names), always adds the runtime SDK packages the generated code
     imports (bedrock-agentcore, boto3), and adds the AWS OTEL distro when
-    observability is enabled. Dedupes and sorts. No version pins — the
-    platform itself ships unpinned bundles, and inventing pins here would
-    drift from the real environment (see gap risk #2). The README documents
-    that callers should pin for production.
+    observability is enabled. Dedupes and sorts. Applies ">=" minimum-version
+    floors for known packages (Holmes supply-chain finding) and prepends a header
+    telling the user to pin exact versions for production.
     """
     provider = getattr(config, "model_provider", "bedrock") or "bedrock"
     provider_pkgs = PROVIDER_PACKAGES.get(provider, _DEFAULT_PROVIDER_PACKAGES)
@@ -76,7 +102,7 @@ def build_requirements(config: RuntimeConfig, connected_tools=None) -> str:
     if _observability_enabled(config, connected_tools or []):
         packages.update(_OBSERVABILITY_PACKAGES)
 
-    return "\n".join(sorted(packages)) + "\n"
+    return _REQUIREMENTS_HEADER + "\n".join(_pin(p) for p in sorted(packages)) + "\n"
 
 
 def build_dockerfile() -> str:

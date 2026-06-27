@@ -4,7 +4,8 @@
  */
 
 import type { AgentCoreComponentType } from '../types/workflow';
-import type { ToolConfiguration } from '../types/components';
+import type { ToolConfiguration, ConnectorConfiguration } from '../types/components';
+import { CONNECTOR_TOOL_PREFIX } from '../types/components';
 import type { AgentCoreNode } from '../store/workflowStore';
 import { PALETTE_ITEMS } from '../components/palette/ComponentPalette';
 
@@ -107,17 +108,39 @@ export function createNodeFromDrop(
     : PALETTE_ITEMS.find((item) => item.type === componentType);
   const label = paletteItem?.label || componentType;
 
-  // Build initial configuration for tool nodes
-  const configuration = componentType === 'tool' && toolId ? {
-    name: label.toLowerCase().replace(/\s+/g, '_'),
-    toolId,
-    description: paletteItem?.description || '',
-    enabled: true,
-    ...(toolId === 'knowledge_base' ? { isKnowledgeBase: true as const } : {}),
-  } as ToolConfiguration : undefined;
+  // Connector nodes are `tool`-typed with toolId "connector:<id>" — they need
+  // credentials before they can deploy, so they start un-configured (pending)
+  // and open the ConnectorConfigModal on drop.
+  const isConnector = componentType === 'tool' && !!toolId && toolId.startsWith(CONNECTOR_TOOL_PREFIX);
+  const connectorId = isConnector ? toolId!.slice(CONNECTOR_TOOL_PREFIX.length) : '';
 
   // KB tool needs configuration modal (pending), other tools are pre-configured (valid)
   const isKBTool = componentType === 'tool' && toolId === 'knowledge_base';
+
+  // Build initial configuration for tool / connector nodes
+  let configuration: ToolConfiguration | ConnectorConfiguration | undefined;
+  if (isConnector) {
+    configuration = {
+      name: label.toLowerCase().replace(/\s+/g, '_'),
+      toolId: toolId!,
+      description: paletteItem?.description || '',
+      enabled: true,
+      isConnector: true,
+      connectorId,
+      // Asana is API-key only; everything branded else defaults to oauth2_cc,
+      // generic starts on api_key (most common for a pasted spec).
+      authMethod: connectorId === 'asana' || connectorId === 'generic_openapi' ? 'api_key' : 'oauth2_cc',
+      configured: false,
+    } as ConnectorConfiguration;
+  } else if (componentType === 'tool' && toolId) {
+    configuration = {
+      name: label.toLowerCase().replace(/\s+/g, '_'),
+      toolId,
+      description: paletteItem?.description || '',
+      enabled: true,
+      ...(toolId === 'knowledge_base' ? { isKnowledgeBase: true as const } : {}),
+    } as ToolConfiguration;
+  }
 
   return {
     id: `${componentType}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
@@ -128,7 +151,7 @@ export function createNodeFromDrop(
       label,
       componentType,
       configuration,
-      validationStatus: isKBTool ? 'pending'
+      validationStatus: isKBTool || isConnector ? 'pending'
         : componentType === 'tool' && toolId ? 'valid'
         : ['code_interpreter', 'browser', 'observability'].includes(componentType) ? 'valid'
         : 'pending',

@@ -181,11 +181,19 @@ def ddb_map(item, key):
             result[k] = str(val['BOOL']).lower()
     return result
 
+def ddb_str_list(mapval, key):
+    \"\"\"Extract a DynamoDB string-list (L of S) nested under a map key.\"\"\"
+    v = mapval.get(key, {})
+    return [e.get('S', '') for e in v.get('L', []) if e.get('S')]
+
 for item in items:
     dep_id = ddb_str(item, 'deployment_id')
     runtime_id = ddb_str(item, 'runtime_id')
     mcp_id = ddb_str(item, 'mcp_server_runtime_id')
     gw = ddb_map(item, 'gateway_result')
+    gw_raw = item.get('gateway_result', {}).get('M', {})
+    connector_providers = ddb_str_list(gw_raw, 'connector_credential_providers')
+    connector_secrets = ddb_str_list(gw_raw, 'connector_secret_arns')
     policy = ddb_map(item, 'policy_result')
     memory = ddb_map(item, 'memory_result')
     guardrails = ddb_map(item, 'guardrails_result')
@@ -196,6 +204,8 @@ for item in items:
         'runtime_id': runtime_id,
         'mcp_server_runtime_id': mcp_id,
         'gateway_id': gw.get('gateway_id', ''),
+        'connector_credential_providers': connector_providers,
+        'connector_secret_arns': connector_secrets,
         'policy_engine_id': policy.get('engine_id', ''),
         'memory_id': memory.get('memory_id', ''),
         'guardrail_id': guardrails.get('guardrail_id', ''),
@@ -305,6 +315,28 @@ for item in items:
       aws bedrock-agentcore-control delete-gateway \
         --gateway-identifier "${gw_id}" --region "${AWS_REGION}" 2>/dev/null || true
     fi
+
+    # Delete connector credential providers + secrets recorded in the
+    # gateway_result (mirrors cleanup_gateway_resources on the Lambda delete
+    # path). Provider NAMES and secret ARNs are persisted so teardown can
+    # reach them even after the gateway is gone.
+    local conn_providers conn_secrets
+    conn_providers=$(echo "${dep_json}" | python3 -c "import sys,json; print(' '.join(json.load(sys.stdin).get('connector_credential_providers',[])))" 2>/dev/null)
+    conn_secrets=$(echo "${dep_json}" | python3 -c "import sys,json; print(' '.join(json.load(sys.stdin).get('connector_secret_arns',[])))" 2>/dev/null)
+    for cp_name in ${conn_providers}; do
+      log_info "    Deleting connector credential provider: ${cp_name}"
+      # Provider may be either API-key or OAuth2 — try both (the wrong one is a no-op).
+      aws bedrock-agentcore-control delete-api-key-credential-provider \
+        --name "${cp_name}" --region "${AWS_REGION}" 2>/dev/null || true
+      aws bedrock-agentcore-control delete-oauth2-credential-provider \
+        --name "${cp_name}" --region "${AWS_REGION}" 2>/dev/null || true
+    done
+    for c_arn in ${conn_secrets}; do
+      log_info "    Deleting connector secret: ${c_arn}"
+      aws secretsmanager delete-secret \
+        --secret-id "${c_arn}" --force-delete-without-recovery \
+        --region "${AWS_REGION}" 2>/dev/null || true
+    done
 
     # Delete knowledge base (if we created it)
     local kb_created kb_ds_id
@@ -559,6 +591,91 @@ sweep_orphan_resources() {
       --secret-id "${s_arn}" --force-delete-without-recovery \
       --region "${AWS_REGION}" 2>/dev/null || true
   done
+
+  # 10. SaaS connector secrets minted by the gateway step / direct deploy.
+  #     Owner-scoped naming: agentcore-connector/{owner}/{uuid}. These hold the
+  #     raw API key / OAuth client secret, so sweep any that survived a
+  #     partial-failed deploy whose deployment record never landed.
+  local connector_secrets
+  connector_secrets=$(aws secretsmanager list-secrets --region "${AWS_REGION}" \
+    --query "SecretList[?starts_with(Name, 'agentcore-connector/')].ARN" \
+    --output text 2>/dev/null || echo "")
+  for s_arn in ${connector_secrets}; do
+    log_info "  Deleting orphan connector secret: ${s_arn}"
+    aws secretsmanager delete-secret \
+      --secret-id "${s_arn}" --force-delete-without-recovery \
+      --region "${AWS_REGION}" 2>/dev/null || true
+  done
+
+  # 11. SaaS connector credential providers (acc- name prefix) — opt-in only,
+  #     same shared-account guard as the OAuth2/memory/engine sweep above.
+  if [[ "${CLEANUP_INCLUDE_FOREIGN_RUNTIMES:-0}" == "1" ]]; then
+    local acc_api_providers acc_oauth_providers
+    acc_api_providers=$(aws bedrock-agentcore-control list-api-key-credential-providers \
+      --region "${AWS_REGION}" \
+      --query "apiKeyCredentialProviders[?starts_with(name, 'acc-')].name" \
+      --output text 2>/dev/null || echo "")
+    acc_oauth_providers=$(aws bedrock-agentcore-control list-oauth2-credential-providers \
+      --region "${AWS_REGION}" \
+      --query "oauth2CredentialProviders[?starts_with(name, 'acc-')].name" \
+      --output text 2>/dev/null || echo "")
+    for cp_name in ${acc_api_providers}; do
+      log_info "  Deleting orphan connector API-key credential provider: ${cp_name}"
+      aws bedrock-agentcore-control delete-api-key-credential-provider \
+        --name "${cp_name}" --region "${AWS_REGION}" 2>/dev/null || true
+    done
+    for cp_name in ${acc_oauth_providers}; do
+      log_info "  Deleting orphan connector OAuth2 credential provider: ${cp_name}"
+      aws bedrock-agentcore-control delete-oauth2-credential-provider \
+        --name "${cp_name}" --region "${AWS_REGION}" 2>/dev/null || true
+    done
+  fi
+
+  # 12. AgentCoreMemory-* IAM exec roles (memory_step / direct deploy mint these
+  #     as AgentCoreMemory-<memory_name>). Defense-in-depth for the in-product
+  #     manifest path: a partial-failed deploy whose record never landed can
+  #     leave the role behind. Prefix-scoped so it cannot touch foreign roles.
+  local memory_roles
+  memory_roles=$(aws iam list-roles \
+    --query "Roles[?starts_with(RoleName, 'AgentCoreMemory-')].RoleName" \
+    --output text 2>/dev/null || echo "")
+  for role_name in ${memory_roles}; do
+    log_info "  Deleting orphan memory IAM role: ${role_name}"
+    local mem_managed mem_inline
+    mem_managed=$(aws iam list-attached-role-policies \
+      --role-name "${role_name}" \
+      --query "AttachedPolicies[].PolicyArn" \
+      --output text 2>/dev/null || echo "")
+    for policy_arn in ${mem_managed}; do
+      aws iam detach-role-policy --role-name "${role_name}" --policy-arn "${policy_arn}" 2>/dev/null || true
+    done
+    mem_inline=$(aws iam list-role-policies \
+      --role-name "${role_name}" \
+      --query "PolicyNames[]" \
+      --output text 2>/dev/null || echo "")
+    for policy_name in ${mem_inline}; do
+      aws iam delete-role-policy --role-name "${role_name}" --policy-name "${policy_name}" 2>/dev/null || true
+    done
+    aws iam delete-role --role-name "${role_name}" 2>/dev/null || true
+  done
+
+  # 13. Harness->gateway outbound OAuth2 credential providers (harness-gw- name
+  #     prefix; minted by harness_deployer.ensure_gateway_outbound_provider).
+  #     Defense-in-depth for the manifest path. Opt-in (same shared-account
+  #     guard as the acc-/foreign sweeps above) since provider deletes are
+  #     destructive in shared accounts; the prefix is platform-owned.
+  if [[ "${CLEANUP_INCLUDE_FOREIGN_RUNTIMES:-0}" == "1" ]]; then
+    local harness_gw_providers
+    harness_gw_providers=$(aws bedrock-agentcore-control list-oauth2-credential-providers \
+      --region "${AWS_REGION}" \
+      --query "oauth2CredentialProviders[?starts_with(name, 'harness-gw-')].name" \
+      --output text 2>/dev/null || echo "")
+    for cp_name in ${harness_gw_providers}; do
+      log_info "  Deleting orphan harness gateway OAuth2 provider: ${cp_name}"
+      aws bedrock-agentcore-control delete-oauth2-credential-provider \
+        --name "${cp_name}" --region "${AWS_REGION}" 2>/dev/null || true
+    done
+  fi
 
   log_success "Orphan resource sweep complete."
 }

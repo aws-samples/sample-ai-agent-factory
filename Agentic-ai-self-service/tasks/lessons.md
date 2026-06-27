@@ -1438,3 +1438,1523 @@ Bedrock agent → SFN SUCCEEDED → /api/test-runtime returned a REAL model answ
 ("Paris.") → DELETE /api/runtime cleaned up. Note /api/health is mounted WITHOUT the
 /api prefix (it's /health on the Lambda, not routed via CloudFront) and registry list
 is /api/registry (not /api/registry/agents); hitl is /api/hitl/pending.
+
+## Bug 144 — AI agent generator wires tools straight to the runtime (2026-06-19)
+
+Symptom: "Generate Agent" produced a Slack→Jira agent with two tool nodes; "Apply
+to Canvas" showed "2 Errors — edge-...: Cannot connect tool to runtime".
+
+Root cause: `agent_generator.py` `GENERATION_PROMPT` said EVERY non-runtime node
+must edge to the runtime. That's true for memory/guardrails/etc. but NOT for
+`tool` nodes — the frontend connection matrix (`frontend/src/types/validation.ts`,
+`CONNECTION_COMPATIBILITY`) only allows `tool -> gateway`. Tools attach to a
+gateway, and the gateway attaches to the runtime (`tool -> gateway -> runtime`).
+The generator also emitted no gateway node at all, so the spec was undeployable
+regardless of edge direction (deploy-time tool extraction walks gateway edges).
+
+Rule for myself: when the NL generator's prompt encodes graph-wiring rules, they
+MUST mirror the canvas `CONNECTION_COMPATIBILITY` matrix exactly. `tool` is the
+exception to "everything edges to runtime" — it edges to a gateway, and a gateway
+is REQUIRED whenever any tool exists. `_validate_spec` now enforces this so bad
+specs self-correct via the retry loop instead of reaching the canvas.
+
+## Bug 145 — custom tool "Configure" button did nothing (2026-06-19)
+
+Root cause: `App.tsx` only rendered a modal for `componentType === 'tool'` when
+`isKnowledgeBase` was truthy (KnowledgeBaseConfigModal). Custom tools (isCustom)
+and plain built-in tools had NO modal, so Configure / double-click opened nothing.
+
+Fix: added `frontend/src/components/modals/ToolConfigModal.tsx` (edit
+name/description/enabled; read-only inputSchema + lambdaCode for custom tools) and
+rendered it for non-KB tool nodes. Preserve all unsurfaced fields (toolId,
+isCustom, lambdaCode, inputSchema) on save — spread initialConfig as the base, then
+backfill only missing fields (a defaults-first spread trips TS2783 under `tsc -b`).
+
+Rule for myself: when adding a node type to a config-modal switch, check EVERY
+branch of the modal render block in App.tsx — a node type can match `componentType`
+but still fall through to no modal if every branch has an extra guard.
+
+## Bug 146 — don't run backend + frontend suites concurrently; isolate before calling a test "flaky" (2026-06-19)
+
+While verifying a fix I ran `pytest` (backend) and `vitest` (frontend) at the same
+time. The machine starved: vitest import times ballooned to 800s+ and tests hit
+their 5s timeouts; pytest's slow Hypothesis property test
+(test_session_properties) also timed out. The failing SET changed between two
+identical runs (6 then 3 failures, different files), which I wrongly called
+"flaky." Run in ISOLATION (single suite, single-threaded) before characterizing a
+failure: backend alone finished in 4:18 (vs 22:00 concurrent) with 0 failures, and
+the real frontend failures turned out to be deterministic test DRIFT, not timing.
+
+Rule for myself: (1) never run the two heavy suites concurrently on this machine;
+(2) "flaky" is a claim that requires evidence — reproduce in isolation and read the
+actual assertion error before using the word. Stale tests that assert old behavior
+look like flakiness under load but are deterministic and must be fixed, not retried.
+
+## Bug 147 — test drift: window.prompt → inline-edit migration left stale tests (2026-06-19)
+
+flow-sidebar was refactored from `window.prompt()` rename/create to inline-edit
+inputs, and `createNodeFromDrop` was changed to return `validationStatus: 'valid'`
+for pre-configured node types — but their tests (from the initial import) were
+never updated, so they failed against current source. Fixes: assert the real
+inline-edit contract (pen reveals input; onRename fires on confirm with
+(id, oldName, newName); Escape cancels), the real create flow (type + Enter), and
+the documented validation-status contract (code_interpreter/browser/observability
+start 'valid', others 'pending'). Also wrapped the async-effect mount in act().
+
+Rule for myself: when a test asserts UI mechanics (window.prompt, a specific
+callback arity), check the SOURCE's current behavior before trusting the test —
+a green test suite that excludes drifted files hides real regressions in CI.
+
+## Bug 148 — AgentCore Harness API: name regex, response envelope, no endpoints (2026-06-24)
+
+Caught LIVE while smoke-testing the new harness_deployer.py against the sandbox
+(us-west-2, boto3 1.43.7) — three undocumented-in-our-notes realities of the GA
+CreateHarness/GetHarness/ListHarnesses API:
+
+1. **harnessName regex is `[a-zA-Z][a-zA-Z0-9_]{0,39}`** — must start with a
+   letter, ONLY letters/digits/UNDERSCORE (NO hyphens), max 40 chars. My first
+   sanitizer produced hyphens + 48 chars and CreateHarness rejected it with a
+   ValidationException. (Runtimes allow underscores too, but the limit/charset
+   differs — do NOT assume parity across AgentCore resource types.)
+2. **Create/Get/List wrap the resource in an envelope.** create_harness and
+   get_harness return `{"harness": {...}}`; list_harnesses returns
+   `{"harnesses": [...]}`. The ARN field is **`arn`**, NOT `harnessArn`, and the
+   id is `harnessId`. Reading resp["harnessArn"] silently yields "" → an empty
+   ARN that breaks the data-plane invoke_harness call downstream.
+3. **No harness-endpoint operations exist in this build.** Only Create/Get/List/
+   Update/Delete Harness. The dev-guide lists CreateHarnessEndpoint etc., but the
+   shipped boto3 model does not expose them — calling list_harnesses_endpoint
+   throws AttributeError. Teardown must NOT assume endpoints exist.
+
+Also confirmed: InvokeHarness lives on the **data plane** client
+("bedrock-agentcore"), not control; runtimeSessionId must be >=33 chars; omitting
+model defaults to `global.anthropic.claude-sonnet-4-6` (converse_stream).
+
+Rule for myself: for any NEW AWS API, introspect the live response shape
+(`get_*` then `list(resp.keys())`) and the operation list
+(`client.meta.service_model.operation_names`) BEFORE writing parsers — dev-guide
+docs lead the shipped boto3 model and field names/envelopes are frequently
+guessed wrong. A real create that returns an empty ARN is the tell.
+
+## Bug (connector teardown): SFN-minted connector secret ARN orphaned
+- `gateway_step.py:61` mints the connector secret on the SFN path and sets `connector["secret_arn"]`.
+- `_deploy_connector_targets` (gateway_deployer.py:1752-1757) only appends to `created_secrets` when IT mints (raw secret_value present). When `secret_arn` is pre-set (SFN path) the ARN is read but NEVER tracked.
+- So persisted `connector_secret_arns` is empty on the SFN path → `cleanup_gateway_resources` (line 2632) leaks the secret on the in-product delete path. cleanup.sh orphan sweep only mitigates via a separate manual script.
+- test_connectors.py:247 codified the leak as expected (`secret_arns == []` when secret_arn supplied).
+- RULE: teardown tracking must be source-agnostic. Track every secret/provider ARN that the deploy CONSUMED, not only the ones the deployer happened to mint. When minting moves upstream (step handler), the upstream minter must register the ARN for teardown.
+
+## Bug 149 — Connector (OpenAPI) gateway targets: sync rejection, 0-count readiness, silent-noop provider delete (2026-06-24)
+
+Caught LIVE end-to-end testing SaaS connectors (deploy NASA APOD OpenAPI target →
+invoke through gateway → teardown). Three real behaviors of OpenAPI gateway
+targets + credential providers:
+
+1. **SynchronizeGatewayTargets rejects OPEN_API_SCHEMA**, same as it rejects
+   LAMBDA ("Target type OPEN_API_SCHEMA is not supported for synchronization").
+   OpenAPI targets are crawled+served by the gateway automatically — you do NOT
+   (and cannot) sync them. Our sync block already catches this non-fatally.
+2. **OpenAPI targets report expected_tool_count==0** in _resolve_gateway_tool_actions
+   because they declare NO inlinePayload (tools are crawled from the spec, not
+   configured inline) AND they can't be synced to advance lastSynchronizedAt. So
+   the Bug-134 serve-verification gate (`if expected_tool_count > 0`) was SKIPPED
+   for connector-only gateways — a connector gateway that crawled nothing would
+   ship "successfully" serving 0 tools. Fix: when connectors were requested and
+   expected_tool_count==0, probe the live MCP tools/list and require >=1 served
+   tool (fail closed otherwise); backfill qualified_tools from the served plane.
+3. **delete_oauth2_credential_provider on an API_KEY provider returns success
+   (empty {}) WITHOUT deleting it.** The original teardown tried oauth2-delete
+   first and broke on the no-error "success" → API-key providers were NEVER
+   deleted (live orphan confirmed: provider survived a logged-"deleted" cleanup).
+   Fix: record each provider as "TYPE:name" (API_KEY|OAUTH) at create time and
+   call the correct deleter; for legacy bare names, delete then VERIFY-gone via
+   the matching get_*.
+
+Rule for myself: an AWS delete that returns 200/empty is NOT proof of deletion —
+for any "try-both-deleters" pattern, verify the resource is actually gone (get_*
+raises NotFound), or better, track the resource type so there's no guessing. And
+a "deploy succeeded" with expected==0 on a verification gate is a gate that didn't
+run — make readiness checks fail closed, not skip, when the count is unknown.
+
+## Bug 150 — Harness->Gateway outbound auth needs a 3-permission chain + outboundAuth.oauth (2026-06-24)
+
+Caught LIVE doing the full Phase B E2E (Harness wired to a connector-backed
+CUSTOM_JWT gateway, invoked to force a connector tool call). A harness with
+config.tools=[{type:agentcore_gateway, gatewayArn}] FAILS at invoke time unless
+ALL of the following are in place — each surfaced as a DISTINCT live error, peeled
+one layer at a time:
+
+1. **outboundAuth.oauth on the tool config.** A platform gateway uses CUSTOM_JWT
+   (Cognito) auth. Without `config.agentCoreGateway.outboundAuth.oauth =
+   {providerArn, scopes, grantType:"CLIENT_CREDENTIALS"}` the harness gets
+   `401 Unauthorized` loading the tool. The providerArn must be an OAuth2
+   credential provider registered (create_oauth2_credential_provider,
+   CustomOauth2 + the gateway's Cognito discoveryUrl/clientId/clientSecret) from
+   the gateway's client_info — same pattern as the internal MCP-target path.
+2. **bedrock-agentcore:InvokeGateway** on the harness EXECUTION role (not just the
+   caller). Mirrors the runtime exec role's GatewayAccess Sid.
+3. **bedrock-agentcore:GetResourceOauth2Token** on the exec role — the harness
+   fetches the outbound token from the token-vault credential provider. Missing →
+   AccessDeniedException on GetResourceOauth2Token.
+4. **secretsmanager:GetSecretValue on arn:...:secret:bedrock-agentcore-identity!***
+   — GetResourceOauth2Token internally reads the AgentCore-managed identity secret
+   holding the token. Missing → "Access denied when retrieving secret
+   ...!default/oauth2/...". This is the layer BENEATH GetResourceOauth2Token.
+
+Also: InvokeHarness streams a full agent turn (model + tool round-trips); the
+default 60s boto3 read timeout cuts off a cold tool_use turn mid-stream
+(stop_reason came back "tool_use" with the tool actually called, but the client
+read timed out). Give the bedrock-agentcore data client read_timeout>=180s.
+
+Final verified result: harness called conn-..._getAstronomyPictureOfDay and
+answered from live NASA data; same-session follow-up worked; teardown left zero
+orphans (harness + outbound provider + role + gateway + connector creds/secret).
+
+Rule for myself: an IAM AccessDenied on a managed AWS action is often a CHAIN —
+fix the named action, re-run, and the NEXT layer (a token fetch, then the secret
+behind it) surfaces. Test the REAL feature path (harness+tool), not a bare
+resource create — my "42" smoke test passed while the whole connector path was
+still broken four layers deep.
+
+## Bug 151/152/153 — Harness STEP-role IAM gaps only visible on a live scoped-role deploy (2026-06-24)
+
+Caught during a full customer-grade E2E (deploy stack -> drive live API -> every
+flow). My earlier harness live tests ran with ADMIN creds, so these scoped-role
+gaps were invisible. The harness STEP Lambda role (StepHarnessRole) needs more than
+the Harness verbs because CreateHarness is a fat operation:
+
+- **Bug 151:** CreateHarness internally calls **CreateAgentRuntime** (a harness is
+  built on top of an AgentCore Runtime). Missing -> AccessDenied on
+  bedrock-agentcore:CreateAgentRuntime (runtime/*). Fix: grant Create/Get/Update/
+  Delete/ListAgentRuntime(+Endpoint) to the harness step role.
+- **Bug 152:** CreateHarness ALWAYS auto-provisions a default **Memory** (even a
+  "bare" harness). Missing -> harness lands in CREATE_FAILED with "Memory operation
+  failed: not authorized ... bedrock-agentcore:CreateMemory". Fix: grant
+  Create/Get/List/Update/DeleteMemory to the harness step role.
+- **Bug 153:** the FIRST CreateOauth2CredentialProvider in an account/region
+  implicitly calls **CreateTokenVault** (token-vault/default). Missing -> AccessDenied
+  on bedrock-agentcore:CreateTokenVault. Fix: grant Create/GetTokenVault.
+
+Also (Bug 80 family, harness edition): CreateHarness validates the freshly-created
+exec role's trust policy SYNCHRONOUSLY -> "Role validation failed ... trust policy
+allows assumption" race. Fix: retry CreateHarness on that marker (12x10s).
+
+Rule for myself: test scoped-role paths through the REAL deployed product, not just
+with admin creds — managed AWS "create" operations (CreateHarness, CreateGateway)
+fan out into a CHAIN of sub-resource creates (runtime, memory, token-vault, workload
+identity, oauth provider), each needing its own IAM verb on the CALLER. Admin creds
+mask every one of them. Also: a deploy that fails mid-step (after gateway, before
+runtime) leaks the gateway+provider+secret — the orphan-guard persist-on-create and
+the cleanup helper both worked to recover these.
+
+## Test-payload gotchas (customer API contract) — 2026-06-24
+- DeployRequest config.framework must be 'strands_agents' (underscore), NOT
+  'strands-agents'. config.pythonRuntime must be the enum 'PYTHON_3_13', NOT
+  'python3.13' (the integration-test fixture had the wrong casing; the field
+  default is correct so omitting it also works).
+- Cognito app client is SRP-only (USER_PASSWORD_AUTH disabled). Drive auth with
+  pycognito AWSSRP; SRP is intermittently flaky -> cache the JWT and retry 6-8x.
+
+## Bug 154 — Harness outbound OAuth provider orphaned on delete (2026-06-24, live customer teardown)
+
+The harness->gateway outbound OAuth provider (harness-gw-<name>, created by
+ensure_gateway_outbound_provider) was ORPHANED after deleting a harness-connector
+flow: the DELETE handler read deployment_record["harness_result"]
+["gateway_outbound_provider_name"], but status_update_step NEVER persists
+harness_result to the record — so the name was unavailable and the provider lingered
+(confirmed live: provider survived a successful DELETE). Fix: destroy_harness now
+RECONSTRUCTS the provider name deterministically from the harness id
+(_harness_name_from_id -> "harness-gw-<name>") and best-effort deletes it, with NO
+dependency on a persisted harness_result. Tested.
+
+Rule for myself: teardown must not depend on optional persisted state that a
+success-path step may never write. If a resource name is DETERMINISTIC, reconstruct
+and delete it directly. Verify teardown by scanning for orphans AFTER delete, not by
+trusting the delete's success flag.
+
+## Bug 155 — Memory name passed raw to CreateMemory (free-form canvas) (2026-06-24)
+
+Caught testing FREE-FORM (non-template) drag-and-drop flows: a user who wires a
+Memory node and types a name like "custom-mem" or "My Memory" gets a hard deploy
+failure — memory_step.py passed memory_config["name"] RAW to CreateMemory, which
+enforces [a-zA-Z][a-zA-Z0-9_]{0,47} (letters/digits/underscore, start with letter,
+<=48). Templates happened to use already-valid names so this never surfaced in
+template testing. Fix: sanitize the memory name (non-allowed -> underscore, ensure
+leading letter, cap 48) before CreateMemory AND the AgentCoreMemory-<name> IAM role.
+
+Rule for myself: ANY user-typed name from the canvas that becomes an AWS resource
+name must be sanitized to that service's regex at the deploy step — templates mask
+this because their names are pre-vetted. Free-form authoring is where raw user
+input actually reaches the API. (Same class as harness/gateway name sanitizers.)
+
+## Bug 156 + test-client finding — memory data-plane lag + concurrent-invoke (2026-06-24, free-form kitchen-sink)
+
+Two findings from the maximal free-form flow (runtime + gateway + built-in tool +
+connector + memory, all hand-wired, no template):
+
+1. **Product (Bug 156, soft):** memory_step waits for get_memory->ACTIVE, but the
+   control-plane ACTIVE LEADS the data-plane CreateEvent the agent uses to write
+   turns — the first invocation hit "Memory status is not active, unable to process
+   CreateEvent". The generated agent caught it ("Could not save to memory") and
+   still answered correctly, so it's a soft/degraded failure, not a crash. Fix:
+   added a 10s settle after ACTIVE in _wait_for_memory_ready.
+
+2. **Test-client (not a product bug):** the kitchen-sink agent's FIRST turn called a
+   tool and legitimately took 37.6s; my client's 180s... actually the client read
+   timed out, then fired turn 2 on the SAME session while turn 1 was still running
+   -> the runtime correctly rejected it with strands ConcurrencyException ("Agent is
+   already processing a request. Concurrent invocations are not supported"). The flow
+   itself was fine ("Invocation completed successfully (37.607s)"). Fix the TEST: 300s
+   per-turn timeout + never fire the next same-session turn after a failed one.
+
+Rule for myself: a 500 from a runtime is not automatically a product bug — pull the
+CloudWatch logs. Here the agent succeeded; the failures were (a) a soft memory data-
+plane race the agent already tolerates, and (b) my own client firing overlapping
+same-session requests after a premature timeout. AgentCore runtimes are single-flight
+per session by design.
+
+## Bug 157 (known limitation, documented) — /api/test-runtime 30s API-Gateway ceiling (2026-06-24)
+
+Free-form kitchen-sink (runtime+gateway+connector+memory+tool) DEPLOYS and the agent
+RUNS CORRECTLY — CloudWatch shows "Invocation completed successfully (79.143s)", 2
+tools discovered, memory wired, agent reasoned + responded. BUT the customer-facing
+/api/test-runtime (and /api/test-runtime-stream) both route through API Gateway HTTP
+API, whose integration timeout is a HARD 30s max (AWS-enforced, non-configurable). A
+cold first turn that calls multiple tools can take 40-80s -> the client/API-GW cuts
+off at 30s even though the agent finishes server-side. The handler code already notes
+this: "API Gateway + Lambda (Mangum) cannot truly stream ... For real streaming, use
+Lambda Function URLs (future enhancement)." So: simple/fast flows (<30s) test fine
+through the UI; heavy multi-tool first-turns exceed the TEST endpoint ceiling. The
+DEPLOYED agent is unaffected — production callers hit AgentCore InvokeAgentRuntime
+directly (no 30s API-GW bound). Not introduced by this work; pre-existing arch limit.
+
+Recommended (future, not this pass): move /api/test-runtime to a Lambda Function URL
+with RESPONSE_STREAM InvokeMode so the test UI can show long multi-tool turns.
+
+Rule for myself: distinguish "the agent failed" from "the SYNC TEST TRANSPORT timed
+out" — always check the runtime CloudWatch log for "Invocation completed successfully"
+before calling an invoke a failure. The test endpoint's 30s ceiling is a transport
+limit, not an agent-capability limit.
+
+## Bug 158 — AgentCoreMemory-<name> IAM role orphaned on flow delete (2026-06-24, free-form)
+
+memory_step creates an IAM role AgentCoreMemory-<sanitized_name>, but the DELETE
+handler deleted the memory and left the role (confirmed live: AgentCoreMemory-custom_mem
+survived a clean flow delete). Fix: delete handler now also deletes the
+AgentCoreMemory-<memory_name> role (memory_result carries memory_name). Mirrors the
+KB-role cleanup already present. (Same orphan class as the harness outbound provider,
+Bug 154 — teardown must cover EVERY sub-resource a deploy step creates, not just the
+headline resource.)
+
+## Production improvements round (2026-06-24) — manifest, streaming, sanitizer, reskin
+
+Built 5 improvements after the customer/free-form testing surfaced recurring classes:
+- **Resource manifest (kills orphan class):** DeploymentState.created_resources[] +
+  store.record_resource() (atomic list_append, best-effort) wired into ALL 9 step
+  handlers + the direct path; deployment_handler._delete_managed_resource() iterates
+  it (Step-0a) before the legacy *_result fallbacks. Types: agent_runtime, harness,
+  memory, gateway, oauth2/api_key_credential_provider, secret, iam_role, lambda,
+  cognito_user_pool, policy_engine, guardrail. Teardown is now complete-by-construction.
+- **Shared sanitizer naming.py** (underscore vs hyphen styles) — the local sanitizers
+  delegate to it; kills the raw-name-to-AWS-API class (Bug 155 family) at the source.
+- **Shift-left validation:** Pydantic normalize-or-422 on name fields + frontend modal hints.
+- **Streaming test endpoint (Bug 157 fix):** Lambda Function URL InvokeMode=RESPONSE_STREAM
+  (stream_handler.py) so >30s tool-heavy agents can be tested past API-GW's 30s cap.
+  Auth is a HAND-ROLLED RS256 verify (no JWT lib bundled) — now covered by
+  test_stream_handler_auth.py (valid accepted; tampered/forged/alg=none/wrong-key/
+  unknown-kid/bad-claims/expired/unconfigured all rejected; fails closed).
+- **IAM completeness test** (test_iam_completeness.py) asserts each step role grants its
+  documented fan-out (harness->CreateAgentRuntime/CreateMemory/CreateTokenVault) so
+  Bug 151/152/153-class gaps are caught pre-deploy.
+- **UI reskin:** MotionSites design language (Barlow + Instrument Serif, glass badges,
+  2px CTAs, corner marks, cinematic hero on LOGIN/empty-state ONLY). Deliberately did
+  NOT put video/heavy motion behind the React Flow canvas (legibility/perf) — the spec
+  itself reserves motion for hero+nav. CSP widened to allow Google Fonts (else the whole
+  reskin silently falls back to system fonts behind the production CSP).
+
+Adversarial review (4 lenses) found 0 blocking; mediums fixed: font CSP, policy_engine +
+guardrail manifest gaps. Test-double drift: adding store.record_resource broke a _FakeStore
+in test_guardrails_enhancement — fix the double when you extend a real interface.
+
+Rule for myself: when a bug repeats across components (orphans, raw names), fix the CLASS
+with a shared mechanism (manifest, one sanitizer), not the instance. And hand-rolled crypto
+on an auth path MUST have adversarial unit tests before it goes live.
+
+## Bug 159 — manifest + legacy fallback double-delete -> false-negative success:false (2026-06-24, improvements live matrix)
+
+After adding the resource manifest (Step-0a generic teardown), delete returned
+success:false on flows that ALSO had legacy *_result cleanups: the manifest deleted
+everything first, then the per-component fallbacks (memory/gateway/cognito/...) ran
+and hit ResourceNotFoundException on the already-gone resources, which they counted
+as cleanup_failures. Teardown FULLY succeeded (everything gone, manifest log shows it)
+but the response lied (success:false). Fix: the manifest is AUTHORITATIVE when present
+— gate ALL legacy *_result fallback blocks (MCP/policy/memory/guardrail/gateway/KB)
+behind `not manifest_used`. Old pre-manifest records have no created_resources and
+still use the fallbacks. The headline runtime/harness destroy still always runs
+(idempotent). Verified the manifest records full gateway side-resources (pool, role,
+lambdas, connector providers+secrets) so gating the gateway fallback leaks nothing.
+
+Rule for myself: when you add a NEW authoritative cleanup path alongside an existing
+one, make them MUTUALLY EXCLUSIVE — running both double-deletes and turns idempotent
+NotFounds into false failures. "success" must reflect reality, not double-count.
+
+## Bug 160 — Function URL auth_type=NONE missing public-invoke permission -> 403 for everyone (2026-06-24, live)
+
+The streaming test endpoint (Lambda Function URL, RESPONSE_STREAM, auth_type=NONE +
+in-handler Cognito JWT verify) returned 403 "Forbidden. For troubleshooting Function
+URL authorization" for BOTH unauthenticated AND valid-Bearer requests. Live check:
+AuthType=NONE but get-policy returned NO resource policy. CDK's add_function_url(NONE)
+is supposed to auto-add the FunctionURLAllowPublicAccess permission; it did not
+materialize here, so AWS rejected at the URL layer before the handler's JWT verify
+ever ran. Fix: explicit fn.add_permission(principal=AnyPrincipal(),
+action="lambda:InvokeFunctionUrl", function_url_auth_type=NONE). Security is preserved
+because the handler still verifies the Cognito access token (test_stream_handler_auth.py)
+— NONE only means "AWS doesn't SigV4-gate it", not "anyone can invoke the runtime".
+
+Rule for myself: ALWAYS verify a Function URL is actually reachable post-deploy
+(curl/requests), and check get-policy — auth_type=NONE without the explicit public
+InvokeFunctionUrl grant is a silent 403 wall. Don't trust the CDK auto-grant.
+
+## Bug 160 UPDATE — account SCP blocks Lambda Function URLs entirely (2026-06-24)
+
+Deeper diagnosis: the streaming Function URL returns 403 for ALL callers regardless
+of auth_type. Proof: set auth_type=AWS_IAM and invoked with a SigV4-signed request
+using ADMIN credentials -> STILL 403. A correctly-signed admin SigV4 call being
+rejected means this is an ACCOUNT-LEVEL guardrail (SCP / org policy) that blocks
+Lambda Function URL invocation (both NONE and AWS_IAM) in this sandbox — NOT a code
+or permission defect. The streaming endpoint code is correct (auth verify covered by
+16 unit tests in test_stream_handler_auth.py) and will work in accounts that permit
+Function URLs.
+
+PRODUCTION GUIDANCE for >30s agents (Bug 157/160): the /api/test-runtime 30s API-GW
+cap remains the practical limit in THIS account because the Function URL escape hatch
+is org-blocked. Options for an environment that needs in-UI testing of tool-heavy
+(>30s) agents: (a) deploy in an account/OU that allows Function URLs, or (b) use an
+async test pattern — POST starts an invoke, the agent result is polled from a results
+table — instead of a synchronous stream. The deployed AGENT is unaffected either way:
+production callers hit AgentCore InvokeAgentRuntime directly (no API-GW/Function-URL
+bound). Verify Function-URL availability in the target account before relying on it.
+
+Rule for myself: when a Function URL 403s even with admin SigV4, stop debugging the
+app — it's an account guardrail. Confirm with a signed admin call early.
+
+## Bug 161 — shared tool Lambda update races on concurrent deploys (2026-06-24, live matrix)
+
+Two parallel gateway deploys (custom_policy_gw + websearch) both reuse the shared
+singleton AgentCoreDynamicTools Lambda and both called update_function_code; the
+second hit "ResourceConflictException: resource ... is currently in the following
+state: Pending" and the whole gateway deploy FAILED. _create_or_update_lambda updated
+immediately on the ResourceConflict (function-exists) branch with no wait/retry. Fix:
+_wait_lambda_updatable() polls State==Active && LastUpdateStatus!=InProgress before
+updating, and the update is retried (8x) on ResourceConflictException so concurrent
+deploys serialize on the shared Lambda. Two users deploying gateway flows at the same
+time is a normal production scenario — this was a real robustness gap.
+
+## Guardrails free-form default mode (test-payload note + UX gap)
+guardrails_step defaults mode="existing" and requires a guardrailId; a free-form user
+dragging a Guardrails node with no id gets "guardrailId is required in existing mode".
+The deploy request must send mode="create". UX improvement worth considering: default
+to "create" when no guardrailId is supplied (a dragged node clearly wants a new one).
+Test fixed to send mode="create".
+
+## Bug 162 — guardrails create path referenced nonexistent Bedrock exception (2026-06-24, live)
+
+guardrails_step's create branch caught `bedrock.exceptions.ResourceAlreadyExistsException`
+— which DOES NOT EXIST on the Bedrock client (valid: ConflictException,
+ResourceInUseException, AccessDenied, etc.). Merely REFERENCING the missing attribute
+in the `except` clause raised AttributeError, crashing the step the first time a
+guardrail-create flow ran in create mode. (Template flows never created guardrails, so
+this hid until a free-form guardrails flow.) Fix: catch broadly, match on error code
+(ConflictException/ResourceInUseException) / message, re-raise anything else.
+
+## Bug 163 — Cedar policy name exceeds CreatePolicy length limit (2026-06-24, live)
+
+policy_step built pol_name = f"{engine_name}_{base_name}"[:128], but CreatePolicy /name
+is capped well under 128 (a 51-char name was rejected live). A longer gateway/engine
+name overflowed. Fix: cap the policy name at 48, keeping the full semantic base_name
+and a bounded engine-name prefix for cross-gateway uniqueness.
+
+Rule for myself: NEVER reference a boto3 client.exceptions.X without confirming X
+exists for THAT service — a wrong name turns a handled case into an AttributeError
+crash. And every user-derived AWS resource NAME needs the SERVICE's real length cap,
+not a guessed one.
+
+## Bug 164 (shift-left) + policy/guardrail free-form findings (2026-06-24)
+
+- Bug 164 (fixed): guardrails_step now fails FAST with a clear "Guardrail has no
+  policies configured..." error if no content/topic/PII/word/grounding policy was
+  set, instead of a 30s-later AWS "Guardrail must have at least one policy"
+  ValidationException. A free-form user who drags a Guardrails node and leaves all
+  filters empty now gets an actionable message.
+- custom_policy_gw free-form: the Cedar ENFORCE fail-closed ("would deny the tool
+  plane: Insufficient permissions to call gateway") is DESIRABLE behavior (Bug 134) —
+  the engine correctly refused to ship a policy that would deny all tools. My minimal
+  free-form policy config under-specified the gateway permission; the customer-support
+  TEMPLATE wires policy+gateway correctly. Not a product regression. A future UX win:
+  surface a clearer "policy needs the gateway's tool actions" hint pre-deploy.
+- Both ran AFTER Bug 162/163 fixes -> no more AttributeError, no more name-length
+  error (policy name correctly 48 chars). The fixes worked; these are deeper config
+  validity findings, not the same bugs.
+
+## Bug 160 FINAL — public Lambda Function URL is forbidden by org security (Palisade/Epoxy) (2026-06-24)
+
+The auth_type=NONE Function URL + explicit Principal:* InvokeFunctionUrl grant I added
+(to make the streaming test endpoint reachable) tripped Amazon's **Palisade** detector
+("World Accessible Lambda Function", finding 19a210be) and **Epoxy** auto-mitigated by
+stripping the public grant — within minutes, live. Combined with the earlier proof that
+even admin SigV4 to the URL was SCP-blocked, the verdict is definitive: PUBLIC Lambda
+Function URLs are not allowed in this org, full stop.
+
+RESOLUTION: switched the Function URL to auth_type=AWS_IAM (SigV4) and REMOVED the
+public-invoke permission. Now compliant (no world access). The endpoint is provisioned
+but not browser-wired — SigV4 from the SPA needs a Cognito Identity Pool (app only has
+a User Pool today); that's future work. Until then the >30s test path keeps the
+documented 30s API-GW sync limit; DEPLOYED agents are unaffected (prod calls
+InvokeAgentRuntime directly). The hand-rolled JWT verify stays as defence-in-depth.
+
+Rule for myself: NEVER add Principal:* / auth_type=NONE on a Lambda (URL or otherwise)
+in an Amazon-managed account — automated security tooling (Palisade/Epoxy) will flag
+and revert it, and it's a real world-exposure risk. Default to AWS_IAM/SigV4 for
+service-to-service or authenticated browser calls; if that needs an Identity Pool the
+app lacks, treat the feature as blocked rather than going public.
+
+## Bug 165 — deployment/delete Lambda role missing bedrock:DeleteGuardrail (2026-06-24, live)
+
+The manifest dispatcher (_delete_managed_resource) added a `guardrail` case calling
+bedrock:DeleteGuardrail, and the legacy guardrails_result fallback also calls it — but
+both run in the DEPLOYMENT Lambda, whose role had only ApplyGuardrail+GetGuardrail (the
+GUARDRAILS STEP role had Delete, the delete-executor role did not). Live: a guardrail
+flow deployed fine but DeleteGuardrail AccessDenied'd on teardown -> orphaned guardrail.
+Fix: add bedrock:GetGuardrail + bedrock:DeleteGuardrail to the deployment Lambda role.
+Extended test_iam_completeness.py to assert EVERY manifest-dispatcher delete action
+(DeleteAgentRuntime/Harness/Memory/Gateway/Oauth2/ApiKey/PolicyEngine/Guardrail/Secret)
+is granted in platform_stack.py — this class of "the create-step role can delete but the
+DELETE-handler role cannot" is now caught pre-deploy.
+
+Rule for myself: the role that CREATES a resource and the role that DELETES it are often
+DIFFERENT (step roles create; the deployment Lambda role deletes via the manifest). When
+adding a manifest dispatcher case, grant the delete verb to the DELETE-executor role, and
+assert it in the IAM-completeness test.
+
+## Connector live validation w/ real SaaS PATs (2026-06-25) — GitHub + Asana PROVEN, 3 real findings
+
+Tested the branded connectors against real APIs using customer-supplied tokens.
+
+RESULTS (full product path: deploy → real authenticated tool call → multi-turn → delete):
+- **GitHub (api-key/Bearer PAT)**: ✅ PROVEN. Agent called the live GitHub API and
+  returned the real account (login omrsamer, 6 public repos, 1 follower, created
+  2025-01-21). tool_grounded, clean delete.
+- **Asana (api-key/PAT)**: ✅ PROVEN. Agent returned the real Asana user (Omar Samer,
+  omarsamer196@gmail.com) + real workspace. tool_grounded, clean delete.
+- **Jira**: direct-API probe showed an Atlassian API TOKEN auths via HTTP Basic
+  (base64(email:token)), NOT Bearer (Bearer'd token → 401). The AgentCore api-key
+  provider can't compute base64(email:token), so **Jira api-key is unsupported** —
+  catalog corrected to OAuth2-only (AtlassianOauth2). OAuth2-CC path still needs a
+  real Atlassian OAuth app (client id/secret) to validate end-to-end — NOT a PAT.
+
+REAL FINDINGS (fixed):
+1. **Bug 166 — invalid OpenAPI spec FAILs the target with a buried reason.** An array
+   schema missing `items` → target status=FAILED, reason "Invalid OpenAPI schema:
+   ...schema.items is missing", gateway serves 0 tools. The deploy reported only the
+   generic "spec may have failed to crawl". Fix: the 0-tools error now reads each
+   FAILED target's statusReason and includes it (actionable). A single valid `/user`
+   endpoint served fine alongside NASA — proving the connector code + crawl work; the
+   spec was the problem.
+2. **Bug 167 — stuck same-named gateway reused across deploys.** A failed connector
+   deploy left conn-github-gw (READY, FAILED target) behind; the next deploy reused it
+   by name and kept serving 0 tools. Fix: the 0-tools abort now tears down the dead
+   gateway (+ providers/secrets/specs) before returning, so a retry starts clean.
+3. Large vendor specs are unusable inline: GitHub's full spec = 12MB / 1194 operations
+   (→1194 tools, absurd). Catalog spec_url should point to FOCUSED specs, not the giant
+   vendor ones. Added S3-routing for specs >100KB (openApiSchema.s3.uri) regardless.
+
+Rule for myself: a connector is only as good as its OpenAPI spec — validate spec
+shape (esp. array `items`) and surface the target's real FAILED reason; ship focused
+specs, not full vendor dumps; and always delete a gateway that fails its serve-probe so
+its name can't be reused.
+
+## Holmes security scan (2026-06-25) — 31 findings, scoped remediation
+
+Ran Holmes (Content Security Review rubric + HolmesContentSecurityReviewBaselinePolicy
+SMGS AppSec static analysis) over backend/src + infra/stacks + scripts (97 files).
+Findings: 13 HIGH + ~16 MEDIUM + 3 LOW(no-action). Two themes: IAM wildcards
+(Resource:"*" + broad bedrock-agentcore:* actions across many roles) and sensitive-data
+logging (logger.exception capturing prompts/lambda_code/user_id).
+
+CRUCIAL: only 2 HIGH were in the NEW session code (harness exec role); the rest are
+PRE-EXISTING platform patterns (per_agent_identity, cfn_template_generator, deployment
+Lambda, step roles, python_exporter). The session's changes introduced no regressions.
+
+REMEDIATED (scope: new code + cheap wins, per user decision):
+- harness_deployer.create_harness_iam_role now scopes InvokeModel to the model FAMILY
+  arn (helper _model_arn_pattern strips us./eu./apac./global. xregion prefixes) and the
+  memory/gateway agentcore actions to the connected ARNs (+ "/*" for sub-resources);
+  ListGateways + token-vault GetResource* stay account-level (no ARN form). Threaded
+  model_id/memory_arn/gateway_arn through get_shared_or_new_harness_role + harness_step.
+  2 new unit tests assert the scoping + the no-ARN "*" fallback.
+- python_exporter.build_requirements now emits ">=" version floors for known packages +
+  a header telling users to pin exact versions for production (supply-chain finding).
+  Tests updated to parse package names (strip version specifiers).
+
+DEFERRED (documented in README "Holmes Security Review" section + here): platform-wide
+IAM scoping (shared runtime / deployment Lambda / step roles / generated CFN roles),
+structured logging to drop user data from tracebacks, and per-connector KMS CMK. These
+are real but large + pre-existing; appropriate as follow-ups for a 1:Many sample.
+
+Rule for myself: when a security scan returns mostly pre-existing findings, separate
+"introduced by my change" (fix now) from "pre-existing platform debt" (document +
+triage) so the response is proportionate and the user decides scope.
+
+## 2026-06-25: Post-Holmes redeploy — Bug 166 (endpoint readiness race)
+
+### Bug 166: runtime READY ≠ invokable — must gate on the DEFAULT endpoint
+- Symptom: fresh-stack matrix P-RUN-001 deployed, runtime reached READY, deploy
+  reported "succeeded", but the very first invoke returned "Runtime not found."
+  Direct boto3 invoke confirmed: `ResourceNotFoundException: No endpoint or agent
+  found with qualifier 'DEFAULT'`. `list_agent_runtime_endpoints` was EMPTY right
+  after the runtime went READY, yet the platform's long-lived runtimes all had a
+  DEFAULT endpoint READY — so auto-creation works, it just LAGS the runtime status.
+- Root cause: `runtime_launch_step` waited only on `get_agent_runtime` → READY,
+  then listed endpoints and — if none was READY yet — **silently fell back to the
+  bare runtime ARN and declared success**. The AgentCore data plane invokes against
+  an endpoint qualifier (DEFAULT) that is provisioned ASYNC after the runtime's own
+  READY. Invoking in that window 404s.
+- Fix: new `runtime_deployer.wait_for_default_endpoint_ready(ctrl, runtime_id,
+  timeout=180)` that polls `list_agent_runtime_endpoints` until the DEFAULT endpoint
+  is READY (fail-fast on *FAILED*). `runtime_launch_step` now calls it after
+  `wait_for_runtime_ready` and RAISES if the endpoint never becomes READY — no more
+  silent bare-ARN fallback. 4 unit tests (test_endpoint_readiness.py).
+- Why prior June runs passed: the lag is variable; on a warm/fast provision the
+  endpoint is READY by the time the tester invokes. On a fresh stack it raced and
+  lost. Gating removes the race entirely.
+
+Rule for myself: "control-plane resource READY" is necessary but NOT sufficient to
+use a resource whose DATA-plane access goes through a separately-provisioned
+sub-resource (endpoint/alias/qualifier). Always gate deploy-success on the thing the
+invoke path actually targets, and never silently fall back to a parent ARN when the
+child isn't ready — that converts a wait into a latent 404.
+
+---
+
+## Bug 145 — Managed S3 Vectors KB fails CreateKnowledgeBase with misleading "unable to assume the given role"
+
+- Surfaced by the matrix tester (2026-06-25, fresh post-Holmes stack) on cell
+  step_functions_ui::P-KB-001: a create_new KB with vectorStoreType=s3_vectors and
+  NO explicit s3VectorsBucketArn dies at the knowledge_base step with
+  `ValidationException: Bedrock Knowledge Base was unable to assume the given role`.
+- The error is a RED HERRING. Reproduced live with a role propagated >25s carrying
+  `bedrock:* s3:* s3vectors:*` on `*` — still failed. The role is fine.
+- Root cause: `_build_storage_config` emitted the auto-managed S3 Vectors storage
+  config `{"type":"S3_VECTORS","s3VectorsConfiguration":{"indexName": "..."}}` with
+  NO `vectorBucketArn`. Bedrock does NOT auto-provision an S3 Vectors bucket from
+  that shape — it rejects the create, but mislabels the failure as an assume-role
+  error. Supplying an explicit, pre-created `vectorBucketArn` makes the identical
+  call succeed immediately (verified: KB YCJFAKT1VV created).
+- Also found a latent index-name mismatch: the create-flow pre-create block defaulted
+  the index to `default-index` while `_build_storage_config` defaulted to
+  `bedrock-knowledge-base-default-index` — retrieval would miss even if create
+  succeeded.
+- Fix (knowledge_base_step.py): in auto-managed s3_vectors mode self-provision a
+  vector bucket `agentcore-kbvec-<deployment_id[:12]>` + index, pin
+  `s3VectorsBucketArn`/`s3VectorsIndexName` into kb_config so the storage config
+  carries the explicit ARN, unify the index name to
+  `bedrock-knowledge-base-default-index`, record an `s3_vectors_bucket` manifest
+  resource for teardown, and add `s3vectors:GetIndex/GetVectorBucketPolicy/
+  PutVectorBucketPolicy` to the KB role. Teardown (`_delete_managed_resource`) now
+  deletes `s3_vectors_bucket` (indexes first, then bucket).
+- REQUIRES a stack redeploy (deployment Lambda code change). KB cells BLOCKED until
+  the operator runs scripts/deploy.sh.
+
+Rule for myself: a Bedrock "unable to assume the given role" ValidationException is
+NOT always about IAM — when the role is provably fine, suspect the storage/target
+resource doesn't exist. Bisect by broadening perms to *:* first; if it still fails,
+it's not perms.
+
+---
+
+## Bug 146 — Harness exec role denies InvokeModelWithResponseStream on cross-region inference-profile ARN
+
+- Surfaced by the matrix tester (2026-06-25) on cell step_functions_ui::P-HARNESS-001
+  (bare managed Harness, deploymentMode=harness, model
+  us.anthropic.claude-sonnet-4-5-20250929-v1:0). The harness DEPLOYS fine but the
+  first invoke fails: `AccessDeniedException ... assumed-role/AgentCoreHarness-...
+  is not authorized to perform: bedrock:InvokeModelWithResponseStream on resource:
+  arn:aws:bedrock:us-east-1:166827918465:inference-profile/us.anthropic.claude-sonnet-4-5-...`.
+- Root cause: harness_deployer._model_arn_pattern() scoped the BedrockModelAccess
+  statement to ONLY a `foundation-model/anthropic.claude*` ARN. For a cross-region
+  inference profile (id prefix us./eu./apac./global.) Bedrock evaluates
+  ConverseStream/InvokeModelWithResponseStream against the INFERENCE-PROFILE ARN too,
+  which the role didn't grant -> AccessDenied. The Runtime exec role dodges this only
+  because it uses Resource:"*" for Bedrock; the harness role is least-privilege.
+- Fix: new harness_deployer._model_resource_arns() returns BOTH the foundation-model
+  family pattern AND `arn:aws:bedrock:*:*:inference-profile/<id>` (+ the no-account
+  `arn:aws:bedrock:*::inference-profile/<id>` form) when the id is a cross-region
+  profile. create_harness_iam_role now uses it (Resource accepts the list).
+  Updated test_harness_deployer.py::test_harness_role_scopes_model_and_resources to
+  assert the list contains both forms. 24/24 harness tests pass.
+- REQUIRES the same stack redeploy as Bug 145 (deployment-Lambda code). Both harness
+  cells (P-HARNESS-001, P-HARNESS-MEM-001) BLOCKED until redeploy.
+
+Rule for myself: when scoping a least-privilege Bedrock model statement, a
+cross-region inference profile (us./eu./apac./global. prefix) needs the
+inference-profile ARN in the policy IN ADDITION TO the foundation-model ARN — the
+foundation-model ARN alone is insufficient for Converse/InvokeModelWithResponseStream.
+
+### Bug 167: KB self-provision (Bug 145) orphans its S3 Vectors bucket on delete
+- Symptom: after Bug 145 made the KB step self-provision an S3 Vectors bucket+index,
+  deleting a KB flow returned success=False with
+  "Manifest cleanup error (s3_vectors_bucket): AccessDeniedException ... DeleteVectorBucket"
+  and left the vector bucket orphaned.
+- Root cause: the manifest delete dispatcher (_delete_managed_resource in
+  deployment_handler.py) calls s3vectors delete_index + delete_vector_bucket, but the
+  DeploymentLambdaRole had ZERO s3vectors actions (only the KB STEP role had the CREATE
+  verbs). A create-side fix that introduces a new managed resource type MUST be paired
+  with the matching delete-side IAM on the delete role.
+- Fix: added s3vectors {List,Get,Describe,Delete}VectorBucket + {List,Get,Describe,Delete}Index
+  to DeploymentLambdaRole; added s3vectors:DeleteVectorBucket + DeleteIndex to the
+  test_iam_completeness _MANIFEST_DELETE_ACTIONS assertion so this can't regress.
+
+Rule for myself (reinforces Bug 165): whenever a change makes the platform CREATE a new
+managed resource type, in the SAME change (1) record it in the manifest, (2) add a delete
+branch to the dispatcher, AND (3) grant the delete verb to the DELETE/deployment role
+(not just the create/step role) + assert it in test_iam_completeness. Create-only fixes
+silently create orphans.
+
+---
+
+## Bug 147 — Stream Function URL is AWS_IAM but the handler demands a Cognito bearer in the same Authorization header (unusable)
+
+- Found by the matrix tester (2026-06-25) while wiring the >30s tool-heavy invoke path.
+  The stream Lambda Function URL (agentcore-workflow-dev-stream,
+  test_runtime_stream_url) is configured AuthType=AWS_IAM + InvokeMode=RESPONSE_STREAM
+  (verified via get_function_url_config). AWS_IAM means the caller MUST SigV4-sign,
+  which puts `AWS4-HMAC-SHA256 ...` in the `Authorization` header.
+- BUT stream_handler._extract_bearer reads the Cognito ACCESS token from that SAME
+  `Authorization` header (and _verify_cognito_token rejects anything that isn't a valid
+  Cognito access JWT). So the two auth mechanisms collide in one header:
+    * SigV4-only  -> Function URL admits the request, handler's _extract_bearer gets the
+      SigV4 string, _verify_cognito_token raises -> client sees `null` / Unauthorized.
+    * Bearer-only -> Function URL infra rejects with `{"Message":"Forbidden"}` (403)
+      before the handler runs.
+  There is NO header the client can populate to satisfy both -> the streaming test path
+  is effectively dead for AWS_IAM callers.
+- Real fix (not yet applied; flagged for the owner): when the Function URL is AWS_IAM,
+  derive the caller identity from the SigV4 request context
+  (event.requestContext.authorizer.iam / accountId) instead of requiring a separate
+  Cognito bearer; OR switch the Function URL to AuthType=NONE (handler already does full
+  Cognito JWT verification) so the bearer can live in Authorization. The docstring claims
+  auth_type=NONE but the deployed URL is AWS_IAM — infra/handler are out of sync.
+- WORKAROUND for the matrix tester: bypass the test endpoints entirely for >30s turns and
+  call the data plane directly — boto3 bedrock-agentcore.invoke_agent_runtime(
+  agentRuntimeArn, qualifier="DEFAULT", payload={"prompt":...}) with a read_timeout. This
+  is the exact call the platform makes, has no 30s ceiling, and returned the canary first
+  try. driver.invoke_direct() implements it; runcell falls back to it on the 30s error.
+
+Rule for myself: an AWS_IAM Lambda Function URL and a custom Authorization-header bearer
+check are mutually exclusive — SigV4 owns Authorization. Verify the URL's real AuthType
+with get_function_url_config rather than trusting a docstring.
+
+---
+
+## Bug 148 — MCP-server-runtime tools do not surface through the Gateway MCP target (agent gets 0 tools)
+
+- Found by the matrix tester (2026-06-25) on cell P-MCP-GW-001 (the
+  mcp-server-gateway-target template chain: runtime + gateway + MCP-server runtime,
+  gateway targets the MCP server). The whole chain DEPLOYS to SUCCEEDED, but invoking
+  the agent runtime returns 500. CloudWatch (runtime agent.py:_get_agent) shows:
+  "Gateway MCPClient returned 0 tools from https://<gw>.gateway.bedrock-agentcore...
+  /mcp after retries — gateway wiring is broken." The agent generated for an MCP-target
+  gateway hard-fails at init if the gateway exposes 0 tools.
+- So the MCP server runtime's tool (get_canary) is NOT being discovered/synced into the
+  gateway's MCP endpoint. Either the gateway MCP-server target isn't crawling the MCP
+  runtime's tools/list, or the MCP server runtime isn't advertising the tool over MCP.
+- Standard gateway + Lambda tools work fine (P-GW-LAM-001, T-strands-gateway-agent PASS),
+  so the gap is specific to the MCP-server-as-gateway-target tool sync.
+- NOT yet root-caused to a code line (needs inspecting the gateway MCP-target sync +
+  the generated FastMCP server's tools/list). Recorded as a candidate bug; P-MCP-GW-001
+  = FAIL (real wiring gap), P-MCP-001 = PARTIAL (deploys+tears down, can't invoke an
+  MCP-protocol runtime via the HTTP test path).
+
+Rule for myself: "deploy SUCCEEDED" for a multi-component chain does NOT mean the data
+plane is wired — an MCP-target gateway can come up healthy yet expose 0 tools. Always
+invoke-verify, and read the runtime's CloudWatch when an invoke 500s (the agent's own
+error message names the broken edge).
+
+---
+
+## Bug 149 — Gateway custom-tool AddPermission races IAM role propagation (flaky "invalid principal" / "no tool targets")
+
+- Found by the matrix tester (2026-06-25). The SAME gateway+customTools config that
+  PASSED early in the run (P-GW-LAM-001) began FAILING mid-run at the gateway step:
+  "Failed to deploy custom tool 'get_canary': ... AddPermission ... The provided
+  principal was invalid" -> surfaced to the user as "Gateway was created but no tool
+  targets could be deployed." Confirmed via /aws/lambda/agentcore-workflow-dev-step-gateway.
+- Root cause: gateway_deployer grants the gateway invoke on the tool Lambda with
+  lambda.add_permission(Principal=gateway_role_arn). lambda:AddPermission VALIDATES that
+  the principal (the just-created gateway IAM role) exists; under create/delete churn the
+  role isn't yet visible (IAM propagation lag > the fixed 10s post-create sleep), so the
+  call fails with InvalidParameterValueException "provided principal was invalid". The
+  add_permission only caught ResourceConflictException, not this propagation error, so it
+  hard-failed the whole tool-target deploy. Variable timing = passes warm, fails under load.
+- Fix: wrap BOTH add_permission call sites (custom-tool path ~line 1191, KB-tool path
+  ~line 996) in an 8×8s retry that catches InvalidParameterValueException whose message
+  mentions "principal" and retries until the role resolves. gateway tests 67/67 pass.
+- REQUIRES the stack redeploy (deployment-Lambda code). Affected cells (P-GW-LAM-001
+  recheck, T-strands-gateway-agent) are flaky until redeploy; P-GW-LAM-001's earlier PASS
+  is still valid (it caught the warm window).
+
+Rule for myself: lambda:AddPermission with a role-ARN Principal validates the role exists
+— treat "invalid principal" right after creating that role as an IAM-propagation flake and
+retry, never a permanent error. A fixed sleep is not enough under churn; use a retry loop.
+
+## Bug 167 — KnowledgeBase teardown ordering: vector bucket + KB role deleted before KB, leaving DELETE_UNSUCCESSFUL orphan (2026-06-25)
+
+- Found by the matrix tester re-running P-KB-001 after the Bug 145 fix shipped. The KB
+  cell DEPLOYED + INGESTED + RETRIEVED correctly (PASS on the real-response gate), but the
+  flow DELETE reported success:false and left the KnowledgeBase in status
+  DELETE_UNSUCCESSFUL — a real orphan.
+- Root cause: the manifest delete dispatcher (_delete_managed_resource) deletes the
+  s3_vectors_bucket AND the KB IAM role (AgentCoreKBRole-<id>) in the same pass as / before
+  the KnowledgeBase delete completes. deleting a KB with the default dataDeletionPolicy=DELETE
+  makes Bedrock delete the underlying vector data, which REQUIRES (a) the S3 Vectors store to
+  still exist and (b) a role it can assume to reach it. Both are already gone -> KB delete
+  fails with failureReasons "Unable to delete data from vector store for data source ...
+  Check your vector store configurations and permissions ... consider updating the
+  dataDeletionPolicy of the data source to RETAIN".
+- Manual orphan clear (what worked): recreate the EXACT vector bucket
+  (agentcore-kbvec-<id>) + index (bedrock-knowledge-base-default-index, float32/1024/cosine)
+  AND recreate the KB role (bedrock.amazonaws.com trust + s3vectors/s3/bedrock perms), wait
+  ~15s for IAM propagation, then delete-knowledge-base -> DELETING -> ResourceNotFound.
+  After that, delete the recreated bucket+index+role + corpus bucket. ZERO orphans verified.
+- Fix to ship (platform): in the KB delete path, delete the KnowledgeBase FIRST and WAIT for
+  it to reach a terminal deleted state, THEN delete the S3 Vectors bucket and the KB IAM role.
+  Alternatively set the data source dataDeletionPolicy=RETAIN at create (then KB delete does
+  not touch the vector store) and let the bucket-delete reclaim the data.
+
+Rule for myself: any managed resource whose DELETE cascades into a SECONDARY store
+(KB->vector store, runtime->endpoint) must have the secondary store + its access role
+OUTLIVE the primary delete. Delete the primary, wait terminal, then reclaim the secondaries.
+
+## Bug 149 follow-up — fix was DROPPED from the 12:41 redeploy bundle (2026-06-25)
+
+- After the team-lead's batched redeploy (Bugs 145/146/166), I extracted the deployed
+  agentcore-workflow-dev-step-gateway Lambda and grep'd it: Bugs 145/146/166 were present,
+  but the Bug 149 add_permission retry was ABSENT (grep "principal not yet propagated" = 0),
+  even though it IS in the working tree. The fix is uncommitted (git ` M gateway_deployer.py`)
+  AND absent from HEAD, so a deploy built from a clean/committed tree would miss it while
+  still picking up the other edits if those were staged differently.
+- Lesson: after a redeploy that is supposed to ship a code fix, VERIFY the fix is actually in
+  the deployed artifact (download the Lambda zip, grep for a unique marker string from the
+  fix) before declaring the fix live. Do not assume "redeploy done" == "my edit shipped",
+  especially for uncommitted working-tree changes.
+
+## Bug 168 — shared tool Lambda policy bricked by orphaned principals (the REAL "Bug 149" cause) (2026-06-25)
+
+- Symptom (identical to the matrix's "Bug 149"): gateway+customTool deploy fails
+  "Gateway was created but no tool targets could be deployed"; gateway-step logs show
+  lambda:AddPermission failing "The provided principal was invalid" for the FULL 8×8s
+  retry window (64s) then giving up.
+- The Bug 149 propagation-retry theory was INCOMPLETE. Proven live: the gateway role
+  EXISTED for minutes, yet AddPermission still rejected it — AND rejected a plain
+  account-id principal AND a service principal AND iam::root. On a FRESH throwaway
+  function the SAME role-ARN principal succeeded instantly. So it was never the
+  principal value or propagation.
+- ROOT CAUSE: the custom-tool Lambda is SHARED by name (AgentCore-CustomTool-<tool>)
+  across deployments and accumulates one `AllowAgentCoreInvoke-<gatewayRole>` resource-
+  policy statement per gateway. When a prior gateway's role is DELETED on teardown, its
+  statement is left behind as a dangling principal (stored as an orphaned AROA... unique
+  id). **A Lambda resource policy that contains ANY dangling principal makes
+  lambda:AddPermission reject EVERY subsequent call with "invalid principal"** — it
+  re-validates the whole policy, not just the new statement. So one torn-down gateway
+  bricks the shared Lambda for all future deploys. Confirmed: removing the single
+  orphaned statement made AddPermission succeed immediately.
+- FIX: `_prune_orphaned_lambda_permissions(lambda_client, fn)` reads the policy and
+  removes any `AllowAgentCoreInvoke-<role>` statement whose role no longer exists in IAM
+  (NoSuchEntity); called at BOTH add_permission sites before adding the new grant. The
+  Bug 149 retry stays as a real-propagation safety net. 5 unit tests
+  (test_gateway_permission_prune.py) + verified live (pruned 5 bricked shared Lambdas,
+  add_permission then succeeded).
+
+Rule for myself: a shared resource's IAM/resource policy is append-only across deploys
+unless you prune it. Any per-consumer statement keyed on a deletable principal (role)
+must be garbage-collected when that principal dies — a single dangling principal can
+poison the entire policy and reject all future edits, not just its own. "Retry the
+invalid-principal error" is wrong when the principal is permanently gone; detect & prune.
+
+## Bug 169 — MCP-server gateway target FAILS: gateway step role missing GetWorkloadAccessToken (the REAL "Bug 148" cause) (2026-06-25)
+
+- Symptom (the matrix's "Bug 148"): an MCP-server-as-gateway-target chain DEPLOYS to
+  "gateway READY" but the agent gets 0 tools and 500s. Mis-diagnosed as an MCP wiring /
+  endpoint-format / tools-list-sync gap.
+- ACTUAL root cause (from get_gateway_target statusReasons — always read the TARGET, not
+  just the gateway): the single MCP target lands in status=FAILED with
+  "Please check the OAuth setup. User: ...StepGatewayRole... is not authorized to perform:
+  bedrock-agentcore:GetWorkloadAccessToken on resource: workload-identity-directory/
+  default/workload-identity/<gateway> ... (AgentCredentialProvider, 403)". The MCP target
+  uses an OAUTH credential provider; wiring it makes the gateway service mint a WORKLOAD
+  access token, and the deploying principal must hold GetWorkloadAccessToken. Gateway
+  READY + target FAILED = 0 tools served.
+- FIX: add bedrock-agentcore:GetWorkloadAccessToken (+ ...ForJWT / ...ForUserId) to the
+  gateway step role (platform_stack.py agentcore_steps["gateway"]). Needs a stack
+  redeploy. The endpoint URL (.../runtimes/<arn>/invocations?qualifier=DEFAULT) + the
+  OAuth provider config were CORRECT all along — purely an IAM gap.
+
+Rule for myself (reinforces Bug 53/65/79): when a gateway is READY but tools are empty,
+the failure is on the TARGET — get_gateway_target.statusReasons names the exact missing
+IAM action. "Gateway READY" never implies "targets healthy". Each new credential-provider
+type a target uses pulls in its own AgentCore IAM verb on the DEPLOYING role.
+
+## Bug 170 — Cedar ENFORCE auto-policy can't validate → degrade to LOG_ONLY, don't fail the deploy (2026-06-25)
+
+- Symptom (matrix P-POL-001): gateway+customTool+policy(ENFORCE) deploy HARD-FAILS at the
+  policy step. The auto-generated `allow_permitted_tools` Cedar policy ends CREATE_FAILED
+  with statusReason "Insufficient permissions to call gateway with ID <gid>" — the engine's
+  analysis wants a gateway-LEVEL call/invoke action in addition to the per-tool
+  AgentCore::Action::"Target___tool" permits. The exact Cedar action name for "call the
+  gateway" is not reliably known across AgentCore versions (probing InvokeGateway/CallGateway/
+  Invoke against a live engine needs a concrete non-wildcard gateway resource + GetGateway).
+- DECISION: rather than block schema-discovery on every customer deploy (or hard-fail the
+  whole flow), DEGRADE GRACEFULLY. When the ENFORCE policy set fails Cedar validation (or
+  the engine would hold 0 ACTIVE policies), drop the CREATE_FAILED policies and attach the
+  engine in LOG_ONLY instead of raising. LOG_ONLY = policies still created + evaluated +
+  logged to CloudWatch, and the tool plane WORKS (Bug 134 proved ENFORCE blocks MCP
+  discovery; LOG_ONLY does not). policy_result now carries requested_mode +
+  downgraded_to_log_only + downgrade_reason so the UI shows "auditing only", never a false
+  "fully enforced".
+- Genuine hard-fails are PRESERVED: if the user explicitly forbids EVERY exposed tool
+  (deny-all by intent) or an ENFORCE manifest is empty by request, we still refuse — those
+  are user-intent errors, not platform schema gaps.
+- Follow-up (non-blocking): to make ENFORCE fully work, emit the correct gateway-call Cedar
+  action once the AgentCore schema is confirmed (StartPolicyGeneration against a live gateway
+  can reveal it). Until then LOG_ONLY is the correct safe default and the deploy always
+  succeeds.
+
+Rule for myself: a security control that can't be PROVEN-valid at deploy time should
+fail OPEN-BUT-AUDITED (LOG_ONLY) with a loud, surfaced downgrade — not fail the whole
+deployment, and never silently claim enforcement it isn't providing. Distinguish
+"platform can't express this policy yet" (degrade) from "user asked to deny everything"
+(honor it).
+
+## Bug 171 — MCP-server gateway target times out fetching tools on COLD start (>30s init) (2026-06-25)
+
+- After fixing the MCP-target IAM chain (Bug 169: GetWorkloadAccessToken +
+  GetResourceOauth2Token + GetResourceApiKey), the target's failure CHANGED from a 403
+  to: "Failed to connect and fetch tools from the provided MCP target server. Error -
+  Runtime initialization time exceeded. Please make sure that initialization completes in
+  30s." So the OAuth/IAM is now correct and the gateway REACHES the MCP runtime — but the
+  Gateway's tool-discovery probe has a HARD ~30s ceiling, and a COLD MCP container
+  (loading the strands-mcp dependency bundle) exceeds it on first contact → target FAILED
+  → gateway serves 0 tools → agent 500s. The gateway-target retry doesn't help: every
+  retry hits the same cold-start ceiling.
+- FIX: PRE-WARM the MCP runtime in mcp_server_step BEFORE the gateway step creates the
+  target. After the runtime is READY (+ DEFAULT endpoint ready, Bug 166), send a real MCP
+  `initialize` JSON-RPC to its data-plane endpoint (invoke_agent_runtime, long read
+  timeout, a few retries) so the container fully starts. The gateway's later probe then
+  hits a warm runtime well under 30s. Best-effort (never fails the deploy). Added
+  bedrock-agentcore:InvokeAgentRuntime to the mcp_server step role.
+
+Rule for myself: when a downstream consumer probes a freshly-deployed runtime under a
+fixed timeout, "control-plane READY" is not enough — pay down the data-plane cold start
+yourself (pre-warm) before handing the resource to a time-boxed consumer. Same family as
+Bug 166 (endpoint readiness) and Bug 156 (memory settle): READY ≠ warm ≠ usable-in-time.
+
+## Bug 172 — stream endpoint: SigV4 IAM caller wrongly blocked by Cognito-sub tenant check (2026-06-25)
+
+- After Bug 147 made the stream Function URL accept SigV4 callers, a streaming invoke
+  returned {"type":"error","error":"Runtime not found"} for a deployment that exists +
+  whose DEFAULT endpoint is READY. Cause: tenant isolation compares the deployment's
+  owner (a Cognito `sub`) to the caller id, but a SigV4 caller's id is its IAM principal
+  ("iam:AROA..."), never a Cognito sub → owner != caller → 404 on every IAM-authed invoke.
+- FIX: the AWS_IAM Function URL is itself the trust boundary (only signed AWS principals
+  in-account reach the handler), so for an `iam:` caller we SKIP the per-Cognito-sub owner
+  check. Cognito-bearer callers keep full owner-scoped isolation (tested both ways).
+
+## MCP-server-as-Gateway-target — UPSTREAM AgentCore limit (30s tool-discovery probe vs Runtime cold start)
+
+- After fixing the entire IAM/OAuth chain (Bug 169: GetWorkloadAccessToken +
+  GetResourceOauth2Token + GetResourceApiKey + UpdateGatewayTarget) AND shipping a lean
+  mcp-only dependency bundle (Bug 171, 46MB→25MB) AND pre-warming the MCP runtime before
+  the gateway target is created, the MCP target STILL ends UPDATE_UNSUCCESSFUL with
+  "Failed to connect and fetch tools from the provided MCP target server. Error - Runtime
+  initialization time exceeded. Please make sure that initialization completes in 30s."
+- ROOT CAUSE is upstream + structural: the AgentCore Gateway's MCP-target tool-discovery
+  probe has a HARD ~30s ceiling, and an AgentCore-Runtime-hosted MCP server cold-starts a
+  fresh micro-VM per gateway connection that exceeds it. Pre-warming warms ONE instance;
+  the gateway's discovery connects fresh and pays the cold start again. We cannot change
+  the 30s probe (AWS-side) or make the Runtime container start in <30s with the MCP deps.
+- STATUS: documented KNOWN LIMITATION, not a platform-code bug. Everything we CAN control
+  is fixed (IAM complete, lean bundle, prewarm, update-retry). The STANDALONE MCP server
+  runtime (P-MCP-001, no gateway) deploys fine; only the gateway-FRONTED variant
+  (P-MCP-GW-001) is constrained. Recommendation for customers who need MCP tools through a
+  gateway: use Lambda custom-tool targets (fast, proven) or a connector OpenAPI target;
+  reserve MCP-server runtimes for direct (non-gateway) MCP clients.
+
+Rule for myself: not every failure is a fixable platform bug — some are upstream service
+constraints. Once I've (a) closed every IAM/config gap, (b) minimized cold start, and (c)
+pre-warmed, and the failure is a fixed service-side timeout I can't influence, the right
+move is to DOCUMENT the limit + recommend the working alternative, not loop indefinitely.
+
+## Bug 173 — MCP server bound port 8080, not 8000: the ACTUAL cause of MCP-gateway "0 tools / init exceeded 30s" (2026-06-25)
+
+- I had concluded MCP-server-as-gateway-target was an UNFIXABLE upstream 30s-probe limit
+  (after fixing IAM Bugs 169/171, lean bundle, prewarm, update-retry). That conclusion was
+  WRONG. The user pointed at the canonical AWS workshop
+  (agentcore-samples/06-workshops/02-AgentCore-gateway/05-mcp-server-as-a-target).
+- Reading the reference MCP server (mcpservers/app/labmcp/main.py): it does
+  `FastMCP(host="0.0.0.0", stateless_http=True)` with NO explicit port → FastMCP's DEFAULT
+  port 8000. Our generator forced `port=int(os.environ.get("PORT","8080"))`.
+- ROOT CAUSE: AgentCore Runtime with serverProtocol=MCP proxies its container ingress to
+  port 8000 (the MCP-runtime contract). Our server listened on 8080, so the runtime's MCP
+  ingress had nothing to talk to. The gateway's tool-discovery probe connected to the
+  runtime but the MCP handshake never reached the server → it looked like a slow/cold init
+  and failed at the 30s ceiling with "Runtime initialization time exceeded." The 30s
+  message was a SYMPTOM of an unreachable server, NOT a genuine cold-start limit. The
+  reference also depends on `mcp` ONLY (no strands/boto3/otel), reinforcing a lean server.
+- FIX: generate the MCP server with `PORT` default 8000 (services/deployment.py
+  generate_mcp_server_code). +3 unit tests pinning port 8000 / streamable-http / 0.0.0.0.
+  The earlier mitigations (lean mcp bundle Bug 171, IAM Bugs 169, UpdateGatewayTarget,
+  prewarm) remain valid hardening but were NOT the fix — the port was.
+
+Rule for myself (important): do NOT declare an "upstream platform limit" until I've checked
+the VENDOR'S OWN WORKING REFERENCE for the exact pattern. A 30s "initialization exceeded"
+on a reachable-looking endpoint is classic wrong-port / wrong-ingress, not a hard service
+ceiling. When a runtime+proxy contract is involved, verify the PORT/host the platform
+expects against a known-good sample before blaming the platform. I burned several redeploys
+treating a symptom as the cause; the reference had the answer in one line.
+
+## Bug 174 — generated MCP server registered ZERO tools for the {name,code} shape (2026-06-25)
+
+- After the port-8000 fix (Bug 173), the MCP gateway target's failure changed from
+  "initialization time exceeded" to "MCP server with targetId ... has no tools" — PROOF
+  the runtime was now reachable + the handshake completed, but tools/list was empty.
+- Root cause: generate_mcp_server_code only parsed custom tools shaped as
+  {toolName/tool_name, implementation}. The mcpServerConfig.tools dict is schema-free and
+  callers/tests send {name, description, code} (code = a COMPLETE `def`). The parser read
+  no name + no implementation → custom_tool_defs empty → server emitted ZERO @mcp.tool().
+- Fix: accept all name keys (toolName/tool_name/name) and all body keys
+  (implementation/code); when `code` already contains a `def`, emit it verbatim under
+  @mcp.tool() (full-function form), else treat the text as the function body. 7 unit tests
+  cover every shape + assert a non-empty server is always produced.
+
+Rule for myself (reinforces Bugs 131/133): a schema-free config dict WILL arrive in every
+plausible shape — parse defensively (multiple key aliases) AND assert the OUTPUT is
+non-degenerate (here: "tools input is non-empty ⇒ at least one @mcp.tool() emitted").
+A silent empty-server is worse than a loud error.
+
+## CORRECTION to the "MCP-server-as-Gateway-target UPSTREAM LIMIT" entry above
+
+That entry was WRONG. It was NOT an upstream 30s-probe limit. The real causes were
+Bug 173 (MCP server bound port 8080, not AgentCore's required 8000 → unreachable behind
+the MCP ingress → "init exceeded 30s" was a symptom) and Bug 174 (the {name,code} custom-
+tool shape registered ZERO tools → "MCP server has no tools"). After both fixes, LIVE
+END-TO-END PASS: gateway target READY, tools synced, agent called get_canary through the
+MCP gateway and returned the exact canary QMCPGW-CANARY-4242. The user pointing at the AWS
+reference workshop (which uses FastMCP default port 8000 + mcp-only deps) was the key.
+Lesson stands: verify against the vendor's working reference before declaring a platform
+limit — I was two one-line fixes away from "works", not at a wall.
+
+## Bug 175 — MCP-server flow teardown: lambda scope + cognito-domain ordering (2026-06-25)
+
+Caught deleting the (now-working) MCP-server-gateway flow. Two orphans:
+- lambda:DeleteFunction on the MCP intercept lambda "MCPServerRuntime" → AccessDenied: the
+  deployment role's lambda delete scope was function:AgentCore* only; the MCP lambda has no
+  AgentCore prefix. Fix: add function:MCPServer* to the scope (+ IAM-completeness test).
+- DeleteUserPool failed "It has a domain configured that should be deleted first." The
+  manifest cognito delete issued delete_user_pool_domain but then immediately deleted the
+  pool, racing the async domain teardown. Fix: poll until describe_user_pool shows no
+  Domain, then delete the pool with a short retry on the lingering "has a domain" error.
+
+Rule for myself: resource-ARN-scoped delete grants must cover EVERY name pattern the
+platform creates (a single off-prefix name like MCPServerRuntime defeats an AgentCore*
+scope). And a parent with an async-deletable child (cognito pool→domain) must delete the
+child AND wait for it to disappear before deleting the parent.
+
+## Bug 176 — Cedar ENFORCE failed because of SINGLETON `action ==` (the real cause behind the Bug 170 LOG_ONLY degrade) (2026-06-25)
+
+- Bug 170 made Cedar ENFORCE degrade to LOG_ONLY because the auto-generated permit ended
+  CREATE_FAILED "Insufficient permissions to call gateway" / "Overly Permissive". I had
+  treated that as unfixable-without-the-schema and degraded. The user asked to actually fix it.
+- Probed the LIVE policy engine against a real gateway (created an engine, tried candidate
+  statements, AND used StartPolicyGeneration to see the service's own output):
+  * `permit(principal is OAuthUser, action == AgentCore::Action::"T___tool", resource ==
+    AgentCore::Gateway::"<arn>")` → CREATE_FAILED "Overly Permissive: will allow every request".
+  * `permit(principal is OAuthUser, action in [AgentCore::Action::"T___tool"], resource ==
+    ...)` → ACTIVE. The ONLY difference is `== X` vs `in [X]`.
+  * The service's StartPolicyGeneration emits the `== X` form AND flags it ALLOW_ALL — i.e.
+    the vendor's own generator produces the broken shape.
+- ROOT CAUSE: AgentCore's policy analysis treats a singleton `action == "X"` permit on a
+  gateway resource as allow-all (overly permissive) and refuses it; the list form
+  `action in [...]` validates even for ONE action. Our policy_step used `action ==` whenever
+  exactly one tool was permitted (and in _cedar_action_ref) → ENFORCE always CREATE_FAILED on
+  single-tool gateways → degraded to LOG_ONLY.
+- FIX: ALWAYS emit `action in [...]` (never singleton `==`), in both the allow_permitted_tools
+  builder and _cedar_action_ref. ENFORCE now validates → ACTIVE → actually enforces. The Bug
+  170 graceful-degrade stays as a safety net but no longer triggers on the normal path.
+
+Rule for myself: when a managed policy/validator rejects your output, probe the LIVE engine
+with minimal variants to find the ACCEPTED shape — and don't trust the vendor's own generator
+blindly (here it emitted the rejected form). A one-token difference (== vs in[]) was the whole bug.
+
+## Bug 177 — Cedar ENFORCE degraded because the POLICY ENGINE wasn't truly ACTIVE yet (2026-06-26)
+
+- After fixing the statement shape (Bug 176, `action in [...]`), ENFORCE STILL degraded to
+  LOG_ONLY: the auto-policy ended CREATE_FAILED "Insufficient permissions to call gateway".
+  The IDENTICAL statement on the SAME engine+gateway reached ACTIVE when I ran it minutes
+  later — so it wasn't the statement.
+- ROOT CAUSE: a freshly-created policy ENGINE takes a while to become truly usable. Live:
+  create_policy against a just-created engine 409s "Policy engine is CREATING, please wait
+  till it is ACTIVE", and (when the gateway tool-plane was just synced) the validation
+  yields the misleading "Insufficient permissions to call gateway" until BOTH the engine
+  and the gateway-association converge. The deployed _wait_for_policy_engine had a 60s budget
+  and the policy Lambda a 120s timeout — too short — so the create raced the convergence and
+  every attempt failed → degrade.
+- FIX: (a) policy Lambda timeout 120s→300s + SFN task 120s→300s; (b) _wait_for_policy_engine
+  60s→180s; (c) new _create_policy_when_engine_ready() retries create on the engine-CREATING
+  409; (d) the post-create CREATE_FAILED transient-retry widened to 6×20s and its matcher now
+  includes the engine-CREATING phrasings. The LOG_ONLY degrade (Bug 170) remains the safety
+  net only for a convergence longer than the budget. Verified live: on a settled gateway the
+  engine is ACTIVE in ~6s and the policy ACTIVE on the first attempt.
+
+Rule for myself: "get_X status == ACTIVE" can still be too early to USE X — a managed
+control-plane resource (policy engine) may report ACTIVE before dependent writes
+(create_policy) are accepted. Budget real minutes + retry the dependent WRITE on the
+"still creating" conflict, and size the Lambda/SFN timeouts to the true convergence window.
+
+## Bug 178 — lazy promotion of Cedar engine LOG_ONLY -> ENFORCE on first use (2026-06-26)
+
+- Resolution of the Bug 177 timing problem (gateway policy-authorization plane converges
+  ~3-5 min after deploy, too long to block the pipeline). Confirmed against the AWS policy
+  workshop (06-workshops/08-AgentCore-policy) + blueprints (05-blueprints, async deploy):
+  policy attachment is a SEPARATE lifecycle step from gateway creation by design.
+- DESIGN (user chose "lazy promote on first invoke/status"): the policy step attaches the
+  engine in LOG_ONLY immediately (tools work, policies evaluated+logged) and records an
+  `enforce_pending` payload (engine_id, gateway_id/arn, intended policy name+statement) on
+  policy_result. New services/policy_promoter.try_promote_to_enforce() is called from the
+  test/invoke handler the first time the agent is used (minutes later): it idempotently
+  recreates any now-valid policies, and ONLY flips the gateway engine to ENFORCE once >=1
+  policy is ACTIVE (never ships an empty deny-all engine). Best-effort: failure stays
+  LOG_ONLY (tools keep working) and the next invoke retries. The new mode is persisted to the
+  deployment record. 5 unit tests; deployment role already holds the needed verbs
+  (Create/Get/List/DeletePolicy, GetGateway, UpdateGateway, ManageResourceScopedPolicy).
+- Net: ENFORCE genuinely works (Cedar shape correct since Bug 176) WITHOUT a 5-min deploy
+  stall — it converges to real enforcement the first time the agent is exercised.
+
+Rule for myself: when a control-plane resource needs minutes of eventual consistency before
+a dependent write succeeds, don't block the synchronous pipeline — attach a safe interim
+state (audit-only) + reconcile to the target state at the next natural touchpoint, idempotently.
+
+## Bug 179 — policy-engine teardown races child-policy deletes (2026-06-26)
+
+- Deleting a gateway+policy(ENFORCE) flow failed: "DeletePolicyEngine: Policy engine still
+  contains 2 policies and cannot be deleted." The manifest dispatcher deleted child policies
+  then immediately called delete_policy_engine, but delete_policy is async + list_policies is
+  eventually-consistent, so the engine delete raced the child deletes. The lazy-promote (Bug
+  178) also adds policies AFTER deploy, so a single delete pass missed them.
+- FIX: in the manifest policy_engine teardown, loop deleting children + re-listing until the
+  engine reports 0 policies (8 rounds × 5s), THEN retry delete_policy_engine across the
+  "still contains N" lag (6 × 5s). No new IAM (DeletePolicy/DeletePolicyEngine already held).
+
+Rule for myself: a parent with async-deleted children needs a delete-children → POLL-empty →
+delete-parent loop, never a single pass — and remember lazy/async features (Bug 178 promote)
+can add children after the initial create, so re-list each round.
+
+## Bug 180 — promoter UpdateGateway arn robustness + create_policy needs non-empty description (2026-06-26)
+
+Two bugs found wiring the Bug 178 lazy-promoter, both of which made it silently NOT promote:
+1. create_policy requires a NON-EMPTY description (min length 1). The enforce_pending
+   policies carried description="" → create failed parameter validation → caught by the
+   inner except (INFO-level, hidden) → "policies not active yet" (misleading). Fix: default
+   to a non-empty description.
+2. UpdateGateway failed when policyEngineConfiguration.arn was a stale/placeholder value.
+   Fix: prefer the gateway's OWN attached engine arn (authoritative), fall back to the
+   recorded engine_arn ONLY if it starts with "arn:". Also added an outcome log line so a
+   non-promotion is visible (the promoter's internal logs were INFO/suppressed).
+Verified live: with a valid arn the promoter returns promoted:true and the gateway flips to
+ENFORCE; the permitted tool still executes (real enforcement, not deny-all).
+
+Rule for myself: when wiring a best-effort reconciler, make its non-success path OBSERVABLE
+(don't bury the reason in suppressed INFO), and validate every required API field (non-empty
+strings, real ARNs) before the call — a swallowed ValidationException reads as "still converging."
+
+## Bug 181 — Cedar ENFORCE lazy-promote also runs on the status poll (Gate 3, 2026-06-26)
+
+- Bug 178 promoted LOG_ONLY->ENFORCE only on the first INVOKE. If a customer deploys a
+  policy flow and checks status (UI poll) before invoking, ENFORCE wouldn't engage until a
+  real invoke. Gate-3 hardening: extracted the promote into a shared
+  deployment_handler._maybe_promote_policy() and call it from BOTH the test/invoke path AND
+  GET /api/deploy/{id} (status). So ENFORCE engages on whichever touchpoint happens first
+  (invoke or status poll), minutes after deploy, with no extra infra. Idempotent +
+  best-effort + persists the new mode so the returned status reflects real enforcement.
+
+Note: the underlying AWS convergence (~3-5 min) is unchanged — we surface/engage it sooner,
+not faster. The flow is honestly LOG_ONLY (audit-only) until the gateway converges, then the
+next invoke/status flips it to ENFORCE.
+
+## Bug 182 — Connector spec fetched against the API allowlist, not the spec-host allowlist (2026-06-26)
+
+Symptom (user testing): drag Runtime+Gateway+Asana, deploy → "Connector spec host
+'raw.githubusercontent.com' is not in the connector allowlist ['app.asana.com']".
+
+Root cause: a branded connector's OpenAPI spec is FETCHED from a vendor doc host (GitHub
+raw), which is DIFFERENT from the runtime API host (app.asana.com). The spec-fetch SSRF
+check (`_validate_outbound_url`) was passed the catalog's `allowlist_hosts` (the API
+allowlist) instead of the doc host, so every catalog connector that fetches its default
+spec_url was rejected.
+
+Fix: added `_VENDOR_SPEC_HOSTS = ["raw.githubusercontent.com"]` + a `spec_host_allowlist`
+field to each catalog entry that ships a default spec_url (asana/slack/github). In
+`_deploy_connector_targets_inner`, resolve `spec_allowlist` from
+`conn.spec_host_allowlist | catalog.spec_host_allowlist`, falling back to the catalog
+spec_url's OWN host for vendor-vetted defaults. The API `allowlist_hosts` is never used for
+the spec fetch. jira/salesforce have spec_url=None (user supplies), so they're exempt.
+
+Why it slipped through before: every connector deploy TEST passed `spec_inline`, which
+bypasses the fetch+allowlist path entirely. The user hit it because the real UI sends NO
+inline spec — it relies on the catalog spec_url. Rule for myself: when a code path has a
+"shortcut" input (inline vs. fetch), at least one test MUST exercise the NON-shortcut path,
+or the shortcut hides the bug. Added tests/test_connectors.py::
+test_catalog_connector_spec_fetched_against_spec_host_not_api_host (real fetch path, only
+urlopen stubbed) + a contract test asserting every default-spec_url connector declares a
+spec_host_allowlist.
+
+## Bug 183 — Harness (and any tools-only deploy) created with ZERO tools because SFN gateway step was gated on an explicit gateway_config (2026-06-26)
+
+Symptom (user testing): created a Harness with memory + "Web Page Fetcher" tool; the harness
+came up with the DEFAULT Strands shell/file-editor tools (i.e. no gateway, no selected tool).
+
+Root cause chain (all verified by reading the code):
+- harness_step reads its tools from a CONNECTED GATEWAY (`event.gateway_result.gateway_arn`);
+  with no gateway_arn it omits `tools` and AgentCore defaults to built-in Strands tools.
+- The SFN gateway step is gated by `HasGateway? = is_present($.gateway_config)`
+  (platform_stack.py ~2404). The Harness authoring form sends `gatewayTools`/`connectors`/
+  `connectedTools` but NEVER an explicit `gatewayConfig` (it has no Gateway node), so
+  `$.gateway_config` was absent → gateway step skipped → no gateway → no tools.
+- The DIRECT path (services/deployment.py:909) already worked because it derives the gateway
+  from `"gateway" in connected_tools` and synthesizes `{"name": ...}` itself. Only the SFN
+  path (deployment_handler.py) had the gap.
+
+Fix: in deployment_handler.handle_deploy, synthesize a minimal `gateway_config={"name":
+friendly_runtime_name}` into the SFN input whenever a gateway is IMPLIED but no explicit one
+was sent. Extracted the predicate to a pure, unit-tested helper
+`_gateway_implied(gateway_tools, connectors, connected_tools)` (true when any of:
+gateway_tools, connectors, or "gateway" in connected_tools). This brings the SFN path to
+parity with the direct path. Tests: tests/test_gateway_implied.py.
+
+Rule for myself: a feature gate keyed on config-PRESENCE ($.X is_present) is a trap when a
+DIFFERENT caller expresses the same intent via a different field (tools/connectors vs. an
+explicit config block). When two deploy paths exist, assert PARITY explicitly — the direct
+path already had the synthesize-gateway logic; the SFN path silently didn't. Diff the two
+paths' gating before declaring a feature works on "the UI".
+
+## Bug 184 — Harness teardown leaks the harness->gateway OAuth2 provider secret (delete-role IAM gap) (2026-06-26)
+
+Found during live teardown of the Bug 183 harness deploy. DELETE /api/runtime/{id}
+reported: "Manifest cleanup error (oauth2_credential_provider): AccessDeniedException ...
+not authorized to perform: secretsmanager:DeleteSecret" and "Cleanup failures in:
+oauth2_credential_provider" — the harness was deleted but the harness->gateway outbound
+OAuth2 credential provider (and its backing secret) orphaned.
+
+Root cause: handle_delete_runtime runs in the DEPLOYMENT lambda's role. That role had
+secretsmanager:DeleteSecret only on `agentcore-trigger/*` and `agentcore-connector/*`. But
+delete_oauth2_credential_provider cascade-deletes the provider's client_secret, which AgentCore
+stores under the `bedrock-agentcore-*` identity namespace (NOT agentcore-connector/ — same
+fact as Bug 83). The GATEWAY/HARNESS STEP role already grants DeleteSecret on
+`bedrock-agentcore-*` + `AgentCore*`; the DELETE role did not — a deploy/teardown role
+PARITY gap.
+
+Fix: added `bedrock-agentcore-*` and `AgentCore*` secret ARNs to the deployment lambda
+role's DeleteSecret statement in _create_deployment_lambda (platform_stack.py), mirroring the
+step role's grant.
+
+Rule for myself: every resource a DEPLOY path creates must be deletable by the DELETE path's
+role — audit deploy-role vs delete-role secret/credential-provider prefixes as a PAIR. When a
+new outbound credential provider is added (harness->gateway here), its backing-secret prefix
+must be added to BOTH roles, not just the creating one. Also: teardown IAM gaps only show up
+in a real delete — always run the delete and read its per-resource cleanup messages, don't
+assume success=true means no orphans.
+
+## Bug 185 — GitHub connector cannot deploy: OpenAPI spec exceeds AgentCore's 10MB target cap (2026-06-26)
+
+Found in the full live matrix. Deploying the GitHub connector failed at
+CreateGatewayTarget: "The provided S3 object exceeds the maximum allowed size of 10 MB"
+(surfaced as ServiceQuotaExceededException). GitHub's published OpenAPI is ~12.5MB and ALL
+variants exceed 10MB (dereferenced is ~70MB). The code already staged >100KB specs to S3, but
+AgentCore caps the staged S3 object at 10MB too — so staging alone didn't help.
+
+Fix: added `_slim_openapi_spec` — recursively strips documentation-only fields
+(description, example/examples, externalDocs, x-github, x-codeSamples) that the gateway
+crawler does NOT need to emit tools, WITHOUT dropping any operations. `_build_openapi_schema`
+slims any spec over ~9.5MB before staging. Verified live-fetched GitHub spec: 12.5MB -> 3.2MB,
+all 1194 operations preserved, under the 10MB cap. Tests:
+tests/test_connectors.py::test_slim_openapi_spec_preserves_operations_and_shrinks +
+test_build_openapi_schema_slims_when_over_s3_cap.
+
+Rule for myself: a connector that "deploys" with a tiny test spec (spec_inline) or a small
+vendor (Asana 3MB, Slack 1.2MB) does NOT prove the big ones work. Test the ACTUAL catalog
+spec_url for EACH branded connector — the size cliff only appears with the real GitHub spec.
+
+## Testing-harness lesson — the SigV4 Function URL stream path is provisioned-but-unwired; the CUSTOMER stream path is /api/test-runtime-stream (2026-06-26)
+
+In the first matrix run, every cell invoked via the SigV4 Lambda Function URL
+(invoke_stream) returned HTTP 200 + EMPTY body, which looked like a gateway-tool failure.
+It was NOT a platform bug for customers: the Function URL is AuthType=AWS_IAM and
+InvokeMode=RESPONSE_STREAM, but the runtime invokes the handler WITHOUT a writable
+response_stream arg, so stream_handler.lambda_handler falls back to the buffered handler()
+which returns a `{statusCode,headers,body}` envelope verbatim as the HTTP body — not raw SSE.
+The Function URL is documented as provisioned-but-unwired (needs a Cognito Identity Pool for
+browser SigV4); the FRONTEND actually uses POST /api/test-runtime-stream through API Gateway,
+which returns correct raw SSE (verified: returns `data: {"type":"token",...}` and the real
+canary). Added driver.invoke_customer_stream and switched the matrix to it.
+
+Rule for myself: test the path the CUSTOMER uses, not an adjacent provisioned-but-unwired
+endpoint. When a "failure" is uniform across only the cells sharing one invoke path while a
+DIFFERENT path passes the same workload (HARNESS used the same fetch tool via sync and
+passed), suspect the test harness's path choice before declaring a platform bug.
+
+## Testing-harness lesson — KB create_new + s3 data source REQUIRES s3BucketUri (2026-06-26)
+
+KB cell failed with "Invalid S3 URI: ". That's correct platform behavior: an s3 data source
+needs a real bucket URI (a required UI input). Switched the test cell to dataSourceType=
+web_crawler (seed URL, no pre-existing bucket). Not a platform bug — a test-payload gap.
+Pre-flight payloads against DeployRequest caught the kbMode requirement but not the
+runtime-only s3BucketUri requirement; only a live deploy surfaced it.
+
+## Bug 185b — connector spec slimmer stripped REQUIRED response descriptions -> invalid spec, 0 tools (2026-06-26)
+
+The Bug 185 slimmer dropped `description` everywhere to shrink GitHub's spec. But OpenAPI
+REQUIRES `description` on Response Objects, so the gateway rejected the slimmed spec:
+"Invalid OpenAPI schema: attribute components.responses.<x>.description is missing" and served
+0 tools (CreateGatewayTarget then errors -> deploy FAILED). Caught only by deploying the REAL
+GitHub connector (the unit test had asserted the WRONG behavior — that descriptions are
+removed).
+
+Fix: `_slim_openapi_spec` now KEEPS all descriptions and drops only example/examples/
+externalDocs + vendor `x-*` extensions. GitHub: 12.5MB -> 4.6MB (still well under the 10MB
+cap), spec stays valid. Rule: when slimming a spec, never strip fields the spec's own schema
+marks REQUIRED (Response.description, Info.title, etc.). Validate the slim output against the
+real consumer, not a hand-written fixture that encodes your assumption.
+
+## Bug 187 — manifest teardown leaked EVERY gateway: delete_gateway without deleting targets, + ValidationException mis-classified as "already gone" (2026-06-26)
+
+Found in the live matrix teardown: after deleting a gateway-bearing deployment, the gateway
+stayed READY in the control plane on EVERY cell, while the teardown message claimed "gateway
+<id> already gone". Two compounding bugs in deployment_handler._delete_managed_resource:
+  1. The gateway branch called delete_gateway WITHOUT first deleting its targets.
+     delete_gateway raises ValidationException "...has targets associated with it. Delete all
+     targets before deleting the gateway."
+  2. The _gone() helper treated ANY "ValidationException" as proof the resource was already
+     gone — so the target-conflict error was swallowed and reported as "already gone",
+     orphaning the gateway + targets + (downstream) its Cognito pool/IAM role.
+
+Fix: (a) gateway branch now lists + deletes all targets, then retries delete_gateway with
+backoff while targets propagate; (b) _gone() only treats genuine not-found shapes
+(NotFound/ResourceNotFound/NoSuchEntity, or a ValidationException that literally says "not
+found"/"does not exist") as gone — never a bare ValidationException. Tests:
+tests/test_teardown_gateway_targets.py (targets-first, conflict-not-gone, genuine-not-found).
+The legacy cleanup_gateway_resources path already deleted targets first; only the manifest
+path (the one that actually runs) had the gap.
+
+Rule for myself: "delete succeeded" in a teardown log is NOT proof the resource is gone —
+ALWAYS re-list the control plane after a teardown and assert zero survivors by STATUS
+(READY=orphan vs DELETING=transient). An over-broad "already gone" exception classifier turns
+every delete failure into a silent leak.
+
+## Bug 188 (RESOLVED — not a bug) — harness backing runtime cascade
+
+Investigated a lingering ``harness_<id>`` runtime after teardown and initially "fixed"
+destroy_harness to delete it via delete_agent_runtime. That was WRONG: the backing runtime is
+HARNESS-MANAGED and delete_agent_runtime rejects it with "This agent runtime is managed by
+harness ... Use DeleteHarness to delete this resource." delete_harness DOES cascade-delete the
+backing runtime — verified live: run1 and run3 harness runtimes were gone after their normal
+teardown; only a CRASHED run's harness (whose delete_harness never ran) lingered. Reverted the
+bad fix. Lesson: before "fixing" an orphan, confirm it came from the NORMAL teardown path, not
+a crashed/aborted test run — and check whether the managed delete already cascades. A wrong fix
+here would have made EVERY harness teardown throw.
+
+## Bug 189 — large connectors overflow the model context window (agent loads ALL gateway tools) (2026-06-27)
+
+Asana connector deployed fine (gateway served 30 tools) but EVERY invoke returned a 500
+RuntimeClientError. Runtime logs: ContextWindowOverflowException — "prompt is too long: 204908
+tokens > 200000 maximum". The generated agent's get_full_tools_list() loads ALL gateway tools
+(full MCP pagination) into the system prompt; large SaaS schemas cost ~6.7K tokens/tool, so 30
+Asana tools = ~205K tokens, over the 200K model context. GitHub (1194 tools) would be
+hopeless.
+
+Fix: cap tools bound to the agent at MAX_GATEWAY_TOOLS (default 20, ~137K tokens — leaves
+headroom for system prompt + conversation) in the codegen's get_full_tools_list. An agent
+can't usefully wield hundreds of tools anyway. Rule: anything injected into the model context
+that scales with external data (tools, RAG chunks, history) needs a hard cap sized against the
+context window — don't assume "the gateway served N tools" means "the agent can use N tools".
+
+## Bug 189b — connector OpenAPI specs fail gateway validation on unsupported media types (GitHub) (2026-06-27)
+
+After the Bug 185b slimmer fix made GitHub's spec valid-enough, CreateGatewayTarget then failed
+with 111 errors: "MediaType application/scim+json is not supported in response (supported types:
+application/json, application/xml, multipart/form-data, application/x-www-form-urlencoded)".
+GitHub's spec uses many media types AgentCore's crawler rejects (scim+json, vnd.github.*,
+text/html, octet-stream, ...). Result: 0 tools served, deploy FAILED.
+
+Fix: added _sanitize_openapi_for_gateway — recursively drops unsupported media types from every
+``content`` map (request bodies + responses), removing a content block entirely if only
+unsupported types remain (the Response keeps its required ``description``). Applied to ALL
+connector specs (inline + staged) in _build_openapi_schema, not gated on size. Returns the
+original string verbatim when nothing changed (preserves formatting). Verified on the real
+GitHub spec: 12.5MB -> sanitize 6.7MB -> slim 4.1MB, 1194 operations preserved, ZERO unsupported
+media types remain. Tests: test_sanitize_openapi_drops_unsupported_media_types +
+test_build_openapi_schema_sanitizes_inline_spec.
+
+Rule: a connector that works for a small/clean vendor spec does NOT prove the big messy ones
+work. Each new branded connector must be deployed with its REAL catalog spec_url — the failure
+modes (size cap, required-field stripping, unsupported media types, context overflow) only
+appear with the actual vendor spec, and they appear in SEQUENCE (fix one, the next surfaces).
+
+## Bug 190 — harness test via the customer streaming route called invoke_agent_runtime on a harness ARN (2026-06-27)
+
+The frontend DeployPanel tests BOTH runtimes and harnesses through POST
+/api/test-runtime-stream. But handle_test_runtime_stream in deployment_handler had NO harness
+branch — it unconditionally built a runtime ARN and called invoke_agent_runtime. For a harness
+that fails: "No endpoint or agent found with qualifier 'DEFAULT' for agent arn:...:harness/...".
+The SYNC route (handle_test_runtime) and the SigV4 stream_handler.py BOTH had the harness
+branch; only the customer-facing API-GW stream route was missing it. Fix: added the
+deployment_mode=="harness" -> invoke_harness branch to handle_test_runtime_stream (mirrors the
+other two paths). Rule: when N entry points should behave identically (sync test, API-GW stream,
+SigV4 stream), grep for the mode-branch in ALL of them — a feature added to 2 of 3 is a latent
+bug in the 3rd.
+
+## Bug 189 follow-up — the tool cap must go in code_generator.py (SFN path), NOT just deployment.py (2026-06-27)
+
+First attempt at the MAX_GATEWAY_TOOLS cap edited services/deployment.py's get_full_tools_list
+— but the SFN codegen step (step-codegen lambda) generates the agent via
+services/code_generator.py, which has its OWN (duplicated, twice) get_full_tools_list template.
+So the cap never reached deployed agents and Asana still overflowed (247 tools!). Fixed both
+copies in code_generator.py. Rule: there are TWO agent-codegen sources in this repo
+(code_generator.py = SFN/step path, deployment.py = direct/legacy path). Any change to generated
+agent behavior MUST be applied to code_generator.py (the live UI path) — verify by downloading
+the deployed step-codegen lambda and grepping the generated template, not just the local file.
+
+## Note — Asana exposes 247 tools (not 30): connector tool counts are large
+
+The gateway's qualified_tools sample showed 30, but the agent's MCPClient discovered 247 Asana
+tools at runtime. Connector tool counts are far larger than the deploy-time sample suggests;
+the MAX_GATEWAY_TOOLS context cap (default 20) is essential for EVERY large branded connector,
+not just GitHub.
+
+## Bug 189d — gateway tool plane can't materialize a huge connector (GitHub 1145 ops) -> 0 tools served (2026-06-27)
+
+After the spec validated (Bugs 185b/189b/189c), the GitHub gateway target was created but synced
+0 tools ("tool plane not fully synced within 180s; 0/0 tools synced") and the deploy failed the
+serves-N-tools gate. The gateway can't materialize ~1145 operations. Fix: _cap_openapi_operations
+caps the connector spec at MAX_CONNECTOR_OPERATIONS (default 80, deterministic by path) so the
+gateway tool plane materializes; the agent further narrows to MAX_GATEWAY_TOOLS (20) at invoke.
+After the cap GitHub served 30 tools. Rule: there are TWO independent scale limits — the gateway
+tool-plane (cap the SPEC's op count) and the model context window (cap the AGENT's tool count);
+both are needed for large connectors.
+
+## Bug 191 — connector operationIds with '/' or >64 chars break Bedrock tool-name validation on EVERY invoke (2026-06-27)
+
+GitHub deployed + served tools, but every invoke failed: "Value 'conn-github-0___actions/get-...
+-for-enterprise' at 'toolConfig.tools.N.member.toolSpec.name' failed to satisfy constraint:
+Member must satisfy regular expression pattern: [a-zA-Z0-9_-]+ ... length <= 64". The gateway
+names each tool <target>___<operationId>; Bedrock Converse requires [a-zA-Z0-9_-]+ and <=64
+chars. ALL 1194 GitHub operationIds contain '/' (meta/root, actions/...). Fix:
+_sanitize_openapi_for_gateway now rewrites every operationId to a compliant, de-duplicated slug
+(non-[A-Za-z0-9_-] -> '_', truncated to 44 chars to leave room for the ~16-char target prefix
+under the 64 cap). Rule: a gateway tool name is derived from operationId — it MUST be sanitized
+to the DOWNSTREAM model's tool-name grammar (Bedrock: [a-zA-Z0-9_-]+, <=64), not just be a valid
+OpenAPI operationId. This bites any connector whose vendor uses '/' or verbose operationIds.
+
+Meta-lesson (GitHub connector): a single big real-world vendor spec surfaced SIX sequential,
+independent incompatibilities (size>10MB, required-desc stripping, unsupported media types,
+content-less requestBody, oneOf schemas, op-count tool-plane limit, operationId tool-name
+grammar). Each fix revealed the next. A connector is only "proven" when its REAL catalog spec
+deploys AND a live invoke returns a real tool-backed answer — not when it merely deploys.
+
+## Bug 192 — teardown didn't release the runtime NAME -> 409 "already in use by another tenant" on redeploy of a deleted resource (2026-06-27)
+
+A customer hit "Deployment request failed (409): Runtime name 'agent_harness' is already in use
+by another tenant. Pick a different name." on a harness they were deploying. Root cause: the
+H-1 cross-tenant name guard checks the RuntimeSlotsTable + AgentVersionsTable (PK = friendly
+runtime_name, shared across tenants). handle_delete_runtime tore down all the AWS resources
+(runtime/harness/gateway/etc.) but NEVER deleted the slots/versions rows — so the name stayed
+permanently locked to the original owner_sub even though the resource was gone. Any later deploy
+of that name (by a different sub) 409s forever.
+
+Found while it was live: the agent_harness slots+versions rows (owner 648884c8..., from a
+2026-06-26 deploy) survived after I'd deleted the backing harness during cleanup; the runtime no
+longer existed but the name was still locked.
+
+Fix: handle_delete_runtime now releases the name at the end of teardown — deletes the slots row
+and all versions rows for the deployment's friendly name, but ONLY those owned by the caller (or
+legacy un-owned rows), so it can never release another tenant's name. The deployment lambda role
+already had grant_read_write_data on both tables. Tests: test_versions_cross_tenant.py::
+test_teardown_releases_name_so_redeploy_works + test_teardown_release_is_tenant_scoped.
+
+Immediate unblock for the customer: deleted the stale agent_harness slots+versions rows by hand
+(resource already gone) so the name was free to redeploy.
+
+Rule for myself: a "delete" that removes the cloud resource but leaves the NAME-RESERVATION
+metadata is a half-teardown — it silently bricks the name. Whenever a deploy guard reads a
+shared-key table to reserve a name, the matching teardown MUST release that reservation (tenant-
+scoped). Audit every name/slot/lock table for a paired delete.
+
+## Bug 192b — a FAILED/superseded deploy permanently locked the runtime name (2026-06-27)
+
+Second facet of Bug 192, hit live on 'omar1' and 'agent_harness'. The deploy name guard (H-1
+cross-tenant check) blocked on ANY foreign-owner versions row regardless of status. But a
+`failed` deploy never produced a usable runtime, and `superseded` is a retired version — neither
+is a live claim, yet both locked the name forever (only the original owner-from-the-same-session
+could ever reuse it, and even they couldn't from a new Cognito sub). On a shared dev/test stack
+where the same person deploys under multiple subs, this bricked common names.
+
+Fix: the versions-table foreign-owner check now only blocks on `status in {pending, succeeded}`
+(a LIVE/in-flight claim). `failed`/`superseded` foreign rows are ignored. The slots-table check
+is unchanged (slot rows only exist post-success = always a live claim). H-1 security is intact:
+a succeeded or in-flight foreign deploy still blocks (test_succeeded_foreign_deploy_still_locks_
+name). Tests: test_failed_foreign_deploy_does_not_lock_name + the updated in-flight test now
+seeds `pending` (not `failed`).
+
+Combined with Bug 192 (teardown releases the name), the name-lock lifecycle is now correct:
+in-flight/live deploys hold the name; failed deploys don't lock it; successful deploys release it
+on teardown. Immediate unblock: hand-deleted the stale omar1 (failed) + agent_harness (succeeded-
+but-resource-gone) rows so both names were free to redeploy.
+
+## Bug 193 — canvas connector deploy sent NO api-key (secret stripped before deploy could read it) (2026-06-27)
+
+Live: deploying a canvas Runtime+Gateway+Asana(API key) failed with "Connector 'asana' api_key
+auth requires a secret_arn or secret_value". Root cause: ConnectorConfigModal collects the api
+key into `secretValue` and attaches it to the node config; handleSaveConfig then STRIPS
+`secretValue` before persisting the node (correct — secrets must never hit canvas JSON/DDB). But
+the deploy payload builder (getConnectedToolsAndGateway) read `secret_value` from the PERSISTED
+node config — where it had already been deleted — so every canvas connector deployed with
+secret_value=undefined.
+
+Fix: added an in-memory, never-persisted `connectorSecretsRef` (Record<nodeId,string>) in App.tsx.
+handleSaveConfig writes the raw secret into it BEFORE stripping; the connectors[] builder reads it
+back by nodeId (fallback to any inline value). Cleared on template/canvas load so secrets don't
+linger or cross canvases. The secret still never enters persisted state — only the transient ref
+and the one-shot deploy payload (backend mints the Secrets Manager secret, then drops it).
+
+Rule for myself: when a security rule strips a field at persist time, anything that needs that
+field at ACTION time (deploy) must read it from a separate transient channel, NOT re-read the
+persisted (now-stripped) object. "Stripped before persist" and "available at deploy" both have to
+be true at once — that requires an explicit in-memory hold, which is easy to forget.
+
+## Bug 193b — Harness authoring connector path had NO secret input at all (would fail like omar1) (2026-06-27)
+
+Found during a self-audit after fixing Bug 193 (canvas connector secret). The Harness authoring
+form (HarnessAuthoring.tsx) let users SELECT a connector (toggle chip) but had NO UI to enter the
+api key / OAuth secret — it built connectors[] with just {connector_id, auth_method:'api_key'} and
+a comment hand-waving "let the backend prompt for / mint the secret" (there is no such backend
+prompt). So ANY harness deploy with a connector would fail exactly like the canvas omar1 case
+("requires a secret_arn or secret_value"). The earlier Bug B harness work only tested built-in
+gateway tools (web_page_fetcher), never a connector, so it slipped through.
+
+Fix: wired the SAME ConnectorConfigModal the canvas uses into HarnessAuthoring — clicking a
+connector chip opens the modal to collect credentials; the full config (incl. transient
+secretValue) is held in an in-memory ref keyed by chip id and read into connectors[]. Chips show
+a "⚠ creds" amber state until configured; the Deploy button is disabled (connectorsNeedingConfig)
+until every selected connector has a credential; cancelling the modal de-selects the connector.
+
+Rule for myself: when I fix a bug on one path (canvas), immediately grep for EVERY other path
+that builds the same payload (harness form, CFN export, templates) and verify each — a per-path
+fix is only a partial fix. "Reuses the same connector catalog" in a comment does NOT mean it
+reuses the same credential-collection UI.

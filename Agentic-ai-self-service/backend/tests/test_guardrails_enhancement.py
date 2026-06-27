@@ -63,6 +63,9 @@ class _FakeStore:
     def update_step(self, *args, **kwargs):
         return None
 
+    def record_resource(self, *args, **kwargs):
+        return None
+
 
 def _load_handler(monkeypatch, fake_bedrock):
     """Import guardrails_step with boto3.client + the store patched out.

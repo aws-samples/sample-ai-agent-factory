@@ -140,27 +140,38 @@ def test_agent_code_is_verbatim_generated_source():
 # ---------------------------------------------------------------------------
 
 
+def _pkg_names(reqs: str) -> set[str]:
+    """Package names from a requirements body, dropping comment lines + any
+    '>=' / '==' version specifier (exporter now applies version floors)."""
+    import re
+    out = set()
+    for line in reqs.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        out.add(re.split(r"[><=]", line, 1)[0])
+    return out
+
+
 def test_bedrock_requirements_include_strands_and_agentcore():
     config = _make_runtime_config()  # default provider == bedrock
-    reqs = build_requirements(config)
-    lines = set(reqs.splitlines())
+    pkgs = _pkg_names(build_requirements(config))
 
-    assert "strands-agents" in lines
-    assert "strands-agents-tools" in lines
+    assert "strands-agents" in pkgs
+    assert "strands-agents-tools" in pkgs
     # bedrock-agentcore is NOT in PROVIDER_PACKAGES but the generated code
     # imports it — the exporter must add it explicitly (gap risk #1).
-    assert "bedrock-agentcore" in lines
-    assert "boto3" in lines
+    assert "bedrock-agentcore" in pkgs
+    assert "boto3" in pkgs
 
 
 def test_openai_provider_adds_openai_package():
     config = _make_runtime_config(modelProvider="openai")
-    reqs = build_requirements(config)
-    lines = set(reqs.splitlines())
+    pkgs = _pkg_names(build_requirements(config))
 
-    assert "openai" in lines
-    assert "strands-agents" in lines
-    assert "bedrock-agentcore" in lines
+    assert "openai" in pkgs
+    assert "strands-agents" in pkgs
+    assert "bedrock-agentcore" in pkgs
 
 
 def test_unknown_provider_falls_back_to_bedrock_packages():
@@ -168,31 +179,39 @@ def test_unknown_provider_falls_back_to_bedrock_packages():
     # the attribute directly (bypassing validation) to prove .get() fallback.
     config = _make_runtime_config()
     object.__setattr__(config, "model_provider", "totally-unknown-provider")
-    reqs = build_requirements(config)
-    lines = set(reqs.splitlines())
+    pkgs = _pkg_names(build_requirements(config))
 
-    assert "strands-agents" in lines
-    assert "bedrock-agentcore" in lines  # no KeyError, fell back gracefully
+    assert "strands-agents" in pkgs
+    assert "bedrock-agentcore" in pkgs  # no KeyError, fell back gracefully
 
 
 def test_observability_adds_otel_distro():
     config = _make_runtime_config(enableOtel=True)
-    reqs = build_requirements(config, connected_tools=[])
-    assert "aws-opentelemetry-distro" in reqs.splitlines()
+    assert "aws-opentelemetry-distro" in _pkg_names(build_requirements(config, connected_tools=[]))
 
 
 def test_no_observability_omits_otel_distro():
     config = _make_runtime_config()
-    reqs = build_requirements(config, connected_tools=[])
-    assert "aws-opentelemetry-distro" not in reqs.splitlines()
+    assert "aws-opentelemetry-distro" not in _pkg_names(build_requirements(config, connected_tools=[]))
 
 
-def test_requirements_sorted_and_deduped():
+def test_requirements_are_version_floored_with_header():
+    """Holmes supply-chain finding: known packages carry a '>=' floor and the
+    body leads with a 'pin exact versions for production' header."""
     config = _make_runtime_config()
     reqs = build_requirements(config)
-    lines = [l for l in reqs.splitlines() if l]
-    assert lines == sorted(lines)
-    assert len(lines) == len(set(lines))
+    assert reqs.lstrip().startswith("#")  # header present
+    assert "boto3>=" in reqs and "bedrock-agentcore>=" in reqs
+
+
+def test_requirements_package_lines_sorted_and_deduped():
+    import re
+    config = _make_runtime_config()
+    pkg_lines = [l for l in build_requirements(config).splitlines() if l and not l.startswith("#")]
+    # Lines are ordered by PACKAGE NAME (the version specifier is appended after).
+    names = [re.split(r"[><=]", l, 1)[0] for l in pkg_lines]
+    assert names == sorted(names)
+    assert len(pkg_lines) == len(set(pkg_lines))
 
 
 # ---------------------------------------------------------------------------
