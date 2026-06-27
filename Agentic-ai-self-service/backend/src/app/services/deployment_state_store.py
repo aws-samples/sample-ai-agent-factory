@@ -352,13 +352,14 @@ class DeploymentStateStore:
                 },
             )
         except Exception as exc:  # noqa: BLE001
-            # SECURITY (CodeQL py/clear-text-logging-sensitive-data): log only the
-            # resource TYPE and the exception CLASS — never the resource dict or a
-            # full traceback, which could carry a secret-bearing local in frame.
+            # SECURITY (CodeQL py/clear-text-logging-sensitive-data): the
+            # `resource` dict is taint-tracked as potentially secret-bearing, so
+            # do NOT reference it in the log at all (not even .get("type")), and
+            # don't emit a traceback. deployment_id + exception class is enough to
+            # diagnose; full detail is available via the DDB write failure itself.
             logger.warning(
-                "record_resource failed for %s (non-fatal): type=%s err=%s",
+                "record_resource failed for %s (non-fatal): err=%s",
                 deployment_id,
-                str(resource.get("type")),
                 type(exc).__name__,
             )
 
