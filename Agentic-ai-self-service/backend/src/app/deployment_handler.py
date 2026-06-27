@@ -48,6 +48,7 @@ from app.models.tool_generation_models import (
 from app.services.config import load_config
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.gateway_deployer import cleanup_gateway_resources, get_cognito_token
+from app.services.harness_deployer import destroy_harness, invoke_harness
 from app.services.runtime_deployer import destroy_runtime
 from app.services.tool_generator import generate_tool
 from app.services.tool_tester import test_tool
@@ -163,6 +164,72 @@ def _scan_for_runtime(table, runtime_id: str) -> Optional[dict]:
             break
         scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
     return None
+
+
+def _gateway_implied(
+    gateway_tools: Optional[list],
+    connectors: Optional[list],
+    connected_tools: Optional[list],
+) -> bool:
+    """Whether a gateway must be deployed even if no explicit ``gateway_config`` was sent.
+
+    Bug B (harness deploys with no tools): the SFN state machine gates its
+    gateway step on ``$.gateway_config`` being present (``HasGateway?`` choice in
+    platform_stack.py). But gateway TOOLS and SaaS CONNECTORS logically REQUIRE a
+    gateway to serve them — and callers that only select tools/connectors
+    (notably the Harness authoring form, which has no Gateway node to populate
+    ``gatewayConfig``) never send an explicit ``gateway_config``. Without it the
+    gateway step is skipped, no gateway is created, and the runtime/harness comes
+    up with ZERO tools (the harness then silently falls back to default Strands
+    tools). The direct path (services/deployment.py) already derives the gateway
+    from ``"gateway" in connected_tools`` and synthesizes ``{"name": ...}``
+    itself — this mirrors that so BOTH paths behave identically.
+    """
+    return bool(gateway_tools or connectors or "gateway" in (connected_tools or []))
+
+
+def _maybe_promote_policy(deployment_state: Optional[dict], region: str) -> bool:
+    """Lazy-promote a pending Cedar policy engine from LOG_ONLY to ENFORCE.
+
+    Bug 178/181: the gateway's policy-authorization plane converges ~3-5 min after
+    deploy, too long to block the deploy pipeline. So the policy step attaches
+    LOG_ONLY + records ``policy_result.enforce_pending``; this helper is called at
+    the natural post-deploy touchpoints — the test/invoke path AND the status poll
+    (Bug 181) — so ENFORCE engages the first time the agent is used OR its status is
+    checked, whichever comes first, without any extra infra. Idempotent +
+    best-effort: any failure leaves LOG_ONLY (tools keep working) and the next
+    touchpoint retries. On success it MUTATES ``deployment_state['policy_result']``
+    in place and persists the new mode. Returns True when it flipped to ENFORCE.
+    """
+    if not deployment_state:
+        return False
+    if not (deployment_state.get("policy_result") or {}).get("enforce_pending"):
+        return False
+    try:
+        from app.services.policy_promoter import try_promote_to_enforce
+        outcome = try_promote_to_enforce(deployment_state, region)
+        logger.info("policy promote outcome: %s", outcome)
+        if outcome and outcome.get("promoted"):
+            pr = dict(deployment_state.get("policy_result") or {})
+            pr["mode"] = "ENFORCE"
+            pr["downgraded_to_log_only"] = False
+            pr["enforce_pending"] = None
+            pr["promoted_at_first_use"] = True
+            deployment_state["policy_result"] = pr
+            try:
+                from app.models.deployment_models import DeploymentStatusEnum
+                _get_state_store().update_status(
+                    deployment_state.get("deployment_id"),
+                    DeploymentStatusEnum.SUCCEEDED,
+                    policy_result=pr,
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("policy promote: could not persist ENFORCE mode")
+            logger.info("policy promote: gateway now in ENFORCE mode")
+            return True
+    except Exception:  # noqa: BLE001
+        logger.warning("policy promote: skipped (will retry next touchpoint)")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -328,10 +395,21 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     # row under this friendly name. Covers the case where slots may not yet
     # exist (a partial earlier deploy that never reached status_update) but
     # the versions table already has rows owned by another sub.
+    #
+    # Bug 192b — only a LIVE claim should hold the name. A `failed` deploy never
+    # produced a usable runtime, and a `superseded` row is a retired version; such
+    # rows must NOT lock the name forever (a customer hit 409 on 'omar1'/'agent_
+    # harness' purely because of leftover failed-deploy rows). Only `pending`
+    # (in-flight) and `succeeded` (live) foreign rows block a new deploy.
+    _LIVE_CLAIM = {"pending", "succeeded"}
     try:
         existing_versions = get_versions_store().list_for_runtime(friendly_runtime_name)
         for v in existing_versions:
-            if v.owner_sub and v.owner_sub != (user_id or ""):
+            if (
+                v.owner_sub
+                and v.owner_sub != (user_id or "")
+                and (v.status or "pending") in _LIVE_CLAIM
+            ):
                 raise HTTPException(
                     status_code=409,
                     detail=(
@@ -366,6 +444,9 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         parent_version_id=parent_version_id,
         deployment_slot=request.deployment_slot or "production",
         agentcore_runtime_name=agentcore_runtime_name,
+        # Phase B — persist the chosen path up-front so the delete/test handlers
+        # know whether to route to harness_deployer even on partial-failed deploys.
+        deployment_mode=request.deployment_mode or "runtime",
     )
 
     store = _get_state_store()
@@ -431,16 +512,41 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         "deployment_slot": request.deployment_slot or "production",
         "parent_version_id": parent_version_id,
         "owner_sub": user_id or "",
+        # Phase B (Bug 9) — deployment_mode MUST reach the SFN path so the state
+        # machine can route HARNESS deploys to harness_step instead of the
+        # codegen/runtime steps. Mirrors the direct path in services/deployment.py.
+        "deployment_mode": request.deployment_mode or "runtime",
     }
-    # Only include gateway fields if gateway is configured
+    # Only include gateway fields if gateway is configured. When a gateway is
+    # only IMPLIED (tools/connectors selected but no explicit gateway_config —
+    # e.g. the Harness authoring form), synthesize a minimal config so the SFN
+    # gateway step actually runs. See _gateway_implied for the full rationale.
     if request.gateway_config:
         sfn_input["gateway_config"] = request.gateway_config
+    elif _gateway_implied(request.gateway_tools, request.connectors, auto_connected):
+        # deploy_gateway only requires `name`; it fills the rest. Reuse the
+        # friendly runtime/harness name so the gateway is recognizably paired
+        # with its agent.
+        sfn_input["gateway_config"] = {"name": friendly_runtime_name}
     if request.gateway_tools:
         sfn_input["gateway_tools"] = request.gateway_tools
     if request.identity_config:
         sfn_input["identity_config"] = request.identity_config.model_dump(mode="json", by_alias=True)
     if request.custom_tools:
         sfn_input["custom_tools"] = [t.model_dump(mode="json", by_alias=True) for t in request.custom_tools]
+    if request.connectors:
+        # Bug 9 — connectors must reach the SFN gateway_step. The step mints the
+        # Secrets Manager secret from the transient secret_value and then drops
+        # it, so we re-include the otherwise-excluded secret_value HERE (and
+        # only here) on the SFN input. It is never written to DDB, the canvas
+        # JSON, or logs — only carried in the SFN execution input so the step
+        # can mint the secret and thread back only the resulting ARN.
+        sfn_input["connectors"] = []
+        for c in request.connectors:
+            conn = c.model_dump(mode="json", by_alias=False, exclude_none=True)
+            if c.secret_value:
+                conn["secret_value"] = c.secret_value
+            sfn_input["connectors"].append(conn)
     if request.memory_config:
         sfn_input["memory_config"] = request.memory_config
     if request.evaluation_config:
@@ -520,7 +626,18 @@ async def handle_deploy_status(deployment_id: str) -> dict:
     if state is None:
         raise HTTPException(status_code=404, detail=f"Deployment '{deployment_id}' not found")
 
-    return state.model_dump(mode="json")
+    result = state.model_dump(mode="json")
+    # Bug 181: the status poll is a natural post-deploy touchpoint to lazy-promote
+    # a pending Cedar engine to ENFORCE (the gateway's policy plane converges a few
+    # minutes after deploy). _maybe_promote_policy mutates the dict's policy_result
+    # in place on success + persists it, so the returned status reflects real
+    # enforcement even before the first invoke. Best-effort; never fails the read.
+    try:
+        if (result.get("policy_result") or {}).get("enforce_pending"):
+            _maybe_promote_policy(result, config.aws_region)
+    except Exception:  # noqa: BLE001
+        logger.warning("status: policy promote attempt skipped")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +723,29 @@ async def handle_test_runtime(request: TestRequest, raw_request: Request) -> Tes
             )
             prompt = f"Previous conversation:\n{history_text}\n\nUser: {request.input}"
 
+        # Phase B — HARNESS mode routes to the DATA-plane invoke_harness instead
+        # of invoke_agent_runtime. The harness ARN was persisted on the record;
+        # the streamed text comes back as ``output`` -> ``response``.
+        if deployment_state and deployment_state.get("deployment_mode") == "harness":
+            harness_arn = deployment_state.get("harness_arn", "")
+            if not harness_arn:
+                return TestResponse(success=False, error="Harness ARN not found for this deployment")
+            session_id = request.session_id or runtime_id
+            result = invoke_harness(region, harness_arn, prompt, session_id)
+            # SECURITY (CodeQL py/stack-trace-exposure): invoke_harness returns
+            # raw exception text in `error`; log it server-side and return a
+            # generic message rather than leaking internals to the caller.
+            harness_ok = bool(result.get("success"))
+            if not harness_ok:
+                logger.warning("Harness invoke failed: %s", result.get("error"))
+            return TestResponse(
+                success=harness_ok,
+                response=result.get("output", ""),
+                error=None if harness_ok else "Harness invocation failed",
+                session_id=session_id,
+                arn=harness_arn,
+            )
+
         # Get runtime ARN
         runtime_arn = ""
         if deployment_state:
@@ -634,6 +774,12 @@ async def handle_test_runtime(request: TestRequest, raw_request: Request) -> Tes
                     get_cognito_token(client_info)
                 except Exception:
                     logger.warning("Could not get Cognito token for gateway auth validation")
+
+        # Bug 178/181: lazy-promote a pending Cedar policy engine LOG_ONLY->ENFORCE.
+        # The gateway's policy-authorization plane converges ~3-5 min after deploy;
+        # this first-invoke is one natural touchpoint to flip it (the status poll is
+        # the other — see _maybe_promote_policy). Best-effort + idempotent.
+        _maybe_promote_policy(deployment_state, region)
 
         # Invoke runtime via boto3 API. Pass session_id BOTH as runtimeSessionId
         # (AgentCore-level routing) and inside payload (so the agent's invoke()
@@ -682,7 +828,30 @@ async def handle_test_runtime(request: TestRequest, raw_request: Request) -> Tes
             error_msg = str(e)
             if "ResourceNotFound" in error_msg:
                 return TestResponse(success=False, error="Runtime not found. It may have been deleted.")
-            return TestResponse(success=False, error=f"Runtime invocation error: {error_msg}")
+            # Bug 157: the sync path uses a ~25s read timeout to stay under API
+            # Gateway's 29s hard cap. Tool-heavy agents (>30s) blow past it even
+            # though the agent keeps running server-side. Detect the read-timeout
+            # and return an actionable message pointing at the streaming Function
+            # URL instead of an opaque "Read timeout on endpoint URL" error.
+            etype = type(e).__name__
+            if (
+                "ReadTimeout" in etype
+                or "ConnectTimeout" in etype
+                or "Read timeout" in error_msg
+                or "timed out" in error_msg.lower()
+            ):
+                return TestResponse(
+                    success=False,
+                    error=(
+                        "Agent still running; exceeded 30s sync test limit — "
+                        "use the streaming endpoint for tool-heavy agents that "
+                        "take longer than 30 seconds to respond."
+                    ),
+                )
+            # SECURITY (CodeQL py/stack-trace-exposure): don't return the raw
+            # exception text to the client — log it, return a generic message.
+            logger.warning("Runtime invocation error: %s", error_msg)
+            return TestResponse(success=False, error="Runtime invocation failed.")
 
     except Exception:
         logger.exception("Unexpected error in test-runtime")
@@ -739,6 +908,41 @@ async def handle_test_runtime_stream(request: TestRequest):
         deployment_state = _scan_for_runtime(table, runtime_id)
     except Exception:
         pass
+
+    # Bug 190 — HARNESS mode must route to the data-plane invoke_harness, NOT
+    # invoke_agent_runtime. The frontend uses THIS streaming route for harness
+    # tests too (DeployPanel calls /api/test-runtime-stream regardless of mode),
+    # so without this branch a harness test calls invoke_agent_runtime with the
+    # HARNESS arn and fails with "No endpoint or agent found with qualifier
+    # 'DEFAULT' for agent arn:...:harness/...". Mirror the sync handle_test_runtime
+    # harness path (and stream_handler.py's branch) here.
+    if deployment_state and deployment_state.get("deployment_mode") == "harness":
+        from fastapi.responses import PlainTextResponse
+
+        harness_arn = deployment_state.get("harness_arn", "")
+        if not harness_arn:
+            return PlainTextResponse(
+                f"data: {json.dumps({'type': 'error', 'error': 'Harness ARN not found for this deployment'})}\n\n",
+                media_type="text/event-stream",
+            )
+        result = invoke_harness(region, harness_arn, prompt, request.session_id or runtime_id)
+        if not result.get("success"):
+            # SECURITY (CodeQL py/stack-trace-exposure): invoke_harness surfaces
+            # raw exception text in `error`; never return that to the external
+            # SSE client. Log the detail server-side, emit a generic message.
+            logger.warning("Harness stream invoke failed: %s", result.get("error"))
+            return PlainTextResponse(
+                f"data: {json.dumps({'type': 'error', 'error': 'Harness invocation failed'})}\n\n",
+                media_type="text/event-stream",
+            )
+        out = result.get("output", "")
+        lines = []
+        words = out.split(" ")
+        for i, word in enumerate(words):
+            token = word + (" " if i < len(words) - 1 else "")
+            lines.append(f"data: {json.dumps({'type': 'token', 'token': token})}\n\n")
+        lines.append(f"data: {json.dumps({'type': 'done', 'session_id': request.session_id or runtime_id, 'full_response': out})}\n\n")
+        return PlainTextResponse("".join(lines), media_type="text/event-stream")
 
     runtime_arn = (deployment_state or {}).get("runtime_arn", "")
     if not runtime_arn:
@@ -868,6 +1072,238 @@ def _validate_deployment_id(deployment_id: str) -> str:
     return deployment_id
 
 
+def _delete_managed_resource(res: dict, region: str) -> str:
+    """Delete one resource from a deployment's created_resources[] manifest.
+
+    Type-dispatched + idempotent (NotFound is treated as success). Returns a
+    human log line, or "" for an unknown type (so older/foreign entries no-op
+    rather than fail the whole teardown).
+    """
+    import boto3
+
+    rtype = res.get("type", "")
+    rid = res.get("id") or res.get("name") or ""
+    rname = res.get("name") or ""
+    res_region = res.get("region") or region
+
+    def _gone(e: Exception) -> bool:
+        s = str(e)
+        # Bug 187 — a ValidationException is NOT proof the resource is gone. In
+        # particular delete_gateway on a gateway that still HAS TARGETS raises
+        # "...has targets associated with it. Delete all targets before deleting
+        # the gateway." Treating that as "already gone" silently ORPHANS the
+        # gateway (+ its targets). Only treat genuine not-found shapes as gone;
+        # for ValidationException, require it to actually say "not found".
+        if "NotFound" in s or "ResourceNotFound" in s or "NoSuchEntity" in s:
+            return True
+        if "ValidationException" in s and ("not found" in s.lower() or "does not exist" in s.lower()):
+            return True
+        return False
+
+    try:
+        if rtype == "agent_runtime":
+            r = destroy_runtime(rid, res_region)
+            return f"[manifest] runtime {rid}: {r.get('message', 'deleted')}"
+        if rtype == "harness":
+            r = destroy_harness(rid, res_region)
+            return f"[manifest] harness {rid}: {r.get('note', 'deleted')}"
+        if rtype == "memory":
+            boto3.client("bedrock-agentcore-control", region_name=res_region).delete_memory(memoryId=rid)
+            return f"[manifest] memory {rid} deleted"
+        if rtype == "gateway":
+            # Bug 187 — delete_gateway FAILS if the gateway still has targets
+            # ("...has targets associated with it. Delete all targets before
+            # deleting the gateway."). Delete every target first, then the
+            # gateway. Without this the teardown leaked the gateway + targets on
+            # EVERY gateway-bearing deployment (the error was mis-swallowed as
+            # "already gone" — see _gone). Best-effort per target so one stuck
+            # target doesn't block the rest.
+            _ctrl = boto3.client("bedrock-agentcore-control", region_name=res_region)
+            try:
+                _tgts = _ctrl.list_gateway_targets(gatewayIdentifier=rid).get("items", [])
+            except Exception:  # noqa: BLE001
+                _tgts = []
+            for _t in _tgts:
+                _tid = _t.get("targetId")
+                if not _tid:
+                    continue
+                try:
+                    _ctrl.delete_gateway_target(gatewayIdentifier=rid, targetId=_tid)
+                except Exception as _te:  # noqa: BLE001
+                    if not _gone(_te):
+                        logger.warning("gateway %s target %s delete: %s", rid, _tid, str(_te)[:160])
+            # Targets delete asynchronously; delete_gateway rejects while any
+            # remain. Retry the gateway delete briefly so target teardown can
+            # propagate (typically a few seconds).
+            for _attempt in range(8):
+                try:
+                    _ctrl.delete_gateway(gatewayIdentifier=rid)
+                    break
+                except Exception as _ge:  # noqa: BLE001
+                    if _gone(_ge):
+                        break
+                    if "target" in str(_ge).lower() and _attempt < 7:
+                        time.sleep(5)
+                        continue
+                    raise
+            return f"[manifest] gateway {rid} deleted"
+        if rtype == "oauth2_credential_provider":
+            boto3.client("bedrock-agentcore-control", region_name=res_region).delete_oauth2_credential_provider(name=rname or rid)
+            return f"[manifest] oauth2 provider {rname or rid} deleted"
+        if rtype == "api_key_credential_provider":
+            boto3.client("bedrock-agentcore-control", region_name=res_region).delete_api_key_credential_provider(name=rname or rid)
+            return f"[manifest] apikey provider {rname or rid} deleted"
+        if rtype == "secret":
+            boto3.client("secretsmanager", region_name=res_region).delete_secret(
+                SecretId=rid, ForceDeleteWithoutRecovery=True
+            )
+            return f"[manifest] secret {rid} deleted"
+        if rtype == "s3_object":
+            # rid is an s3://bucket/key URI for a staged connector OpenAPI spec.
+            if rid.startswith("s3://"):
+                _b, _, _k = rid[5:].partition("/")
+                if _b and _k:
+                    boto3.client("s3", region_name=res_region).delete_object(Bucket=_b, Key=_k)
+            return f"[manifest] s3 object {rid} deleted"
+        if rtype == "iam_role":
+            iam = boto3.client("iam")
+            for pn in iam.list_role_policies(RoleName=rname or rid).get("PolicyNames", []):
+                iam.delete_role_policy(RoleName=rname or rid, PolicyName=pn)
+            for ap in iam.list_attached_role_policies(RoleName=rname or rid).get("AttachedPolicies", []):
+                iam.detach_role_policy(RoleName=rname or rid, PolicyArn=ap["PolicyArn"])
+            iam.delete_role(RoleName=rname or rid)
+            return f"[manifest] iam role {rname or rid} deleted"
+        if rtype == "lambda":
+            boto3.client("lambda", region_name=res_region).delete_function(FunctionName=rname or rid)
+            return f"[manifest] lambda {rname or rid} deleted"
+        if rtype == "policy_engine":
+            ctrl = boto3.client("bedrock-agentcore-control", region_name=res_region)
+            # Bug 179: delete ALL child policies and WAIT until the engine reports
+            # zero, THEN delete the engine. delete_policy is async + list_policies
+            # is eventually-consistent, so a single pass races
+            # delete_policy_engine ("Policy engine still contains N policies").
+            # The lazy-promote (Bug 178) can also add policies after deploy, so we
+            # re-list each round. Poll a few rounds before the engine delete.
+            for _round in range(8):
+                remaining = 0
+                try:
+                    listed = ctrl.list_policies(policyEngineId=rid, maxResults=100)
+                    pols = listed.get("policies", listed.get("items", []))
+                    remaining = len(pols)
+                    for p in pols:
+                        pid = p.get("policyId") or p.get("id")
+                        if pid:
+                            try:
+                                ctrl.delete_policy(policyEngineId=rid, policyId=pid)
+                            except Exception:  # noqa: BLE001
+                                pass
+                except Exception:  # noqa: BLE001
+                    pass
+                if remaining == 0:
+                    break
+                time.sleep(5)
+            # Retry the engine delete across the "still contains N policies" lag.
+            for _attempt in range(6):
+                try:
+                    ctrl.delete_policy_engine(policyEngineId=rid)
+                    break
+                except Exception as pe:  # noqa: BLE001
+                    if "still contains" in str(pe) and _attempt < 5:
+                        time.sleep(5)
+                        continue
+                    raise
+            return f"[manifest] policy engine {rid} deleted"
+        if rtype == "guardrail":
+            boto3.client("bedrock", region_name=res_region).delete_guardrail(guardrailIdentifier=rid)
+            return f"[manifest] guardrail {rid} deleted"
+        if rtype == "knowledge_base":
+            # Bug 167: delete the KB and WAIT for it to reach a terminal deleted
+            # state BEFORE the manifest reclaims the s3_vectors_bucket + KB role
+            # (priority ordering guarantees this type runs first). Deleting a KB
+            # with dataDeletionPolicy=DELETE makes Bedrock delete the underlying
+            # vector data, which needs the store + a role it can assume — both
+            # must still exist at KB-delete time.
+            ba = boto3.client("bedrock-agent", region_name=res_region)
+            try:
+                for ds in ba.list_data_sources(knowledgeBaseId=rid).get(
+                    "dataSourceSummaries", []
+                ):
+                    try:
+                        ba.delete_data_source(
+                            knowledgeBaseId=rid, dataSourceId=ds["dataSourceId"]
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+            except Exception:  # noqa: BLE001
+                pass
+            ba.delete_knowledge_base(knowledgeBaseId=rid)
+            # Poll to a terminal deleted state (ResourceNotFound) so the
+            # downstream bucket/role deletes don't race the cascade.
+            for _ in range(24):  # ~2 min
+                try:
+                    ba.get_knowledge_base(knowledgeBaseId=rid)
+                except Exception as ge:  # noqa: BLE001
+                    if _gone(ge):
+                        break
+                time.sleep(5)
+            return f"[manifest] knowledge base {rid} deleted"
+        if rtype == "s3_vectors_bucket":
+            # Auto-provisioned S3 Vectors bucket backing a managed KB (Bug 145).
+            # Indexes must be deleted before the bucket.
+            s3v = boto3.client("s3vectors", region_name=res_region)
+            bname = rname or rid
+            try:
+                for ix in s3v.list_indexes(vectorBucketName=bname).get("indexes", []):
+                    try:
+                        s3v.delete_index(vectorBucketName=bname, indexName=ix["indexName"])
+                    except Exception:  # noqa: BLE001
+                        pass
+            except Exception:  # noqa: BLE001
+                pass
+            s3v.delete_vector_bucket(vectorBucketName=bname)
+            return f"[manifest] s3 vectors bucket {bname} deleted"
+        if rtype == "cognito_user_pool":
+            cog = boto3.client("cognito-idp", region_name=res_region)
+            # Bug 175: a user pool with a configured domain CANNOT be deleted until
+            # the domain is gone ("User pool cannot be deleted. It has a domain
+            # configured that should be deleted first."). delete_user_pool_domain
+            # is async, so we delete it then POLL until describe_user_pool shows no
+            # Domain before deleting the pool — otherwise the pool delete races the
+            # domain teardown and orphans the pool.
+            try:
+                dom = cog.describe_user_pool(UserPoolId=rid).get("UserPool", {}).get("Domain")
+                if dom:
+                    cog.delete_user_pool_domain(UserPoolId=rid, Domain=dom)
+                    for _ in range(12):  # ~1 min
+                        try:
+                            still = cog.describe_user_pool(UserPoolId=rid).get("UserPool", {}).get("Domain")
+                        except Exception:  # noqa: BLE001
+                            still = None
+                        if not still:
+                            break
+                        time.sleep(5)
+            except Exception:  # noqa: BLE001
+                pass
+            # Delete the pool, retrying briefly if the domain teardown is still
+            # settling (the same InvalidParameter "has a domain" can lag).
+            for _attempt in range(6):
+                try:
+                    cog.delete_user_pool(UserPoolId=rid)
+                    break
+                except Exception as ce:  # noqa: BLE001
+                    if "domain" in str(ce).lower() and _attempt < 5:
+                        time.sleep(5)
+                        continue
+                    raise
+            return f"[manifest] cognito pool {rid} deleted"
+        # Unknown type: no-op (do not fail teardown).
+        return ""
+    except Exception as e:  # noqa: BLE001
+        if _gone(e):
+            return f"[manifest] {rtype} {rid or rname} already gone"
+        raise
+
+
 @deployment_app.delete(
     "/api/runtime/{runtime_id}",
     response_model=DeleteResponse,
@@ -915,9 +1351,67 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
     except Exception as exc:
         cleanup_messages.append(f"State lookup error: {exc}")
 
+    # Step 0a: GENERIC manifest-driven teardown. Iterate created_resources[] and
+    # delete every recorded sub-resource by type. This is the primary teardown
+    # path that makes cleanup complete-by-construction (no orphans when a new
+    # component is added). The per-component *_result cleanups below remain as a
+    # fallback for older records that predate the manifest, and are idempotent
+    # against anything this loop already deleted.
+    # When a manifest is present it is AUTHORITATIVE: it lists every created
+    # sub-resource, so the legacy per-component *_result fallbacks below are
+    # SKIPPED. Running them after the manifest would re-issue deletes against
+    # already-gone resources and count the resulting ResourceNotFoundExceptions
+    # as cleanup failures — a false-negative success:false even though teardown
+    # fully succeeded (observed live in the free-form matrix). Old records that
+    # predate the manifest have no created_resources and still use the fallbacks.
+    manifest_used = bool(deployment_record and deployment_record.get("created_resources"))
+    if manifest_used:
+        seen_mres: set = set()
+        # Bug 167: tear down in DEPENDENCY order. A "primary" resource whose
+        # delete cascades into a backing store or needs its exec role (KB ->
+        # S3 Vectors store + role; runtime/gateway -> their child resources)
+        # MUST be deleted (and reach a terminal state) BEFORE the secondaries it
+        # depends on. Lower priority number = deleted earlier. Unlisted types
+        # default to the middle band, then backing-stores/roles/secrets last.
+        _DELETE_PRIORITY = {
+            "knowledge_base": 0,
+            "agent_runtime": 1,
+            "harness": 1,
+            "gateway": 2,
+            "policy_engine": 2,
+            "lambda": 5,
+            "memory": 6,
+            "guardrail": 6,
+            "oauth2_credential_provider": 7,
+            "api_key_credential_provider": 7,
+            # Secondaries that must OUTLIVE the primaries above:
+            "s3_vectors_bucket": 8,
+            "iam_role": 9,
+            "cognito_user_pool": 9,
+            "secret": 9,
+            "s3_object": 9,
+        }
+        _ordered = sorted(
+            deployment_record.get("created_resources") or [],
+            key=lambda r: _DELETE_PRIORITY.get(str(r.get("type")), 4),
+        )
+        for _res in _ordered:
+            try:
+                key = (str(_res.get("type")), str(_res.get("id") or _res.get("name")))
+                if key in seen_mres:
+                    continue
+                seen_mres.add(key)
+                _msg = _delete_managed_resource(_res, region)
+                if _msg:
+                    cleanup_messages.append(_msg)
+            except Exception as exc:  # noqa: BLE001
+                cleanup_messages.append(f"Manifest cleanup error ({_res.get('type')}): {exc}")
+                cleanup_failures.append(str(_res.get("type")))
+
     # Step 0: Clean up MCP server runtime if one was deployed
+    # (legacy fallback — skipped when the manifest already handled teardown)
     mcp_server_runtime_id = deployment_record.get("mcp_server_runtime_id") if deployment_record else None
-    if mcp_server_runtime_id:
+    if mcp_server_runtime_id and not manifest_used:
         try:
             mcp_destroy = destroy_runtime(mcp_server_runtime_id, region)
             cleanup_messages.append(f"MCP server runtime destroyed: {mcp_destroy.get('message', 'ok')}")
@@ -931,7 +1425,7 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
 
     # Step 0.5: Clean up policy engine if one was attached
     # Correct order: detach from gateway → delete policies → delete engine
-    if deployment_record:
+    if deployment_record and not manifest_used:
         policy_result = deployment_record.get("policy_result") or {}
         policy_engine_id = policy_result.get("engine_id")
         if policy_engine_id:
@@ -997,7 +1491,7 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
                 cleanup_failures.append("policy_engine")
 
     # Step 0.6: Clean up memory if one was created
-    if deployment_record:
+    if deployment_record and not manifest_used:
         memory_result = deployment_record.get("memory_result") or {}
         memory_id = memory_result.get("memory_id")
         if memory_id:
@@ -1008,9 +1502,24 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
             except Exception as exc:
                 cleanup_messages.append(f"Memory cleanup error: {exc}")
                 cleanup_failures.append("memory")
+            # Bug 158: memory_step creates an AgentCoreMemory-<name> IAM role; the
+            # delete path deleted the memory but ORPHANED the role (confirmed live).
+            # Delete it too (best-effort, idempotent).
+            memory_name = memory_result.get("memory_name")
+            if memory_name:
+                mem_role_name = f"AgentCoreMemory-{memory_name}"
+                try:
+                    iam_c = boto3.client("iam")
+                    for pn in iam_c.list_role_policies(RoleName=mem_role_name).get("PolicyNames", []):
+                        iam_c.delete_role_policy(RoleName=mem_role_name, PolicyName=pn)
+                    iam_c.delete_role(RoleName=mem_role_name)
+                    cleanup_messages.append(f"Memory IAM role deleted: {mem_role_name}")
+                except Exception as exc:
+                    if "NoSuchEntity" not in str(exc):
+                        cleanup_messages.append(f"Memory role cleanup error: {exc}")
 
     # Step 0.7: Clean up guardrail if we created it
-    if deployment_record:
+    if deployment_record and not manifest_used:
         guardrails_result = deployment_record.get("guardrails_result") or {}
         if guardrails_result.get("created_by_flow"):
             guardrail_id = guardrails_result.get("guardrail_id")
@@ -1024,7 +1533,7 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
                     cleanup_failures.append("guardrail")
 
     # Step 1: Clean up gateway resources
-    if gateway_config:
+    if gateway_config and not manifest_used:
         try:
             gw_log = cleanup_gateway_resources(
                 runtime_id=runtime_id,
@@ -1046,7 +1555,7 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
     kb_result = (deployment_record or {}).get("knowledge_base_result") or {}
     dep_id = (deployment_record or {}).get("deployment_id", "")
     kb_lambda_suffix = dep_id[:8] if dep_id else ""
-    if kb_lambda_suffix:
+    if kb_lambda_suffix and not manifest_used:
         try:
             lambda_client = boto3.client("lambda", region_name=region)
             kb_fn_name = f"AgentCore-KBTool-{kb_lambda_suffix}"
@@ -1097,21 +1606,103 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
             cleanup_messages.append(f"KB cleanup error: {exc}")
             cleanup_failures.append("knowledge_base")
 
-    # Step 2: Destroy the runtime via boto3
+    # Step 2: Destroy the runtime via boto3 — or the Harness (Phase B). HARNESS
+    # mode targets the managed harness instead of an AgentCore Runtime; the
+    # harness id was persisted on the record (fall back to runtime_id, which the
+    # frontend sends as the deployment id for harness deploys).
     runtime_destroy_failed = False
+    if deployment_record and deployment_record.get("deployment_mode") == "harness":
+        try:
+            harness_id = deployment_record.get("harness_id") or runtime_id
+            destroy_result = destroy_harness(harness_id, region)
+            cleanup_messages.append(
+                f"Harness destroy: {destroy_result.get('note', destroy_result.get('harness_id', 'ok'))}"
+            )
+            if not destroy_result.get("success", True) and not manifest_used:
+                runtime_destroy_failed = True
+            # Tear down the OAuth2 credential provider registered so the harness
+            # could call its connected gateway (no orphan).
+            _hr = deployment_record.get("harness_result") or {}
+            _gw_prov = _hr.get("gateway_outbound_provider_name") if isinstance(_hr, dict) else None
+            if _gw_prov:
+                try:
+                    import boto3 as _boto3
+
+                    _boto3.client(
+                        "bedrock-agentcore-control", region_name=region
+                    ).delete_oauth2_credential_provider(name=_gw_prov)
+                    cleanup_messages.append(f"Harness gateway OAuth provider {_gw_prov} deleted")
+                except Exception as _e:  # noqa: BLE001
+                    if "ResourceNotFound" not in str(_e) and "NotFound" not in str(_e):
+                        cleanup_messages.append(f"Harness gateway OAuth provider delete error: {_e}")
+        except Exception:
+            logger.exception("Harness destroy error for %s", runtime_id)
+            cleanup_messages.append("Harness destroy error (check server logs)")
+            if not manifest_used:
+                runtime_destroy_failed = True
+    else:
+        try:
+            destroy_result = destroy_runtime(runtime_id, region)
+            cleanup_messages.append(destroy_result.get("message", "Runtime destroy completed"))
+            # destroy_runtime returns success:false on AccessDenied / other errors;
+            # propagate that to the top-level response. See tasks/lessons.md Bug 44
+            # — previously this handler returned success:true even when the
+            # underlying destroy failed, masking IAM and AccessDenied errors.
+            # EXCEPTION (Bug 159): when the manifest already deleted the
+            # agent_runtime in Step 0a, this second destroy can see the runtime
+            # already-gone OR mid-state-transition and report success:false — that
+            # is NOT a real failure (the resource is gone). Only count it when the
+            # manifest did NOT handle the runtime.
+            if not destroy_result.get("success", True) and not manifest_used:
+                runtime_destroy_failed = True
+        except Exception:
+            logger.exception("Runtime destroy error for %s", runtime_id)
+            cleanup_messages.append("Runtime destroy error (check server logs)")
+            if not manifest_used:
+                runtime_destroy_failed = True
+
+    # Bug 192 — release the runtime NAME so it can be redeployed. The slots +
+    # versions rows (AgentVersionsTable / RuntimeSlotsTable) are the cross-tenant
+    # name lock used by the deploy guard (H-1). If teardown leaves them behind, the
+    # friendly name stays permanently locked even after the AWS resource is gone,
+    # and a later deploy of the same name fails with 409 "already in use by another
+    # tenant" — exactly what a customer hit after a prior harness was torn down.
+    # Delete ONLY rows owned by this caller (tenant-safe) for the friendly name on
+    # the deployment record. Best-effort: never fail the teardown on this.
     try:
-        destroy_result = destroy_runtime(runtime_id, region)
-        cleanup_messages.append(destroy_result.get("message", "Runtime destroy completed"))
-        # destroy_runtime returns success:false on AccessDenied / other errors;
-        # propagate that to the top-level response. See tasks/lessons.md Bug 44
-        # — previously this handler returned success:true even when the
-        # underlying destroy failed, masking IAM and AccessDenied errors.
-        if not destroy_result.get("success", True):
-            runtime_destroy_failed = True
-    except Exception:
-        logger.exception("Runtime destroy error for %s", runtime_id)
-        cleanup_messages.append("Runtime destroy error (check server logs)")
-        runtime_destroy_failed = True
+        friendly = None
+        if deployment_record:
+            friendly = (
+                deployment_record.get("friendly_runtime_name")
+                or deployment_record.get("workflow_id")
+            )
+            # Fall back to deriving from the agentcore runtime name (strip _<suffix>).
+            if not friendly:
+                acn = deployment_record.get("agentcore_runtime_name") or ""
+                friendly = acn.rsplit("_", 1)[0] if "_" in acn else acn
+        if friendly:
+            from app.services.agent_versions_store import (
+                get_slots_store,
+                get_versions_store,
+            )
+
+            vstore = get_versions_store()
+            removed_versions = 0
+            for v in vstore.list_for_runtime(friendly):
+                # Only the owner may release the name (and pre-tenancy rows with no
+                # owner_sub are safe to clean up).
+                if not v.owner_sub or v.owner_sub == (caller_sub or ""):
+                    vstore.delete(friendly, v.version_id)
+                    removed_versions += 1
+            sstore = get_slots_store()
+            slot = sstore.get(friendly)
+            if slot is not None and (not slot.owner_sub or slot.owner_sub == (caller_sub or "")):
+                sstore.delete(friendly)
+            if removed_versions or slot is not None:
+                cleanup_messages.append(f"Released runtime name '{friendly}' (slots/versions)")
+    except Exception:  # noqa: BLE001
+        logger.warning("Slots/versions release failed for %s", runtime_id, exc_info=True)
+        cleanup_messages.append("Runtime name release skipped (check server logs)")
 
     # Audit #11 (tasks/lessons.md Bug 106): overall_success is False if either
     # runtime-destroy failed (Bug 44) OR any other cleanup step (gateway, KB,
@@ -1185,10 +1776,13 @@ async def handle_generate_tool(request: ToolGenerateRequest):
     except Exception as e:
         # Catch-all so the client gets structured JSON instead of plaintext
         # "Internal Server Error" 500. See tasks/lessons.md Bug 33.
+        # SECURITY (CodeQL py/stack-trace-exposure): log the exception detail
+        # server-side; return a generic message (no exception type/text) to the
+        # client.
         logger.exception("handle_generate_tool failed")
         raise HTTPException(
             status_code=500,
-            detail={"error": f"Tool generation failed: {type(e).__name__}: {e}"},
+            detail={"error": "Tool generation failed."},
         ) from e
 
 

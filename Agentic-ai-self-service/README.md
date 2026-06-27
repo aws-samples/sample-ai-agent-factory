@@ -2,6 +2,10 @@
 
 A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, configure, and deploy AI agents through a drag-and-drop canvas interface. Inspired by n8n's node-based editor, built for the AgentCore ecosystem. Deployed to AWS with API Gateway, Lambda, Step Functions, DynamoDB, and CloudFront.
 
+**Two authoring paths, one deploy pipeline.** Build agents either by wiring components on the **Visual Canvas** (code-generated AgentCore **Runtime**) or as a config-driven **AgentCore Harness** (AWS's managed, Strands-powered harness — declare model + instructions + tools + memory, no code artifact). Pick the mode at deploy time (`deploymentMode: "runtime" | "harness"`); both share the same Gateway, Memory, connectors, test, and teardown surfaces.
+
+**Real SaaS connectors.** Connect agents to live third-party APIs (Jira, Asana, Slack, GitHub, Salesforce, or any OpenAPI spec) as Gateway targets with API-key or OAuth2 (client-credentials) outbound auth — credentials live only in Secrets Manager, never in the canvas or logs.
+
 ## Architecture
 
 ![Architecture](docs/architecture.jpg)
@@ -15,6 +19,8 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 | Workflow CRUD | Lambda (FastAPI + Mangum) | Workflow create, read, update, delete, validate, import/export |
 | Deployment orchestration | Lambda + Step Functions | 13-step agent deployment with retries and timeouts |
 | Agent framework | Strands Agents SDK | Provider-aware model init, multi-agent patterns (Graph, Swarm, Workflow) |
+| Managed harness | Bedrock AgentCore Harness | Config-driven authoring path (`create_harness` / `invoke_harness`) — model + instructions + tools + memory, no code artifact |
+| Streaming test endpoint | Lambda Function URL (RESPONSE_STREAM, AWS_IAM) | Streams long (>30s) agent test invocations past the API Gateway 30s cap |
 | Model providers | 13 Strands providers | Bedrock, OpenAI, Anthropic, Gemini, Mistral, Ollama, Groq, DeepSeek, Together, LiteLLM, SageMaker, Writer, LlamaAPI |
 | Workflow storage | DynamoDB | Persistent storage with on-demand billing |
 | Deployment state | DynamoDB | Deployment progress tracking with 30-day TTL |
@@ -26,7 +32,9 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 
 ## Key Features
 
-- **Visual Canvas** -- Drag-and-drop AgentCore components (Runtime, Gateway, Memory, Knowledge Base, Browser, Identity, Observability, Policy) and wire them together.
+- **Visual Canvas** -- Drag-and-drop AgentCore components (Runtime, Gateway, Memory, Knowledge Base, Browser, Identity, Observability, Policy, Connectors) and wire them together.
+- **AgentCore Harness (parallel authoring path)** -- Deploy a config-driven managed harness instead of a code-generated runtime: declare model, instructions, connected gateway/connectors, and memory — AWS runs the orchestration loop (powered by Strands). Selected via `deploymentMode: "harness"`; shares the same gateway/memory/connector steps and the same test/delete/teardown path as the runtime mode. Memory is auto-provisioned for session continuity.
+- **Real SaaS Connectors** -- A curated catalog (Jira, Asana, Slack, GitHub, Salesforce) plus a generic OpenAPI/MCP connector lets agents call live third-party APIs as Gateway targets. Outbound auth is API-key or OAuth2 client-credentials; secrets are minted into Secrets Manager (`agentcore-connector/{owner}/*`) and the raw value never touches the canvas, DynamoDB, or logs. Branded connectors map to first-class AgentCore OAuth2 vendors (e.g. `AtlassianOauth2` for Jira) where available; Jira also supports API-key auth via a pre-computed HTTP Basic `base64(email:token)` credential, and Asana uses a Personal Access Token. GitHub + Asana are proven live end-to-end (agent → real upstream data); Jira/Slack/Salesforce paths are in place pending live credentials.
 - **Template Gallery** -- Six production-ready templates to deploy in one click: Web Search Agent, Strands + Gateway, Customer Support Assistant, Customer Support Blueprint, MCP Server Runtime, and MCP Server Gateway Target.
 - **CloudFormation Export** -- Generate downloadable CloudFormation stacks from any template or free-form diagram. Includes `deploy.sh`, `teardown.sh`, template YAML, and all code artifacts in a single zip. External users can deploy without the platform.
 - **AI Tool Generator** -- Describe a tool in natural language (e.g. "a tool that fetches GitHub repo info") and Claude Sonnet on Bedrock generates a complete Lambda function with tool schema. Add it to your canvas and deploy as a Gateway Target.
@@ -44,7 +52,7 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 - **Deployment Persistence** -- Active deployments are stored per-user. Switching browsers or refreshing shows a banner to restore the last deployment with its test panel.
 - **In-Canvas Testing** -- Test deployed agents directly from the UI with conversation history support.
 - **Knowledge Base (RAG)** -- Create Bedrock Knowledge Bases with 5 data source types (S3, Web Crawler, Confluence, Salesforce, SharePoint), 3 vector store types (S3 Vectors, OpenSearch Serverless, RDS Aurora PostgreSQL), 3 parsing strategies (Default, Bedrock Data Automation, Foundation Model), 3 chunking strategies (Fixed-Size, Hierarchical, Semantic), custom transformation Lambda, and configurable deletion policy and KMS encryption. The Web Crawler data source filters empty / null seed URLs before submission, BDA parsing auto-attaches `supplementalDataStorageConfiguration` pointing at the artifacts bucket, and S3 Vectors managed mode is the default — with an "Advanced (custom bucket)" toggle in the modal to attach an existing `s3VectorsBucketArn` / `s3VectorsIndexName` / `s3VectorsIndexArn`. Deployed as a Gateway tool target with a per-deployment Lambda for RetrieveAndGenerate.
-- **Full Resource Cleanup** -- Delete from AWS removes Runtime, Gateway, Gateway Targets, Cognito User Pool, custom tool Lambdas, Knowledge Base, Memory, Policy Engine, and Lambda functions.
+- **Full Resource Cleanup (manifest-driven)** -- Every deploy step records the AWS sub-resources it creates into a per-deployment manifest (`created_resources[]`); delete then iterates the manifest and tears down **everything** — Runtime/Harness, Gateway + targets, Cognito User Pool, credential providers, connector secrets, Knowledge Base, Memory (+ its IAM role), Policy Engine, Guardrail, custom-tool Lambdas, and IAM roles. Teardown is complete-by-construction (no orphans when a new component type is added), with the legacy per-component cleanup retained as a fallback for pre-manifest records.
 
 ## Enterprise Platform Capabilities
 
@@ -53,7 +61,7 @@ Beyond the core canvas, the platform layers an enterprise feature set on top of 
 ### Agent lifecycle & quality
 
 - **Agent Versioning & Rollback** -- Every deploy is an immutable, versioned snapshot. A runtime has `production` / `staging` slots; `GET /api/runtimes/{name}/versions` lists history and `POST .../rollback` promotes the previous version back into production. Lets you ship, compare, and revert without losing prior canvases.
-- **Cedar Policy Enforcement (`ENFORCE`)** -- Attach an AgentCore Policy node to a Gateway and the platform generates schema-correct Cedar (`permit(principal is AgentCore::OAuthUser, action in [Target___tool…], resource == Gateway::"<arn>")`) over the **real** synced tool manifest. Forbidden tools are denied by omission (default-deny); the deploy **fails closed** rather than ever attaching an empty/deny-all engine. Permitted tools return data, forbidden tools are denied at the gateway.
+- **Cedar Policy Enforcement (`ENFORCE`)** -- Attach an AgentCore Policy node to a Gateway and the platform generates schema-correct Cedar (`permit(principal is AgentCore::OAuthUser, action in [AgentCore::Action::"Target___tool", …], resource == AgentCore::Gateway::"<arn>")`) over the **real** synced tool manifest. The action list form (`action in [...]`) is required even for a single tool — a singleton `action == "X"` is rejected by AgentCore's analysis as overly-permissive. Forbidden tools are denied by omission (default-deny). Because a freshly-created policy engine + gateway take a few minutes to become consistent (AgentCore-side), the deploy attaches the engine in **`LOG_ONLY`** immediately (tools work; policies are still evaluated + logged) and **lazily promotes to `ENFORCE`** on the first invoke or status poll once the gateway converges — surfaced as `policy_result.mode` / `downgraded_to_log_only` / `promoted_at_first_use`. Promotion only flips once ≥1 policy is `ACTIVE`, so the engine never ships empty/deny-all. Verified live: after convergence, the gateway reaches `ENFORCE`, permitted tools return data and forbidden tools are denied.
 - **Evaluation Framework** -- Register AgentCore Online Evaluation (built-in goal-success / correctness / helpfulness evaluators + custom judge prompts) at deploy time. `GET /api/runtimes/{name}/evaluations` aggregates per-evaluator scores from the runtime's CloudWatch log group via Logs Insights.
 - **Observability Dashboard** -- Each deploy upserts a per-runtime CloudWatch dashboard (latency, invocations, errors, token usage, tool-call success). `GET /api/runtimes/{name}/dashboard-url` returns the deep link. Platform Lambdas and deployed agents both emit OTLP spans (see [Observability](#observability)).
 - **Cost & Usage Analytics** -- `GET /api/runtimes/{name}/cost` prices `gen_ai.usage.*` token counts from the runtime's logs against a baked Bedrock price table and returns `{total_cost, total_in, total_out, by_model}` for the requested window.
@@ -71,7 +79,7 @@ Beyond the core canvas, the platform layers an enterprise feature set on top of 
 - **Per-Agent Identity** -- Opt-in `identityConfig.mode=per_agent` mints a distinct least-privilege IAM execution role scoped to exactly the resources an agent is wired to (vs the shared demo role). Roles are tagged `ManagedBy=agentcore-flows` so cleanup is tag-scoped.
 - **Agentic Retrieval** -- Knowledge Base nodes support `retrievalStrategy` of `multi_hop` (LLM query decomposition + iterative retrieve), `hybrid` (vector + keyword, with managed-KB fallback to semantic), or `reranked` (wide retrieve + Claude-judge reorder) beyond simple retrieval.
 - **Scheduled / Event Triggers** -- Register `cron`, `eventbridge`, `s3`, or `webhook` triggers on a runtime (`/api/runtimes/{name}/triggers`). The `target_runtime_arn` is derived server-side from the owned production slot (confused-deputy guard); webhook triggers mint an owner-scoped HMAC secret in Secrets Manager. New triggers are recorded as **`registered`** (not yet firing) until the AWS resource is provisioned — the UI never falsely shows an unwired trigger as active.
-- **Connector Catalog** -- `GET /api/connectors` lists pre-built SaaS connector definitions (tool + credential schema) for discovery; live use supplies credentials via Secrets Manager.
+- **SaaS Connectors (live OpenAPI Gateway targets)** -- A curated catalog (Jira/`AtlassianOauth2` + API-key Basic, Asana/PAT, Slack, GitHub, Salesforce) plus a generic OpenAPI/MCP connector, deployable as real Gateway targets. The deploy step fetches the connector's OpenAPI spec (SSRF-guarded, host-allowlisted), registers an API-key or OAuth2 client-credentials credential provider backed by an owner-scoped Secrets Manager secret, and attaches it to the gateway target. OpenAPI targets are crawled (not inline) and readiness is verified by probing the gateway's live MCP `tools/list`. `GET /api/connectors` lists the catalog for discovery. Teardown deletes the target, credential provider, and secret via the resource manifest. **Live-verified:** GitHub (api-key → real `/user` login) and Asana (PAT → real `/users/me`) end-to-end; Jira/Slack/Salesforce require live credentials to exercise.
 - **GitOps Sync** -- Store a Git PAT in an owner-scoped Secrets Manager namespace (`/api/workflows/{id}/git-token`) and pull a workflow spec from a repo (`/api/workflows/{id}/git-sync`), preserving id/owner/ACL. SSRF-guarded.
 - **Human-in-the-Loop (HITL)** -- Inject a `human_approval` tool into an agent; pending approvals land in an owner-scoped queue (`GET /api/hitl/pending`, `POST /api/hitl/{id}/decision`) surfaced in the UI inbox.
 - **Team Workspaces & Sharing** -- Share a workflow with viewer/editor roles (`/api/workflows/{id}/share`); list workspace-visible workflows (`GET /api/workspaces`). Owner-only mutation with escalation guards.
@@ -109,7 +117,7 @@ CDK-NAG (`cdk_nag.AwsSolutionsChecks`) runs during every `cdk synth` to flag sec
 - **OTEL secret namespace lock** — User-supplied `auth_header_secret_arn` (per-canvas Observability node) is validated against `^arn:aws:secretsmanager:.*:secret:agentcore-otel/.*` before being granted to the runtime IAM role. Foreign ARNs are rejected at the API boundary; tenant cannot trick the runtime into reading + exfiltrating arbitrary secrets via OTLP headers. Secrets created via `POST /api/observability/credentials` are tagged with `owner_sub` (Cognito sub) so cross-tenant ownership is auditable.
 - **Tenant isolation hardening** — The `X-Test-Sub` header bypass is removed from `services/auth.py`; tests inject sub via FastAPI `dependency_overrides`. `assert_owner` returns 404 for None-owner records (no legacy-data bypass). Flow/workflow listing uses strict `owner_sub == caller_sub` equality (no None-coalescing fallback that previously surfaced legacy rows in every tenant's list).
 - **MCPClient wiring proof gate** — When a runtime is configured with `GATEWAY_URL` but `MCPClient.list_tools_sync()` returns an empty list, the runtime raises `RuntimeError("Gateway MCPClient returned 0 tools…")` at first invocation rather than letting the agent bluff a canary out of the system prompt. Coverage-audit finding #109 (9 silent-canary GW PASSes) is now structurally impossible.
-- **Cedar ENFORCE policy enforcement (fail-closed)** — When a Policy node runs in `ENFORCE` mode, the policy step builds a schema-correct Cedar policy set against the gateway's real MCP tool manifest: one `permit(principal is AgentCore::OAuthUser, action in [AgentCore::Action::"{Target}___{tool}", …], resource == AgentCore::Gateway::"<arn>")` over the **allowed** tools, with forbidden tools **denied by omission** (AgentCore is default-deny, so a lone `forbid` is rejected by Cedar analysis as "Overly Restrictive"). Three guards make the engine fail closed rather than silently deny the tool plane: (1) policy names are **engine-prefixed** because AgentCore policy names are account-global, not engine-scoped — two concurrent deploys emitting the same name no longer collide (Bug 137); (2) on a name conflict the step recovers the existing policy *from this engine* and validates it, or aborts if the name belongs to a foreign engine; (3) before attaching the engine, the step reads it back with `list_policies` and refuses to attach unless **≥1 policy is ACTIVE** — catching any empty-engine path (collision, async drop, eventual consistency) that would otherwise ship a deny-all engine the runtime sees as 0 tools. Verified across three consecutive fresh deploys: permitted tools return real data, forbidden tools are denied, and an empty engine aborts the deploy.
+- **Cedar ENFORCE policy enforcement (lazy-promote, never deny-all)** — When a Policy node runs in `ENFORCE` mode, the policy step builds a schema-correct Cedar policy set against the gateway's real MCP tool manifest: one `permit(principal is AgentCore::OAuthUser, action in [AgentCore::Action::"{Target}___{tool}", …], resource == AgentCore::Gateway::"<arn>")` over the **allowed** tools (the `action in [...]` **list** form is mandatory even for one tool — a singleton `action == "X"` is rejected as "Overly Permissive"), with forbidden tools **denied by omission** (AgentCore is default-deny). Several guards keep the engine from ever silently denying the tool plane: (1) policy names are **engine-prefixed** because AgentCore policy names are account-global, not engine-scoped (Bug 137); (2) on a name conflict the step recovers the existing policy *from this engine* and validates it, or aborts if the name belongs to a foreign engine; (3) it never attaches an engine holding **0 ACTIVE policies**. A freshly-created policy engine + gateway take a few minutes to become consistent on the AgentCore side (`create_policy` 409s / `CREATE_FAILED "Insufficient permissions to call gateway"` until then), which is too long to block the deploy. So the step attaches the engine in **`LOG_ONLY`** up front (tools work, policies evaluated + logged) and records an `enforce_pending` payload; a shared `_maybe_promote_policy()` then **promotes to `ENFORCE` on the first invoke or status poll** once the policy validates `ACTIVE` — idempotent, best-effort, and surfaced via `policy_result.{mode,downgraded_to_log_only,promoted_at_first_use}`. Verified live: post-convergence the gateway reaches `ENFORCE`, permitted tools return data, forbidden tools are denied; the policy engine is torn down children-first on delete.
 - **DDB GSI NULL-key safety** — `DeploymentState` serializer omits None-valued optional fields (`runtime_id`, `gateway_url`, `completed_at`, etc.) via `model_dump(mode="json", exclude_none=True)` so the `runtime_id-index` GSI accepts the initial intake write. Pairs with the runtime_id-index GSI for cost-bounded delete/test/invoke lookups.
 - **Frontend ErrorBoundary** — `frontend/src/components/ErrorBoundary.tsx` wraps the app root. A render-time exception shows a recoverable banner with reset/reload buttons instead of a blank screen.
 - **Auto-save error toast** — `useAutoSave` exposes `lastSaveError` so a transient save failure renders a dismissable toast instead of being clobbered by a subsequent successful read.
@@ -125,6 +133,40 @@ CDK-NAG (`cdk_nag.AwsSolutionsChecks`) runs during every `cdk synth` to flag sec
 - Standard checks: trailing whitespace, end-of-file fixer, YAML/JSON validation, merge conflict markers
 
 Install with `pip install pre-commit && pre-commit install`. Run manually with `pre-commit run --all-files`.
+
+### Holmes Security Review — status & known hardening items
+
+The codebase is scanned with **Holmes** (Content Security Review rubric + SMGS AppSec
+static-analysis baseline: Checkov / cfn-guard / Semgrep). Latest scan (97 files across
+`backend/src`, `infra/stacks`, `scripts`).
+
+**Remediated:**
+- **Harness execution role least-privilege** — `bedrock:InvokeModel` is scoped to the
+  connected model's family ARN, and the memory/gateway data-plane actions are scoped to
+  the connected memory/gateway ARNs (falling back to `*` only when an ARN is unknown).
+  Token-vault fetches (`GetResourceOauth2Token`/`GetResourceApiKey`) stay account-level
+  (no resource-ARN form). See `services/harness_deployer.create_harness_iam_role`.
+- **Exported `requirements.txt` supply chain** — generated dependency lists now carry
+  `>=` minimum-version floors and a header instructing users to pin exact versions before
+  a production build. See `services/python_exporter.build_requirements`.
+- **Teardown completeness (no orphans)** — IAM grants added for the manifest delete path so
+  no managed resource orphans on delete: `s3vectors:Delete*` + `bedrock:DeleteKnowledgeBase`/
+  `DeleteDataSource` (KB vector store), `lambda:DeleteFunction` scoped to `MCPServer*` as well
+  as `AgentCore*`, and the policy-engine teardown deletes child policies before the engine.
+  An `IAM-completeness` test asserts every manifest delete verb is granted.
+
+**Known hardening items (tracked, lower priority for a 1:Many sample):**
+- Several platform IAM roles (shared runtime role, deployment Lambda, per-step roles, and
+  the generated CloudFormation evaluation/memory/CFN-provider roles) use broad
+  `bedrock-agentcore:*` / `Resource: "*"` actions for development convenience. Production
+  deployments should scope these to specific resource ARNs and tag-based IAM conditions
+  (`ManagedBy=agentcore-flows`), and constrain destructive actions
+  (`Delete*`, `logs:DeleteLogGroup`, `cloudwatch:DeleteDashboards`).
+- Several `logger.exception(...)` call sites may include user-supplied prompt/config in
+  tracebacks; production should use structured logging that records error type + id only
+  and routes detail to a tenant-scoped store.
+- Connector credential secrets use the default Secrets Manager key; consider a customer
+  KMS CMK per your data-classification policy.
 
 ## Observability
 
@@ -421,7 +463,14 @@ Step Functions State Machine (13 steps, 30min timeout)
     │   Creates AgentCore Policy Engine with Cedar-based policies
     │   Output: { policy_engine_id }
     │
-    ├── Step 12: GenerateCode (30s timeout)
+    ├── Choice: deployment_mode == "harness"?
+    │   If harness → DeployHarness (create_harness + wait READY, reusing the
+    │       gateway/memory results above; records harness_id/arn). SKIPS codegen,
+    │       IAM, ConfigureRuntime, and LaunchRuntime, then rejoins at the
+    │       evaluation/auth/status_update tail.
+    │   Otherwise (runtime, default) → GenerateCode (Step 12 below).
+    │
+    ├── Step 12: GenerateCode (30s timeout)   [runtime mode]
     │   Generates Strands Agent code (provider-aware model init + multi-agent)
     │   Merges gateway credentials into code (from gateway step output)
     │   Downloads pre-built dependency bundle from S3 (base.zip or strands-mcp.zip)
@@ -777,16 +826,22 @@ In the UI: developers click **Publish to Registry** in the Deploy panel after a 
 
 ### Template 6: MCP Server Gateway Target (Advanced)
 - Architecture: Agent Runtime → MCP Gateway → MCP Server Runtime (multi-runtime chain)
-- Tools: Weather, Web Search, URL Fetcher -- hosted on the MCP Server Runtime, invoked through Gateway
+- Tools: hosted on the MCP Server Runtime, invoked through the Gateway as an MCP target
 - Auth: Cognito OAuth2 between Agent and MCP Server via Gateway
-- Components: 2 Runtimes + Gateway + Identity (22 CFN resources)
+- Components: 2 Runtimes + Gateway + Identity
 - Use case: Decouple tool hosting from agent logic via MCP protocol
+- Notes: the generated MCP server binds **port 8000** (the AgentCore MCP-runtime ingress contract) and uses a lean `mcp`-only dependency bundle so it cold-starts within the Gateway's ~30s tool-discovery probe; the gateway step pre-warms the runtime and retries `UpdateGatewayTarget`. Verified live end-to-end (target `READY`, agent calls the MCP tool through the gateway).
 
-### Custom Deployment
+### Custom Deployment (free-form)
 - Framework: Strands Agents (with provider selection from 13 providers)
 - Multi-agent: Optional Graph, Swarm, or Workflow orchestration patterns
-- Tools: Any combination of built-in tools + AI-generated custom tools deployed as Lambda Gateway Targets
-- Components: User-configured
+- Tools: Any combination of built-in tools + AI-generated custom tools + SaaS connectors, deployed as Gateway Targets
+- Components: User-configured — hand-wire any valid combination of Runtime/Gateway/Memory/Identity/Policy/Guardrails/Observability/Connectors on the canvas (no `templateId`); the backend deploys whatever is wired
+
+### Harness Mode (config-driven, no canvas required)
+- Authoring: declare model + instructions + connected gateway/connectors + memory
+- Deploy: `deploymentMode: "harness"` — runs `create_harness` instead of codegen/runtime steps, reusing the shared gateway/memory steps
+- Test/Delete: identical surface to runtime mode (`/api/test-runtime`, `DELETE /api/runtime/{id}` → `invoke_harness` / `delete_harness`)
 
 ## Project Structure
 
@@ -798,7 +853,8 @@ In the UI: developers click **Publish to Registry** in the Deploy panel after a 
 |   +-- src/app/
 |   |   +-- main.py                       # FastAPI entry point (auto-selects storage backend)
 |   |   +-- lambda_handler.py             # Mangum wrapper for Workflow Lambda
-|   |   +-- deployment_handler.py         # Deployment Lambda (deploy, status, test, delete)
+|   |   +-- deployment_handler.py         # Deployment Lambda (deploy, status, test, delete; manifest-driven teardown)
+|   |   +-- stream_handler.py             # Lambda Function URL handler (RESPONSE_STREAM) for >30s test invokes; accepts the AWS_IAM SigV4 caller OR a Cognito JWT
 |   |   +-- models/
 |   |   |   +-- enums.py                  # Component types, frameworks, statuses
 |   |   |   +-- components.py             # Pydantic models for all AgentCore components
@@ -847,7 +903,11 @@ In the UI: developers click **Publish to Registry** in the Deploy panel after a 
 |   |   |   +-- deployment.py             # End-to-end deploy orchestration (direct + SFN paths)
 |   |   |   +-- code_generator.py         # Agent code generation (Strands Agents, 13 providers, multi-agent)
 |   |   |   +-- runtime_deployer.py       # AgentCore runtime configure/launch/destroy + transient-error retry
-|   |   |   +-- gateway_deployer.py       # Gateway deploy, Cognito OAuth, JWT auth, custom tool Lambdas, cleanup
+|   |   |   +-- harness_deployer.py       # AgentCore Harness lifecycle (create/get/invoke/destroy) + gateway outbound-auth wiring
+|   |   |   +-- connectors.py             # SaaS connector catalog (Jira/Asana/Slack/GitHub/Salesforce + generic OpenAPI)
+|   |   |   +-- policy_promoter.py         # Lazy-promote a Cedar policy engine LOG_ONLY -> ENFORCE on first invoke/status (post-convergence)
+|   |   |   +-- naming.py                 # Shared AgentCore resource-name sanitizer (underscore vs hyphen styles)
+|   |   |   +-- gateway_deployer.py       # Gateway deploy, Cognito OAuth, JWT auth, custom tool + connector (OpenAPI) targets, cleanup
 |   |   |   +-- tool_catalog_store.py     # DynamoDB tool catalog storage
 |   |   |   +-- flow_submission_store.py  # DynamoDB flow submission storage
 |   |   |   +-- tool_tester.py            # Tool testing utilities
@@ -871,6 +931,7 @@ In the UI: developers click **Publish to Registry** in the Deploy panel after a 
 |   |       +-- policy_step.py            # AgentCore Policy Engine creation
 |   |       +-- runtime_configure_step.py # AgentCore runtime creation (with gateway env vars)
 |   |       +-- runtime_launch_step.py    # Runtime launch + readiness polling
+|   |       +-- harness_step.py           # AgentCore Harness create + wait (runs instead of codegen/runtime in harness mode)
 |   |       +-- auth_step.py              # JWT auth configuration on runtime
 |   |       +-- status_update_step.py     # Final status + gateway_result write to DynamoDB
 |   +-- tests/
@@ -880,15 +941,18 @@ In the UI: developers click **Publish to Registry** in the Deploy panel after a 
 |   +-- src/
 |   |   +-- components/
 |   |   |   +-- ai/                       # ToolGeneratorPanel + AgentGeneratorPanel (NL → canvas)
+|   |   |   +-- auth/                      # AuthWrapper (Amplify Authenticator) + cinematic login hero
 |   |   |   +-- canvas/                   # WorkflowCanvas (React Flow)
 |   |   |   +-- deploy/                   # DeployPanel + tabs: VersionsList, EvaluationResultsPanel,
-|   |   |   |                             #   ObservabilityPanel, CostPanel, TriggersPanel; Publish-to-Registry
+|   |   |   |                             #   ObservabilityPanel, CostPanel, TriggersPanel; Publish-to-Registry; authoring-mode toggle
+|   |   |   +-- harness/                  # Harness authoring form (model/instructions/memory/tools) for deploymentMode=harness
+|   |   |   +-- hero/                      # MotionSites-style hero (animated gradient, glass badge, corner marks) for login/empty-state
 |   |   |   +-- modals/                   # Runtime/Gateway/Identity/KB/Policy/Guardrails/Memory/Observability/
 |   |   |   |                             #   Evaluation/A2A config modals + Registry, PromptLibrary, Hitl inbox,
-|   |   |   |                             #   ConnectorPicker
+|   |   |   |                             #   ConnectorPicker + ConnectorConfigModal (SaaS connector auth/spec)
 |   |   |   |   +-- kb/                   # Knowledge Base sub-components (DataSourceFields, VectorStoreFields, AdvancedFields)
 |   |   |   +-- nodes/                    # AgentCoreNode component
-|   |   |   +-- palette/                  # ComponentPalette (drag source + AI Tool Generator + Registry buttons)
+|   |   |   +-- palette/                  # ComponentPalette (drag source + AI Tool Generator + Registry + Connectors)
 |   |   |   +-- templates/                # TemplateGallery
 |   |   +-- auth/useIsRegistryAdmin.ts    # Reads cognito:groups from the ID token for registry RBAC
 |   |   +-- data/templates.ts             # Template definitions

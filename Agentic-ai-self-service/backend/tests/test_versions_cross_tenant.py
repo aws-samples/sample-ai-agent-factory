@@ -129,7 +129,7 @@ def _deploy_handler_ownership_check(
         )
     versions = versions_store.list_for_runtime(friendly_runtime_name)
     for v in versions:
-        if v.owner_sub and v.owner_sub != user_id:
+        if v.owner_sub and v.owner_sub != user_id and (v.status or "pending") in {"pending", "succeeded"}:
             raise PermissionError(
                 f"Runtime name '{friendly_runtime_name}' is already in use by another tenant."
             )
@@ -164,9 +164,11 @@ def test_bob_cannot_clobber_alices_slot(stores):
 
 
 def test_bob_blocked_when_only_versions_row_exists(stores):
-    """Cover the partial-deploy case: Alice's earlier deploy wrote a
-    versions row but never reached status_update (so no slot row yet).
-    Bob still can't take her name."""
+    """Cover the IN-FLIGHT partial-deploy case: Alice's deploy wrote a `pending`
+    versions row but hasn't reached status_update yet (so no slot row). Bob still
+    can't take her name. (Bug 192b: a `failed` row would NOT block — see
+    test_failed_foreign_deploy_does_not_lock_name — but a `pending` in-flight one
+    represents a live claim and MUST block.)"""
     versions_store, slots_store = stores
     versions_store.put(
         AgentVersion(
@@ -176,7 +178,7 @@ def test_bob_blocked_when_only_versions_row_exists(stores):
             created_at="2026-05-28T10:00:00+00:00",
             deployment_id="dep-alice-partial",
             agentcore_runtime_name="alice_bot_xx",
-            status="failed",
+            status="pending",
         )
     )
     # No slots row.
@@ -230,3 +232,102 @@ def test_legacy_no_owner_row_passes_through(stores):
         friendly_runtime_name="legacy_bot",
         user_id="anyone",
     )  # no exception — current behavior
+
+
+# ---------------------------------------------------------------------------
+# Bug 192 — teardown must RELEASE the name (delete slots + versions rows) so a
+# later deploy of the same name doesn't 409 after the resource is gone.
+# ---------------------------------------------------------------------------
+
+
+def _teardown_release_name(versions_store, slots_store, *, friendly_runtime_name, caller_sub):
+    """Mirror of the Bug-192 name-release in deployment_handler.handle_delete_runtime:
+    delete only the caller's (or un-owned) slot+version rows for the name."""
+    for v in versions_store.list_for_runtime(friendly_runtime_name):
+        if not v.owner_sub or v.owner_sub == (caller_sub or ""):
+            versions_store.delete(friendly_runtime_name, v.version_id)
+    slot = slots_store.get(friendly_runtime_name)
+    if slot is not None and (not slot.owner_sub or slot.owner_sub == (caller_sub or "")):
+        slots_store.delete(friendly_runtime_name)
+
+
+def test_teardown_releases_name_so_redeploy_works(stores):
+    """After Alice tears down, the name frees up — a fresh deploy (even by Bob)
+    no longer hits the 409 cross-tenant lock (the resource + rows are gone)."""
+    versions_store, slots_store = stores
+    _seed_alice(versions_store, slots_store)
+    # Pre-condition: Bob is blocked while Alice's rows exist.
+    with pytest.raises(PermissionError):
+        _deploy_handler_ownership_check(
+            versions_store, slots_store, friendly_runtime_name="alice_bot", user_id="bob"
+        )
+    # Alice tears down her deployment.
+    _teardown_release_name(
+        versions_store, slots_store, friendly_runtime_name="alice_bot", caller_sub="alice"
+    )
+    # Rows are gone.
+    assert slots_store.get("alice_bot") is None
+    assert versions_store.list_for_runtime("alice_bot") == []
+    # Now anyone can deploy the name again — no 409.
+    _deploy_handler_ownership_check(
+        versions_store, slots_store, friendly_runtime_name="alice_bot", user_id="bob"
+    )
+
+
+def test_teardown_release_is_tenant_scoped(stores):
+    """A teardown by the WRONG owner must NOT release another tenant's name."""
+    versions_store, slots_store = stores
+    _seed_alice(versions_store, slots_store)
+    # Bob's teardown attempt must not delete Alice's rows.
+    _teardown_release_name(
+        versions_store, slots_store, friendly_runtime_name="alice_bot", caller_sub="bob"
+    )
+    assert slots_store.get("alice_bot") is not None
+    assert len(versions_store.list_for_runtime("alice_bot")) == 1
+
+
+# ---------------------------------------------------------------------------
+# Bug 192b — a FAILED foreign deploy must NOT lock the name (only live claims do).
+# ---------------------------------------------------------------------------
+
+
+def test_failed_foreign_deploy_does_not_lock_name(stores):
+    """A prior FAILED deploy by another sub left a versions row but no live
+    resource — it must NOT block a fresh deploy of the same name (the 'omar1'
+    customer 409). pending/succeeded rows still block."""
+    versions_store, slots_store = stores
+    versions_store.put(
+        AgentVersion(
+            runtime_name="omar1",
+            version_id=new_version_id(),
+            owner_sub="someone_else",
+            created_at="2026-06-26T12:27:00+00:00",
+            deployment_id="dep-failed",
+            agentcore_runtime_name="omar1_xx",
+            status="failed",
+        )
+    )
+    # No slots row (deploy never reached status_update). Bob can take the name.
+    _deploy_handler_ownership_check(
+        versions_store, slots_store, friendly_runtime_name="omar1", user_id="bob"
+    )  # no exception
+
+
+def test_succeeded_foreign_deploy_still_locks_name(stores):
+    """Sanity: a SUCCEEDED foreign row (live claim) still blocks (H-1 intact)."""
+    versions_store, slots_store = stores
+    versions_store.put(
+        AgentVersion(
+            runtime_name="live_bot",
+            version_id=new_version_id(),
+            owner_sub="alice",
+            created_at="2026-06-26T12:27:00+00:00",
+            deployment_id="dep-live",
+            agentcore_runtime_name="live_bot_xx",
+            status="succeeded",
+        )
+    )
+    with pytest.raises(PermissionError):
+        _deploy_handler_ownership_check(
+            versions_store, slots_store, friendly_runtime_name="live_bot", user_id="bob"
+        )

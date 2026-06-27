@@ -31,6 +31,10 @@ export const CONNECTION_COMPATIBILITY: Record<AgentCoreComponentType, AgentCoreC
   policy: ['runtime', 'gateway'],
   guardrails: ['runtime'],
   a2a: ['runtime'],
+  // `tool` covers both built-in/custom tools AND SaaS connector nodes (a
+  // connector is a `tool`-typed node with toolId "connector:<id>"). Both wire
+  // through the gateway (tool/connector -> gateway -> runtime); neither may
+  // attach directly to the runtime.
   tool: ['gateway'],
 };
 

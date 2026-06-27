@@ -60,24 +60,46 @@ def sanitize_aws_name(name: str) -> str:
     AWS AgentCore Gateway names must match: ([0-9a-zA-Z][-]?){1,48}
     Only alphanumeric characters and hyphens are allowed.
 
+    Thin wrapper over the shared ``naming.sanitize_agentcore_name`` (hyphen
+    style). Kept as a named function because callers/tests import it.
+
     Args:
         name: Original name
 
     Returns:
         Sanitized name with underscores replaced by hyphens
     """
-    import re
+    from app.services.naming import sanitize_agentcore_name
 
-    # Replace underscores with hyphens
-    sanitized = name.replace("_", "-")
-    # Remove any characters that aren't alphanumeric or hyphens
-    sanitized = re.sub(r"[^a-zA-Z0-9-]", "", sanitized)
-    # Remove consecutive hyphens
-    sanitized = re.sub(r"-+", "-", sanitized)
-    # Remove leading/trailing hyphens
-    sanitized = sanitized.strip("-")
-    # Truncate to 48 characters
-    return sanitized[:48]
+    return sanitize_agentcore_name(name, style="hyphen")
+
+
+def _record_resource_best_effort(deployment_id: str, region: str, resource: dict) -> None:
+    """Bug 9 parity: mirror the SFN step handlers' manifest writes onto the
+    DIRECT deploy path. Append one created sub-resource to ``created_resources``
+    so the generic delete path can tear it down. Best-effort by contract — a
+    DeploymentStateStore failure here must NEVER fail the deploy. Recorded TYPE
+    strings match the _delete_managed_resource dispatcher.
+    """
+    try:
+        from app.services.deployment_state_store import DeploymentStateStore
+
+        store = DeploymentStateStore(
+            table_name=os.environ.get(
+                "DEPLOYMENT_TABLE_NAME",
+                os.environ.get("DEPLOYMENTS_TABLE_NAME", "DeploymentState"),
+            ),
+            region=region,
+        )
+        resource.setdefault("region", region)
+        store.record_resource(deployment_id, resource)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Direct-path record_resource failed for %s (non-fatal): %s",
+            deployment_id,
+            resource.get("type"),
+            exc_info=True,
+        )
 
 
 # ============================================================================
@@ -296,17 +318,35 @@ def _create_transport():
 
 
 def get_full_tools_list(client):
-    \"\"\"Retrieve all tools from MCP client, handling pagination.\"\"\"
+    \"\"\"Retrieve tools from the MCP gateway, handling pagination.
+
+    Bug 189: large SaaS connectors expose MANY large-schema operations (Asana ~30,
+    GitHub ~1194). Loading ALL of them into the agent's system prompt blows the
+    model context window (observed: 204,908 tokens > 200,000 max ->
+    ContextWindowOverflowException, every invoke fails with a 500). Cap the number
+    of tools bound to the agent so it stays well under the context limit. An agent
+    cannot usefully wield hundreds of tools anyway; the cap keeps the most-recently
+    listed page(s) and is generous enough for real workflows. Override via
+    MAX_GATEWAY_TOOLS.
+
+    Default 20: observed per-tool cost for large SaaS schemas is ~6.7K tokens
+    (Asana's 30 tools = ~205K prompt tokens), so 20 tools (~137K) leaves headroom
+    under the 200K model context for the system prompt + conversation.\"\"\"
+    import os as _os
+    max_tools = int(_os.environ.get("MAX_GATEWAY_TOOLS", "20"))
     more_tools = True
     tools = []
     pagination_token = None
     while more_tools:
         tmp_tools = client.list_tools_sync(pagination_token=pagination_token)
         tools.extend(tmp_tools)
-        if tmp_tools.pagination_token is None:
+        if len(tools) >= max_tools or tmp_tools.pagination_token is None:
             more_tools = False
         else:
             pagination_token = tmp_tools.pagination_token
+    if len(tools) > max_tools:
+        print(f"Gateway exposed {len(tools)} tools; capping to {max_tools} to fit the model context window (set MAX_GATEWAY_TOOLS to change).")
+        tools = tools[:max_tools]
     return tools
 """)
 
@@ -443,9 +483,10 @@ def generate_mcp_server_code(
 ) -> str:
     """Generate FastMCP server code for an MCP Server Runtime.
 
-    Uses the ``mcp`` package (bundled in strands-mcp.zip) to expose tools
-    via the streamable-HTTP MCP transport.  The generated server runs on
-    the PORT env-var (default 8080) which AgentCore Runtime expects.
+    Uses the ``mcp`` package (bundled via the lean mcp bundle) to expose tools
+    via the streamable-HTTP MCP transport. The server binds port 8000 — the
+    AgentCore Runtime MCP-protocol ingress contract (Bug 173); 8080 made the
+    server unreachable and the gateway target timed out fetching tools.
     """
     tools = tools or ["get_order", "get_customer", "list_orders", "process_refund"]
     tq = '"""'
@@ -455,8 +496,15 @@ def generate_mcp_server_code(
     custom_tool_defs: list[dict] = []
     for t in tools:
         if isinstance(t, dict):
-            tool_names.append(t.get("toolName", t.get("tool_name", "")))
-            if t.get("implementation"):
+            # Bug 174: accept ALL common name keys (toolName / tool_name / name)
+            # and ALL body keys (implementation / code). The mcpServerConfig.tools
+            # shape is a free dict (no strict schema), and callers/tests commonly
+            # send {"name","description","code"} — the old parser only read
+            # toolName+implementation, so such tools produced an EMPTY server and
+            # the gateway target failed "MCP server ... has no tools".
+            name = t.get("toolName") or t.get("tool_name") or t.get("name") or ""
+            tool_names.append(name)
+            if t.get("implementation") or t.get("code"):
                 custom_tool_defs.append(t)
         else:
             tool_names.append(t)
@@ -555,15 +603,27 @@ def wikipedia_search(query: str) -> str:
         return json.dumps({"error": str(e)})
 ''')
 
-    # Generate custom tools from dict definitions (toolName + implementation)
+    # Generate custom tools from dict definitions (name/toolName + code/implementation)
     for ct in custom_tool_defs:
-        ct_name_raw = ct.get("toolName", ct.get("tool_name", "custom_tool"))
+        ct_name_raw = ct.get("toolName") or ct.get("tool_name") or ct.get("name") or "custom_tool"
         # Sanitize tool name to valid Python identifier (prevent code injection)
         ct_name = re.sub(r"[^a-zA-Z0-9_]", "_", ct_name_raw)
         if not ct_name or not ct_name[0].isalpha():
             ct_name = "tool_" + ct_name
         ct_desc = ct.get("description", "A custom tool").replace('"""', r'\"\"\"')
-        ct_impl = ct.get("implementation", "return {'result': 'ok'}")
+        # Bug 174: the body can arrive as `implementation` (a function BODY) or as
+        # `code` (often a COMPLETE `def name(...): ...`). If `code` already defines
+        # the function, emit it verbatim under @mcp.tool() (just ensure the def name
+        # matches ct_name); otherwise treat the text as the function body.
+        ct_code = ct.get("code")
+        if ct_code and "def " in ct_code:
+            body = ct_code.strip()
+            # Point the decorator at whatever function the code defines (its name
+            # becomes the MCP tool name). Normalise the registered name to ct_name
+            # only if the code's def name is unsafe; otherwise keep the author's.
+            tool_impls.append(f"\n@mcp.tool()\n{body}\n")
+            continue
+        ct_impl = ct.get("implementation") or ct.get("code") or "return {'result': 'ok'}"
         # Build parameter signature from inputSchema
         ct_schema = ct.get("inputSchema", ct.get("input_schema", {}))
         ct_props = ct_schema.get("properties", {})
@@ -628,7 +688,15 @@ import json
 import os
 from mcp.server.fastmcp import FastMCP
 
-PORT = int(os.environ.get("PORT", "8080"))
+# AgentCore Runtime with serverProtocol=MCP proxies the container's ingress to
+# port 8000 (the documented MCP-runtime contract — see the AWS
+# agentcore-samples MCP-server-as-a-target workshop, which uses the FastMCP
+# default 8000). Binding 8080 (Bug 173) left the MCP server unreachable behind
+# the runtime's MCP ingress: the Gateway's tool-discovery probe connected but
+# the MCP handshake never landed, so the target failed with "Runtime
+# initialization time exceeded ... 30s" and the gateway served 0 tools. Default
+# to 8000; honour PORT only if AgentCore ever overrides it.
+PORT = int(os.environ.get("PORT", "8000"))
 mcp = FastMCP(host="0.0.0.0", port=PORT, stateless_http=True)
 {mock_data}
 {tools_str}
@@ -695,6 +763,9 @@ class WorkflowExecutor:
         guardrails_config: Optional[dict] = None,
         knowledge_base_config: Optional[dict] = None,
         observability_config: Optional[dict] = None,
+        connectors: Optional[list] = None,
+        owner_sub: str = "",
+        deployment_mode: str = "runtime",
     ) -> DeploymentResult:
         """Deploy workflow to AWS AgentCore.
 
@@ -726,6 +797,7 @@ class WorkflowExecutor:
         connected_tools = connected_tools or []
         gateway_tools = gateway_tools or []
         custom_tools = custom_tools or []
+        connectors = connectors or []
         state = DeploymentState(
             deployment_id=deployment_id,
             workflow_id=workflow.id,
@@ -801,12 +873,17 @@ class WorkflowExecutor:
                 sts = boto3.client("sts")
                 account_id = sts.get_caller_identity()["Account"]
                 iam_client = boto3.client("iam")
+                _mcp_role_name = f"{mcp_name}-mcp-role"
                 mcp_role_arn = create_runtime_iam_role(
                     iam_client,
-                    f"{mcp_name}-mcp-role",
+                    _mcp_role_name,
                     account_id,
                     self.region,
                     [],  # MCP server doesn't need extra tool permissions
+                )
+                _record_resource_best_effort(
+                    deployment_id, self.region,
+                    {"type": "iam_role", "name": _mcp_role_name},
                 )
 
                 # Create MCP server runtime (protocol=MCP)
@@ -824,6 +901,10 @@ class WorkflowExecutor:
                 )
                 mcp_server_runtime_id = mcp_runtime_result["runtime_id"]
                 logger.info("Created MCP server runtime: %s", mcp_server_runtime_id)
+                _record_resource_best_effort(
+                    deployment_id, self.region,
+                    {"type": "agent_runtime", "id": mcp_server_runtime_id},
+                )
 
                 # Wait for MCP server runtime to be ready
                 mcp_launch = wait_for_runtime_ready(agentcore_ctrl, mcp_server_runtime_id)
@@ -868,6 +949,8 @@ class WorkflowExecutor:
                     gateway_tools=gateway_tools,
                     identity_config=identity_config,
                     custom_tools=custom_tools,
+                    connectors=connectors,
+                    owner_sub=owner_sub,
                     mcp_server_runtime_arn=mcp_server_runtime_arn,
                 )
 
@@ -879,6 +962,36 @@ class WorkflowExecutor:
                     gateway_result.get("gateway_url"),
                     gateway_result.get("gateway_id"),
                 )
+
+                # Bug 9 parity: mirror gateway_step's manifest writes here so the
+                # generic delete path can tear down the gateway + Cognito pool +
+                # tool lambdas/roles + connector secrets/providers on the direct
+                # path too. Types match _delete_managed_resource exactly.
+                _gw = gateway_result
+                if _gw.get("gateway_id"):
+                    _record_resource_best_effort(deployment_id, self.region, {"type": "gateway", "id": _gw["gateway_id"]})
+                if _gw.get("gateway_name"):
+                    _record_resource_best_effort(deployment_id, self.region, {"type": "iam_role", "name": f"AgentCoreGateway-{_gw['gateway_name']}"})
+                _gw_pool = (_gw.get("client_info") or {}).get("user_pool_id")
+                if _gw_pool:
+                    _record_resource_best_effort(deployment_id, self.region, {"type": "cognito_user_pool", "id": _gw_pool})
+                for _fn in [_gw.get("lambda_function_name"), _gw.get("kb_lambda_name"), *( _gw.get("custom_tool_lambdas") or [])]:
+                    if _fn:
+                        _record_resource_best_effort(deployment_id, self.region, {"type": "lambda", "name": _fn})
+                for _rn in _gw.get("custom_tool_roles") or []:
+                    if _rn:
+                        _record_resource_best_effort(deployment_id, self.region, {"type": "iam_role", "name": _rn})
+                for _sa in _gw.get("connector_secret_arns") or []:
+                    if _sa:
+                        _record_resource_best_effort(deployment_id, self.region, {"type": "secret", "id": _sa})
+                for _entry in _gw.get("connector_credential_providers") or []:
+                    if not _entry:
+                        continue
+                    _kind, _, _pname = str(_entry).partition(":")
+                    if not _pname:
+                        _kind, _pname = "OAUTH", str(_entry)
+                    _ptype = "api_key_credential_provider" if _kind.upper() == "API_KEY" else "oauth2_credential_provider"
+                    _record_resource_best_effort(deployment_id, self.region, {"type": _ptype, "name": _pname})
 
             # ------------------------------------------------------------------
             # Phase 1.5: Deploy Policy Engine (if policy node is connected)
@@ -1158,6 +1271,10 @@ class WorkflowExecutor:
                             import time as _time
 
                             _time.sleep(10)  # IAM propagation
+                            _record_resource_best_effort(
+                                deployment_id, self.region,
+                                {"type": "iam_role", "name": memory_role_name},
+                            )
                         except iam_client.exceptions.EntityAlreadyExistsException:
                             memory_role_arn = iam_client.get_role(RoleName=memory_role_name)["Role"]["Arn"]
 
@@ -1242,6 +1359,11 @@ class WorkflowExecutor:
                                     memory_id = arn.split(":memory/")[-1]
                                     break
                         logger.info("Created memory resource: %s", memory_id)
+                        if memory_id:
+                            _record_resource_best_effort(
+                                deployment_id, self.region,
+                                {"type": "memory", "id": memory_id},
+                            )
 
                         if memory_id:
                             # Wait for memory to become ACTIVE
@@ -1300,6 +1422,161 @@ class WorkflowExecutor:
                 logger.warning(
                     "Knowledge Base deployment is only supported via the SFN deploy path. "
                     "Use the deployed platform (not local dev) to deploy Knowledge Base configurations."
+                )
+
+            # ------------------------------------------------------------------
+            # Phase B branch — AgentCore Harness (managed authoring path).
+            # When deployment_mode == "harness" the shared steps above (gateway,
+            # memory) have already run, so the harness can wire a connected
+            # gateway + memory. We SKIP codegen / S3 upload / runtime IAM /
+            # runtime configure+launch entirely and instead create+wait a
+            # managed Harness, mirroring how this direct path calls
+            # runtime_deployer for the default runtime mode. Bug 9: this is the
+            # direct-path twin of step_handlers/harness_step.py.
+            # ------------------------------------------------------------------
+            if deployment_mode == "harness":
+                from app.services import harness_deployer
+
+                harness_name = harness_deployer.sanitize_harness_name(runtime_config.name)
+                gateway_arn = None
+                if gateway_result:
+                    gateway_arn = gateway_result.get("gateway_arn") or gateway_result.get("arn")
+
+                memory_arn = None
+                if memory_id:
+                    try:
+                        sts = boto3.client("sts")
+                        account_id = sts.get_caller_identity()["Account"]
+                        memory_arn = (
+                            f"arn:aws:bedrock-agentcore:{self.region}:{account_id}:memory/{memory_id}"
+                        )
+                    except Exception:
+                        logger.warning("Could not resolve memory ARN for harness")
+
+                iam_client = boto3.client("iam")
+                harness_role_arn = harness_deployer.get_shared_or_new_harness_role(
+                    iam_client, harness_name
+                )
+
+                agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=self.region)
+                create_result = harness_deployer.create_harness(
+                    agentcore_ctrl,
+                    harness_name,
+                    harness_role_arn,
+                    model_id=runtime_config.model.model_id or None,
+                    system_prompt=runtime_config.system_prompt or None,
+                    gateway_arn=gateway_arn,
+                    memory_arn=memory_arn,
+                )
+                harness_id = create_result.get("harness_id", "")
+                if not harness_id:
+                    raise RuntimeError("create_harness returned no harness_id")
+                early_harness_arn = create_result.get("arn", "")
+
+                # Bug 9 parity: mirror harness_step's manifest writes.
+                _record_resource_best_effort(
+                    deployment_id, self.region,
+                    {"type": "harness", "id": harness_id},
+                )
+                if not os.environ.get("SHARED_HARNESS_ROLE_ARN", ""):
+                    _record_resource_best_effort(
+                        deployment_id, self.region,
+                        {"type": "iam_role", "name": f"AgentCoreHarness-{harness_name}"},
+                    )
+
+                # ORPHAN GUARD (Bug 153): the AWS harness resource now exists.
+                # wait_for_harness_ready can run for up to 600s; persist the
+                # destroyable handle (harness_id/arn, mirrored into
+                # runtime_id/runtime_arn for the GSI lookup) onto the record NOW
+                # with status IN_PROGRESS, so a failure/timeout during the wait
+                # still leaves the delete path something to clean up.
+                try:
+                    from app.services.deployment_state_store import DeploymentStateStore as _DSS
+
+                    _early_store = _DSS(
+                        table_name=os.environ.get(
+                            "DEPLOYMENT_TABLE_NAME",
+                            os.environ.get("DEPLOYMENTS_TABLE_NAME", "DeploymentState"),
+                        ),
+                        region=self.region,
+                    )
+                    if _early_store.get(deployment_id) is not None:
+                        from app.models.deployment_models import DeploymentStatusEnum as _DSE
+
+                        _early_store.update_status(
+                            deployment_id,
+                            _DSE.IN_PROGRESS,
+                            runtime_id=harness_id,
+                            runtime_arn=early_harness_arn or None,
+                            harness_id=harness_id,
+                            harness_arn=early_harness_arn or None,
+                            deployment_mode="harness",
+                        )
+                except Exception:
+                    logger.warning(
+                        "Could not pre-persist harness handle for %s (orphan guard)",
+                        deployment_id,
+                        exc_info=True,
+                    )
+
+                ready = harness_deployer.wait_for_harness_ready(agentcore_ctrl, harness_id)
+                if not ready.get("success"):
+                    raise RuntimeError(
+                        f"Harness failed to become ready: {ready.get('error', 'unknown error')}"
+                    )
+                harness_arn = ready.get("arn") or create_result.get("arn", "")
+
+                state.phase = DeploymentPhase.COMPLETED
+                state.runtime_id = harness_id
+                state.endpoint_url = harness_arn
+                state.completed_at = datetime.now(timezone.utc)
+
+                created_resources = [f"harness:{harness_name}"]
+                if gateway_result:
+                    created_resources.append(f"gateway:{gateway_result.get('gateway_url', '')}")
+
+                # Persist harness id/arn + deployment_mode to the record so the
+                # delete/test paths route to harness_deployer.
+                try:
+                    from app.services.deployment_state_store import DeploymentStateStore as _DSS
+
+                    _store = _DSS(
+                        table_name=os.environ.get(
+                            "DEPLOYMENT_TABLE_NAME",
+                            os.environ.get("DEPLOYMENTS_TABLE_NAME", "DeploymentState"),
+                        ),
+                        region=self.region,
+                    )
+                    if _store.get(deployment_id) is not None:
+                        from app.models.deployment_models import DeploymentStatusEnum as _DSE
+
+                        _store.update_status(
+                            deployment_id,
+                            _DSE.SUCCEEDED,
+                            completed_at=state.completed_at,
+                            runtime_endpoint=harness_arn,
+                            # Mirror the SFN path: persist the harness handle into
+                            # the runtime_id/runtime_arn fields so the DELETE /
+                            # test-runtime GSI lookup finds the record and the
+                            # deployment_mode branch routes to harness_deployer.
+                            runtime_id=harness_id,
+                            runtime_arn=harness_arn,
+                            harness_id=harness_id,
+                            harness_arn=harness_arn,
+                            deployment_mode="harness",
+                            gateway_result=gateway_result or None,
+                        )
+                except Exception:
+                    logger.warning(
+                        "Could not persist harness record for %s", deployment_id, exc_info=True
+                    )
+
+                return DeploymentResult(
+                    deployment_id=deployment_id,
+                    status="success",
+                    endpoint_url=harness_arn,
+                    created_resources=created_resources,
+                    runtime_id=harness_id,
                 )
 
             if template_id:
@@ -1439,13 +1716,18 @@ class WorkflowExecutor:
             else:
                 _otel_secret = (observability_config or {}).get("auth_header_secret_arn") \
                     or (observability_config or {}).get("authHeaderSecretArn")
+            _runtime_role_name = f"{runtime_config.name}-role"
             role_arn = create_runtime_iam_role(
                 iam_client,
-                f"{runtime_config.name}-role",
+                _runtime_role_name,
                 account_id,
                 self.region,
                 connected_tools,
                 otel_secret_arn=_otel_secret,
+            )
+            _record_resource_best_effort(
+                deployment_id, self.region,
+                {"type": "iam_role", "name": _runtime_role_name},
             )
 
             agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=self.region)
@@ -1501,6 +1783,10 @@ class WorkflowExecutor:
                 env_vars,
             )
             state.runtime_id = runtime_result["runtime_id"]
+            _record_resource_best_effort(
+                deployment_id, self.region,
+                {"type": "agent_runtime", "id": state.runtime_id},
+            )
 
             # ------------------------------------------------------------------
             # Phase 5: Wait for runtime to become ready

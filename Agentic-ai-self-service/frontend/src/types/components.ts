@@ -504,6 +504,63 @@ export interface KnowledgeBaseToolConfig extends ToolConfiguration {
 }
 
 // ============================================================================
+// Connector Configuration (Phase A — SaaS connectors)
+// ============================================================================
+
+// Connector nodes are `tool`-typed nodes whose `toolId` is prefixed with
+// CONNECTOR_TOOL_PREFIX (e.g. "connector:github"). They wire to the gateway
+// exactly like tools, but the gateway turns them into OpenAPI MCP targets
+// backed by an AgentCore credential provider + Secrets Manager secret.
+export const CONNECTOR_TOOL_PREFIX = 'connector:';
+
+// Branded catalog ids understood by backend services/connectors.py, plus the
+// generic OpenAPI/MCP connector. `string` keeps it open for future catalog
+// growth without a frontend change.
+export type ConnectorId =
+  | 'jira'
+  | 'asana'
+  | 'slack'
+  | 'github'
+  | 'salesforce'
+  | 'generic_openapi'
+  | string;
+
+// Mirrors AUTH_API_KEY / AUTH_OAUTH2_CC in services/connectors.py.
+export type ConnectorAuthMethod = 'api_key' | 'oauth2_cc';
+
+// Where an API key is injected on outbound requests (matches the boto3
+// credentialLocation enum: HEADER | QUERY_PARAMETER).
+export type ConnectorCredentialLocation = 'HEADER' | 'QUERY_PARAMETER';
+
+export interface ConnectorConfiguration extends ToolConfiguration {
+  // Marks this tool node as a SaaS connector so dispatch/extraction can branch.
+  isConnector: true;
+  connectorId: ConnectorId;
+  authMethod: ConnectorAuthMethod;
+  // Set true once the secret has been handed to the backend (Secrets Manager).
+  // The raw `secretValue` is transient and stripped before the node is
+  // persisted — never written to the canvas JSON / DDB.
+  configured: boolean;
+  // Transient: the raw secret the user typed. Stripped before persist; only
+  // forwarded to the deploy payload (which mints a Secrets Manager secret).
+  secretValue?: string;
+  // Reference to an already-minted secret (returned by the credential POST).
+  secretArn?: string;
+  // oauth2_cc only
+  oauthVendor?: string;
+  scopes?: string[];
+  clientId?: string;
+  discoveryUrl?: string;
+  // api_key only (catalog provides sensible defaults)
+  credentialLocation?: ConnectorCredentialLocation;
+  credentialParameterName?: string;
+  credentialPrefix?: string;
+  // generic_openapi only — one of a hosted spec URL or an inline spec body.
+  specUrl?: string;
+  specContent?: string;
+}
+
+// ============================================================================
 // Union Type for All Component Configurations
 // ============================================================================
 
@@ -520,4 +577,5 @@ export type ComponentConfiguration =
   | GuardrailsConfiguration
   | A2AConfiguration
   | ToolConfiguration
-  | KnowledgeBaseToolConfig;
+  | KnowledgeBaseToolConfig
+  | ConnectorConfiguration;

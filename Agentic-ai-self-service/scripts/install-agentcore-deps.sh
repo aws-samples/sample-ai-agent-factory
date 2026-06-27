@@ -109,11 +109,26 @@ main() {
   install_packages "${strands_dir}" bedrock-agentcore boto3 strands-agents strands-agents-tools mcp "${otel_packages[@]}"
   create_bundle_zip "${strands_dir}" "${OUTPUT_DIR}/strands-mcp.zip"
 
-  local base_size strands_size
+  # Bundle 3: mcp-lean (Bug 171) — the generated MCP SERVER only does
+  # `from mcp.server.fastmcp import FastMCP` (+ json/os); it does NOT import
+  # strands or otel. Bundling it with the heavy strands-mcp.zip made the MCP
+  # container cold-start exceed the Gateway's hard 30s tool-discovery probe, so
+  # the MCP target landed FAILED ("Runtime initialization time exceeded ...
+  # 30s") and the gateway served 0 tools. A lean bundle (just mcp + bedrock-
+  # agentcore runtime + boto3, NO strands, NO otel) cuts cold-start well under
+  # the probe limit. The MCP server step prefers this bundle, falling back to
+  # strands-mcp.zip if absent.
+  log_info "Building mcp-lean bundle (bedrock-agentcore + boto3 + mcp only — fast MCP-server cold start)..."
+  local mcplean_dir="${OUTPUT_DIR}/mcp-lean"
+  install_packages "${mcplean_dir}" bedrock-agentcore boto3 mcp
+  create_bundle_zip "${mcplean_dir}" "${OUTPUT_DIR}/mcp-lean.zip"
+
+  local base_size strands_size mcplean_size
   base_size=$(du -sh "${OUTPUT_DIR}/base.zip" | cut -f1)
   strands_size=$(du -sh "${OUTPUT_DIR}/strands-mcp.zip" | cut -f1)
+  mcplean_size=$(du -sh "${OUTPUT_DIR}/mcp-lean.zip" | cut -f1)
 
-  log_success "Bundles created: base.zip (${base_size}), strands-mcp.zip (${strands_size})"
+  log_success "Bundles created: base.zip (${base_size}), strands-mcp.zip (${strands_size}), mcp-lean.zip (${mcplean_size})"
 }
 
 main "$@"

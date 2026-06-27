@@ -3,7 +3,7 @@
 import re
 from typing import Annotated, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .enums import (
     A2ACommunicationPattern,
@@ -172,6 +172,23 @@ class GatewayConfiguration(BaseModel):
     target_config: GatewayTargetConfig
     enable_semantic_search: bool = True
 
+    @field_validator("name")
+    @classmethod
+    def _normalize_gateway_name(cls, v: str) -> str:
+        """Shift-left the AgentCore Gateway name regex (hyphen style) to the
+        API boundary. NORMALIZE a fixable name (e.g. "My Gateway") rather than
+        block the deploy; reject only names that sanitize to empty."""
+        from ..services.naming import is_valid_agentcore_name, sanitize_agentcore_name
+
+        if v is None or not str(v).strip():
+            raise ValueError("gateway name must not be empty")
+        if is_valid_agentcore_name(v, style="hyphen"):
+            return v
+        normalized = sanitize_agentcore_name(v, style="hyphen")
+        if not normalized:
+            raise ValueError(f"gateway name '{v}' cannot be normalized to a valid AgentCore name")
+        return normalized
+
     # Credentials (optional, for OpenAPI targets)
     api_key_credentials: Optional[APIKeyCredentials] = None
     oauth2_credentials: Optional[OAuth2Credentials] = None
@@ -213,6 +230,96 @@ class GatewayConfiguration(BaseModel):
 
 
 # ============================================================================
+# SaaS Connector Configuration Model
+# ============================================================================
+
+
+class ConnectorConfig(BaseModel):
+    """A single SaaS connector to deploy as a Gateway OpenAPI target.
+
+    Mirrors the per-connector dict that ``gateway_deployer.deploy_gateway`` expects
+    (snake_case canonical fields). ``connector_id`` is validated against the curated
+    catalog (``services.connectors.known_connector_ids``) and ``auth_method`` against
+    that connector's advertised methods (``services.connectors.supports_auth``) — both
+    loud-reject at the API boundary so a typo is a 422 instead of a mid-SFN crash
+    (mirrors the GatewayConfiguration / RuntimeConfig validation style).
+
+    HARD RULE — secret hygiene: ``secret_value`` is WRITE-ONLY. It is a transient
+    raw credential used once to mint a Secrets Manager secret in the gateway step;
+    it is excluded from serialization (``Field(exclude=True)``) so it never lands in
+    the canvas JSON, the deployment record, or logs. Only ``secret_arn`` is persisted.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    connector_id: str = Field(alias="connectorId", min_length=1)
+    auth_method: Literal["api_key", "oauth2_cc"] = Field(alias="authMethod")
+
+    # Write-only raw credential — minted into a Secrets Manager secret then dropped.
+    # exclude=True keeps it out of every model_dump()/serialized payload (DDB, canvas,
+    # logs); repr=False keeps it out of __repr__/exception output.
+    secret_value: Optional[str] = Field(
+        alias="secretValue", default=None, exclude=True, repr=False
+    )
+    secret_arn: Optional[str] = Field(alias="secretArn", default=None)
+
+    # OpenAPI spec source (one of; catalog default used if neither).
+    spec_url: Optional[str] = Field(alias="specUrl", default=None)
+    spec_inline: Optional[str] = Field(alias="specInline", default=None)
+
+    # oauth2_cc only.
+    scopes: list[str] = Field(default_factory=list)
+    client_id: Optional[str] = Field(alias="clientId", default=None)
+    oauth_vendor: Optional[str] = Field(alias="oauthVendor", default=None)
+    discovery_url: Optional[str] = Field(alias="discoveryUrl", default=None)
+
+    # api_key only (catalog provides defaults).
+    credential_location: Optional[str] = Field(alias="credentialLocation", default=None)
+    credential_parameter_name: Optional[str] = Field(
+        alias="credentialParameterName", default=None
+    )
+    credential_prefix: Optional[str] = Field(alias="credentialPrefix", default=None)
+
+    @field_validator("credential_location", mode="before")
+    @classmethod
+    def _normalize_credential_location(cls, v):
+        """Normalize + constrain to the Gateway API enum (HEADER|QUERY_PARAMETER).
+
+        A bad literal becomes a clean 422 here instead of a mid-deploy boto3
+        ValidationException. Case-insensitive so 'header' from the UI still passes.
+        """
+        if v is None or v == "":
+            return None
+        norm = str(v).strip().upper()
+        if norm not in ("HEADER", "QUERY_PARAMETER"):
+            raise ValueError(
+                "credential_location must be 'HEADER' or 'QUERY_PARAMETER' "
+                f"(got '{v}')."
+            )
+        return norm
+
+    @model_validator(mode="after")
+    def _validate_connector(self) -> "ConnectorConfig":
+        """Loud-reject unknown connector ids / unsupported auth methods."""
+        # Lazy import: the connectors catalog lives under app.services, and
+        # importing that package at module load would create a cycle
+        # (services -> validation -> app.models). The module itself is pure data.
+        from ..services import connectors as connectors_catalog
+
+        if self.connector_id not in connectors_catalog.known_connector_ids():
+            raise ValueError(
+                f"connector_id '{self.connector_id}' is not a known connector. "
+                f"Valid ids: {connectors_catalog.known_connector_ids()}."
+            )
+        if not connectors_catalog.supports_auth(self.connector_id, self.auth_method):
+            raise ValueError(
+                f"connector '{self.connector_id}' does not support auth_method "
+                f"'{self.auth_method}'."
+            )
+        return self
+
+
+# ============================================================================
 # Memory Configuration Models
 # ============================================================================
 
@@ -224,6 +331,23 @@ class MemoryConfiguration(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     enabled: bool = True
     # Memory is typically configured at runtime level
+
+    @field_validator("name")
+    @classmethod
+    def _normalize_memory_name(cls, v: str) -> str:
+        """Shift-left the AgentCore Memory name regex (underscore style) to the
+        API boundary (Bug 155). NORMALIZE a fixable name (e.g. "My Memory")
+        rather than block the deploy; reject only names that sanitize to empty."""
+        from ..services.naming import is_valid_agentcore_name, sanitize_agentcore_name
+
+        if v is None or not str(v).strip():
+            raise ValueError("memory name must not be empty")
+        if is_valid_agentcore_name(v, style="underscore"):
+            return v
+        normalized = sanitize_agentcore_name(v, style="underscore", prefix="mem")
+        if not normalized:
+            raise ValueError(f"memory name '{v}' cannot be normalized to a valid AgentCore name")
+        return normalized
 
 
 # ============================================================================

@@ -37,11 +37,15 @@ def sanitize_runtime_name(name: str) -> str:
     """Sanitize a name for agentcore requirements.
 
     Rules: starts with a letter, only letters/numbers/underscores, max 48 chars.
+
+    Thin wrapper over the shared ``naming.sanitize_agentcore_name`` (underscore
+    style) — kept as a named function because step handlers/tests import it.
     """
-    sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", name).lower()[:48]
-    if sanitized and not sanitized[0].isalpha():
-        sanitized = "agent_" + sanitized
-    return sanitized or "agent_default"
+    from app.services.naming import sanitize_agentcore_name
+
+    return sanitize_agentcore_name(
+        name, style="underscore", prefix="agent", fallback="agent_default"
+    )
 
 
 def _merge_deps_into_zip(target_zf: zipfile.ZipFile, bundle_bytes: bytes) -> None:
@@ -515,6 +519,63 @@ def wait_for_runtime_ready(agentcore_ctrl, runtime_id: str, timeout: int = 600) 
         "success": False,
         "runtime_id": runtime_id,
         "error": f"Runtime did not become READY within {timeout}s",
+    }
+
+
+def wait_for_default_endpoint_ready(
+    agentcore_ctrl, runtime_id: str, timeout: int = 180
+) -> dict:
+    """Poll until the runtime's DEFAULT endpoint is READY (Bug 166).
+
+    ``get_agent_runtime`` returning READY is NOT sufficient to invoke: the
+    AgentCore data plane invokes against an *endpoint* qualifier (DEFAULT), and
+    the DEFAULT endpoint is provisioned ASYNCHRONOUSLY — it can still be CREATING
+    (or not yet listed) for a window AFTER the runtime itself reports READY.
+    Invoking in that window fails with ``ResourceNotFoundException: No endpoint
+    or agent found with qualifier 'DEFAULT'`` — surfaced to the user as the
+    opaque "Runtime not found." So the launch step must gate on the ENDPOINT,
+    not just the runtime.
+
+    Returns ``{"success": True, "endpoint_arn": ...}`` once DEFAULT is READY.
+    The endpoint is auto-created by ``create_agent_runtime``; we only WAIT for
+    it here (no explicit create — that would race the service-side creator and
+    raise ConflictException).
+    """
+    start = time.time()
+    last_seen = ""
+    while time.time() - start < timeout:
+        try:
+            eps = agentcore_ctrl.list_agent_runtime_endpoints(
+                agentRuntimeId=runtime_id
+            ).get("runtimeEndpoints", [])
+            for ep in eps:
+                if ep.get("name") == "DEFAULT":
+                    last_seen = ep.get("status", "")
+                    if last_seen == "READY":
+                        return {
+                            "success": True,
+                            "endpoint_arn": ep.get("agentRuntimeEndpointArn", ""),
+                            "status": "READY",
+                        }
+                    if "FAILED" in last_seen:
+                        return {
+                            "success": False,
+                            "status": last_seen,
+                            "error": f"DEFAULT endpoint entered {last_seen}",
+                        }
+        except Exception as e:  # noqa: BLE001 — transient list errors are retried
+            logger.warning(
+                "Error listing endpoints for runtime %s (will retry)", runtime_id
+            )
+        time.sleep(5)
+
+    return {
+        "success": False,
+        "status": last_seen or "ABSENT",
+        "error": (
+            f"DEFAULT endpoint for runtime {runtime_id} did not become READY "
+            f"within {timeout}s (last status: {last_seen or 'not listed'})"
+        ),
     }
 
 
