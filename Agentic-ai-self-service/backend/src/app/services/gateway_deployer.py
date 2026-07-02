@@ -3135,6 +3135,7 @@ def deploy_gateway(
                 try:
                     _abort_cfg = {
                         "gateway_id": gateway["gatewayId"],
+                        "gateway_name": gateway_name,  # P-PLAT-TEARDOWN: so IAM role is cleaned
                         "client_info": client_info,
                         "connector_credential_providers": connector_credential_providers,
                         "connector_secret_arns": connector_secret_arns,
@@ -3354,6 +3355,27 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: Opti
         except Exception as e:
             if "NoSuchEntity" not in str(e):
                 cleanup_log.append(f"IAM role cleanup error for {role_name}: {e}")
+
+    # Delete the gateway's own execution role (AgentCoreGateway-<gateway_name>).
+    # P-PLAT-TEARDOWN: failed deploys leave orphaned IAM roles because the gateway
+    # step creates the role early (before targets) but only records resources at
+    # the END on success. On failure the role never gets into the manifest. Delete
+    # it explicitly here so abort-cleanup (line ~3143) catches it.
+    gw_name = gateway_config.get("gateway_name")
+    if gw_name:
+        gw_role_name = f"AgentCoreGateway-{gw_name}"
+        try:
+            iam_client = _create_iam_client()
+            # Role may have inline + attached policies; detach all before delete.
+            for pn in iam_client.list_role_policies(RoleName=gw_role_name).get("PolicyNames", []):
+                iam_client.delete_role_policy(RoleName=gw_role_name, PolicyName=pn)
+            for ap in iam_client.list_attached_role_policies(RoleName=gw_role_name).get("AttachedPolicies", []):
+                iam_client.detach_role_policy(RoleName=gw_role_name, PolicyArn=ap["PolicyArn"])
+            iam_client.delete_role(RoleName=gw_role_name)
+            cleanup_log.append(f"Gateway IAM role {gw_role_name} deleted")
+        except Exception as e:  # noqa: BLE001
+            if "NoSuchEntity" not in str(e):
+                cleanup_log.append(f"Gateway IAM role cleanup error: {e}")
 
     # Delete SaaS connector credential providers (API-key OR OAuth2 — try both,
     # since the stored name doesn't record the type). Non-fatal per item.

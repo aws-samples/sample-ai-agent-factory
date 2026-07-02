@@ -86,6 +86,31 @@ _PROVIDER_DEFAULT_ENDPOINTS: dict[str, str] = {
 }
 
 
+# P-PLAT-010 / Bug 194: env that enables AgentCore-native ADOT observability
+# WITHOUT injecting a 3rd-party/localhost OTLP endpoint. This flag is REQUIRED
+# for gen_ai.usage spans to reach the runtime's
+# /aws/bedrock-agentcore/runtimes/{rid}-DEFAULT log group — which
+# cost_tracking.summarize_from_logs() reads for GET /cost. Without it the
+# managed deploy path creates NO TracerProvider at all (StrandsTelemetry only
+# runs when OTEL_EXPORTER_OTLP_ENDPOINT is set), so NO spans are emitted
+# anywhere and by_model stays {} (Bug 194 root cause).
+# CAVEAT: prior live testing showed this flag ALONE did not produce spans —
+# the managed runtime container never starts OTEL auto-instrumentation (the
+# entrypoint is not launched under opentelemetry-instrument), so the deeper
+# fix lives in the runtime container bootstrap. See tasks/lessons.md Bug 194.
+# OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental is required for the
+# token-count attributes to appear on those spans (Bug 17). We deliberately do
+# NOT set OTEL_EXPORTER_OTLP_ENDPOINT here — ADOT supplies the AgentCore
+# collector endpoint itself; injecting one would route spans off to a 3rd party
+# (or a non-existent localhost:4318 sidecar, Bug 18) instead of -DEFAULT.
+# Account-level prerequisite (CloudWatch Transaction Search trace-segment
+# destination = CloudWatchLogs) is operator-managed and confirmed enabled.
+_AGENTCORE_NATIVE_OBSERVABILITY_ENV: dict[str, str] = {
+    "AGENT_OBSERVABILITY_ENABLED": "true",
+    "OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental",
+}
+
+
 @lru_cache(maxsize=1)
 def get_platform_observability_defaults() -> Optional[dict]:
     """Read platform-level OTEL defaults from SSM Parameter Store.
@@ -241,18 +266,48 @@ def build_otel_env_vars(
         return {}
 
     provider = obs.get("provider", "langfuse")
-    endpoint = obs.get("otlp_endpoint") or obs.get("otlpEndpoint") \
-        or _PROVIDER_DEFAULT_ENDPOINTS.get(provider, "")
+    caller_endpoint = obs.get("otlp_endpoint") or obs.get("otlpEndpoint") or ""
+    caller_secret = (
+        obs.get("auth_header_secret_arn") or obs.get("authHeaderSecretArn") or ""
+    )
+    caller_headers = obs.get("extra_headers") or obs.get("extraHeaders") or {}
+
+    # P-PLAT-010 cost-rollup gap (Bug 194): a 3rd-party provider default
+    # endpoint (e.g. langfuse's cloud URL) is only usable when the caller
+    # actually supplied credentials for it. If observability is "enabled" by
+    # default but the caller gave NO endpoint AND NO credentials (no secret
+    # ARN, no auth headers), injecting OTEL_EXPORTER_OTLP_ENDPOINT=<provider-
+    # cloud-url> would route the gen_ai.usage spans off to an unauthenticated
+    # 3rd-party endpoint (401, dropped) instead of the -DEFAULT log group that
+    # cost_tracking.summarize_from_logs() reads, leaving by_model={}.
+    #
+    # So: only fall back to a provider DEFAULT endpoint when the caller has
+    # credentials that make it usable. Otherwise we do NOT inject a 3rd-party
+    # endpoint; instead we ENABLE AgentCore-native ADOT observability so the
+    # runtime emits gen_ai.usage spans to its -DEFAULT log group (the source
+    # GET /cost reads). Bug 194 proved that leaving OTEL_* entirely unset does
+    # NOT preserve any native export — the managed deploy path creates no
+    # TracerProvider, so nothing is emitted at all. An explicit caller endpoint
+    # (or platform default, handled in the `if plat:` block above) is always
+    # honoured. This native path does NOT set OTEL_EXPORTER_OTLP_ENDPOINT, so
+    # it does not reintroduce the non-existent localhost:4318 sidecar (Bug 18).
+    endpoint = caller_endpoint
     if not endpoint:
-        # Without an endpoint there's nothing to export to.
-        return {}
+        default_endpoint = _PROVIDER_DEFAULT_ENDPOINTS.get(provider, "")
+        if default_endpoint and (caller_secret or caller_headers):
+            endpoint = default_endpoint
+    if not endpoint:
+        # No usable 3rd-party export target, but observability IS enabled
+        # (explicitly or by default). Turn on AgentCore-native ADOT capture so
+        # gen_ai.usage spans land in the -DEFAULT log group for cost rollup.
+        return dict(_AGENTCORE_NATIVE_OBSERVABILITY_ENV)
 
     protocol = obs.get("otlp_protocol") or obs.get("otlpProtocol", "http/protobuf")
     service_name = obs.get("service_name") or obs.get("serviceName") or runtime_name
     sample_rate = obs.get("sample_rate") if "sample_rate" in obs \
         else obs.get("sampleRate", 1.0)
     resource_attrs = obs.get("resource_attributes") or obs.get("resourceAttributes") or {}
-    secret_arn = obs.get("auth_header_secret_arn") or obs.get("authHeaderSecretArn") or ""
+    secret_arn = caller_secret
     if secret_arn and not plat:
         # Critic Finding 1: per-canvas (tenant-supplied) ARNs MUST live in
         # the agentcore-otel/ namespace. Skip validation when plat is set —
@@ -260,7 +315,7 @@ def build_otel_env_vars(
         # values which are admin-managed via SSM (see the `if plat:` block
         # above). We deliberately do not double-check platform defaults.
         _validate_user_otel_secret_arn(secret_arn)
-    extra_headers = obs.get("extra_headers") or obs.get("extraHeaders") or {}
+    extra_headers = caller_headers
 
     env: dict[str, str] = {
         "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,

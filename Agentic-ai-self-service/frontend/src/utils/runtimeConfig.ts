@@ -51,10 +51,13 @@ export const AVAILABLE_MODELS: ModelOption[] = regionalize([
   // Amazon Bedrock Models (provider: 'bedrock') — default, IAM-based, no API key
   // ============================================================================
 
-  // Anthropic Claude 4.5 Series — Bedrock GA Sep–Nov 2025
-  { provider: 'bedrock', modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0', label: 'Claude Sonnet 4.5', maxTokens: 200000 },
+  // Anthropic Claude current series — note: new-generation IDs have no date
+  // suffix and no ":N" version suffix (verified live via bedrock-runtime
+  // converse, 2026-07-01).
+  { provider: 'bedrock', modelId: 'us.anthropic.claude-sonnet-5', label: 'Claude Sonnet 5', maxTokens: 200000 },
+  { provider: 'bedrock', modelId: 'us.anthropic.claude-sonnet-4-6', label: 'Claude Sonnet 4.6', maxTokens: 200000 },
+  { provider: 'bedrock', modelId: 'us.anthropic.claude-opus-4-8', label: 'Claude Opus 4.8', maxTokens: 200000 },
   { provider: 'bedrock', modelId: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', label: 'Claude Haiku 4.5', maxTokens: 200000 },
-  { provider: 'bedrock', modelId: 'us.anthropic.claude-opus-4-5-20251101-v1:0', label: 'Claude Opus 4.5', maxTokens: 200000 },
   // NOTE: Older models are intentionally excluded by policy. Only models
   // published on Amazon Bedrock between October 2025 and May 2026 are listed
   // here. Claude Sonnet 4 / Opus 4.1 (May–Aug 2025), Claude 3.x, Nova v1
@@ -98,9 +101,9 @@ export const AVAILABLE_MODELS: ModelOption[] = regionalize([
   // ============================================================================
   // Anthropic Direct API (requires ANTHROPIC_API_KEY)
   // ============================================================================
-  { provider: 'anthropic', modelId: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5 (Direct)', maxTokens: 200000 },
-  { provider: 'anthropic', modelId: 'claude-opus-4-5-20251101', label: 'Claude Opus 4.5 (Direct)', maxTokens: 200000 },
-  { provider: 'anthropic', modelId: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 (Direct)', maxTokens: 200000 },
+  { provider: 'anthropic', modelId: 'claude-sonnet-5', label: 'Claude Sonnet 5 (Direct)', maxTokens: 200000 },
+  { provider: 'anthropic', modelId: 'claude-opus-4-8', label: 'Claude Opus 4.8 (Direct)', maxTokens: 200000 },
+  { provider: 'anthropic', modelId: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (Direct)', maxTokens: 200000 },
 
   // ============================================================================
   // Google Gemini (requires GOOGLE_API_KEY)
@@ -231,7 +234,7 @@ export function createDefaultRuntimeConfig(): RuntimeConfiguration {
     framework: 'strands_agents',
     model: {
       provider: 'bedrock',
-      modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+      modelId: 'us.anthropic.claude-sonnet-5',
       temperature: 0.7,
       topP: 0.9,
     },

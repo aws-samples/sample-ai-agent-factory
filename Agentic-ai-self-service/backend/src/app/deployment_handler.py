@@ -213,6 +213,9 @@ def _maybe_promote_policy(deployment_state: Optional[dict], region: str) -> bool
             pr = dict(deployment_state.get("policy_result") or {})
             pr["mode"] = "ENFORCE"
             pr["downgraded_to_log_only"] = False
+            # P-PLAT-027: fail-closed attach leaves ENFORCE active with pending
+            # policies; once the promoter validates them the pending flag clears.
+            pr["enforce_validation_pending"] = False
             pr["enforce_pending"] = None
             pr["promoted_at_first_use"] = True
             deployment_state["policy_result"] = pr

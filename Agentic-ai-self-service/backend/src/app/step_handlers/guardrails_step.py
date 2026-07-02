@@ -95,10 +95,14 @@ def _build_content_filter_config(content_filters) -> dict:
         strength_upper = str(strength).upper()
         if strength_upper not in _FILTER_STRENGTHS:
             strength_upper = "MEDIUM"
+        # PROMPT_ATTACK is an input-only filter: Bedrock CreateGuardrail rejects
+        # any non-NONE outputStrength ("PROMPT ATTACK content filter strength for
+        # response must be NONE"). Mirror the CFN-export path here.
+        output_strength = "NONE" if category == "PROMPT_ATTACK" else strength_upper
         filter_entry = {
             "type": category,
             "inputStrength": strength_upper,
-            "outputStrength": strength_upper,
+            "outputStrength": output_strength,
         }
         filters.append(filter_entry)
     if not filters:

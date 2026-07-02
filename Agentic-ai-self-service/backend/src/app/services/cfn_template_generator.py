@@ -417,7 +417,7 @@ class CfnTemplateGenerator:
                 },
                 "ModelId": {
                     "Type": "String",
-                    "Default": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                    "Default": "us.anthropic.claude-sonnet-5",
                     "Description": "Bedrock model ID (cross-region inference profile)",
                 },
                 "ArtifactsBucket": {
@@ -1140,7 +1140,7 @@ def handler(event, context):
     def _add_kb_tool_lambda_and_target(self, template: dict, deployment_name: str, kb_config: dict) -> None:
         """Add a Lambda function and Gateway Target for the Knowledge Base tool."""
         kb_mode = kb_config.get("kbMode", "existing")
-        foundation_model_id = kb_config.get("foundationModelId", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+        foundation_model_id = kb_config.get("foundationModelId", "us.anthropic.claude-sonnet-5")
 
         # For "existing" mode, KB ID is a parameter; for "create_new", it's created by the KB resources
         if kb_mode == "existing":
@@ -1441,7 +1441,7 @@ def handler(event, context):
                 "BedrockDataAutomationConfiguration": {"ParsingModality": "MULTIMODAL"},
             }
         elif parsing_strategy == "bedrock_foundation_model":
-            parsing_model_id = kb_config.get("parsingModelId", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+            parsing_model_id = kb_config.get("parsingModelId", "us.anthropic.claude-sonnet-5")
             fm_cfg: dict = {
                 "ModelArn": {"Fn::Sub": f"arn:aws:bedrock:${{AWS::Region}}::foundation-model/{parsing_model_id}"},
                 "ParsingModality": "MULTIMODAL",
@@ -2680,7 +2680,7 @@ chmod +x deploy.sh teardown.sh
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | DeploymentName | {deployment_name} | Base name for all resources |
-| ModelId | {config.model.get("id", "us.anthropic.claude-haiku-4-5-20251001-v1:0")} | Bedrock model ID |
+| ModelId | {config.model.get("id", "us.anthropic.claude-sonnet-5")} | Bedrock model ID |
 | ArtifactsBucket | (required) | S3 bucket for code and bundles |
 | DependencyBundleKey | {STRANDS_BUNDLE_KEY} | S3 key for dependency bundle |
 

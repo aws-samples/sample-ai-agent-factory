@@ -1362,7 +1362,7 @@ class PlatformStack(cdk.Stack):
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
                 "POWERTOOLS_SERVICE_NAME": "deployment",
-                "TOOL_GENERATOR_MODEL_ID": f"{'eu' if self.region.startswith('eu-') else 'ap' if self.region.startswith('ap-') else 'us'}.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                "TOOL_GENERATOR_MODEL_ID": f"{'eu' if self.region.startswith('eu-') else 'ap' if self.region.startswith('ap-') else 'us'}.anthropic.claude-sonnet-5",
                 "PYTHONPATH": "/var/task/src:/var/task:/var/task/lib",
                 # Needed by destroy_runtime to skip cascade-deletion of the
                 # stack-managed shared runtime role (Bug 62).
@@ -2071,6 +2071,66 @@ class PlatformStack(cdk.Stack):
                 ],
                 resources=["*"],
             ))
+
+        # Bug 196 — auto-cleanup on failure. When a deployment fails, the
+        # status_update step iterates created_resources and deletes them to
+        # prevent orphans (KB, Cognito pools, gateways, IAM roles, Lambdas,
+        # vector buckets). Needs DELETE verbs across every resource type.
+        if step_name == "status_update":
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "bedrock:DeleteKnowledgeBase",
+                    "bedrock:ListDataSources",
+                    "bedrock:DeleteDataSource",
+                    "bedrock:GetKnowledgeBase",
+                ],
+                resources=["*"],
+            ))
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "s3vectors:DeleteVectorBucket",
+                    "s3vectors:GetVectorBucket",
+                    "s3vectors:ListIndexes",
+                    "s3vectors:DeleteIndex",
+                ],
+                resources=["*"],
+            ))
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "iam:DeleteRole",
+                    "iam:GetRole",
+                    "iam:ListAttachedRolePolicies",
+                    "iam:DetachRolePolicy",
+                    "iam:ListRolePolicies",
+                    "iam:DeleteRolePolicy",
+                ],
+                resources=[f"arn:aws:iam::{self.account}:role/AgentCore*"],
+            ))
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "cognito-idp:DeleteUserPool",
+                    "cognito-idp:DescribeUserPool",
+                    "cognito-idp:DeleteUserPoolDomain",
+                ],
+                resources=[f"arn:aws:cognito-idp:{self.region}:{self.account}:userpool/*"],
+            ))
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "bedrock-agentcore:DeleteGateway",
+                    "bedrock-agentcore:GetGateway",
+                    "bedrock-agentcore:DeleteAgentRuntime",
+                    "bedrock-agentcore:GetAgentRuntime",
+                ],
+                resources=["*"],
+            ))
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "lambda:DeleteFunction",
+                    "lambda:GetFunction",
+                ],
+                resources=[f"arn:aws:lambda:{self.region}:{self.account}:function:AgentCore*"],
+            ))
+
         return role
 
     def _create_step_lambdas(self) -> dict[str, _lambda.Function]:

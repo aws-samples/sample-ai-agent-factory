@@ -480,14 +480,24 @@ def handler(event: dict, context) -> dict:
         # and FAIL the deploy if any did not reach ACTIVE — otherwise we'd attach an
         # engine in ENFORCE that silently denies the tool plane (the original bug).
         is_enforce = policy_config.get("mode", "ENFORCE") == "ENFORCE"
-        # Bug 170: when an auto-generated ENFORCE policy fails Cedar validation
-        # (e.g. the engine's analysis reports "Insufficient permissions to call
-        # gateway" — it wants a gateway-level call action whose exact schema is
-        # not reliably known across AgentCore versions), DEGRADE GRACEFULLY to
-        # LOG_ONLY instead of failing the whole deployment. A flow that deploys in
-        # LOG_ONLY (policies still created + evaluated + logged to CloudWatch, and
-        # the tool plane WORKS) is strictly better for the customer than a deploy
-        # that hard-fails. We surface the downgrade clearly in policy_result.
+        # P-PLAT-027 (supersedes Bug 170): when an ENFORCE policy fails Cedar
+        # validation (e.g. "Insufficient permissions to call gateway" while the
+        # gateway's policy-authorization plane converges), we must FAIL CLOSED.
+        # The old behavior downgraded to LOG_ONLY so the tool plane stayed
+        # functional — but that silently serves a tool the user explicitly
+        # forbade (restricted-tool value leaked in live verification). AgentCore
+        # engines are default-deny, so attaching in ENFORCE with the policies
+        # still pending denies ALL tools until the permit validates — tools are
+        # temporarily unavailable instead of unprotected. The lazy promoter
+        # (Bug 178) then creates the pending policies once the gateway converges,
+        # which un-bricks the tool plane under real enforcement.
+        # Users who prefer availability over enforcement can opt out explicitly
+        # with policyConfig.on_enforce_failure = "log_only".
+        fail_open_requested = (
+            str(policy_config.get("on_enforce_failure", "fail_closed")).lower()
+            == "log_only"
+        )
+        enforce_validation_pending = False
         downgrade_to_log_only = False
         downgrade_reason = ""
         if is_enforce and created_policy_ids:
@@ -557,16 +567,30 @@ def handler(event: dict, context) -> dict:
                 if status != "ACTIVE":
                     failed.append((pol_name, reason))
             if failed:
-                downgrade_to_log_only = True
-                downgrade_reason = (
-                    "Cedar ENFORCE validation failed (" +
-                    "; ".join(f"{n}: {r}" for n, r in failed) +
-                    ") — attaching engine in LOG_ONLY so the tool plane stays "
-                    "functional while policies are still evaluated + logged."
-                )
+                failure_detail = "; ".join(f"{n}: {r}" for n, r in failed)
+                if fail_open_requested:
+                    downgrade_to_log_only = True
+                    downgrade_reason = (
+                        f"Cedar ENFORCE validation failed ({failure_detail}) — "
+                        "attaching engine in LOG_ONLY per explicit "
+                        "on_enforce_failure=log_only opt-in; policies are still "
+                        "evaluated + logged but NOT enforced."
+                    )
+                else:
+                    # FAIL CLOSED (P-PLAT-027): attach in ENFORCE with the permit
+                    # still pending. Default-deny blocks every tool (including the
+                    # forbidden one) until the promoter validates the permit.
+                    enforce_validation_pending = True
+                    downgrade_reason = (
+                        f"Cedar ENFORCE validation failed ({failure_detail}) — "
+                        "attaching engine in ENFORCE anyway (fail-closed): ALL "
+                        "tools are denied until the permit policy validates. The "
+                        "policy promoter retries on status/test touchpoints."
+                    )
                 logger.warning(downgrade_reason)
                 # Drop the CREATE_FAILED policies so the engine holds only ACTIVE
-                # ones (LOG_ONLY tolerates an empty/partial set; it never denies).
+                # ones; the pending payload below recreates them once the gateway
+                # converges.
                 for pol_name, pid in created_policy_ids:
                     try:
                         d = agentcore_ctrl.get_policy(policyEngineId=engine_id, policyId=pid)
@@ -575,13 +599,22 @@ def handler(event: dict, context) -> dict:
                     except Exception:  # noqa: BLE001
                         pass
 
-        if is_enforce and created_count == 0:
-            # Nothing valid to enforce — same graceful degrade rather than abort.
-            downgrade_to_log_only = True
-            downgrade_reason = downgrade_reason or (
-                "No ENFORCE Cedar policies could be created for this gateway — "
-                "attaching engine in LOG_ONLY (audit-only) so tools still work."
-            )
+        if is_enforce and created_count == 0 and not enforce_validation_pending:
+            # Nothing valid to enforce. Same fail-closed rule as above.
+            if fail_open_requested:
+                downgrade_to_log_only = True
+                downgrade_reason = downgrade_reason or (
+                    "No ENFORCE Cedar policies could be created for this gateway — "
+                    "attaching engine in LOG_ONLY (audit-only) per explicit "
+                    "on_enforce_failure=log_only opt-in."
+                )
+            else:
+                enforce_validation_pending = True
+                downgrade_reason = downgrade_reason or (
+                    "No ENFORCE Cedar policies could be created for this gateway — "
+                    "attaching engine in ENFORCE (fail-closed, default-deny): all "
+                    "tools are denied until the policies validate via the promoter."
+                )
             logger.warning(downgrade_reason)
 
         # Bug 137 backstop (authoritative): before attaching in ENFORCE, confirm the
@@ -589,7 +622,7 @@ def handler(event: dict, context) -> dict:
         # created_count is a client-side intent counter; this checks ground truth and
         # catches ANY path (name collision, async drop, eventual-consistency) that
         # would otherwise ship an empty deny-all engine that serves 0 tools at runtime.
-        if is_enforce and not downgrade_to_log_only:
+        if is_enforce and not downgrade_to_log_only and not enforce_validation_pending:
             active_on_engine = 0
             for _attempt in range(10):
                 try:
@@ -602,13 +635,23 @@ def handler(event: dict, context) -> dict:
                     logger.warning("list_policies backstop attempt failed: %s", le)
                 time.sleep(3)
             if active_on_engine == 0:
-                # Empty ENFORCE engine would deny ALL tools — degrade to LOG_ONLY
-                # (Bug 170) rather than abort the deploy (was the Bug 137 trap).
-                downgrade_to_log_only = True
-                downgrade_reason = downgrade_reason or (
-                    f"ENFORCE engine {engine_id} holds 0 ACTIVE policies — would "
-                    "deny ALL tools; attaching in LOG_ONLY so the tool plane works."
-                )
+                # Empty ENFORCE engine denies ALL tools (default-deny). Fail
+                # closed (P-PLAT-027): keep ENFORCE — a temporarily-denied tool
+                # plane is safer than serving a tool the user forbade. LOG_ONLY
+                # only with the explicit opt-in.
+                if fail_open_requested:
+                    downgrade_to_log_only = True
+                    downgrade_reason = downgrade_reason or (
+                        f"ENFORCE engine {engine_id} holds 0 ACTIVE policies — "
+                        "attaching in LOG_ONLY per on_enforce_failure=log_only."
+                    )
+                else:
+                    enforce_validation_pending = True
+                    downgrade_reason = downgrade_reason or (
+                        f"ENFORCE engine {engine_id} holds 0 ACTIVE policies — "
+                        "staying in ENFORCE (fail-closed, all tools denied) until "
+                        "the promoter validates the policies."
+                    )
                 logger.warning(downgrade_reason)
             else:
                 logger.info("Engine %s holds %d ACTIVE policies — safe to attach in ENFORCE",
@@ -616,9 +659,9 @@ def handler(event: dict, context) -> dict:
 
         # Attach policy engine to gateway.
         # ENFORCE is the requested default (real enforcement). When the auto-built
-        # ENFORCE policy can't validate against the gateway's Cedar schema we fall
-        # back to LOG_ONLY (Bug 170) so the deploy still succeeds with a working
-        # tool plane + audited policies, rather than hard-failing.
+        # ENFORCE policy can't validate yet we STAY in ENFORCE (fail-closed,
+        # default-deny — P-PLAT-027) unless the user explicitly opted into
+        # on_enforce_failure=log_only.
         mode = policy_config.get("mode", "ENFORCE")
         if mode not in ("LOG_ONLY", "ENFORCE"):
             mode = "ENFORCE"
@@ -669,8 +712,13 @@ def handler(event: dict, context) -> dict:
         # used (minutes later), which idempotently re-creates the now-valid policy
         # and flips the engine to ENFORCE. Carries the intended Cedar statements so
         # the promoter doesn't have to recompute them.
+        # The pending payload now serves BOTH paths: the fail-closed ENFORCE
+        # attach (promoter creates the pending policies to UN-BRICK the denied
+        # tool plane) and the explicit log_only opt-in (promoter flips the mode
+        # to ENFORCE once policies validate).
         enforce_pending = None
-        if downgrade_to_log_only and policy_config.get("mode", "ENFORCE") == "ENFORCE":
+        if (downgrade_to_log_only or enforce_validation_pending) \
+                and policy_config.get("mode", "ENFORCE") == "ENFORCE":
             _plist = []
             for pol in policies:
                 _bn = re.sub(r"[^A-Za-z0-9_]", "_", pol.get("name", "default_policy"))
@@ -699,6 +747,10 @@ def handler(event: dict, context) -> dict:
                 # implying full enforcement.
                 "requested_mode": policy_config.get("mode", "ENFORCE"),
                 "downgraded_to_log_only": downgrade_to_log_only,
+                # P-PLAT-027: True when the engine attached in ENFORCE with the
+                # permit still pending — all tools are denied (fail-closed)
+                # until the promoter validates the policies.
+                "enforce_validation_pending": enforce_validation_pending,
                 "downgrade_reason": downgrade_reason or None,
                 # Bug 178: lazy-promotion context (None unless a downgrade happened).
                 "enforce_pending": enforce_pending,

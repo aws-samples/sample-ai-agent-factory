@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 
 TOOL_GENERATOR_MODEL_ID = os.environ.get(
     "TOOL_GENERATOR_MODEL_ID",
-    # Bedrock flagged claude-sonnet-4-20250514 as Legacy in 2026-Q2.
-    # Use the current 4.5 generation. See tasks/lessons.md Bug 26.
-    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    # Bedrock flagged the dated Sonnet 4 (May 2025) IDs as Legacy in 2026-Q2.
+    # Use the current date-less generation. See tasks/lessons.md Bug 26.
+    "us.anthropic.claude-sonnet-5",
 )
 
 # Compact prompt for clarification mode — fast, low tokens

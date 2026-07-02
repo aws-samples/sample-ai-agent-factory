@@ -30,9 +30,12 @@ const PARSING_STRATEGY_OPTIONS = [
 const PARSING_MODELS = [
   // Bedrock-current parsing models. Titan removed (Legacy).
   // See tasks/lessons.md Bug 113.
-  { value: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0', label: 'Claude Sonnet 4.5' },
+  // New-generation Claude IDs have no date suffix and no ":N" version suffix
+  // (verified live via bedrock-runtime converse, 2026-07-01).
+  { value: 'us.anthropic.claude-sonnet-5', label: 'Claude Sonnet 5' },
+  { value: 'us.anthropic.claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+  { value: 'us.anthropic.claude-opus-4-8', label: 'Claude Opus 4.8' },
   { value: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', label: 'Claude Haiku 4.5' },
-  { value: 'us.anthropic.claude-opus-4-5-20251101-v1:0', label: 'Claude Opus 4.5' },
 ];
 
 const DELETION_POLICY_OPTIONS = [
@@ -85,7 +88,7 @@ export function ParsingStrategyFields({ config, updateField, errors }: AdvancedF
           <SelectField
             label="Parser Model"
             id="kb-parsing-model"
-            value={config.parsingModelId || 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'}
+            value={config.parsingModelId || 'us.anthropic.claude-sonnet-5'}
             onChange={(v) => updateField('parsingModelId', v)}
             options={PARSING_MODELS}
             required

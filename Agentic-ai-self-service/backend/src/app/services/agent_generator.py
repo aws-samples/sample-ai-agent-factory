@@ -30,7 +30,7 @@ AGENT_GENERATOR_MODEL_ID = os.environ.get(
     "AGENT_GENERATOR_MODEL_ID",
     os.environ.get(
         "TOOL_GENERATOR_MODEL_ID",
-        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "us.anthropic.claude-sonnet-5",
     ),
 )
 
@@ -57,7 +57,7 @@ GENERATION_PROMPT = """Generate an AgentCore canvas spec from the conversation. 
 
 - `runtime` (REQUIRED, exactly one): the agent itself. Configuration:
     {"name": "<snake_case>", "framework": "strands_agents", "modelProvider": "bedrock",
-     "model": {"modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0"},
+     "model": {"modelId": "us.anthropic.claude-sonnet-5"},
      "systemPrompt": "<the agent's role and instructions>",
      "protocol": "HTTP", "pythonRuntime": "PYTHON_3_13", "enableOtel": false}
 - `gateway` (OPTIONAL): MCP gateway with predefined tools. Configuration:

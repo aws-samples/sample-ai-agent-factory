@@ -27,10 +27,12 @@ from .components import ConnectorConfig
 # last 30 days.` See tasks/lessons.md Bug 113. Update when new generations
 # ship within the policy window.
 _BEDROCK_ACTIVE_MODEL_SUBSTRINGS = (
-    # Anthropic Claude 4.5 (Bedrock GA Sep–Nov 2025)
-    "anthropic.claude-sonnet-4-5",
+    # Anthropic current generation (date-less IDs, no -v1:0 suffix)
+    "anthropic.claude-sonnet-5",
+    "anthropic.claude-sonnet-4-6",
+    "anthropic.claude-opus-4-8",
+    # Anthropic Claude Haiku 4.5 (Bedrock GA Oct 2025; dated ID with -v1:0)
     "anthropic.claude-haiku-4-5",
-    "anthropic.claude-opus-4-5",
     # Amazon Nova 2 (Bedrock GA Q4 2025)
     "amazon.nova-2-",
     "amazon.nova-premier",
@@ -72,8 +74,8 @@ def _validate_bedrock_model_id(model_id: str) -> None:
     # invocation. Policy: only Bedrock models published Oct 2025 – May 2026.
     _LEGACY_SUBSTRINGS = (
         "claude-3-",                      # Claude 3.x (early 2024)
-        "claude-sonnet-4-20250514",       # Claude Sonnet 4 (May 2025) — pre-cutoff
-        "claude-opus-4-1-20250805",       # Claude Opus 4.1 (Aug 2025) — pre-cutoff
+        "claude-sonnet-4-2",              # Claude Sonnet 4 dated IDs (May 2025) — pre-cutoff
+        "claude-opus-4-1",                # Claude Opus 4.1 (Aug 2025) — pre-cutoff
         "amazon.nova-pro-v1",             # Nova v1 (Dec 2024) — pre-cutoff
         "amazon.nova-lite-v1",
         "amazon.nova-micro-v1",
@@ -89,8 +91,8 @@ def _validate_bedrock_model_id(model_id: str) -> None:
                 f"Bedrock model '{model_id}' is outside the supported window "
                 f"(Oct 2025 – May 2026) and Bedrock flags it Legacy. "
                 f"Use a current ID such as "
-                f"us.anthropic.claude-sonnet-4-5-20250929-v1:0, "
-                f"us.anthropic.claude-haiku-4-5-20251001-v1:0, "
+                f"us.anthropic.claude-sonnet-5, "
+                f"us.anthropic.claude-opus-4-8, "
                 f"or us.amazon.nova-2-lite-v1:0. "
                 f"See tasks/lessons.md Bug 113."
             )

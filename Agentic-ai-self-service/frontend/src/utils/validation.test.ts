@@ -289,7 +289,7 @@ describe('Property 24: Ready-to-Deploy Indicator', () => {
       framework: 'strands_agents',
       model: {
         provider: 'anthropic',
-        modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+        modelId: 'us.anthropic.claude-sonnet-5',
         temperature: 0.7,
         topP: 0.9,
       },
@@ -425,7 +425,7 @@ describe('Property 16: Required Field Validation', () => {
       framework: 'strands_agents',
       model: {
         provider: 'anthropic',
-        modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+        modelId: 'us.anthropic.claude-sonnet-5',
         temperature: 0.7,
         topP: 0.9,
       },

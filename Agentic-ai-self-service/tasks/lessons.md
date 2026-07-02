@@ -2958,3 +2958,126 @@ Rule for myself: when I fix a bug on one path (canvas), immediately grep for EVE
 that builds the same payload (harness form, CFN export, templates) and verify each — a per-path
 fix is only a partial fix. "Reuses the same connector catalog" in a comment does NOT mean it
 reuses the same credential-collection UI.
+
+## Bug 194 (ROOT-CAUSE, deferred) — default Strands+Bedrock runtimes emit ZERO gen_ai.usage spans, so GET /cost by_model stays {} (2026-06-30)
+
+Symptom: with the P-PLAT-010 observability fix in place (no 3rd-party OTLP endpoint
+injected; runtime env has no OTEL_*), the runtime's `/aws/bedrock-agentcore/runtimes/{rid}-DEFAULT`
+log group contains ONLY plain app logs — zero `gen_ai.usage` events. `cost_tracking.summarize_from_logs`
+reads that group, so `by_model` / `total_cost` stay empty even after real invokes.
+
+Root cause (read, not guessed — traced the deploy bundle + AgentCore SDK source):
+- Spans are produced ONLY if something creates an OTel SDK `TracerProvider`. In the generated
+  agent, the ONLY thing that does this is the codegen `_otel_bootstrap()` which calls
+  `StrandsTelemetry().setup_otlp_exporter()`. That function returns immediately when
+  `OTEL_EXPORTER_OTLP_ENDPOINT` is unset (code_generator.py:1826-1828).
+- `observability.build_otel_env_vars()` now CORRECTLY returns `{}` (no endpoint) in the default
+  case (P-PLAT-010 / lessons Bug 18 — don't reintroduce the localhost:4318 sidecar). So the
+  endpoint is unset → `StrandsTelemetry` is never called → NO TracerProvider → NO spans of any
+  kind → nothing lands in `-DEFAULT`.
+- AgentCore does NOT auto-create the provider. Proven from `bedrock_agentcore/runtime/tracing.py`
+  + `app.py` inside the shipped `base.zip`/`strands-mcp.zip`: the SDK only `add_span_processor`s a
+  `BaggageSpanProcessor` onto an ALREADY-EXISTING provider, and explicitly no-ops on the
+  `ProxyTracerProvider` (no SDK provider). app.py:209 comment: "In the managed runtime ADOT sets
+  up the TracerProvider before __init__ runs" — i.e. AgentCore relies on ADOT auto-instrumentation,
+  which it only enables when runtime observability is turned on.
+- The deploy bundles confirm it: `strands-mcp.zip` ships `opentelemetry/instrumentation/auto_instrumentation/`
+  (sitecustomize + `initialize()` that loads a distro + OTLP exporter), but that sitecustomize lives
+  UNDER the package, not at the site-packages root, so it only runs when the entrypoint is launched
+  via the `opentelemetry-instrument` wrapper. Nothing in our deploy sets that up, and
+  `AGENT_OBSERVABILITY_ENABLED` is NEVER set anywhere in the repo. `base.zip` has no distro at all.
+- So the lessons Bug 18 / P-PLAT-010 comment "Leaving OTEL_* unset preserves the native export so
+  cost rollup works" is WRONG: there IS no native export when OTEL_* is unset. The two outcomes are
+  (a) inject a 3rd-party endpoint → spans go to Langfuse, not `-DEFAULT`; or (b) inject nothing →
+  NO spans anywhere. Neither populates `-DEFAULT`. `-DEFAULT` is only fed by AgentCore-native ADOT
+  observability, which is OFF by default for our runtimes.
+
+Recommended fix (DEFERRED — needs a live deploy to verify, per the Bug 18 rule + lessons line ~1040
+gate "NOT provable by unit/import tests; must be confirmed on real AWS"; background agents can't
+auth for that): enable AgentCore-native observability on the runtime WITHOUT reintroducing a
+localhost endpoint. Minimal candidate: in `build_otel_env_vars`, in the no-3rd-party-endpoint
+branch (the `return {}` paths), instead return native-enable env:
+  `AGENT_OBSERVABILITY_ENABLED=true` + `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental`
+(the latter so token-count attrs appear — Bug 17). Do NOT set `OTEL_EXPORTER_OTLP_ENDPOINT`
+(ADOT supplies the AgentCore collector endpoint itself). Then live-verify: deploy a default
+Strands+Bedrock runtime, invoke 2-3x, Logs-Insights the `-DEFAULT` group for `gen_ai.usage` and
+assert `by_model` non-zero via GET /cost. Also confirm CloudWatch Transaction Search is enabled at
+the account level (a one-time, account-wide prerequisite codegen cannot set). Only ship once gate 4
+(non-zero by_model with the deployed model id) passes on real AWS — a 200 is NOT a pass.
+
+Rule for myself: "we stopped clobbering native export" only helps if native export was ever ON.
+Before claiming an unset-env path "preserves" a telemetry sink, prove that sink emits with the env
+unset — here it does not. The enable-side (ADOT/AGENT_OBSERVABILITY_ENABLED) is a separate, missing
+piece, and turning it on is a live-verify-required change, not a blind unit-tested one.
+
+Update (2026-07-01): the env-flag half IS now implemented and deployed — `build_otel_env_vars()`
+returns `_AGENTCORE_NATIVE_OBSERVABILITY_ENV` (`AGENT_OBSERVABILITY_ENABLED=true` +
+`OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental`) in the no-3rd-party-endpoint branch,
+and the deployed agentcore-workflow-dev code was verified byte-identical to source on 2026-07-01.
+Live verification of non-zero `by_model` via GET /cost is scheduled in the current matrix run.
+Caveat: prior live testing showed the flag ALONE produced zero `gen_ai.usage` spans in `-DEFAULT` —
+the managed runtime container never starts OTEL auto-instrumentation (codegen `StrandsTelemetry` is
+gated on a 3rd-party endpoint; nothing launches the entrypoint under `opentelemetry-instrument`).
+So the flag is necessary but likely NOT sufficient; if the matrix run still shows `{}`, the
+suspected root cause is the runtime container bootstrap, which is where the deeper fix lives.
+
+## Bug 195 — stale-Lambda deploy race: workflow repair agent edited code AFTER the CDK deploy snapshot (2026-07-01)
+
+Symptom: after "deploy then test", 7/10 first-batch matrix cells failed with
+`ValidationException: The provided model identifier is invalid` at INVOKE time (deploys all
+SUCCEEDED). Root cause: the fix workflow's repair agent patched
+`runtime_configure_step.py::_to_cross_region_model_id` (stop appending `-v1:0` to date-less
+model ids) minutes AFTER `./scripts/deploy.sh` had already zipped the backend — the deployed
+Lambda still unconditionally appended `-v1:0`, producing `us.anthropic.claude-sonnet-5-v1:0`.
+Cells that bake the model id into generated agent code (codegen path) passed; cells that pass
+it via the MODEL_ID env var (runtime-configure path) failed — a confusing split that pointed
+at the env path.
+
+Rule for myself: after ANY code-editing workflow finishes, re-diff the DEPLOYED bundle against
+the working tree for EVERY changed file (download Lambda zip, `diff -q` the app tree) before
+starting live verification. "Deploy succeeded" + "tests were green locally" does not mean the
+artifact contains the fix — check `git status` timestamps vs deploy start time.
+
+## Matrix run 2026-07-01 — live findings (30 PASS / 10 FAIL of 40 cells)
+
+Confirmed product bugs found by the run (each with evidence under tasks/matrix-tester/evidence/):
+1. [SECURITY] P-PLAT-027: `policyConfig.mode=ENFORCE` silently ships LOG_ONLY — Cedar validation
+   fails ("Insufficient permissions to call gateway"), lazy promotion (Bug-178/181 path) never
+   fires; restricted tool value LEAKS. Fail-closed guarantee violated.
+2. [SECURITY] P-PLAT-012: Bedrock guardrail ANONYMIZE regex redacts only the FIRST character of
+   the match on output ("{MTX_REDACT}TX-SECRET-778899") — secret digits leak. Injection block +
+   normal passthrough work; isolated to sensitive-info regex redaction offsets.
+3. P-HARNESS-001: harness deploys SUCCEED but invocation returns generic "Harness invocation
+   failed" with null logs (check harness envelope/serverProtocol invoke path).
+4. P-MCP-001: MCP-protocol runtime container exceeds AgentCore 30s init limit (JSON-RPC -32010)
+   — MCP server bootstrap too slow.
+5. P-MCP-GW-001: two-part — (a) flow DELETE leaks the gateway OAuth2 credential provider
+   (mcp-cred-* "already exists" on redeploy); (b) after deploy, agent→gateway MCP calls fail
+   "Authorization error when sending message" (4-layer outbound-auth chain).
+6. P-PLAT-018: KB ingestion 403 s3:ListBucket immediately after role creation (IAM eventual
+   consistency, no retry in knowledge_base_step.py:~753) AND failed deploy does not cascade-
+   delete the orphaned KB/data-source (retry dies on ConflictException).
+7. P-PLAT-010 / Bug 194 CONFIRMED STILL LIVE post-redeploy: enableOtel runtime emits zero
+   gen_ai.usage spans to -DEFAULT (otel-rt-logs stream empty); /cost by_model={}. The
+   AGENT_OBSERVABILITY_ENABLED env alone is insufficient — container bootstrap fix required.
+8. P-PLAT-017: multi-hop RAG cell hits MaxTokensReachedException because verbatim TOOL_TRACE
+   output requirement blows the token budget (cell-design + maxTokens headroom issue).
+Minor: P-SWARM-001 canary spec invites hyphenation (spec flaw, not platform); runcell.py lacks
+expect_redacted/expect_intervened gates; kb delete first attempt 503 (retry worked); GET
+/api/runtime/{rid} is 405 (no GET route) which breaks gone-checks.
+9. Bug 195 — Harness temperature parameter: Claude Sonnet 5 rejects the `temperature` parameter
+   with `ValidationException: temperature is deprecated for this model`. FIX: harness_deployer.py
+   now conditionally excludes `temperature` for models containing "claude-sonnet-5" or
+   "claude-opus-5" in their model ID (2026-07-02).
+10. Bug 196 — Failed deployments orphan AWS resources: KB, Cognito pools, gateways, and other
+    resources created before a step failure were not automatically cleaned up. Users had to
+    manually call DELETE /api/runtime/{id} to trigger cleanup.
+    **Part 1 FIX**: status_update_step.py now runs _auto_cleanup_on_failure() when a deployment
+    fails, iterating the created_resources manifest in dependency order and deleting each
+    resource. The code was initially broken (used `store.get_deployment()` instead of
+    `store.get().model_dump()`) — fixed and verified (2026-07-02).
+    **Part 2 FIX**: The status_update Lambda IAM role lacked cleanup permissions. Added
+    bedrock:DeleteKnowledgeBase, s3vectors:DeleteVectorBucket, iam:DeleteRole,
+    cognito-idp:DeleteUserPool, bedrock-agentcore:DeleteGateway, lambda:DeleteFunction (and
+    supporting read verbs) to the _create_step_role() function in platform_stack.py. This is
+    best-effort — cleanup errors are logged but don't change the failure status (2026-07-02).

@@ -42,9 +42,12 @@ const FOUNDATION_MODELS = [
   // Bedrock-current models (Oct 2025 – May 2026 policy window).
   // Older models (Titan, Llama 3, Mistral Large 2402, Claude 3.x) removed —
   // Bedrock flags them Legacy. See tasks/lessons.md Bug 113.
-  { value: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0', label: 'Claude Sonnet 4.5' },
+  // New-generation Claude IDs have no date suffix and no ":N" version suffix
+  // (verified live via bedrock-runtime converse, 2026-07-01).
+  { value: 'us.anthropic.claude-sonnet-5', label: 'Claude Sonnet 5' },
+  { value: 'us.anthropic.claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+  { value: 'us.anthropic.claude-opus-4-8', label: 'Claude Opus 4.8' },
   { value: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', label: 'Claude Haiku 4.5' },
-  { value: 'us.anthropic.claude-opus-4-5-20251101-v1:0', label: 'Claude Opus 4.5' },
   { value: 'us.amazon.nova-2-lite-v1:0', label: 'Amazon Nova 2 Lite' },
   { value: 'us.amazon.nova-premier-v1:0', label: 'Amazon Nova Premier' },
 ];
@@ -93,7 +96,7 @@ function createDefaultKBConfig(): KnowledgeBaseToolConfig {
     maxTokens: 300,
     overlapPercentage: 20,
     embeddingModelId: 'amazon.titan-embed-text-v2:0',
-    foundationModelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+    foundationModelId: 'us.anthropic.claude-sonnet-5',
     vectorStoreType: 's3_vectors',
     parsingStrategy: 'default',
     dataDeletionPolicy: 'DELETE',
@@ -420,7 +423,7 @@ export function KnowledgeBaseConfigModal({
         <SelectField
           label="RAG Foundation Model"
           id="kb-foundation-model"
-          value={config.foundationModelId || 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'}
+          value={config.foundationModelId || 'us.anthropic.claude-sonnet-5'}
           onChange={(v) => updateField('foundationModelId', v)}
           options={FOUNDATION_MODELS}
           required

@@ -123,8 +123,14 @@ def try_promote_to_enforce(deployment_state: dict, region: str) -> Optional[dict
     """
     pr = (deployment_state or {}).get("policy_result") or {}
     pending = pr.get("enforce_pending")
-    # Nothing pending, or already enforcing → no-op.
-    if not pending or pr.get("mode") == "ENFORCE":
+    # Nothing pending → no-op. Note: mode == ENFORCE alone is NOT a no-op
+    # anymore — the fail-closed path (P-PLAT-027) attaches in ENFORCE with the
+    # permit policies still pending (default-deny bricks the tool plane), and
+    # this promoter is what creates them to restore the permitted tools.
+    if not pending:
+        return None
+    already_enforcing = pr.get("mode") == "ENFORCE"
+    if already_enforcing and not pr.get("enforce_validation_pending"):
         return None
 
     engine_id = pending.get("engine_id")
@@ -138,8 +144,16 @@ def try_promote_to_enforce(deployment_state: dict, region: str) -> Optional[dict
         #    only now converged). If none are ACTIVE, stay LOG_ONLY (never deny-all).
         active = _ensure_policies_active(ctrl, engine_id, pending.get("policies") or [])
         if active == 0:
-            return {"promoted": False, "mode": "LOG_ONLY",
+            return {"promoted": False, "mode": pr.get("mode") or "LOG_ONLY",
                     "reason": "policies not ACTIVE yet (gateway still converging)"}
+
+        # Fail-closed path (P-PLAT-027): the gateway is ALREADY in ENFORCE; the
+        # pending policies just became ACTIVE, which un-bricks the permitted
+        # tools. No gateway update needed.
+        if already_enforcing:
+            logger.info("promote: engine %s policies now ACTIVE under ENFORCE", engine_id)
+            return {"promoted": True, "mode": "ENFORCE",
+                    "reason": f"{active} ACTIVE policy(ies); fail-closed ENFORCE now serving permitted tools"}
 
         # 2. Flip the gateway's engine config to ENFORCE, preserving other fields.
         gw = ctrl.get_gateway(gatewayIdentifier=gateway_id)

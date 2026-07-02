@@ -74,20 +74,28 @@ FRAMEWORK_PACKAGES = {"strands_agents": "strands-agents", "custom": ""}
 def _to_cross_region_model_id(model_id: str) -> str:
     """Convert on-demand model IDs to cross-region inference profile format.
 
-    On-demand model IDs like ``anthropic.claude-3-5-sonnet-20241022-v2:0``
-    fail with ValidationException on Bedrock converse API.  Cross-region
-    inference profiles (``us.anthropic.…``) work reliably.
+    On-demand model IDs like ``anthropic.claude-sonnet-5`` fail with
+    ValidationException on Bedrock converse API.  Cross-region inference
+    profiles (``us.anthropic.…``) work reliably.
 
     Already-prefixed IDs (``us.…``, ``global.…``) are returned as-is.
 
-    Appends ``-v1:0`` version suffix when missing — Bedrock inference
-    profiles require this suffix (e.g. ``us.anthropic.claude-sonnet-4-20250514-v1:0``).
+    Appends the ``-v1:0`` version suffix only to LEGACY date-suffixed IDs
+    that are missing it (e.g. ``us.anthropic.claude-haiku-4-5-20251001`` →
+    ``…-20251001-v1:0``). Current-generation IDs
+    (``us.anthropic.claude-sonnet-5``, ``us.anthropic.claude-opus-4-8``)
+    carry NO date suffix and NO ``:N`` version suffix — appending one would
+    produce an invalid model ID, so they pass through unchanged.
     """
     if not model_id.startswith(("us.", "global.", "eu.", "ap.")):
         model_id = f"us.{model_id}"
-    # Bedrock inference profiles require a version suffix like -v1:0 or -v2:0.
-    # If the model ID looks like it's missing one, append -v1:0.
-    if "anthropic." in model_id and not _has_version_suffix(model_id):
+    # Only legacy DATED Bedrock inference profiles require a -v1:0 style
+    # version suffix. Dateless current-generation IDs must NOT get one.
+    if (
+        "anthropic." in model_id
+        and _has_date_suffix(model_id)
+        and not _has_version_suffix(model_id)
+    ):
         model_id = f"{model_id}-v1:0"
     return model_id
 
@@ -96,6 +104,16 @@ def _has_version_suffix(model_id: str) -> bool:
     """Check if model ID already has a version suffix like -v1:0 or -v2:0."""
     import re
     return bool(re.search(r"-v\d+:\d+$", model_id))
+
+
+def _has_date_suffix(model_id: str) -> bool:
+    """Check if model ID ends with a legacy date segment like ``-20251001``.
+
+    Current-generation model IDs (``claude-sonnet-5``, ``claude-opus-4-8``)
+    have no date segment and must not receive a ``-v1:0`` suffix.
+    """
+    import re
+    return bool(re.search(r"-\d{8}$", model_id))
 
 
 def _get_model_id(config: RuntimeConfig) -> str:
@@ -107,7 +125,7 @@ def _get_model_id(config: RuntimeConfig) -> str:
     SECURITY: Validates the model ID to prevent code injection via
     f-string interpolation in generated code templates.
     """
-    model_id = config.model.get("modelId", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+    model_id = config.model.get("modelId", "us.anthropic.claude-sonnet-5")
     model_id = _to_cross_region_model_id(model_id)
     return _sanitize_identifier(model_id)
 
@@ -2069,51 +2087,97 @@ _HITL_TOOLS = [human_approval]
 '''
 
 
+# Flat-key guardrail kwargs for the Strands ``BedrockModel`` constructor.
+#
+# Strands' ``BedrockModel`` has NO ``guardrail_config`` parameter — its config
+# TypedDict (strands/models/bedrock.py) is total=False with FLAT keys, so an
+# unknown ``guardrail_config=...`` kwarg was silently swallowed and the guardrail
+# was never wired into the converse ``guardrailConfig``. Strands only builds that
+# guardrailConfig when both ``guardrail_id`` AND ``guardrail_version`` are set.
+#
+# We build a dict at runtime that is empty when no guardrail is configured, then
+# splat it into the constructor (``**_GUARDRAIL_KWARGS``) so a no-guardrail deploy
+# is a no-op. ``guardrail_redact_output`` defaults to False in Strands, so we set
+# it True explicitly for OUTPUT redaction; input redaction already defaults True.
+_GUARDRAIL_KWARGS_ASSIGN = (
+    '_GUARDRAIL_KWARGS = {"guardrail_id": GUARDRAIL_ID, '
+    '"guardrail_version": GUARDRAIL_VERSION or "DRAFT", '
+    '"guardrail_trace": "enabled", '
+    '"guardrail_redact_output": True} if GUARDRAIL_ID else {}'
+)
+
+
 def _strip_env_block(code: str) -> str:
     """Return ``code`` with the injected guardrail env block removed.
 
-    The env block itself contains the literal ``_guardrail_config`` token. We
-    only want to detect whether the *constructor* already carries the kwarg, so
-    we drop that single assignment line before the membership test to avoid a
-    false positive that would skip injection.
+    The env block itself contains the literal ``guardrail_id=`` token (inside
+    the ``_GUARDRAIL_KWARGS`` string). We only want to detect whether the
+    *constructor* already carries the kwargs, so we drop that single assignment
+    line before the membership test to avoid a false positive that would skip
+    injection.
     """
-    return code.replace(
-        '_guardrail_config = {"guardrailIdentifier": GUARDRAIL_ID, '
-        '"guardrailVersion": GUARDRAIL_VERSION} if GUARDRAIL_ID else None',
-        '',
-    )
+    return code.replace(_GUARDRAIL_KWARGS_ASSIGN, '')
 
 
-def _append_kwarg_to_call(code: str, call_prefix: str, kwarg: str) -> str:
-    """Append ``kwarg`` before the closing ``)`` of the FIRST ``call_prefix(``.
+def _append_kwarg_to_calls(code: str, call_prefix: str, kwarg: str) -> str:
+    """Append ``kwarg`` before the balanced closing ``)`` of EVERY
+    ``call_prefix(`` occurrence in ``code``.
 
     Paren-balanced so nested calls in the argument list (e.g.
     ``os.environ.get("MODEL_ID", "...")``) don't terminate the match early.
-    Returns ``code`` unchanged when the call isn't found or is unbalanced.
+
+    Multi-agent templates (graph/swarm/workflow) emit ONE constructor PER
+    sub-agent — patching only the first occurrence left every downstream
+    agent's model unguarded (PII redaction / output blocking silently
+    bypassed). Each constructor is checked individually: if its argument
+    list already contains ``kwarg`` it is left untouched, which makes the
+    injection idempotent per call site. Scanning resumes after each
+    (possibly modified) call so shifted positions can't be re-matched.
+
+    Returns ``code`` unchanged for calls that aren't found or are unbalanced.
     """
-    start = code.find(call_prefix)
-    if start < 0:
-        return code
-    open_paren = start + len(call_prefix) - 1  # index of the '(' in call_prefix
-    depth = 0
-    for i in range(open_paren, len(code)):
-        ch = code[i]
-        if ch == '(':
-            depth += 1
-        elif ch == ')':
-            depth -= 1
-            if depth == 0:
-                # i is the matching closing paren of this constructor call.
-                return f"{code[:i]}, {kwarg}{code[i:]}"
-    return code
+    out: list[str] = []
+    pos = 0
+    while True:
+        start = code.find(call_prefix, pos)
+        if start < 0:
+            out.append(code[pos:])
+            break
+        open_paren = start + len(call_prefix) - 1  # index of the '(' in call_prefix
+        depth = 0
+        close = -1
+        for i in range(open_paren, len(code)):
+            ch = code[i]
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    # i is the matching closing paren of this constructor call.
+                    close = i
+                    break
+        if close < 0:
+            # Unbalanced call — emit the rest unchanged and stop.
+            out.append(code[pos:])
+            break
+        args = code[open_paren + 1:close]
+        if kwarg in args:
+            # Per-call idempotency: this constructor is already patched.
+            out.append(code[pos:close + 1])
+        else:
+            out.append(f"{code[pos:close]}, {kwarg}{code[close]}")
+        pos = close + 1
+    return "".join(out)
 
 
 def _inject_guardrails(code: str) -> str:
     """Post-process generated code to add guardrail support via env vars.
 
-    Injects ``GUARDRAIL_ID`` / ``GUARDRAIL_VERSION`` env-var reading and
-    passes ``guardrail_config`` to any Strands ``BedrockModel`` constructor,
-    or ``guardrailConfig`` to boto3 ``converse()`` calls.
+    Injects ``GUARDRAIL_ID`` / ``GUARDRAIL_VERSION`` env-var reading and splats
+    the flat guardrail kwargs (``guardrail_id`` / ``guardrail_version`` /
+    ``guardrail_trace`` / ``guardrail_redact_output``) into any Strands
+    ``BedrockModel`` constructor via ``**_GUARDRAIL_KWARGS``, or ``guardrailConfig``
+    to boto3 ``converse()`` calls.
 
     The injection is string-based to keep generation functions simple.
     """
@@ -2121,7 +2185,7 @@ def _inject_guardrails(code: str) -> str:
         '\n# Guardrails configuration (injected by AgentCore Flows)\n'
         'GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID", "")\n'
         'GUARDRAIL_VERSION = os.environ.get("GUARDRAIL_VERSION", "")\n'
-        '_guardrail_config = {"guardrailIdentifier": GUARDRAIL_ID, "guardrailVersion": GUARDRAIL_VERSION} if GUARDRAIL_ID else None\n'
+        + _GUARDRAIL_KWARGS_ASSIGN + '\n'
     )
 
     # Inject env vars after the last top-level import or constant.
@@ -2131,7 +2195,13 @@ def _inject_guardrails(code: str) -> str:
     # triple-quoted strings:
     #   SYSTEM_PROMPT = """short prompt"""           (single-line)
     #   SYSTEM_PROMPT = """long\nmultiline\n"""      (multi-line)
-    for marker in ['MODEL_ID = os.environ', 'SYSTEM_PROMPT = """']:
+    #
+    # Idempotency: a second _inject_guardrails call must NOT re-inject the env
+    # block. The constructor/converse splats are individually guarded, but the
+    # env assignment is unguarded — gate the whole block on the GUARDRAIL_ID
+    # assignment not already being present.
+    already_has_env_block = 'GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID"' in code
+    for marker in ([] if already_has_env_block else ['MODEL_ID = os.environ', 'SYSTEM_PROMPT = """']):
         idx = code.find(marker)
         if idx >= 0:
             # Find end of that line
@@ -2150,7 +2220,7 @@ def _inject_guardrails(code: str) -> str:
                 code = code[:eol + 1] + guardrail_env_block + code[eol + 1:]
                 break
 
-    # Inject into Strands BedrockModel: add guardrail_config parameter.
+    # Inject into Strands BedrockModel: splat the flat guardrail kwargs.
     #
     # The constructor shape differs by template: some emit
     # ``BedrockModel(model_id=MODEL_ID, region_name=REGION)`` while the default
@@ -2161,17 +2231,39 @@ def _inject_guardrails(code: str) -> str:
     # READY but never wired into the model, silently disabling INPUT blocking
     # on the most common pattern. Balance-match the constructor's parens and
     # append the kwarg before the closing ``)`` so every shape is covered.
-    if 'BedrockModel(' in code and 'guardrail_config' not in _strip_env_block(code):
-        code = _append_kwarg_to_call(
-            code, 'BedrockModel(', 'guardrail_config=_guardrail_config'
+    if 'BedrockModel(' in code and '**_GUARDRAIL_KWARGS' not in _strip_env_block(code):
+        code = _append_kwarg_to_calls(
+            code, 'BedrockModel(', '**_GUARDRAIL_KWARGS'
         )
 
-    # Inject into boto3 converse() calls: add guardrailConfig parameter
+    # Inject into boto3 converse() calls: add guardrailConfig parameter.
+    #
+    # NOTE: this is a plain str.replace into ALREADY-RENDERED code (the host
+    # generators are f-strings whose ``{{``/``}}`` have already collapsed to
+    # single braces). It is NOT a ``.format`` call — so the splat below MUST use
+    # SINGLE braces. Using ``{{...}}`` here would land LITERAL double braces in
+    # the deployed file, which Python parses as a set literal of an unhashable
+    # dict (``TypeError: unhashable type: 'dict'``) and crashes at runtime.
     if '.converse(' in code and 'guardrailConfig' not in code:
-        code = code.replace(
-            'toolConfig=TOOL_CONFIG,',
-            'toolConfig=TOOL_CONFIG,\n            **({{"guardrailConfig": {{"guardrailIdentifier": GUARDRAIL_ID, "guardrailVersion": GUARDRAIL_VERSION}}}} if GUARDRAIL_ID else {{}}),',
+        guardrail_splat = (
+            '\n            **({"guardrailConfig": {"guardrailIdentifier": '
+            'GUARDRAIL_ID, "guardrailVersion": GUARDRAIL_VERSION}} '
+            'if GUARDRAIL_ID else {}),'
         )
+        # Tool-using converse templates anchor on toolConfig=TOOL_CONFIG,.
+        if 'toolConfig=TOOL_CONFIG,' in code:
+            code = code.replace(
+                'toolConfig=TOOL_CONFIG,',
+                'toolConfig=TOOL_CONFIG,' + guardrail_splat,
+            )
+        # The lightweight no-tools converse template has no toolConfig anchor;
+        # wire guardrails in via its inferenceConfig line instead so guardrails
+        # are enforced there too (low-risk: same converse() guardrailConfig API).
+        elif 'inferenceConfig={"maxTokens": 2048},' in code:
+            code = code.replace(
+                'inferenceConfig={"maxTokens": 2048},',
+                'inferenceConfig={"maxTokens": 2048},' + guardrail_splat,
+            )
 
     return code
 

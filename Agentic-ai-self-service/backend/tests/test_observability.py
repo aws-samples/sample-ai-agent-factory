@@ -16,6 +16,8 @@ from app.services.observability import (
 
 
 def test_disabled_returns_empty():
+    """Truly-disabled stays {} — the Bug 194 native-enable path must NOT
+    force observability on when the user explicitly turned it off."""
     assert build_otel_env_vars(None, runtime_name="agent") == {}
     assert build_otel_env_vars({"enabled": False}, runtime_name="agent") == {}
 
@@ -97,13 +99,91 @@ def test_dual_export_native_field_is_ignored():
     assert "OTEL_DUAL_EXPORT_NATIVE_ENDPOINT" not in env
 
 
-def test_no_endpoint_returns_empty():
-    """Custom provider with no endpoint = nothing to export to."""
+def test_no_endpoint_enables_native_observability():
+    """Custom provider, enabled, no 3rd-party endpoint = enable AgentCore-native
+    ADOT capture (Bug 194), NOT empty env.
+
+    Returning {} here used to leave the runtime with NO TracerProvider, so it
+    emitted zero gen_ai.usage spans and GET /cost by_model stayed {}. The fix
+    turns on AGENT_OBSERVABILITY_ENABLED so spans land in the -DEFAULT log group
+    the cost rollup reads — without injecting an OTLP endpoint (no localhost
+    sidecar, Bug 18).
+    """
     env = build_otel_env_vars(
         {"enabled": True, "provider": "custom"},
         runtime_name="agent",
     )
-    assert env == {}
+    assert env == {
+        "AGENT_OBSERVABILITY_ENABLED": "true",
+        "OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental",
+    }
+    # No 3rd-party/localhost endpoint is injected on the native path.
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in env
+
+
+def test_langfuse_default_without_credentials_enables_native_observability():
+    """P-PLAT-010 / Bug 194: enabled (incl. by default) but no caller endpoint
+    and no credentials must NOT inject a 3rd-party OTLP endpoint, and must NOT
+    return {}.
+
+    Injecting the langfuse cloud URL with no auth would route gen_ai.usage spans
+    off to an unauthenticated endpoint (401, dropped) instead of the -DEFAULT
+    log group cost reads. But Bug 194 proved leaving OTEL_* entirely unset emits
+    NO spans at all — the managed deploy path creates no TracerProvider. So the
+    native path enables AgentCore-native ADOT observability (which feeds
+    -DEFAULT) without an endpoint. AGENT_OBSERVABILITY_ENABLED is what turns
+    native export on; an unset env does NOT preserve any native export.
+    """
+    native = {
+        "AGENT_OBSERVABILITY_ENABLED": "true",
+        "OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental",
+    }
+    env = build_otel_env_vars(
+        {"enabled": True},  # provider defaults to 'langfuse', no endpoint/creds
+        runtime_name="agent",
+    )
+    assert env == native
+
+    # Explicit langfuse provider, still no credentials -> same native env.
+    env2 = build_otel_env_vars(
+        {"enabled": True, "provider": "langfuse"},
+        runtime_name="agent",
+    )
+    assert env2 == native
+
+
+def test_langfuse_default_with_secret_uses_default_endpoint():
+    """When the caller supplies credentials for langfuse, the provider default
+    endpoint IS usable, so we fall back to it (no explicit endpoint needed)."""
+    env = build_otel_env_vars(
+        {
+            "enabled": True,
+            "provider": "langfuse",
+            "auth_header_secret_arn": (
+                "arn:aws:secretsmanager:us-east-1:123456789012:secret:"
+                "agentcore-otel/langfuse/u-creds-abcdef123456"
+            ),
+        },
+        runtime_name="agent",
+    )
+    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == (
+        "https://cloud.langfuse.com/api/public/otel"
+    )
+
+
+def test_langfuse_default_with_extra_headers_uses_default_endpoint():
+    """Auth via extra headers also makes the provider default endpoint usable."""
+    env = build_otel_env_vars(
+        {
+            "enabled": True,
+            "provider": "langfuse",
+            "extra_headers": {"Authorization": "Basic abc"},
+        },
+        runtime_name="agent",
+    )
+    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == (
+        "https://cloud.langfuse.com/api/public/otel"
+    )
 
 
 def test_inject_otel_adds_bootstrap_after_app_init():
