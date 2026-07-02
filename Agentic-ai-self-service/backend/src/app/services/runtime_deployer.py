@@ -947,6 +947,16 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
     except Exception as e:
         logger.warning("Triggers cleanup for %s failed: %s", canonical_id, e)
 
+    # NOTE on the RuntimeSlots row: the friendly-name slot/version rows are
+    # cleaned up by the OWNER-SCOPED release block in deployment_handler.py
+    # (the Bug-192 release, ~L1683-1700), which deletes them only when
+    # slot.owner_sub matches the caller. We deliberately do NOT delete the slot
+    # row here: destroy_runtime() has no caller_sub, so an unconditional delete
+    # would regress the cross-tenant name-lock invariant (a legacy null-owner
+    # deployment record + a friendly-name collision could let one tenant drop
+    # another tenant's slot). Tenant-safe slot teardown belongs to the caller-
+    # aware path, not this resource-level destroy.
+
     if deleted_any_role:
         return {"success": True, "message": f"Runtime {runtime_id} and execution role deleted"}
     return {"success": True, "message": f"Runtime {runtime_id} deleted"}

@@ -79,7 +79,7 @@ def _model_arn_pattern(model_id: str) -> Optional[str]:
     """Best-effort Bedrock foundation-model ARN pattern from a model id.
 
     Scopes InvokeModel to the model FAMILY rather than ``*``. Bedrock model ids
-    look like ``us.anthropic.claude-sonnet-4-5-20250929-v1:0`` (an inference
+    look like ``us.anthropic.claude-sonnet-5`` (an inference
     profile) — we scope to the provider+family prefix across regions/accounts so
     cross-region inference profiles still resolve, while excluding unrelated
     providers. Returns None when we can't parse one (caller falls back to ``*``).
@@ -124,7 +124,7 @@ def _model_resource_arns(model_id: str) -> Optional[list]:
     _XREGION = {"us", "eu", "apac", "global", "apse", "use", "usw"}
     if first in _XREGION:
         # The inference-profile id is the full model id (e.g.
-        # us.anthropic.claude-sonnet-4-5-...). Scope across regions/accounts.
+        # us.anthropic.claude-sonnet-5). Scope across regions/accounts.
         resources.append(f"arn:aws:bedrock:*:*:inference-profile/{base}")
         # System-defined inference profiles are also referenced without an
         # account; include that form too for safety.
@@ -414,13 +414,16 @@ def create_harness(
         "executionRoleArn": role_arn,
     }
     if model_id:
-        create_params["model"] = {
-            "bedrockModelConfig": {
-                "modelId": model_id,
-                "maxTokens": max_tokens,
-                "temperature": temperature,
-            }
+        model_config = {
+            "modelId": model_id,
+            "maxTokens": max_tokens,
         }
+        # Claude Sonnet 5 and later models reject the temperature parameter
+        # with ValidationException: "temperature is deprecated for this model".
+        # Only include temperature for older models.
+        if not any(m in model_id.lower() for m in ("claude-sonnet-5", "claude-opus-5")):
+            model_config["temperature"] = temperature
+        create_params["model"] = {"bedrockModelConfig": model_config}
     if system_prompt:
         create_params["systemPrompt"] = [{"text": system_prompt}]
 

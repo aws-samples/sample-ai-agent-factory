@@ -14,8 +14,10 @@ from unittest.mock import MagicMock, patch
 from app.services import policy_promoter as pp
 
 
-def _state(mode="LOG_ONLY", pending=True):
+def _state(mode="LOG_ONLY", pending=True, validation_pending=False):
     pr = {"mode": mode, "engine_arn": "arn:eng", "downgraded_to_log_only": mode != "ENFORCE"}
+    if validation_pending:
+        pr["enforce_validation_pending"] = True
     if pending:
         pr["enforce_pending"] = {
             "engine_id": "eng-1", "gateway_id": "gw-1",
@@ -31,6 +33,34 @@ def test_noop_when_nothing_pending():
 
 def test_noop_when_already_enforce():
     assert pp.try_promote_to_enforce(_state(mode="ENFORCE"), "us-east-1") is None
+
+
+def test_failclosed_enforce_unbricks_when_policies_active():
+    """P-PLAT-027: fail-closed attach — engine already ENFORCE, policies pending.
+
+    The promoter must still run (create the pending policies) and report
+    promoted=True WITHOUT calling update_gateway (mode is already ENFORCE).
+    """
+    ctrl = MagicMock()
+    ctrl.list_policies.return_value = {"policies": [{"name": "allow", "status": "ACTIVE", "policyId": "p1"}]}
+    with patch.object(pp, "_ctrl", return_value=ctrl):
+        out = pp.try_promote_to_enforce(
+            _state(mode="ENFORCE", validation_pending=True), "us-east-1")
+    assert out["promoted"] is True and out["mode"] == "ENFORCE"
+    ctrl.update_gateway.assert_not_called()
+
+
+def test_failclosed_enforce_stays_denied_until_policies_active():
+    """P-PLAT-027: policies still failing — stays ENFORCE (denied), no flip."""
+    ctrl = MagicMock()
+    ctrl.list_policies.return_value = {"policies": []}
+    ctrl.create_policy.return_value = {"policyId": "p1"}
+    ctrl.get_policy.return_value = {"status": "CREATE_FAILED"}
+    with patch.object(pp, "_ctrl", return_value=ctrl):
+        out = pp.try_promote_to_enforce(
+            _state(mode="ENFORCE", validation_pending=True), "us-east-1")
+    assert out["promoted"] is False and out["mode"] == "ENFORCE"
+    ctrl.update_gateway.assert_not_called()
 
 
 def test_promotes_when_policies_active():

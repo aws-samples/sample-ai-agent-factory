@@ -119,7 +119,7 @@ def test_create_harness_parses_envelope_and_arn():
         ctrl,
         "my_harness",
         "arn:aws:iam::111122223333:role/AgentCoreHarness-my_harness",
-        model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        model_id="us.anthropic.claude-sonnet-5",
         system_prompt="You are helpful.",
         gateway_arn="arn:aws:bedrock-agentcore:us-west-2:111122223333:gateway/gw-1",
         memory_arn="arn:aws:bedrock-agentcore:us-west-2:111122223333:memory/mem-1",
@@ -149,6 +149,32 @@ def test_create_harness_omits_model_when_not_specified():
     assert "model" not in kwargs  # service defaults to Claude Sonnet 4.6
     assert "tools" not in kwargs
     assert "memory" not in kwargs
+
+
+def test_create_harness_excludes_temperature_for_claude_sonnet_5():
+    """Claude Sonnet 5+ rejects temperature with ValidationException."""
+    ctrl = MagicMock()
+    ctrl.create_harness.return_value = {
+        "harness": {"harnessId": "h1", "arn": "arn:...:harness/h1", "status": "CREATING"}
+    }
+    create_harness(ctrl, "h", "role-arn", model_id="us.anthropic.claude-sonnet-5")
+    _, kwargs = ctrl.create_harness.call_args
+    model_cfg = kwargs["model"]["bedrockModelConfig"]
+    assert model_cfg["modelId"] == "us.anthropic.claude-sonnet-5"
+    assert "temperature" not in model_cfg  # excluded for Claude 5
+
+
+def test_create_harness_includes_temperature_for_older_models():
+    """Older models (e.g. Claude Sonnet 4.6) still receive temperature."""
+    ctrl = MagicMock()
+    ctrl.create_harness.return_value = {
+        "harness": {"harnessId": "h1", "arn": "arn:...:harness/h1", "status": "CREATING"}
+    }
+    create_harness(ctrl, "h", "role-arn", model_id="us.anthropic.claude-sonnet-4-6-20250514-v1:0")
+    _, kwargs = ctrl.create_harness.call_args
+    model_cfg = kwargs["model"]["bedrockModelConfig"]
+    assert model_cfg["modelId"] == "us.anthropic.claude-sonnet-4-6-20250514-v1:0"
+    assert "temperature" in model_cfg  # included for older models
 
 
 def test_create_harness_idempotent_on_conflict():
@@ -334,7 +360,7 @@ def test_harness_role_scopes_model_and_resources(monkeypatch):
 
     hd.create_harness_iam_role(
         iam, "AgentCoreHarness-x",
-        model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        model_id="us.anthropic.claude-sonnet-5",
         memory_arn="arn:aws:bedrock-agentcore:us-east-1:1:memory/m-1",
         gateway_arn="arn:aws:bedrock-agentcore:us-east-1:1:gateway/g-1",
     )
@@ -351,7 +377,7 @@ def test_harness_role_scopes_model_and_resources(monkeypatch):
         for r in model_res
     )
     assert any(
-        "inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0" in r
+        "inference-profile/us.anthropic.claude-sonnet-5" in r
         for r in model_res
     )
     # Memory/gateway statement scoped to the connected ARNs, not "*"

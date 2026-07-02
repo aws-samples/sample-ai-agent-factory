@@ -155,7 +155,7 @@ def retrieve_multi_hop(query: str, max_hops: int = 3) -> str:
     except Exception:
         max_hops = 3
 
-    agent_model = _rag_os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+    agent_model = _rag_os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-5")
 
     def _decompose(q, prior):
         """Ask the agent model for the next sub-question (or DONE)."""

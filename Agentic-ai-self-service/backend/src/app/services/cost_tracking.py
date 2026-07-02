@@ -19,11 +19,14 @@ tenant-supplied) and SK is a random sortable ``event_id``, so cross-tenant
 overwrite is structurally impossible (Bug 122). ``owner_sub`` is still stamped
 and the ``owner_sub-event_id-index`` GSI is owner-scoped.
 
-Bedrock price window (Bug 113): only models published Oct-2025..May-2026 are
-listed — ``us.anthropic.claude-sonnet-4-5-20250929-v1:0`` and
-``us.anthropic.claude-haiku-4-5-20251001-v1:0`` (plus their ``eu.``/``ap.``
-inference-profile variants and the bare bedrock model-id forms). Unknown
-models fall back to a default rate and are logged, never crash.
+Bedrock price window (Bug 113): current as of the July-2026 window —
+``anthropic.claude-sonnet-5``, ``anthropic.claude-sonnet-4-6``,
+``anthropic.claude-opus-4-8``, and ``anthropic.claude-haiku-4-5-...``; the
+previous-window ``anthropic.claude-sonnet-4-5-...`` id is kept because
+deployed runtimes may still emit it in logs (the table prices LOGGED ids).
+Keys are matched after the ``us.``/``eu.``/``ap.`` inference-profile prefix
+is stripped. Unknown models fall back to a default rate and are logged,
+never crash.
 """
 
 from __future__ import annotations
@@ -50,14 +53,23 @@ logger = logging.getLogger(__name__)
 # Rates are keyed by the *normalized* bedrock model id (inference-profile
 # region prefix stripped). Both the long anthropic-foundation-model id and the
 # bare form are listed so whatever lands in ``gen_ai.request.model`` resolves.
-# Source: AWS Bedrock on-demand pricing, current as of the May-2026 window.
+# Source: AWS Bedrock on-demand pricing, current as of the July-2026 window.
 # REVIEW each model-window rotation (Bug 113).
 _PRICE_PER_1K: dict[str, tuple[float, float]] = {
     # (input_per_1k, output_per_1k)
-    # Claude Sonnet 4.5 (published 2025-09-29)
-    "anthropic.claude-sonnet-4-5-20250929-v1:0": (0.003, 0.015),
+    # Claude Sonnet 5
+    "anthropic.claude-sonnet-5": (0.003, 0.015),
+    # Claude Sonnet 4.6
+    "anthropic.claude-sonnet-4-6": (0.003, 0.015),
+    # Claude Opus 4.8
+    "anthropic.claude-opus-4-8": (0.005, 0.025),
     # Claude Haiku 4.5 (published 2025-10-01)
     "anthropic.claude-haiku-4-5-20251001-v1:0": (0.001, 0.005),
+    # -- Previous window: kept because deployed runtimes may still emit this
+    #    model id in logs; the table prices LOGGED ids, so removing it would
+    #    misprice history.
+    # Claude Sonnet 4.5 (published 2025-09-29)
+    "anthropic.claude-sonnet-4-5-20250929-v1:0": (0.003, 0.015),
 }
 
 # Fallback rate for unknown models so the endpoint never crashes (and is

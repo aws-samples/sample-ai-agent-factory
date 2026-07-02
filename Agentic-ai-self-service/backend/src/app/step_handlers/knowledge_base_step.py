@@ -470,7 +470,7 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
         logger.exception("Failed to update step status for KB step")
 
     kb_mode = kb_config.get("kbMode", "existing")
-    foundation_model_id = kb_config.get("foundationModelId", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+    foundation_model_id = kb_config.get("foundationModelId", "us.anthropic.claude-sonnet-5")
     foundation_model_arn = _build_model_arn(region, foundation_model_id)
 
     bedrock_agent = boto3.client("bedrock-agent", region_name=region)
@@ -697,7 +697,7 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
             # rejects unknown keys on vectorIngestionConfiguration, so do not
             # add anything BDA-related here.
         elif parsing_strategy == "bedrock_foundation_model":
-            parsing_model_id = kb_config.get("parsingModelId", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+            parsing_model_id = kb_config.get("parsingModelId", "us.anthropic.claude-sonnet-5")
             fm_config: dict = {
                 "modelArn": _build_model_arn(region, parsing_model_id),
                 "parsingModality": "MULTIMODAL",

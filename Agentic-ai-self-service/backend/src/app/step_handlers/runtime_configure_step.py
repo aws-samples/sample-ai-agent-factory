@@ -29,13 +29,24 @@ def _get_env(name: str, default: str = "") -> str:
 
 
 def _to_cross_region_model_id(model_id: str) -> str:
-    """Ensure model ID uses cross-region inference profile format with version suffix."""
+    """Ensure model ID uses cross-region inference profile format.
+
+    Appends the ``-v1:0`` version suffix only to LEGACY date-suffixed IDs
+    (e.g. ``us.anthropic.claude-haiku-4-5-20251001``). Current-generation
+    dateless IDs (``us.anthropic.claude-sonnet-5``) must pass through
+    unchanged — appending ``-v1:0`` produces an invalid model identifier.
+    Mirrors code_generator._to_cross_region_model_id.
+    """
     if not model_id:
         return model_id
     if not model_id.startswith(("us.", "global.", "eu.", "ap.")):
         model_id = f"us.{model_id}"
-    # Bedrock inference profiles require a version suffix like -v1:0
-    if "anthropic." in model_id and not re.search(r"-v\d+:\d+$", model_id):
+    # Only legacy DATED inference profiles require a -v1:0 version suffix.
+    if (
+        "anthropic." in model_id
+        and re.search(r"-\d{8}$", model_id)
+        and not re.search(r"-v\d+:\d+$", model_id)
+    ):
         model_id = f"{model_id}-v1:0"
     return model_id
 

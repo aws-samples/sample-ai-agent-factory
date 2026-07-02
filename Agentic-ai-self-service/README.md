@@ -290,7 +290,7 @@ These are passed as CDK context parameters to the infrastructure stack.
 | `WORKFLOWS_TABLE_NAME` | DynamoDB table name for workflow definitions |
 | `STATE_MACHINE_ARN` | Step Functions state machine ARN for deployment orchestration |
 | `APP_AWS_REGION` | AWS region for service calls |
-| `TOOL_GENERATOR_MODEL_ID` | Claude model ID for AI Tool Generator (default: `us.anthropic.claude-sonnet-4-20250514-v1:0`) |
+| `TOOL_GENERATOR_MODEL_ID` | Claude model ID for AI Tool Generator (default: `us.anthropic.claude-sonnet-5`) |
 
 ### SSM Parameters
 
