@@ -987,9 +987,9 @@ Resources:
                 - !Sub |
                     ARCH=$(uname -m)
                     if [ "$ARCH" = "aarch64" ]; then
-                      URL="https://desktop-release.q.us-east-1.amazonaws.com/2.11.0/kirocli-aarch64-linux.zip"
+                      URL="https://desktop-release.q.us-east-1.amazonaws.com/2.10.0/kirocli-aarch64-linux.zip"
                     else
-                      URL="https://desktop-release.q.us-east-1.amazonaws.com/2.11.0/kirocli-x86_64-linux.zip"
+                      URL="https://desktop-release.q.us-east-1.amazonaws.com/2.10.0/kirocli-x86_64-linux.zip"
                     fi
                     curl --proto '=https' --tlsv1.2 -sSf "$URL" -o /tmp/kirocli.zip
                     cd /tmp && unzip -qo kirocli.zip
