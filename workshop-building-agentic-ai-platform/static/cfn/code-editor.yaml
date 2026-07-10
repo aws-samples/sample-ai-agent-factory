@@ -996,7 +996,7 @@ Resources:
                     sudo -u ${CodeEditorUser} /tmp/kirocli/install.sh 2>&1
                     rm -rf /tmp/kirocli /tmp/kirocli.zip
                 - echo "Kiro CLI installed. Checking configuration"
-                - !Sub sudo -i -u ${CodeEditorUser} kiro-cli --version
+                - !Sub sudo -i -u ${CodeEditorUser} /usr/local/bin/kiro-cli --version
           - name: ConfigureKiroCliCustomAgent
             action: aws:runShellScript
             inputs:
