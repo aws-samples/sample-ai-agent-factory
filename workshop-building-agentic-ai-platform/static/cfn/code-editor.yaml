@@ -1,10 +1,13 @@
-Description: Create a Code Editor instance with an Amazon CloudFront distribution for use in Workshop Studio. Version 1.5.1
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create a Code Editor instance with an Amazon CloudFront distribution for use in Workshop Studio. Version 1.7.0
 
 Parameters:
   CodeEditorUser:
     Type: String
     Description: UserName for Code Editor
     Default: participant
+    AllowedPattern: ^[a-z_][a-z0-9_-]{0,31}$
+    ConstraintDescription: Must be a valid Linux username (1-32 chars, lowercase, starting with a letter or underscore)
   InstanceName:
     Type: String
     Description: Code Editor EC2 instance name
@@ -26,6 +29,8 @@ Parameters:
     Type: String
     Description: Folder to open in Code Editor
     Default: /workshop
+    AllowedPattern: ^/[A-Za-z0-9_][A-Za-z0-9_/.-]*$
+    ConstraintDescription: Must be an absolute path starting with / and an alphanumeric or underscore character
   DevServerBasePath:
     Type: String
     Description: Base path for the application to be added to Nginx sites-available list
@@ -35,9 +40,11 @@ Parameters:
     Description: Port for the DevServer
     Default: 8081
   RepoUrl:
-    Description: Remote repo URL to clone. To not clone a remote repo, leave blank
+    Description: Remote repo URL to clone (https, git SSH, or codecommit::). The literal placeholder {.Region} is replaced with the stack's region at bootstrap time. Leave blank to skip.
     Type: String
     Default: ''
+    AllowedPattern: ^$|^[A-Za-z0-9:/@._~+%{}-]+$
+    ConstraintDescription: Must be a valid repo URL containing only letters, digits, and the characters :/@._~+%{}- (shell metacharacters are rejected)
   AssetZipS3Path:
     Description: S3 path holding the asset zip file to be copied into the home folder. To not include any assets, leave blank
     Type: String
@@ -50,60 +57,19 @@ Parameters:
     Description: S3 path holding the folder zip file, with each folder being a subfolder of the home directory. Each folder will have its own local git repo. To not include any folders, leave blank
     Type: String
     Default: ''
-  WorkshopAssetsBucket:
-    Description: Workshop Studio assets S3 bucket. When set, the workshop source/ tree is synced into the IDE home folder on boot.
-    Type: String
-    Default: ''
-  WorkshopAssetsPrefix:
-    Description: Workshop Studio assets S3 prefix (ends with '/'). Set to "{{.AssetsBucketPrefix}}" in contentspec.yaml.
-    Type: String
-    Default: ''
-  CloudFrontPrefixListIdOverride:
-    Description: >
-      Optional override for the CloudFront origin-facing managed prefix-list ID
-      (com.amazonaws.global.cloudfront.origin-facing). Leave empty to look the
-      ID up from the AWSRegionsPrefixListID map below. Set this ONLY when
-      deploying to a region not present in that map; find the ID with:
-      aws ec2 describe-managed-prefix-lists --region <REGION> --query
-      "PrefixLists[?PrefixListName=='com.amazonaws.global.cloudfront.origin-facing'].PrefixListId"
-    Type: String
-    Default: ''
-  VpcId:
-    Description: >
-      Optional VPC for the Code Editor instance. Leave BOTH this and SubnetId
-      empty to use the account's default VPC (the Workshop Studio sandbox
-      always has one). Set BOTH when deploying into an account without a
-      default VPC (common in enterprise landing zones where default VPCs are
-      deleted as a security baseline).
-    Type: String
-    Default: ''
-  SubnetId:
-    Description: >
-      Optional PUBLIC subnet for the Code Editor instance (must belong to
-      VpcId and must route to an Internet Gateway). The instance is assigned a
-      public IP so CloudFront can reach it as a custom origin. Set together
-      with VpcId; leave empty to use the default VPC.
-    Type: String
-    Default: ''
 
 Conditions:
   IsAL2023: !Equals [!Ref InstanceOperatingSystem, 'AmazonLinux-2023']
-  # When the override is supplied, the AWSRegionsPrefixListID FindInMap (which
-  # would fail for an unmapped region) is NOT evaluated.
-  HasCloudFrontPrefixListIdOverride: !Not [!Equals [!Ref CloudFrontPrefixListIdOverride, '']]
-  # Custom networking: both VpcId and SubnetId supplied -> SG is created in
-  # that VPC and the instance launches in that subnet with a public IP.
-  # Otherwise the SG/instance land in the account's default VPC (original
-  # behavior, required by Workshop Studio sandboxes).
-  HasCustomNetwork: !And
-    - !Not [!Equals [!Ref VpcId, '']]
-    - !Not [!Equals [!Ref SubnetId, '']]
-  IsGraviton: !Not [
-    !Equals [
-      !Select [0, !Split ['g', !Select [0, !Split ['.', !Ref InstanceType]]]],
-      !Select [0, !Split ['.', !Ref InstanceType]]
-    ]
-  ]
+  # Graviton iff family contains 'g' AND does not start with 'g'. Misses a1/g5g/inf/trn (obvious at boot).
+  IsGraviton: !And
+    - !Not
+      - !Equals # family contains 'g' (e.g. t4g, c7gd, im4gn; rejects m5, a1)
+        - !Select [0, !Split ['.', !Ref InstanceType]]
+        - !Join ['', !Split ['g', !Select [0, !Split ['.', !Ref InstanceType]]]]
+    - !Not
+      - !Equals # family does not start with 'g' (rejects g5, g4dn, g6, g5g)
+        - !Select [0, !Split ['g', !Select [0, !Split ['.', !Ref InstanceType]]]]
+        - ''
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -126,8 +92,6 @@ Metadata:
           - AssetZipS3Path
           - BranchZipS3Path
           - FolderZipS3Path
-          - WorkshopAssetsBucket
-          - WorkshopAssetsPrefix
     ParameterLabels:
       CodeEditorUser:
         default: Code Editor user name
@@ -153,10 +117,6 @@ Metadata:
         default: Branch file S3 path
       FolderZipS3Path:
         default: Folder file S3 path
-      WorkshopAssetsBucket:
-        default: Workshop Studio assets bucket
-      WorkshopAssetsPrefix:
-        default: Workshop Studio assets prefix
 
 Mappings:
   ArmImage:
@@ -181,6 +141,8 @@ Mappings:
       PrefixList: pl-58a04531
     ap-northeast-2:
       PrefixList: pl-22a6434b
+    ap-northeast-3:
+      PrefixList: pl-31a14458
     ap-south-1:
       PrefixList: pl-9aa247f3
     ap-southeast-1:
@@ -214,10 +176,6 @@ Resources:
   CodeEditorSecret:
     Type: AWS::SecretsManager::Secret
     Metadata:
-      checkov:
-        skip:
-          - id: CKV_AWS_149
-            comment: "Workshop secrets use the AWS-managed Secrets Manager key; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
       cfn_nag:
         rules_to_suppress:
           - id: W77
@@ -311,6 +269,7 @@ Resources:
                       logger.info(f'Getting secret from {secret_name}')
 
                       secret = secrets_mgr.get_secret_value(SecretId = secret_name)
+                      logger.debug(f'secret: {secret}')
                       secret_value = secret['SecretString']
 
                       responseData = {}
@@ -318,6 +277,7 @@ Resources:
                           responseData = secret_value
                       else:
                           responseData = {'secret': secret_value}
+                      logger.debug(f'responseData: {responseData}')
                       logger.debug(f'type(responseData): {type(responseData)}')
                       cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData=json.loads(responseData), reason='OK', noEcho=True)
               except Exception as e:
@@ -364,11 +324,11 @@ Resources:
                   while [ $retry_count -lt $max_retries ]; do
                     echo "Installing extension: $extension_name (attempt $((retry_count + 1))/$max_retries)"
 
-                    if ! sudo -i -u {{ CodeEditorUser }} code-server --install-extension "$extension_name" --force 2>&1; then
+                    if ! sudo -i -u {{ CodeEditorUser }} code-editor-server --install-extension "$extension_name" --force 2>&1; then
                       echo "Failed to install $extension_name on attempt $((retry_count + 1))"
                     fi
 
-                    if sudo -i -u {{ CodeEditorUser }} code-server --list-extensions | grep -qi "$extension_name"; then
+                    if sudo -i -u {{ CodeEditorUser }} code-editor-server --list-extensions | grep -qi "$extension_name"; then
                       echo "Successfully installed $extension_name"
                       exit 0
                     else
@@ -504,6 +464,7 @@ Resources:
                   fi
                 - !Sub |
                   tee /etc/sudoers.d/91-vscode-user <<EOF
+                  # WORKSHOP POSTURE: passwordless sudo is intentional so participants can install tools without being prompted.
                   ${CodeEditorUser} ALL=(ALL) NOPASSWD:ALL
                   EOF
                 - !Sub mkdir -p /home/${CodeEditorUser}/.local/bin && chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}
@@ -538,6 +499,17 @@ Resources:
                 - rm -rf /tmp/aws
                 - echo "AWS CLI installed. Checking configuration"
                 - aws --version
+          - name: InstallKiroCLI
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - !Sub sudo -u ${CodeEditorUser} curl -fsSL https://cli.kiro.dev/install -o /tmp/kiro_cli_install.sh
+                - !Sub sudo -u ${CodeEditorUser} bash /tmp/kiro_cli_install.sh 2>&1
+                - echo "Kiro CLI installed. Checking configuration"
+                - !Sub sudo -i -u ${CodeEditorUser} kiro-cli --version
           - name: InstallGitDnf
             action: aws:runShellScript
             precondition:
@@ -555,7 +527,7 @@ Resources:
                   then
                     dnf install -y python3-pip
                     echo "Installing git-remote-codecommit with pip3"
-                    sudo -u participant PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install git-remote-codecommit==1.17
+                    sudo -u ${CodeEditorUser} PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install git-remote-codecommit
                   fi
           - name: InstallGitApt
             action: aws:runShellScript
@@ -576,7 +548,7 @@ Resources:
                   then
                     apt-get -q update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q python3-pip
                     echo "Installing git-remote-codecommit with pip3"
-                    sudo -u participant PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install git-remote-codecommit==1.17
+                    sudo -u ${CodeEditorUser} PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install git-remote-codecommit
                   fi
           - name: ConfigureGit
             action: aws:runShellScript
@@ -727,48 +699,11 @@ Resources:
                     sudo -u ${CodeEditorUser} git -C ${HomeFolder} restore .
                     rm -rf /tmp/branch
                     rm -rf /tmp/git
-                    echo "Branches downloaded. Checking configuration: $HomeFolder"
+                    echo "Branches downloaded. Checking configuration: ${HomeFolder}"
                     sudo -u ${CodeEditorUser} git -C ${HomeFolder} branch
                     ls -la ${HomeFolder}
                   fi
-          - name: SyncWorkshopAssets
-            # Pulls the workshop source tree from the Workshop Studio assets
-            # bucket into ${HomeFolder}. Without this, the IDE opens to an
-            # empty folder and participants have nothing to run.
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 900
-              runCommand:
-                - '#!/bin/bash'
-                - set -euo pipefail
-                - !Sub |
-                  if [[ -z "${WorkshopAssetsBucket}" ]]
-                  then
-                    echo "No workshop assets bucket configured — skipping sync"
-                    exit 0
-                  fi
-                  mkdir -p ${HomeFolder}
-                  chown -R ${CodeEditorUser}:${CodeEditorUser} ${HomeFolder}
-                  echo "Syncing workshop assets from s3://${WorkshopAssetsBucket}/${WorkshopAssetsPrefix} into ${HomeFolder}"
-                  # The Workshop Studio assets prefix contains the full repo tree
-                  # (content/, static/, source/, contentspec.yaml, README.md).
-                  # We sync it all so participants have the source + any
-                  # referenced fixtures/scripts available inside the IDE.
-                  sudo -u ${CodeEditorUser} aws s3 sync \
-                    "s3://${WorkshopAssetsBucket}/${WorkshopAssetsPrefix}" \
-                    "${HomeFolder}/" \
-                    --exclude '*.zip' \
-                    --only-show-errors
-                  chown -R ${CodeEditorUser}:${CodeEditorUser} ${HomeFolder}
-                  echo "Workshop assets synced. Top-level contents:"
-                  ls -la ${HomeFolder}
           - name: InstallCodeEditor
-            # Install coder.com's open-source code-server. We moved off the
-            # AWS code-editor-server build because it enforces a per-request
-            # ?tkn= query param that does not compose cleanly with CloudFront
-            # (every navigation must reinject the token). code-server has
-            # native password auth via ~/.config/code-server/config.yaml,
-            # which works cleanly behind CloudFront.
             action: aws:runShellScript
             inputs:
               timeoutSeconds: 600
@@ -776,11 +711,7 @@ Resources:
                 - '#!/bin/bash'
                 - set -euo pipefail
                 - !Sub export CodeEditorUser=${CodeEditorUser}
-                # The upstream installer references $HOME with `set -u`; SSM
-                # invokes scripts without HOME set, so export it explicitly.
-                - export HOME=/root
-                - curl -fsSL https://code-server.dev/install.sh -o /tmp/code-server-install.sh
-                - bash /tmp/code-server-install.sh 2>&1 || { echo "code-server installation failed"; exit 1; }
+                - curl -fsSL https://code-editor.amazonaws.com/content/code-editor-server/dist/aws-workshop-studio/install.sh | bash -s -- 2>&1 || { echo "Code Editor installation failed"; exit 1; }
           - name: ConfigureNginx
             action: aws:runShellScript
             inputs:
@@ -826,10 +757,6 @@ Resources:
                 - nginx -t 2>&1
                 - systemctl status nginx
           - name: ConfigureAuthToken
-            # Write code-server's native password-auth config. Same
-            # randomly-generated secret (CodeEditorSecret) the stack already
-            # creates — just delivered via config.yaml instead of a token
-            # file. Participants paste this password at the login screen.
             action: aws:runShellScript
             inputs:
               timeoutSeconds: 600
@@ -837,14 +764,10 @@ Resources:
                 - '#!/bin/bash'
                 - set -euo pipefail
                 - !Sub |
-                  sudo -u ${CodeEditorUser} mkdir -p /home/${CodeEditorUser}/.config/code-server
-                  tee /home/${CodeEditorUser}/.config/code-server/config.yaml <<EOF
-                  bind-addr: 127.0.0.1:8080
-                  auth: password
-                  password: "{{ CodeEditorPassword }}"
-                  cert: false
-                  EOF
-                  chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}/.config
+                  sudo -u ${CodeEditorUser} mkdir -p /home/${CodeEditorUser}/.code-editor-server/data
+                  sudo -u ${CodeEditorUser} touch /home/${CodeEditorUser}/.code-editor-server/data/token
+                  # token format: /^[0-9A-Za-z_-]+$/
+                  echo -n "{{ CodeEditorPassword }}" > /home/${CodeEditorUser}/.code-editor-server/data/token
           - name: ConfigureCodeEditor
             action: aws:runShellScript
             inputs:
@@ -852,12 +775,12 @@ Resources:
               runCommand:
                 - '#!/bin/bash'
                 - set -euo pipefail
-                - !Sub sudo -i -u ${CodeEditorUser} mkdir -p /home/${CodeEditorUser}/.local/share/code-server/User
-                - !Sub sudo -i -u ${CodeEditorUser} touch /home/${CodeEditorUser}/.local/share/code-server/User/settings.json
+                - !Sub sudo -i -u ${CodeEditorUser} mkdir -p /home/${CodeEditorUser}/.code-editor-server/data/User
+                - !Sub sudo -i -u ${CodeEditorUser} touch /home/${CodeEditorUser}/.code-editor-server/data/User/settings.json
                 - !Sub touch /home/${CodeEditorUser}/.hushlogin
                 - !Sub mkdir -p ${HomeFolder} && chown -R ${CodeEditorUser}:${CodeEditorUser} ${HomeFolder}
                 - !Sub |
-                  tee /home/${CodeEditorUser}/.local/share/code-server/User/settings.json <<EOF
+                  tee /home/${CodeEditorUser}/.code-editor-server/data/User/settings.json <<EOF
                   {
                     "aws.telemetry": false,
                     "extensions.autoUpdate": false,
@@ -877,11 +800,11 @@ Resources:
                   }
                   EOF
                 - !Sub chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}
-                - !Sub systemctl enable --now code-server@${CodeEditorUser}
-                - !Sub systemctl restart code-server@${CodeEditorUser}
-                - echo "code-server installed. Checking configuration"
-                - !Sub sudo -i -u ${CodeEditorUser} code-server --version
-                - !Sub systemctl status code-server@${CodeEditorUser}
+                - !Sub systemctl enable --now code-editor@${CodeEditorUser}
+                - !Sub systemctl restart code-editor@${CodeEditorUser}
+                - echo "Code Editor installed. Checking configuration"
+                - !Sub sudo -i -u ${CodeEditorUser} code-editor-server -v
+                - !Sub systemctl status code-editor@${CodeEditorUser}
           - name: InstallAWSToolkitExtension
             action: aws:runDocument
             inputs:
@@ -889,14 +812,6 @@ Resources:
               documentPath: !Ref InstallCodeEditorExtensionSSMDoc
               documentParameters:
                 ExtensionId: AmazonWebServices.aws-toolkit-vscode
-                CodeEditorUser: !Ref CodeEditorUser
-          - name: InstallAmazonQExtension
-            action: aws:runDocument
-            inputs:
-              documentType: SSMDocument
-              documentPath: !Ref InstallCodeEditorExtensionSSMDoc
-              documentParameters:
-                ExtensionId: AmazonWebServices.amazon-q-vscode
                 CodeEditorUser: !Ref CodeEditorUser
           - name: InstallLiveServerExtension
             action: aws:runDocument
@@ -915,662 +830,6 @@ Resources:
                 ExtensionId: synedra.auto-run-command
                 CodeEditorUser: !Ref CodeEditorUser
 # Install optional packages here - any of these blocks can be deleted if that software is not required for the workshop
-          - name: InstallNodeDnf
-            action: aws:runShellScript
-            precondition:
-              StringEquals:
-                - '{{ LinuxFlavor }}'
-                - al2023
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                - set -euo pipefail
-                # AL2023 `dnf install nodejs` ships Node 18, which Vite 7
-                # (used by Module 4's FAST frontend) rejects. Pull Node 20
-                # from NodeSource instead so the frontend build succeeds.
-                - curl -fsSL https://rpm.nodesource.com/setup_20.x -o /tmp/nodesource_setup.sh
-                - bash /tmp/nodesource_setup.sh
-                - dnf install -y nodejs
-                - echo "Node and npm installed. Checking configuration"
-                - node -v
-                - npm -v
-          - name: InstallNodeApt
-            action: aws:runShellScript
-            precondition:
-              StringEquals:
-                - '{{ LinuxFlavor }}'
-                - ubuntu
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg
-                - echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" > /etc/apt/sources.list.d/nodesource.list
-                - apt-get -q update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q nodejs
-                - npm install -g npm@10.8.1
-                - echo "Node and npm installed. Checking configuration"
-                - node -v
-                - npm -v
-          - name: InstallCDK
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - npm install -g aws-cdk@2.147.0
-                - echo "AWS CDK installed. Checking configuration"
-                - cdk --version
-          - name: InstallSAMCLI
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - curl -fsSL https://github.com/aws/aws-sam-cli/releases/latest/download/aws-sam-cli-linux-$(uname -m | sed 's/aarch64/arm64/').zip -o /tmp/aws_sam.zip
-                - !Sub chown -R ${CodeEditorUser}:${CodeEditorUser} /tmp/aws_sam.zip
-                - unzip -q -d /tmp/sam-installation /tmp/aws_sam.zip
-                - sudo bash /tmp/sam-installation/install
-                - rm -rf /tmp/sam-installation
-                - echo "AWS SAM CLI installed. Checking configuration"
-                - sam --version
-          - name: InstallKiroCLI
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - !Sub |
-                    ARCH=$(uname -m)
-                    if [ "$ARCH" = "aarch64" ]; then
-                      URL="https://desktop-release.q.us-east-1.amazonaws.com/2.10.0/kirocli-aarch64-linux.zip"
-                    else
-                      URL="https://desktop-release.q.us-east-1.amazonaws.com/2.10.0/kirocli-x86_64-linux.zip"
-                    fi
-                    curl --proto '=https' --tlsv1.2 -sSf "$URL" -o /tmp/kirocli.zip
-                    cd /tmp && unzip -qo kirocli.zip
-                    sudo -u ${CodeEditorUser} /tmp/kirocli/install.sh 2>&1
-                    rm -rf /tmp/kirocli /tmp/kirocli.zip
-                - echo "Kiro CLI installed. Checking configuration"
-                - !Sub sudo -i -u ${CodeEditorUser} kiro-cli --version
-          - name: ConfigureKiroCliCustomAgent
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - echo "Writing MCP config"
-                - !Sub mkdir -p /home/${CodeEditorUser}/.aws/amazonq/cli-agents
-                - !Sub |
-                  tee /home/${CodeEditorUser}/.aws/amazonq/cli-agents/participant.json <<EOF
-                  {
-                    "name": "participant",
-                    "description": "Coding Expert",
-                    "prompt": "You are an expert on AWS Services. When asked questions about AWS services, validate your answers against the latest AWS documentation and blog articles.",
-                    "mcpServers": {
-                      "aws_core": {
-                        "command": "uvx",
-                        "args": [
-                          "mcp-proxy",
-                          "--transport",
-                          "streamablehttp",
-                          "https://knowledge-mcp.global.api.aws"
-                        ],
-                        "env": {
-                          "FASTMCP_LOG_LEVEL": "ERROR",
-                          "aws-foundation": "true",
-                          "security-identity": "true"
-                        },
-                        "autoApprove": [],
-                        "disabled": false
-                      }
-                    },
-                    "tools": [
-                      "fs_read",
-                      "fs_write",
-                      "execute_bash",
-                      "use_aws",
-                      "@aws_core"
-                    ],
-                    "toolAliases": {},
-                    "allowedTools": [
-                      "fs_read",
-                      "@aws_core"
-                    ],
-                    "resources": [
-                      "file://AmazonQ.md",
-                      "file://README.md",
-                      "file://.amazonq/rules/**/*.md"
-                    ],
-                    "hooks": {},
-                    "toolsSettings": {},
-                    "useLegacyMcpJson": false,
-                    "model": null
-                  }
-                  EOF
-                - !Sub mkdir -p /home/${CodeEditorUser}/.local/share/amazon-q/settings
-                - !Sub |
-                  tee /home/${CodeEditorUser}/.local/share/amazon-q/settings.json <<EOF
-                  {
-                    "chat.defaultAgent": "participant",
-                    "mcp.loadedBefore": true
-                  }
-                  EOF
-                - !Sub chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}
-                - echo "Amazon Q Custom Agent configured"
-          - name: Installuv
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 600
-              runCommand:
-                - '#!/bin/bash'
-                - set -euo pipefail
-                # SECURITY: uv installer pinned to a SPECIFIC, IMMUTABLE VERSION
-                # (astral.sh/uv/0.11.21/install.sh) and sha256-verified (blocking).
-                # We pin the VERSIONED URL, not the rolling astral.sh/uv/install.sh
-                # — the rolling URL changes on every uv release, so hashing it
-                # would break the bootstrap at the next release. To bump uv:
-                # change the version in the URL below and refresh the hash with
-                #   curl -fsSL https://astral.sh/uv/<version>/install.sh | sha256sum
-                - !Sub sudo -u ${CodeEditorUser} curl -fsSL https://astral.sh/uv/0.11.21/install.sh -o /tmp/uv_install.sh
-                - |
-                  EXPECTED_SHA="053045e1e69ec77358fd44f2ef2cacb768a22d50f433e213624f0157ffbbc883"
-                  ACTUAL_SHA=$(sha256sum /tmp/uv_install.sh | awk '{print $1}')
-                  if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
-                    echo "ERROR: uv installer sha256 mismatch. expected=$EXPECTED_SHA actual=$ACTUAL_SHA"
-                    echo "Refusing to run an unverified installer (pinned uv 0.11.21)."
-                    exit 1
-                  fi
-                - !Sub sudo -i -u ${CodeEditorUser} bash /tmp/uv_install.sh 2>&1
-                - !Sub |
-                    if uv generate-shell-completion bash &>/dev/null; then
-                      echo 'eval "$(uv generate-shell-completion bash)"' >> /home/${CodeEditorUser}/.bashrc
-                    fi
-                - !Sub |
-                    if uvx generate-shell-completion bash &>/dev/null; then
-                      echo 'eval "$(uvx generate-shell-completion bash)"' >> /home/${CodeEditorUser}/.bashrc
-                    fi
-                - echo "uv installed. Checking configuration"
-                - !Sub sudo -i -u ${CodeEditorUser} uv --version
-          - name: InstallPythonDnf
-            # AL2023 ships Python 3.9 by default; we install 3.13 for the workshop.
-            action: aws:runShellScript
-            precondition:
-              StringEquals:
-                - '{{ LinuxFlavor }}'
-                - al2023
-            inputs:
-              timeoutSeconds: 900
-              runCommand:
-                - '#!/bin/bash'
-                - set -euo pipefail
-                - dnf install -y python3.13 python3.13-pip python3-virtualenv python3-pytest python3-boto3
-                - !Sub echo 'alias python3=python3.13' >> /home/${CodeEditorUser}/.bashrc
-                - !Sub echo 'alias pip3=pip3.13' >> /home/${CodeEditorUser}/.bashrc
-                - python3.13 -m pip install --upgrade pip==24.0 2>&1
-                # Jupyter + workshop libraries for the notebook-driven modules.
-                # Pin the Jupyter/ipykernel stack (kernel stability) and the
-                # strands version; let strands-agents resolve its own transitive
-                # deps (httpx, openai, mcp, pydantic, boto3) — pinning them to old
-                # versions made the resolver unsatisfiable (strands needs mcp>=1.8,
-                # openai>=1.68). Keep this aligned with module-2 requirements.txt.
-                - !Sub |
-                  sudo -u ${CodeEditorUser} python3.13 -m pip install --user \
-                    jupyter==1.0.0 ipykernel==6.29.4 nbformat==5.10.4 nbconvert==7.16.4 \
-                    pyyaml requests \
-                    'strands-agents[litellm,openai]==0.1.5'
-                # Register an ipykernel under a unique name so VS Code auto-selects it
-                # without colliding with the system python3 interpreter.
-                - !Sub |
-                  sudo -u ${CodeEditorUser} python3.13 -m ipykernel install --user \
-                    --name workshop --display-name "Python 3 (workshop)"
-                - !Sub sudo -u ${CodeEditorUser} python3.13 -m jupyter --version
-          - name: InstallPythonApt
-            # Ubuntu 22 default is Python 3.10, Ubuntu 24 default is Python 3.12
-            action: aws:runShellScript
-            precondition:
-              StringEquals:
-                - '{{ LinuxFlavor }}'
-                - ubuntu
-            inputs:
-              timeoutSeconds: 900
-              runCommand:
-                - '#!/bin/bash'
-                - set -euo pipefail
-                - dpkg --configure -a
-                - apt-get -q update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q python3-pip python3-venv python3-boto3 python3-pytest
-                - systemctl start multipathd.service packagekit.service
-                - systemctl restart unattended-upgrades.service
-                - systemctl restart networkd-dispatcher.service
-                # Jupyter + workshop libraries for the notebook-driven modules.
-                # See InstallPythonDnf above for why transitive deps are unpinned.
-                - !Sub |
-                  sudo -u ${CodeEditorUser} python3 -m pip install --user --break-system-packages \
-                    jupyter==1.0.0 ipykernel==6.29.4 nbformat==5.10.4 nbconvert==7.16.4 \
-                    pyyaml requests \
-                    'strands-agents[litellm,openai]==0.1.5'
-                - !Sub |
-                  sudo -u ${CodeEditorUser} python3 -m ipykernel install --user \
-                    --name workshop --display-name "Python 3 (workshop)"
-                - !Sub sudo -u ${CodeEditorUser} python3 -m jupyter --version
-          - name: ConfigurePython
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                - set -euo pipefail
-                - !Sub echo 'export AWS_DEFAULT_REGION=${AWS::Region}' >> /home/${CodeEditorUser}/.bashrc
-                - !Sub sudo -i -u ${CodeEditorUser} aws configure set region ${AWS::Region}
-                - !Sub echo 'alias pytest=pytest-3' >> /home/${CodeEditorUser}/.bashrc
-                - !Sub |
-                    target_file="/home/${CodeEditorUser}/.local/share/code-server/User/settings.json"
-                    if [ ! -f "$target_file" ]; then
-                      echo '{}' > "$target_file"
-                    fi
-                    # Point the Python / Jupyter extensions at the workshop
-                    # interpreter and trust the registered ipykernel so VS
-                    # Code picks it up without prompting.
-                    tmp=$(mktemp)
-                    jq '. + {
-                      "python.testing.pytestEnabled": true,
-                      "python.defaultInterpreterPath": "/usr/bin/python3.13",
-                      "jupyter.kernels.trusted": [
-                        "/home/${CodeEditorUser}/.local/share/jupyter/kernels/workshop/kernel.json",
-                        "/home/${CodeEditorUser}/.local/share/jupyter/kernels/workshop-fast/kernel.json"
-                      ],
-                      "notebook.kernelPicker.type": "mru",
-                      "jupyter.askForKernelRestart": false
-                    }' "$target_file" > "$tmp" && mv "$tmp" "$target_file"
-                    chown ${CodeEditorUser}:${CodeEditorUser} "$target_file"
-                # Write a workspace-level settings file so /workshop/* notebooks pick
-                # the named 'workshop' kernel on first open without a picker prompt.
-                - !Sub |
-                    mkdir -p /workshop/.vscode
-                    cat > /workshop/.vscode/settings.json <<'WSSETTINGS'
-                    {
-                      "jupyter.kernels.trusted": [
-                        "/home/${CodeEditorUser}/.local/share/jupyter/kernels/workshop/kernel.json",
-                        "/home/${CodeEditorUser}/.local/share/jupyter/kernels/workshop-fast/kernel.json"
-                      ],
-                      "notebook.kernelPicker.type": "mru",
-                      "jupyter.askForKernelRestart": false,
-                      "python.defaultInterpreterPath": "/usr/bin/python3.13"
-                    }
-                    WSSETTINGS
-                    chown -R ${CodeEditorUser}:${CodeEditorUser} /workshop/.vscode
-                - echo "Python and Pip installed. Checking configuration"
-                - !Sub sudo -i -u ${CodeEditorUser} python3 --version
-                - !Sub sudo -i -u ${CodeEditorUser} pip3 --version
-          - name: PrepareModule4bFastVenv
-            # Module 4b notebooks (FAST / CDK path) import packages not in the
-            # workshop kernel: bedrock-agentcore, mcp, bedrock-agentcore-starter-toolkit.
-            # Create a dedicated venv + register the 'workshop-fast' kernel so the
-            # Module 4b notebooks auto-select without the participant needing to run
-            # `python -m venv` themselves.
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 900
-              runCommand:
-                - '#!/bin/bash'
-                - set -euo pipefail
-                - !Sub |
-                    FAST_VENV=/home/${CodeEditorUser}/.venvs/workshop-fast
-                    if command -v python3.13 >/dev/null 2>&1; then
-                      PY=python3.13
-                    else
-                      PY=python3
-                    fi
-                    sudo -u ${CodeEditorUser} $PY -m venv $FAST_VENV
-                    sudo -u ${CodeEditorUser} $FAST_VENV/bin/pip install --upgrade pip==24.0
-                    # Pin only the kernel stack + the workshop libs; let pip
-                    # resolve transitive deps. The old boto3/httpx/pydantic/mcp
-                    # pins conflicted with strands-agents and bedrock-agentcore
-                    # (e.g. mcp==1.0.0 vs strands' mcp>=1.8, boto3==1.34 too old
-                    # for bedrock-agentcore-starter-toolkit).
-                    sudo -u ${CodeEditorUser} $FAST_VENV/bin/pip install \
-                      jupyter==1.0.0 ipykernel==6.29.4 nbformat==5.10.4 \
-                      'strands-agents[litellm]==0.1.5' \
-                      bedrock-agentcore==0.1.0 bedrock-agentcore-starter-toolkit==0.1.0 \
-                      mcp
-                    sudo -u ${CodeEditorUser} $FAST_VENV/bin/python -m ipykernel install --user \
-                      --name workshop-fast --display-name "Python 3 (workshop-fast)"
-                    sudo -u ${CodeEditorUser} $FAST_VENV/bin/python -m jupyter --version
-          - name: InstallPythonExtension
-            action: aws:runDocument
-            inputs:
-              documentType: SSMDocument
-              documentPath: !Ref InstallCodeEditorExtensionSSMDoc
-              documentParameters:
-                ExtensionId: ms-python.python
-                CodeEditorUser: !Ref CodeEditorUser
-          - name: InstallJupyterExtension
-            action: aws:runDocument
-            inputs:
-              documentType: SSMDocument
-              documentPath: !Ref InstallCodeEditorExtensionSSMDoc
-              documentParameters:
-                ExtensionId: ms-toolsai.jupyter
-                CodeEditorUser: !Ref CodeEditorUser
-          - name: InstallJavaDnf
-            action: aws:runShellScript
-            precondition:
-              StringEquals:
-                - '{{ LinuxFlavor }}'
-                - al2023
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - dnf install -y java-21-amazon-corretto java-17-amazon-corretto java-1.8.0-amazon-corretto maven
-          - name: InstallJavaApt
-            action: aws:runShellScript
-            precondition:
-              StringEquals:
-                - '{{ LinuxFlavor }}'
-                - ubuntu
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - dpkg --configure -a
-                - curl -fsSL https://apt.corretto.aws/corretto.key | gpg --dearmor -o /usr/share/keyrings/corretto-keyring.gpg
-                - echo "deb [signed-by=/usr/share/keyrings/corretto-keyring.gpg] https://apt.corretto.aws stable main" > /etc/apt/sources.list.d/corretto.list
-                - DEBIAN_FRONTEND=noninteractive apt-get update
-                - DEBIAN_FRONTEND=noninteractive apt-get install -y -q java-21-amazon-corretto-jdk java-17-amazon-corretto-jdk java-1.8.0-amazon-corretto-jdk maven
-          - name: ConfigureJava
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - !Sub echo 'export JAVA_1_8_HOME=$(dirname $(dirname $(readlink -f $(which java))))' >> /home/${CodeEditorUser}/.bashrc
-                - !Sub echo 'export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))' >> /home/${CodeEditorUser}/.bashrc
-                - !Sub echo 'export PATH=$PATH:$JAVA_HOME/bin:/usr/share/maven/bin' >> /home/${CodeEditorUser}/.bashrc
-                - echo "Java and Maven installed. Checking configuration"
-                - java -version 2>&1
-                - mvn --version
-                - update-alternatives --display java
-          - name: InstallJavaExtension
-            action: aws:runDocument
-            inputs:
-              documentType: SSMDocument
-              documentPath: !Ref InstallCodeEditorExtensionSSMDoc
-              documentParameters:
-                ExtensionId: vscjava.vscode-java-pack
-                CodeEditorUser: !Ref CodeEditorUser
-          - name: InstallGoDnf
-            action: aws:runShellScript
-            precondition:
-              StringEquals:
-                - '{{ LinuxFlavor }}'
-                - al2023
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - dnf install -y golang
-          - name: InstallGoApt
-            action: aws:runShellScript
-            precondition:
-              StringEquals:
-                - '{{ LinuxFlavor }}'
-                - ubuntu
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - dpkg --configure -a
-                - add-apt-repository ppa:longsleep/golang-backports
-                - apt-get -q update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q golang-go
-          - name: ConfigureGo
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - !Sub chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}
-                - echo "Go installed. Checking configuration"
-                - go version
-          - name: InstallDotNetDnf
-            action: aws:runShellScript
-            precondition:
-              StringEquals:
-                - '{{ LinuxFlavor }}'
-                - al2023
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - dnf install -y dotnet-sdk-8.0
-          - name: InstallDotNetApt
-            action: aws:runShellScript
-            precondition:
-              StringEquals:
-                - '{{ LinuxFlavor }}'
-                - ubuntu
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - dpkg --configure -a
-                - apt-get -q update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q dotnet-sdk-8.0
-          - name: ConfigureDotNet
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - !Sub sudo -i -u ${CodeEditorUser} dotnet tool install Microsoft.Web.LibraryManager.Cli --create-manifest-if-needed
-                - !Sub echo 'PATH=$PATH:/home/${CodeEditorUser}/.dotnet/tools' >> /home/${CodeEditorUser}/.bashrc
-                - !Sub chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}
-                - echo "Dotnet installed. Checking configuration"
-                - !Sub sudo -i -u ${CodeEditorUser} dotnet --list-sdks
-          - name: InstallRust
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - !Sub sudo -u ${CodeEditorUser} curl -fsSL https://sh.rustup.rs -o /tmp/rust_install.sh
-                - !Sub sudo -i -u ${CodeEditorUser} bash /tmp/rust_install.sh -y 2>&1
-                - echo "Rust installed. Checking configuration"
-                - !Sub sudo -i -u ${CodeEditorUser} rustc --version
-          - name: InstallVite
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - npm install -g create-vite@5.2.3
-                - echo "Vite installed. Checking configuration"
-                - create-vite -h
-          - name: InstallDockerDnf
-            action: aws:runShellScript
-            precondition:
-              StringEquals:
-                - '{{ LinuxFlavor }}'
-                - al2023
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - dnf install -y docker amazon-ecr-credential-helper
-          - name: InstallDockerApt
-            action: aws:runShellScript
-            precondition:
-              StringEquals:
-                - '{{ LinuxFlavor }}'
-                - ubuntu
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - dpkg --configure -a
-                # - curl -fsSL https://get.docker.com | bash
-                - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-                - echo "deb [signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release --codename --short) stable" > /etc/apt/sources.list.d/docker.list
-                - apt-get -q update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker-ce docker-ce-cli containerd.io amazon-ecr-credential-helper
-          - name: ConfigureDocker
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - !Sub usermod -aG docker ${CodeEditorUser}
-                - !Sub sudo -u ${CodeEditorUser} newgrp docker
-                - !Sub systemctl restart code-server@${CodeEditorUser}
-                - systemctl start docker.service
-                - !Sub mkdir -p /home/${CodeEditorUser}/.docker
-                - !Sub |
-                  tee /home/${CodeEditorUser}/.docker/config.json <<EOF
-                  {
-                    "credsStore": "ecr-login"
-                  }
-                  EOF
-                - !Sub chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}/.docker
-                # The workshop host is Graviton (arm64), but FAST's CedarPolicyLambda
-                # is an x86_64 PythonFunction (it omits `architecture`, so CDK
-                # defaults to X86_64), so `cdk deploy` runs
-                # `docker build --platform linux/amd64`. Without QEMU/binfmt
-                # emulation registered WITH THE 'F' (fix-binary) FLAG, that build
-                # fails at the first RUN layer with "exec /bin/sh: exec format error".
-                # The 'F' flag is essential: `docker build` runs each RUN in a fresh
-                # container, so the kernel must pin the qemu interpreter fd at
-                # registration time (F) rather than resolve its path per-process —
-                # otherwise the interpreter isn't visible inside the build container.
-                # tonistiigi/binfmt registers WITH 'F'; that is why it is used here.
-                - |
-                  for i in $(seq 1 30); do
-                    if docker info >/dev/null 2>&1; then break; fi
-                    echo "waiting for docker daemon ($i/30)..."; sleep 2
-                  done
-                # Register via tonistiigi/binfmt (installs handlers with the F flag).
-                # Pull through the account ECR pull-through cache if configured;
-                # otherwise fall back to Docker Hub. Do not swallow failure.
-                - |
-                  if docker run --privileged --rm tonistiigi/binfmt:qemu-v9.2.2 --install amd64; then
-                    echo "binfmt: amd64 emulation registered (tonistiigi/binfmt, F flag)"
-                  else
-                    echo "WARNING: binfmt registration FAILED - linux/amd64 docker builds (FAST CedarPolicyLambda) will not work on this arm64 host" >&2
-                  fi
-                # Verify the x86_64 handler is registered AND carries the F flag.
-                # Without F the handler exists but docker build still fails.
-                - |
-                  H=/proc/sys/fs/binfmt_misc/qemu-x86_64
-                  if test -f "$H" && grep -q '^flags:.*F' "$H"; then
-                    echo "binfmt qemu-x86_64 handler present with F flag - cross-arch docker build ready"
-                  else
-                    echo "WARNING - qemu-x86_64 handler missing or lacks F flag; amd64 docker build will fail" >&2
-                    cat "$H" 2>/dev/null || true
-                  fi
-                - echo "Docker installed. Checking configuration"
-                - docker --version
-                - docker buildx ls || true
-                - systemctl status docker.service
-          - name: InstallDockerExtension
-            action: aws:runDocument
-            inputs:
-              documentType: SSMDocument
-              documentPath: !Ref InstallCodeEditorExtensionSSMDoc
-              documentParameters:
-                ExtensionId: ms-azuretools.vscode-docker
-                CodeEditorUser: !Ref CodeEditorUser
-          - name: InstallTerraformDnf
-            action: aws:runShellScript
-            precondition:
-              StringEquals:
-                - '{{ LinuxFlavor }}'
-                - al2023
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - dnf config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
-                - dnf -y install terraform 2>&1
-                - echo "Terraform installed. Checking configuration"
-                - terraform --version
-          - name: InstallTerraformApt
-            action: aws:runShellScript
-            precondition:
-              StringEquals:
-                - '{{ LinuxFlavor }}'
-                - ubuntu
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - dpkg --configure -a
-                - curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-keyring.gpg
-                - echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-keyring.gpg] https://apt.releases.hashicorp.com/ $(lsb_release --codename --short) main" >> /etc/apt/sources.list.d/hashicorp.list
-                - apt-get -q update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q terraform
-                - echo "Terraform installed. Checking configuration"
-                - terraform --version
-          - name: InstallPrettierExtension
-            action: aws:runDocument
-            inputs:
-              documentType: SSMDocument
-              documentPath: !Ref InstallCodeEditorExtensionSSMDoc
-              documentParameters:
-                ExtensionId: esbenp.prettier-vscode
-                CodeEditorUser: !Ref CodeEditorUser
-          - name: ConfigurePrettier
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - !Sub |
-                    target_file="/home/${CodeEditorUser}/.local/share/code-server/User/settings.json"
-                    if [ ! -f "$target_file" ]; then
-                      echo '{}' > "$target_file"
-                    fi
-                    echo "$(jq '. + {"editor.defaultFormatter": "esbenp.prettier-vscode", "editor.formatOnSave": true}' "$target_file")" > "$target_file"
-                - echo "Prettier add-in installed"
-          - name: ConfigureGraphExplorer
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 600
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - echo "Configuring nginx for Graph Explorer"
-                - !Sub |
-                  if [[ -n "${DevServerBasePath}" ]]
-                  then
-                      sed -i '$i\
-                      # Graph Explorer API endpoints - regex for common patterns\
-                      location ~ ^/${DevServerBasePath}/(logger|summary|status|gremlin|openCypher|sparql|defaultConnection)$ {\
-                          proxy_pass http://localhost:${DevServerPort}/$1;\
-                      }' /etc/nginx/conf.d/code-editor.conf
-                  fi
-                - systemctl enable nginx 2>&1
-                - systemctl restart nginx
-                - echo "Nginx config updated installed. Checking configuration"
-                - nginx -t 2>&1
-                - systemctl status nginx
 # Install Workshop specific packages here
 
   SSMDocLambdaRole:
@@ -1628,7 +887,7 @@ Resources:
       Environment:
         Variables:
           RetrySleep: 2900
-          TimeoutThreshold: 5000
+          AbortTimeRemaining: 5000
       Architectures:
         - arm64
       Role: !GetAtt SSMDocLambdaRole.Arn
@@ -1651,7 +910,7 @@ Resources:
                   cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData={}, reason='No action to take')
               else:
                   sleep_ms = int(os.environ.get('RetrySleep'))
-                  timeout_threshold_ms = int(os.environ.get('TimeoutThreshold'))
+                  abort_time_remaining_ms = int(os.environ.get('AbortTimeRemaining'))
                   resource_properties = event['ResourceProperties']
                   instance_id = resource_properties['InstanceId']
                   document_name = resource_properties['DocumentName']
@@ -1674,7 +933,7 @@ Resources:
                   for key, value in resource_properties.items():
                       parameters[key] = [value]
 
-                  logger.debug(f'parameter keys: {list(parameters.keys())}')
+                  logger.debug(f'parameters: {parameters}')
 
                   retry = True
                   attempt_no = 0
@@ -1700,14 +959,14 @@ Resources:
 
                       except ssm.exceptions.InvalidInstanceId as e:
                           time_remaining_ms = context.get_remaining_time_in_millis()
-                          if (time_remaining_ms > timeout_threshold_ms):
+                          if (time_remaining_ms > abort_time_remaining_ms):
                               logger.info(f'Instance {instance_id} not ready. Sleeping: {sleep_ms/1000}s')
                               time.sleep(sleep_ms/1000)
                               retry = True
                           else:
-                              logger.info(f'Instance {instance_id} not ready, timed out. Time remaining {time_remaining_ms/1000}s < Timeout threshold {timeout_threshold_ms/1000}s')
+                              logger.info(f'Instance {instance_id} not ready, timed out. Time remaining {time_remaining_ms/1000}s < Abort time remaining {abort_time_remaining_ms/1000}s')
                               logger.error(e, exc_info=True)
-                              cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason='Timed out. Time remaining: ' + str(time_remaining_ms/1000) + 's < Timeout threshold: ' + str(timeout_threshold_ms/1000) + 's')
+                              cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason='Timed out. Time remaining: ' + str(time_remaining_ms/1000) + 's < Abort time remaining: ' + str(abort_time_remaining_ms/1000) + 's')
                               retry = False
 
                       except Exception as e:
@@ -1719,40 +978,16 @@ Resources:
     Type: Custom::RunSSMDocLambda
     Properties:
       ServiceToken: !GetAtt RunSSMDocLambda.Arn
-      ServiceTimeout: 600
+      ServiceTimeout: 305
       InstanceId: !Ref CodeEditorInstance
       DocumentName: !Ref CodeEditorSSMDoc
       CloudWatchLogGroupName: !Sub /aws/ssm/${CodeEditorSSMDoc}
       CodeEditorPassword: !GetAtt SecretPlaintext.password
       LinuxFlavor: !If [IsAL2023, 'al2023', 'ubuntu']
 
+  # WORKSHOP POSTURE: This role is intentionally broad so participants can explore AWS during the workshop. ReadOnlyAccess grants read on every service in the account.
   CodeEditorInstanceBootstrapRole:
     Type: AWS::IAM::Role
-    Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: W28
-            reason: >
-              AdministratorAccess on this EC2 instance role is intentional and
-              scoped by environment, not by policy. This role belongs to the
-              participant's disposable, single-occupant Code Editor IDE — the
-              execution environment from which the participant runs CDK and
-              creates resources across ~25 services (Bedrock, AgentCore,
-              Lambda, ECS, Amplify, CloudFront, Cognito, EventBridge, S3, SSM,
-              etc.) with runtime-generated names. The real boundary is the
-              account itself: a per-participant Workshop Studio sandbox (with
-              its SCP), or for self-hosted, a dedicated disposable account
-              (plus the optional static/cfn/self-service-scp.json region
-              fence). The least-privilege artifact a customer studies is the
-              scoped ParticipantRole — static/cfn/workshop-iam-policy-*.json
-              (attached via contentspec.yaml) — NOT this IDE execution role.
-              Scoping the IDE role to exact ARNs breaks the very modules it
-              exists to run (it cannot pre-know the ac-*/fast-*/agentcore-*
-              resource names created at participant time).
-          - id: W43
-            reason: >
-              AdministratorAccess attached by design — see W28. This is the
-              disposable IDE execution sandbox, not a runtime workload role.
     Properties:
       AssumeRolePolicyDocument:
         Version: 2012-10-17
@@ -1764,15 +999,11 @@ Resources:
                 - !Sub ssm.${AWS::URLSuffix}
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        # The IDE is the participant's disposable execution environment; it gets
-        # AdministratorAccess so every module's create/deploy steps work. The
-        # studied least-privilege policy is the ParticipantRole
-        # (static/cfn/workshop-iam-policy-*.json), not this role. The account
-        # boundary (sandbox SCP / dedicated disposable account) is the control.
-        - !Sub arn:${AWS::Partition}:iam::aws:policy/AdministratorAccess
         - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
         - !Sub arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy
         - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonQDeveloperAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/ReadOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSCodeCommitPowerUser
 
   CodeEditorInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -1796,22 +1027,8 @@ Resources:
             DeleteOnTermination: true
             Encrypted: true
       Monitoring: true
-      # Default VPC: plain SecurityGroupIds (subnet/public-IP from VPC
-      # defaults). Custom network: NetworkInterfaces with an explicit subnet
-      # and AssociatePublicIpAddress so PublicDnsName (the CloudFront origin)
-      # resolves even when the subnet has MapPublicIpOnLaunch disabled. The
-      # two properties are mutually exclusive in EC2, hence the paired !Ifs.
-      SecurityGroupIds: !If
-        - HasCustomNetwork
-        - !Ref AWS::NoValue
-        - [!Ref SecurityGroup]
-      NetworkInterfaces: !If
-        - HasCustomNetwork
-        - - DeviceIndex: '0'
-            SubnetId: !Ref SubnetId
-            GroupSet: [!Ref SecurityGroup]
-            AssociatePublicIpAddress: true
-        - !Ref AWS::NoValue
+      SecurityGroupIds:
+        - !Ref SecurityGroup
       IamInstanceProfile: !Ref CodeEditorInstanceProfile
       UserData:
         Fn::Base64: !Sub |
@@ -1847,9 +1064,9 @@ Resources:
         ParametersInCacheKeyAndForwardedToOrigin:
           CookiesConfig:
             CookieBehavior: all
-          EnableAcceptEncodingGzip: False
+          EnableAcceptEncodingGzip: True
+          EnableAcceptEncodingBrotli: True
           HeadersConfig:
-            # whitelist is the AWS CloudFront API value name (legacy); semantics are an allow list
             HeaderBehavior: whitelist
             Headers:
               - Accept-Charset
@@ -1859,7 +1076,6 @@ Resources:
               - Referer
               - Host
               - Accept-Language
-              - Accept-Encoding
               - Accept-Datetime
           QueryStringsConfig:
             QueryStringBehavior: all
@@ -1868,29 +1084,12 @@ Resources:
     Type: AWS::CloudFront::Distribution
     DependsOn: ElasticIPAssociation
     Metadata:
-      checkov:
-        skip:
-          - id: CKV_AWS_174
-            comment: "CloudFront uses the default certificate; minimum TLS 1.2 is not enforceable without a custom domain/ACM cert. Workshop sample."
-          - id: CKV_AWS_86
-            comment: "WAF is out of scope for the ephemeral workshop CloudFront distribution."
       cfn_nag:
         rules_to_suppress:
           - id: W10
             reason: CloudFront Distribution access logging would require setup of an S3 bucket and changes in IAM, which add unnecessary complexity to the template
           - id: W70
-            reason: >
-              Workshop Studio accounts do not include a custom domain that can
-              be used to provision an ACM certificate, so the distribution
-              uses the default *.cloudfront.net cert and cannot set a custom
-              TLS minimum protocol at the edge. ViewerProtocolPolicy is
-              `redirect-to-https` on both cache behaviors, so any plaintext
-              HTTP arrival is 301-redirected to HTTPS before reaching the
-              IDE; code-server's WebSocket transport (wss://) rides the
-              already-established HTTPS viewer connection, so the redirect
-              does not affect it (validated by live us-west-2 deploy). The
-              companion OriginProtocolPolicy: http-only on the EC2 origin
-              runs inside CloudFront's private network.
+            reason: Workshop Studio does not include a domain that can be used to provision a certificate, so it is not possible to setup TLS. See PFR EE-6016
     Properties:
       DistributionConfig:
         Enabled: True
@@ -1907,6 +1106,7 @@ Resources:
             CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # see https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html#managed-cache-policy-caching-disabled
             Compress: False
             OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # Managed-AllViewer - see https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-origin-request-policies.html#:~:text=When%20using%20AWS,47e4%2Db989%2D5492eafa07d3
+            ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03 # Managed-SecurityHeadersPolicy
             TargetOriginId: !Sub CloudFront-${AWS::StackName}
             ViewerProtocolPolicy: redirect-to-https
             PathPattern: '/proxy/*'
@@ -1920,7 +1120,9 @@ Resources:
             - POST
             - DELETE
           CachePolicyId: !Ref CodeEditorInstanceCachePolicy
+          Compress: True
           OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # Managed-AllViewer - see https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-origin-request-policies.html#:~:text=When%20using%20AWS,47e4%2Db989%2D5492eafa07d3
+          ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03 # Managed-SecurityHeadersPolicy
           TargetOriginId: !Sub CloudFront-${AWS::StackName}
           ViewerProtocolPolicy: redirect-to-https
         Origins:
@@ -1930,15 +1132,6 @@ Resources:
               OriginProtocolPolicy: http-only
         ViewerCertificate:
           CloudFrontDefaultCertificate: true
-          # MinimumProtocolVersion is set to TLSv1.2_2021 to satisfy Checkov
-          # CKV_AWS_174 (which reads templates, not runtime behavior). Note:
-          # when CloudFrontDefaultCertificate=true, CloudFront pins the actual
-          # floor to TLSv1 for the default *.cloudfront.net cert regardless of
-          # this value. To truly enforce TLS 1.2 at the edge, an ACM custom
-          # cert bound via Aliases is required — Workshop Studio does not
-          # provide one (see W70 above). The viewer→CloudFront leg remains
-          # safe because redirect-to-https is enforced below and modern
-          # browsers negotiate TLSv1.2+ with CloudFront by default.
           MinimumProtocolVersion: TLSv1.2_2021
 
   SecurityGroup:
@@ -1947,26 +1140,18 @@ Resources:
       cfn_nag:
         rules_to_suppress:
           - id: F1000
-            reason: All outbound traffic should be allowed from this instance. The EC2 instance is provisioned in the default VPC (or the participant-supplied VpcId), which already has this egress rule, and it is not possible to duplicate this egress rule in the default VPC
+            reason: All outbound traffic should be allowed from this instance. The EC2 instance is provisioned in the default VPC, which already has this egress rule, and it is not possible to duplicate this egress rule in the default VPC
     Properties:
       GroupDescription: Security Group for Code Editor - only allow CloudFront ingress
-      # Without VpcId, EC2 places the SG in the default VPC — accounts that
-      # deleted their default VPC (a common enterprise security baseline) fail
-      # with "No default VPC for this user". Supplying VpcId+SubnetId routes
-      # around that.
-      VpcId: !If
-        - HasCustomNetwork
-        - !Ref VpcId
-        - !Ref AWS::NoValue
       SecurityGroupIngress:
         - Description: Allow HTTP from com.amazonaws.global.cloudfront.origin-facing
           IpProtocol: tcp
           FromPort: 80
           ToPort: 80
-          SourcePrefixListId: !If
-            - HasCloudFrontPrefixListIdOverride
-            - !Ref CloudFrontPrefixListIdOverride
-            - !FindInMap [AWSRegionsPrefixListID, !Ref 'AWS::Region', PrefixList]
+          SourcePrefixListId: !FindInMap [AWSRegionsPrefixListID, !Ref 'AWS::Region', PrefixList]
+      Tags:
+        - Key: Name
+          Value: !Sub ${InstanceName}-sg
 
   CodeEditorHealthCheckLambdaRole:
     Type: AWS::IAM::Role
@@ -2001,7 +1186,7 @@ Resources:
       Environment:
         Variables:
           RetrySleep: 2900
-          TimeoutThreshold: 5000
+          AbortTimeRemaining: 5000
       Architectures:
         - arm64
       Role: !GetAtt CodeEditorHealthCheckLambdaRole.Arn
@@ -2035,15 +1220,21 @@ Resources:
                   logger.debug(f'response.status: {response.status}')
                   content = response.read()
                   logger.debug(f'content: {content}')
-                  # Any 2xx/3xx on /healthz means code-server has bound to its
-                  # port and is serving. code-server returns JSON like
-                  # {"status":"alive","lastHeartbeat":...} — we don't inspect
-                  # the body (the old code-editor-server returned a different
-                  # shape with `hasActiveConnections`, which no longer applies).
+                  # This will be true for any return code below 4xx (so 3xx and 2xx)
                   if 200 <= response.status < 400:
-                      logger.info(f'Health check OK. Status: {response.status}')
-                      return True
+                      response_dict = json.loads(content.decode('utf-8'))
+                      logger.debug(f'response_dict: {response_dict}')
+                      # Checking for expected keys and if the key has the expected value
+                      if 'hasActiveConnections' in response_dict:
+                          # Response code 200 and correct JSON returned
+                          logger.info('Health check OK.')
+                          return True
+                      else:
+                          # Response code 200 but the 'hasActiveConnections' key is not present
+                          logger.info(f'Health check failed. Response: {response_dict}')
+                          return False
                   else:
+                      # Response was not ok (error 4xx or 5xx)
                       logger.info(f'Healthcheck failed. Return code: {response.status}')
                       return False
 
@@ -2083,7 +1274,7 @@ Resources:
                       cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData={}, reason='No action to take')
                   else:
                       sleep_ms = int(os.environ.get('RetrySleep'))
-                      timeout_threshold_ms = int(os.environ.get('TimeoutThreshold'))
+                      abort_time_remaining_ms = int(os.environ.get('AbortTimeRemaining'))
                       resource_properties = event['ResourceProperties']
                       url = resource_properties['Url']
 
@@ -2092,7 +1283,7 @@ Resources:
                       time_remaining_ms = context.get_remaining_time_in_millis()
                       attempt_no = 0
                       health_check = False
-                      while (attempt_no == 0 or (time_remaining_ms > timeout_threshold_ms and not health_check)):
+                      while (attempt_no == 0 or (time_remaining_ms > abort_time_remaining_ms and not health_check)):
                           attempt_no += 1
                           logger.info(f'Attempt: {attempt_no}. Time Remaining: {time_remaining_ms/1000}s')
                           health_check = healthURLOk(url)
@@ -2104,7 +1295,7 @@ Resources:
                           logger.info(f'Health check successful. Attempts: {attempt_no}. Time Remaining: {time_remaining_ms/1000}s')
                           cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData={}, reason='Code Editor healthcheck successful')
                       else:
-                          logger.info(f'Health check failed. Timed out. Attempts: {attempt_no}. Time remaining {time_remaining_ms/1000}s < Timeout threshold {timeout_threshold_ms/1000}s')
+                          logger.info(f'Health check failed. Timed out. Attempts: {attempt_no}. Time remaining {time_remaining_ms/1000}s < Abort time remaining {abort_time_remaining_ms/1000}s')
                           cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason='Code Editor healthcheck failed. Timed out after ' + str(attempt_no) + ' attempts')
                           logger.info(f'Response sent')
 
@@ -2140,7 +1331,7 @@ Resources:
       Environment:
         Variables:
           RetrySleep: 2900
-          TimeoutThreshold: 5000
+          AbortTimeRemaining: 5000
       Architectures:
         - arm64
       Role: !GetAtt SSMDocLambdaRole.Arn
@@ -2163,7 +1354,7 @@ Resources:
                   cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData={}, reason='No action to take')
               else:
                   sleep_ms = int(os.environ.get('RetrySleep'))
-                  timeout_threshold_ms = int(os.environ.get('TimeoutThreshold'))
+                  abort_time_remaining_ms = int(os.environ.get('AbortTimeRemaining'))
                   resource_properties = event['ResourceProperties']
                   instance_id = resource_properties['InstanceId']
                   document_name = resource_properties['DocumentName']
@@ -2227,14 +1418,14 @@ Resources:
                                       logger.info(f'SSM Document {document_name} on EC2 instance {instance_id} not yet complete. Status: {invocation_status}')
                                       retry = True
                           if retry == True:
-                              if (time_remaining_ms > timeout_threshold_ms):
+                              if (time_remaining_ms > abort_time_remaining_ms):
                                   logger.info(f'Sleeping: {sleep_ms/1000}s')
                                   time.sleep(sleep_ms/1000)
                                   time_remaining_ms = context.get_remaining_time_in_millis()
                               else:
-                                  logger.info(f'Time remaining {time_remaining_ms/1000}s < Timeout threshold {timeout_threshold_ms/1000}s')
-                                  logger.info(f'Stopping check due to timeout as time remaining {time_remaining_ms/1000}s < Timeout threshold {timeout_threshold_ms/1000}s')
-                                  cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason='Timed out. Time remaining: ' + str(time_remaining_ms/1000) + 's < Timeout threshold: ' + str(timeout_threshold_ms/1000) + 's')
+                                  logger.info(f'Time remaining {time_remaining_ms/1000}s < Abort time remaining {abort_time_remaining_ms/1000}s')
+                                  logger.info(f'Aborting check as time remaining {time_remaining_ms/1000}s < Abort time remaining {abort_time_remaining_ms/1000}s')
+                                  cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason='Timed out. Time remaining: ' + str(time_remaining_ms/1000) + 's < Abort time remaining: ' + str(abort_time_remaining_ms/1000) + 's')
                                   retry = False
                       except Exception as e:
                           logger.error(e, exc_info=True)
@@ -2252,8 +1443,5 @@ Resources:
 
 Outputs:
   URL:
-    Description: Workshop IDE URL. Open in a browser, then paste the IdePassword value at the code-server sign-in prompt.
-    Value: !Sub https://${CloudFrontDistribution.DomainName}/?folder=${HomeFolder}
-  IdePassword:
-    Description: Password for the Workshop IDE login. Randomly generated on stack create; paste this into the code-server sign-in form when prompted.
-    Value: !GetAtt SecretPlaintext.password
+    Description: Code Editor URL
+    Value: !Sub https://${CloudFrontDistribution.DomainName}/?folder=${HomeFolder}&tkn=${SecretPlaintext.password}
