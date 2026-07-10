@@ -987,16 +987,16 @@ Resources:
                 - !Sub |
                     ARCH=$(uname -m)
                     if [ "$ARCH" = "aarch64" ]; then
-                      URL="https://desktop-release.q.us-east-1.amazonaws.com/latest/kirocli-aarch64-linux.zip"
+                      URL="https://desktop-release.q.us-east-1.amazonaws.com/2.11.0/kirocli-aarch64-linux.zip"
                     else
-                      URL="https://desktop-release.q.us-east-1.amazonaws.com/latest/kirocli-x86_64-linux.zip"
+                      URL="https://desktop-release.q.us-east-1.amazonaws.com/2.11.0/kirocli-x86_64-linux.zip"
                     fi
                     curl --proto '=https' --tlsv1.2 -sSf "$URL" -o /tmp/kirocli.zip
                     cd /tmp && unzip -qo kirocli.zip
                     sudo -u ${CodeEditorUser} /tmp/kirocli/install.sh 2>&1
                     rm -rf /tmp/kirocli /tmp/kirocli.zip
                 - echo "Kiro CLI installed. Checking configuration"
-                - !Sub sudo -i -u ${CodeEditorUser} /usr/local/bin/kiro-cli --version
+                - !Sub sudo -i -u ${CodeEditorUser} kiro-cli --version
           - name: ConfigureKiroCliCustomAgent
             action: aws:runShellScript
             inputs:
