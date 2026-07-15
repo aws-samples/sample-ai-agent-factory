@@ -120,29 +120,13 @@ backend/lib/
 *tmp*
 package-lock.json
 
-# Local-only test/visibility artifacts — never commit (contains live tokens, scratch state)
-tasks/matrix-tester/
+# Local-only development-process folder — planning notes, lessons, e2e test
+# harness, live tokens, scratch evidence. Never committed to the public sample.
+tasks/
 docs/decks/
-# Live Cognito JWT / refresh tokens written by the e2e test driver — SECRETS
-tasks/e2e-run/.token
-tasks/e2e-run/.refresh
-# Bulky/scratch e2e evidence (DOM dumps, per-cell probe artifacts, live state)
-tasks/e2e-run/evidence/
-tasks/e2e-run/state.json
-tasks/e2e-run/platform.json
-tasks/*-hero-dom-*.html
 
 # Holmes local scan metadata
 .holmes/
-# Local-only e2e test-harness scratch (not product code; get_token.py holds a test password)
-tasks/e2e-run/CORRECTED_SCOPE.md
-tasks/e2e-run/scripts/get_token.py
-tasks/e2e-run/scripts/m1probe.py
-tasks/e2e-run/scripts/control_plane_run.py
-tasks/e2e-run/scripts/run_order.txt
-tasks/e2e-run/scripts/serial_run.sh
-tasks/e2e-run/scripts/specs/
-tasks/e2e-run/scripts/specs-run/
 
 # Frontend source lib/ is real source, not a Python build artifact
 !frontend/src/lib/
