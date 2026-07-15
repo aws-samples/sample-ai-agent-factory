@@ -1265,6 +1265,25 @@ def _delete_managed_resource(res: dict, region: str) -> str:
                 pass
             s3v.delete_vector_bucket(vectorBucketName=bname)
             return f"[manifest] s3 vectors bucket {bname} deleted"
+        if rtype == "oss_collection":
+            # Auto-provisioned OpenSearch Serverless collection backing a managed KB.
+            # This is a STANDING billable resource — deleting it is critical to avoid
+            # ~$350/mo orphans. delete_collection removes its indexes; then remove the
+            # three security/access policies we created (named <coll>-enc/-net/-acc).
+            aoss = boto3.client("opensearchserverless", region_name=res_region)
+            cname = rname or rid
+            try:
+                det = aoss.batch_get_collection(names=[cname]).get("collectionDetails", [])
+                if det:
+                    aoss.delete_collection(id=det[0]["id"])
+            except Exception:  # noqa: BLE001
+                pass
+            for suffix, ptype in ((f"{cname}-acc"[:32], "data"), (f"{cname}-net"[:32], "network"), (f"{cname}-enc"[:32], "encryption")):
+                try:
+                    aoss.delete_access_policy(name=suffix, type=ptype) if ptype == "data" else aoss.delete_security_policy(name=suffix, type=ptype)
+                except Exception:  # noqa: BLE001
+                    pass
+            return f"[manifest] oss collection {cname} + policies deleted"
         if rtype == "cognito_user_pool":
             cog = boto3.client("cognito-idp", region_name=res_region)
             # Bug 175: a user pool with a configured domain CANNOT be deleted until
@@ -1389,6 +1408,7 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
             "api_key_credential_provider": 7,
             # Secondaries that must OUTLIVE the primaries above:
             "s3_vectors_bucket": 8,
+            "oss_collection": 8,
             "iam_role": 9,
             "cognito_user_pool": 9,
             "secret": 9,

@@ -128,14 +128,14 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
       />
 
       {/* Panel */}
-      <div className="relative bg-white rounded-xl shadow-lg w-full max-w-4xl max-h-[85vh] flex flex-col">
+      <div className="relative rounded-xl w-full max-w-4xl max-h-[85vh] flex flex-col" style={{ background: 'var(--color-surface-elevated)', boxShadow: 'var(--elevation-4)', border: '1px solid var(--color-border)' }}>
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 bg-gradient-to-r from-gray-50 to-white">
+        <div className="flex items-center justify-between px-6 py-4 border-b" style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg-subtle)' }}>
           <div>
-            <h2 className="text-lg font-semibold text-gray-900 tracking-tight">
-              Agent Registry {isAdmin && <span className="text-xs font-normal text-blue-600">(Admin)</span>}
+            <h2 className="text-lg font-semibold tracking-tight" style={{ color: 'var(--color-text-primary)' }}>
+              Agent Registry {isAdmin && <span className="text-xs font-normal" style={{ color: 'var(--accent)' }}>(Admin)</span>}
             </h2>
-            <p className="text-xs text-gray-500 mt-0.5">
+            <p className="text-xs mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
               {isAdmin
                 ? 'Browse, approve, and manage published agent blueprints'
                 : 'Browse and clone published agent blueprints to your canvas'}

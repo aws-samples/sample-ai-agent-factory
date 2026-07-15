@@ -233,6 +233,31 @@ def create_harness_iam_role(
                 "Resource": scoped_resources or "*",
             },
             {
+                # CreateHarness ALWAYS auto-provisions a DEFAULT AgentCore Memory
+                # for the harness session (memory/harness_<name>_*), whose ARN is
+                # NOT known when this role policy is built (it's minted later by the
+                # harness service). Without memory data-plane perms on that ARN, the
+                # first InvokeHarness fails with AccessDenied on ListEvents
+                # (verified live: "not authorized to perform bedrock-agentcore:
+                # ListEvents on resource memory/harness_<name>_..."). Scope the
+                # memory data-plane verbs to the harness-owned memory name prefix.
+                "Sid": "AgentCoreHarnessOwnedMemory",
+                "Effect": "Allow",
+                "Action": [
+                    "bedrock-agentcore:GetMemory",
+                    "bedrock-agentcore:CreateEvent",
+                    "bedrock-agentcore:ListEvents",
+                    "bedrock-agentcore:GetEvent",
+                    "bedrock-agentcore:ListSessions",
+                    "bedrock-agentcore:RetrieveMemoryRecords",
+                    "bedrock-agentcore:ListMemoryRecords",
+                ],
+                "Resource": [
+                    "arn:aws:bedrock-agentcore:*:*:memory/harness_*",
+                    "arn:aws:bedrock-agentcore:*:*:memory/harness_*/*",
+                ],
+            },
+            {
                 # Account-level agentcore actions with no resource-ARN form:
                 # ListGateways (collection) + the token-vault token/key fetches
                 # GetResourceOauth2Token/GetResourceApiKey (needed to load the

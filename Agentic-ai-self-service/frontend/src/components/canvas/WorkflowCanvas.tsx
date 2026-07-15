@@ -74,24 +74,27 @@ const edgeTypes: EdgeTypes = {
 // MiniMap Node Color Function
 // ============================================================================
 
+// Minimap fills must be literal hex (SVG fill can't read CSS vars). These MIRROR
+// the canonical --node-* tokens in index.css / NODE_ACCENT so the minimap and
+// the node cards are the same color for a given type (previously they diverged).
 const MINIMAP_COLORS: Record<string, string> = {
-  runtime: '#3B82F6',
-  gateway: '#22C55E',
-  memory: '#06B6D4',
-  code_interpreter: '#F59E0B',
-  browser: '#6366F1',
-  observability: '#EC4899',
-  identity: '#A855F7',
-  evaluation: '#10B981',
-  policy: '#EF4444',
-  guardrails: '#EF4444',
-  a2a: '#14B8A6',
-  tool: '#EAB308',
+  runtime: '#0972d3',
+  gateway: '#037f0c',
+  memory: '#0972d3',
+  code_interpreter: '#d45b07',
+  browser: '#5b48d3',
+  observability: '#c41367',
+  identity: '#7d2bd0',
+  evaluation: '#037f0c',
+  policy: '#d91515',
+  guardrails: '#d91515',
+  a2a: '#067a6e',
+  tool: '#d45b07',
 };
 
 const getMinimapNodeColor = (node: Node<AgentCoreNodeData>): string => {
   const componentType = node.data?.componentType;
-  return componentType ? MINIMAP_COLORS[componentType] || '#6B7280' : '#6B7280';
+  return componentType ? MINIMAP_COLORS[componentType] || '#5f6b7a' : '#5f6b7a';
 };
 
 // ============================================================================
@@ -387,7 +390,8 @@ export function WorkflowCanvas({
   return (
     <div
       ref={canvasRef}
-      className="w-full h-full relative"
+      className="no-darkmap w-full h-full relative"
+      style={{ background: 'var(--canvas-bg)' }}
       data-testid="workflow-canvas"
       onDragOver={handleDragOver}
       onDragEnter={handleDragEnter}
@@ -421,12 +425,13 @@ export function WorkflowCanvas({
         maxZoom={4}
         deleteKeyCode={null} // We handle deletion ourselves
       >
-        {/* Grid Background */}
+        {/* Grid Background — dot color themed via CSS (.react-flow__background),
+            bg transparent so the themed canvas wrapper shows through. */}
         <Background
           variant={BackgroundVariant.Dots}
-          gap={24}
-          size={0.8}
-          color="#d1d5db"
+          gap={28}
+          size={1}
+          color="transparent"
         />
 
         {/* Zoom Controls */}
@@ -441,6 +446,8 @@ export function WorkflowCanvas({
         <MiniMap
           nodeColor={getMinimapNodeColor}
           nodeStrokeWidth={3}
+          maskColor="rgba(6, 8, 15, 0.7)"
+          bgColor="#0b1220"
           zoomable
           pannable
           position="bottom-left"
@@ -459,7 +466,7 @@ export function WorkflowCanvas({
         >
           <div className="px-4 py-3 rounded-lg border-2 shadow-md min-w-[150px] bg-white border-gray-300">
             <div className="flex items-center gap-2">
-              <span className="text-xl">{ghostItem.icon}</span>
+              <span className="text-xl">{ghostItem.customIcon || '🔧'}</span>
               <div className="flex-1">
                 <div className="font-medium text-gray-800 text-sm">{ghostItem.label}</div>
                 <div className="text-xs text-gray-500 capitalize">{ghostItem.type}</div>

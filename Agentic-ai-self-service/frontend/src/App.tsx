@@ -1,5 +1,8 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import { m } from 'motion/react';
 import { signOut } from 'aws-amplify/auth';
+import { staggerContainer, fadeRise, pressable, spring } from './lib/motion';
+import { ThemeToggle } from './components/ThemeToggle';
 import WorkflowCanvas from './components/canvas/WorkflowCanvas';
 import { ComponentPalette } from './components/palette/ComponentPalette';
 import { RuntimeConfigurationModal } from './components/modals/RuntimeConfigurationModal';
@@ -55,6 +58,13 @@ function App() {
   // never-persisted map keyed by nodeId, written at config-save and read when the
   // deploy payload's connectors[] is built. Cleared on a fresh canvas load.
   const connectorSecretsRef = useRef<Record<string, string>>({});
+  const [connectorSecretsRev, setConnectorSecretsRev] = useState(0);
+  const [connectorSecrets, setConnectorSecrets] = useState<Record<string, string>>({});
+
+  // Sync connector secrets state with ref whenever it changes
+  useEffect(() => {
+    setConnectorSecrets({ ...connectorSecretsRef.current });
+  }, [connectorSecretsRev]);
 
   const [paletteCollapsed, setPaletteCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -152,7 +162,7 @@ function App() {
   const deployableNodeId = (selectedRuntimeConfig ? selectedNodeId : null) || firstRuntimeNode?.id || null;
 
   // Get connected tools, gateway config, identity config, custom tools, and MCP server config
-  const getConnectedToolsAndGateway = useCallback(() => {
+  const { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig, a2aConfig } = useMemo(() => {
     if (!deployableNodeId) return { tools: [], gatewayConfig: null, gatewayTools: [], identityConfig: null, customTools: [], connectors: [] as DeployConnector[], memoryConfig: null, evaluationConfig: null, policyConfig: null, guardrailsConfig: null, observabilityConfig: null, mcpServerConfig: null, knowledgeBaseConfig: null, a2aConfig: null };
     const connectedTools: string[] = [];
     const gatewayTools: string[] = [];
@@ -237,7 +247,7 @@ function App() {
                 // Transient — minted into Secrets Manager backend-side, then dropped.
                 // Read from the in-memory secrets map (the persisted node has the
                 // raw value stripped for security); fall back to any inline value.
-                secret_value: connectorSecretsRef.current[otherNodeId] || c.secretValue || undefined,
+                secret_value: connectorSecrets[otherNodeId] || c.secretValue || undefined,
                 secret_arn: c.secretArn || undefined,
                 spec_url: c.specUrl || undefined,
                 spec_inline: c.specContent || undefined,
@@ -301,30 +311,26 @@ function App() {
     }
 
     return { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig, a2aConfig };
-  }, [deployableNodeId, edges, nodes]);
+  }, [deployableNodeId, edges, nodes, connectorSecrets]);
 
-  const { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig, a2aConfig } = getConnectedToolsAndGateway();
+  // Handle pending node creation - open modal when node appears (adjust state during render pattern)
+  if (pendingNodeConfig) {
+    const newNode = nodes.find((n) =>
+      n.data.componentType === pendingNodeConfig.componentType &&
+      Math.abs(n.position.x - pendingNodeConfig.position.x) < 20 &&
+      Math.abs(n.position.y - pendingNodeConfig.position.y) < 20
+    );
 
-  // Handle pending node creation - open modal when node appears
-  useEffect(() => {
-    if (pendingNodeConfig) {
-      const newNode = nodes.find((n) =>
-        n.data.componentType === pendingNodeConfig.componentType &&
-        Math.abs(n.position.x - pendingNodeConfig.position.x) < 20 &&
-        Math.abs(n.position.y - pendingNodeConfig.position.y) < 20
-      );
-
-      if (newNode) {
-        setConfigModal({
-          isOpen: true,
-          nodeId: newNode.id,
-          componentType: pendingNodeConfig.componentType,
-          initialConfig: newNode.data.configuration,
-        });
-        setPendingNodeConfig(null);
-      }
+    if (newNode && !configModal.isOpen) {
+      setConfigModal({
+        isOpen: true,
+        nodeId: newNode.id,
+        componentType: pendingNodeConfig.componentType,
+        initialConfig: newNode.data.configuration,
+      });
+      setPendingNodeConfig(null);
     }
-  }, [nodes, pendingNodeConfig]);
+  }
 
   const handleToggleCollapse = useCallback(() => {
     setPaletteCollapsed((prev) => !prev);
@@ -374,6 +380,7 @@ function App() {
       // back from here so the backend can mint the Secrets Manager secret.
       if (persisted.secretValue) {
         connectorSecretsRef.current[configModal.nodeId] = persisted.secretValue;
+        setConnectorSecretsRev(r => r + 1);
       }
       if ('secretValue' in persisted) delete persisted.secretValue;
       updateNodeConfiguration(configModal.nodeId, persisted);
@@ -387,6 +394,7 @@ function App() {
   const handleSelectTemplate = useCallback((template: WorkflowTemplate) => {
     // New canvas content => drop any transient connector secrets from the old one.
     connectorSecretsRef.current = {};
+    setConnectorSecretsRev(r => r + 1);
     const { nodes: templateNodes, edges: templateEdges } = instantiateTemplate(template);
     loadTemplate(templateNodes, templateEdges, template.id);
   }, [loadTemplate]);
@@ -465,15 +473,18 @@ function App() {
   // Phase B — segmented authoring-mode toggle, shared by both modes' top nav.
   // MotionSites: glass badge with refined transitions.
   const authoringToggle = (
-    <div className="flex items-center gap-0.5 p-0.5 bg-white/10 backdrop-blur-sm rounded-md" role="tablist" aria-label="Authoring mode">
+    <div className="no-darkmap flex items-center gap-0.5 p-0.5 backdrop-blur-sm rounded-md" style={{ background: 'rgba(255,255,255,0.08)' }} role="tablist" aria-label="Authoring mode">
       <button
         role="tab"
         aria-selected={authoringMode === 'visual'}
         onClick={() => setAuthoringMode('visual')}
-        className={`px-2.5 py-1 rounded text-xs font-medium transition-colors duration-200 ${
-          authoringMode === 'visual' ? 'bg-white text-[#232f3e]' : 'text-white/70 hover:text-white hover:bg-white/10'
-        }`}
-        style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
+        className="no-darkmap px-2.5 py-1 rounded text-xs font-semibold transition-colors duration-200"
+        style={{
+          transitionTimingFunction: 'var(--ease-out-quint)',
+          background: authoringMode === 'visual' ? 'var(--accent)' : 'transparent',
+          color: authoringMode === 'visual' ? '#06080f' : 'rgba(255,255,255,0.88)',
+          boxShadow: authoringMode === 'visual' ? '0 0 14px -4px var(--accent)' : 'none',
+        }}
       >
         Visual Canvas
       </button>
@@ -481,10 +492,13 @@ function App() {
         role="tab"
         aria-selected={authoringMode === 'harness'}
         onClick={() => setAuthoringMode('harness')}
-        className={`px-2.5 py-1 rounded text-xs font-medium transition-colors duration-200 ${
-          authoringMode === 'harness' ? 'bg-white text-[#232f3e]' : 'text-white/70 hover:text-white hover:bg-white/10'
-        }`}
-        style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
+        className="no-darkmap px-2.5 py-1 rounded text-xs font-semibold transition-colors duration-200"
+        style={{
+          transitionTimingFunction: 'var(--ease-out-quint)',
+          background: authoringMode === 'harness' ? 'var(--accent)' : 'transparent',
+          color: authoringMode === 'harness' ? '#06080f' : 'rgba(255,255,255,0.88)',
+          boxShadow: authoringMode === 'harness' ? '0 0 14px -4px var(--accent)' : 'none',
+        }}
       >
         Harness
       </button>
@@ -527,23 +541,37 @@ function App() {
 
       <div className="flex-1 relative flex flex-col">
         {/* Top Header Bar */}
-        <div className="h-12 bg-[#232f3e] flex items-center justify-between px-4 z-20 border-b border-white/10">
+        <div
+          className="no-darkmap h-12 flex items-center justify-between px-4 z-20 relative"
+          style={{
+            background: 'var(--header-bg)',
+            backdropFilter: 'blur(12px)',
+            borderBottom: '1px solid var(--color-border)',
+            boxShadow: '0 1px 0 var(--header-hairline)',
+          }}
+        >
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2.5">
-              <div className="w-7 h-7 rounded-md bg-[#ff9900] flex items-center justify-center">
-                <svg className="w-4 h-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <div
+                className="w-7 h-7 rounded-md flex items-center justify-center"
+                style={{
+                  background: 'linear-gradient(135deg, var(--neon-cyan), var(--neon-violet))',
+                  boxShadow: '0 0 14px -2px var(--neon-cyan)',
+                }}
+              >
+                <svg className="w-4 h-4 text-[#06080f]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
                 </svg>
               </div>
-              <span className="font-semibold text-white text-sm tracking-tight">AgentCore Flows</span>
+              <span className="font-semibold text-sm tracking-tight u-neon-text">AgentCore Flows</span>
             </div>
-            <div className="h-5 w-px bg-white/20" />
-            <span className="font-medium text-white/80 text-sm">
+            <div className="h-5 w-px bg-white/25" />
+            <span className="font-medium text-white/95 text-sm">
               {activeFlowName || 'Untitled Flow'}
             </span>
-            <div className="h-5 w-px bg-white/20" />
-            <div className="flex items-center gap-2 text-xs text-white/60">
-              <span className="px-2 py-0.5 backdrop-blur-sm rounded font-light" style={{ backgroundColor: 'rgba(255, 255, 255, 0.1)' }}>{nodes.length} node{nodes.length !== 1 ? 's' : ''}</span>
+            <div className="h-5 w-px bg-white/25" />
+            <div className="flex items-center gap-2 text-xs text-white/80">
+              <span className="px-2 py-0.5 backdrop-blur-sm rounded font-normal" style={{ backgroundColor: 'rgba(255, 255, 255, 0.14)' }}>{nodes.length} node{nodes.length !== 1 ? 's' : ''}</span>
             </div>
             <div className="h-5 w-px bg-white/20" />
             {authoringToggle}
@@ -552,16 +580,21 @@ function App() {
           <div className="flex items-center gap-3">
             {/* Status indicator - MotionSites glass badge */}
             {deployableConfig && (
-              <div className="flex items-center gap-1.5 px-2.5 py-1 backdrop-blur-sm rounded-md text-xs font-medium border transition-colors duration-200" style={{ backgroundColor: 'rgba(16, 185, 129, 0.15)', color: 'rgb(110, 231, 183)', borderColor: 'rgba(16, 185, 129, 0.3)' }}>
-                <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
-                Ready
-              </div>
+              <m.div
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={spring.bouncy}
+                className="no-darkmap flex items-center gap-1.5 px-2.5 py-1 backdrop-blur-sm rounded-md text-xs font-semibold border" style={{ backgroundColor: 'rgba(52, 211, 153, 0.22)', color: '#6ee7b7', borderColor: 'rgba(52, 211, 153, 0.5)', boxShadow: '0 0 14px -4px rgba(52,211,153,0.7)' }}
+              >
+                <div className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: '#34d399', boxShadow: '0 0 8px #34d399' }} />
+                Ready to deploy
+              </m.div>
             )}
 
             {/* Phase 2 Gap 2A — Registry (browse/clone agents) */}
             <button
               onClick={() => setShowRegistry(true)}
-              className="px-3 py-1.5 rounded-md text-sm text-white/70 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
+              className="px-3 py-1.5 rounded-md text-sm text-white/85 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
               style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
               title="Browse the agent registry"
               aria-label="Browse agent registry"
@@ -574,7 +607,7 @@ function App() {
             {/* Phase 2 Gap 2D — HITL approvals inbox */}
             <button
               onClick={() => setShowHitlInbox(true)}
-              className="px-3 py-1.5 rounded-md text-sm text-white/70 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
+              className="px-3 py-1.5 rounded-md text-sm text-white/85 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
               style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
               title="Human-in-the-loop approvals"
               aria-label="Human-in-the-loop approvals inbox"
@@ -586,32 +619,43 @@ function App() {
             </button>
 
             {/* Deploy Button - MotionSites off-white CTA with rounded-[2px] */}
-            <button
+            <m.button
               onClick={() => setShowDeployPanel(true)}
               disabled={!canDeploy}
+              whileHover={canDeploy ? { scale: 1.03 } : undefined}
+              whileTap={canDeploy ? { scale: 0.96 } : undefined}
+              transition={spring.snappy}
               className={`
-                px-4 py-1.5 font-medium transition-all duration-200 flex items-center gap-2 text-sm
-                ${canDeploy
-                  ? 'text-[#171717] hover:scale-[1.01] active:scale-95'
-                  : 'bg-white/10 text-white/30 cursor-not-allowed'}
+                no-darkmap relative overflow-hidden px-4 py-1.5 font-semibold flex items-center gap-2 text-sm
+                ${canDeploy ? 'text-[#06080f]' : 'text-white/30 cursor-not-allowed'}
+                ${canDeploy ? 'u-gradient-anim' : ''}
               `}
               style={{
-                backgroundColor: canDeploy ? '#f8f8f8' : undefined,
+                background: canDeploy
+                  ? 'linear-gradient(90deg, var(--neon-cyan), var(--neon-violet), var(--neon-magenta))'
+                  : 'rgba(255,255,255,0.06)',
                 borderRadius: '2px',
-                boxShadow: canDeploy ? '0 1px 2px rgba(0, 0, 0, 0.2)' : 'none',
-                transitionTimingFunction: 'var(--ease-out-quint)',
+                boxShadow: canDeploy ? '0 0 18px -4px var(--neon-cyan)' : 'none',
               }}
               title={!canDeploy ? 'Configure a Runtime node first' : 'Deploy to AgentCore'}
               aria-label={!canDeploy ? 'Configure a Runtime node first' : 'Deploy agent to AgentCore'}
             >
+              {/* sheen sweep on hover when enabled */}
+              {canDeploy && (
+                <span
+                  className="pointer-events-none absolute inset-y-0 -left-1/3 w-1/3 opacity-0 group-hover:opacity-100"
+                  style={{ background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.7), transparent)' }}
+                />
+              )}
               <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M22 2L11 13" /><path d="M22 2l-7 20-4-9-9-4 20-7z" />
               </svg>
               Deploy
-            </button>
+            </m.button>
+            <ThemeToggle />
             <button
               onClick={() => signOut()}
-              className="px-3 py-1.5 rounded-md text-sm text-white/60 hover:text-white hover:bg-white/10 transition-colors duration-200"
+              className="px-3 py-1.5 rounded-md text-sm text-white/80 hover:text-white hover:bg-white/10 transition-colors duration-200"
               style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
               title="Sign out"
               aria-label="Sign out"
@@ -738,82 +782,89 @@ function App() {
           {/* Help hint when no nodes - MotionSites empty state with glass badge */}
           {nodes.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="text-center max-w-xl px-4">
-                {/* Glass badge */}
-                <div className="inline-flex mb-6">
+              {/* Twin aurora glows behind the headline for cinematic depth */}
+              <div
+                className="absolute pointer-events-none"
+                style={{
+                  width: 720, height: 440,
+                  backgroundImage:
+                    'radial-gradient(40% 50% at 38% 42%, rgba(34,211,238,0.16), transparent 70%), radial-gradient(40% 50% at 64% 55%, rgba(167,139,250,0.16), transparent 70%)',
+                  filter: 'blur(10px)',
+                }}
+              />
+              <m.div
+                className="relative text-center max-w-xl px-4"
+                variants={staggerContainer(0.09, 0.05)}
+                initial="hidden"
+                animate="visible"
+              >
+                {/* Glass badge (dark neon) */}
+                <m.div variants={fadeRise} className="inline-flex mb-6">
                   <div
-                    className="rounded-full px-1.5 py-1.5 backdrop-blur-sm"
-                    style={{ backgroundColor: 'rgba(0, 0, 0, 0.05)' }}
+                    className="no-darkmap flex items-center gap-2 rounded-full px-3 py-1 text-sm font-medium tracking-tight"
+                    style={{
+                      background: 'var(--glass-bg)',
+                      backdropFilter: 'blur(10px)',
+                      border: '1px solid var(--glass-border)',
+                      color: 'var(--color-text-secondary)',
+                      boxShadow: '0 0 20px -8px var(--neon-cyan)',
+                    }}
                   >
-                    <div
-                      className="rounded-full px-3 py-1 text-sm font-medium tracking-tight"
-                      style={{
-                        backgroundColor: 'rgba(255, 255, 255, 0.95)',
-                        color: '#171717',
-                      }}
-                    >
-                      Visual Workflow Builder
-                    </div>
+                    <span className="relative flex h-1.5 w-1.5">
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full opacity-75" style={{ background: 'var(--neon-cyan)' }} />
+                      <span className="relative inline-flex h-1.5 w-1.5 rounded-full" style={{ background: 'var(--neon-cyan)' }} />
+                    </span>
+                    Visual Workflow Builder
                   </div>
-                </div>
+                </m.div>
 
-                {/* Headline - Instrument Serif italic + Barlow light */}
-                <h3
-                  className="text-3xl sm:text-4xl md:text-5xl mb-3 leading-tight text-[#16191f]"
-                  style={{
-                    fontFamily: 'var(--font-accent)',
-                    fontStyle: 'italic',
-                    fontWeight: 400,
-                  }}
+                {/* Headline - Instrument Serif italic, neon-gradient clipped */}
+                <m.h3
+                  variants={fadeRise}
+                  className="no-darkmap text-4xl sm:text-5xl md:text-6xl mb-3 leading-tight u-neon-text u-gradient-anim"
+                  style={{ fontFamily: 'var(--font-accent)', fontStyle: 'italic', fontWeight: 400 }}
                 >
                   Build Your First Agent
-                </h3>
-                <p
-                  className="text-base sm:text-lg mb-8 font-light tracking-tight leading-relaxed"
-                  style={{ color: 'rgba(23, 23, 23, 0.65)' }}
+                </m.h3>
+                <m.p
+                  variants={fadeRise}
+                  className="no-darkmap text-base sm:text-lg mb-8 font-light tracking-tight leading-relaxed"
+                  style={{ color: 'var(--color-text-secondary)' }}
                 >
                   Drag components from the sidebar, start with a template, or let AI generate an agent for you.
-                </p>
+                </m.p>
 
-                {/* CTAs - MotionSites rounded-[2px] */}
-                <div className="flex gap-3 justify-center">
-                  <button
+                {/* CTAs — neon gradient primary + glass secondary */}
+                <m.div variants={fadeRise} className="flex gap-3 justify-center">
+                  <m.button
+                    {...pressable}
                     onClick={() => setShowTemplateGallery(true)}
-                    className="pointer-events-auto px-5 py-2.5 text-sm font-medium transition-all duration-200 active:scale-95"
+                    className="no-darkmap u-gradient-anim pointer-events-auto px-5 py-2.5 text-sm font-semibold"
                     style={{
-                      backgroundColor: '#f8f8f8',
-                      color: '#171717',
+                      background: 'linear-gradient(90deg, var(--neon-cyan), var(--neon-violet), var(--neon-magenta))',
+                      color: '#06080f',
                       borderRadius: '2px',
-                      boxShadow: '0 1px 2px rgba(0, 0, 0, 0.1)',
-                      transitionTimingFunction: 'var(--ease-out-quint)',
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.transform = 'scale(1.01)';
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.transform = 'scale(1)';
+                      boxShadow: '0 0 22px -6px var(--neon-cyan)',
                     }}
                   >
                     Browse Templates
-                  </button>
-                  <button
+                  </m.button>
+                  <m.button
+                    {...pressable}
                     onClick={() => setShowAgentGenerator(true)}
-                    className="pointer-events-auto px-5 py-2.5 bg-white text-[#0972d3] text-sm font-medium transition-all duration-200 border border-[#0972d3]/25 hover:border-[#0972d3]/40 active:scale-95"
+                    className="no-darkmap pointer-events-auto px-5 py-2.5 text-sm font-medium"
                     style={{
+                      background: 'var(--glass-bg)',
+                      backdropFilter: 'blur(10px)',
+                      color: 'var(--neon-cyan)',
+                      border: '1px solid color-mix(in srgb, var(--neon-cyan) 40%, transparent)',
                       borderRadius: '2px',
-                      transitionTimingFunction: 'var(--ease-out-quint)',
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.transform = 'scale(1.01)';
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.transform = 'scale(1)';
                     }}
                   >
                     Generate with AI
-                  </button>
-                </div>
-              </div>
+                  </m.button>
+                </m.div>
+              </m.div>
             </div>
           )}
         </div>

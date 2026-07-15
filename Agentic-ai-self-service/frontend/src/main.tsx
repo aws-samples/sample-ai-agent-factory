@@ -4,6 +4,11 @@ import './auth/configure';
 import './index.css';
 import App from './App.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { AppMotionProvider } from './lib/AppMotionProvider';
+import { applyStoredTheme } from './lib/theme';
+
+// Apply persisted theme before first paint to avoid a flash of the wrong theme.
+applyStoredTheme();
 
 const needsAuth = !!import.meta.env.VITE_COGNITO_USER_POOL_ID;
 
@@ -15,9 +20,11 @@ async function render() {
     createRoot(document.getElementById('root')!).render(
       <StrictMode>
         <ErrorBoundary>
-          <AuthWrapper>
-            <App />
-          </AuthWrapper>
+          <AppMotionProvider>
+            <AuthWrapper>
+              <App />
+            </AuthWrapper>
+          </AppMotionProvider>
         </ErrorBoundary>
       </StrictMode>,
     );
@@ -25,7 +32,9 @@ async function render() {
     createRoot(document.getElementById('root')!).render(
       <StrictMode>
         <ErrorBoundary>
-          <App />
+          <AppMotionProvider>
+            <App />
+          </AppMotionProvider>
         </ErrorBoundary>
       </StrictMode>,
     );

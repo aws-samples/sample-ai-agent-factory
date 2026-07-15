@@ -11,6 +11,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { m } from 'motion/react';
+import { spring, tween } from '../../lib/motion';
 import {
   generateCanvasApi,
   type AgentGenerateResponse,
@@ -161,8 +163,21 @@ export function AgentGeneratorPanel({
 
   return (
     <>
-      <div className="fixed inset-0 bg-black/20 z-40" onClick={onClose} />
-      <div className="fixed right-0 top-0 bottom-0 w-[460px] bg-white shadow-2xl z-50 flex flex-col overflow-hidden border-l border-[#e9ebed]">
+      <m.div
+        className="fixed inset-0 z-40"
+        style={{ background: 'rgba(11, 18, 32, 0.28)', backdropFilter: 'blur(2px)' }}
+        onClick={onClose}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={tween.base}
+      />
+      <m.div
+        className="fixed right-0 top-0 bottom-0 w-[460px] bg-white z-50 flex flex-col overflow-hidden border-l border-[#e9ebed]"
+        style={{ boxShadow: 'var(--elevation-4)' }}
+        initial={{ x: '100%' }}
+        animate={{ x: 0 }}
+        transition={spring.gentle}
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#e9ebed] bg-[#232f3e]">
           <div className="flex items-center gap-3">
@@ -338,7 +353,7 @@ export function AgentGeneratorPanel({
             </button>
           </div>
         </div>
-      </div>
+      </m.div>
     </>
   );
 }

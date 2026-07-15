@@ -3,6 +3,8 @@
  */
 
 import { useCallback } from 'react';
+import { m } from 'motion/react';
+import { popIn, tween } from '../../lib/motion';
 import type { WorkflowTemplate, TemplateDifficulty } from '../../types/templates';
 import { WORKFLOW_TEMPLATES } from '../../data/templates';
 
@@ -72,11 +74,24 @@ export function TemplateGallery({ isOpen, onClose, onSelectTemplate, hasExisting
   return (
     <>
       {/* Backdrop */}
-      <div className="fixed inset-0 bg-black/20 z-40" onClick={onClose} />
+      <m.div
+        className="fixed inset-0 z-40"
+        style={{ background: 'rgba(11, 18, 32, 0.44)', backdropFilter: 'blur(3px)' }}
+        onClick={onClose}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={tween.base}
+      />
 
       {/* Modal Panel */}
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-8">
-        <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[80vh] flex flex-col overflow-hidden border border-[#e9ebed]">
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-8 pointer-events-none">
+        <m.div
+          className="pointer-events-auto bg-white rounded-xl w-full max-w-3xl max-h-[80vh] flex flex-col overflow-hidden border border-[#e9ebed]"
+          style={{ boxShadow: 'var(--elevation-4)' }}
+          variants={popIn}
+          initial="hidden"
+          animate="visible"
+        >
           {/* Header */}
           <div className="flex items-center justify-between px-6 py-3.5 border-b border-[#e9ebed] bg-[#232f3e]">
             <div className="flex items-center gap-3">
@@ -177,7 +192,7 @@ export function TemplateGallery({ isOpen, onClose, onSelectTemplate, hasExisting
               Templates are fully customizable — double-click any node to edit its configuration
             </p>
           </div>
-        </div>
+        </m.div>
       </div>
     </>
   );

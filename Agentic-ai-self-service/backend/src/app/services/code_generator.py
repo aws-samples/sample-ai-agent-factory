@@ -575,9 +575,16 @@ def _discover_gateway_tools():
     only after retries are exhausted (preserves the Bug-105 wiring-proof gate).
     """
     import logging as _gw_log
+    import os as _gw_os
     import time as _gw_time
     _gw_logger = _gw_log.getLogger("agentcore.gateway")
-    attempts = 6
+    # A Cedar-ENFORCE gateway's policy plane can take minutes (not seconds) to
+    # converge to a servable tool list after a fresh deploy — a plain gateway
+    # serves tools in ~60s, but ENFORCE mode lags. This retry runs at CONTAINER
+    # INIT (eager warm), which has a generous startup budget, so we can afford a
+    # wide window. Tunable via GATEWAY_DISCOVERY_ATTEMPTS / _BACKOFF_S.
+    attempts = int(_gw_os.environ.get("GATEWAY_DISCOVERY_ATTEMPTS", "30"))
+    backoff = int(_gw_os.environ.get("GATEWAY_DISCOVERY_BACKOFF_S", "15"))
     for attempt in range(1, attempts + 1):
         mcp_client = MCPClient(_create_transport)
         mcp_client.start()
@@ -593,7 +600,7 @@ def _discover_gateway_tools():
             # MCP session. Do NOT stop() it.
             return tools
         # Empty attempt: stop this client so its daemon thread + http session
-        # are not leaked across the (up to 6) retries on a cold start.
+        # are not leaked across the retries on a cold start.
         try:
             mcp_client.stop(None, None, None)
         except Exception:  # noqa: BLE001
@@ -601,33 +608,41 @@ def _discover_gateway_tools():
         if attempt < attempts:
             _gw_logger.warning(
                 "Gateway tools/list returned 0 tools (attempt %d/%d) from %s — "
-                "retrying with a fresh MCP session.",
-                attempt, attempts, GATEWAY_URL,
+                "retrying with a fresh MCP session in %ds.",
+                attempt, attempts, GATEWAY_URL, backoff,
             )
-            _gw_time.sleep(10)
+            _gw_time.sleep(backoff)
     return []
 
 _agent = None
+import threading as _agent_thr
+_agent_lock = _agent_thr.Lock()
 
 def _get_agent():
     global _agent
     if _agent is not None:
         return _agent
-    model = BedrockModel(model_id=MODEL_ID, region_name=REGION)
-    if GATEWAY_URL:
-        tools = _discover_gateway_tools()
-        # Wiring proof gate: a gateway-enabled agent that came up with zero
-        # tools (after retries) is silently broken. Surface it as an error
-        # rather than letting the model bluff a canary out of the system prompt.
-        if not tools:
-            raise RuntimeError(
-                f"Gateway MCPClient returned 0 tools from {{GATEWAY_URL}} after retries — "
-                "gateway wiring is broken. Check Cognito credentials, gateway target "
-                "schemas, and that the target Lambda has been deployed."
-            )
-        _agent = Agent(model=model, tools=tools, system_prompt=SYSTEM_PROMPT)
-    else:
-        _agent = Agent(model=model, system_prompt=SYSTEM_PROMPT)
+    # Serialize the (possibly minutes-long) gateway discovery: the background
+    # warm thread and the first invoke must not run two concurrent discoveries.
+    # Whoever gets the lock builds the agent; the other blocks and reuses it.
+    with _agent_lock:
+        if _agent is not None:
+            return _agent
+        model = BedrockModel(model_id=MODEL_ID, region_name=REGION, max_tokens=8192)
+        if GATEWAY_URL:
+            tools = _discover_gateway_tools()
+            # Wiring proof gate: a gateway-enabled agent that came up with zero
+            # tools (after retries) is silently broken. Surface it as an error
+            # rather than letting the model bluff a canary out of the system prompt.
+            if not tools:
+                raise RuntimeError(
+                    f"Gateway MCPClient returned 0 tools from {{GATEWAY_URL}} after retries — "
+                    "gateway wiring is broken. Check Cognito credentials, gateway target "
+                    "schemas, and that the target Lambda has been deployed."
+                )
+            _agent = Agent(model=model, tools=tools, system_prompt=SYSTEM_PROMPT)
+        else:
+            _agent = Agent(model=model, system_prompt=SYSTEM_PROMPT)
     return _agent
 
 
@@ -638,6 +653,25 @@ def invoke(payload):
     agent = _get_agent()
     result = agent(message)
     return {{"response": str(result)}}
+
+# Eager warm at CONTAINER INIT — in a BACKGROUND thread so the HTTP server starts
+# immediately and passes AgentCore's /ping health check, while gateway tool discovery
+# (which for a Cedar-ENFORCE gateway can take minutes to converge) runs asynchronously.
+# The data-plane invoke is capped ~30s, so a cold gateway tool plane blows past it and
+# returns 503 on the first call if discovery runs lazily inside invoke. Warming in the
+# background means _get_agent() (called from invoke) blocks on the already-in-progress
+# warm instead of starting a fresh cold discovery under the 30s ceiling.
+if GATEWAY_URL:
+    import threading as _thr
+    def _bg_warm():
+        try:
+            _get_agent()
+        except Exception as _warm_err:  # noqa: BLE001
+            import logging as _wl
+            _wl.getLogger("agentcore.gateway").warning(
+                "Background gateway warm failed (invoke will retry): %s", _warm_err
+            )
+    _thr.Thread(target=_bg_warm, name="gateway-warm", daemon=True).start()
 
 if __name__ == "__main__":
     app.run()
@@ -664,6 +698,19 @@ def _generate_tools_agent(
     kb_config: Optional[dict] = None,
 ) -> str:
     """Generate agent with built-in tools (code interpreter, browser, KB retrieve)."""
+    # When the code interpreter is available, the model must ACTUALLY CALL
+    # execute_python for any computation rather than answering from its own
+    # reasoning (which produces fabricated/incorrect results for non-trivial
+    # arithmetic — the tool exists precisely so results are computed, not guessed).
+    # Prepend a hard directive so the tool is used deterministically.
+    if has_code_interpreter:
+        system_prompt = (
+            "You have an execute_python tool that runs code in a real sandbox. "
+            "For ANY computation, data processing, hashing, or arithmetic beyond "
+            "trivial single-digit sums, you MUST call execute_python and report the "
+            "tool's actual stdout VERBATIM. NEVER compute or guess results yourself "
+            "and NEVER describe calling the tool without actually calling it.\n\n"
+        ) + system_prompt
     imports = [
         '"""AgentCore Runtime Agent — Strands Agent with Built-in Tools"""',
         "import os",
@@ -765,9 +812,34 @@ def execute_python(code: str, description: str = "") -> str:
     """Execute Python code in a secure sandbox. Use for calculations, data analysis, or any Python task."""
     with code_session(REGION) as client:
         response = client.invoke("executeCode", {"code": code, "language": "python", "clearContext": False})
+    # The AgentCore code-interpreter streams multiple events; the FIRST frame is
+    # often the invocation echo, not the execution output. Drain the whole stream
+    # and extract the real stdout/text (content[].text) instead of returning the
+    # first frame — otherwise the agent never sees stdout and fabricates a result.
+    texts = []
+    structured = None
     for event in response.get("stream", [response]):
-        result = event.get("result", event)
-        return json.dumps(result) if isinstance(result, dict) else str(result)
+        result = event.get("result", event) if isinstance(event, dict) else event
+        if isinstance(result, dict):
+            structured = result
+            content = result.get("content") or []
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+                        texts.append(str(item["text"]))
+            for key in ("stdout", "output", "text"):
+                if result.get(key):
+                    texts.append(str(result[key]))
+            so = result.get("structuredContent")
+            if isinstance(so, dict) and so.get("stdout"):
+                texts.append(str(so["stdout"]))
+    if texts:
+        # de-dup while preserving order
+        seen = set()
+        out = [t for t in texts if not (t in seen or seen.add(t))]
+        return "\\n".join(out).strip()
+    if structured is not None:
+        return json.dumps(structured)
     return "No output"
 '''
 
@@ -807,6 +879,89 @@ def browse_web(url: str, action: str = "navigate") -> str:
 '''
 
     tl = ", ".join(tools_list)
+
+    # Deterministic tool-use fallback for the code interpreter: some models emit
+    # the tool call as PROSE (```python ...```) instead of a real tool_use block,
+    # then report a fabricated result. When the Strands turn returned code-looking
+    # text without executing, re-run via boto3 Converse with
+    # toolChoice={{"tool": {{"name": "execute_python"}}}} — Bedrock then FORCES a real
+    # tool call, we run it through the same code_session, and return the true stdout.
+    if has_code_interpreter:
+        ci_forced_helper = '''
+import re as _ci_re
+import boto3 as _ci_boto3
+
+def _looks_unexecuted(t):
+    # The model sometimes NARRATES a tool call instead of emitting a real tool_use
+    # block (then fabricates the result). Detect the common evasion phrasings AND
+    # code-block/tool narration; when in doubt, force real execution (the forced
+    # path is idempotent for genuine compute requests).
+    if not t:
+        return True
+    tl = t.lower()
+    _narration = (
+        "execute_python", "```", "i'll call", "i will call", "let me call",
+        "let me run", "i'll run", "i will run", "the stdout", "stdout was",
+        "based on the exact", "based on executing", "the output is", "the result is",
+        "running the code", "executing the code", "the tool returned", "would output",
+    )
+    return any(k in tl for k in _narration)
+
+def _forced_execute(prompt):
+    """Force a real execute_python call via Converse toolChoice, return stdout."""
+    br = _ci_boto3.client("bedrock-runtime", region_name=REGION)
+    tool_config = {
+        "tools": [{"toolSpec": {
+            "name": "execute_python",
+            "description": "Execute Python code in a secure sandbox and return stdout.",
+            "inputSchema": {"json": {"type": "object",
+                "properties": {"code": {"type": "string", "description": "Python code to run"}},
+                "required": ["code"]}},
+        }}],
+        "toolChoice": {"tool": {"name": "execute_python"}},
+    }
+    messages = [{"role": "user", "content": [{"text": prompt}]}]
+    resp = br.converse(modelId=MODEL_ID, system=[{"text": SYSTEM_PROMPT}],
+                       messages=messages, toolConfig=tool_config)
+    out = resp["output"]["message"]
+    for block in out.get("content", []):
+        if "toolUse" in block:
+            code = block["toolUse"]["input"].get("code", "")
+            stdout = execute_python(code)  # real sandbox execution
+            # feed the tool result back for a final natural-language answer
+            messages.append(out)
+            messages.append({"role": "user", "content": [{"toolResult": {
+                "toolUseId": block["toolUse"]["toolUseId"],
+                "content": [{"text": stdout}]}}]})
+            resp2 = br.converse(modelId=MODEL_ID, system=[{"text": SYSTEM_PROMPT}],
+                                messages=messages)
+            for b2 in resp2["output"]["message"].get("content", []):
+                if "text" in b2:
+                    return b2["text"]
+            return stdout
+    return None
+'''
+        ci_forced_call = '''    import logging as _fl
+    _cilog = _fl.getLogger("agentcore.ci")
+    _pl = (prompt or "").lower()
+    _compute_intent = any(k in _pl for k in (
+        "execute_python", "run ", "compute", "calculate", "print(", "hashlib",
+        "sha256", "code interpreter", "python", "stdout", "evaluate"))
+    if _looks_unexecuted(text) or _compute_intent:
+        _cilog.warning("CI result looks unexecuted (len=%d); forcing execute_python via toolChoice", len(text or ""))
+        try:
+            forced = _forced_execute(prompt)
+            if forced:
+                _cilog.warning("forced execute produced result (len=%d)", len(forced))
+                text = forced
+            else:
+                _cilog.warning("forced execute returned None")
+        except Exception as _fe:
+            _cilog.warning("forced execute failed: %s", _fe)'''
+    else:
+        ci_forced_helper = ""
+        ci_forced_call = "    pass"
+
     return (
         "\n".join(imports)
         + f"""
@@ -822,14 +977,39 @@ _agent = None
 def _get_agent():
     global _agent
     if _agent is None:
-        model = BedrockModel(model_id=MODEL_ID, region_name=REGION)
+        # Raise max_tokens: agentic-RAG (multi-hop/reranked) and multi-tool loops
+        # accumulate large context across tool calls and otherwise hit
+        # MaxTokensReachedException on the default output budget. 8192 is safe for
+        # Claude Sonnet/Opus 5 and comfortably covers multi-hop retrieval answers.
+        model = BedrockModel(model_id=MODEL_ID, region_name=REGION, max_tokens=8192)
         _agent = Agent(model=model, system_prompt=SYSTEM_PROMPT, tools=[{tl}])
     return _agent
 
+def _final_text(result):
+    # Extract the agent's final assistant text from a Strands AgentResult.
+    # str(result) can fall back to a tool name when the last turn was a tool_use
+    # with no synthesized text; pull the text content out of the result message
+    # so tool output actually reaches the caller instead of a bare tool name.
+    try:
+        msg = getattr(result, "message", None)
+        if isinstance(msg, dict):
+            content = msg.get("content") or []
+            texts = [c["text"] for c in content
+                     if isinstance(c, dict) and c.get("text")]
+            if texts:
+                return "\\n".join(texts).strip()
+    except Exception:
+        pass
+    return str(result).strip()
+
+{ci_forced_helper}
 @app.entrypoint
 def invoke(payload):
-    result = _get_agent()(payload.get("prompt", "Hello"))
-    return {{"response": str(result)}}
+    prompt = payload.get("prompt", "Hello")
+    result = _get_agent()(prompt)
+    text = _final_text(result)
+{ci_forced_call}
+    return {{"response": text}}
 
 if __name__ == "__main__":
     app.run()
@@ -1260,7 +1440,7 @@ def _get_agent(**extra_kwargs):
     global _model, _agent
     if _agent is None or extra_kwargs:
         if _model is None:
-            _model = BedrockModel(model_id=MODEL_ID, region_name=REGION)
+            _model = BedrockModel(model_id=MODEL_ID, region_name=REGION, max_tokens=8192)
         _agent = Agent(model=_model, {agent_tools}system_prompt=SYSTEM_PROMPT, **extra_kwargs)
     return _agent
 

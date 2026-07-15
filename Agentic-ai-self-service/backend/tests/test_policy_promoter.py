@@ -89,6 +89,50 @@ def test_stays_log_only_when_no_active_policy():
     ctrl.update_gateway.assert_not_called()  # never flip to a deny-all ENFORCE
 
 
+def test_recovers_create_failed_in_place_without_delete():
+    """Race-free convergence: a CREATE_FAILED policy already occupies the name.
+
+    The promoter must UPDATE it in place (stable policyId, no name-free window)
+    rather than delete+recreate — which used to let concurrent status-poll runs
+    clobber each other forever. Asserts update_policy is used, delete_policy is
+    NOT, and the policy converges to ACTIVE.
+    """
+    ctrl = MagicMock()
+    # a CREATE_FAILED policy already exists on the engine (from the deploy attach)
+    ctrl.list_policies.return_value = {
+        "policies": [{"name": "allow", "status": "CREATE_FAILED", "policyId": "p1"}]}
+    # gateway has since converged: the in-place update validates ACTIVE
+    ctrl.get_policy.return_value = {"status": "ACTIVE"}
+    ctrl.get_gateway.return_value = {"name": "gw", "roleArn": "r", "protocolType": "MCP",
+                                     "policyEngineConfiguration": {"arn": "arn:eng"}}
+    with patch.object(pp, "_ctrl", return_value=ctrl):
+        out = pp.try_promote_to_enforce(_state(), "us-east-1")
+    assert out["promoted"] is True and out["mode"] == "ENFORCE"
+    # updated in place — no delete, no create (race-free)
+    ctrl.update_policy.assert_called_once()
+    ctrl.delete_policy.assert_not_called()
+    ctrl.create_policy.assert_not_called()
+    _, ukw = ctrl.update_policy.call_args
+    assert ukw["policyId"] == "p1"
+    assert ukw["validationMode"] == "IGNORE_ALL_FINDINGS"
+    # update_policy's description is a STRUCTURE {"optionalValue": str}, not a
+    # bare string (create_policy's is a string) — a str raises ParamValidationError.
+    assert isinstance(ukw["description"], dict) and "optionalValue" in ukw["description"]
+
+
+def test_skips_in_flight_policy_owned_by_concurrent_run():
+    """A CREATING policy belongs to another concurrent promoter run — leave it."""
+    ctrl = MagicMock()
+    ctrl.list_policies.return_value = {
+        "policies": [{"name": "allow", "status": "CREATING", "policyId": "p1"}]}
+    with patch.object(pp, "_ctrl", return_value=ctrl):
+        out = pp.try_promote_to_enforce(_state(), "us-east-1")
+    assert out["promoted"] is False
+    ctrl.update_policy.assert_not_called()
+    ctrl.delete_policy.assert_not_called()
+    ctrl.create_policy.assert_not_called()
+
+
 def test_best_effort_never_raises():
     ctrl = MagicMock()
     ctrl.list_policies.side_effect = Exception("boom")

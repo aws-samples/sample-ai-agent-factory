@@ -75,24 +75,58 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
         if status == "ACTIVE":
             active += 1
             continue
-        # Drop a stale/failed one, then (re)create.
-        if cur:
-            try:
-                ctrl.delete_policy(policyEngineId=engine_id, policyId=cur.get("policyId") or cur.get("id"))
-            except Exception:  # noqa: BLE001
-                pass
-            time.sleep(2)  # let the name free up before reuse
+        # RACE GUARD (root cause of the never-converging permit): this promoter
+        # runs on EVERY status poll, and the poller (UI / test harness) hits the
+        # status endpoint every ~20s. Lambda scales out, so 2+ promoter runs
+        # overlap. The old code unconditionally did delete->wait->create on the
+        # SAME account-global name, so overlapping runs clobbered each other:
+        # run A creates a fresh policy, run B (seeing it mid-create) deletes it
+        # and starts its own, forever — the exact CREATING/CREATE_FAILED/DELETING
+        # churn observed live for 40+ min on a gateway that a SINGLE un-raced
+        # create converges to ACTIVE instantly. Fix: never touch an in-flight
+        # (CREATING/DELETING) policy — another concurrent run owns it; just report
+        # not-yet-active and let it finish. Only recreate a genuinely terminal
+        # CREATE_FAILED/FAILED one.
+        if status in ("CREATING", "DELETING", "UPDATING"):
+            logger.info("promote: policy %s is %s (another run owns it) — skipping", name, status)
+            continue
+        _desc = pol.get("description") or "Auto-permit for allowed gateway tools (ENFORCE)."
+        _defn = {"cedar": {"statement": stmt}}
         try:
-            cp = ctrl.create_policy(
-                policyEngineId=engine_id, name=name,
-                # create_policy requires a NON-EMPTY description (min length 1) —
-                # an empty string fails parameter validation and the create never
-                # happens (the bug that made promotion silently report "not active
-                # yet" even after the gateway converged). Default to a meaningful one.
-                description=(pol.get("description") or "Auto-permit for allowed gateway tools (ENFORCE)."),
-                definition={"cedar": {"statement": stmt}},
-            )
-            pid = cp.get("policyId")
+            if cur:
+                # RECOVER IN PLACE (the elegant race-free fix): a CREATE_FAILED
+                # policy already occupies this account-global name. The old code
+                # deleted it and recreated — but delete_policy is ASYNC, opening a
+                # name-free window in which a CONCURRENT status-poll promoter run
+                # (Lambda scales out; clients poll ~every 20s) creates its own,
+                # then the two clobber each other forever (observed live: 40+ min
+                # of CREATING/CREATE_FAILED/DELETING churn on a gateway that a
+                # single un-raced call converges instantly). update_policy mutates
+                # the SAME stable policyId with no deletion — no name-free window,
+                # so overlapping runs are idempotent (both update the same id).
+                # This re-validates against the now-converged gateway → ACTIVE.
+                pid = cur.get("policyId") or cur.get("id")
+                # NOTE: update_policy's `description` is a STRUCTURE
+                # {"optionalValue": str} — NOT a bare string like create_policy's.
+                # Passing a str raises ParamValidationError (caught below), which
+                # silently left the policy CREATE_FAILED forever. Proven live: with
+                # the correct shape the stuck policy flips ACTIVE on the first poll.
+                ctrl.update_policy(
+                    policyEngineId=engine_id, policyId=pid,
+                    description={"optionalValue": _desc}, definition=_defn,
+                    validationMode="IGNORE_ALL_FINDINGS",
+                )
+            else:
+                cp = ctrl.create_policy(
+                    policyEngineId=engine_id, name=name,
+                    # create_policy requires a NON-EMPTY description (min length 1).
+                    description=_desc, definition=_defn,
+                    # IGNORE_ALL_FINDINGS: skip the gateway-calling validation that
+                    # fails "Insufficient permissions to call gateway" on fresh
+                    # gateways (proven live). Enforcement preserved via default-deny.
+                    validationMode="IGNORE_ALL_FINDINGS",
+                )
+                pid = cp.get("policyId")
             # Poll THIS policy's own status to terminal — do NOT rely on a fresh
             # list_policies(), which is eventually-consistent and returns 0 right
             # after a create (the bug that made promotion always report "not
@@ -101,7 +135,7 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
             for _ in range(10):
                 d = ctrl.get_policy(policyEngineId=engine_id, policyId=pid)
                 final = d.get("status", "")
-                if final in ("ACTIVE", "CREATE_FAILED", "FAILED"):
+                if final in ("ACTIVE", "CREATE_FAILED", "FAILED", "UPDATE_FAILED"):
                     break
                 time.sleep(3)
             if final == "ACTIVE":
@@ -109,7 +143,18 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
             else:
                 logger.info("promote: policy %s still %s (gateway converging)", name, final)
         except Exception as e:  # noqa: BLE001
-            logger.info("promote: recreate of %s not yet valid: %s", name, str(e)[:120])
+            # ConflictException is BENIGN and self-healing — a concurrent promoter
+            # run (Lambda scale-out on overlapping status polls) is already acting
+            # on this policy. Two forms seen live: "already exists" (concurrent
+            # create) and "Concurrent modification ... / cannot be updated while it
+            # is in UPDATING status" (concurrent update). In BOTH cases another run
+            # owns the transition — do NOT delete or retry destructively here; the
+            # next poll sees it CREATING/UPDATING/ACTIVE and converges.
+            if "ConflictException" in type(e).__name__ or "already exists" in str(e):
+                logger.info("promote: %s owned by a concurrent run (%s) — leaving it",
+                            name, str(e)[:80])
+            else:
+                logger.info("promote: recreate of %s not yet valid: %s", name, str(e)[:120])
 
     return active
 

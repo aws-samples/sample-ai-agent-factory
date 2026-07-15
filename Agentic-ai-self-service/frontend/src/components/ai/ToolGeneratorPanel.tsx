@@ -410,7 +410,7 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
         }`}
       >
         {/* Header */}
-        <div className="h-14 flex items-center justify-between px-4 border-b border-gray-200 bg-gradient-to-r from-purple-50 to-indigo-50 flex-shrink-0">
+        <div className="h-14 flex items-center justify-between px-4 border-b border-gray-200 flex-shrink-0" style={{ background: 'var(--color-bg-subtle)' }}>
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center">
               <span className="text-white text-sm">AI</span>

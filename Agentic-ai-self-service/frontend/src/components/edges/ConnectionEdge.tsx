@@ -13,8 +13,8 @@ import {
   type Edge,
 } from '@xyflow/react';
 import type { ConnectionType, ValidationStatus } from '../../types/workflow';
-import { CONNECTION_COLORS } from '../../types/validation';
 import type { ValidationError } from '../../types/validation';
+import { getEdgeColorWithValidation } from './edgeUtils';
 
 // ============================================================================
 // Edge Data Interface
@@ -25,86 +25,6 @@ export interface ConnectionEdgeData extends Record<string, unknown> {
   label?: string;
   validationStatus?: ValidationStatus;
   validationErrors?: ValidationError[];
-}
-
-// ============================================================================
-// Bezier Path Calculation
-// ============================================================================
-
-/**
- * Calculate cubic Bezier control points for smooth edge curves.
- * Property 11: Bezier Curve Path Validity
- * For any edge connecting two ports, the rendered path shall be a valid
- * cubic Bezier curve with control points calculated to create smooth curvature.
- */
-export function calculateBezierControlPoints(
-  sourceX: number,
-  sourceY: number,
-  targetX: number,
-  targetY: number
-): {
-  sourceControlX: number;
-  sourceControlY: number;
-  targetControlX: number;
-  targetControlY: number;
-} {
-  // Calculate horizontal distance for control point offset
-  const dx = Math.abs(targetX - sourceX);
-  const controlOffset = Math.max(dx * 0.5, 50); // Minimum offset of 50px
-
-  return {
-    sourceControlX: sourceX + controlOffset,
-    sourceControlY: sourceY,
-    targetControlX: targetX - controlOffset,
-    targetControlY: targetY,
-  };
-}
-
-/**
- * Generate SVG path string for cubic Bezier curve.
- */
-export function generateBezierPath(
-  sourceX: number,
-  sourceY: number,
-  targetX: number,
-  targetY: number
-): string {
-  const { sourceControlX, sourceControlY, targetControlX, targetControlY } =
-    calculateBezierControlPoints(sourceX, sourceY, targetX, targetY);
-
-  return `M ${sourceX},${sourceY} C ${sourceControlX},${sourceControlY} ${targetControlX},${targetControlY} ${targetX},${targetY}`;
-}
-
-// ============================================================================
-// Color Determination
-// ============================================================================
-
-/**
- * Get edge color based on connection type.
- * Property 12: Connection Color by Type
- * For any edge with connection type T, the rendered color shall be:
- * - blue (#3B82F6) for data
- * - green (#22C55E) for authentication
- * - orange (#F97316) for policy
- */
-export function getEdgeColor(connectionType: ConnectionType): string {
-  return CONNECTION_COLORS[connectionType] || CONNECTION_COLORS.data;
-}
-
-/**
- * Get edge color based on validation status (overrides connection type color if error).
- */
-export function getEdgeColorWithValidation(
-  connectionType: ConnectionType,
-  validationStatus?: ValidationStatus
-): string {
-  if (validationStatus === 'error') {
-    return '#EF4444'; // red-500
-  }
-  if (validationStatus === 'warning') {
-    return '#F59E0B'; // amber-500
-  }
-  return getEdgeColor(connectionType);
 }
 
 // ============================================================================
@@ -145,6 +65,20 @@ function ConnectionEdge({
 
   return (
     <>
+      {/* Neon glow underlay — bloom around the wire; brighter when selected. */}
+      <path
+        d={edgePath}
+        fill="none"
+        stroke={edgeColor}
+        strokeWidth={selected ? 9 : 6}
+        strokeLinecap="round"
+        style={{
+          opacity: selected ? 0.55 : 0.32,
+          filter: 'blur(4px)',
+          transition: 'opacity 0.2s ease, stroke-width 0.2s ease',
+        }}
+      />
+
       {/* Main edge path */}
       <BaseEdge
         id={id}
@@ -152,11 +86,25 @@ function ConnectionEdge({
         markerEnd={markerEnd}
         style={{
           stroke: edgeColor,
-          strokeWidth: selected ? 3 : 2,
+          strokeWidth: selected ? 2.5 : 2,
           strokeDasharray: hasError ? '5,5' : undefined,
           transition: 'stroke-width 0.15s ease',
         }}
       />
+
+      {/* Animated flow overlay when selected — dashes travel source→target to
+          convey direction/activity (paused under prefers-reduced-motion via CSS). */}
+      {selected && !hasError && (
+        <path
+          d={edgePath}
+          fill="none"
+          stroke="#ffffff"
+          strokeWidth={2.5}
+          strokeDasharray="1 10"
+          strokeLinecap="round"
+          style={{ opacity: 0.9, animation: 'edge-flow 0.9s linear infinite' }}
+        />
+      )}
 
       {/* Selection highlight (wider invisible path for easier clicking) */}
       <path
@@ -177,8 +125,8 @@ function ConnectionEdge({
           className="overflow-visible"
         >
           <div
-            className="flex items-center justify-center text-xs bg-white px-2 py-0.5 rounded border shadow-sm"
-            style={{ borderColor: edgeColor }}
+            className="flex items-center justify-center text-xs bg-white px-2 py-0.5 rounded border"
+            style={{ borderColor: edgeColor, boxShadow: 'var(--elevation-1)' }}
           >
             {data.label}
           </div>

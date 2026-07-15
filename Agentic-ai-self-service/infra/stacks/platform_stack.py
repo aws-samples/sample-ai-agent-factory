@@ -1099,6 +1099,12 @@ class PlatformStack(cdk.Stack):
                     "bedrock-agentcore:ListPolicyEngines",
                     "bedrock-agentcore:CreatePolicy",
                     "bedrock-agentcore:DeletePolicy",
+                    # UpdatePolicy: the lazy promoter recovers a CREATE_FAILED
+                    # permit by UPDATING it in place (race-free — no delete/create
+                    # name-collision window) once the gateway converges. Without
+                    # this action the update is silently AccessDenied and the
+                    # permit stays CREATE_FAILED forever, so ENFORCE never engages.
+                    "bedrock-agentcore:UpdatePolicy",
                     "bedrock-agentcore:ListPolicies",
                     "bedrock-agentcore:GetPolicy",
                     # Bug 134: gateway-scoped policy create/delete is authorized as
@@ -1149,6 +1155,15 @@ class PlatformStack(cdk.Stack):
                     "s3vectors:GetIndex",
                     "s3vectors:DescribeIndex",
                     "s3vectors:DeleteIndex",
+                    # OpenSearch Serverless: the KB step auto-provisions an OSS
+                    # collection; this (deployment/teardown) role only needs the
+                    # DELETE verbs to reclaim it via the manifest (standing billable
+                    # resource — orphan = ~$350/mo). Create verbs live on the KB step
+                    # role, keeping this policy small enough to avoid an overflow policy.
+                    "aoss:BatchGetCollection",
+                    "aoss:DeleteCollection",
+                    "aoss:DeleteSecurityPolicy",
+                    "aoss:DeleteAccessPolicy",
                 ],
                 resources=["*"],
             )
@@ -1786,6 +1801,19 @@ class PlatformStack(cdk.Stack):
                 ],
                 resources=["*"],
             ))
+            # OpenSearch Serverless: KB step auto-provisions a collection +
+            # security/access policies + vector index when the caller supplies no
+            # opensearchCollectionArn (Bedrock requires a pre-existing collection).
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "aoss:CreateCollection", "aoss:BatchGetCollection", "aoss:DeleteCollection",
+                    "aoss:CreateSecurityPolicy", "aoss:GetSecurityPolicy", "aoss:DeleteSecurityPolicy",
+                    "aoss:CreateAccessPolicy", "aoss:GetAccessPolicy", "aoss:DeleteAccessPolicy",
+                    "aoss:CreateIndex", "aoss:DescribeIndex", "aoss:DeleteIndex",
+                    "aoss:APIAccessAll",
+                ],
+                resources=["*"],
+            ))
 
         # guardrails creates Bedrock Guardrails.
         if step_name == "guardrails":
@@ -2209,7 +2237,7 @@ class PlatformStack(cdk.Stack):
                 # CREATING" / validates "Insufficient permissions to call gateway"
                 # until it converges). The step waits for the engine + retries the
                 # policy create across that window, so it needs a generous budget.
-                "timeout": 300,
+                "timeout": 600,
             },
             "knowledge_base": {
                 "handler": "src/app/step_handlers/knowledge_base_step.handler",
@@ -2390,9 +2418,11 @@ class PlatformStack(cdk.Stack):
         policy_step = self._create_step_task(
             "CreatePolicy",
             self.step_lambdas["policy"],
-            # Bug 177: matched to the 300s Lambda budget — the policy engine's
-            # CREATING->ACTIVE convergence + policy-create retry can take minutes.
-            timeout_seconds=300,
+            # Bug 177 + Cedar IGNORE_ALL_FINDINGS convergence: matched to the 600s
+            # Lambda budget — the engine CREATING->ACTIVE + up to 12 policy-create
+            # retries (as the engine<->gateway authorization converges) can take
+            # several minutes on a freshly-created gateway.
+            timeout_seconds=600,
             result_path="$",
         )
         policy_step.add_retry(**self._retry_kwargs())
@@ -3466,6 +3496,19 @@ class PlatformStack(cdk.Stack):
         ]
         _suppress(self.workflow_lambda.role, iam_reasons)
         _suppress(self.deployment_lambda.role, iam_reasons)
+        # When the deployment role's inline policy exceeds the IAM size limit, CDK
+        # splits the excess into a separate "OverflowPolicy<N>" managed-policy
+        # resource that apply_to_children on the role does NOT reach. Suppress the
+        # same IAM5 wildcard findings on it by path (best-effort; ignored if absent).
+        for _n in range(1, 4):
+            try:
+                cdk_nag.NagSuppressions.add_resource_suppressions_by_path(
+                    self,
+                    f"/{self.stack_name}/DeploymentLambdaRole/OverflowPolicy{_n}/Resource",
+                    [cdk_nag.NagPackSuppression(id=nid, reason=reason) for nid, reason in iam_reasons],
+                )
+            except Exception:  # noqa: BLE001
+                pass
         # Bug 157 — streaming test Lambda role: same invoke-on-* wildcards as the
         # deployment Lambda's test path (InvokeAgentRuntime/InvokeHarness).
         if hasattr(self, "stream_lambda"):

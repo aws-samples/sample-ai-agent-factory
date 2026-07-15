@@ -4,31 +4,21 @@
  * Displays validation indicators with tooltips.
  * Runtime nodes have input, output, and tool handles.
  * Requirements: 8.1, 8.2
+ *
+ * Redesign: layered depth (resting → hover-lift → selected-glow) via motion,
+ * a tinted icon chip, canonical CSS-var accent colors (single source of truth,
+ * shared with the minimap), and a spring "drop-in" enter animation. All node
+ * data logic, handle ids, and data-testids are preserved.
  */
 
 import { memo, useState } from 'react';
+import { m } from 'motion/react';
 import { Handle, Position, type NodeProps, type Node } from '@xyflow/react';
 import type { AgentCoreNodeData } from '../../store/workflowStore';
 import type { RuntimeConfiguration, ToolConfiguration } from '../../types/components';
-
-// ============================================================================
-// Component Type Colors
-// ============================================================================
-
-const COMPONENT_COLORS: Record<string, { bg: string; border: string; accent: string; icon: string }> = {
-  runtime: { bg: 'bg-white', border: 'border-[#0972d3]', accent: 'bg-[#0972d3]', icon: '🤖' },
-  gateway: { bg: 'bg-white', border: 'border-[#037f0c]', accent: 'bg-[#037f0c]', icon: '🔌' },
-  memory: { bg: 'bg-white', border: 'border-[#0972d3]', accent: 'bg-[#0972d3]', icon: '🧠' },
-  code_interpreter: { bg: 'bg-white', border: 'border-[#d45b07]', accent: 'bg-[#d45b07]', icon: '💻' },
-  browser: { bg: 'bg-white', border: 'border-[#5b48d3]', accent: 'bg-[#5b48d3]', icon: '🌐' },
-  observability: { bg: 'bg-white', border: 'border-[#c41367]', accent: 'bg-[#c41367]', icon: '📊' },
-  identity: { bg: 'bg-white', border: 'border-[#7d2bd0]', accent: 'bg-[#7d2bd0]', icon: '🔑' },
-  evaluation: { bg: 'bg-white', border: 'border-[#037f0c]', accent: 'bg-[#037f0c]', icon: '✅' },
-  policy: { bg: 'bg-white', border: 'border-[#d91515]', accent: 'bg-[#d91515]', icon: '🛡️' },
-  guardrails: { bg: 'bg-white', border: 'border-[#d91515]', accent: 'bg-[#d91515]', icon: '🚧' },
-  a2a: { bg: 'bg-white', border: 'border-[#067a6e]', accent: 'bg-[#067a6e]', icon: '🔄' },
-  tool: { bg: 'bg-white', border: 'border-[#d45b07]', accent: 'bg-[#d45b07]', icon: '🔧' },
-};
+import { COMPONENT_ICONS } from '../icons/componentIcons';
+import { nodeEnter, spring } from '../../lib/motion';
+import { accentFor } from './nodeColors';
 
 // ============================================================================
 // Validation Status Indicators
@@ -95,7 +85,7 @@ function AgentCoreNode({ data, selected }: AgentCoreNodeProps) {
     return <div className="p-2 text-xs text-red-500 bg-red-50 rounded border border-red-200">Invalid node</div>;
   }
 
-  const colors = COMPONENT_COLORS[data.componentType] || COMPONENT_COLORS.runtime;
+  const accent = accentFor(data.componentType);
   const validation = VALIDATION_INDICATORS[data.validationStatus] || VALIDATION_INDICATORS.pending;
   const hasValidationIssues = data.validationStatus === 'error' || data.validationStatus === 'warning';
   const isRuntime = data.componentType === 'runtime';
@@ -104,8 +94,31 @@ function AgentCoreNode({ data, selected }: AgentCoreNodeProps) {
   const toolConfig = data.configuration as ToolConfiguration | undefined;
   const execState = data.executionState as string | undefined;
 
+  const isError = data.validationStatus === 'error';
+  const isWarning = data.validationStatus === 'warning';
+
+  // Border reflects validation state, else accent (bright when selected).
+  const borderColor = isError
+    ? 'var(--neon-red)'
+    : isWarning
+    ? 'var(--neon-amber)'
+    : selected
+    ? accent
+    : `color-mix(in srgb, ${accent} 30%, var(--color-border))`;
+
+  // Neon glow: subtle ambient halo at rest, bright ring + bloom when selected.
+  const restGlow = `var(--elevation-2), 0 0 18px -6px color-mix(in srgb, ${accent} 60%, transparent)`;
+  const selectedGlow = `var(--elevation-3), 0 0 0 1px ${accent}, 0 0 24px -2px color-mix(in srgb, ${accent} 70%, transparent)`;
+
   return (
-    <div className="relative min-w-[180px] group">
+    <m.div
+      className="relative min-w-[184px] group"
+      variants={nodeEnter}
+      initial="hidden"
+      animate="visible"
+      exit="exit"
+      transition={spring.snappy}
+    >
       {/* Execution state badge — outside overflow-hidden container so it's visible */}
       {execState === 'completed' && (
         <div className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-green-500 rounded-full flex items-center justify-center shadow-sm z-10">
@@ -132,29 +145,41 @@ function AgentCoreNode({ data, selected }: AgentCoreNodeProps) {
 
       <div
         className={`
-          rounded-xl border cursor-pointer overflow-hidden
-          ${colors.bg} ${colors.border}
-          ${selected ? 'ring-2 ring-[#0972d3] ring-offset-1 shadow-md' : 'shadow-sm hover:shadow-md'}
-          ${data.validationStatus === 'error' ? 'border-red-500' : ''}
-          ${data.validationStatus === 'warning' ? 'border-amber-500' : ''}
+          no-darkmap relative cursor-pointer overflow-hidden
           ${execState === 'running' ? 'execution-running' : ''}
-          transition-all duration-200
+          transition-[box-shadow,border-color] duration-200
         `}
         style={{
-          boxShadow: selected ? 'var(--shadow-md)' : 'var(--shadow-sm)',
+          borderRadius: 'var(--radius-surface)',
+          border: `1px solid ${borderColor}`,
+          background: 'var(--node-card-bg)',
+          boxShadow: selected ? selectedGlow : restGlow,
           transitionTimingFunction: 'var(--ease-out-quint)',
         }}
         data-testid={`node-${data.componentType}`}
       >
-      {/* Color accent bar at top */}
-      <div className={`h-1 ${colors.accent}`} />
+      {/* Neon accent bar at top with bloom + shimmer sweep */}
+      <div className="relative h-[3px] overflow-hidden" style={{ background: accent, boxShadow: `0 0 12px ${accent}` }}>
+        <div
+          className="absolute inset-y-0 w-1/3"
+          style={{
+            background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.85), transparent)',
+            animation: 'u-shimmer 4.5s ease-in-out infinite',
+          }}
+        />
+      </div>
+      {/* Accent wash so the card glows in its type color */}
+      <div
+        className="pointer-events-none absolute inset-0"
+        style={{ background: `linear-gradient(180deg, color-mix(in srgb, ${accent} 14%, transparent), transparent 55%)` }}
+      />
 
       {/* Input Handle - Left side */}
       <Handle
         type="target"
         position={Position.Left}
         id="input"
-        className="w-2.5 h-2.5 !bg-[#0972d3] border-2 border-white"
+        className="!w-2.5 !h-2.5 !border-2 !border-[#0b1220] !bg-[#0972d3] transition-transform hover:!scale-125"
         style={{ top: '50%' }}
       />
 
@@ -164,20 +189,30 @@ function AgentCoreNode({ data, selected }: AgentCoreNodeProps) {
           type="target"
           position={Position.Top}
           id="tools"
-          className="w-2.5 h-2.5 !bg-[#037f0c] border-2 border-white"
+          className="!w-2.5 !h-2.5 !border-2 !border-[#0b1220] !bg-[#037f0c] transition-transform hover:!scale-125"
           style={{ left: '50%' }}
         />
       )}
 
       {/* Node Content */}
-      <div className="px-3.5 py-2.5">
+      <div className="relative px-3.5 py-2.5">
         <div className="flex items-center gap-2.5">
-          <span className="text-base leading-none">{colors.icon}</span>
+          {/* Neon icon chip with glow */}
+          <div
+            className="flex-shrink-0 flex items-center justify-center w-8 h-8 rounded-lg"
+            style={{
+              color: accent,
+              background: `color-mix(in srgb, ${accent} 16%, transparent)`,
+              boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${accent} 45%, transparent), 0 0 12px -2px color-mix(in srgb, ${accent} 70%, transparent)`,
+            }}
+          >
+            {COMPONENT_ICONS[data.componentType]}
+          </div>
           <div className="flex-1 min-w-0">
-            <div className="font-semibold text-[#16191f] text-[13px] truncate tracking-tight leading-tight">
+            <div className="no-darkmap font-semibold text-[13px] truncate tracking-tight leading-tight" style={{ color: 'var(--color-text-primary)' }}>
               {data.label || data.componentType}
             </div>
-            <div className="text-[11px] text-[#5f6b7a] leading-tight mt-0.5">
+            <div className="no-darkmap text-[11px] leading-tight mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
               {isRuntime && runtimeConfig?.framework ? (
                 <span className="capitalize">{runtimeConfig.framework.replace(/_/g, ' ')}</span>
               ) : isTool && toolConfig?.toolId ? (
@@ -202,7 +237,7 @@ function AgentCoreNode({ data, selected }: AgentCoreNodeProps) {
             </span>
 
             {showTooltip && (
-              <div className="absolute z-50 right-0 top-full mt-1 p-2 bg-white rounded-md shadow-lg border border-[#e9ebed] min-w-[200px]">
+              <div className="absolute z-50 right-0 top-full mt-1 p-2 bg-white rounded-md border border-[#e9ebed] min-w-[200px]" style={{ boxShadow: 'var(--elevation-3)' }}>
                 <ValidationTooltip errors={data.validationErrors} warnings={data.validationWarnings} status={data.validationStatus} />
               </div>
             )}
@@ -211,14 +246,20 @@ function AgentCoreNode({ data, selected }: AgentCoreNodeProps) {
 
         {/* Framework badge for Runtime */}
         {isRuntime && runtimeConfig?.framework && (
-          <div className="mt-1.5 text-[10px] bg-[#0972d3]/10 text-[#0972d3] px-2 py-0.5 rounded font-medium inline-block">
+          <div
+            className="mt-1.5 text-[10px] px-2 py-0.5 rounded font-medium inline-block"
+            style={{ color: accent, background: `color-mix(in srgb, ${accent} 10%, transparent)` }}
+          >
             {runtimeConfig.framework.replace(/_/g, ' ')}
           </div>
         )}
 
         {/* Tool type badge */}
         {isTool && toolConfig?.toolId && (
-          <div className="mt-1.5 text-[10px] bg-[#d45b07]/10 text-[#d45b07] px-2 py-0.5 rounded font-medium inline-block">
+          <div
+            className="mt-1.5 text-[10px] px-2 py-0.5 rounded font-medium inline-block"
+            style={{ color: accent, background: `color-mix(in srgb, ${accent} 10%, transparent)` }}
+          >
             gateway tool
           </div>
         )}
@@ -229,7 +270,7 @@ function AgentCoreNode({ data, selected }: AgentCoreNodeProps) {
         type="source"
         position={Position.Right}
         id="output"
-        className="w-2.5 h-2.5 !bg-[#ff9900] border-2 border-white"
+        className="!w-2.5 !h-2.5 !border-2 !border-[#0b1220] !bg-[#ff9900] transition-transform hover:!scale-125"
         style={{ top: '50%' }}
       />
 
@@ -238,7 +279,7 @@ function AgentCoreNode({ data, selected }: AgentCoreNodeProps) {
         Double-click to configure
       </div>
       </div>
-    </div>
+    </m.div>
   );
 }
 

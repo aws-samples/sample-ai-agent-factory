@@ -3,6 +3,8 @@
  */
 
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import { m } from 'motion/react';
+import { spring, tween } from '../../lib/motion';
 import type { RuntimeConfiguration, GatewayConfiguration, IdentityConfiguration } from '../../types/components';
 import { authFetch } from '../../auth/authFetch';
 import { WORKFLOW_TEMPLATES } from '../../data/templates';
@@ -389,7 +391,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
         message,
       });
     }
-  }, [config, nodeId, deploymentMode, connectedTools, gatewayConfig, gatewayTools, templateId, identityConfig, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, warmupRuntime, resetAllExecutionStates, setNodeExecutionStateByType]);
+  }, [config, nodeId, deploymentMode, connectedTools, gatewayConfig, gatewayTools, templateId, identityConfig, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, a2aConfig, knowledgeBaseConfig, observabilityConfig, warmupRuntime, resetAllExecutionStates, setNodeExecutionStateByType]);
 
   // ============================================================
   // CFN Download UI
@@ -554,7 +556,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
     } finally {
       setIsDownloadingCfn(false);
     }
-  }, [config, nodeId, connectedTools, gatewayConfig, gatewayTools, templateId, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, identityConfig]);
+  }, [config, nodeId, connectedTools, gatewayConfig, gatewayTools, templateId, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, identityConfig, a2aConfig, observabilityConfig]);
 
   // Gap 2A — publish the deployed agent's canvas as a reusable registry blueprint.
   // This closes the deploy -> registry -> Browse -> Clone-to-canvas loop: the
@@ -879,10 +881,23 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
   return (
     <>
       {/* Backdrop */}
-      <div className="fixed inset-0 bg-black/20 z-40" onClick={onClose} />
+      <m.div
+        className="fixed inset-0 z-40"
+        style={{ background: 'rgba(11, 18, 32, 0.28)', backdropFilter: 'blur(2px)' }}
+        onClick={onClose}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={tween.base}
+      />
 
       {/* Panel */}
-      <div className="fixed right-0 top-0 bottom-0 w-[420px] bg-white shadow-2xl z-50 flex flex-col overflow-hidden border-l border-[#e9ebed]">
+      <m.div
+        className="fixed right-0 top-0 bottom-0 w-[420px] bg-white z-50 flex flex-col overflow-hidden border-l border-[#e9ebed]"
+        style={{ boxShadow: 'var(--elevation-4)' }}
+        initial={{ x: '100%' }}
+        animate={{ x: 0 }}
+        transition={spring.gentle}
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#e9ebed] bg-[#232f3e]">
           <div className="flex items-center gap-3">
@@ -1118,7 +1133,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
               {/* Template Tools Configuration */}
               {activeTemplate && activeTemplate.builtInTools.length > 0 && (
                 <div className="rounded-xl border border-gray-200 overflow-hidden">
-                  <div className="px-4 py-3 bg-gradient-to-r from-slate-50 to-slate-100 border-b border-gray-200 flex items-center gap-2">
+                  <div className="px-4 py-3 border-b border-gray-200 flex items-center gap-2" style={{ background: 'var(--color-bg-subtle)' }}>
                     <span className="text-sm">🧰</span>
                     <h4 className="text-sm font-medium text-gray-700">Template Tools Configuration</h4>
                     <span className="ml-auto text-[10px] px-2 py-0.5 bg-[#0972d3]/10 text-[#0972d3] rounded font-medium">
@@ -1553,7 +1568,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
           </div>
         </div>
         )}
-      </div>
+      </m.div>
     </>
   );
 }

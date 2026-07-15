@@ -6,6 +6,8 @@
 import { useState, useCallback, useMemo } from 'react';
 import type { AgentCoreComponentType } from '../../types/workflow';
 import { FlowSidebar } from '../flow-sidebar';
+import { COMPONENT_ICONS } from '../icons/componentIcons';
+import { accentFor } from '../nodes/nodeColors';
 
 // ============================================================================
 // Palette Item Definition
@@ -15,91 +17,81 @@ export interface PaletteItem {
   type: AgentCoreComponentType;
   label: string;
   description: string;
-  icon: string;
   category: 'compute' | 'integration' | 'security' | 'tools' | 'connectors';
   toolId?: string;
+  customIcon?: string; // For tool-specific icons like 🦆, 📄, etc.
 }
 
 // ============================================================================
 // Component Definitions
 // ============================================================================
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const PALETTE_ITEMS: PaletteItem[] = [
   {
     type: 'runtime',
     label: 'AgentCore Runtime',
     description: 'Deploy and execute AI agents in serverless environments',
-    icon: '🤖',
     category: 'compute',
   },
   {
     type: 'gateway',
     label: 'AgentCore Gateway',
     description: 'Convert APIs and services into MCP-compatible tools',
-    icon: '🔌',
     category: 'integration',
   },
   {
     type: 'memory',
     label: 'AgentCore Memory',
     description: 'Persistent memory for agent conversations',
-    icon: '🧠',
     category: 'compute',
   },
   {
     type: 'code_interpreter',
     label: 'Code Interpreter',
     description: 'Secure code execution sandbox for agents',
-    icon: '💻',
     category: 'compute',
   },
   {
     type: 'browser',
     label: 'Browser Tool',
     description: 'Cloud-based browser for web interactions',
-    icon: '🌐',
     category: 'integration',
   },
   {
     type: 'observability',
     label: 'Observability',
     description: 'OpenTelemetry tracing and monitoring',
-    icon: '📊',
     category: 'integration',
   },
   {
     type: 'identity',
     label: 'AgentCore Identity',
     description: 'Manage agent credentials for external resources',
-    icon: '🔑',
     category: 'security',
   },
   {
     type: 'evaluation',
     label: 'AgentCore Evaluations',
     description: 'Quality assessment with built-in and custom evaluators',
-    icon: '✅',
     category: 'compute',
   },
   {
     type: 'policy',
     label: 'AgentCore Policy',
     description: 'Cedar-based fine-grained access control for tool invocations',
-    icon: '🛡️',
     category: 'security',
   },
   {
     type: 'guardrails',
     label: 'Bedrock Guardrails',
     description: 'Content filtering, PII detection, topic blocking, and prompt attack defense',
-    icon: '🚧',
     category: 'security',
   },
   {
     type: 'a2a',
     label: 'Agent-to-Agent (A2A)',
     description: 'Multi-agent orchestration and communication patterns',
-    icon: '🔄',
     category: 'integration',
   },
   // ── Tools ──────────────────────────────────────────────────────────────
@@ -107,7 +99,7 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     type: 'tool',
     label: 'DuckDuckGo Search',
     description: 'Web search via DuckDuckGo API - returns top results',
-    icon: '🦆',
+    customIcon: '🦆',
     category: 'tools',
     toolId: 'duckduckgo_search',
   },
@@ -115,7 +107,7 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     type: 'tool',
     label: 'Web Page Fetcher',
     description: 'Fetch and extract content from web pages by URL',
-    icon: '📄',
+    customIcon: '📄',
     category: 'tools',
     toolId: 'web_page_fetcher',
   },
@@ -123,7 +115,7 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     type: 'tool',
     label: 'Wikipedia Search',
     description: 'Search and retrieve Wikipedia article summaries',
-    icon: '📚',
+    customIcon: '📚',
     category: 'tools',
     toolId: 'wikipedia_search',
   },
@@ -131,7 +123,7 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     type: 'tool',
     label: 'Weather API',
     description: 'Get current weather data for any location',
-    icon: '🌤️',
+    customIcon: '🌤️',
     category: 'tools',
     toolId: 'weather_api',
   },
@@ -140,7 +132,7 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     type: 'tool',
     label: 'Get Order',
     description: 'Look up order details by order ID - items, status, dates, total',
-    icon: '📦',
+    customIcon: '📦',
     category: 'tools',
     toolId: 'get_order',
   },
@@ -148,7 +140,7 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     type: 'tool',
     label: 'Get Customer',
     description: 'Look up customer info and order summary by customer ID',
-    icon: '👤',
+    customIcon: '👤',
     category: 'tools',
     toolId: 'get_customer',
   },
@@ -156,7 +148,7 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     type: 'tool',
     label: 'List Orders',
     description: 'List orders for a customer sorted by date',
-    icon: '📋',
+    customIcon: '📋',
     category: 'tools',
     toolId: 'list_orders',
   },
@@ -164,7 +156,7 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     type: 'tool',
     label: 'Process Refund',
     description: 'Process a refund for an order with amount validation',
-    icon: '💰',
+    customIcon: '💰',
     category: 'tools',
     toolId: 'process_refund',
   },
@@ -173,7 +165,7 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     type: 'tool',
     label: 'Knowledge Base',
     description: 'RAG-powered Q&A using Amazon Bedrock Knowledge Bases',
-    icon: '📖',
+    customIcon: '📖',
     category: 'tools',
     toolId: 'knowledge_base',
   },
@@ -185,7 +177,7 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     type: 'tool',
     label: 'Jira',
     description: 'Atlassian Jira — create and search issues via the gateway',
-    icon: '🟦',
+    customIcon: '🟦',
     category: 'connectors',
     toolId: 'connector:jira',
   },
@@ -193,7 +185,7 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     type: 'tool',
     label: 'Asana',
     description: 'Asana tasks and projects (API key only)',
-    icon: '🅰️',
+    customIcon: '🅰️',
     category: 'connectors',
     toolId: 'connector:asana',
   },
@@ -201,7 +193,7 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     type: 'tool',
     label: 'Slack',
     description: 'Post messages and read channels via Slack',
-    icon: '💬',
+    customIcon: '💬',
     category: 'connectors',
     toolId: 'connector:slack',
   },
@@ -209,7 +201,7 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     type: 'tool',
     label: 'GitHub',
     description: 'Issues, pull requests, and repos via GitHub',
-    icon: '🐙',
+    customIcon: '🐙',
     category: 'connectors',
     toolId: 'connector:github',
   },
@@ -217,7 +209,7 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     type: 'tool',
     label: 'Salesforce',
     description: 'Leads, accounts, and SOQL via Salesforce',
-    icon: '☁️',
+    customIcon: '☁️',
     category: 'connectors',
     toolId: 'connector:salesforce',
   },
@@ -225,7 +217,7 @@ export const PALETTE_ITEMS: PaletteItem[] = [
     type: 'tool',
     label: 'OpenAPI / MCP Connector',
     description: 'Bring any OpenAPI spec or MCP server as a gateway target',
-    icon: '🧩',
+    customIcon: '🧩',
     category: 'connectors',
     toolId: 'connector:generic_openapi',
   },
@@ -283,21 +275,55 @@ function PaletteItemComponent({ item, onDragStart, onDragEnd }: PaletteItemCompo
     [item.type, item.toolId, onDragStart]
   );
 
+  const accent = accentFor(item.type);
+
+  // Use custom emoji icon for tools/connectors, or component icon for core types
+  const iconDisplay = item.customIcon ? (
+    <span className="text-base">{item.customIcon}</span>
+  ) : (
+    <div style={{ color: accent }}>
+      {COMPONENT_ICONS[item.type]}
+    </div>
+  );
+
+  // NOTE: this element uses the NATIVE HTML5 drag API (dataTransfer) to drop
+  // nodes on the canvas. framer-motion's <m.div> overrides onDragStart/onDragEnd
+  // with its OWN pointer-gesture system (incompatible signature), so the
+  // draggable root MUST stay a plain <div>. Hover-lift is done via CSS transform
+  // (the -translate-y on hover) to avoid the gesture collision entirely.
   return (
     <div
       draggable
       onDragStart={handleDragStart}
       onDragEnd={onDragEnd}
-      className="flex items-start gap-2.5 p-2.5 rounded-lg border border-[#e9ebed] bg-white hover:bg-[#f2f3f3] hover:border-[#0972d3]/30 cursor-grab active:cursor-grabbing transition-all group"
+      className="no-darkmap flex items-start gap-2.5 p-2.5 rounded-lg cursor-grab active:cursor-grabbing transition-all duration-150 group hover:-translate-y-0.5 active:translate-y-0"
+      style={{
+        background: 'var(--color-surface)',
+        border: '1px solid var(--color-border)',
+        transitionTimingFunction: 'var(--ease-out-quint)',
+        // @ts-expect-error CSS custom prop for hover glow
+        '--pi-accent': accent,
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.borderColor = `color-mix(in srgb, ${accent} 55%, transparent)`;
+        e.currentTarget.style.boxShadow = `0 0 18px -6px ${accent}, var(--elevation-2)`;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.borderColor = 'var(--color-border)';
+        e.currentTarget.style.boxShadow = 'none';
+      }}
       data-testid={`palette-item-${item.type}`}
       data-component-type={item.type}
     >
-      <div className="w-8 h-8 rounded-md bg-[#f2f3f3] group-hover:bg-[#0972d3]/10 flex items-center justify-center flex-shrink-0 transition-colors">
-        <span className="text-base">{item.icon}</span>
+      <div
+        className="no-darkmap w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0 transition-colors"
+        style={{ background: `color-mix(in srgb, ${accent} 14%, transparent)`, boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${accent} 30%, transparent)` }}
+      >
+        {iconDisplay}
       </div>
       <div className="flex-1 min-w-0">
-        <div className="font-medium text-[#16191f] text-[13px] group-hover:text-[#0972d3] transition-colors">{item.label}</div>
-        <div className="text-[11px] text-[#8d99a8] mt-0.5 line-clamp-2 leading-relaxed">{item.description}</div>
+        <div className="no-darkmap font-medium text-[13px] transition-colors" style={{ color: 'var(--color-text-primary)' }}>{item.label}</div>
+        <div className="no-darkmap text-[11px] mt-0.5 line-clamp-2 leading-relaxed" style={{ color: 'var(--color-text-tertiary)' }}>{item.description}</div>
       </div>
     </div>
   );
@@ -381,25 +407,35 @@ export function ComponentPalette({
           </svg>
         </button>
         <div className="space-y-1.5">
-          {PALETTE_ITEMS.map((item) => (
-            <div
-              key={item.toolId || item.type}
-              draggable
-              onDragStart={(e) => {
-                e.dataTransfer.setData('application/agentcore-component', item.type);
-                if (item.toolId) {
-                  e.dataTransfer.setData('application/agentcore-tool-id', item.toolId);
-                }
-                e.dataTransfer.effectAllowed = 'copy';
-                onDragStart?.(item.type, e);
-              }}
-              onDragEnd={onDragEnd}
-              className="w-9 h-9 rounded-md bg-[#f2f3f3] hover:bg-[#0972d3]/10 flex items-center justify-center cursor-grab active:cursor-grabbing transition-colors"
-              title={item.label}
-            >
-              <span className="text-base">{item.icon}</span>
-            </div>
-          ))}
+          {PALETTE_ITEMS.map((item) => {
+            const collapsedIcon = item.customIcon ? (
+              <span className="text-base">{item.customIcon}</span>
+            ) : (
+              <div className="text-[#0972d3]">
+                {COMPONENT_ICONS[item.type]}
+              </div>
+            );
+
+            return (
+              <div
+                key={item.toolId || item.type}
+                draggable
+                onDragStart={(e) => {
+                  e.dataTransfer.setData('application/agentcore-component', item.type);
+                  if (item.toolId) {
+                    e.dataTransfer.setData('application/agentcore-tool-id', item.toolId);
+                  }
+                  e.dataTransfer.effectAllowed = 'copy';
+                  onDragStart?.(item.type, e);
+                }}
+                onDragEnd={onDragEnd}
+                className="w-9 h-9 rounded-md bg-[#f2f3f3] hover:bg-[#0972d3]/10 flex items-center justify-center cursor-grab active:cursor-grabbing transition-colors"
+                title={item.label}
+              >
+                {collapsedIcon}
+              </div>
+            );
+          })}
         </div>
       </div>
     );

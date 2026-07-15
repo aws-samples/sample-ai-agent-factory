@@ -1,34 +1,170 @@
 @import "tailwindcss";
 
-/* MotionSites Design Language — Barlow (light/medium body) + Instrument Serif (italic accents) */
+/* ═══════════════════════════════════════════════════════════════════════════
+   DARK NEON DESIGN LANGUAGE (motionsites-inspired)
+   Barlow body + Instrument Serif italic accents, on a deep space-black canvas
+   with neon cyan/violet/magenta accents and glow-based elevation.
+   ═══════════════════════════════════════════════════════════════════════════ */
 
 @theme {
   /* Typography */
   --font-body: 'Barlow', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-accent: 'Instrument Serif', Georgia, serif;
 
-  /* MotionSites color tokens */
+  /* Motion color tokens (kept; now dark-mode aware) */
   --color-motion-white: #ffffff;
   --color-motion-white-75: rgba(255, 255, 255, 0.75);
   --color-motion-white-90: rgba(255, 255, 255, 0.9);
   --color-motion-off-white: #f8f8f8;
-  --color-motion-dark: #171717;
-  --color-motion-surface-glass: rgba(255, 255, 255, 0.1);
+  --color-motion-dark: #05070d;
+  --color-motion-surface-glass: rgba(255, 255, 255, 0.06);
 }
 
 :root {
   font-family: var(--font-body);
   line-height: 1.5;
-  font-weight: 300;
-  color-scheme: light;
-  color: #16191f;
-  background-color: #f2f3f3;
+  font-weight: 400;
+  color-scheme: dark;
+  color: #e8ecf4;
+  background-color: #06080f;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 
-  /* AWS-inspired design tokens — refined for Linear/Vercel-grade polish */
+  /* ── Neon accent ramp ────────────────────────────────────────────────── */
+  --neon-cyan: #22d3ee;
+  --neon-blue: #38bdf8;
+  --neon-violet: #a78bfa;
+  --neon-magenta: #f472d0;
+  --neon-lime: #a3e635;
+  --neon-amber: #fbbf24;
+  --neon-red: #fb7185;
+  /* Primary accent used for focus/active/CTA glow */
+  --accent: var(--neon-cyan);
+  --accent-2: var(--neon-violet);
+
+  /* AWS brand (kept for continuity, brightened for dark) */
+  --color-aws-squid-ink: #0b1220;
+  --color-aws-anchor: #05070d;
+  --color-aws-smile: #ff9f2e;
+  --color-aws-smile-hover: #ffb454;
+  --color-aws-blue: #38bdf8;
+  --color-aws-blue-hover: #7dd3fc;
+
+  /* ── Semantic surfaces — deep, layered space blacks ──────────────────── */
+  --color-bg: #06080f;            /* app background (deepest) */
+  --color-bg-subtle: #0a0e1a;     /* subtle raised bg */
+  --color-surface: #0e1424;       /* cards / panels */
+  --color-surface-hover: #131b2e; /* hovered card */
+  --color-surface-elevated: #141c30; /* modals / popovers */
+  --color-surface-glass: rgba(18, 26, 46, 0.6);
+  --canvas-bg: #06080f;                              /* graph canvas */
+  --canvas-dot: rgba(148, 172, 255, 0.16);           /* grid dots */
+  --node-card-bg: linear-gradient(180deg, #101a30, #0b1220); /* node card fill */
+  --header-bg: linear-gradient(180deg, rgba(14,20,36,0.92), rgba(6,8,15,0.92));
+  --header-fg: #eef2fb;                              /* header text */
+  --header-fg-dim: rgba(238,242,251,0.6);            /* header dim text */
+  --header-hairline: rgba(56,189,248,0.15);          /* header bottom glow line */
+
+  /* ── Borders — luminous hairlines ────────────────────────────────────── */
+  --color-border: rgba(148, 172, 255, 0.12);
+  --color-border-hover: rgba(148, 172, 255, 0.24);
+  --color-border-active: var(--accent);
+  --color-border-subtle: rgba(255, 255, 255, 0.06);
+
+  /* ── Text hierarchy — bright on dark ─────────────────────────────────── */
+  --color-text-primary: #eef2fb;
+  --color-text-secondary: #a3adc8;
+  --color-text-tertiary: #6b7797;
+  --color-text-placeholder: #56607d;
+
+  /* ── Elevation via GLOW, not drop-shadow ─────────────────────────────── */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(148, 172, 255, 0.04);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(148, 172, 255, 0.06);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(148, 172, 255, 0.08);
+
+  /* Easing curves */
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* Radius tokens — unified system */
+  --radius-motion: 2px;   /* primary CTAs, inputs, rectangular badges */
+  --radius-control: 6px;  /* secondary buttons, chips */
+  --radius-surface: 8px;  /* nodes, panels, modals */
+
+  /* Modal sizing tokens */
+  --modal-width: 540px;
+  --modal-content-height: 360px;
+
+  /* ── Elevation via GLOW (dark neon) ──────────────────────────────────── */
+  --elevation-0: none;
+  --elevation-1: 0 1px 2px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(148, 172, 255, 0.05);
+  --elevation-2: 0 4px 14px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(148, 172, 255, 0.07);
+  --elevation-3: 0 10px 30px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(148, 172, 255, 0.09);
+  --elevation-4: 0 20px 60px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(148, 172, 255, 0.12);
+  /* Neon focus ring recipe (color-tunable per component via --ring-color) */
+  --ring-color: var(--accent);
+  --ring: 0 0 0 1px color-mix(in srgb, var(--ring-color) 60%, transparent), 0 0 16px color-mix(in srgb, var(--ring-color) 45%, transparent);
+  --ring-strong: 0 0 0 1px var(--ring-color), 0 0 24px color-mix(in srgb, var(--ring-color) 65%, transparent);
+
+  /* ── Glass surface recipe (dark) ─────────────────────────────────────── */
+  --glass-bg: rgba(14, 20, 36, 0.62);
+  --glass-border: rgba(148, 172, 255, 0.16);
+  --glass-blur: 16px;
+  --glass-dark-bg: rgba(6, 8, 15, 0.55);
+  --glass-dark-border: rgba(148, 172, 255, 0.12);
+
+  /* ── Motion scales (mirrors framer-motion springs in ts) ─────────────── */
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 320ms;
+  --dur-slower: 520ms;
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  /* --ease-out-quint / --ease-spring already defined above */
+
+  /* ── Canonical node accent palette — NEON (single source of truth) ────
+     Bright, saturated hues that glow on the dark canvas. Both the node cards
+     and the minimap read from here. */
+  --node-runtime: #38bdf8;          /* sky */
+  --node-memory: #22d3ee;           /* cyan */
+  --node-gateway: #34d399;          /* emerald */
+  --node-evaluation: #a3e635;       /* lime */
+  --node-code_interpreter: #fb923c; /* orange */
+  --node-tool: #fbbf24;             /* amber */
+  --node-browser: #818cf8;          /* indigo */
+  --node-observability: #f472d0;    /* magenta */
+  --node-identity: #a78bfa;         /* violet */
+  --node-policy: #fb7185;           /* rose */
+  --node-guardrails: #f43f5e;       /* red */
+  --node-a2a: #2dd4bf;              /* teal */
+  --node-default: #94a3b8;          /* slate */
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   LIGHT THEME OVERRIDE
+   Activated by <html data-theme="light">. Restores the Linear/Vercel-grade light
+   surfaces while KEEPING the neon accent ramp (toned for light) so node/edge
+   colors stay vivid. Dark is the default (:root above); this only overrides the
+   semantic tokens. The dark-only body glow + compat layer are scoped to
+   [data-theme="dark"] / :not([data-theme="light"]) further below.
+   ═══════════════════════════════════════════════════════════════════════════ */
+:root[data-theme="light"] {
+  color-scheme: light;
+  color: #16191f;
+  background-color: #f2f3f3;
+
+  /* Accents — slightly deeper so they read on white */
+  --neon-cyan: #0891b2;
+  --neon-blue: #0972d3;
+  --neon-violet: #7c3aed;
+  --neon-magenta: #db2777;
+  --neon-lime: #4d7c0f;
+  --neon-amber: #b45309;
+  --neon-red: #dc2626;
+  --accent: #0972d3;
+  --accent-2: #7c3aed;
+
   --color-aws-squid-ink: #232f3e;
   --color-aws-anchor: #16191f;
   --color-aws-smile: #ff9900;
@@ -36,40 +172,63 @@
   --color-aws-blue: #0972d3;
   --color-aws-blue-hover: #0061b9;
 
-  /* Semantic surface tokens */
+  --color-bg: #f7f8f9;
+  --color-bg-subtle: #f2f3f5;
   --color-surface: #ffffff;
   --color-surface-hover: #fafbfc;
   --color-surface-elevated: #ffffff;
-  --color-bg: #f7f8f9;
-  --color-bg-subtle: #f2f3f5;
+  --color-surface-glass: rgba(255, 255, 255, 0.7);
+  --canvas-bg: #f7f8f9;
+  --canvas-dot: #dfe3e8;
+  --node-card-bg: #ffffff;
+  --header-bg: #232f3e;              /* AWS squid-ink header (light theme) */
+  --header-fg: #ffffff;
+  --header-fg-dim: rgba(255,255,255,0.6);
+  --header-hairline: rgba(0,0,0,0.1);
 
-  /* Border tokens — hairline first */
   --color-border: #e9ebed;
   --color-border-hover: #d1d5db;
   --color-border-active: #0972d3;
   --color-border-subtle: rgba(0, 0, 0, 0.06);
 
-  /* Text hierarchy */
   --color-text-primary: #16191f;
   --color-text-secondary: #5f6b7a;
   --color-text-tertiary: #8d99a8;
   --color-text-placeholder: #9ca3af;
 
-  /* Shadows — micro-layered, not blurry Material shadows */
-  --shadow-sm: 0 1px 0 rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.06);
-  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 8px rgba(0, 0, 0, 0.08);
-  --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.04), 0 8px 16px rgba(0, 0, 0, 0.1);
+  /* Elevation — real (soft grey) shadows for light */
+  --elevation-1: 0 1px 2px rgba(16, 25, 31, 0.05), 0 1px 1px rgba(16, 25, 31, 0.04);
+  --elevation-2: 0 2px 4px rgba(16, 25, 31, 0.06), 0 4px 10px rgba(16, 25, 31, 0.08);
+  --elevation-3: 0 4px 8px rgba(16, 25, 31, 0.06), 0 12px 28px rgba(16, 25, 31, 0.12);
+  --elevation-4: 0 8px 16px rgba(16, 25, 31, 0.08), 0 24px 56px rgba(16, 25, 31, 0.16);
+  --shadow-sm: 0 1px 0 rgba(0,0,0,0.04), 0 1px 3px rgba(0,0,0,0.06);
+  --shadow-md: 0 1px 2px rgba(0,0,0,0.04), 0 4px 8px rgba(0,0,0,0.08);
+  --shadow-lg: 0 2px 4px rgba(0,0,0,0.04), 0 8px 16px rgba(0,0,0,0.1);
 
-  /* Easing curves */
-  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  /* Softer focus ring for light (no heavy glow) */
+  --ring: 0 0 0 3px color-mix(in srgb, var(--ring-color) 22%, transparent);
+  --ring-strong: 0 0 0 3px color-mix(in srgb, var(--ring-color) 40%, transparent);
 
-  /* MotionSites button radius */
-  --radius-motion: 2px;
+  /* Glass — frosted white */
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.55);
+  --glass-dark-bg: rgba(255, 255, 255, 0.6);
+  --glass-dark-border: rgba(0, 0, 0, 0.08);
 
-  /* Modal sizing tokens */
-  --modal-width: 540px;
-  --modal-content-height: 360px;
+  /* Node accents — the deeper AWS-service hues for light contrast */
+  --node-runtime: #0972d3;
+  --node-memory: #0972d3;
+  --node-gateway: #037f0c;
+  --node-evaluation: #037f0c;
+  --node-code_interpreter: #d45b07;
+  --node-tool: #d45b07;
+  --node-browser: #5b48d3;
+  --node-observability: #c41367;
+  --node-identity: #7d2bd0;
+  --node-policy: #d91515;
+  --node-guardrails: #d91515;
+  --node-a2a: #067a6e;
+  --node-default: #5f6b7a;
 }
 
 body {
@@ -79,50 +238,209 @@ body {
   background-color: var(--color-bg);
 }
 
-/* Remove default focus outline and add a consistent one */
-*:focus-visible {
-  outline: 2px solid var(--color-aws-blue);
-  outline-offset: 2px;
+/* Ambient aurora glow behind the whole app — DARK theme only. */
+:root:not([data-theme="light"]) body {
+  background-image:
+    radial-gradient(60% 50% at 18% 0%, rgba(56, 189, 248, 0.10), transparent 60%),
+    radial-gradient(50% 50% at 100% 10%, rgba(167, 139, 250, 0.10), transparent 55%),
+    radial-gradient(70% 60% at 50% 100%, rgba(34, 211, 238, 0.06), transparent 65%);
+  background-attachment: fixed;
 }
 
-/* Scrollbar refinement */
+/* Neon focus ring */
+*:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  border-radius: var(--radius-control);
+}
+
+/* Scrollbar refinement (dark) */
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #d1d5db;
-  border-radius: 3px;
+  background: rgba(148, 172, 255, 0.18);
+  border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #9ca3af;
+  background: rgba(148, 172, 255, 0.34);
+}
+:root[data-theme="light"] ::-webkit-scrollbar-thumb { background: #d1d5db; }
+:root[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DARK-MODE COMPATIBILITY LAYER
+   Many components hard-code light Tailwind utilities (bg-white, bg-gray-50,
+   text-[#16191f], border-[#e9ebed], the #232f3e header, etc.). Rather than
+   hand-edit 29 files, remap those literal utilities to dark-neon surfaces here.
+   Hero surfaces (nodes, canvas, hero) are styled explicitly and opt OUT via
+   the .no-darkmap escape hatch where needed.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* All utility remaps below apply ONLY in dark mode. Light mode uses the raw
+   Tailwind utilities (which are correct on a light background) untouched. */
+:root:not([data-theme="light"]) {
+  /* Surfaces */
+  .bg-white:not(.no-darkmap) { background-color: var(--color-surface) !important; }
+  .bg-\[\#fafafa\]:not(.no-darkmap),
+  .bg-\[\#fafbfc\]:not(.no-darkmap),
+  .bg-\[\#f8f8f8\]:not(.no-darkmap),
+  .bg-\[\#f7f8f9\]:not(.no-darkmap),
+  .bg-\[\#f2f3f3\]:not(.no-darkmap),
+  .bg-\[\#f2f3f5\]:not(.no-darkmap),
+  .bg-gray-50:not(.no-darkmap),
+  .bg-gray-100:not(.no-darkmap),
+  .bg-slate-50:not(.no-darkmap),
+  .bg-slate-100:not(.no-darkmap) { background-color: var(--color-bg-subtle) !important; }
+  .bg-\[\#f2f8fd\]:not(.no-darkmap) { background-color: rgba(56, 189, 248, 0.08) !important; }
+
+  /* Light ACCENT tints used for selected/highlighted states (radio cards,
+     info callouts, badges). These weren't remapped before, so a selected card
+     kept a light bg while its text turned bright → invisible text. Map the
+     "-50/-100" tints to dark translucent tints in their own hue. */
+  .bg-blue-50:not(.no-darkmap),
+  .bg-blue-100:not(.no-darkmap) { background-color: color-mix(in srgb, var(--neon-blue) 14%, transparent) !important; }
+  .bg-sky-50:not(.no-darkmap),
+  .bg-cyan-50:not(.no-darkmap) { background-color: color-mix(in srgb, var(--neon-cyan) 14%, transparent) !important; }
+  .bg-indigo-50:not(.no-darkmap),
+  .bg-indigo-100:not(.no-darkmap),
+  .bg-violet-50:not(.no-darkmap),
+  .bg-purple-50:not(.no-darkmap) { background-color: color-mix(in srgb, var(--neon-violet) 14%, transparent) !important; }
+  .bg-green-50:not(.no-darkmap),
+  .bg-green-100:not(.no-darkmap),
+  .bg-emerald-50:not(.no-darkmap),
+  .bg-emerald-100:not(.no-darkmap) { background-color: color-mix(in srgb, var(--neon-lime) 12%, transparent) !important; }
+  .bg-red-50:not(.no-darkmap),
+  .bg-red-100:not(.no-darkmap),
+  .bg-rose-50:not(.no-darkmap) { background-color: color-mix(in srgb, var(--neon-red) 14%, transparent) !important; }
+  .bg-amber-50:not(.no-darkmap),
+  .bg-amber-100:not(.no-darkmap),
+  .bg-yellow-50:not(.no-darkmap),
+  .bg-orange-50:not(.no-darkmap) { background-color: color-mix(in srgb, var(--neon-amber) 14%, transparent) !important; }
+
+  /* Dark-tinted badge backgrounds (e.g. yellow-100/blue-100 "API Key" chips)
+     with their saturated text kept readable. */
+  .bg-yellow-100:not(.no-darkmap) { background-color: color-mix(in srgb, var(--neon-amber) 20%, transparent) !important; }
+  .text-yellow-800:not(.no-darkmap) { color: var(--neon-amber) !important; }
+  .text-blue-900:not(.no-darkmap),
+  .text-blue-800:not(.no-darkmap),
+  .text-blue-700:not(.no-darkmap) { color: var(--neon-blue) !important; }
+  .text-blue-600:not(.no-darkmap) { color: var(--neon-blue) !important; }
+  .text-green-800:not(.no-darkmap),
+  .text-green-700:not(.no-darkmap),
+  .text-green-600:not(.no-darkmap),
+  .text-emerald-900:not(.no-darkmap),
+  .text-emerald-700:not(.no-darkmap) { color: var(--neon-lime) !important; }
+  .text-red-800:not(.no-darkmap),
+  .text-red-700:not(.no-darkmap),
+  .text-red-600:not(.no-darkmap) { color: var(--neon-red) !important; }
+  .text-amber-700:not(.no-darkmap),
+  .text-amber-600:not(.no-darkmap),
+  .text-yellow-700:not(.no-darkmap),
+  .text-yellow-600:not(.no-darkmap) { color: var(--neon-amber) !important; }
+  .text-indigo-700:not(.no-darkmap),
+  .text-purple-800:not(.no-darkmap),
+  .text-purple-700:not(.no-darkmap),
+  .text-purple-600:not(.no-darkmap) { color: var(--neon-violet) !important; }
+
+  /* Selected/active accent BORDERS become neon so the highlight still reads. */
+  .border-blue-500:not(.no-darkmap),
+  .border-blue-400:not(.no-darkmap),
+  .border-blue-200:not(.no-darkmap) { border-color: color-mix(in srgb, var(--neon-blue) 60%, transparent) !important; }
+
+  /* The dark AWS header stays dark, but align it to the new palette */
+  .bg-\[\#232f3e\]:not(.no-darkmap) { background-color: #0a0f1c !important; }
+
+  /* Text — dark literals become bright */
+  .text-\[\#16191f\]:not(.no-darkmap),
+  .text-\[\#171717\]:not(.no-darkmap) { color: var(--color-text-primary) !important; }
+  .text-\[\#5f6b7a\]:not(.no-darkmap) { color: var(--color-text-secondary) !important; }
+  .text-\[\#8d99a8\]:not(.no-darkmap) { color: var(--color-text-tertiary) !important; }
+  .text-gray-900:not(.no-darkmap),
+  .text-gray-800:not(.no-darkmap),
+  .text-gray-700:not(.no-darkmap) { color: var(--color-text-primary) !important; }
+  .text-gray-600:not(.no-darkmap),
+  .text-gray-500:not(.no-darkmap) { color: var(--color-text-secondary) !important; }
+  .text-gray-400:not(.no-darkmap) { color: var(--color-text-tertiary) !important; }
+  /* Semantic text tokens used inline should stay bright regardless */
+
+  /* Borders */
+  .border-\[\#e9ebed\]:not(.no-darkmap),
+  .border-gray-200:not(.no-darkmap),
+  .border-gray-100:not(.no-darkmap),
+  .border-gray-300:not(.no-darkmap) { border-color: var(--color-border) !important; }
+
+  /* Hover states on light greys */
+  .hover\:bg-gray-100:hover:not(.no-darkmap),
+  .hover\:bg-gray-50:hover:not(.no-darkmap),
+  .hover\:bg-\[\#f2f3f3\]:hover:not(.no-darkmap) { background-color: var(--color-surface-hover) !important; }
+
+  /* Inputs/selects/textareas — dark fields with readable text.
+     color is !important so a stray text-gray-900 on the field can't hide it. */
+  input:not([type="checkbox"]):not([type="radio"]):not(.no-darkmap),
+  select:not(.no-darkmap),
+  textarea:not(.no-darkmap) {
+    background-color: rgba(6, 8, 15, 0.6) !important;
+    color: var(--color-text-primary) !important;
+    border-color: var(--color-border) !important;
+  }
+  /* <option> renders in the OS popup — force dark bg + light text so it's legible */
+  select:not(.no-darkmap) option {
+    background-color: #0e1424 !important;
+    color: var(--color-text-primary) !important;
+  }
+  input::placeholder, textarea::placeholder { color: var(--color-text-placeholder); }
 }
 
-/* React Flow overrides for premium feel */
-.react-flow__controls {
-  border-radius: 8px !important;
-  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.08), 0 1px 2px -1px rgb(0 0 0 / 0.08) !important;
-  border: 1px solid var(--color-border) !important;
-  overflow: hidden !important;
+/* React Flow overrides — dark canvas surfaces + neon glow (dark only) */
+:root:not([data-theme="light"]) {
+  .react-flow__controls {
+    border-radius: 8px !important;
+    box-shadow: var(--elevation-2) !important;
+    border: 1px solid var(--color-border) !important;
+    overflow: hidden !important;
+    background: var(--color-surface) !important;
+  }
+  .react-flow__controls-button {
+    border-bottom: 1px solid var(--color-border) !important;
+    width: 28px !important;
+    height: 28px !important;
+    background: var(--color-surface) !important;
+    color: var(--color-text-secondary) !important;
+    fill: var(--color-text-secondary) !important;
+  }
+  .react-flow__controls-button:hover {
+    background: var(--color-surface-hover) !important;
+    color: var(--accent) !important;
+    fill: var(--accent) !important;
+  }
+  .react-flow__controls-button svg { fill: currentColor !important; }
+  .react-flow__minimap {
+    border-radius: 8px !important;
+    box-shadow: var(--elevation-2) !important;
+    border: 1px solid var(--color-border) !important;
+    background: var(--color-surface) !important;
+  }
+  .react-flow__attribution { background: rgba(6, 8, 15, 0.5) !important; }
+  .react-flow__attribution a { color: var(--color-text-tertiary) !important; }
 }
 
-.react-flow__controls-button {
-  border-bottom: 1px solid var(--color-border) !important;
-  width: 28px !important;
-  height: 28px !important;
+/* Light mode: keep React Flow controls neutral-light */
+:root[data-theme="light"] {
+  .react-flow__controls,
+  .react-flow__controls-button,
+  .react-flow__minimap { background: #ffffff !important; border-color: var(--color-border) !important; box-shadow: var(--elevation-1) !important; }
+  .react-flow__controls-button { color: var(--color-text-secondary) !important; fill: var(--color-text-secondary) !important; }
 }
 
-.react-flow__controls-button:hover {
-  background: #f2f3f3 !important;
-}
-
-.react-flow__minimap {
-  border-radius: 8px !important;
-  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.08) !important;
-  border: 1px solid var(--color-border) !important;
-}
+/* Themed canvas dot-grid color (Background color prop is "transparent"). */
+.react-flow__background .react-flow__background-pattern circle,
+.react-flow__background pattern circle { fill: var(--canvas-dot) !important; }
+.react-flow__background path { stroke: var(--canvas-dot) !important; }
 
 /* Execution state: running node pulse animation */
 .execution-running {
@@ -131,9 +449,116 @@ body {
 
 @keyframes execution-pulse {
   0%, 100% {
-    box-shadow: 0 0 0 0 rgba(9, 114, 211, 0.4);
+    box-shadow: 0 0 0 0 rgba(34, 211, 238, 0.55), 0 0 18px rgba(34, 211, 238, 0.5);
   }
   50% {
-    box-shadow: 0 0 0 6px rgba(9, 114, 211, 0);
+    box-shadow: 0 0 0 7px rgba(34, 211, 238, 0), 0 0 26px rgba(34, 211, 238, 0.2);
+  }
+}
+
+/* ── Redesign utilities ─────────────────────────────────────────────────
+   Reusable recipes so components stay declarative. Prefer these over
+   re-deriving glass/elevation inline. */
+
+/* Frosted-glass surface (dark neon). Pair with a hairline border. */
+.u-glass {
+  background: var(--glass-bg);
+  backdrop-filter: saturate(160%) blur(var(--glass-blur));
+  -webkit-backdrop-filter: saturate(160%) blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+}
+.u-glass-dark {
+  background: var(--glass-dark-bg);
+  backdrop-filter: saturate(150%) blur(var(--glass-blur));
+  -webkit-backdrop-filter: saturate(150%) blur(var(--glass-blur));
+  border: 1px solid var(--glass-dark-border);
+}
+
+/* Elevation helpers */
+.u-elevation-1 { box-shadow: var(--elevation-1); }
+.u-elevation-2 { box-shadow: var(--elevation-2); }
+.u-elevation-3 { box-shadow: var(--elevation-3); }
+.u-elevation-4 { box-shadow: var(--elevation-4); }
+
+/* Neon text — gradient-clipped headline accent. */
+.u-neon-text {
+  background: linear-gradient(90deg, var(--neon-cyan), var(--neon-violet));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Canvas depth: a soft radial neon vignette layer behind the graph. */
+.u-canvas-vignette::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(120% 80% at 50% 0%, rgba(34, 211, 238, 0.06), transparent 60%),
+    radial-gradient(100% 100% at 50% 100%, rgba(167, 139, 250, 0.05), transparent 70%);
+  z-index: 0;
+}
+
+/* Subtle sheen sweep for premium empty-state / hero CTAs. */
+@keyframes u-sheen {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(120%); }
+}
+
+/* Traveling dash for selected/active edges (direction of flow). */
+@keyframes edge-flow {
+  to { stroke-dashoffset: -11; }
+}
+
+/* ── Ambient motion (the motionsites "drift / pulse / breathe" signature) ──
+   Slow, continuous, looping — the opposite of snappy UI springs. Used on
+   selected surfaces, the deploy CTA, and accent bars. */
+
+/* Breathing neon glow — for the selected node/edge halo. */
+@keyframes u-breathe {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+.u-breathe { animation: u-breathe 3.2s ease-in-out infinite; }
+
+/* Slow gradient drift — for gradient-filled CTAs / neon text. */
+@keyframes u-gradient-drift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+.u-gradient-anim {
+  background-size: 200% 200%;
+  animation: u-gradient-drift 8s ease infinite;
+}
+
+/* Shimmer sweep across an accent bar. */
+@keyframes u-shimmer {
+  0% { transform: translateX(-100%); }
+  60%, 100% { transform: translateX(220%); }
+}
+
+/* Gentle float — for hero orbs / accent squares. */
+@keyframes u-float {
+  0%, 100% { transform: translate(0, 0); }
+  50% { transform: translate(0, -8px); }
+}
+
+/* ── Reduced-motion: honor the OS setting everywhere ─────────────────────
+   framer-motion respects this via useReducedMotion() in the TS layer; this
+   is the CSS backstop for keyframe/transition-based motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .execution-running {
+    animation: none !important;
+    box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.6), 0 0 14px rgba(34, 211, 238, 0.5) !important;
   }
 }
