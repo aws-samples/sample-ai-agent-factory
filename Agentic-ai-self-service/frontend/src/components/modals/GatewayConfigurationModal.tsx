@@ -6,12 +6,14 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { ConfigurationModal, type ValidationError } from './ConfigurationModal';
 import { TextField, TextArea, SelectField, CheckboxField, FormSection } from './FormFields';
+import { listMcpServersApi, type McpServerSummary } from '../../services/api';
 import type {
   GatewayConfiguration,
   GatewayTargetType,
   OpenAPITargetConfig,
   LambdaTargetConfig,
   SmithyTargetConfig,
+  MCPServerTargetConfig,
 } from '../../types/components';
 import {
   TARGET_TYPE_OPTIONS,
@@ -46,15 +48,26 @@ export function GatewayConfigurationModal({
     ...initialConfig,
   }));
 
-  // Reset config when modal opens with new initial config
+  // Reset config when modal opens with new initial config (adjust state during render pattern)
+  const [lastInitial, setLastInitial] = useState<typeof initialConfig | symbol>(Symbol('unset'));
+  if (isOpen && initialConfig !== lastInitial) {
+    setLastInitial(initialConfig);
+    setConfig({ ...createDefaultGatewayConfig(), ...initialConfig });
+  }
+
+  // External MCP catalog — loaded lazily when the MCP Server target is chosen.
+  // Only `direct-*` tiers are wireable as a Gateway target; `adapter-*` need a
+  // hosted proxy first, so they're filtered out of the picker.
+  const [mcpCatalog, setMcpCatalog] = useState<McpServerSummary[]>([]);
+  const [mcpCatalogError, setMcpCatalogError] = useState<string | null>(null);
   useEffect(() => {
-    if (isOpen) {
-      setConfig({
-        ...createDefaultGatewayConfig(),
-        ...initialConfig,
-      });
-    }
-  }, [isOpen, initialConfig]);
+    if (config.targetType !== 'mcp_server' || mcpCatalog.length > 0) return;
+    let cancelled = false;
+    listMcpServersApi()
+      .then((all) => { if (!cancelled) setMcpCatalog(all.filter((s) => s.tier.startsWith('direct'))); })
+      .catch((e) => { if (!cancelled) setMcpCatalogError(e instanceof Error ? e.message : String(e)); });
+    return () => { cancelled = true; };
+  }, [config.targetType, mcpCatalog.length]);
 
   // Validation
   const validationErrors = useMemo(() => {
@@ -116,12 +129,10 @@ export function GatewayConfigurationModal({
     onClose();
   }, [config, onSave, onClose]);
 
-  // Get field error
-  const getFieldError = (field: string) =>
-    validationErrors.find((e) => e.field === field)?.message;
-
   // Render target-specific fields
   const renderTargetFields = () => {
+    const getFieldError = (field: string) =>
+      validationErrors.find((e) => e.field === field)?.message;
     switch (config.targetType) {
       case 'openapi':
         return (
@@ -174,13 +185,100 @@ export function GatewayConfigurationModal({
           />
         );
 
+      case 'mcp_server': {
+        const mcpCfg = config.targetConfig as MCPServerTargetConfig;
+        const selected = mcpCatalog.find((s) => s.id === mcpCfg.serverId);
+        // Extract {placeholder} tokens from the selected catalog endpoint.
+        const placeholders = selected?.endpoint
+          ? Array.from(selected.endpoint.matchAll(/\{([a-zA-Z0-9_]+)\}/g)).map((m) => m[1])
+          : [];
+        return (
+          <>
+            {mcpCatalogError && (
+              <div className="text-xs text-red-600 mb-2">Failed to load MCP catalog: {mcpCatalogError}</div>
+            )}
+            <SelectField
+              id="serverId"
+              label="MCP Server"
+              value={mcpCfg.serverId || ''}
+              onChange={(value) => updateTargetConfig('serverId', value)}
+              options={[
+                { value: '', label: mcpCatalog.length ? 'Select a server…' : 'Loading catalog…' },
+                ...mcpCatalog.map((s) => ({
+                  value: s.id,
+                  label: `${s.display_name} — ${s.auth_type === 'none' ? 'no auth' : s.auth_type}${s.live_testable ? ' ✓' : ''}`,
+                })),
+              ]}
+              required
+              helpText="Verified external MCP servers wireable as a Gateway target (direct tiers only)."
+            />
+            {selected && (
+              <p className="text-[11px] text-gray-500 -mt-2">
+                Endpoint: <span className="font-mono">{selected.endpoint}</span> · tier {selected.tier}
+              </p>
+            )}
+            {/* Endpoint placeholders (e.g. a Shopify store domain). */}
+            {placeholders.map((token) => (
+              <TextField
+                key={token}
+                id={`ev_${token}`}
+                label={`Endpoint value: ${token}`}
+                value={(mcpCfg.endpointVars || {})[token] || ''}
+                onChange={(value) =>
+                  updateTargetConfig('endpointVars', { ...(mcpCfg.endpointVars || {}), [token]: value })
+                }
+                placeholder={token === 'store_domain' ? 'shop.myshopify.com' : token}
+                helpText={`Fills {${token}} in the endpoint`}
+              />
+            ))}
+            {/* Tier-2 API key */}
+            {selected?.auth_type === 'api_key' && (
+              <TextField
+                id="apiKey"
+                label="API Key"
+                type="password"
+                value={mcpCfg.apiKey || ''}
+                onChange={(value) => updateTargetConfig('apiKey', value)}
+                placeholder="Paste the provider API key"
+                helpText="Stored in Secrets Manager at deploy; never persisted in the canvas."
+              />
+            )}
+            {/* Tier-3 OAuth client-credentials */}
+            {selected?.auth_type === 'oauth2_client_credentials' && (
+              <>
+                <TextField
+                  id="oauthClientId" label="OAuth Client ID"
+                  value={mcpCfg.oauth?.clientId || ''}
+                  onChange={(value) => updateTargetConfig('oauth', { ...(mcpCfg.oauth || {}), clientId: value })}
+                />
+                <TextField
+                  id="oauthClientSecret" label="OAuth Client Secret" type="password"
+                  value={mcpCfg.oauth?.clientSecret || ''}
+                  onChange={(value) => updateTargetConfig('oauth', { ...(mcpCfg.oauth || {}), clientSecret: value })}
+                />
+                <TextField
+                  id="oauthDiscoveryUrl" label="OIDC Discovery URL"
+                  value={mcpCfg.oauth?.discoveryUrl || ''}
+                  onChange={(value) => updateTargetConfig('oauth', { ...(mcpCfg.oauth || {}), discoveryUrl: value })}
+                  placeholder="https://idp.example.com/.well-known/openid-configuration"
+                />
+              </>
+            )}
+          </>
+        );
+      }
+
       default:
         return null;
     }
   };
 
   // Build tabs
-  const tabs = useMemo(() => [
+  const tabs = useMemo(() => {
+    const getFieldError = (field: string) =>
+      validationErrors.find((e) => e.field === field)?.message;
+
+    return [
     {
       id: 'general',
       label: 'General',
@@ -246,7 +344,8 @@ export function GatewayConfigurationModal({
         </div>
       ),
     },
-  ], [config, validationErrors, updateConfig, handleTargetTypeChange, renderTargetFields, getFieldError]);
+    ];
+  }, [config, validationErrors, updateConfig, handleTargetTypeChange, renderTargetFields]);
 
   return (
     <ConfigurationModal

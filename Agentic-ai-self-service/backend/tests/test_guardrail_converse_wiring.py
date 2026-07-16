@@ -53,7 +53,7 @@ def _cfg() -> RuntimeConfig:
             "name": "cvgr00001",
             "model": {
                 "provider": "bedrock",
-                "modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                "modelId": "us.anthropic.claude-sonnet-5",
             },
             "systemPrompt": "You are a search agent.",
         }

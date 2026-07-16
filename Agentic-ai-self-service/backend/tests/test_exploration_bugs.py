@@ -30,7 +30,7 @@ def _make_runtime_config(**overrides) -> RuntimeConfig:
         "name": "test-agent",
         "framework": "strands_agents",
         "model": {
-            "modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "modelId": "us.anthropic.claude-sonnet-5",
             "provider": "bedrock",
         },
         "systemPrompt": "You are a helpful assistant.",
@@ -46,7 +46,7 @@ def _make_runtime_configuration(
     """Build a minimal RuntimeConfiguration for deployment.py tests."""
     return RuntimeConfiguration(
         name="test-agent",
-        model=ModelConfiguration(provider=provider, model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0"),
+        model=ModelConfiguration(provider=provider, model_id="us.anthropic.claude-sonnet-5"),
         system_prompt="You are a helpful assistant.",
         model_provider=provider,
     )
@@ -96,7 +96,7 @@ class TestCodeGeneratorSDKPattern:
     def test_langchain_web_search_uses_sdk(self):
         code = code_generator._generate_langchain_web_search(
             system_prompt="You are a web search assistant.",
-            model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            model_id="us.anthropic.claude-sonnet-5",
             region="us-west-2",
         )
         _assert_sdk_pattern_present(code, "langchain_web_search")
@@ -105,7 +105,7 @@ class TestCodeGeneratorSDKPattern:
     def test_strands_gateway_uses_sdk(self):
         code = code_generator._generate_strands_gateway(
             system_prompt="You are a gateway agent.",
-            model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            model_id="us.anthropic.claude-sonnet-5",
             creds=_GATEWAY_CREDS,
         )
         _assert_sdk_pattern_present(code, "strands_gateway")
@@ -114,7 +114,7 @@ class TestCodeGeneratorSDKPattern:
     def test_default_agent_uses_sdk(self):
         code = code_generator._generate_default_agent(
             system_prompt="You are helpful.",
-            model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            model_id="us.anthropic.claude-sonnet-5",
             region="us-west-2",
         )
         _assert_sdk_pattern_present(code, "default_agent")
@@ -123,7 +123,7 @@ class TestCodeGeneratorSDKPattern:
     def test_strands_default_uses_sdk(self):
         code = code_generator._generate_strands_default(
             system_prompt="You are helpful.",
-            model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            model_id="us.anthropic.claude-sonnet-5",
             region="us-west-2",
             provider="bedrock",
         )
@@ -231,7 +231,7 @@ class TestExplorationProperties:
         system_prompt=st.text(min_size=1, max_size=200),
         model_id=st.sampled_from(
             [
-                "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                "us.anthropic.claude-sonnet-5",
                 "us.anthropic.claude-haiku-4-5-20251001-v1:0",
                 "us.amazon.nova-2-lite-v1:0",
             ]

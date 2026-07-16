@@ -9,8 +9,6 @@ import * as fc from 'fast-check';
 import { useWorkflowStore } from '../../store/workflowStore';
 import type { AgentCoreNode } from '../../store/workflowStore';
 import type { RuntimeConfiguration } from '../../types/components';
-// ValidationError type is used in the test file for type annotations
-import type { ValidationError as _ValidationError } from '../../types/validation';
 
 // ============================================================================
 // Test Helpers

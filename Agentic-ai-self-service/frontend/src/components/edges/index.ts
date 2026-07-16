@@ -8,4 +8,4 @@ export {
   calculateBezierControlPoints,
   generateBezierPath,
   getEdgeColor,
-} from './ConnectionEdge';
+} from './edgeUtils';

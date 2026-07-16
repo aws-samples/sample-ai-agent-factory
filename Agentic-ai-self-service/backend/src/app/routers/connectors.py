@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from app.services.auth import get_caller_sub
 from app.services.connectors_catalog import get_connector, list_connectors
+from app.services.rbac import require_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ def _summary(entry: dict) -> ConnectorSummary:
 # ---------------------------------------------------------------------------
 
 
-@router.get("", response_model=list[ConnectorSummary])
+@router.get("", response_model=list[ConnectorSummary], dependencies=[Depends(require_scopes("connector:read"))])
 async def list_catalog(
     caller_sub: str = Depends(get_caller_sub),
 ) -> list[ConnectorSummary]:
@@ -97,7 +98,7 @@ async def list_catalog(
     return [_summary(entry) for entry in list_connectors()]
 
 
-@router.get("/{connector_id}", response_model=ConnectorDetail)
+@router.get("/{connector_id}", response_model=ConnectorDetail, dependencies=[Depends(require_scopes("connector:read"))])
 async def get_catalog_entry(
     connector_id: str,
     caller_sub: str = Depends(get_caller_sub),

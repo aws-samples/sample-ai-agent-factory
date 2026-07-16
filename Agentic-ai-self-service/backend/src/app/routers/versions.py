@@ -25,6 +25,7 @@ from app.services.agent_versions_store import (
     get_versions_store,
 )
 from app.services.auth import assert_owner, get_caller_sub
+from app.services.rbac import require_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +119,7 @@ class PromoteRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-@router.get("/{runtime_name}/versions", response_model=list[VersionResponse])
+@router.get("/{runtime_name}/versions", response_model=list[VersionResponse], dependencies=[Depends(require_scopes("agent:read"))])
 async def list_versions(
     runtime_name: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -140,7 +141,7 @@ async def list_versions(
     ]
 
 
-@router.get("/{runtime_name}/slots", response_model=SlotsResponse)
+@router.get("/{runtime_name}/slots", response_model=SlotsResponse, dependencies=[Depends(require_scopes("agent:read"))])
 async def get_slots(
     runtime_name: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -163,6 +164,7 @@ async def get_slots(
 @router.post(
     "/{runtime_name}/versions/{version_id}/promote",
     response_model=PromoteResponse,
+    dependencies=[Depends(require_scopes("agent:write"))],
 )
 async def promote_version(
     runtime_name: str,
@@ -230,7 +232,7 @@ async def promote_version(
     )
 
 
-@router.post("/{runtime_name}/rollback", response_model=PromoteResponse)
+@router.post("/{runtime_name}/rollback", response_model=PromoteResponse, dependencies=[Depends(require_scopes("agent:write"))])
 async def rollback_runtime(
     runtime_name: str,
     caller_sub: str = Depends(get_caller_sub),

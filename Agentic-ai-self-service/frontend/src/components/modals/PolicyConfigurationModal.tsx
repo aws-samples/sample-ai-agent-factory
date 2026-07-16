@@ -3,7 +3,7 @@
  * Supports Cedar policy statement editing.
  */
 
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { ConfigurationModal, type ValidationError } from './ConfigurationModal';
 import { TextField, FormSection } from './FormFields';
 import type { PolicyConfiguration, PolicyRule } from '../../types/components';
@@ -71,14 +71,12 @@ export function PolicyConfigurationModal({
     ...initialConfig,
   }));
 
-  useEffect(() => {
-    if (isOpen) {
-      setConfig({
-        ...createDefaultPolicyConfig(),
-        ...initialConfig,
-      });
-    }
-  }, [isOpen, initialConfig]);
+  // Reset config when modal opens with new initial config (adjust state during render pattern)
+  const [lastInitial, setLastInitial] = useState<typeof initialConfig | symbol>(Symbol('unset'));
+  if (isOpen && initialConfig !== lastInitial) {
+    setLastInitial(initialConfig);
+    setConfig({ ...createDefaultPolicyConfig(), ...initialConfig });
+  }
 
   const validationErrors = useMemo(() => {
     const errors: ValidationError[] = [];

@@ -62,7 +62,6 @@ export function EvaluationResultsPanel({ runtimeName, refreshKey }: EvaluationRe
       setDashboard(null);
       // Errors that aren't 404 still log via the eval results error path.
       if (!getErrorMessage(e).toLowerCase().includes('not found')) {
-        // eslint-disable-next-line no-console
         console.warn('dashboard-url fetch failed:', e);
       }
     } finally {

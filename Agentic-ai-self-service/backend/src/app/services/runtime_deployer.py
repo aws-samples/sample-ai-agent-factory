@@ -120,10 +120,12 @@ def create_runtime_iam_role(
     region: str,
     connected_tools: Optional[list] = None,
     otel_secret_arn: Optional[str] = None,
+    resource_tags: Optional[dict] = None,
 ) -> str:
     """Create or reuse an IAM execution role for an AgentCore runtime.
 
-    Returns the role ARN.
+    ``resource_tags`` (Phase 2 governance tagging) are merged onto the role
+    alongside the mandatory ManagedBy tag. Returns the role ARN.
     """
     trust_policy = {
         "Version": "2012-10-17",
@@ -139,7 +141,16 @@ def create_runtime_iam_role(
     # Bug 139: tag every runtime exec role ManagedBy=agentcore-flows so the
     # delete-path IAM grant can be scoped by aws:ResourceTag instead of a broad
     # role/*-role wildcard that would match unrelated account roles.
-    _managed_tag = [{"Key": "ManagedBy", "Value": "agentcore-flows"}]
+    # Phase 2 (Loom): merge the resolved governance tags (owner/application/
+    # cost-center/…) so cost attribution + ABAC work off real AWS resource tags.
+    # IAM keys/values must be strings; the ManagedBy tag is always last so it
+    # can't be overridden by a caller-supplied governance tag of the same key.
+    _managed_tag = [
+        {"Key": str(k), "Value": str(v)}
+        for k, v in (resource_tags or {}).items()
+        if k and k != "ManagedBy"
+    ]
+    _managed_tag.append({"Key": "ManagedBy", "Value": "agentcore-flows"})
     try:
         resp = iam_client.create_role(
             RoleName=role_name,
@@ -330,6 +341,27 @@ def create_runtime_iam_role(
     return role_arn
 
 
+def _build_network_configuration(vpc_config: Optional[dict]) -> dict:
+    """Build the AgentCore networkConfiguration block.
+
+    VPC mode (Loom-study 0.1) when vpc_config carries subnets + security groups;
+    PUBLIC otherwise. Accepts both snake_case (our model) and camelCase keys.
+    Verified against the live control-plane model: networkModeConfig = VpcConfig
+    {subnets, securityGroups}.
+    """
+    if not vpc_config:
+        return {"networkMode": "PUBLIC"}
+    subnets = vpc_config.get("subnet_ids") or vpc_config.get("subnets") or []
+    sgs = vpc_config.get("security_group_ids") or vpc_config.get("securityGroups") or []
+    if not subnets or not sgs:
+        # Incomplete VPC config → fail safe to PUBLIC rather than a rejected call.
+        return {"networkMode": "PUBLIC"}
+    return {
+        "networkMode": "VPC",
+        "networkModeConfig": {"subnets": list(subnets), "securityGroups": list(sgs)},
+    }
+
+
 def create_agent_runtime(
     agentcore_ctrl,
     runtime_name: str,
@@ -341,11 +373,19 @@ def create_agent_runtime(
     protocol: str = "HTTP",
     env_vars: Optional[dict] = None,
     authorizer_config: Optional[dict] = None,
+    vpc_config: Optional[dict] = None,
 ) -> dict:
     """Create an AgentCore runtime using the boto3 control API.
 
+    ``vpc_config`` (Loom-study 0.1): when supplied ({subnet_ids, security_group_ids})
+    the runtime is created in VPC network mode so it can reach VPC-private
+    resources. Previously networkMode was HARDCODED to PUBLIC and the modeled
+    vpc_config field was read by no deployer (dead config). Falls back to PUBLIC
+    when absent.
+
     Returns dict with runtime_id, arn, status.
     """
+    network_configuration = _build_network_configuration(vpc_config)
     create_params = {
         "agentRuntimeName": runtime_name,
         "agentRuntimeArtifact": {
@@ -361,7 +401,7 @@ def create_agent_runtime(
             }
         },
         "roleArn": role_arn,
-        "networkConfiguration": {"networkMode": "PUBLIC"},
+        "networkConfiguration": network_configuration,
         "protocolConfiguration": {"serverProtocol": protocol},
     }
 
@@ -504,11 +544,21 @@ def wait_for_runtime_ready(agentcore_ctrl, runtime_id: str, timeout: int = 600) 
                     "status": status,
                 }
             if "FAILED" in status:
+                # Surface AgentCore's own reason — CREATE_FAILED alone is
+                # undiagnosable. The field name varies across API versions.
+                reason = (
+                    resp.get("statusReason")
+                    or resp.get("failureReason")
+                    or resp.get("reasonCode")
+                    or (resp.get("statusReasons") or [""])[0]
+                    or ""
+                )
+                logger.error("Runtime %s %s: %s", runtime_id, status, reason)
                 return {
                     "success": False,
                     "runtime_id": runtime_id,
                     "status": status,
-                    "error": f"Runtime entered {status}",
+                    "error": f"Runtime entered {status}" + (f": {reason}" if reason else ""),
                 }
         except Exception as e:
             logger.warning("Error checking runtime status: %s", e)

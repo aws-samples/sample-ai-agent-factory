@@ -25,96 +25,13 @@ import {
   CONNECTOR_TOOL_PREFIX,
   type ConnectorConfiguration,
   type ConnectorAuthMethod,
-  type ConnectorId,
 } from '../../types/components';
-
-// ============================================================================
-// Catalog support map (mirror of backend services/connectors.py)
-// ============================================================================
-
-interface ConnectorCatalogEntry {
-  displayName: string;
-  /** Auth methods the backend catalog supports for this connector. */
-  authMethods: ConnectorAuthMethod[];
-  /** OAuth2 vendor passed to create_oauth2_credential_provider (oauth2_cc). */
-  oauthVendor?: string;
-  /** Default api-key wiring (catalog defaults; editable for the generic one). */
-  credentialLocation: 'HEADER' | 'QUERY_PARAMETER';
-  credentialParameterName: string;
-  credentialPrefix?: string;
-  /** generic connector requires a user-supplied spec. */
-  generic?: boolean;
-}
-
-// asana = api_key only (no oauth vendor). jira=AtlassianOauth2, slack=SlackOauth2,
-// github=GithubOauth2, salesforce=SalesforceOauth2.
-export const CONNECTOR_AUTH_SUPPORT: Record<string, ConnectorCatalogEntry> = {
-  jira: {
-    displayName: 'Jira',
-    authMethods: ['oauth2_cc', 'api_key'],
-    oauthVendor: 'AtlassianOauth2',
-    credentialLocation: 'HEADER',
-    credentialParameterName: 'Authorization',
-    credentialPrefix: 'Bearer',
-  },
-  asana: {
-    displayName: 'Asana',
-    authMethods: ['api_key'],
-    credentialLocation: 'HEADER',
-    credentialParameterName: 'Authorization',
-    credentialPrefix: 'Bearer',
-  },
-  slack: {
-    displayName: 'Slack',
-    authMethods: ['oauth2_cc', 'api_key'],
-    oauthVendor: 'SlackOauth2',
-    credentialLocation: 'HEADER',
-    credentialParameterName: 'Authorization',
-    credentialPrefix: 'Bearer',
-  },
-  github: {
-    displayName: 'GitHub',
-    authMethods: ['oauth2_cc', 'api_key'],
-    oauthVendor: 'GithubOauth2',
-    credentialLocation: 'HEADER',
-    credentialParameterName: 'Authorization',
-    credentialPrefix: 'Bearer',
-  },
-  salesforce: {
-    displayName: 'Salesforce',
-    authMethods: ['oauth2_cc', 'api_key'],
-    oauthVendor: 'SalesforceOauth2',
-    credentialLocation: 'HEADER',
-    credentialParameterName: 'Authorization',
-    credentialPrefix: 'Bearer',
-  },
-  generic_openapi: {
-    displayName: 'OpenAPI / MCP Connector',
-    authMethods: ['api_key', 'oauth2_cc'],
-    credentialLocation: 'HEADER',
-    credentialParameterName: 'Authorization',
-    credentialPrefix: 'Bearer',
-    generic: true,
-  },
-};
-
-const AUTH_METHOD_LABELS: Record<ConnectorAuthMethod, string> = {
-  api_key: 'API key',
-  oauth2_cc: 'OAuth 2.0 (client credentials)',
-};
-
-const CREDENTIAL_LOCATION_OPTIONS = [
-  { value: 'HEADER', label: 'Header' },
-  { value: 'QUERY_PARAMETER', label: 'Query parameter' },
-];
-
-function connectorIdFromConfig(cfg: Partial<ConnectorConfiguration>): ConnectorId {
-  if (cfg.connectorId) return cfg.connectorId;
-  if (cfg.toolId?.startsWith(CONNECTOR_TOOL_PREFIX)) {
-    return cfg.toolId.slice(CONNECTOR_TOOL_PREFIX.length);
-  }
-  return 'generic_openapi';
-}
+import {
+  CONNECTOR_AUTH_SUPPORT,
+  AUTH_METHOD_LABELS,
+  CREDENTIAL_LOCATION_OPTIONS,
+  connectorIdFromConfig,
+} from './connectorConfig.helpers';
 
 // ============================================================================
 // Props
@@ -213,6 +130,13 @@ export function ConnectorConfigModal({
       toolId: `${CONNECTOR_TOOL_PREFIX}${config.connectorId}`,
       scopes: config.authMethod === 'oauth2_cc' ? scopes : undefined,
       oauthVendor: config.authMethod === 'oauth2_cc' ? entry.oauthVendor ?? config.oauthVendor : undefined,
+      // Phase 3 (Loom) OBO — only meaningful for oauth2_cc; clear otherwise so a
+      // stale 'obo' flag can't ride along on an api_key connector.
+      delegationMode: config.authMethod === 'oauth2_cc' ? (config.delegationMode ?? 'm2m') : undefined,
+      oboGrantType:
+        config.authMethod === 'oauth2_cc' && config.delegationMode === 'obo'
+          ? (config.oboGrantType ?? 'TOKEN_EXCHANGE')
+          : undefined,
       // Transient secret: attach only when the user typed one this session. It
       // is forwarded to the deploy payload then stripped before persist.
       secretValue: secretValue.trim() ? secretValue.trim() : undefined,
@@ -318,6 +242,32 @@ export function ConnectorConfigModal({
                 onChange={(v) => update('discoveryUrl', v)}
                 placeholder="https://issuer/.well-known/openid-configuration"
                 helpText="OIDC/OAuth discovery document for the token endpoint."
+              />
+            )}
+            {/* Phase 3 (Loom) OBO — on-behalf-of delegation. Only offered for the
+                generic (custom OIDC) connector; branded vendors are M2M-only. */}
+            {isGeneric && (
+              <SelectField
+                id="delegationMode"
+                label="Delegation"
+                value={config.delegationMode ?? 'm2m'}
+                onChange={(v) => update('delegationMode', v as 'm2m' | 'obo')}
+                options={[
+                  { value: 'm2m', label: 'Machine-to-machine (shared identity)' },
+                  { value: 'obo', label: 'On-behalf-of (act as end-user)' },
+                ]}
+              />
+            )}
+            {isGeneric && config.delegationMode === 'obo' && (
+              <SelectField
+                id="oboGrantType"
+                label="Token exchange grant"
+                value={config.oboGrantType ?? 'TOKEN_EXCHANGE'}
+                onChange={(v) => update('oboGrantType', v as 'TOKEN_EXCHANGE' | 'JWT_AUTHORIZATION_GRANT')}
+                options={[
+                  { value: 'TOKEN_EXCHANGE', label: 'RFC 8693 Token Exchange (Okta/Auth0)' },
+                  { value: 'JWT_AUTHORIZATION_GRANT', label: 'RFC 7523 JWT Grant (Entra ID)' },
+                ]}
               />
             )}
           </>

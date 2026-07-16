@@ -45,7 +45,7 @@ def _make_runtime_config(**overrides) -> RuntimeConfig:
         "name": "test-agent",
         "framework": "strands_agents",
         "model": {
-            "modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "modelId": "us.anthropic.claude-sonnet-5",
             "provider": "anthropic",
         },
         "systemPrompt": "You are a helpful assistant.",
@@ -61,7 +61,7 @@ def _make_runtime_configuration(framework: AgentFramework, **overrides) -> Runti
         "framework": framework,
         "model": ModelConfiguration(
             provider=ModelProvider.ANTHROPIC,
-            model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            model_id="us.anthropic.claude-sonnet-5",
         ),
         "system_prompt": "You are a helpful assistant.",
     }
@@ -80,7 +80,7 @@ _safe_text = st.text(
 
 _model_ids = st.sampled_from(
     [
-        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "us.anthropic.claude-sonnet-5",
         "us.anthropic.claude-haiku-4-5-20251001-v1:0",
         "us.amazon.nova-2-lite-v1:0",
     ]
@@ -446,7 +446,7 @@ class TestSystemPromptEscapingPreservation:
         escaped = code_generator._escape_triple_quotes(system_prompt)
         code = code_generator._generate_default_agent(
             escaped,
-            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "us.anthropic.claude-sonnet-5",
             "us-east-1",
         )
         try:

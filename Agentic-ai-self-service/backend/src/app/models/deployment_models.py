@@ -202,6 +202,11 @@ class DeploymentState(BaseModel):
     # carries enough to delete it; the type-dispatched deleter no-ops on unknown
     # types so older records (no manifest) still fall back to *_result cleanup.
     created_resources: Optional[list[dict]] = None
+    # Phase 7 (opt-in) — the account/region this deploy targeted (None → home).
+    # Recorded so the SEPARATE delete request can assume the same cross-account
+    # role to tear down, without the original SFN event.
+    target_account_id: Optional[str] = None
+    target_region: Optional[str] = None
 
 
 # ============================================================================
@@ -243,6 +248,16 @@ class RuntimeConfig(BaseModel):
         "deepseek", "groq", "together",
     ] = Field(alias="modelProvider", default="bedrock")
     provider_api_key_ref: Optional[str] = Field(alias="providerApiKeyRef", default=None)
+    # Optional base URL for OpenAI-compatible providers / a self-hosted LiteLLM
+    # proxy. Injected as PROVIDER_BASE_URL and read by the generated model init.
+    provider_base_url: Optional[str] = Field(alias="providerBaseUrl", default=None, max_length=512)
+    # VPC egress (Loom-study 0.1). When set, the runtime is created in VPC network
+    # mode with these subnets/SGs so it can reach VPC-private resources. Accepts a
+    # {subnet_ids, security_group_ids} dict; None → PUBLIC network mode.
+    vpc_config: Optional[dict] = Field(alias="vpcConfig", default=None)
+    # Loom-study 4.2 — a named VPC profile (subnets/SGs defined once, picked here).
+    # Resolved to vpc_config at the deploy boundary; explicit vpc_config wins.
+    vpc_profile: Optional[str] = Field(alias="vpcProfile", default=None, max_length=64)
     # Multi-agent pattern
     multi_agent_pattern: str = Field(alias="multiAgentPattern", default="none")
     multi_agent_config: Optional[dict] = Field(alias="multiAgentConfig", default=None)
@@ -395,6 +410,19 @@ class CustomToolDefinition(BaseModel):
     input_schema: dict = Field(alias="inputSchema", default_factory=dict)
 
 
+class ImportRuntimeRequest(BaseModel):
+    """Adopt an already-deployed AgentCore Runtime by ARN (Loom-study 1.5).
+
+    POST /api/runtime/import — records an externally-built runtime as a
+    caller-owned SUCCEEDED deployment without any codegen/deploy.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    runtime_arn: str = Field(alias="runtimeArn", min_length=20, max_length=2048)
+    aws_region: Optional[str] = Field(alias="awsRegion", default=None, max_length=30)
+
+
 class DeployRequest(BaseModel):
     """Request body for POST /api/deploy."""
 
@@ -418,6 +446,11 @@ class DeployRequest(BaseModel):
     # entry's secret_value is write-only (minted into Secrets Manager in the
     # gateway step, then dropped); only secret_arn is ever persisted.
     connectors: Optional[list[ConnectorConfig]] = Field(default=None, max_length=20)
+    # External MCP catalog servers wired as Gateway `mcpServer` targets (Loom
+    # external-MCP path). Each entry: {server_id, endpoint_vars?, secret_value?
+    # (write-only, minted then dropped), secret_arn?, oauth?}. Only direct-* tier
+    # catalog entries are wireable; adapter-* are rejected server-side.
+    external_mcp_servers: Optional[list[dict]] = Field(alias="externalMcpServers", default=None, max_length=20)
     memory_config: Optional[dict] = Field(alias="memoryConfig", default=None)
     evaluation_config: Optional[dict] = Field(alias="evaluationConfig", default=None)
     policy_config: Optional[dict] = Field(alias="policyConfig", default=None)
@@ -435,6 +468,22 @@ class DeployRequest(BaseModel):
     )
     version_description: Optional[str] = Field(
         alias="versionDescription", default=None, max_length=500
+    )
+    # Phase 2 (Loom) governance tagging. Caller supplies ad-hoc tag values
+    # and/or selects a named tag profile; the deploy handler resolves them
+    # against the org's tag policies (required-tag enforcement → HTTP 400) and
+    # applies the resolved set to every AWS resource the deploy creates.
+    resource_tags: Optional[dict] = Field(alias="resourceTags", default=None)
+    tag_profile: Optional[str] = Field(alias="tagProfile", default=None, max_length=128)
+    # Phase 7 (opt-in) deployment targets. Default None → deploy to the
+    # platform's home account + region (unchanged). When multi-region/account is
+    # enabled, targetAccountId routes the deploy through a cross-account
+    # sts:AssumeRole and targetRegion selects an allowlisted region.
+    target_account_id: Optional[str] = Field(
+        alias="targetAccountId", default=None, pattern=r"^\d{12}$"
+    )
+    target_region: Optional[str] = Field(
+        alias="targetRegion", default=None, max_length=32
     )
 
     @model_validator(mode="after")

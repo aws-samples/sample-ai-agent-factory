@@ -199,6 +199,49 @@ export interface CostSummary {
   from_ts?: number;
   to_ts?: number;
   currency?: string;
+  // Phase 4 (Loom) FinOps — owner budget status annotated by the cost endpoint
+  // when the caller has an owner budget set.
+  owner_budget?: {
+    spend: number;
+    limit: number;
+    used_pct: number;
+    status: 'ok' | 'warn' | 'over';
+  };
+}
+
+// Phase 5 (Loom) — OTEL trace waterfall.
+export interface TraceSpan {
+  span_id: string;
+  parent_span_id: string;
+  name: string;
+  offset_ms: number;
+  duration_ms: number;
+  depth: number;
+  children: TraceSpan[];
+}
+export interface TraceWaterfall {
+  trace_id: string | null;
+  start_ms: number;
+  total_ms: number;
+  spans: TraceSpan[];
+  runtime_name?: string;
+  query_status?: string;
+}
+
+// Phase 5 (Loom) — admin action-audit summary.
+export interface AuditSummary {
+  total: number;
+  by_action: Record<string, number>;
+  by_actor: Record<string, number>;
+  // Loom-study 5.2 — analytics extras (optional for backward compat with older
+  // backends that don't return them).
+  distinct_actors?: number;
+  distinct_sessions?: number;
+  by_day?: Array<{ day: string; count: number }>;
+  events: Array<{
+    action: string; actor_sub: string; method: string; path: string;
+    status_code: number; ts: string;
+  }>;
 }
 
 // Phase 3 Gap 3F — scheduled / event triggers.
@@ -591,6 +634,77 @@ export class ApiClient {
     return this.request<CostSummary>(
       `/api/runtimes/${encodeURIComponent(runtimeName)}/cost${suffix}`
     );
+  }
+
+  /** Phase 5 (Loom) — OTEL span waterfall for a runtime's production version. */
+  async getTraces(
+    runtimeName: string,
+    opts?: { from?: number; to?: number; traceId?: string }
+  ): Promise<TraceWaterfall> {
+    const qs = new URLSearchParams();
+    if (opts?.from) qs.set('from', String(opts.from));
+    if (opts?.to) qs.set('to', String(opts.to));
+    if (opts?.traceId) qs.set('traceId', opts.traceId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return this.request<TraceWaterfall>(
+      `/api/runtimes/${encodeURIComponent(runtimeName)}/traces${suffix}`
+    );
+  }
+
+  /** Phase 5 (Loom) — admin action-audit summary (admin scope). */
+  async getAudit(limit = 200): Promise<AuditSummary> {
+    return this.request<AuditSummary>(`/api/admin/audit?limit=${limit}`);
+  }
+
+  /** Phase 6 (Loom) — AWS Agent Registry federation config/status. */
+  async getAwsRegistryConfig(): Promise<{ enabled: boolean; registry_id: string | null; available: boolean }> {
+    return this.request(`/api/registry/aws-config`);
+  }
+
+  /** Phase 6 — enable AWS Agent Registry federation with a registryId (admin). */
+  async enableAwsRegistry(registryId: string): Promise<{ enabled: boolean; registry_id: string; available: boolean }> {
+    return this.request(`/api/registry/aws-config`, {
+      method: 'POST',
+      body: JSON.stringify({ registry_id: registryId }),
+    });
+  }
+
+  /** Phase 6 — semantic search across the AWS Agent Registry. */
+  async searchAwsRegistry(q: string): Promise<{ enabled: boolean; results: Array<Record<string, unknown>> }> {
+    return this.request(`/api/registry/aws-search?q=${encodeURIComponent(q)}`);
+  }
+
+  /** Phase 7 (opt-in) — multi-region/account deployment targets config. */
+  async getDeployTargets(): Promise<{
+    enabled: boolean;
+    regions: string[];
+    accounts: Array<{ account_id: string; role_arn: string; region: string }>;
+  }> {
+    return this.request(`/api/admin/deploy-targets`);
+  }
+
+  /** Phase 7 — explicitly enable/disable multi-region/account deployment. */
+  async enableDeployTargets(enabled: boolean): Promise<{ enabled: boolean }> {
+    return this.request(`/api/admin/deploy-targets/enable`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    });
+  }
+
+  /** Phase 7 — add an allowlisted deploy region. */
+  async addDeployRegion(region: string): Promise<{ regions: string[] }> {
+    return this.request(`/api/admin/deploy-targets/regions`, {
+      method: 'POST',
+      body: JSON.stringify({ region }),
+    });
+  }
+
+  /** Phase 7 — register a cross-account deploy target (validated server-side). */
+  async addDeployAccount(accountId: string, roleArn: string, region: string): Promise<{ account_id: string; validated: boolean }> {
+    return this.request(`/api/admin/deploy-targets/accounts`, {
+      method: 'POST',
+      body: JSON.stringify({ account_id: accountId, role_arn: roleArn, region }),
+    });
   }
 
   // ==========================================================================
@@ -1013,6 +1127,10 @@ export interface RegistryEntry {
   reviewed_by?: string | null;
   reviewed_at?: string | null;
   rejection_reason?: string | null;
+  // Populated only by the single-entry GET (detail view). Null on list results —
+  // the browse grid does not carry full snapshots. Lets the Components tab render
+  // the blueprint's nodes/edges without triggering a clone.
+  canvas_snapshot?: RegistryCanvasSnapshot | null;
 }
 
 export interface PublishRegistryRequest {
@@ -1025,10 +1143,218 @@ export interface PublishRegistryRequest {
   latest_version_id?: string;
 }
 
+/**
+ * A registry canvas snapshot is a RAW React-Flow canvas — the exact
+ * {name, nodes, edges} the store holds, captured verbatim at publish time.
+ * It is NOT the NL-generator's GeneratedCanvasSpec ({idSuffix, configuration,
+ * sourceIdSuffix}) shape. Kept loosely typed (nodes/edges as unknown[]) so this
+ * module stays free of React-Flow store types; App.tsx casts to AgentCoreNode[]
+ * /Edge[] when loading. (Mislabeling this as GeneratedCanvasSpec is exactly what
+ * let the broken clone-apply cast compile and silently drop all edges.)
+ */
+export interface RegistryCanvasSnapshot {
+  name: string;
+  nodes: unknown[];
+  edges: unknown[];
+}
+
 export interface RegistryCloneResponse {
   agent_slug: string;
   display_name: string;
-  canvas_snapshot: GeneratedCanvasSpec;
+  canvas_snapshot: RegistryCanvasSnapshot;
+}
+
+// ---------------------------------------------------------------------------
+// Verified external MCP-server catalog (browsable in the Registry UI)
+// ---------------------------------------------------------------------------
+
+export interface McpServerSummary {
+  id: string;
+  display_name: string;
+  publisher: string;
+  category: string;
+  /** Integration tier: direct-none | direct-apikey | direct-oauth | adapter-3lo | adapter-stdio */
+  tier: string;
+  /** live | docs | community */
+  verified: string;
+  auth_type: string;
+  live_testable: boolean;
+  endpoint?: string | null;
+}
+
+export interface McpServerDetail extends McpServerSummary {
+  credentials_needed: string;
+  example_tools: string[];
+  api_key_descriptor?: Record<string, unknown> | null;
+  oauth_descriptor?: Record<string, unknown> | null;
+}
+
+/** List the verified external MCP-server catalog (registry:read). */
+export async function listMcpServersApi(
+  baseUrl: string = API_BASE_URL,
+): Promise<McpServerSummary[]> {
+  const response = await authFetch(`${baseUrl}/api/mcp-servers`, { method: 'GET' });
+  if (!response.ok) {
+    throw new Error(`MCP servers fetch failed (${response.status})`);
+  }
+  return (await response.json()) as McpServerSummary[];
+}
+
+/** Fetch one MCP server's detail (endpoint/auth/tools). */
+export async function getMcpServerApi(
+  serverId: string,
+  baseUrl: string = API_BASE_URL,
+): Promise<McpServerDetail> {
+  const response = await authFetch(
+    `${baseUrl}/api/mcp-servers/${encodeURIComponent(serverId)}`,
+    { method: 'GET' },
+  );
+  if (!response.ok) {
+    throw new Error(`MCP server fetch failed (${response.status})`);
+  }
+  return (await response.json()) as McpServerDetail;
+}
+
+// ---------------------------------------------------------------------------
+// Identity: token-info (Loom-study 1.3) — the caller's decoded claims/scopes
+// ---------------------------------------------------------------------------
+
+export interface AnnotatedClaim {
+  claim: string;
+  value: unknown;
+  note: string;
+}
+
+export interface TokenInfo {
+  sub: string;
+  claims: AnnotatedClaim[];
+  groups: string[];
+  scopes: string[];
+}
+
+// ---------------------------------------------------------------------------
+// End-user chat (Loom-study Phase 3) — list deployed agents + stream an invoke
+// ---------------------------------------------------------------------------
+
+export interface DeployedAgentSummary {
+  deployment_id: string;
+  runtime_id: string | null;
+  runtime_arn?: string | null;
+  agentcore_runtime_name?: string | null;
+  status: string;
+  memory_result?: Record<string, unknown> | null;
+}
+
+/** List the caller's own succeeded deployments (the chat agent picker). */
+export async function listMyAgentsApi(baseUrl: string = API_BASE_URL): Promise<DeployedAgentSummary[]> {
+  const response = await authFetch(`${baseUrl}/api/deployments?status=succeeded`, { method: 'GET' });
+  if (!response.ok) {
+    throw new Error(`Agent list failed (${response.status})`);
+  }
+  return (await response.json()) as DeployedAgentSummary[];
+}
+
+/**
+ * Stream an invocation of a deployed runtime, calling onToken for each streamed
+ * token. Resolves to {sessionId, fullText}. Reuses the /api/test-runtime-stream
+ * SSE contract (data: {type: token|done|error}). Falls back to the non-streaming
+ * /api/test-runtime when SSE isn't available.
+ */
+export async function streamInvokeApi(
+  params: { runtimeId: string; input: string; sessionId?: string | null },
+  onToken: (t: string) => void,
+  baseUrl: string = API_BASE_URL,
+): Promise<{ sessionId: string | null; fullText: string }> {
+  const body = JSON.stringify({
+    runtimeId: params.runtimeId,
+    input: params.input,
+    ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+  });
+  // authFetch adds Authorization + X-Session-Id.
+  const resp = await authFetch(`${baseUrl}/api/test-runtime-stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  });
+  const ct = resp.headers.get('content-type') || '';
+  if (resp.ok && resp.body && ct.includes('text/event-stream')) {
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let full = '';
+    let sid: string | null = params.sessionId ?? null;
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const evt = JSON.parse(line.slice(6));
+          if (evt.type === 'token' && evt.token) {
+            full += evt.token;
+            onToken(evt.token);
+          } else if (evt.type === 'done') {
+            sid = evt.session_id || sid;
+            if (evt.full_response) full = evt.full_response;
+          } else if (evt.type === 'error') {
+            const err = new Error(evt.error || 'Stream error');
+            (err as { __streamError?: boolean }).__streamError = true;
+            throw err;
+          }
+        } catch (e) {
+          // Re-throw our deliberate stream-error events; swallow JSON.parse
+          // failures on malformed/partial SSE lines (which are not tagged).
+          if (e instanceof Error && (e as { __streamError?: boolean }).__streamError) throw e;
+        }
+      }
+    }
+    if (full) return { sessionId: sid, fullText: full };
+  }
+  // Fallback: non-streaming invoke.
+  const r2 = await authFetch(`${baseUrl}/api/test-runtime`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  });
+  const data = (await r2.json()) as { success?: boolean; response?: string; error?: string; sessionId?: string };
+  if (!data.success) throw new Error(data.error || 'Invocation failed');
+  const text = data.response || '';
+  if (text) onToken(text);
+  return { sessionId: data.sessionId || params.sessionId || null, fullText: text };
+}
+
+export interface LiveModelOption {
+  provider: string;
+  modelId: string;
+  label: string;
+  maxTokens: number;
+  source?: string;
+}
+
+/**
+ * Fetch the live Bedrock model catalog (Loom-study 5.1). The model picker can
+ * call this to reflect models actually available in the account instead of the
+ * hardcoded list; callers should fall back to the static AVAILABLE_MODELS on
+ * error so the picker is never empty.
+ */
+export async function listModelsApi(baseUrl: string = API_BASE_URL): Promise<LiveModelOption[]> {
+  const response = await authFetch(`${baseUrl}/api/models`, { method: 'GET' });
+  if (!response.ok) {
+    throw new Error(`Model catalog fetch failed (${response.status})`);
+  }
+  return (await response.json()) as LiveModelOption[];
+}
+
+/** Fetch the signed-in caller's decoded identity (claims + groups + scopes). */
+export async function getTokenInfoApi(baseUrl: string = API_BASE_URL): Promise<TokenInfo> {
+  const response = await authFetch(`${baseUrl}/api/identity/token-info`, { method: 'GET' });
+  if (!response.ok) {
+    throw new Error(`Token info fetch failed (${response.status})`);
+  }
+  return (await response.json()) as TokenInfo;
 }
 
 /** Publish a deployed agent's canvas snapshot to the org registry. */
@@ -1065,6 +1391,25 @@ export async function searchRegistryApi(
     throw new Error(`Registry search failed (${response.status})`);
   }
   return (await response.json()) as RegistryEntry[];
+}
+
+/**
+ * Fetch a single registry entry (detail view). Unlike the list, this response
+ * carries `canvas_snapshot` so the Components tab can render the blueprint's
+ * nodes/edges. This is a READ, not a clone — it does NOT increment usage.
+ */
+export async function getRegistryEntryApi(
+  slug: string,
+  baseUrl: string = API_BASE_URL,
+): Promise<RegistryEntry> {
+  const response = await authFetch(
+    `${baseUrl}/api/registry/${encodeURIComponent(slug)}`,
+    { method: 'GET' },
+  );
+  if (!response.ok) {
+    throw new Error(`Registry entry fetch failed (${response.status})`);
+  }
+  return (await response.json()) as RegistryEntry;
 }
 
 /** Clone a registry entry — returns the canvas snapshot to drop on the canvas. */

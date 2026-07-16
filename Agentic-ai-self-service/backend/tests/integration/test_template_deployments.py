@@ -27,7 +27,7 @@ def _build_runtime_config(name: str, framework: str) -> dict:
         "name": name,
         "entrypoint": "agent.py",
         "framework": framework,
-        "model": {"modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0"},
+        "model": {"modelId": "us.anthropic.claude-sonnet-5"},
         "systemPrompt": "You are a helpful assistant.",
         "deploymentType": "agentcore",
         "pythonRuntime": "python3.13",

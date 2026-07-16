@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Loom-study 4.3 — PrivateLink ingress for private agent invocation. Provisions an
+  internal Network Load Balancer + a VPC Endpoint Service so consumers in another
+  VPC can invoke agents over AWS PrivateLink (no public internet). Also creates a
+  per-protocol security group. Download + deploy this alongside a VPC-egress agent
+  (see docs/PERSONAS.md / the Networking settings). Fully exercising it requires a
+  consumer VPC that creates an interface VPC Endpoint to the output service name.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC the internal NLB lives in (same VPC as the agent's egress config).
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets (>=2 AZs recommended) for the internal NLB.
+  TargetPort:
+    Type: Number
+    Default: 8080
+    Description: Port the agent/runtime target listens on.
+  IngressCidr:
+    Type: String
+    Default: 10.0.0.0/8
+    Description: CIDR allowed to reach the NLB (typically the consumer VPC/RFC1918 range).
+  AllowedPrincipals:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >
+      Optional IAM principal ARNs allowed to create an endpoint to the service
+      (e.g. arn:aws:iam::111122223333:root). Leave empty to manage later.
+
+Conditions:
+  HasPrincipals: !Not [!Equals [!Join ["", !Ref AllowedPrincipals], ""]]
+
+Resources:
+  # Per-protocol security group (HTTPS/HTTP/MCP/A2A) — ingress from the consumer
+  # CIDR only, all egress. Attach to the agent's VPC config / the NLB targets.
+  AgentIngressSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PrivateLink ingress for AgentCore agents (per-protocol)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp  # HTTPS
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref IngressCidr
+        - IpProtocol: tcp  # runtime/MCP/A2A default
+          FromPort: !Ref TargetPort
+          ToPort: !Ref TargetPort
+          CidrIp: !Ref IngressCidr
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: loom:application
+          Value: agentcore-privatelink
+
+  # Internal NLB — the PrivateLink data path. `internal` scheme keeps it off the
+  # public internet; the VPC Endpoint Service fronts it for cross-VPC consumers.
+  IngressNlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: network
+      Scheme: internal
+      Subnets: !Ref SubnetIds
+
+  IngressTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Protocol: TCP
+      Port: !Ref TargetPort
+      VpcId: !Ref VpcId
+      TargetType: ip  # register the runtime/proxy ENI IPs
+      HealthCheckProtocol: TCP
+
+  IngressListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref IngressNlb
+      Protocol: TCP
+      Port: !Ref TargetPort
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref IngressTargetGroup
+
+  # The VPC Endpoint Service — consumers create an interface endpoint to its name.
+  # AcceptanceRequired=true so the producer explicitly approves each consumer.
+  EndpointService:
+    Type: AWS::EC2::VPCEndpointService
+    Properties:
+      NetworkLoadBalancerArns:
+        - !Ref IngressNlb
+      AcceptanceRequired: true
+
+  EndpointServicePermissions:
+    Type: AWS::EC2::VPCEndpointServicePermissions
+    Condition: HasPrincipals
+    Properties:
+      ServiceId: !Ref EndpointService
+      AllowedPrincipals: !Ref AllowedPrincipals
+
+Outputs:
+  EndpointServiceName:
+    Description: >
+      Give this to consumers — they create an interface VPC Endpoint to it. Shape:
+      com.amazonaws.vpce.<region>.vpce-svc-xxxx
+    Value: !Sub "com.amazonaws.vpce.${AWS::Region}.${EndpointService}"
+  SecurityGroupId:
+    Description: Attach to the agent's VPC config (subnets/SGs) and NLB targets.
+    Value: !Ref AgentIngressSecurityGroup
+  NlbArn:
+    Value: !Ref IngressNlb

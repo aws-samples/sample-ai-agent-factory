@@ -1,0 +1,132 @@
+{
+  "_README": "Phase 7 (opt-in) cross-account deployment. In EACH target AWS account, pre-provision THREE things (all name-by-convention; the platform references them without per-deploy creation, which also avoids the fresh-role IAM-propagation race that CREATE_FAILs runtimes for ~17-20 min): (1) role 'AgentCoreFlowsDeploymentRole' — assumed by the platform to run the deploy; (2) role 'AgentCoreFlowsRuntimeRole' — the AgentCore runtime execution role, passed to CreateAgentRuntime (trusts bedrock-agentcore.amazonaws.com, reads the code zip from the target-account bucket + the deps bundle); (3) S3 bucket 'agentcore-flows-artifacts-<TARGET_ACCOUNT_ID>-<REGION>' — AgentCore's runtime code-fetch is SAME-ACCOUNT-ONLY, so the final code.zip is uploaded HERE (the platform's deps bundle is read cross-account during codegen and bundled in). On the PLATFORM side: add the target account id to the stack context `-c deploy_target_accounts=<id>` + redeploy (grants the deploy role read on the platform deps bundle), THEN register the account via the admin API. Replace <PLATFORM_ACCOUNT_ID> with the platform/home account. VERIFIED LIVE: agent deployed + runtime confirmed present in a second account.",
+
+  "_STEP_2_runtime-role-trust.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "TrustAgentCoreRuntime",
+        "Effect": "Allow",
+        "Principal": { "Service": "bedrock-agentcore.amazonaws.com" },
+        "Action": "sts:AssumeRole"
+      }
+    ]
+  },
+
+  "_STEP_2_runtime-role-permissions.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "RuntimeBedrock",
+        "Effect": "Allow",
+        "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "bedrock:Converse", "bedrock:ConverseStream"],
+        "Resource": "*"
+      },
+      {
+        "Sid": "RuntimeArtifactsRead",
+        "Effect": "Allow",
+        "Action": ["s3:GetObject"],
+        "Resource": "arn:aws:s3:::agentcore-workflow-*-artifacts-*/*",
+        "_note": "The runtime reads its code zip from the PLATFORM artifacts bucket cross-account — the bucket policy (deploy_target_accounts context) grants this role GetObject on deployments/*."
+      },
+      {
+        "Sid": "RuntimeLogs",
+        "Effect": "Allow",
+        "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+        "Resource": "*"
+      }
+    ],
+    "_note": "Create AgentCoreFlowsRuntimeRole with runtime-role-trust.json, attach these perms, then WAIT ~20 min (or until a test CreateAgentRuntime succeeds) before first real use so AgentCore's IAM cache has propagated — exactly why the home account pre-creates its shared role at stack-init."
+  },
+
+  "trust-policy.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "TrustPlatformAccountToAssume",
+        "Effect": "Allow",
+        "Principal": { "AWS": "arn:aws:iam::<PLATFORM_ACCOUNT_ID>:root" },
+        "Action": "sts:AssumeRole",
+        "Condition": {
+          "StringEquals": { "sts:RoleSessionName": "agentcore-flows-deploy" }
+        }
+      }
+    ]
+  },
+
+  "permissions-policy.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "AgentCoreControlPlane",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock-agentcore:CreateAgentRuntime",
+          "bedrock-agentcore:GetAgentRuntime",
+          "bedrock-agentcore:UpdateAgentRuntime",
+          "bedrock-agentcore:DeleteAgentRuntime",
+          "bedrock-agentcore:ListAgentRuntimes",
+          "bedrock-agentcore:InvokeAgentRuntime",
+          "bedrock-agentcore:CreateAgentRuntimeEndpoint",
+          "bedrock-agentcore:DeleteAgentRuntimeEndpoint",
+          "bedrock-agentcore:CreateGateway",
+          "bedrock-agentcore:GetGateway",
+          "bedrock-agentcore:DeleteGateway",
+          "bedrock-agentcore:CreateGatewayTarget",
+          "bedrock-agentcore:DeleteGatewayTarget",
+          "bedrock-agentcore:ListGatewayTargets",
+          "bedrock-agentcore:SynchronizeGatewayTargets",
+          "bedrock-agentcore:CreateOauth2CredentialProvider",
+          "bedrock-agentcore:GetOauth2CredentialProvider",
+          "bedrock-agentcore:DeleteOauth2CredentialProvider",
+          "bedrock-agentcore:CreateApiKeyCredentialProvider",
+          "bedrock-agentcore:DeleteApiKeyCredentialProvider",
+          "bedrock-agentcore:CreateMemory",
+          "bedrock-agentcore:GetMemory",
+          "bedrock-agentcore:DeleteMemory",
+          "bedrock-agentcore:CreateWorkloadIdentity",
+          "bedrock-agentcore:GetWorkloadIdentity",
+          "bedrock-agentcore:DeleteWorkloadIdentity"
+        ],
+        "Resource": "*",
+        "_note": "Wildcard Resource: AgentCore resource ARNs are created dynamically at deploy time. Scope by tag/condition in a hardened deployment."
+      },
+      {
+        "Sid": "BedrockModelInvoke",
+        "Effect": "Allow",
+        "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "bedrock:Converse", "bedrock:ConverseStream"],
+        "Resource": "*"
+      },
+      {
+        "Sid": "RuntimeExecRoleManagement",
+        "Effect": "Allow",
+        "Action": [
+          "iam:CreateRole", "iam:GetRole", "iam:DeleteRole",
+          "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:AttachRolePolicy",
+          "iam:DetachRolePolicy", "iam:TagRole", "iam:ListRolePolicies",
+          "iam:PassRole"
+        ],
+        "Resource": [
+          "arn:aws:iam::*:role/AgentCoreRuntime-*",
+          "arn:aws:iam::*:role/AgentCoreGateway-*",
+          "arn:aws:iam::*:role/AgentCoreMemory-*"
+        ]
+      },
+      {
+        "Sid": "SupportingServices",
+        "Effect": "Allow",
+        "Action": [
+          "s3:GetObject", "s3:PutObject",
+          "logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents",
+          "logs:StartQuery", "logs:GetQueryResults", "logs:DescribeLogGroups",
+          "secretsmanager:CreateSecret", "secretsmanager:GetSecretValue",
+          "secretsmanager:DeleteSecret",
+          "cognito-idp:CreateUserPool", "cognito-idp:DeleteUserPool",
+          "cognito-idp:CreateUserPoolClient", "cognito-idp:CreateUserPoolDomain"
+        ],
+        "Resource": "*",
+        "_note": "Tighten per-resource in a hardened target-account deployment."
+      }
+    ]
+  }
+}

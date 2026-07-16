@@ -57,6 +57,7 @@ from app.services.agent_versions_store import (
     get_versions_store,
 )
 from app.services.auth import assert_owner, get_caller_sub
+from app.services.rbac import require_scopes
 from app.services.gateway_deployer import (
     _DiscoveryUrlBlocked,
     _DiscoveryUrlInvalid,
@@ -301,7 +302,7 @@ class DeleteTriggerResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-@router.post("/{runtime_name}/triggers", response_model=TriggerResponse)
+@router.post("/{runtime_name}/triggers", response_model=TriggerResponse, dependencies=[Depends(require_scopes("trigger:write"))])
 async def create_trigger(
     runtime_name: str,
     body: CreateTriggerRequest,
@@ -367,7 +368,7 @@ async def create_trigger(
     return TriggerResponse.from_model(trig)
 
 
-@router.get("/{runtime_name}/triggers", response_model=list[TriggerResponse])
+@router.get("/{runtime_name}/triggers", response_model=list[TriggerResponse], dependencies=[Depends(require_scopes("trigger:read"))])
 async def list_triggers(
     runtime_name: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -392,6 +393,7 @@ async def list_triggers(
 @router.delete(
     "/{runtime_name}/triggers/{trigger_id}",
     response_model=DeleteTriggerResponse,
+    dependencies=[Depends(require_scopes("trigger:write"))],
 )
 async def delete_trigger(
     runtime_name: str,

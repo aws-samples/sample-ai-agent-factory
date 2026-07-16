@@ -109,6 +109,7 @@ def handler(event: dict, context) -> dict:
         identity_config = event.get("identity_config") or {}
         custom_tools = event.get("custom_tools") or []
         connectors = event.get("connectors") or []
+        external_mcp_servers = event.get("external_mcp_servers") or []
         owner_sub = event.get("owner_sub") or ""
 
         # SaaS connectors carrying a raw secret_value: mint a Secrets Manager
@@ -136,6 +137,18 @@ def handler(event: dict, context) -> dict:
             connector.pop("secret_value", None)
             connector.pop("secretValue", None)
 
+        # External MCP catalog selections carrying a raw API key / OAuth client
+        # secret: mint the Secrets Manager secret NOW (same hygiene as connectors)
+        # so the raw value is dropped before the SFN event is re-emitted. Tier-2
+        # api_key → {apiKey}; Tier-3 oauth client secret → handled by the deployer
+        # (it needs client_id + discovery too), so only the api_key raw is pre-minted.
+        for _mcp in external_mcp_servers:
+            _raw = _mcp.get("secret_value") or _mcp.get("secretValue")
+            if _raw and not (_mcp.get("secret_arn") or _mcp.get("secretArn")):
+                _mcp["secret_arn"] = _put_connector_secret(region, owner_sub, {"apiKey": _raw})
+            _mcp.pop("secret_value", None)
+            _mcp.pop("secretValue", None)
+
         mcp_server_runtime_arn = event.get("mcp_server_runtime_arn")
         mcp_oauth = event.get("mcp_oauth")
 
@@ -149,6 +162,7 @@ def handler(event: dict, context) -> dict:
             identity_config=identity_config,
             custom_tools=custom_tools,
             connectors=connectors,
+            external_mcp_servers=external_mcp_servers,
             owner_sub=owner_sub,
             mcp_server_runtime_arn=mcp_server_runtime_arn,
             mcp_oauth=mcp_oauth,

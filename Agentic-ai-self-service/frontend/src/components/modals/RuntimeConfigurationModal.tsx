@@ -3,7 +3,7 @@
  * Strands-only with model provider selection and multi-agent pattern support.
  */
 
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { ConfigurationModal, type ValidationError } from './ConfigurationModal';
 import { TextField, TextArea, SelectField, SliderField, FormSection, CheckboxField } from './FormFields';
 import type { RuntimeConfiguration, StrandsModelProvider, MultiAgentPattern, AgentDefinition } from '../../types/components';
@@ -48,15 +48,12 @@ export function RuntimeConfigurationModal({
     ...initialConfig,
   }));
 
-  // Only reset config when modal opens with NEW initialConfig
-  const [lastInitialConfig, setLastInitialConfig] = useState(initialConfig);
-
-  useEffect(() => {
-    if (isOpen && initialConfig !== lastInitialConfig) {
-      setConfig({ ...createDefaultRuntimeConfig(), ...initialConfig });
-      setLastInitialConfig(initialConfig);
-    }
-  }, [isOpen, initialConfig, lastInitialConfig]);
+  // Reset config when modal opens with new initial config (adjust state during render pattern)
+  const [lastInitial, setLastInitial] = useState<typeof initialConfig | symbol>(Symbol('unset'));
+  if (isOpen && initialConfig !== lastInitial) {
+    setLastInitial(initialConfig);
+    setConfig({ ...createDefaultRuntimeConfig(), ...initialConfig });
+  }
 
   // Platform-managed OTEL defaults — when on, the per-runtime "Enable OTEL"
   // checkbox is meaningless (every agent emits traces regardless).
@@ -83,15 +80,15 @@ export function RuntimeConfigurationModal({
     return errors;
   }, [config]);
 
-  const updateConfig = useCallback(<K extends keyof RuntimeConfiguration>(key: K, value: RuntimeConfiguration[K]) => {
+  const updateConfig = <K extends keyof RuntimeConfiguration>(key: K, value: RuntimeConfiguration[K]) => {
     setConfig((prev) => ({ ...prev, [key]: value }));
-  }, []);
+  };
 
-  const updateModel = useCallback(<K extends keyof RuntimeConfiguration['model']>(key: K, value: RuntimeConfiguration['model'][K]) => {
+  const updateModel = <K extends keyof RuntimeConfiguration['model']>(key: K, value: RuntimeConfiguration['model'][K]) => {
     setConfig((prev) => ({ ...prev, model: { ...prev.model, [key]: value } }));
-  }, []);
+  };
 
-  const handleProviderChange = useCallback((newProvider: StrandsModelProvider) => {
+  const handleProviderChange = (newProvider: StrandsModelProvider) => {
     const models = getModelsForProvider(newProvider);
     setConfig((prev) => ({
       ...prev,
@@ -101,17 +98,17 @@ export function RuntimeConfigurationModal({
         : { ...prev.model, provider: newProvider, modelId: '' },
       providerApiKeyRef: undefined,
     }));
-  }, []);
+  };
 
-  const handlePatternChange = useCallback((pattern: MultiAgentPattern) => {
+  const handlePatternChange = (pattern: MultiAgentPattern) => {
     setConfig((prev) => ({
       ...prev,
       multiAgentPattern: pattern,
       multiAgentConfig: pattern === 'none' ? undefined : (prev.multiAgentConfig || { agents: [] }),
     }));
-  }, []);
+  };
 
-  const handleAddAgent = useCallback(() => {
+  const handleAddAgent = () => {
     setConfig((prev) => {
       const existing = prev.multiAgentConfig || { agents: [] };
       const idx = existing.agents.length + 1;
@@ -128,9 +125,9 @@ export function RuntimeConfigurationModal({
         multiAgentConfig: { ...existing, agents: [...existing.agents, newAgent] },
       };
     });
-  }, []);
+  };
 
-  const handleRemoveAgent = useCallback((idx: number) => {
+  const handleRemoveAgent = (idx: number) => {
     setConfig((prev) => {
       const existing = prev.multiAgentConfig || { agents: [] };
       return {
@@ -138,21 +135,21 @@ export function RuntimeConfigurationModal({
         multiAgentConfig: { ...existing, agents: existing.agents.filter((_, i) => i !== idx) },
       };
     });
-  }, []);
+  };
 
-  const handleUpdateAgent = useCallback((idx: number, field: keyof AgentDefinition, value: string | string[]) => {
+  const handleUpdateAgent = (idx: number, field: keyof AgentDefinition, value: string | string[]) => {
     setConfig((prev) => {
       const existing = prev.multiAgentConfig || { agents: [] };
       const agents = [...existing.agents];
       agents[idx] = { ...agents[idx], [field]: value };
       return { ...prev, multiAgentConfig: { ...existing, agents } };
     });
-  }, []);
+  };
 
-  const handleSave = useCallback(() => {
+  const handleSave = () => {
     onSave(config);
     onClose();
-  }, [config, onSave, onClose]);
+  };
 
   const getFieldError = (field: string) => validationErrors.find((e) => e.field === field)?.message;
 
@@ -553,7 +550,7 @@ export function RuntimeConfigurationModal({
         </div>
       ),
     },
-  ], [config, validationErrors, availableModels, tokenCount, provider, providerInfo, multiAgentAgents, updateConfig, updateModel, handleProviderChange, handlePatternChange, handleAddAgent, handleRemoveAgent, handleUpdateAgent, getFieldError]);
+  ], [config, validationErrors, availableModels, tokenCount, provider, providerInfo, multiAgentAgents, platformOtelEnabled, updateConfig, updateModel, handleProviderChange, handlePatternChange, handleAddAgent, handleRemoveAgent, handleUpdateAgent, getFieldError]);
 
   return (
     <ConfigurationModal

@@ -3,7 +3,7 @@
  * Requirements: Phase 3 Gap 3A
  */
 
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { ConfigurationModal, type ValidationError } from './ConfigurationModal';
 import { TextField, FormSection } from './FormFields';
 import type { A2AConfiguration } from '../../types/components';
@@ -55,15 +55,12 @@ export function A2AConfigurationModal({
     ...initialConfig,
   }));
 
-  // Reset config when modal opens with new initial config
-  useEffect(() => {
-    if (isOpen) {
-      setConfig({
-        ...DEFAULT_CONFIG,
-        ...initialConfig,
-      });
-    }
-  }, [isOpen, initialConfig]);
+  // Reset config when modal opens with new initial config (adjust state during render pattern)
+  const [lastInitial, setLastInitial] = useState<typeof initialConfig | symbol>(Symbol('unset'));
+  if (isOpen && initialConfig !== lastInitial) {
+    setLastInitial(initialConfig);
+    setConfig({ ...DEFAULT_CONFIG, ...initialConfig });
+  }
 
   // Validation
   const validationErrors = useMemo(() => {
@@ -103,10 +100,6 @@ export function A2AConfigurationModal({
     onClose();
   }, [config, onSave, onClose]);
 
-  // Get field error
-  const getFieldError = (field: string) =>
-    validationErrors.find((e) => e.field === field)?.message;
-
   // Capability management
   const [newCapability, setNewCapability] = useState('');
 
@@ -136,7 +129,11 @@ export function A2AConfigurationModal({
   }, [config.peerAllowlist, updateConfig]);
 
   // Build tabs
-  const tabs = useMemo(() => [
+  const tabs = useMemo(() => {
+    const getFieldError = (field: string) =>
+      validationErrors.find((e) => e.field === field)?.message;
+
+    return [
     {
       id: 'general',
       label: 'General',
@@ -319,7 +316,8 @@ export function A2AConfigurationModal({
         </div>
       ),
     },
-  ], [config, validationErrors, updateConfig, getFieldError, newCapability, handleAddCapability, handleRemoveCapability, newPeerUrl, handleAddPeer, handleRemovePeer]);
+    ];
+  }, [config, validationErrors, updateConfig, newCapability, handleAddCapability, handleRemoveCapability, newPeerUrl, handleAddPeer, handleRemovePeer]);
 
   return (
     <ConfigurationModal

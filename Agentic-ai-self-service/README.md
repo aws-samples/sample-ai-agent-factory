@@ -84,6 +84,26 @@ Beyond the core canvas, the platform layers an enterprise feature set on top of 
 - **Human-in-the-Loop (HITL)** -- Inject a `human_approval` tool into an agent; pending approvals land in an owner-scoped queue (`GET /api/hitl/pending`, `POST /api/hitl/{id}/decision`) surfaced in the UI inbox.
 - **Team Workspaces & Sharing** -- Share a workflow with viewer/editor roles (`/api/workflows/{id}/share`); list workspace-visible workflows (`GET /api/workspaces`). Owner-only mutation with escalation guards.
 
+### Enterprise governance & operations (Loom-inspired)
+
+An enterprise governance layer modeled on [awslabs/loom](https://github.com/awslabs/loom/) — scope-based access control, least-privilege automation, private networking, config-driven human oversight, and FinOps self-drive. Each item is wired end-to-end and verified against real AWS. See [`docs/LOOM_ENHANCEMENT_PLAN.md`](docs/LOOM_ENHANCEMENT_PLAN.md) for the full plan and live-verification evidence.
+
+- **Scope-based RBAC/ABAC** -- Two-dimensional authz from Cognito groups: tenant role (`t-admin`/`t-user`) × resource groups (`g-admins-*`/`g-users-*`) → a scope set; `require_scopes()` guards every write route. Advisory by default (`RBAC_ENFORCE=false`: log-would-deny), flips to fail-closed 403. Scopes never bypass `owner_sub` tenant isolation. See [RBAC Rollout](docs/RBAC_ROLLOUT.md).
+- **3rd-party OIDC IdP federation** -- Context-gated Cognito identity provider federates an external IdP (e.g. Okta) and maps its group claim into the platform's internal group model, so federated users inherit RBAC scopes without a separate platform account (`-c oidc_client_id=… -c oidc_groups_claim=groups`).
+- **JIT least-privilege permission requests** -- `POST /api/permissions/requests` files a scoped IAM-widening request; a registry-admin approves it, which `PutRolePolicy`s a `JIT-{id}` inline policy scoped **only** to platform `AgentCore*` roles and validated against an action allowlist (no `iam:`/`sts:`/`*` escalation). Reject closes the request.
+- **Config-driven HITL approval policies** -- `/api/settings/approval-policies` define glob-matched tool/action rules (`require` block vs `notify`). On deploy, enabled policies serialize into the runtime's `LOOM_APPROVAL_POLICIES` env var so a **guaranteed** `BeforeToolInvocation` hook forces approval on matching tools — independent of whether the model chooses to call `human_approval`. Applies to both codegen and managed-harness runtimes.
+- **OBO identity propagation & inspection** -- `GET /api/identity/token-info` decodes the caller JWT (issuer/scopes/claims) for the UI; `POST /api/identity/test-obo` validates an RFC 8693 on-behalf-of exchange config (`TOKEN_EXCHANGE` / `JWT_AUTHORIZATION_GRANT`) without a live user token. The connector `delegationMode=obo` mints an AgentCore OAuth2 provider so the agent calls downstream **as the end-user**.
+- **VPC-egress runtimes & named profiles** -- `/api/settings/vpc-profiles` define reusable `{subnet_ids, security_group_ids}` bundles; a deploy referencing one by name (`vpcProfile`) threads `networkMode=VPC` into the runtime so it runs in customer private subnets. Unknown profile → 400 at deploy. Optional PrivateLink ingress IaC (NLB + VPCEndpointService + SG) ships as a downloadable add-on ([`docs/privatelink-ingress.yaml`](docs/privatelink-ingress.yaml)).
+- **Import existing runtime by ARN** -- `POST /api/runtime/import` adopts an externally-built AgentCore Runtime as a caller-owned deployment (no codegen/deploy) so pre-existing runtimes join the platform's version/slot/cost/observability surfaces.
+- **Integration gating** -- When AWS Agent Registry federation is enabled, a deploy referencing an MCP/A2A integration is rejected unless each referenced integration is `APPROVED` in the registry (no-op when federation is off).
+- **AWS Agent Registry federation** -- Opt-in federation of deployed agents into the org-wide AWS-native Agent Registry (`CreateRegistryRecord` → submit → approve → search), auto-registered on deploy and removed on teardown.
+- **Cost budgets + scheduled FinOps reconciliation** -- `/api/cost/budgets` set per owner/agent/tag monthly limits (warn + hard thresholds) evaluated against the same `gen_ai.usage` pipeline as the cost dashboard. A daily EventBridge sweep (`cost_reconcile_step`) walks every budget, sums month-to-date actual spend, and emits a `BudgetBreach` CloudWatch metric for any warn/over — so an idle-but-overspending agent trips an alarm even when nobody opens the dashboard.
+- **Live model catalog** -- `GET /api/models` discovers text models live from Bedrock (`list_inference_profiles` + `list_foundation_models`, filtered to TEXT/ACTIVE/ON_DEMAND) merged with a curated friendly-label overlay, replacing the hardcoded picker; falls back to a static list if Bedrock is unreachable.
+- **Rich admin analytics** -- `GET /api/admin/audit` (admin scope) rolls up audited writes into `by_action`/`by_actor` plus `distinct_actors`, `distinct_sessions`, and a chart-ready `by_day` time-series rendered as summary tiles + a dependency-free activity chart.
+- **End-user Chat persona + admin View-as** -- Consumer personas (`t-user`) get a streaming ChatPage instead of the builder canvas; admins get the builder and can preview the consumer experience. Persona derives purely from Cognito group scopes — no privilege change.
+- **Multi-region / multi-account deploy (opt-in)** -- Off by default; when enabled, a region allowlist + cross-account `sts:AssumeRole` into a name-scoped `AgentCoreFlowsDeploymentRole` (with a dry-run identity check) lets a deploy land in a registered target account.
+- **Non-Bedrock provider credentials** -- Selecting any non-Bedrock provider (OpenAI/Anthropic/Gemini/LiteLLM/Mistral/Groq/DeepSeek/Together/Writer) injects the provider key from an `agentcore-provider/*`-namespaced secret into the generated model init at deploy time (`PROVIDER_API_KEY`, optional `PROVIDER_BASE_URL`).
+
 ## Security
 
 ### Infrastructure Hardening
@@ -267,6 +287,33 @@ aws cloudformation describe-stacks \
 
 Look for `CloudFrontUrl` (frontend), `ApiGatewayUrl` (API), and `S3BucketName` (frontend assets).
 
+### First sign-in — assign a persona (why a fresh user is "read-only")
+
+> **Important:** `COGNITO_USERS="you@example.com"` pre-creates a Cognito **user** but assigns it to **no group**. Group membership is what grants capability **scopes** (see [Personas & access](#agent-registry--roles--approval)), so a brand-new user signs in with an **empty `cognito:groups` claim → zero scopes**. The backend ships **advisory** (`RBAC_ENFORCE=false`), so the API still lets you *browse*, but the UI fails closed on scopes it can't find — the **"Clone to canvas" button is disabled**, publish is hidden, etc. That "read-only" experience is expected until you assign a group. The registry detail view's **Access tab** shows exactly which actions you can/can't perform and why.
+
+Assign yourself a persona after the first deploy (identity is an AWS/IdP responsibility — there is no in-app user-management screen by design):
+
+```bash
+POOL_ID=$(aws cognito-idp list-user-pools --max-results 40 \
+  --query "UserPools[?Name=='agentcore-workflow-dev-users'].Id | [0]" --output text)
+
+# Full access (all scopes) + admin UI + registry approver:
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username you@example.com --group-name g-admins-super
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username you@example.com --group-name t-admin
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username you@example.com --group-name registry-admin
+
+# ...or a standard end-user who can build/deploy/invoke + browse & clone the registry:
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username you@example.com --group-name g-users-default
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username you@example.com --group-name t-user
+```
+
+**Sign out and back in** (or refresh the token) after changing groups — scopes are read from the ID token at sign-in, so the change takes effect on the next token issuance. See the [group → scope map](#agent-registry--roles--approval) and [`docs/PERSONAS.md`](docs/PERSONAS.md) for the full model.
+
 ### Configuration
 
 | Variable | Default | Description |
@@ -274,7 +321,7 @@ Look for `CloudFrontUrl` (frontend), `ApiGatewayUrl` (API), and `S3BucketName` (
 | `ENVIRONMENT_NAME` | `dev` | Environment identifier (e.g., `dev`, `staging`, `prod`) |
 | `AWS_REGION` | `us-east-1` | Target AWS region |
 | `PROJECT_NAME` | `agentcore-workflow` | Project name used for resource naming and tagging |
-| `COGNITO_USERS` | *(none)* | Comma-separated emails for pre-created Cognito users (e.g., `user1@example.com,user2@example.com`) |
+| `COGNITO_USERS` | *(none)* | Comma-separated emails for pre-created Cognito users (e.g., `user1@example.com,user2@example.com`). **Users are created in NO group → no scopes → read-only until you assign a persona** (see [First sign-in](#first-sign-in--assign-a-persona-why-a-fresh-user-is-read-only)). |
 | `OTEL_ENDPOINT` | *(unset)* | OTLP HTTP endpoint for platform-level observability (e.g. `https://cloud.langfuse.com/api/public/otel`). When set, every platform Lambda + every deployed agent exports traces here. Per-canvas Observability nodes can still add resource attributes additively but cannot override the endpoint. |
 | `OTEL_AUTH_SECRET_ARN` | *(unset)* | ARN of a Secrets Manager secret holding the precomputed `Authorization` header value (e.g. `Basic <base64>`). Created by `scripts/bootstrap-otel-secret.sh`. Required when `OTEL_ENDPOINT` is set. |
 | `OTEL_SAMPLE_RATE` | `1.0` | Trace sampling ratio (0.0–1.0). |
@@ -591,12 +638,13 @@ The CDK stack (`infra/stacks/platform_stack.py`) creates:
 - **Deployment Lambda** -- Handles deploy initiation, status polling, runtime testing, runtime deletion (full cleanup), AI tool generation via Claude Sonnet on Bedrock, and CloudFormation template generation/export. 120s timeout for LLM calls.
 - **Step Functions State Machine** -- Orchestrates multi-step deployments: validate -> [mcp_server?] -> [knowledge_base?] -> [gateway?] -> [memory?] -> [policy?] -> codegen -> IAM -> runtime configure -> runtime launch -> [evaluation?] -> [auth?] -> status update. 3 retries with exponential backoff per step.
 - **Step Lambdas** -- Individual Lambda functions for each deployment step (validate, codegen, IAM, gateway, knowledge_base, mcp_server, memory, policy, evaluation, runtime_configure, runtime_launch, auth, status_update).
-- **DynamoDB Tables** -- Workflows + Deployments (TTL + GSI on workflow_id/runtime_id), plus the enterprise-feature stores: `agent-versions`, `runtime-slots`, `agent-registry`, `prompt-library`, `hitl-requests` (24h TTL), `triggers`, `usage-events` (90d TTL), and `flows`. Each user-data table carries an `owner_sub` GSI for owner-scoped list queries.
-- **Cognito User Pool Groups** -- `registry-admin` and `registry-developer` for the registry two-persona approval model (see [Agent Registry — Roles & Approval](#agent-registry--roles--approval)).
+- **DynamoDB Tables** -- Workflows + Deployments (TTL + GSI on workflow_id/runtime_id), plus the enterprise-feature stores: `agent-versions`, `runtime-slots`, `agent-registry`, `prompt-library`, `hitl-requests` (24h TTL), `triggers`, `usage-events` (90d TTL), `budget`, `audit` (90d TTL), `permission-requests`, the shared org-config table (tag policies + VPC profiles + approval policies), and `flows`. Each user-data table carries an `owner_sub` GSI for owner-scoped list queries.
+- **Cognito User Pool Groups** -- `registry-admin` / `registry-developer` for the registry two-persona approval model, plus the RBAC groups `t-admin`/`t-user` (tenant role) and `g-admins-*`/`g-users-*` (resource scopes). See [Agent Registry — Roles & Approval](#agent-registry--roles--approval).
+- **EventBridge Rules** -- `policy-sweep` (rate 5 min — converges pending Cedar `ENFORCE` permits to `ACTIVE`) and `cost-reconcile` (rate 24 h — sweeps budgets for month-to-date breaches). Both invoke the Deployment Lambda with a sentinel payload.
 - **S3 Bucket** -- Frontend static assets (CloudFront OAI access only) + AgentCore dependency bundles + deployment code artifacts.
 - **CloudFront Distribution** -- HTTPS, SPA routing (404/403 -> index.html), API Gateway as additional origin for `/api/*`.
 - **SSM Parameters** -- CORS origins, AWS region, DynamoDB table name under `/agentcore-workflow/{env}/`.
-- **IAM Roles** -- Least-privilege per function: Workflow Lambda gets DynamoDB workflows + SSM read; Deployment Lambda gets DynamoDB deployments + bedrock-agentcore + cleanup permissions (Cognito, Lambda, STS); Step Lambdas get full deployment permissions (IAM, Lambda, Cognito, S3, bedrock-agentcore).
+- **IAM Roles** -- Least-privilege per function: Workflow Lambda gets DynamoDB workflows + SSM read; Deployment Lambda gets DynamoDB deployments + bedrock-agentcore + `bedrock:ListFoundationModels`/`ListInferenceProfiles` (live model catalog) + `cloudwatch:PutMetricData` (budget breach) + JIT `iam:PutRolePolicy` scoped to `AgentCore*` roles + cleanup permissions (Cognito, Lambda, STS); Step Lambdas get full deployment permissions (IAM, Lambda, Cognito, S3, bedrock-agentcore).
 - **CloudWatch Log Groups** -- Lambda and Step Functions execution logs.
 
 All resources are tagged with `environment` and `project` for cost tracking.
@@ -754,13 +802,31 @@ The CFN generator supports both built-in templates (all 7) and free-form diagram
 
 ## Agent Registry — Roles & Approval
 
-The registry turns a deployed agent into a reusable, governed blueprint others can discover and clone. It uses a **two-persona model driven entirely by Cognito groups** — no separate auth system.
+The registry turns a deployed agent into a reusable, governed blueprint others can discover and clone. Access is **driven entirely by Cognito groups** — no separate auth system. Two group families cooperate:
 
-### Personas
+1. **Scope groups** (`g-admins-*` / `g-users-*`) grant capability **scopes** — the actual enforcement boundary. Registry actions map to `registry:read` (browse, view, **clone**) and `registry:write` (publish, edit, delete, approve, reject).
+2. **Registry-persona groups** (`registry-admin` / `registry-developer`) drive the **two-persona approval workflow** (who may approve vs only publish).
+
+> **A user in NO group has NO scopes → effectively read-only.** `registry:read` gates the **Clone to canvas** button, so a freshly-provisioned user (e.g. one created via `COGNITO_USERS`, which assigns no group) can browse but **cannot clone or publish** until a scope group is assigned. This is the most common "why is Clone greyed out?" cause — see [First sign-in — assign a persona](#first-sign-in--assign-a-persona-why-a-fresh-user-is-read-only). The registry detail **Access tab** renders exactly which actions the signed-in user can/can't perform, and why.
+
+### Group → scope map (source of truth: `backend/src/app/services/rbac.py` `GROUP_SCOPES`)
+
+| Cognito group | Scopes granted | Registry capability |
+|---------------|----------------|---------------------|
+| `g-admins-super` (legacy `org-admin`) | `admin` (implies all) + `invoke` | Everything |
+| `g-admins-registry` (legacy `registry-admin`) | `registry:read`, `registry:write` | Publish, clone, edit/delete, approve/reject |
+| `g-users-default` | `invoke`, `agent:read`, `cost:read`, `prompt:read`, **`registry:read`** | Browse + **clone** approved entries; publish own via `registry-developer`; **cannot** approve |
+| `g-admins-security` | `settings:read/write`, `observability:read` | — (no registry scopes) |
+| `g-admins-cost` | `cost:read/write` | — (no registry scopes) |
+| *(no group)* | *(none)* | Browse only (advisory backend); **Clone disabled** |
+
+`t-admin` / `t-user` are a separate **UI dimension** — they decide which admin sections render, not what you're authorized to do (scopes do that). A typical user gets one type group + one scope group. Mirrored in the UI at `frontend/src/auth/scopes.ts` (keep in sync).
+
+### Registry personas (the approval workflow, on top of scopes)
 
 | Persona | Cognito group | Can do | Cannot do |
 |---------|---------------|--------|-----------|
-| **Developer** | `registry-developer` (or any signed-in user) | Publish (entry enters `pending`); view **approved** entries + their **own** (any status); clone approved/own; edit/delete their own | Approve or reject; see other users' pending entries |
+| **Developer** | `registry-developer` (+ a scope group granting `registry:read`/`registry:write`) | Publish (entry enters `pending`); view **approved** entries + their **own** (any status); clone approved/own; edit/delete their own | Approve or reject; see other users' pending entries |
 | **Admin** | `registry-admin` (legacy `org-admin` also honored) | Everything a developer can, **plus**: see the pending-review queue, approve/reject submissions, delete any entry | — |
 
 ### Entry lifecycle
@@ -783,15 +849,31 @@ developer publishes ──▶ pending ──▶ (admin approves) ──▶ appro
 
 ### Assigning personas
 
+All groups below are created by the CDK stack at deploy time (`platform_stack.py`), so you only *assign* users. Give each user a **scope group** (what they can do) plus the matching **registry-persona group** (approver vs publisher):
+
 ```bash
-# Create the two Cognito groups (the CDK stack also defines them at deploy time)
-aws cognito-idp admin-add-user-to-group \
-  --user-pool-id <POOL_ID> --username alice@example.com --group-name registry-admin
-aws cognito-idp admin-add-user-to-group \
-  --user-pool-id <POOL_ID> --username bob@example.com   --group-name registry-developer
+POOL_ID=$(aws cognito-idp list-user-pools --max-results 40 \
+  --query "UserPools[?Name=='agentcore-workflow-dev-users'].Id | [0]" --output text)
+
+# An approver: registry admin scopes + the approver persona + admin UI
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username alice@example.com --group-name g-admins-registry
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username alice@example.com --group-name registry-admin
+
+# A standard developer: read-only defaults incl. registry:read (browse + clone),
+# plus the developer persona so they can publish their own blueprints
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username bob@example.com --group-name g-users-default
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username bob@example.com --group-name registry-developer
 ```
 
-In the UI: developers click **Publish to Registry** in the Deploy panel after a deploy, and **Registry** in the component palette to browse and **Clone to Canvas**. Admins additionally see a **Pending review** tab with Approve / Reject actions.
+> Group changes take effect on the **next token issuance** — have the user **sign out and back in** (or refresh the session). If Cognito is federated to Okta/Entra, map the IdP group claim to these names and assign in the IdP instead — zero platform change.
+
+In the UI: developers click **Publish to Registry** in the Deploy panel after a deploy, and **Registry** in the component palette to browse and **Clone to Canvas** (Clone requires `registry:read`). Admins additionally see a **Pending review** tab with Approve / Reject actions.
+
+> The registry roles above are one slice of the platform-wide persona/scope model. For the full group→scope map (super-admin, security, cost, standard-user, …), how personas are *defined* (`rbac.py` `GROUP_SCOPES`), *created* (CDK `CfnUserPoolGroup`), and *assigned* (AWS Cognito / federated IdP), see [`docs/PERSONAS.md`](docs/PERSONAS.md).
 
 ## Deployment Templates
 

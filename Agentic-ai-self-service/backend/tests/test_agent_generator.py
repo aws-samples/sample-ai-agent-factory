@@ -24,7 +24,7 @@ def _runtime_node(suffix="rt", name="my_agent"):
             "name": name,
             "framework": "strands_agents",
             "modelProvider": "bedrock",
-            "model": {"modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0"},
+            "model": {"modelId": "us.anthropic.claude-sonnet-5"},
             "systemPrompt": "You are helpful.",
             "protocol": "HTTP",
             "pythonRuntime": "PYTHON_3_13",

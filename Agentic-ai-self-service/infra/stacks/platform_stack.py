@@ -23,18 +23,51 @@ from aws_cdk import aws_cloudfront as cloudfront
 from aws_cdk import aws_cloudfront_origins as origins
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as dynamodb
+from aws_cdk import aws_events as events
+from aws_cdk import aws_events_targets as events_targets
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as _lambda
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_s3_deployment as s3_deployment
+from aws_cdk import aws_sns as sns
+from aws_cdk import aws_kms as kms
+from aws_cdk import aws_cloudwatch_actions as cw_actions
 from aws_cdk import aws_ssm as ssm
 from aws_cdk import aws_stepfunctions as sfn
 from aws_cdk import aws_stepfunctions_tasks as sfn_tasks
 from aws_cdk import aws_wafv2 as wafv2
 from aws_cdk import custom_resources as cr
 import cdk_nag
-from constructs import Construct
+import jsii
+from constructs import Construct, IConstruct
+
+
+@jsii.implements(cdk.IAspect)
+class _OverflowPolicyNagSuppressor:
+    """Aspect: suppress IAM5 wildcard findings on CDK auto-generated
+    ``OverflowPolicy<N>`` managed policies.
+
+    CDK splits an over-large inline role policy into ``OverflowPolicy<N>``
+    constructs during SYNTHESIS — after a stack's __init__ runs — so a
+    suppression applied in __init__ can miss them (their creation races with
+    the grant that tips the policy over the IAM size limit). An Aspect visits
+    every node during synthesis, catching overflow policies whenever they land.
+    """
+
+    def __init__(self, reasons):
+        self._reasons = reasons
+
+    def visit(self, node: IConstruct) -> None:
+        if node.node.id.startswith("OverflowPolicy"):
+            try:
+                cdk_nag.NagSuppressions.add_resource_suppressions(
+                    node,
+                    [cdk_nag.NagPackSuppression(id=nid, reason=reason)
+                     for nid, reason in self._reasons],
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
 
 class PlatformStack(cdk.Stack):
@@ -96,6 +129,13 @@ class PlatformStack(cdk.Stack):
         self.triggers_table = self._create_triggers_table()
         # Phase 3 Gap 3H — prompt library / catalog table.
         self.prompt_library_table = self._create_prompt_library_table()
+        # Phase 2 (Loom) governance tagging — tag policies + tag profiles table.
+        self.tag_policy_table = self._create_tag_policy_table()
+        # Phase 4 (Loom) FinOps — cost budgets table.
+        self.budget_table = self._create_budget_table()
+        # Phase 5 (Loom) — action-audit trail table.
+        self.audit_table = self._create_audit_table()
+        self.permission_requests_table = self._create_permission_requests_table()
         self.logging_bucket = self._create_logging_bucket()
         self.artifacts_bucket = self._create_artifacts_bucket()
         self._upload_agentcore_deps()
@@ -414,6 +454,43 @@ class PlatformStack(cdk.Stack):
         )
         return table
 
+    def _create_permission_requests_table(self) -> dynamodb.Table:
+        """Loom-study 1.6 — JIT IAM permission-request workflow table.
+
+        PK ``org_id`` (tenant), SK ``request_id`` (sortable). GSI
+        ``status-request_id-index`` powers the admin pending-review queue. A
+        builder requests specific IAM actions+resources on a managed role with a
+        justification; a security approver approves, and on approval the role's
+        inline policy is widened. No TTL — an auditable escalation history.
+        """
+        table = dynamodb.Table(
+            self,
+            "PermissionRequestsTable",
+            table_name=f"{self._project}-{self._env}-permission-requests",
+            partition_key=dynamodb.Attribute(
+                name="org_id", type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="request_id", type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=self._removal_policy,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+        table.add_global_secondary_index(
+            index_name="status-request_id-index",
+            partition_key=dynamodb.Attribute(
+                name="status", type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="request_id", type=dynamodb.AttributeType.STRING,
+            ),
+        )
+        return table
+
     def _create_triggers_table(self) -> dynamodb.Table:
         """Phase 3 Gap 3F — DynamoDB table for scheduled / event triggers.
 
@@ -495,6 +572,82 @@ class PlatformStack(cdk.Stack):
             ),
         )
         return table
+
+    def _create_tag_policy_table(self) -> dynamodb.Table:
+        """Phase 2 (Loom) governance tagging — tag policies + tag profiles.
+
+        PK ``org_id``, SK ``POLICY#<key>`` | ``PROFILE#<name>`` (single-table,
+        record kind discriminated by SK prefix — see services/tag_policy_store).
+        Low-volume org-wide config; no GSI. Mirrors _create_prompt_library_table.
+        """
+        return dynamodb.Table(
+            self,
+            "TagPolicyTable",
+            table_name=f"{self._project}-{self._env}-tag-policy",
+            partition_key=dynamodb.Attribute(
+                name="org_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="sk",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=self._removal_policy,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_budget_table(self) -> dynamodb.Table:
+        """Phase 4 (Loom) FinOps — cost budgets table.
+
+        PK ``org_id``, SK ``BUDGET#<scope>#<key>`` (single-table; see
+        services/budget_store). Low-volume org config; no GSI.
+        """
+        return dynamodb.Table(
+            self,
+            "BudgetTable",
+            table_name=f"{self._project}-{self._env}-budget",
+            partition_key=dynamodb.Attribute(
+                name="org_id", type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="sk", type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=self._removal_policy,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_audit_table(self) -> dynamodb.Table:
+        """Phase 5 (Loom) — action-audit trail.
+
+        PK ``org_id``, SK ``<ts_iso>#<event_id>`` (sortable). TTL on ``ttl``
+        (90-day) bounds growth. See services/audit_store.
+        """
+        return dynamodb.Table(
+            self,
+            "AuditTable",
+            table_name=f"{self._project}-{self._env}-audit",
+            partition_key=dynamodb.Attribute(
+                name="org_id", type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="sk", type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=self._removal_policy,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            time_to_live_attribute="ttl",
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
 
     def _create_usage_events_table(self) -> dynamodb.Table:
         """Phase 2 Gap 2B — DynamoDB table for explicit per-invocation usage
@@ -672,7 +825,7 @@ class PlatformStack(cdk.Stack):
 
     def _create_artifacts_bucket(self) -> s3.Bucket:
         """Create S3 bucket for deployment code artifacts."""
-        return s3.Bucket(
+        bucket = s3.Bucket(
             self,
             "ArtifactsBucket",
             bucket_name=f"{self._project}-{self._env}-artifacts-{self.region}-{self.account}",
@@ -687,6 +840,56 @@ class PlatformStack(cdk.Stack):
                 s3.LifecycleRule(expiration=Duration.days(90), prefix="deployments/"),
             ],
         )
+        # Phase 7 (opt-in) cross-account deploy: a target account's
+        # AgentCoreFlowsDeploymentRole (assumed by the step Lambdas) must
+        # read/write code artifacts here — the artifacts bucket is a PLATFORM
+        # resource, not per-account. Grant scoped to that exact role name in ANY
+        # account, on the deployments/ prefix only (not the agentcore-deps/
+        # bundles). No effect until cross-account deploy is used. IAM on the
+        # assuming side is still name-scoped, so this is a two-sided, bounded grant.
+        # Phase 7 (opt-in) cross-account deploy: a target account's
+        # AgentCoreFlowsDeploymentRole (assumed by the step Lambdas) must
+        # read/write code artifacts here — the artifacts bucket is a PLATFORM
+        # resource, not per-account.
+        #
+        # S3 resource policies (unlike IAM) require CONCRETE account principals:
+        #   * a wildcard-account ARN ("arn:aws:iam::*:role/...") → "Invalid principal"
+        #   * Principal:* (even condition-gated) → blocked by BlockPublicPolicy
+        #     (the bucket is correctly BLOCK_ALL).
+        # So trusted deploy-target account IDs are supplied at CDK-deploy time via
+        # context (`-c deploy_target_accounts=111111111111,222222222222`) and we
+        # add a CONCRETE-principal grant per account, scoped to the deployments/
+        # prefix + that exact role name. Empty by default → no cross-account
+        # grant (feature dormant). Registering a NEW target account is therefore
+        # a two-step, deliberate action: add the id to context + redeploy, THEN
+        # register via the admin API. This is the security-correct topology under
+        # BlockPublicAccess; documented in docs/RBAC_ROLLOUT.md / cross-account.
+        _target_accounts_ctx = self.node.try_get_context("deploy_target_accounts") or ""
+        _target_accounts = [a.strip() for a in str(_target_accounts_ctx).split(",") if a.strip()]
+        if _target_accounts:
+            bucket.add_to_resource_policy(
+                iam.PolicyStatement(
+                    sid="CrossAccountDeployRoleArtifacts",
+                    effect=iam.Effect.ALLOW,
+                    principals=[
+                        iam.ArnPrincipal(f"arn:aws:iam::{acct}:role/{_rname}")
+                        for acct in _target_accounts
+                        # Both the deploy role (uploads the code zip) AND the
+                        # runtime role (reads it at agent boot) need artifacts
+                        # access across the account boundary.
+                        for _rname in ("AgentCoreFlowsDeploymentRole", "AgentCoreFlowsRuntimeRole")
+                    ],
+                    actions=["s3:GetObject", "s3:PutObject"],
+                    resources=[
+                        # code artifacts written/read per deploy
+                        bucket.arn_for_objects("deployments/*"),
+                        # pre-built dependency bundles the codegen step downloads
+                        # to bundle into the runtime zip (read-only in practice).
+                        bucket.arn_for_objects("agentcore-deps/*"),
+                    ],
+                )
+            )
+        return bucket
 
     def _upload_agentcore_deps(self) -> None:
         """Upload pre-built aarch64 dependency bundles to S3 artifacts bucket.
@@ -963,6 +1166,12 @@ class PlatformStack(cdk.Stack):
                 "APP_AWS_REGION": self.region,
                 "POWERTOOLS_SERVICE_NAME": "workflow",
                 "PYTHONPATH": "/var/task/src:/var/task:/var/task/lib",
+                # Scope-based RBAC (services/rbac.py). Advisory by default: the
+                # dependency logs would-be denials but allows the request. Flip
+                # to "true" (redeploy) to enforce 403s once group grants are
+                # validated in real traffic — mirrors the Cedar LOG_ONLY→ENFORCE
+                # promotion. Overridable via `cdk deploy -c rbac_enforce=true`.
+                "RBAC_ENFORCE": self.node.try_get_context("rbac_enforce") or "false",
             },
             log_group=logs.LogGroup(
                 self,
@@ -990,6 +1199,15 @@ class PlatformStack(cdk.Stack):
         )
         # DynamoDB deployments table: read/write
         self.deployments_table.grant_read_write_data(role)
+        # Loom-study 1.6 — JIT IAM permission-request workflow. The router
+        # (create/list/approve/reject) is on the deployment Lambda; on approve it
+        # widens a managed role's inline policy, so grant PutRolePolicy scoped to
+        # the platform's own AgentCore* managed roles (never arbitrary roles).
+        self.permission_requests_table.grant_read_write_data(role)
+        role.add_to_policy(iam.PolicyStatement(
+            actions=["iam:PutRolePolicy", "iam:GetRolePolicy"],
+            resources=[f"arn:aws:iam::{self.account}:role/AgentCore*"],
+        ))
         # Phase 1 Gap 1A — versions + slots tables. The deployment Lambda is
         # the read-write owner: handle_deploy() seeds the AgentVersion row,
         # and the versions router promotes/rolls back slots.
@@ -1010,6 +1228,13 @@ class PlatformStack(cdk.Stack):
         # Phase 3 Gap 3H — prompt library. routers/prompts.py (mounted on the
         # deployment Lambda) reads/writes this table + the owner_sub GSI.
         self.prompt_library_table.grant_read_write_data(role)
+        # Phase 2 (Loom) governance tagging. routers/tags.py + the deploy-time
+        # tag resolver (services/tag_policy_store) read/write this table.
+        self.tag_policy_table.grant_read_write_data(role)
+        # Phase 4 (Loom) FinOps — cost budgets (routers/cost.py budgets_router).
+        self.budget_table.grant_read_write_data(role)
+        # Phase 5 (Loom) — audit trail (middleware writes, /api/admin/audit reads).
+        self.audit_table.grant_read_write_data(role)
         # states:StartExecution on the state machine (granted after SM creation)
         # SSM read
         role.add_to_policy(
@@ -1036,6 +1261,10 @@ class PlatformStack(cdk.Stack):
                 actions=[
                     "bedrock:InvokeModel",
                     "bedrock:InvokeModelWithResponseStream",
+                    # Loom-study 5.1 — live model catalog (/api/models) discovers
+                    # available Bedrock models + inference profiles at request time.
+                    "bedrock:ListFoundationModels",
+                    "bedrock:ListInferenceProfiles",
                     # KB cleanup on runtime delete (Bug 90).
                     "bedrock:GetKnowledgeBase",
                     "bedrock:ListKnowledgeBases",
@@ -1055,6 +1284,11 @@ class PlatformStack(cdk.Stack):
                     # cascades through Get/Delete on runtime + endpoint +
                     # gateway + memory + policy resources.
                     "bedrock-agentcore:InvokeAgentRuntime",
+                    # Phase 1 (Loom-study 1.2) — OBO dry-run (routers/identity
+                    # test-obo) exchanges the caller's JWT for an on-behalf-of
+                    # downstream token to PROVE delegation runs as the user.
+                    "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
+                    "bedrock-agentcore:GetResourceOauth2Token",
                     "bedrock-agentcore:CreateAgentRuntime",
                     "bedrock-agentcore:GetAgentRuntime",
                     "bedrock-agentcore:UpdateAgentRuntime",
@@ -1097,6 +1331,20 @@ class PlatformStack(cdk.Stack):
                     "bedrock-agentcore:GetPolicyEngine",
                     "bedrock-agentcore:DeletePolicyEngine",
                     "bedrock-agentcore:ListPolicyEngines",
+                    # Phase 6 (Loom) — AWS Agent Registry federation (opt-in).
+                    # The registry router publishes/approves/searches records in
+                    # the org-wide AWS-native catalog. Public preview; feature is
+                    # off unless an admin configures a registryId.
+                    "bedrock-agentcore:CreateRegistry",
+                    "bedrock-agentcore:GetRegistry",
+                    "bedrock-agentcore:CreateRegistryRecord",
+                    "bedrock-agentcore:GetRegistryRecord",
+                    "bedrock-agentcore:ListRegistryRecords",
+                    "bedrock-agentcore:SubmitRegistryRecordForApproval",
+                    "bedrock-agentcore:UpdateRegistryRecordStatus",
+                    "bedrock-agentcore:UpdateRegistryRecord",
+                    "bedrock-agentcore:DeleteRegistryRecord",
+                    "bedrock-agentcore:SearchRegistryRecords",
                     "bedrock-agentcore:CreatePolicy",
                     "bedrock-agentcore:DeletePolicy",
                     # UpdatePolicy: the lazy promoter recovers a CREATE_FAILED
@@ -1180,6 +1428,18 @@ class PlatformStack(cdk.Stack):
                     "logs:DeleteLogGroup",
                 ],
                 resources=["*"],
+            )
+        )
+        # Phase 7 (opt-in) — cross-account deployment. The deploy path assumes a
+        # target account's deployment role (services/deploy_target.session_for_
+        # target). NAME-SCOPED to the agreed role name so this is NOT a blanket
+        # AssumeRole: each target account must create a role named exactly
+        # `AgentCoreFlowsDeploymentRole` trusting this platform account. Feature
+        # is OFF by default (no target = no assume-role call is ever made).
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["sts:AssumeRole"],
+                resources=["arn:aws:iam::*:role/AgentCoreFlowsDeploymentRole"],
             )
         )
         # Phase 1 Gap 1D — dashboard URL probe + cascade-delete on
@@ -1373,6 +1633,21 @@ class PlatformStack(cdk.Stack):
                 "TRIGGERS_TABLE_NAME": self.triggers_table.table_name,
                 # Phase 3 Gap 3H — prompt library table (routers/prompts.py).
                 "PROMPT_LIBRARY_TABLE_NAME": self.prompt_library_table.table_name,
+                # Phase 2 (Loom) governance tagging table (routers/tags.py +
+                # deploy-time tag resolver).
+                "TAG_POLICY_TABLE_NAME": self.tag_policy_table.table_name,
+                # Phase 4 (Loom) FinOps — cost budgets table (routers/cost.py).
+                "BUDGET_TABLE_NAME": self.budget_table.table_name,
+                # Phase 5 (Loom) — audit trail table (middleware + admin router).
+                "AUDIT_TABLE_NAME": self.audit_table.table_name,
+                # Loom-study 1.6 — JIT IAM permission-request workflow table.
+                "PERMISSION_REQUESTS_TABLE_NAME": self.permission_requests_table.table_name,
+                # Loom-study 1.1 — 3rd-party IdP group-claim mapping. When OIDC
+                # federation is configured, a federated user's groups arrive under
+                # this claim and are mapped to internal g-*/t-* groups by
+                # services/auth.extract_cognito_groups. Empty when not federated.
+                "OIDC_GROUPS_CLAIM": self.node.try_get_context("oidc_groups_claim") or "",
+                "OIDC_GROUP_MAP": self.node.try_get_context("oidc_group_map") or "",
                 "ARTIFACTS_BUCKET_NAME": self.artifacts_bucket.bucket_name,
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
@@ -1410,6 +1685,53 @@ class PlatformStack(cdk.Stack):
                     f"{self._project}-{self._env}-deployment"
                 ],
             )
+        )
+
+        # Loom-study 0.6 — scheduled Cedar-ENFORCE promotion sweep. A Cedar
+        # ENFORCE gateway attaches FAIL-CLOSED with its permit pending until the
+        # gateway's authorization plane converges (20-59+ min, AWS-side). The lazy
+        # promoter only fires on USER touchpoints (invoke / status GET); an idle
+        # ENFORCE agent with no touchpoints would stay deny-all indefinitely
+        # (observed live in P-PLAT-027). This rule self-drives the promoter every
+        # 5 min by invoking the deployment Lambda with a {"policy_sweep": true}
+        # sentinel (handled in deployment_handler.handler → policy_sweep_step).
+        events.Rule(
+            self,
+            "PolicySweepSchedule",
+            rule_name=f"{self._project}-{self._env}-policy-sweep",
+            description="Self-drive pending Cedar ENFORCE promotions (Loom-study 0.6)",
+            schedule=events.Schedule.rate(Duration.minutes(5)),
+            targets=[
+                events_targets.LambdaFunction(
+                    fn,
+                    event=events.RuleTargetInput.from_object({"policy_sweep": True}),
+                    retry_attempts=2,
+                )
+            ],
+        )
+
+        # Loom-study 5.3 — scheduled FinOps cost reconciliation. Cost analytics
+        # are QUERY-TIME (summarize_from_logs reads CloudWatch on demand), so a
+        # budget breach only emits the BudgetBreach metric when a human opens the
+        # cost panel. An idle-but-overspending agent would never trip an ops
+        # alarm. This rule self-drives breach detection DAILY by invoking the
+        # deployment Lambda with a {"cost_reconcile": true} sentinel (handled in
+        # deployment_handler.handler → cost_reconcile_step): it walks every
+        # budget, sums month-to-date actual cost from logs, and emits the metric
+        # for any warn/over budget — no user touchpoint required.
+        events.Rule(
+            self,
+            "CostReconcileSchedule",
+            rule_name=f"{self._project}-{self._env}-cost-reconcile",
+            description="Self-drive budget-breach detection month-to-date (Loom-study 5.3)",
+            schedule=events.Schedule.rate(Duration.hours(24)),
+            targets=[
+                events_targets.LambdaFunction(
+                    fn,
+                    event=events.RuleTargetInput.from_object({"cost_reconcile": True}),
+                    retry_attempts=2,
+                )
+            ],
         )
         return fn
 
@@ -1587,12 +1909,24 @@ class PlatformStack(cdk.Stack):
         # and these tables hold no secrets.
         self.agent_versions_table.grant_read_write_data(role)
         self.runtime_slots_table.grant_read_write_data(role)
+        # Loom-study 2.2 — runtime_configure/harness steps READ approval policies
+        # (tag-policy table) to inject LOOM_APPROVAL_POLICIES into the runtime.
+        if step_name in {"runtime_configure", "harness"}:
+            self.tag_policy_table.grant_read_data(role)
         role.add_to_policy(iam.PolicyStatement(
             actions=["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
             resources=[f"arn:aws:ssm:{self.region}:{self.account}:parameter/agentcore-workflow/{self._env}/*"],
         ))
         role.add_to_policy(iam.PolicyStatement(actions=["sts:GetCallerIdentity"], resources=["*"]))
         role.add_to_policy(iam.PolicyStatement(actions=["cloudwatch:PutMetricData"], resources=["*"]))
+        # Phase 7 (opt-in) cross-account deploy: each step Lambda assumes the
+        # target account's deployment role (services/step_clients). NAME-SCOPED
+        # to the agreed role name — NOT a blanket AssumeRole. Feature is off by
+        # default (no target → no assume-role call is ever made).
+        role.add_to_policy(iam.PolicyStatement(
+            actions=["sts:AssumeRole"],
+            resources=["arn:aws:iam::*:role/AgentCoreFlowsDeploymentRole"],
+        ))
 
         # ── Per-step grants ──────────────────────────────────────────────────
         # Every step that writes to S3 (codegen, gateway, knowledge_base,
@@ -1654,6 +1988,34 @@ class PlatformStack(cdk.Stack):
                 # Defence-in-depth: these roles may only be passed to AgentCore,
                 # never to another service (matches the policy-step grant below).
                 conditions={"StringEquals": {"iam:PassedToService": "bedrock-agentcore.amazonaws.com"}},
+            ))
+
+        # Non-Bedrock model providers: runtime_configure / harness resolve the
+        # agent's provider_api_key_ref secret at deploy time and inject it as the
+        # PROVIDER_API_KEY env var. Scope GetSecretValue to the agentcore-provider/
+        # namespace (same namespace-lock discipline as the OTEL secret) so a
+        # tenant cannot point provider_api_key_ref at an arbitrary foreign secret.
+        if step_name in {"runtime_configure", "harness"}:
+            role.add_to_policy(iam.PolicyStatement(
+                actions=["secretsmanager:GetSecretValue"],
+                resources=[
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:agentcore-provider/*",
+                ],
+            ))
+            # VPC egress (Loom-study 0.1): a VPC-mode runtime makes AWS lazily
+            # create the AWSServiceRoleForBedrockAgentCoreNetwork service-linked
+            # role on first use. Without CreateServiceLinkedRole (scoped to that
+            # SLR) the FIRST VPC-mode deploy in an account fails. Scoped by the
+            # iam:AWSServiceName condition so it can only create THIS SLR.
+            role.add_to_policy(iam.PolicyStatement(
+                actions=["iam:CreateServiceLinkedRole"],
+                resources=[
+                    f"arn:aws:iam::{self.account}:role/aws-service-role/"
+                    "network.bedrock-agentcore.amazonaws.com/AWSServiceRoleForBedrockAgentCoreNetwork*"
+                ],
+                conditions={"StringEquals": {
+                    "iam:AWSServiceName": "network.bedrock-agentcore.amazonaws.com"
+                }},
             ))
 
         # policy step calls update_gateway(roleArn=...) when binding the
@@ -2286,6 +2648,10 @@ class PlatformStack(cdk.Stack):
                     # Phase 2 Gap 2D — HITL table name so runtime_configure_step
                     # injects it into the runtime's environmentVariables.
                     "HITL_REQUESTS_TABLE_NAME": self.hitl_requests_table.table_name,
+                    # Loom-study 2.2 — approval policies live in the tag-policy
+                    # table; runtime_configure_step reads them to inject
+                    # LOOM_APPROVAL_POLICIES into the runtime (guaranteed HITL hook).
+                    "TAG_POLICY_TABLE_NAME": self.tag_policy_table.table_name,
                     "ARTIFACTS_BUCKET_NAME": self.artifacts_bucket.bucket_name,
                     "ENVIRONMENT": self._env,
                     "APP_AWS_REGION": self.region,
@@ -2727,6 +3093,32 @@ class PlatformStack(cdk.Stack):
             refresh_token_validity=Duration.days(7),
         )
 
+        # Loom-study 1.1 — OPT-IN 3rd-party OIDC IdP federation (Entra/Okta/Auth0/
+        # generic OIDC). Federating INTO Cognito (vs Loom's in-app multi-issuer
+        # validation) keeps the API-Gateway Cognito JWT authorizer unchanged —
+        # the serverless-correct fit. Enabled only when oidc_* context is set, so
+        # the default password-auth flow is undisturbed. Config:
+        #   -c oidc_provider_name=Okta -c oidc_issuer=https://... \
+        #   -c oidc_client_id=... -c oidc_client_secret=... \
+        #   [-c oidc_groups_claim=groups] [-c oidc_hosted_domain_prefix=...]
+        _oidc_name = self.node.try_get_context("oidc_provider_name")
+        _oidc_issuer = self.node.try_get_context("oidc_issuer")
+        _oidc_client_id = self.node.try_get_context("oidc_client_id")
+        _oidc_client_secret = self.node.try_get_context("oidc_client_secret")
+        if _oidc_name and _oidc_issuer and _oidc_client_id and _oidc_client_secret:
+            self._configure_oidc_federation(
+                pool, client,
+                provider_name=str(_oidc_name),
+                issuer=str(_oidc_issuer),
+                client_id=str(_oidc_client_id),
+                client_secret=str(_oidc_client_secret),
+                groups_claim=str(self.node.try_get_context("oidc_groups_claim") or "groups"),
+                domain_prefix=str(
+                    self.node.try_get_context("oidc_hosted_domain_prefix")
+                    or f"{self._project}-{self._env}-{self.account}"
+                )[:63],
+            )
+
         # Two-persona approval workflow groups for the agent registry.
         # 'registry-admin' members can approve/reject submissions and manage any
         # entry; 'registry-developer' members publish (pending) and manage their
@@ -2749,6 +3141,30 @@ class PlatformStack(cdk.Stack):
             description="Registry publishers",
             precedence=10,
         )
+
+        # Scope-based RBAC groups (services/rbac.py GROUP_SCOPES). Two dimensions:
+        #   * type groups (t-admin / t-user) drive which UI sections render;
+        #   * resource groups (g-admins-* / g-users-*) grant capability scopes.
+        # A user belongs to one type group + one or more resource groups.
+        # Enforcement is advisory until RBAC_ENFORCE=true on the API Lambda.
+        _rbac_groups = [
+            ("TypeAdminGroup", "t-admin", "UI: all admin sections", 1),
+            ("TypeUserGroup", "t-user", "UI: end-user sections only", 20),
+            ("AdminSuperGroup", "g-admins-super", "All scopes", 1),
+            ("AdminRegistryGroup", "g-admins-registry", "registry:read/write", 5),
+            ("AdminSecurityGroup", "g-admins-security", "settings + observability", 5),
+            ("AdminCostGroup", "g-admins-cost", "cost:read/write", 5),
+            ("UserDefaultGroup", "g-users-default", "invoke + read-only defaults", 20),
+        ]
+        for _cid, _gname, _desc, _prec in _rbac_groups:
+            cognito.CfnUserPoolGroup(
+                self,
+                _cid,
+                user_pool_id=pool.user_pool_id,
+                group_name=_gname,
+                description=_desc,
+                precedence=_prec,
+            )
 
         # Pre-create users from context (comma-separated string via env var).
         #
@@ -2812,6 +3228,66 @@ class PlatformStack(cdk.Stack):
 
         return pool, client
 
+    def _configure_oidc_federation(
+        self, pool, client, *, provider_name: str, issuer: str,
+        client_id: str, client_secret: str, groups_claim: str, domain_prefix: str,
+    ) -> None:
+        """Attach an external OIDC IdP to the Cognito pool (Loom-study 1.1).
+
+        Adds (1) an OIDC identity provider with attribute mapping (email + the
+        external group claim mapped to the Cognito ``custom:ext_groups`` attribute
+        via a pre-token trigger downstream / or directly into a group claim), (2)
+        a hosted-UI domain so the SPA can redirect to the IdP, and (3) supported
+        identity providers + OAuth flows on the app client. Idempotent-by-name.
+
+        Group→internal-group mapping: the external claim (e.g. Okta ``groups``) is
+        surfaced so services/auth can normalize it — see docs/PERSONAS.md. Cognito
+        maps OIDC claims to standard/custom attributes; the group claim is carried
+        through and read by the backend group resolver.
+        """
+        idp = cognito.CfnUserPoolIdentityProvider(
+            self,
+            "OidcIdentityProvider",
+            user_pool_id=pool.user_pool_id,
+            provider_name=provider_name,
+            provider_type="OIDC",
+            provider_details={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "oidc_issuer": issuer,
+                "authorize_scopes": "openid email profile",
+                "attributes_request_method": "GET",
+            },
+            # Map the OIDC email claim to the Cognito email attribute so federated
+            # users resolve to an email identity. The group claim is carried in the
+            # token and normalized backend-side (services/auth group resolver).
+            attribute_mapping={"email": "email"},
+        )
+
+        # Hosted-UI domain — required for the federated authorization-code redirect.
+        cognito.CfnUserPoolDomain(
+            self,
+            "CognitoHostedDomain",
+            user_pool_id=pool.user_pool_id,
+            domain=domain_prefix,
+        )
+
+        # Wire the app client to accept the federated IdP + code flow. The client
+        # must depend on the IdP existing first (CFN ordering).
+        cfn_client = client.node.default_child
+        cfn_client.supported_identity_providers = ["COGNITO", provider_name]
+        cfn_client.allowed_o_auth_flows = ["code"]
+        cfn_client.allowed_o_auth_scopes = ["openid", "email", "profile"]
+        cfn_client.allowed_o_auth_flows_user_pool_client = True
+        cfn_client.add_dependency(idp)
+
+        CfnOutput(self, "OidcProviderName", value=provider_name)
+        CfnOutput(self, "OidcGroupsClaim", value=groups_claim)
+        CfnOutput(
+            self, "CognitoHostedUiDomain",
+            value=f"https://{domain_prefix}.auth.{self.region}.amazoncognito.com",
+        )
+
     # ------------------------------------------------------------------
     # API Gateway HTTP API
     # ------------------------------------------------------------------
@@ -2854,11 +3330,20 @@ class PlatformStack(cdk.Stack):
         )
 
         # Workflow Lambda integration
-        workflow_integration = apigw_integrations.HttpLambdaIntegration("WorkflowIntegration", self.workflow_lambda)
+        # scope_permission_to_route=False grants ONE broad lambda:InvokeFunction
+        # permission per integration instead of one AWS::Lambda::Permission per
+        # route. The deployment Lambda backs ~29 routes; per-route permissions
+        # pushed its resource-based policy past the 20,480-byte hard limit
+        # (deploy failed with "final policy size ... bigger than the limit").
+        # A single wildcard-source-ARN permission is functionally equivalent
+        # (API Gateway is still the only invoker) and keeps the policy tiny.
+        workflow_integration = apigw_integrations.HttpLambdaIntegration(
+            "WorkflowIntegration", self.workflow_lambda, scope_permission_to_route=False
+        )
 
         # Deployment Lambda integration
         deployment_integration = apigw_integrations.HttpLambdaIntegration(
-            "DeploymentIntegration", self.deployment_lambda
+            "DeploymentIntegration", self.deployment_lambda, scope_permission_to_route=False
         )
 
         # JWT Authorizer (Cognito)
@@ -2938,7 +3423,9 @@ class PlatformStack(cdk.Stack):
         )
         api.add_routes(
             path="/api/runtime/{proxy+}",
-            methods=[apigwv2.HttpMethod.DELETE, apigwv2.HttpMethod.GET],
+            # POST added for /api/runtime/import (Loom-study 1.5 — adopt an
+            # externally-built runtime by ARN).
+            methods=[apigwv2.HttpMethod.DELETE, apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
             integration=deployment_integration,
             authorizer=jwt_authorizer,
         )
@@ -3053,6 +3540,43 @@ class PlatformStack(cdk.Stack):
             integration=deployment_integration,
             authorizer=jwt_authorizer,
         )
+        # Verified external MCP-server catalog (read-only). GET list + GET /{id}
+        # detail on the deployment Lambda (routers/mcp_servers.py). Browsable in
+        # the Registry UI alongside published agent blueprints.
+        api.add_routes(
+            path="/api/mcp-servers",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        api.add_routes(
+            path="/api/mcp-servers/{proxy+}",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Phase 1 (Loom-study 1.2/1.3) — identity inspection + OBO dry-run.
+        # GET /token-info + POST /test-obo on the deployment Lambda (routers/identity).
+        api.add_routes(
+            path="/api/identity/{proxy+}",
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Loom-study 1.6 — JIT IAM permission requests (create/list/approve/reject).
+        api.add_routes(
+            path="/api/permissions/{proxy+}",
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Loom-study 5.1 — live model catalog.
+        api.add_routes(
+            path="/api/models",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
         # Phase 3 Gap 3H — prompt management library. POST save + GET list on
         # the collection, plus GET/PUT/DELETE on /{prompt_name} via proxy.
         # Mounted on the deployment Lambda (routers/prompts.py).
@@ -3070,6 +3594,39 @@ class PlatformStack(cdk.Stack):
                 apigwv2.HttpMethod.PUT,
                 apigwv2.HttpMethod.DELETE,
             ],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Phase 2 (Loom) governance tagging — routers/tags.py mounts
+        # /api/settings/tags + /api/settings/tag-profiles on the deployment
+        # Lambda. Bug 21 enumeration: HTTP API needs explicit routes per path.
+        api.add_routes(
+            path="/api/settings/{proxy+}",
+            methods=[
+                apigwv2.HttpMethod.GET,
+                apigwv2.HttpMethod.POST,
+                apigwv2.HttpMethod.DELETE,
+            ],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Phase 4 (Loom) FinOps — routers/cost.py budgets_router mounts
+        # /api/cost/budgets on the deployment Lambda.
+        api.add_routes(
+            path="/api/cost/{proxy+}",
+            methods=[
+                apigwv2.HttpMethod.GET,
+                apigwv2.HttpMethod.POST,
+                apigwv2.HttpMethod.DELETE,
+            ],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Phase 5 (Loom) — admin audit dashboard (/api/admin/audit) + Phase 7
+        # deployment-targets management (/api/admin/deploy-targets*, POST).
+        api.add_routes(
+            path="/api/admin/{proxy+}",
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
             integration=deployment_integration,
             authorizer=jwt_authorizer,
         )
@@ -3426,7 +3983,33 @@ class PlatformStack(cdk.Stack):
     # ------------------------------------------------------------------
 
     def _create_lambda_alarms(self) -> None:
-        """Create CloudWatch alarms for all Lambda functions."""
+        """Create CloudWatch alarms for Lambdas + the new governance surfaces.
+
+        Production hardening (Part B): an SNS alarm topic routes EVERY alarm to
+        operators; DynamoDB throttle alarms cover the governance stores; a Step
+        Functions ExecutionsFailed alarm covers the deploy pipeline; and a metric
+        filter on the RBAC "would-deny" advisory log line lets an admin SEE what
+        enforcement WOULD block before flipping RBAC_ENFORCE=true.
+        """
+        # --- SNS alarm topic: single fan-out for all alarms ---------------
+        alarm_topic = sns.Topic(
+            self,
+            "AlarmTopic",
+            topic_name=f"{self._project}-{self._env}-alarms",
+            display_name="AgentCore platform alarms",
+            # Security best practice (cdk-nag SNS2/SNS3): SSE at rest + enforce
+            # TLS in transit. AWS-managed SNS key keeps it zero-ops.
+            master_key=kms.Alias.from_alias_name(self, "SnsManagedKey", "alias/aws/sns"),
+            enforce_ssl=True,
+        )
+        self.alarm_topic = alarm_topic
+        _action = cw_actions.SnsAction(alarm_topic)
+
+        def _wire(alarm: cloudwatch.Alarm) -> None:
+            alarm.add_alarm_action(_action)
+            alarm.add_ok_action(_action)
+
+        # --- Lambda error + throttle alarms (all functions) ---------------
         all_fns: dict[str, _lambda.Function] = {
             "workflow": self.workflow_lambda,
             "deployment": self.deployment_lambda,
@@ -3434,7 +4017,7 @@ class PlatformStack(cdk.Stack):
         }
         for name, fn in all_fns.items():
             slug = name.replace("_", "-")
-            fn.metric_errors(period=Duration.minutes(5)).create_alarm(
+            _wire(fn.metric_errors(period=Duration.minutes(5)).create_alarm(
                 self,
                 f"Alarm-{slug}-errors",
                 alarm_name=f"{self._project}-{self._env}-{slug}-errors",
@@ -3442,8 +4025,8 @@ class PlatformStack(cdk.Stack):
                 evaluation_periods=1,
                 comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
                 treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            )
-            fn.metric_throttles(period=Duration.minutes(5)).create_alarm(
+            ))
+            _wire(fn.metric_throttles(period=Duration.minutes(5)).create_alarm(
                 self,
                 f"Alarm-{slug}-throttles",
                 alarm_name=f"{self._project}-{self._env}-{slug}-throttles",
@@ -3451,6 +4034,66 @@ class PlatformStack(cdk.Stack):
                 evaluation_periods=1,
                 comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
                 treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            ))
+
+        # --- p99 latency on the two user-facing API Lambdas ---------------
+        for name, fn in (("workflow", self.workflow_lambda), ("deployment", self.deployment_lambda)):
+            _wire(fn.metric_duration(period=Duration.minutes(5), statistic="p99").create_alarm(
+                self,
+                f"Alarm-{name}-p99",
+                alarm_name=f"{self._project}-{self._env}-{name}-p99-latency",
+                threshold=25000,  # ms — below the 29s API-GW ceiling
+                evaluation_periods=3,
+                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            ))
+
+        # --- DynamoDB throttle alarms on the governance stores ------------
+        _ddb_tables = {
+            "workflows": self.workflows_table,
+            "deployments": self.deployments_table,
+            "tag-policy": self.tag_policy_table,
+            "budget": self.budget_table,
+            "audit": self.audit_table,
+        }
+        for tname, table in _ddb_tables.items():
+            _wire(table.metric("ThrottledRequests", period=Duration.minutes(5), statistic="Sum").create_alarm(
+                self,
+                f"Alarm-ddb-{tname}-throttle",
+                alarm_name=f"{self._project}-{self._env}-ddb-{tname}-throttle",
+                threshold=1,
+                evaluation_periods=1,
+                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            ))
+
+        # --- Step Functions: deploy pipeline failures ---------------------
+        if hasattr(self, "state_machine"):
+            _wire(self.state_machine.metric_failed(period=Duration.minutes(5)).create_alarm(
+                self,
+                "Alarm-sfn-deploy-failed",
+                alarm_name=f"{self._project}-{self._env}-deploy-executions-failed",
+                threshold=1,
+                evaluation_periods=1,
+                comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+                treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            ))
+
+        # --- RBAC advisory "would-deny" metric filter --------------------
+        # services/rbac.py logs "RBAC advisory (would-deny): ..." in advisory
+        # mode. This metric filter surfaces it as a CloudWatch metric so an admin
+        # can quantify what RBAC_ENFORCE=true WOULD block before enabling it
+        # (safe rollout — see docs/RBAC_ROLLOUT.md). No alarm (informational).
+        if hasattr(self, "workflow_lambda") and self.workflow_lambda.log_group is not None:
+            logs.MetricFilter(
+                self,
+                "RbacWouldDenyMetricFilter",
+                log_group=self.workflow_lambda.log_group,
+                metric_namespace=f"{self._project}/{self._env}/rbac",
+                metric_name="WouldDeny",
+                filter_pattern=logs.FilterPattern.literal('"RBAC advisory (would-deny)"'),
+                metric_value="1",
+                default_value=0,
             )
 
     # ------------------------------------------------------------------
@@ -3496,19 +4139,14 @@ class PlatformStack(cdk.Stack):
         ]
         _suppress(self.workflow_lambda.role, iam_reasons)
         _suppress(self.deployment_lambda.role, iam_reasons)
-        # When the deployment role's inline policy exceeds the IAM size limit, CDK
-        # splits the excess into a separate "OverflowPolicy<N>" managed-policy
-        # resource that apply_to_children on the role does NOT reach. Suppress the
-        # same IAM5 wildcard findings on it by path (best-effort; ignored if absent).
-        for _n in range(1, 4):
-            try:
-                cdk_nag.NagSuppressions.add_resource_suppressions_by_path(
-                    self,
-                    f"/{self.stack_name}/DeploymentLambdaRole/OverflowPolicy{_n}/Resource",
-                    [cdk_nag.NagPackSuppression(id=nid, reason=reason) for nid, reason in iam_reasons],
-                )
-            except Exception:  # noqa: BLE001
-                pass
+        # When a role's inline policy exceeds the IAM size limit, CDK splits the
+        # excess into auto-generated "OverflowPolicy<N>" managed policies DURING
+        # SYNTHESIS — after this __init__-time method runs — so a fixed by-path
+        # suppression can miss them once a grant tips the policy over the limit
+        # (hit when the Phase 2 tag-policy grant grew the deployment role). An
+        # Aspect visits nodes during synth and suppresses the same IAM5 wildcard
+        # findings on any OverflowPolicy, whenever/wherever CDK creates it.
+        cdk.Aspects.of(self).add(_OverflowPolicyNagSuppressor(iam_reasons))
         # Bug 157 — streaming test Lambda role: same invoke-on-* wildcards as the
         # deployment Lambda's test path (InvokeAgentRuntime/InvokeHarness).
         if hasattr(self, "stream_lambda"):

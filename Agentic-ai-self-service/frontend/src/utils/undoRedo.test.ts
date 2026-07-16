@@ -444,7 +444,7 @@ describe('Helper Functions', () => {
       fc.assert(
         fc.property(workflowStateArb, nodeArb, (state, extraNode) => {
           const modified = cloneWorkflowState(state);
-          modified.nodes.push(extraNode as any);
+          modified.nodes.push(extraNode as typeof modified.nodes[number]);
           expect(areStatesEqual(state, modified)).toBe(false);
         }),
         { numRuns: 100 }

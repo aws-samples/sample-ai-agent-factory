@@ -20,10 +20,11 @@ from typing import Optional
 
 import boto3
 from botocore.exceptions import ClientError
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.services.auth import get_caller_sub
+from app.services.rbac import require_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,7 @@ class PlatformDefaultsResponse(BaseModel):
     service_name_prefix: Optional[str] = None
 
 
-@router.get("/observability/platform-defaults", response_model=PlatformDefaultsResponse)
+@router.get("/observability/platform-defaults", response_model=PlatformDefaultsResponse, dependencies=[Depends(require_scopes("observability:read"))])
 def get_platform_defaults() -> PlatformDefaultsResponse:
     """Return platform-level OTEL defaults so the UI can show them as locked.
 
@@ -126,7 +127,7 @@ def get_platform_defaults() -> PlatformDefaultsResponse:
     )
 
 
-@router.post("/observability/credentials", response_model=StoreCredentialsResponse)
+@router.post("/observability/credentials", response_model=StoreCredentialsResponse, dependencies=[Depends(require_scopes("observability:write"))])
 def store_credentials(
     request: StoreCredentialsRequest,
     raw_request: Request,

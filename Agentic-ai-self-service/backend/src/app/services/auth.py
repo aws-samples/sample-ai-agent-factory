@@ -21,6 +21,7 @@ heuristic ever returns False on a production code path (Critic Finding 3).
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 from fastapi import HTTPException, Request
@@ -93,6 +94,97 @@ def assert_owner(record_owner_sub: Optional[str], caller_sub: str) -> None:
         raise HTTPException(status_code=404, detail="Not found")
 
 
+def extract_cognito_groups(request: Request) -> list[str]:
+    """Return the caller's ``cognito:groups`` as a normalized list of strings.
+
+    The claim may arrive as a Python list, a JSON-array string (``"[a, b]"``),
+    or a bracketed/space/comma-joined string depending on how the HTTP API JWT
+    authorizer serializes it — so we parse all shapes. Returns ``[]`` when the
+    claim is absent or unparseable (fail-closed: no groups → no scopes).
+
+    NOTE: returns ``[]`` in local dev (no ``aws.event``). Callers that grant
+    local-dev full access (get_caller_role, is_registry_admin, rbac) handle the
+    no-event case explicitly BEFORE calling this — do not infer local-dev here.
+    """
+    import json as _json
+
+    aws_event = request.scope.get("aws.event") if request.scope else None
+    if aws_event is None:
+        return []
+
+    try:
+        authz = aws_event["requestContext"]["authorizer"]
+        jwt = authz.get("jwt") or authz
+        claims = jwt.get("claims") or jwt
+    except (KeyError, TypeError, AttributeError) as e:
+        logger.warning("Could not extract claims from authorizer: %s", e)
+        return []
+
+    groups = _parse_group_claim(claims.get("cognito:groups"))
+
+    # Loom-study 1.1 — 3rd-party IdP federation. A federated user's groups arrive
+    # under the IdP's own claim (e.g. Okta "groups"), NOT cognito:groups. When
+    # OIDC_GROUPS_CLAIM is configured, ALSO read that claim and map its values to
+    # our internal g-*/t-* vocabulary via OIDC_GROUP_MAP (JSON {external:internal}).
+    # Unmapped external groups are dropped (fail-closed: an unknown IdP group
+    # grants nothing). This keeps rbac.GROUP_SCOPES keyed on our own names.
+    ext_claim = os.environ.get("OIDC_GROUPS_CLAIM")
+    if ext_claim:
+        ext_groups = _parse_group_claim(claims.get(ext_claim))
+        if ext_groups:
+            try:
+                mapping = _json.loads(os.environ.get("OIDC_GROUP_MAP") or "{}")
+            except ValueError:
+                mapping = {}
+            for g in ext_groups:
+                mapped = mapping.get(g)
+                if mapped:
+                    groups.append(str(mapped))
+    # De-dup while preserving order.
+    seen: set[str] = set()
+    return [g for g in groups if not (g in seen or seen.add(g))]
+
+
+def _parse_group_claim(raw) -> list[str]:
+    """Parse a group claim that may be a list, JSON-array string, or delimited."""
+    import json as _json
+
+    if isinstance(raw, list):
+        return [str(g) for g in raw]
+    if isinstance(raw, str) and raw:
+        s = raw.strip()
+        if s.startswith("["):
+            try:
+                parsed = _json.loads(s)
+                if isinstance(parsed, list):
+                    return [str(g) for g in parsed]
+            except ValueError:
+                pass
+        s = s.strip("[]")
+        return [g.strip() for g in s.replace(",", " ").split() if g.strip()]
+    return []
+
+
+def get_caller_claims(request: Request) -> dict:
+    """Return ALL JWT claims the authorizer injected for the caller (or {}).
+
+    Reuses the same authorizer-context extraction as get_caller_sub /
+    extract_cognito_groups. Used by the token-info endpoint (Loom-study 1.3) to
+    show the signed-in user their decoded identity/claims. Returns {} in local
+    dev or when no authorizer context is present.
+    """
+    aws_event = request.scope.get("aws.event") if request.scope else None
+    if aws_event is None:
+        return {}
+    try:
+        authz = aws_event["requestContext"]["authorizer"]
+        jwt = authz.get("jwt") or authz
+        claims = jwt.get("claims") or jwt
+        return dict(claims) if isinstance(claims, dict) else {}
+    except (KeyError, TypeError, AttributeError):
+        return {}
+
+
 # Gap 2E: org-wide RBAC role from the Cognito group claim. ADVISORY ONLY.
 # The per-workflow ACL (services/workspace_acl.py) is the authoritative authz
 # check for view/edit/share; this role must NEVER bypass that ACL (a group=
@@ -104,46 +196,16 @@ _ROLE_PRECEDENCE = {"org-admin": 3, "editor": 2, "viewer": 1, "none": 0}
 def get_caller_role(request: Request) -> str:
     """Return the caller's highest-privilege Cognito group role.
 
-    One of 'org-admin' | 'editor' | 'viewer' | 'none'. Mirrors the defensive
-    authorizer-claim walk in get_caller_sub. The cognito:groups claim may be a
-    JSON-array string, a comma/space-joined string, or a list depending on the
-    HTTP API JWT authorizer/token serialization, so we parse all shapes.
+    One of 'org-admin' | 'editor' | 'viewer' | 'none'. Group parsing is shared
+    with the rest of the auth layer via extract_cognito_groups.
     """
-    import json as _json
-
     aws_event = request.scope.get("aws.event") if request.scope else None
     if aws_event is None:
         # Local dev: single-user keeps full access, like _LOCAL_DEV_SUB.
         return "org-admin"
 
-    groups: list[str] = []
-    try:
-        authz = aws_event["requestContext"]["authorizer"]
-        jwt = authz.get("jwt") or authz
-        claims = jwt.get("claims") or jwt
-        raw = claims.get("cognito:groups")
-    except (KeyError, TypeError, AttributeError) as e:
-        logger.warning("Could not extract cognito:groups from authorizer: %s", e)
-        raw = None
-
-    if isinstance(raw, list):
-        groups = [str(g) for g in raw]
-    elif isinstance(raw, str) and raw:
-        s = raw.strip()
-        if s.startswith("["):
-            try:
-                parsed = _json.loads(s)
-                if isinstance(parsed, list):
-                    groups = [str(g) for g in parsed]
-            except ValueError:
-                groups = []
-        if not groups:
-            # Cognito also delivers groups as a bracketed/space/comma list.
-            s = s.strip("[]")
-            groups = [g.strip() for g in s.replace(",", " ").split() if g.strip()]
-
     best = "none"
-    for g in groups:
+    for g in extract_cognito_groups(request):
         if _ROLE_PRECEDENCE.get(g, 0) > _ROLE_PRECEDENCE[best]:
             best = g
     return best
@@ -159,41 +221,13 @@ _REGISTRY_ADMIN_GROUPS = {"registry-admin", "org-admin"}
 def is_registry_admin(request: Request) -> bool:
     """True if the caller is a registry approver (group registry-admin/org-admin).
 
-    Reuses the exact defensive cognito:groups claim parsing from get_caller_role
-    (list / JSON-array string / comma-or-space-joined string). In local dev (no
-    aws.event) returns True, mirroring get_caller_role's full-access local path.
+    Reuses the shared cognito:groups claim parsing (extract_cognito_groups). In
+    local dev (no aws.event) returns True, mirroring get_caller_role's
+    full-access local path.
     """
-    import json as _json
-
     aws_event = request.scope.get("aws.event") if request.scope else None
     if aws_event is None:
         # Local dev: single-user keeps full access, like get_caller_role.
         return True
 
-    groups: list[str] = []
-    try:
-        authz = aws_event["requestContext"]["authorizer"]
-        jwt = authz.get("jwt") or authz
-        claims = jwt.get("claims") or jwt
-        raw = claims.get("cognito:groups")
-    except (KeyError, TypeError, AttributeError) as e:
-        logger.warning("Could not extract cognito:groups from authorizer: %s", e)
-        raw = None
-
-    if isinstance(raw, list):
-        groups = [str(g) for g in raw]
-    elif isinstance(raw, str) and raw:
-        s = raw.strip()
-        if s.startswith("["):
-            try:
-                parsed = _json.loads(s)
-                if isinstance(parsed, list):
-                    groups = [str(g) for g in parsed]
-            except ValueError:
-                groups = []
-        if not groups:
-            # Cognito also delivers groups as a bracketed/space/comma list.
-            s = s.strip("[]")
-            groups = [g.strip() for g in s.replace(",", " ").split() if g.strip()]
-
-    return any(g in _REGISTRY_ADMIN_GROUPS for g in groups)
+    return any(g in _REGISTRY_ADMIN_GROUPS for g in extract_cognito_groups(request))

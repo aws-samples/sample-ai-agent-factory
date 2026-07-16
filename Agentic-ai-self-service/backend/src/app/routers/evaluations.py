@@ -36,6 +36,7 @@ from app.services.agent_versions_store import (
     get_versions_store,
 )
 from app.services.auth import assert_owner, get_caller_sub
+from app.services.rbac import require_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ def _resolve_owned_runtime_id(
     return version.runtime_id, version.version_id
 
 
-@router.get("/{runtime_name}/evaluation-config")
+@router.get("/{runtime_name}/evaluation-config", dependencies=[Depends(require_scopes("eval:read"))])
 async def get_evaluation_config(
     runtime_name: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -130,7 +131,7 @@ async def get_evaluation_config(
     }
 
 
-@router.get("/{runtime_name}/evaluations")
+@router.get("/{runtime_name}/evaluations", dependencies=[Depends(require_scopes("eval:read"))])
 async def list_evaluation_results(
     runtime_name: str,
     hours: int = 24,
@@ -265,7 +266,7 @@ async def list_evaluation_results(
     }
 
 
-@router.get("/{runtime_name}/dashboard-url")
+@router.get("/{runtime_name}/dashboard-url", dependencies=[Depends(require_scopes("eval:read"))])
 async def get_dashboard_url(
     runtime_name: str,
     caller_sub: str = Depends(get_caller_sub),

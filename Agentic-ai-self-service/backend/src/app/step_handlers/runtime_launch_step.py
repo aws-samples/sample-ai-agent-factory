@@ -12,6 +12,7 @@ import os
 import boto3
 
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
+from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.observability_dashboard import put_dashboard_for_runtime
 from app.services.runtime_deployer import (
@@ -50,7 +51,7 @@ def handler(event: dict, context) -> dict:
         if not runtime_id:
             raise RuntimeError("No runtime_id provided from configure step")
 
-        agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
+        agentcore_ctrl = step_clients.client(event, "bedrock-agentcore-control")
 
         # Manifest: re-record the runtime for generic teardown (idempotent with
         # runtime_configure_step; covers any caller that reaches launch without

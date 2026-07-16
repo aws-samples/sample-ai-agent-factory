@@ -27,7 +27,7 @@ from app.services.code_generator import generate_agent_code
 def _cfg():
     return RuntimeConfig(
         name="hitl_t",
-        model={"modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0"},
+        model={"modelId": "us.anthropic.claude-sonnet-5"},
         systemPrompt="You approve sensitive actions.",
         modelProvider="bedrock",
     )

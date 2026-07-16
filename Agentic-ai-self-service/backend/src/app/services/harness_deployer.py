@@ -642,13 +642,76 @@ def invoke_harness(
             "tool_calls": tool_calls,
         }
 
+    # Loom-study 2.4 — HITL for MANAGED (harness) agents. Direct-code agents get
+    # a guaranteed BeforeToolInvocation gate (2.1), but a managed harness runs the
+    # tool inside AWS's loop where we can't inject a hook. Our leverage is the
+    # invoke boundary: inspect the streamed toolUse names against the org's
+    # approval policies and, for a policy-matched "require" tool, RECORD a PENDING
+    # approval + surface approval_required so an operator reviews it. (True mid-loop
+    # blocking of a managed tool needs a gateway-side interceptor — noted in the
+    # plan.) Best-effort; never fails the invoke.
+    approval_required = _harness_approval_check(region, tool_calls, session_id)
+
     return {
         "success": not error,
         "output": "".join(text_parts),
         "stop_reason": stop_reason,
         "tool_calls": tool_calls,
+        "approval_required": approval_required,
         "error": error,
     }
+
+
+def _harness_approval_check(region: str, tool_calls: list, session_id: str) -> list:
+    """Match invoked harness tools against org approval policies; record PENDING
+    rows for "require"-mode matches. Returns the list of matched tool names."""
+    import os
+    import fnmatch
+
+    if not tool_calls:
+        return []
+    pol_table = os.environ.get("TAG_POLICY_TABLE_NAME", "")
+    hitl_table = os.environ.get("HITL_REQUESTS_TABLE_NAME", "")
+    if not pol_table:
+        return []
+    try:
+        from app.services.approval_policy_store import ApprovalPolicyStore
+        policies = ApprovalPolicyStore(pol_table, region).list("default")
+    except Exception:  # noqa: BLE001
+        return []
+    matched: list = []
+    for name in tool_calls:
+        for p in policies:
+            if not p.enabled:
+                continue
+            if any(fnmatch.fnmatch(name or "", pat) for pat in p.tool_match):
+                matched.append(name)
+                if p.mode == "require" and hitl_table:
+                    _record_harness_pending(region, hitl_table, name, session_id)
+                break
+    return matched
+
+
+def _record_harness_pending(region: str, hitl_table: str, tool_name: str, session_id: str) -> None:
+    import os
+    import time
+    import secrets
+
+    try:
+        import boto3
+        ms = int(time.time() * 1000)
+        boto3.resource("dynamodb", region_name=region).Table(hitl_table).put_item(Item={
+            "runtime_id": os.environ.get("HITL_RUNTIME_ID", "harness"),
+            "request_id": "%012x%s" % (ms, secrets.token_hex(10)),
+            "owner_sub": os.environ.get("RUNTIME_OWNER_SUB", ""),
+            "status": "PENDING",
+            "action": ("harness-tool:" + str(tool_name))[:2000],
+            "reason": ("session:" + str(session_id))[:2000],
+            "created_at": ms,
+            "ttl": int(time.time()) + 24 * 60 * 60,
+        })
+    except Exception:  # noqa: BLE001
+        logger.warning("harness HITL pending-record skipped")
 
 
 def _resolve_harness_identifier(agentcore_ctrl, identifier: str) -> str:

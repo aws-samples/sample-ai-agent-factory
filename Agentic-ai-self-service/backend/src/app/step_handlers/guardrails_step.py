@@ -20,6 +20,7 @@ from typing import Optional
 import boto3
 
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
+from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.guardrail_builders import (
     build_contextual_grounding_config,
@@ -187,7 +188,7 @@ def handler(event: dict, context) -> dict:
         region = _get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1"))
         mode = guardrails_config.get("mode", "existing")
 
-        bedrock = boto3.client("bedrock", region_name=region)
+        bedrock = step_clients.client(event, "bedrock")
 
         if mode == "existing":
             # Validate existing guardrail

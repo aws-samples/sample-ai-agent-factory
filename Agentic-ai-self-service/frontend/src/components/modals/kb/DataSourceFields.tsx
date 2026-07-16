@@ -3,6 +3,8 @@
  * Each component renders the fields specific to its data source type.
  */
 
+/* eslint-disable react-refresh/only-export-components */
+
 import { TextField, SelectField } from '../FormFields';
 import type { KnowledgeBaseToolConfig, KBDataSourceType } from '../../../types/components';
 import type { ValidationError } from '../ConfigurationModal';

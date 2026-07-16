@@ -17,6 +17,7 @@ from app.models.deployment_models import (
     DeploymentStepName,
     RuntimeConfig,
 )
+from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.observability import build_otel_env_vars, get_platform_observability_defaults
 from app.services.runtime_deployer import create_agent_runtime, sanitize_runtime_name
@@ -88,7 +89,7 @@ def handler(event: dict, context) -> dict:
         if not s3_bucket:
             raise RuntimeError("No s3_bucket provided from codegen step")
 
-        agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
+        agentcore_ctrl = step_clients.client(event, "bedrock-agentcore-control")
 
         # Build environment variables for the runtime
         env_vars = {}
@@ -102,6 +103,34 @@ def handler(event: dict, context) -> dict:
             else:
                 raw_model_id = ""
             env_vars["MODEL_ID"] = _to_cross_region_model_id(raw_model_id)
+
+        # Non-Bedrock providers (openai/anthropic/gemini/litellm/mistral/…) read
+        # their credential from PROVIDER_API_KEY. Resolve it from the agent's
+        # provider_api_key_ref (a Secrets Manager ARN) at deploy time and inject
+        # the plaintext value as an env var — same pattern as COGNITO_CLIENT_SECRET
+        # below, so no extra runtime IAM grant is needed. Without this, selecting
+        # any non-Bedrock provider deploys an agent whose model calls 401
+        # (provider_api_key_ref was previously consumed NOWHERE). PROVIDER_BASE_URL
+        # supports OpenAI-compatible gateways / a LiteLLM proxy.
+        _provider = getattr(config, "model_provider", None)
+        if _provider is None and isinstance(model_cfg, dict):
+            _provider = model_cfg.get("provider")
+        elif _provider is None and hasattr(model_cfg, "provider"):
+            _provider = getattr(model_cfg, "provider", None)
+        _provider = _provider or "bedrock"
+        if str(_provider).lower() not in ("bedrock", ""):
+            _key_ref = getattr(config, "provider_api_key_ref", None)
+            if _key_ref:
+                try:
+                    _sm = step_clients.client(event, "secretsmanager")
+                    _val = _sm.get_secret_value(SecretId=_key_ref).get("SecretString", "")
+                    if _val:
+                        env_vars["PROVIDER_API_KEY"] = _val
+                except Exception:  # noqa: BLE001
+                    logger.warning("Could not resolve provider_api_key_ref for %s provider", _provider)
+            _base_url = getattr(config, "provider_base_url", None)
+            if _base_url:
+                env_vars["PROVIDER_BASE_URL"] = str(_base_url)
 
         gateway_result = event.get("gateway_result") or {}
         memory_result = event.get("memory_result") or {}
@@ -174,6 +203,30 @@ def handler(event: dict, context) -> dict:
                 env_vars["HITL_RUNTIME_ID"] = runtime_name
                 env_vars["RUNTIME_OWNER_SUB"] = event.get("owner_sub", "")
 
+        # Loom-study 2.2 — inject org-configured HITL approval policies so the
+        # generated agent's BeforeToolInvocation hook (2.1) GUARANTEES a gate on
+        # matching tools, independent of whether the model calls human_approval.
+        # Also needs the HITL table (the hook records PENDING rows) even when the
+        # "hitl" tool node isn't wired, so set the table when policies exist.
+        try:
+            from app.services.approval_policy_store import ApprovalPolicyStore, serialize_for_agent
+            _pol_table = _get_env("TAG_POLICY_TABLE_NAME", "")
+            if _pol_table:
+                _region = _get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1"))
+                _policies = ApprovalPolicyStore(_pol_table, _region).list(
+                    event.get("owner_org") or "default"
+                )
+                _serialized = serialize_for_agent(_policies)
+                if _serialized:
+                    env_vars["LOOM_APPROVAL_POLICIES"] = _serialized
+                    _hitl_table = _get_env("HITL_REQUESTS_TABLE_NAME", "")
+                    if _hitl_table:
+                        env_vars.setdefault("HITL_REQUESTS_TABLE_NAME", _hitl_table)
+                        env_vars.setdefault("HITL_RUNTIME_ID", runtime_name)
+                        env_vars.setdefault("RUNTIME_OWNER_SUB", event.get("owner_sub", ""))
+        except Exception:  # noqa: BLE001 — policy injection must never fail a deploy
+            logger.warning("approval-policy injection skipped")
+
         # Gap 3A - A2A. Inject agent-card + peer-allowlist env when the runtime
         # is A2A (by protocol OR by an 'a2a' tool node). The self-contained
         # agent reads these at runtime; absent vars fail-closed (no allowlist =>
@@ -215,6 +268,7 @@ def handler(event: dict, context) -> dict:
             python_runtime=config.python_runtime or "PYTHON_3_13",
             protocol=server_protocol,
             env_vars=env_vars if env_vars else None,
+            vpc_config=getattr(config, "vpc_config", None),
         )
 
         # Manifest: record the runtime for generic teardown right after create
@@ -226,8 +280,14 @@ def handler(event: dict, context) -> dict:
         )
         # Per-deploy exec role minted by iam_step (mode == 'per_agent'); skip the
         # Bug-60 shared role, which is reused across every runtime in the stack.
+        # Phase 7 (opt-in) cross-account: the target-account runtime role is
+        # PRE-PROVISIONED by the target-account owner (the platform didn't create
+        # it) — it is shared infrastructure like the home shared role and MUST
+        # NOT be recorded/torn down (deleting it breaks every future deploy into
+        # that account — observed live). Skip recording when cross-account.
+        _cross_account = bool(event.get("target_account_id"))
         shared_role_arn = _get_env("SHARED_RUNTIME_ROLE_ARN", "")
-        if role_arn and role_arn != shared_role_arn:
+        if role_arn and role_arn != shared_role_arn and not _cross_account:
             role_name = role_arn.rsplit("/", 1)[-1]
             if role_name and not role_name.endswith("-shared"):
                 store.record_resource(

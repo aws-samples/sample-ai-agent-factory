@@ -21,6 +21,7 @@ from app.models.deployment_models import (
     DeploymentStepName,
     RuntimeConfig,
 )
+from app.services import step_clients
 from app.services.code_generator import generate_agent_code, generate_requirements
 from app.services.deployment_state_store import DeploymentStateStore
 
@@ -145,8 +146,8 @@ def handler(event: dict, context) -> dict:
             config.name or f"agent-{deployment_id[:8]}"
         )
         version_id = event.get("version_id") or ""
-        bucket = _get_env("ARTIFACTS_BUCKET_NAME", "")
-        region = _get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1"))
+        platform_bucket = _get_env("ARTIFACTS_BUCKET_NAME", "")
+        region = event.get("target_region") or _get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1"))
         entrypoint = config.entrypoint or "agent.py"
         if version_id:
             s3_key = f"deployments/by-name/{friendly_runtime_name}/v/{version_id}/code.zip"
@@ -155,25 +156,45 @@ def handler(event: dict, context) -> dict:
             # (e.g. legacy direct deploys). Falls back to the pre-versioning prefix.
             s3_key = f"deployments/by-name/{friendly_runtime_name}/code.zip"
 
+        # Phase 7 (opt-in) cross-account: AgentCore's runtime code-fetch does NOT
+        # honor cross-account S3 grants — the runtime must read its code zip from
+        # a bucket IN ITS OWN account. So a cross-account deploy uploads the final
+        # code.zip to a PRE-PROVISIONED bucket in the TARGET account
+        # (agentcore-flows-artifacts-<acct>-<region>, created at account
+        # registration), while the dependency BUNDLE is still read from the
+        # platform bucket (cross-account read, granted to the Deployment role).
+        # Same-account is unchanged: everything uses the platform bucket.
+        _target_account = event.get("target_account_id")
+        upload_bucket = (
+            f"agentcore-flows-artifacts-{_target_account}-{region}"
+            if _target_account else platform_bucket
+        )
+
         # Select bundle based on generated code: strands-mcp.zip (43MB) only
         # when code imports strands, otherwise base.zip (18MB) to stay within
         # the 30s runtime initialization window.
         deps_bundle = None
-        if bucket:
-            s3_client = boto3.client("s3", region_name=region)
+        if upload_bucket:
+            # The deploy session (target account when cross-account) uploads the
+            # final zip. The dependency bundle lives ONLY in the platform bucket,
+            # so it's read with the HOME/default session (never the target).
+            upload_s3 = step_clients.client(event, "s3")
+            import boto3 as _boto3
+            deps_s3 = _boto3.client("s3", region_name=_get_env("APP_AWS_REGION", "us-east-1"))
 
             bundle_key = STRANDS_BUNDLE_KEY if _needs_strands_bundle(agent_code) else BASE_BUNDLE_KEY
-            logger.info("Downloading dependency bundle: s3://%s/%s", bucket, bundle_key)
-            deps_bundle = _download_bundle(s3_client, bucket, bundle_key)
-
-            if not deps_bundle:
-                logger.warning("Bundle download failed for %s", bundle_key)
+            if platform_bucket:
+                logger.info("Downloading dependency bundle: s3://%s/%s (platform)", platform_bucket, bundle_key)
+                deps_bundle = _download_bundle(deps_s3, platform_bucket, bundle_key)
+                if not deps_bundle:
+                    logger.warning("Bundle download failed for %s", bundle_key)
 
             from app.services.runtime_deployer import upload_code_to_s3
 
+            logger.info("Uploading code.zip to s3://%s/%s", upload_bucket, s3_key)
             upload_code_to_s3(
-                s3_client,
-                bucket,
+                upload_s3,
+                upload_bucket,
                 s3_key,
                 agent_code,
                 "",
@@ -181,11 +202,11 @@ def handler(event: dict, context) -> dict:
                 deps_bundle=deps_bundle,
             )
         else:
-            logger.warning("No ARTIFACTS_BUCKET_NAME set, code not uploaded to S3")
+            logger.warning("No artifacts bucket resolved, code not uploaded to S3")
 
         return {
             **event,
-            "s3_bucket": bucket,
+            "s3_bucket": upload_bucket,
             "s3_key": s3_key,
             "entrypoint": entrypoint,
             "agent_code": agent_code,
