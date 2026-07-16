@@ -3,6 +3,8 @@
  * Each component renders the fields specific to its vector store type.
  */
 
+/* eslint-disable react-refresh/only-export-components */
+
 import { useState } from 'react';
 import { TextField } from '../FormFields';
 import type { KnowledgeBaseToolConfig, KBVectorStoreType } from '../../../types/components';

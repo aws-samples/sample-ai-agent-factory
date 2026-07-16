@@ -3,7 +3,7 @@
  * Supports SEMANTIC, SUMMARY, and EPISODIC extraction strategies.
  */
 
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { ConfigurationModal, type ValidationError } from './ConfigurationModal';
 import { TextField, FormSection } from './FormFields';
 import type { MemoryConfiguration, MemoryStrategyConfig, ExtractionStrategy } from '../../types/components';
@@ -76,14 +76,12 @@ export function MemoryConfigurationModal({
     ...initialConfig,
   }));
 
-  useEffect(() => {
-    if (isOpen) {
-      setConfig({
-        ...createDefaultMemoryConfig(),
-        ...initialConfig,
-      });
-    }
-  }, [isOpen, initialConfig]);
+  // Reset config when modal opens with new initial config (adjust state during render pattern)
+  const [lastInitial, setLastInitial] = useState<typeof initialConfig | symbol>(Symbol('unset'));
+  if (isOpen && initialConfig !== lastInitial) {
+    setLastInitial(initialConfig);
+    setConfig({ ...createDefaultMemoryConfig(), ...initialConfig });
+  }
 
   const validationErrors = useMemo(() => {
     const errors: ValidationError[] = [];

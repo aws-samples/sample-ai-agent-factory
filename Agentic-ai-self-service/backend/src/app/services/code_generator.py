@@ -1593,27 +1593,33 @@ def _get_model_init_code(provider: str, model_id: str, region: str) -> tuple[str
     elif provider == "openai":
         return (
             "from strands.models.openai import OpenAIModel",
-            f'model = OpenAIModel(model_id="{model_id}")',
+            # PROVIDER_API_KEY is injected from the agent's provider_api_key_ref
+            # secret at deploy time (runtime_configure_step). Without it a
+            # non-Bedrock provider silently initializes with no credential and
+            # every model call 401s. An optional PROVIDER_BASE_URL supports
+            # OpenAI-compatible gateways/proxies.
+            f'model = OpenAIModel(model_id="{model_id}", client_args={{k: v for k, v in {{"api_key": os.environ.get("PROVIDER_API_KEY", ""), "base_url": os.environ.get("PROVIDER_BASE_URL") or None}}.items() if v}})',
         )
     elif provider == "anthropic":
         return (
             "from strands.models.anthropic import AnthropicModel",
-            f'model = AnthropicModel(model_id="{model_id}")',
+            f'model = AnthropicModel(model_id="{model_id}", client_args={{"api_key": os.environ.get("PROVIDER_API_KEY", "")}})',
         )
     elif provider == "gemini":
         return (
             "from strands.models.gemini import GeminiModel",
-            f'model = GeminiModel(model_id="{model_id}")',
+            f'model = GeminiModel(model_id="{model_id}", client_args={{"api_key": os.environ.get("PROVIDER_API_KEY", "")}})',
         )
     elif provider == "litellm":
         return (
             "from strands.models.litellm import LiteLLMModel",
-            f'model = LiteLLMModel(model_id="{model_id}")',
+            # LiteLLM: api_key + optional proxy base_url, both from injected env.
+            f'model = LiteLLMModel(model_id="{model_id}", client_args={{k: v for k, v in {{"api_key": os.environ.get("PROVIDER_API_KEY", ""), "base_url": os.environ.get("PROVIDER_BASE_URL") or None}}.items() if v}})',
         )
     elif provider == "mistral":
         return (
             "from strands.models.mistral import MistralModel",
-            f'model = MistralModel(model_id="{model_id}")',
+            f'model = MistralModel(model_id="{model_id}", api_key=os.environ.get("PROVIDER_API_KEY", ""))',
         )
     elif provider == "ollama":
         return (
@@ -1628,22 +1634,29 @@ def _get_model_init_code(provider: str, model_id: str, region: str) -> tuple[str
     elif provider == "groq":
         return (
             "from strands.models.openai import OpenAIModel",
-            f'model = OpenAIModel(model_id="{model_id}", client_args={{"api_key": os.environ.get("GROQ_API_KEY", ""), "base_url": "https://api.groq.com/openai/v1"}})',
+            # Prefer the deploy-injected PROVIDER_API_KEY (runtime_configure_step
+            # resolves provider_api_key_ref into it); fall back to the
+            # provider-specific var for local/manual runs. Without the fallback
+            # chain, a deployed groq agent read an unset GROQ_API_KEY and 401'd.
+            f'model = OpenAIModel(model_id="{model_id}", client_args={{"api_key": os.environ.get("PROVIDER_API_KEY") or os.environ.get("GROQ_API_KEY", ""), "base_url": "https://api.groq.com/openai/v1"}})',
         )
     elif provider == "deepseek":
         return (
             "from strands.models.openai import OpenAIModel",
-            f'model = OpenAIModel(model_id="{model_id}", client_args={{"api_key": os.environ.get("DEEPSEEK_API_KEY", ""), "base_url": "https://api.deepseek.com/v1"}})',
+            f'model = OpenAIModel(model_id="{model_id}", client_args={{"api_key": os.environ.get("PROVIDER_API_KEY") or os.environ.get("DEEPSEEK_API_KEY", ""), "base_url": "https://api.deepseek.com/v1"}})',
         )
     elif provider == "together":
         return (
             "from strands.models.litellm import LiteLLMModel",
-            f'model = LiteLLMModel(model_id="together_ai/{model_id}")',
+            # LiteLLM reads TOGETHER_API_KEY from env by default; mirror the
+            # deploy-injected PROVIDER_API_KEY into it so the resolved secret is
+            # actually used (otherwise together deploys keyless and 401s).
+            f'model = LiteLLMModel(model_id="together_ai/{model_id}", client_args={{k: v for k, v in {{"api_key": os.environ.get("PROVIDER_API_KEY") or os.environ.get("TOGETHER_API_KEY", "")}}.items() if v}})',
         )
     elif provider == "writer":
         return (
             "from strands.models.openai import OpenAIModel",
-            f'model = OpenAIModel(model_id="{model_id}", client_args={{"api_key": os.environ.get("WRITER_API_KEY", ""), "base_url": "https://api.writer.com/v1"}})',
+            f'model = OpenAIModel(model_id="{model_id}", client_args={{"api_key": os.environ.get("PROVIDER_API_KEY") or os.environ.get("WRITER_API_KEY", ""), "base_url": "https://api.writer.com/v1"}})',
         )
     # Fallback to Bedrock
     return (
@@ -2205,6 +2218,11 @@ def _maybe_inject_hitl(code: str) -> str:
             new_args = _re.sub(r"(tools=)([^,\n]+)", r"\1list(\2) + [human_approval]", args, count=1)
         else:
             new_args = "tools=[human_approval], " + args
+        # Register the GUARANTEED approval hook (2.1) on every Agent. Idempotent;
+        # only add when not already present. _APPROVAL_HOOKS is [] when strands
+        # hooks are unavailable, so this is a safe no-op there.
+        if "hooks=" not in new_args:
+            new_args = "hooks=_APPROVAL_HOOKS, " + new_args
         out.append(new_args + ")")
         i = j
     return "".join(out)
@@ -2261,6 +2279,104 @@ def human_approval(action: str, reason: str = "") -> str:
         "runtime_id": runtime_id,
         "message": "A human approval request was recorded. Do not perform the action until it is approved.",
     })
+
+
+def _hitl_record_pending(tool_name, tool_input):
+    """Record a PENDING approval row for an auto-gated tool. Returns request_id or ''."""
+    import time as _t, secrets as _s, boto3 as _b
+    table_name = _hitl_os.environ.get("HITL_REQUESTS_TABLE_NAME", "")
+    runtime_id = _hitl_os.environ.get("HITL_RUNTIME_ID", "")
+    if not table_name or not runtime_id:
+        return ""
+    region = _hitl_os.environ.get("AWS_REGION", _hitl_os.environ.get("APP_AWS_REGION", "us-east-1"))
+    ms = int(_t.time() * 1000)
+    request_id = "%012x%s" % (ms, _s.token_hex(10))
+    try:
+        _b.resource("dynamodb", region_name=region).Table(table_name).put_item(Item={
+            "runtime_id": runtime_id, "request_id": request_id,
+            "owner_sub": _hitl_os.environ.get("RUNTIME_OWNER_SUB", ""),
+            "status": "PENDING", "action": ("tool:" + str(tool_name))[:2000],
+            "reason": _hitl_json.dumps(tool_input)[:2000] if tool_input else "",
+            "created_at": ms, "ttl": int(_t.time()) + 24 * 60 * 60,
+        })
+    except Exception:  # noqa: BLE001
+        return ""
+    return request_id
+
+
+# ── GUARANTEED approval gate: a BeforeToolInvocation hook that blocks tools
+# matching LOOM_APPROVAL_POLICIES *regardless of whether the model calls
+# human_approval*. This is the enforcement the voluntary tool above can't give.
+try:
+    import fnmatch as _hitl_fnmatch
+    from strands.experimental.hooks import BeforeToolInvocationEvent as _BeforeToolEvent
+    from strands.hooks import HookProvider as _HookProvider, HookRegistry as _HookRegistry
+
+    def _hitl_load_policies():
+        raw = _hitl_os.environ.get("LOOM_APPROVAL_POLICIES", "")
+        if not raw:
+            return []
+        try:
+            return _hitl_json.loads(raw)
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _hitl_matches(tool_name, policies):
+        for p in policies:
+            for pat in p.get("tool_match", []):
+                if _hitl_fnmatch.fnmatch(tool_name or "", pat):
+                    return p
+        return None
+
+    class _ApprovalHook(_HookProvider):
+        """Blocks policy-matched tools by replacing the selected tool with a
+        deny-stub that records a PENDING approval and returns a refusal — so the
+        real tool never runs until a human approves out of band."""
+
+        def register_hooks(self, registry, **kwargs):
+            registry.add_callback(_BeforeToolEvent, self._before_tool)
+
+        def _before_tool(self, event):
+            policies = _hitl_load_policies()
+            if not policies:
+                return
+            tool_name = ""
+            try:
+                tool_name = (event.tool_use or {}).get("name", "")
+            except Exception:  # noqa: BLE001
+                tool_name = ""
+            matched = _hitl_matches(tool_name, policies)
+            if not matched:
+                return
+            mode = matched.get("mode", "require")
+            req_id = _hitl_record_pending(tool_name, (event.tool_use or {}).get("input"))
+            if mode == "notify":
+                return  # recorded, but allow the tool to proceed
+            # require → block: swap the selected tool for a deny-stub.
+            _orig = event.selected_tool
+
+            class _DenyStub:
+                tool_name = tool_name
+                def __getattr__(self, _n):
+                    return getattr(_orig, _n) if _orig is not None else None
+                async def invoke(self, tool_use, *a, **k):
+                    return {"toolUseId": tool_use.get("toolUseId", ""), "status": "error",
+                            "content": [{"text": _hitl_json.dumps({
+                                "status": "APPROVAL_REQUIRED", "tool": tool_name,
+                                "request_id": req_id, "policy": matched.get("name"),
+                                "message": "This tool requires human approval before it can run."})}]}
+                # Strands tools may be invoked via __call__ or stream; provide both.
+                def __call__(self, tool_use, *a, **k):
+                    import asyncio as _a
+                    return _a.get_event_loop().run_until_complete(self.invoke(tool_use, *a, **k))
+            try:
+                event.selected_tool = _DenyStub()
+            except Exception:  # noqa: BLE001
+                pass
+
+    _APPROVAL_HOOKS = [_ApprovalHook()]
+except Exception:  # noqa: BLE001 — strands hooks unavailable → no guaranteed gate
+    _APPROVAL_HOOKS = []
 
 
 _HITL_TOOLS = [human_approval]

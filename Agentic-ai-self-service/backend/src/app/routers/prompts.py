@@ -37,6 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.services.auth import assert_owner, get_caller_sub
+from app.services.rbac import require_scopes
 from app.services.prompt_library_store import (
     DEFAULT_ORG_ID,
     MAX_BODY_LEN,
@@ -195,7 +196,7 @@ def resolve_visible_body(
 # ---------------------------------------------------------------------------
 
 
-@router.post("", response_model=PromptEntryResponse)
+@router.post("", response_model=PromptEntryResponse, dependencies=[Depends(require_scopes("prompt:write"))])
 async def create_prompt(
     body: CreatePromptRequest,
     caller_sub: str = Depends(get_caller_sub),
@@ -241,7 +242,7 @@ async def create_prompt(
     return PromptEntryResponse.from_entry(entry, caller_sub)
 
 
-@router.get("", response_model=list[PromptEntryResponse])
+@router.get("", response_model=list[PromptEntryResponse], dependencies=[Depends(require_scopes("prompt:read"))])
 async def list_prompts(
     q: Optional[str] = Query(default=None, max_length=200),
     tag: Optional[str] = Query(default=None, max_length=64),
@@ -273,7 +274,7 @@ async def list_prompts(
     return [PromptEntryResponse.from_entry(e, caller_sub) for e in visible]
 
 
-@router.get("/{name}", response_model=PromptEntryResponse)
+@router.get("/{name}", response_model=PromptEntryResponse, dependencies=[Depends(require_scopes("prompt:read"))])
 async def get_prompt(
     name: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -287,7 +288,7 @@ async def get_prompt(
     return PromptEntryResponse.from_entry(entry, caller_sub)
 
 
-@router.put("/{name}", response_model=PromptEntryResponse)
+@router.put("/{name}", response_model=PromptEntryResponse, dependencies=[Depends(require_scopes("prompt:write"))])
 async def update_prompt(
     name: str,
     body: UpdatePromptRequest,
@@ -310,7 +311,7 @@ async def update_prompt(
     return PromptEntryResponse.from_entry(updated, caller_sub)
 
 
-@router.delete("/{name}")
+@router.delete("/{name}", dependencies=[Depends(require_scopes("prompt:write"))])
 async def delete_prompt(
     name: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -326,7 +327,7 @@ async def delete_prompt(
     return {"success": ok, "prompt_name": name}
 
 
-@router.post("/{name}/versions", response_model=AddVersionResponse)
+@router.post("/{name}/versions", response_model=AddVersionResponse, dependencies=[Depends(require_scopes("prompt:write"))])
 async def add_prompt_version(
     name: str,
     body: AddPromptVersionRequest,
@@ -350,7 +351,7 @@ async def add_prompt_version(
     )
 
 
-@router.post("/{name}/promote/{version_id}", response_model=PromoteResponse)
+@router.post("/{name}/promote/{version_id}", response_model=PromoteResponse, dependencies=[Depends(require_scopes("prompt:write"))])
 async def promote_prompt_version(
     name: str,
     version_id: str,
@@ -376,7 +377,7 @@ async def promote_prompt_version(
     )
 
 
-@router.get("/{name}/resolve", response_model=ResolvePromptResponse)
+@router.get("/{name}/resolve", response_model=ResolvePromptResponse, dependencies=[Depends(require_scopes("prompt:read"))])
 async def resolve_prompt(
     name: str,
     version: Optional[str] = Query(default=None, max_length=64),

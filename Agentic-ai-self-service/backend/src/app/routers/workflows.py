@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, ValidationError
 
 from app.services.auth import assert_owner, get_caller_sub
+from app.services.rbac import require_scopes
 
 
 def _validate_workflow_id(workflow_id: str) -> str:
@@ -94,7 +95,7 @@ class DeleteResponse(BaseModel):
     message: str
 
 
-@router.post("", response_model=WorkflowResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=WorkflowResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_scopes("agent:write"))])
 async def create_workflow(
     request: WorkflowCreateRequest,
     caller_sub: str = Depends(get_caller_sub),
@@ -134,7 +135,7 @@ async def create_workflow(
         )
 
 
-@router.get("", response_model=list[WorkflowDefinition])
+@router.get("", response_model=list[WorkflowDefinition], dependencies=[Depends(require_scopes("agent:read"))])
 async def list_workflows(
     caller_sub: str = Depends(get_caller_sub),
 ) -> list[WorkflowDefinition]:
@@ -172,7 +173,7 @@ async def list_workflows(
     return result
 
 
-@router.get("/{workflow_id}", response_model=WorkflowDefinition)
+@router.get("/{workflow_id}", response_model=WorkflowDefinition, dependencies=[Depends(require_scopes("agent:read"))])
 async def get_workflow(
     workflow_id: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -209,7 +210,7 @@ async def get_workflow(
     return workflow
 
 
-@router.put("/{workflow_id}", response_model=WorkflowResponse)
+@router.put("/{workflow_id}", response_model=WorkflowResponse, dependencies=[Depends(require_scopes("agent:write"))])
 async def update_workflow(
     workflow_id: str,
     request: WorkflowUpdateRequest,
@@ -278,7 +279,7 @@ async def update_workflow(
     )
 
 
-@router.delete("/{workflow_id}", response_model=DeleteResponse)
+@router.delete("/{workflow_id}", response_model=DeleteResponse, dependencies=[Depends(require_scopes("agent:write"))])
 async def delete_workflow(
     workflow_id: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -310,7 +311,7 @@ async def delete_workflow(
     )
 
 
-@router.post("/{workflow_id}/validate", response_model=ValidationResult)
+@router.post("/{workflow_id}/validate", response_model=ValidationResult, dependencies=[Depends(require_scopes("agent:write"))])
 async def validate_workflow(workflow_id: str) -> ValidationResult:
     """Validate a workflow configuration.
 
@@ -361,7 +362,7 @@ class ExportResponse(BaseModel):
     message: str
 
 
-@router.post("/import", response_model=ImportResponse)
+@router.post("/import", response_model=ImportResponse, dependencies=[Depends(require_scopes("agent:write"))])
 async def import_workflow(request: ImportRequest) -> ImportResponse:
     """Import a workflow from JSON.
 
@@ -434,7 +435,7 @@ async def import_workflow(request: ImportRequest) -> ImportResponse:
         )
 
 
-@router.get("/{workflow_id}/export", response_model=ExportResponse)
+@router.get("/{workflow_id}/export", response_model=ExportResponse, dependencies=[Depends(require_scopes("agent:read"))])
 async def export_workflow(workflow_id: str) -> ExportResponse:
     """Export a workflow as JSON.
 
@@ -471,7 +472,7 @@ class DeployRequest(BaseModel):
     enable_cloudtrail: bool = True
 
 
-@router.post("/{workflow_id}/deploy", response_model=DeploymentResult)
+@router.post("/{workflow_id}/deploy", response_model=DeploymentResult, dependencies=[Depends(require_scopes("agent:write"))])
 async def deploy_workflow(workflow_id: str, request: DeployRequest) -> DeploymentResult:
     """Deploy a workflow to AWS.
 

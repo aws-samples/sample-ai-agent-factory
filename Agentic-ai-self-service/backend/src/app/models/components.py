@@ -273,6 +273,20 @@ class ConnectorConfig(BaseModel):
     oauth_vendor: Optional[str] = Field(alias="oauthVendor", default=None)
     discovery_url: Optional[str] = Field(alias="discoveryUrl", default=None)
 
+    # Phase 3 (Loom) OBO identity propagation. "m2m" (default) = shared
+    # machine-to-machine client-credentials; "obo" = on-behalf-of token exchange
+    # so the agent calls the connector AS THE END-USER (RFC 8693 / RFC 7523).
+    # OBO requires the CustomOauth2 vendor + a token-exchange-capable IdP.
+    delegation_mode: Literal["m2m", "obo"] = Field(alias="delegationMode", default="m2m")
+    obo_grant_type: Optional[Literal["TOKEN_EXCHANGE", "JWT_AUTHORIZATION_GRANT"]] = Field(
+        alias="oboGrantType", default=None
+    )
+    # Phase 1 (Loom-study 1.2): explicit RFC 8693 `audience` for the OBO exchange.
+    # Okta custom authorization servers REJECT a token exchange without an
+    # explicit audience — a hard blocker for a common enterprise IdP. Threaded
+    # into the exchange call; falls back to the subject token's aud when unset.
+    oauth_audience: Optional[str] = Field(alias="oauthAudience", default=None, max_length=512)
+
     # api_key only (catalog provides defaults).
     credential_location: Optional[str] = Field(alias="credentialLocation", default=None)
     credential_parameter_name: Optional[str] = Field(

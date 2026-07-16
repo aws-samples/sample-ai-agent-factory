@@ -124,7 +124,16 @@ export interface SmithyTargetConfig {
 
 export interface MCPServerTargetConfig {
   type: 'mcp_server';
-  serverUrl: string;
+  /** Catalog server id (e.g. "aws-knowledge") from GET /api/mcp-servers. */
+  serverId?: string;
+  /** Optional raw MCP endpoint (advanced; catalog serverId is preferred). */
+  serverUrl?: string;
+  /** Fills `{placeholder}` tokens in a catalog endpoint (e.g. store_domain). */
+  endpointVars?: Record<string, string>;
+  /** Tier-2 API key (write-only — minted into Secrets Manager, never persisted). */
+  apiKey?: string;
+  /** Tier-3 OAuth client-credentials (write-only). */
+  oauth?: { clientId?: string; clientSecret?: string; discoveryUrl?: string; scopes?: string[] };
 }
 
 export interface APIKeyCredentials {
@@ -551,6 +560,12 @@ export interface ConnectorConfiguration extends ToolConfiguration {
   scopes?: string[];
   clientId?: string;
   discoveryUrl?: string;
+  // Phase 3 (Loom) OBO identity propagation. 'm2m' (default) = shared
+  // client-credentials; 'obo' = on-behalf-of token exchange (agent acts AS the
+  // end-user). OBO requires a custom OIDC provider (discoveryUrl) + a
+  // token-exchange-capable IdP.
+  delegationMode?: 'm2m' | 'obo';
+  oboGrantType?: 'TOKEN_EXCHANGE' | 'JWT_AUTHORIZATION_GRANT';
   // api_key only (catalog provides sensible defaults)
   credentialLocation?: ConnectorCredentialLocation;
   credentialParameterName?: string;

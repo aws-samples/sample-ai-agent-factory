@@ -123,6 +123,39 @@ export function CostPanel({ runtimeName, refreshKey }: CostPanelProps) {
             )}
           </div>
 
+          {/* Phase 4 (Loom) FinOps — owner budget spend bar. Rendered when the
+              caller has an owner budget set (annotated by the cost endpoint). */}
+          {cost.owner_budget && cost.owner_budget.limit > 0 && (
+            <div className="rounded-lg border border-gray-200 px-3 py-2.5">
+              <div className="flex items-center justify-between mb-1.5 text-xs">
+                <span className="font-semibold text-gray-800">Monthly budget</span>
+                <span className={
+                  cost.owner_budget.status === 'over' ? 'text-red-600 font-semibold'
+                  : cost.owner_budget.status === 'warn' ? 'text-amber-600 font-semibold'
+                  : 'text-green-700 font-semibold'
+                }>
+                  ${cost.owner_budget.spend.toFixed(2)} / ${cost.owner_budget.limit.toFixed(2)}
+                  {' '}({cost.owner_budget.used_pct}%)
+                </span>
+              </div>
+              <div className="h-2 w-full rounded-full bg-gray-100 overflow-hidden">
+                <div
+                  className={
+                    cost.owner_budget.status === 'over' ? 'h-full bg-red-500'
+                    : cost.owner_budget.status === 'warn' ? 'h-full bg-amber-500'
+                    : 'h-full bg-green-500'
+                  }
+                  style={{ width: `${Math.min(cost.owner_budget.used_pct, 100)}%` }}
+                />
+              </div>
+              {cost.owner_budget.status === 'over' && (
+                <div className="text-[11px] text-red-600 mt-1">
+                  Over budget — new spend exceeds the monthly limit.
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Per-model breakdown */}
           {Object.keys(cost.by_model).length > 0 && (
             <div>

@@ -526,7 +526,7 @@ def test_resolved_body_with_triple_quotes_codegen_safe():
     nasty_body = 'Line1\n"""injection attempt"""\nLine3 with \\ backslash'
     cfg = RuntimeConfig(
         name="prompt_lib_t",
-        model={"modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0"},
+        model={"modelId": "us.anthropic.claude-sonnet-5"},
         systemPrompt=nasty_body,
         modelProvider="bedrock",
     )

@@ -392,6 +392,12 @@ def _stream_invoke(write, body: dict, caller_sub: Optional[str]) -> None:
         payload_body: dict[str, str] = {"prompt": prompt}
         if session_id:
             payload_body["session_id"] = session_id
+        # Phase 3 (Loom) OBO — pass the user's access token to the runtime so its
+        # OAuth2 handler can perform the on-behalf-of exchange. Carried in the
+        # invoke payload (not an AgentCore header, which the proxy strips).
+        _uat = body.get("_user_access_token")
+        if _uat:
+            payload_body["user_access_token"] = _uat
         invoke_params: dict = {
             "agentRuntimeArn": runtime_arn,
             "payload": json.dumps(payload_body),
@@ -455,6 +461,15 @@ def _handle(event: dict, write) -> None:
     except Exception:  # noqa: BLE001
         write(_sse({"type": "error", "error": "Invalid JSON body"}))
         return
+
+    # Phase 3 (Loom) OBO — forward the caller's bearer token so the runtime's
+    # OAuth2 handler can use it as the SUBJECT token in an on-behalf-of exchange
+    # (agent acts AS the user downstream). Only the user's own token is carried;
+    # the SigV4 path has no bearer and simply omits it (M2M connectors ignore it).
+    if isinstance(body, dict):
+        _bearer = _extract_bearer(event)
+        if _bearer:
+            body["_user_access_token"] = _bearer
 
     _stream_invoke(write, body, caller_sub)
 

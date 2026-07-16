@@ -329,7 +329,7 @@ def test_multi_hop_respects_max_hops_cap(monkeypatch):
 def _cfg():
     return RuntimeConfig(
         name="rag_t",
-        model={"modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0"},
+        model={"modelId": "us.anthropic.claude-sonnet-5"},
         systemPrompt="You answer from the knowledge base.",
         modelProvider="bedrock",
     )

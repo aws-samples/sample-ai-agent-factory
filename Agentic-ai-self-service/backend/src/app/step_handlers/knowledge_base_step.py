@@ -16,6 +16,7 @@ import time
 import boto3
 
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
+from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
 
 logger = logging.getLogger(__name__)
@@ -37,10 +38,10 @@ def _build_model_arn(region: str, model_id: str) -> str:
     return f"arn:aws:bedrock:{region}::foundation-model/{model_id}"
 
 
-def _get_account_id() -> str:
+def _get_account_id(event: dict) -> str:
     """Resolve the current AWS account id (for constructing ARNs)."""
     try:
-        return boto3.client("sts").get_caller_identity()["Account"]
+        return step_clients.account_id_for_event(event)
     except Exception:  # noqa: BLE001
         return ""
 
@@ -211,8 +212,22 @@ def _wait_for_kb_active(bedrock_agent, kb_id: str, max_wait: int = 120) -> None:
     raise TimeoutError(f"Knowledge Base {kb_id} did not become ACTIVE within {max_wait}s")
 
 
-def _start_and_wait_ingestion(bedrock_agent, kb_id: str, ds_id: str, max_wait: int = 300) -> str:
-    """Start a data ingestion job and poll until complete or timeout."""
+def _start_and_wait_ingestion(bedrock_agent, kb_id: str, ds_id: str, max_wait: int = 600) -> tuple[str, str]:
+    """Start a data ingestion job and poll until complete or timeout.
+
+    Returns ``(job_id, terminal_status)`` where terminal_status is one of
+    ``COMPLETE`` (KB is queryable) or ``IN_PROGRESS`` (still ingesting — the KB
+    exists but a query may return nothing yet). ``FAILED`` raises.
+
+    Why this matters (P-E2E matrix finding): the KB used to be reported as part
+    of a ``succeeded`` deploy the moment the job STARTED, even if vectors weren't
+    queryable yet. Under a combined deploy (Runtime+Gateway+Memory+KB) the extra
+    contention meant the corpus hadn't produced queryable vectors within the old
+    300s window, so the KB tool returned nothing and the agent said "technical
+    error". We now (a) wait longer by default and (b) return the real terminal
+    status so the deploy result can tell the caller the KB is still ingesting
+    instead of silently implying it's ready.
+    """
     resp = bedrock_agent.start_ingestion_job(
         knowledgeBaseId=kb_id,
         dataSourceId=ds_id,
@@ -229,15 +244,16 @@ def _start_and_wait_ingestion(bedrock_agent, kb_id: str, ds_id: str, max_wait: i
         status = job_resp.get("ingestionJob", {}).get("status", "")
         if status == "COMPLETE":
             logger.warning("Ingestion job %s completed", job_id)
-            return job_id
+            return job_id, "COMPLETE"
         if status == "FAILED":
             failure = job_resp.get("ingestionJob", {}).get("failureReasons", [])
             raise RuntimeError(f"Ingestion job failed: {failure}")
         time.sleep(5)
 
-    # Timeout is not fatal - ingestion continues in background
+    # Timeout is not fatal — ingestion continues in the background — but report
+    # it so the deploy result / KB tool can surface "still ingesting" honestly.
     logger.warning("Ingestion job %s still running after %ds (continuing)", job_id, max_wait)
-    return job_id
+    return job_id, "IN_PROGRESS"
 
 
 def _find_existing_kb(bedrock_agent, kb_name: str) -> str | None:
@@ -253,7 +269,7 @@ def _find_existing_kb(bedrock_agent, kb_name: str) -> str | None:
     return None
 
 
-def _ensure_oss_collection(region: str, deployment_id: str, kb_role_arn: str, kb_config: dict, store, dep_id: str) -> str:
+def _ensure_oss_collection(region: str, deployment_id: str, kb_role_arn: str, kb_config: dict, store, dep_id: str, event: dict) -> str:
     """Auto-provision an OpenSearch Serverless collection + vector index for a KB.
 
     Bedrock's CreateKnowledgeBase requires a PRE-EXISTING OSS collection ARN — unlike
@@ -271,7 +287,7 @@ def _ensure_oss_collection(region: str, deployment_id: str, kb_role_arn: str, kb
     """
     import botocore.exceptions
 
-    aoss = boto3.client("opensearchserverless", region_name=region)
+    aoss = step_clients.client(event, "opensearchserverless")
     # Names: 3-32 chars, lowercase alphanumeric + hyphen, must start with a letter.
     coll_name = ("kb" + deployment_id.replace("-", "").lower())[:32]
     idx_name = kb_config.get("opensearchVectorIndexName") or "bedrock-knowledge-base-default-index"
@@ -300,12 +316,12 @@ def _ensure_oss_collection(region: str, deployment_id: str, kb_role_arn: str, kb
     # 3. data-access policy: KB role + the caller (deployment Lambda) principal.
     caller_arn = ""
     try:
-        caller_arn = boto3.client("sts").get_caller_identity()["Arn"]
+        caller_arn = step_clients.client(event, "sts").get_caller_identity()["Arn"]
         # normalise assumed-role ARN -> role ARN for the policy principal
         if ":assumed-role/" in caller_arn:
             _, _, tail = caller_arn.partition(":assumed-role/")
             role = tail.split("/")[0]
-            caller_arn = f"arn:aws:iam::{_get_account_id()}:role/{role}"
+            caller_arn = f"arn:aws:iam::{_get_account_id(event)}:role/{role}"
     except Exception:  # noqa: BLE001
         pass
     principals = [p for p in [kb_role_arn, caller_arn] if p]
@@ -602,7 +618,7 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
     foundation_model_id = kb_config.get("foundationModelId", "us.anthropic.claude-sonnet-5")
     foundation_model_arn = _build_model_arn(region, foundation_model_id)
 
-    bedrock_agent = boto3.client("bedrock-agent", region_name=region)
+    bedrock_agent = step_clients.client(event, "bedrock-agent")
 
     if kb_mode == "existing":
         kb_id = kb_config.get("knowledgeBaseId", "").strip()
@@ -633,7 +649,7 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
         embedding_model_arn = _build_model_arn(region, embedding_model_id)
 
         # Step 1: Create IAM role with permissions based on data source + vector store
-        iam_client = boto3.client("iam")
+        iam_client = step_clients.client(event, "iam")
         role_name = f"AgentCoreKBRole-{deployment_id[:8]}"
         role_arn = _create_kb_role(iam_client, role_name, kb_config)
         logger.warning("KB role created: %s", role_arn)
@@ -669,7 +685,7 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
                     or "bedrock-knowledge-base-default-index"
                 )
                 kb_config["s3VectorsIndexName"] = vec_idx
-                s3v = boto3.client("s3vectors", region_name=region)
+                s3v = step_clients.client(event, "s3vectors")
                 if not vec_arn:
                     # Auto-managed mode: create our own vector bucket. Bucket
                     # names: 3-63 chars, lowercase alphanum + hyphen.
@@ -686,7 +702,7 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
                     except Exception:
                         vec_arn = ""
                     if not vec_arn:
-                        vec_arn = f"arn:aws:s3vectors:{region}:{_get_account_id()}:bucket/{vec_bucket_name}"
+                        vec_arn = f"arn:aws:s3vectors:{region}:{_get_account_id(event)}:bucket/{vec_bucket_name}"
                     kb_config["s3VectorsBucketArn"] = vec_arn
                     # Record for teardown.
                     if store is not None:
@@ -717,7 +733,7 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
             # and record it to the manifest for teardown (standing billable resource).
             elif kb_config.get("vectorStoreType") == "opensearch_serverless" \
                     and not kb_config.get("opensearchCollectionArn"):
-                _ensure_oss_collection(region, deployment_id, role_arn, kb_config, store, deployment_id)
+                _ensure_oss_collection(region, deployment_id, role_arn, kb_config, store, deployment_id, event)
 
             storage_config = _build_storage_config(kb_config)
             vector_kb_config: dict = {
@@ -893,8 +909,12 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
         ds_id = ds_resp["dataSource"]["dataSourceId"]
         logger.warning("Data source created: %s for KB %s", ds_id, kb_id)
 
-        # Step 5: Start ingestion
-        _start_and_wait_ingestion(bedrock_agent, kb_id, ds_id, max_wait=300)
+        # Step 5: Start ingestion. Wait up to 600s for queryable vectors; record
+        # the terminal status so a KB that's still ingesting is reported honestly
+        # rather than silently implied ready (P-E2E matrix finding).
+        _job_id, ingestion_status = _start_and_wait_ingestion(
+            bedrock_agent, kb_id, ds_id, max_wait=600
+        )
 
         event["knowledge_base_result"] = {
             "kb_id": kb_id,
@@ -902,6 +922,7 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
             "kb_role_arn": role_arn,
             "created_by_flow": True,
             "foundation_model_arn": foundation_model_arn,
+            "ingestion_status": ingestion_status,  # COMPLETE | IN_PROGRESS
         }
         return event
 

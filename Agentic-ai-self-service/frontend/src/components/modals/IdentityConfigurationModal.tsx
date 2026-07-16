@@ -3,7 +3,7 @@
  * Requirements: 5.1, 5.2
  */
 
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { ConfigurationModal, type ValidationError } from './ConfigurationModal';
 import { TextField, SelectField, FormSection } from './FormFields';
 import type { IdentityConfiguration, OAuth2Provider } from '../../types/components';
@@ -59,15 +59,12 @@ export function IdentityConfigurationModal({
     ...initialConfig,
   }));
 
-  // Reset config when modal opens with new initial config
-  useEffect(() => {
-    if (isOpen) {
-      setConfig({
-        ...createDefaultIdentityConfig(),
-        ...initialConfig,
-      });
-    }
-  }, [isOpen, initialConfig]);
+  // Reset config when modal opens with new initial config (adjust state during render pattern)
+  const [lastInitial, setLastInitial] = useState<typeof initialConfig | symbol>(Symbol('unset'));
+  if (isOpen && initialConfig !== lastInitial) {
+    setLastInitial(initialConfig);
+    setConfig({ ...createDefaultIdentityConfig(), ...initialConfig });
+  }
 
   // Validation
   const validationErrors = useMemo(() => {
@@ -140,12 +137,12 @@ export function IdentityConfigurationModal({
     onClose();
   }, [config, onSave, onClose]);
 
-  // Get field error
-  const getFieldError = (field: string) =>
-    validationErrors.find((e) => e.field === field)?.message;
-
   // Build tabs
-  const tabs = useMemo(() => [
+  const tabs = useMemo(() => {
+    const getFieldError = (field: string) =>
+      validationErrors.find((e) => e.field === field)?.message;
+
+    return [
     {
       id: 'general',
       label: 'General',
@@ -343,7 +340,8 @@ export function IdentityConfigurationModal({
         </div>
       ),
     },
-  ], [config, validationErrors, updateConfig, handleCredentialTypeChange, getFieldError]);
+    ];
+  }, [config, validationErrors, updateConfig, handleCredentialTypeChange]);
 
   return (
     <ConfigurationModal

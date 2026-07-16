@@ -33,6 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.services.auth import assert_owner, get_caller_sub
+from app.services.rbac import require_scopes
 from app.services.hitl_store import (
     STATUS_APPROVED,
     STATUS_REJECTED,
@@ -121,7 +122,7 @@ class DecisionResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-@router.get("/pending", response_model=list[HitlRequestResponse])
+@router.get("/pending", response_model=list[HitlRequestResponse], dependencies=[Depends(require_scopes("hitl:read"))])
 async def list_pending(
     caller_sub: str = Depends(get_caller_sub),
 ) -> list[HitlRequestResponse]:
@@ -134,7 +135,38 @@ async def list_pending(
     return [HitlRequestResponse.from_model(r) for r in requests]
 
 
-@router.post("/{request_id}/decision", response_model=DecisionResponse)
+@router.get("/logs", dependencies=[Depends(require_scopes("hitl:read"))])
+async def approval_logs(
+    status: Optional[str] = None,
+    limit: int = 200,
+    caller_sub: str = Depends(get_caller_sub),
+) -> list[dict]:
+    """Durable approval-decision history (Loom-study 2.3).
+
+    The PENDING HITL rows TTL-expire in 24h; decision events are mirrored to the
+    audit store (90-day retention) as ``hitl_approved`` / ``hitl_rejected``. This
+    returns those, newest-first, optionally filtered by ``status``
+    (approved|rejected). hitl:read scoped.
+    """
+    from app.services.audit_store import get_audit_store
+
+    events = get_audit_store().list_recent("default", limit=max(1, min(limit, 1000)))
+    wanted = {"hitl_approved", "hitl_rejected"}
+    if status:
+        wanted = {f"hitl_{status.lower()}"}
+    return [
+        {
+            "action": e.action,
+            "decided_by": e.actor_sub,
+            "at": e.ts,
+            "path": e.path,
+        }
+        for e in events
+        if e.action in wanted
+    ]
+
+
+@router.post("/{request_id}/decision", response_model=DecisionResponse, dependencies=[Depends(require_scopes("hitl:write"))])
 async def decide(
     request_id: str,
     body: DecisionRequest,
@@ -178,6 +210,27 @@ async def decide(
         updated.status,
         caller_sub,
     )
+
+    # Loom-study 2.3 — durable approval audit. The HITL row itself TTL-expires in
+    # 24h; write the DECISION to the audit store (90-day retention) so approval
+    # history survives for compliance + is queryable via GET /api/hitl/logs.
+    # Best-effort — an audit hiccup must not fail the decision.
+    try:
+        from app.services.audit_store import AuditEvent, get_audit_store
+
+        get_audit_store().record(
+            AuditEvent(
+                org_id="default",
+                actor_sub=caller_sub,
+                action=f"hitl_{updated.status.lower()}",
+                method="POST",
+                path=f"/api/hitl/{request_id}/decision",
+                status_code=200,
+            )
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("HITL decision audit write skipped")
+
     return DecisionResponse(
         success=True,
         request_id=request_id,

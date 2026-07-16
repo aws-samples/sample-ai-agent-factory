@@ -78,7 +78,7 @@ def _load_handler(monkeypatch, fake_bedrock):
     except Exception:  # pragma: no cover - environment-dependent
         return None
 
-    monkeypatch.setattr(guardrails_step.boto3, "client", lambda *a, **k: fake_bedrock)
+    monkeypatch.setattr(guardrails_step.step_clients, "client", lambda *a, **k: fake_bedrock)
     monkeypatch.setattr(guardrails_step, "_get_deployment_store", lambda: _FakeStore())
     # Skip the READY polling sleeps.
     monkeypatch.setattr(guardrails_step.time, "sleep", lambda *_: None)

@@ -46,7 +46,7 @@ REGION = os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-
 # end-to-end driver script, not a unit test).
 BUCKET = os.environ.get("ARTIFACTS_BUCKET_NAME", "")
 BUNDLE_KEY = "agentcore-deps/strands-mcp.zip"
-MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+MODEL_ID = "us.anthropic.claude-sonnet-5"
 TEST_PROMPT = "What is 2 + 2? Answer in one sentence."
 TIMEOUT_READY = 300  # seconds to wait for READY
 RUN_ID = uuid.uuid4().hex[:6]

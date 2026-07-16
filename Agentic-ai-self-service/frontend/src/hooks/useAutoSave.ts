@@ -121,13 +121,16 @@ export function useAutoSave(
   interval: number = DEFAULT_INTERVAL,
 ): UseAutoSaveResult {
   const flowIdRef = useRef(flowId);
-  flowIdRef.current = flowId;
-
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasReceivedFirstState = useRef(false);
 
   const [lastSaveError, setLastSaveError] = useState<Error | null>(null);
   const clearLastSaveError = useCallback(() => setLastSaveError(null), []);
+
+  // Update ref in effect to avoid ref mutation during render
+  useEffect(() => {
+    flowIdRef.current = flowId;
+  }, [flowId]);
 
   useEffect(() => {
     const unsubscribe = useWorkflowStore.subscribe(
@@ -199,7 +202,6 @@ export function useAutoSave(
               // this state is autosave-specific.
               const error = err instanceof Error ? err : new Error(String(err));
               // Log so the failure is also visible in dev tools / observability.
-              // eslint-disable-next-line no-console
               console.error('[useAutoSave] flow save failed', error);
               setLastSaveError(error);
             });

@@ -38,6 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.services.auth import assert_owner, get_caller_sub
+from app.services.rbac import require_scopes
 from app.services.storage import get_workflow_storage
 from app.services.workspace_acl import (
     Acl,
@@ -133,7 +134,7 @@ class WorkspaceWorkflowResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-@router.post("/workflows/{workflow_id}/share", response_model=AclResponse)
+@router.post("/workflows/{workflow_id}/share", response_model=AclResponse, dependencies=[Depends(require_scopes("workspace:write"))])
 async def share_workflow(
     workflow_id: str,
     body: ShareRequest,
@@ -181,7 +182,7 @@ async def share_workflow(
     )
 
 
-@router.delete("/workflows/{workflow_id}/share/{sub}", response_model=AclResponse)
+@router.delete("/workflows/{workflow_id}/share/{sub}", response_model=AclResponse, dependencies=[Depends(require_scopes("workspace:write"))])
 async def unshare_workflow(
     workflow_id: str,
     sub: str,
@@ -212,7 +213,7 @@ async def unshare_workflow(
     )
 
 
-@router.get("/workspaces", response_model=list[WorkspaceWorkflowResponse])
+@router.get("/workspaces", response_model=list[WorkspaceWorkflowResponse], dependencies=[Depends(require_scopes("workspace:read"))])
 async def list_workspaces(
     caller_sub: str = Depends(get_caller_sub),
 ) -> list[WorkspaceWorkflowResponse]:

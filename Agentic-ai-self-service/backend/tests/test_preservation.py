@@ -37,7 +37,7 @@ def _make_runtime_config(**overrides) -> RuntimeConfig:
         "name": "test-agent",
         "framework": "strands_agents",
         "model": {
-            "modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "modelId": "us.anthropic.claude-sonnet-5",
             "provider": "anthropic",
         },
         "systemPrompt": "You are a helpful assistant.",
@@ -55,7 +55,7 @@ def _make_runtime_configuration(
         "framework": AgentFramework.STRANDS_AGENTS,
         "model": ModelConfiguration(
             provider=provider,
-            model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            model_id="us.anthropic.claude-sonnet-5",
         ),
         "system_prompt": "You are a helpful assistant.",
     }
@@ -80,10 +80,10 @@ _safe_text = st.text(
 
 _model_ids = st.sampled_from(
     [
-        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "us.anthropic.claude-sonnet-5",
         "us.anthropic.claude-haiku-4-5-20251001-v1:0",
         "us.amazon.nova-2-lite-v1:0",
-        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "us.anthropic.claude-sonnet-5",
     ]
 )
 
@@ -184,7 +184,7 @@ class TestCodeGeneratorFrameworkLogicPreservation:
         """
         code = code_generator._generate_langchain_web_search(
             "You are a search agent.",
-            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "us.anthropic.claude-sonnet-5",
             "us-east-1",
         )
         assert "duckduckgo_search" in code
@@ -205,7 +205,7 @@ class TestCodeGeneratorFrameworkLogicPreservation:
         """
         code = code_generator._generate_default_agent(
             "You are a helpful assistant.",
-            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "us.anthropic.claude-sonnet-5",
             "us-east-1",
         )
         assert "import boto3" in code
@@ -230,7 +230,7 @@ class TestGatewayMCPPreservation:
         """
         code = code_generator._generate_strands_gateway(
             "You are a gateway agent.",
-            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "us.anthropic.claude-sonnet-5",
             _GATEWAY_CREDS,
         )
         assert "def _get_gateway_token():" in code
@@ -259,7 +259,7 @@ class TestGatewayMCPPreservation:
         """
         code = code_generator._generate_customer_support(
             "You are a support agent.",
-            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "us.anthropic.claude-sonnet-5",
             _GATEWAY_CREDS,
         )
         assert "def _get_gateway_token():" in code
@@ -290,7 +290,7 @@ class TestBuiltInToolsPreservation:
         """
         code = code_generator._generate_tools_agent(
             "You are a tools agent.",
-            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "us.anthropic.claude-sonnet-5",
             "us-east-1",
             has_browser=True,
             has_code_interpreter=False,
@@ -404,7 +404,7 @@ class TestSystemPromptEscapingPreservation:
         special_prompt = "You are an agent. Handle 'quotes' and \\backslashes\\ carefully."
         code = code_generator._generate_default_agent(
             code_generator._escape_triple_quotes(special_prompt),
-            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "us.anthropic.claude-sonnet-5",
             "us-east-1",
         )
         # The generated code should be syntactically valid Python
@@ -436,7 +436,7 @@ class TestSystemPromptEscapingPreservation:
         syntactically valid Python code.
         """
         escaped = code_generator._escape_triple_quotes(system_prompt)
-        code = code_generator._generate_default_agent(escaped, "us.anthropic.claude-sonnet-4-5-20250929-v1:0", "us-east-1")
+        code = code_generator._generate_default_agent(escaped, "us.anthropic.claude-sonnet-5", "us-east-1")
         try:
             compile(code, "<test>", "exec")
         except SyntaxError as e:

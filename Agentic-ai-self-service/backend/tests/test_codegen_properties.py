@@ -38,7 +38,7 @@ valid_runtime_config_st = st.builds(
     ),
     entrypoint=st.just("agent.py"),
     framework=st.just("strands_agents"),
-    model=st.fixed_dictionaries({"modelId": st.just("us.anthropic.claude-sonnet-4-5-20250929-v1:0")}),
+    model=st.fixed_dictionaries({"modelId": st.just("us.anthropic.claude-sonnet-5")}),
     system_prompt=st.text(min_size=1, max_size=200).filter(lambda x: len(x.strip()) > 0),
     deployment_type=st.just("direct_code_deploy"),
     python_runtime=st.just("PYTHON_3_12"),
@@ -103,7 +103,7 @@ class TestCodeGeneratorProperty:
         config = RuntimeConfig(
             name="test",
             framework="strands_agents",
-            model={"modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0"},
+            model={"modelId": "us.anthropic.claude-sonnet-5"},
             system_prompt="test",
             deployment_type="direct_code_deploy",
             python_runtime="PYTHON_3_12",

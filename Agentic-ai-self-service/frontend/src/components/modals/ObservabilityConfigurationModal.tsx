@@ -16,6 +16,7 @@ import type {
   ObservabilityConfiguration,
   ObservabilityProvider,
 } from '../../types/components';
+import { createDefaultObservabilityConfig } from './observabilityUtils';
 
 interface PlatformDefaults {
   enabled: boolean;
@@ -63,24 +64,6 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
 ];
 
 const PROVIDER_OPTIONS = PROVIDER_PRESETS.map((p) => ({ value: p.value, label: p.label }));
-
-// ============================================================================
-// Defaults
-// ============================================================================
-
-export function createDefaultObservabilityConfig(): ObservabilityConfiguration {
-  return {
-    name: 'Observability',
-    enableOtel: true,
-    provider: 'langfuse',
-    otlpEndpoint: 'https://cloud.langfuse.com/api/public/otel',
-    otlpProtocol: 'http/protobuf',
-    serviceName: undefined,
-    sampleRate: 1.0,
-    resourceAttributes: {},
-    extraHeaders: {},
-  };
-}
 
 // ============================================================================
 // Props

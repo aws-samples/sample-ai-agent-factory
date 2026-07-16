@@ -13,6 +13,7 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
 import boto3
 
@@ -22,6 +23,7 @@ from app.services.agent_versions_store import (
     get_slots_store,
     get_versions_store,
 )
+from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
 
 logger = logging.getLogger(__name__)
@@ -33,7 +35,7 @@ def _gone(exc: Exception) -> bool:
     return any(x in msg for x in ("notfound", "not found", "does not exist", "no longer exists"))
 
 
-def _auto_cleanup_on_failure(store: DeploymentStateStore, deployment_id: str) -> None:
+def _auto_cleanup_on_failure(store: DeploymentStateStore, deployment_id: str, event: dict) -> None:
     """Best-effort cleanup of created_resources on deploy failure.
 
     Iterates the manifest in dependency order (primary resources before
@@ -65,7 +67,7 @@ def _auto_cleanup_on_failure(store: DeploymentStateStore, deployment_id: str) ->
         cleaned = 0
         for res in ordered:
             try:
-                _cleanup_resource(res, region)
+                _cleanup_resource(res, region, event)
                 cleaned += 1
             except Exception as e:
                 if _gone(e):
@@ -77,24 +79,39 @@ def _auto_cleanup_on_failure(store: DeploymentStateStore, deployment_id: str) ->
         logger.warning("Auto-cleanup error for %s: %s", deployment_id, str(e)[:200])
 
 
-def _cleanup_resource(res: dict, region: str) -> None:
-    """Delete a single resource from the manifest. Raises on failure."""
+def _cleanup_resource(res: dict, region: str, event: dict) -> None:
+    """Delete a single resource from the manifest. Raises on failure.
+
+    Phase 7 (opt-in) cross-account teardown: a resource created in a target
+    account records its ``account`` (+ ``region``) in the manifest. Delete is a
+    SEPARATE request that doesn't carry the original deploy's SFN event, so we
+    reconstruct the target from the manifest record itself — the clients then
+    assume the same cross-account role that created the resource. For
+    same-account resources (no ``account`` recorded) this is the passed event /
+    default session — unchanged behavior.
+    """
     rtype = str(res.get("type", ""))
     rid = res.get("id") or ""
     rname = res.get("name") or ""
     res_region = res.get("region") or region
+    # Prefer the resource's own recorded target (self-contained teardown); fall
+    # back to the caller's event (the failure-path auto-cleanup passes the live
+    # deploy event, which already carries the target).
+    res_account = res.get("account")
+    if res_account:
+        event = {"target_account_id": res_account, "target_region": res_region}
 
     if rtype == "gateway":
-        ctrl = boto3.client("bedrock-agentcore-control", region_name=res_region)
+        ctrl = step_clients.client(event, "bedrock-agentcore-control", region_name=res_region)
         ctrl.delete_gateway(gatewayIdentifier=rid)
     elif rtype == "agent_runtime":
-        ctrl = boto3.client("bedrock-agentcore-control", region_name=res_region)
+        ctrl = step_clients.client(event, "bedrock-agentcore-control", region_name=res_region)
         ctrl.delete_agent_runtime(agentRuntimeId=rid)
     elif rtype == "harness":
-        ctrl = boto3.client("bedrock-agentcore-control", region_name=res_region)
+        ctrl = step_clients.client(event, "bedrock-agentcore-control", region_name=res_region)
         ctrl.delete_harness(harnessId=rid)
     elif rtype == "policy_engine":
-        ctrl = boto3.client("bedrock-agentcore-control", region_name=res_region)
+        ctrl = step_clients.client(event, "bedrock-agentcore-control", region_name=res_region)
         # Delete policies first, then engine
         try:
             pols = ctrl.list_policies(policyEngineId=rid, maxResults=100).get("policies", [])
@@ -108,9 +125,9 @@ def _cleanup_resource(res: dict, region: str) -> None:
         time.sleep(2)
         ctrl.delete_policy_engine(policyEngineId=rid)
     elif rtype == "guardrail":
-        boto3.client("bedrock", region_name=res_region).delete_guardrail(guardrailIdentifier=rid)
+        step_clients.client(event, "bedrock", region_name=res_region).delete_guardrail(guardrailIdentifier=rid)
     elif rtype == "knowledge_base":
-        ba = boto3.client("bedrock-agent", region_name=res_region)
+        ba = step_clients.client(event, "bedrock-agent", region_name=res_region)
         # Delete data sources first
         try:
             for ds in ba.list_data_sources(knowledgeBaseId=rid).get("dataSourceSummaries", []):
@@ -130,7 +147,7 @@ def _cleanup_resource(res: dict, region: str) -> None:
                     break
             time.sleep(5)
     elif rtype == "s3_vectors_bucket":
-        s3v = boto3.client("s3vectors", region_name=res_region)
+        s3v = step_clients.client(event, "s3vectors", region_name=res_region)
         bname = rname or rid
         try:
             for ix in s3v.list_indexes(vectorBucketName=bname).get("indexes", []):
@@ -142,7 +159,7 @@ def _cleanup_resource(res: dict, region: str) -> None:
             pass
         s3v.delete_vector_bucket(vectorBucketName=bname)
     elif rtype == "cognito_user_pool":
-        cog = boto3.client("cognito-idp", region_name=res_region)
+        cog = step_clients.client(event, "cognito-idp", region_name=res_region)
         # Delete domain first (required)
         try:
             dom = cog.describe_user_pool(UserPoolId=rid).get("UserPool", {}).get("Domain")
@@ -169,12 +186,12 @@ def _cleanup_resource(res: dict, region: str) -> None:
                     continue
                 raise
     elif rtype == "memory":
-        ctrl = boto3.client("bedrock-agentcore-control", region_name=res_region)
+        ctrl = step_clients.client(event, "bedrock-agentcore-control", region_name=res_region)
         ctrl.delete_memory(memoryId=rid)
     elif rtype == "lambda":
-        boto3.client("lambda", region_name=res_region).delete_function(FunctionName=rname or rid)
+        step_clients.client(event, "lambda", region_name=res_region).delete_function(FunctionName=rname or rid)
     elif rtype == "iam_role":
-        iam = boto3.client("iam")
+        iam = step_clients.client(event, "iam")
         role_name = rname or rid
         # Detach/delete policies first
         try:
@@ -189,11 +206,11 @@ def _cleanup_resource(res: dict, region: str) -> None:
             pass
         iam.delete_role(RoleName=role_name)
     elif rtype == "secret":
-        boto3.client("secretsmanager", region_name=res_region).delete_secret(
+        step_clients.client(event, "secretsmanager", region_name=res_region).delete_secret(
             SecretId=rid, ForceDeleteWithoutRecovery=True
         )
     elif rtype in ("oauth2_credential_provider", "api_key_credential_provider"):
-        ctrl = boto3.client("bedrock-agentcore-control", region_name=res_region)
+        ctrl = step_clients.client(event, "bedrock-agentcore-control", region_name=res_region)
         if rtype == "oauth2_credential_provider":
             ctrl.delete_oauth2_credential_provider(name=rname)
         else:
@@ -211,6 +228,68 @@ def _get_deployment_store() -> DeploymentStateStore:
         table_name=_get_env("DEPLOYMENT_TABLE_NAME", "DeploymentState"),
         region=_get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1")),
     )
+
+
+def _auto_register_in_aws_registry(
+    *,
+    store: DeploymentStateStore,
+    deployment_id: str,
+    runtime_arn: Optional[str],
+    runtime_endpoint: Optional[str],
+    friendly_runtime_name: str,
+    is_a2a: bool,
+) -> None:
+    """Register a just-deployed agent into the AWS Agent Registry as DRAFT.
+
+    No-op when the feature is disabled (no configured registry id) or the
+    deployment already has a record. Builds an A2A agentCard descriptor for A2A
+    runtimes, else a CUSTOM descriptor with the agent's identity/endpoint. The
+    record starts in DRAFT — a curator approves it via the registry router
+    (visibility/integration gating enforced elsewhere). Loom-study 0.4.
+    """
+    from app.services.aws_agent_registry import (
+        build_a2a_descriptor,
+        build_custom_descriptor,
+        get_registry,
+    )
+
+    registry = get_registry()
+    if registry is None:
+        return  # federation disabled — nothing to do
+    if store.get_registry_record_id(deployment_id):
+        return  # idempotent — already registered
+
+    if is_a2a:
+        descriptor_type = "a2a"
+        descriptors = build_a2a_descriptor(
+            name=friendly_runtime_name,
+            description=f"Agent {friendly_runtime_name} deployed via the platform",
+            url=runtime_endpoint or runtime_arn or "",
+        )
+    else:
+        descriptor_type = "custom"
+        descriptors = build_custom_descriptor(
+            {
+                "name": friendly_runtime_name,
+                "runtimeArn": runtime_arn or "",
+                "endpoint": runtime_endpoint or "",
+                "deploymentId": deployment_id,
+            }
+        )
+
+    result = registry.register(
+        name=friendly_runtime_name,
+        descriptor_type=descriptor_type,
+        descriptors=descriptors,
+        description=f"Auto-registered on deploy: {friendly_runtime_name}",
+    )
+    record_id = result.get("record_id")
+    if record_id:
+        store.set_registry_record(deployment_id, record_id, result.get("status") or "DRAFT")
+        logger.info(
+            "AWS Agent Registry: registered %s as %s (%s)",
+            friendly_runtime_name, record_id, result.get("status"),
+        )
 
 
 def handler(event: dict, context) -> dict:
@@ -312,7 +391,7 @@ def handler(event: dict, context) -> dict:
             # so failed deployments don't leave orphaned AWS resources (KB, Cognito
             # pools, gateways, etc.). Best-effort — cleanup errors are logged but
             # don't change the failure status.
-            _auto_cleanup_on_failure(store, deployment_id)
+            _auto_cleanup_on_failure(store, deployment_id, event)
 
             return {
                 "deployment_id": deployment_id,
@@ -419,6 +498,26 @@ def handler(event: dict, context) -> dict:
                     friendly_runtime_name,
                     version_id,
                 )
+
+        # Loom-study 0.4 — auto-register the deployed agent into the AWS Agent
+        # Registry as a DRAFT record when the federation feature is enabled. Was
+        # entirely un-wired: aws_agent_registry.register() had ZERO callers, so the
+        # governance/discovery integration never fired on deploy. Best-effort: a
+        # registry failure must NOT fail an already-succeeded deploy. Idempotent:
+        # skip when the deployment already carries a registry_record_id.
+        try:
+            _cfg = event.get("config") or {}
+            _protocol = (_cfg.get("protocol") if isinstance(_cfg, dict) else None) or event.get("protocol", "")
+            _auto_register_in_aws_registry(
+                store=store,
+                deployment_id=deployment_id,
+                runtime_arn=runtime_arn,
+                runtime_endpoint=runtime_endpoint,
+                friendly_runtime_name=friendly_runtime_name or runtime_id or deployment_id,
+                is_a2a=str(_protocol).upper() == "A2A",
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("AWS Agent Registry auto-register skipped (best-effort)")
 
         return {
             "deployment_id": deployment_id,

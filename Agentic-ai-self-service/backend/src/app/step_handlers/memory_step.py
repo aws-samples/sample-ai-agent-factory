@@ -20,6 +20,7 @@ import uuid
 import boto3
 
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
+from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.naming import sanitize_agentcore_name
 
@@ -195,7 +196,7 @@ def handler(event: dict, context) -> dict:
                 },
             }
 
-        agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
+        agentcore_ctrl = step_clients.client(event, "bedrock-agentcore-control")
 
         # Check if memory with this name already exists
         existing_memory_id = _find_memory_by_name(agentcore_ctrl, memory_name)
@@ -204,7 +205,7 @@ def handler(event: dict, context) -> dict:
             memory_id = existing_memory_id
         else:
             # Create IAM role for memory
-            iam_client = boto3.client("iam")
+            iam_client = step_clients.client(event, "iam")
             memory_role_name = f"AgentCoreMemory-{memory_name}"
             trust_policy = {
                 "Version": "2012-10-17",
@@ -378,7 +379,7 @@ def handler(event: dict, context) -> dict:
         # before status_update writes the full record. Otherwise the memory
         # leaks. See tasks/lessons.md Bug 85.
         try:
-            ddb = boto3.client("dynamodb", region_name=region)
+            ddb = step_clients.client(event, "dynamodb")
             ddb.update_item(
                 TableName=os.environ.get("DEPLOYMENT_TABLE_NAME", "DeploymentState"),
                 Key={"deployment_id": {"S": deployment_id}},

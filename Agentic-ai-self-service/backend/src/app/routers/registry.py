@@ -38,6 +38,7 @@ from app.services.auth import (
     get_caller_sub,
     is_registry_admin,
 )
+from app.services.rbac import require_scopes
 from app.services.registry_store import (
     DEFAULT_ORG_ID,
     RegistryEntry,
@@ -130,9 +131,19 @@ class RegistryEntryResponse(BaseModel):
     reviewed_by: Optional[str] = None
     reviewed_at: Optional[str] = None
     rejection_reason: Optional[str] = None
+    # Populated ONLY on single-entry GET (detail view's Components tab), never in
+    # the list response — including the full snapshot in every browse-grid card
+    # would bloat the list payload. None on list items by design.
+    canvas_snapshot: Optional[dict] = None
 
     @classmethod
-    def from_entry(cls, e: RegistryEntry, caller_sub: str) -> "RegistryEntryResponse":
+    def from_entry(
+        cls,
+        e: RegistryEntry,
+        caller_sub: str,
+        *,
+        include_snapshot: bool = False,
+    ) -> "RegistryEntryResponse":
         return cls(
             org_id=e.org_id,
             agent_slug=e.agent_slug,
@@ -150,6 +161,7 @@ class RegistryEntryResponse(BaseModel):
             reviewed_by=e.reviewed_by,
             reviewed_at=e.reviewed_at,
             rejection_reason=e.rejection_reason,
+            canvas_snapshot=e.canvas_snapshot if include_snapshot else None,
         )
 
 
@@ -179,7 +191,7 @@ def _visible_to(entry: RegistryEntry, caller_sub: str, caller_org: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-@router.post("", response_model=RegistryEntryResponse)
+@router.post("", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:write"))])
 async def publish(
     body: PublishRequest,
     caller_sub: str = Depends(get_caller_sub),
@@ -239,7 +251,7 @@ async def publish(
     return RegistryEntryResponse.from_entry(entry, caller_sub)
 
 
-@router.get("", response_model=list[RegistryEntryResponse])
+@router.get("", response_model=list[RegistryEntryResponse], dependencies=[Depends(require_scopes("registry:read"))])
 async def search(
     q: Optional[str] = Query(default=None, max_length=200),
     tag: Optional[str] = Query(default=None, max_length=64),
@@ -311,7 +323,68 @@ def _can_view(entry: RegistryEntry, caller_sub: str, caller_org: str, is_admin: 
     return entry.status == "approved" and _visible_to(entry, caller_sub, caller_org)
 
 
-@router.get("/{slug}", response_model=RegistryEntryResponse)
+# ---------------------------------------------------------------------------
+# Phase 6 (Loom) — AWS Bedrock AgentCore Agent Registry federation. Opt-in.
+# DECLARED BEFORE the /{slug} routes: FastAPI matches in declaration order, so
+# these literal /aws-* paths must precede the /{slug} path parameter or they'd
+# be captured as a slug and 404 (caught live). Degrades gracefully when the
+# feature is unconfigured / the API is absent (public preview).
+# ---------------------------------------------------------------------------
+
+
+class AwsRegistryEnableRequest(BaseModel):
+    registry_id: str = Field(min_length=1, max_length=256)
+
+
+@router.get("/aws-config", dependencies=[Depends(require_scopes("registry:read"))])
+async def aws_registry_config(caller_sub: str = Depends(get_caller_sub)) -> dict:
+    """Return whether AWS Agent Registry federation is enabled + reachable."""
+    from app.services.aws_agent_registry import get_configured_registry_id, get_registry
+
+    rid = get_configured_registry_id()
+    if not rid:
+        return {"enabled": False, "registry_id": None, "available": False}
+    reg = get_registry()
+    return {"enabled": True, "registry_id": rid,
+            "available": bool(reg and reg.available())}
+
+
+@router.post("/aws-config", dependencies=[Depends(require_scopes("registry:write"))])
+async def aws_registry_enable(
+    body: AwsRegistryEnableRequest,
+    caller_sub: str = Depends(get_caller_sub),
+    is_admin: bool = Depends(caller_is_admin),
+) -> dict:
+    """Enable AWS Agent Registry federation with a registryId. Admin only."""
+    if not is_admin:
+        raise HTTPException(status_code=403, detail="Requires registry-admin role")
+    from app.services.aws_agent_registry import AwsAgentRegistry, set_configured_registry_id
+
+    # Validate reachability before persisting so a typo fails loudly here.
+    if not AwsAgentRegistry(body.registry_id).available():
+        raise HTTPException(
+            status_code=400,
+            detail="Registry not reachable (check the registryId / region / permissions)",
+        )
+    set_configured_registry_id(body.registry_id)
+    return {"enabled": True, "registry_id": body.registry_id, "available": True}
+
+
+@router.get("/aws-search", dependencies=[Depends(require_scopes("registry:read"))])
+async def aws_registry_search(
+    q: str = Query(min_length=1, max_length=256),
+    caller_sub: str = Depends(get_caller_sub),
+) -> dict:
+    """Semantic search across the AWS Agent Registry (empty when disabled)."""
+    from app.services.aws_agent_registry import get_registry
+
+    reg = get_registry()
+    if reg is None:
+        return {"enabled": False, "results": []}
+    return {"enabled": True, "results": reg.search(q)}
+
+
+@router.get("/{slug}", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:read"))])
 async def get_entry(
     slug: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -324,10 +397,17 @@ async def get_entry(
         # 404 (not 403) — don't disclose existence of entries the caller
         # can't see. Same rule as services/auth.assert_owner.
         raise HTTPException(status_code=404, detail="Not found")
-    return RegistryEntryResponse.from_entry(entry, caller_sub)
+    # Single-entry detail view carries the snapshot so the UI's Components tab
+    # can render the blueprint's nodes/edges without a clone side-effect.
+    return RegistryEntryResponse.from_entry(entry, caller_sub, include_snapshot=True)
 
 
-@router.post("/{slug}/clone", response_model=CloneResponse)
+# Clone is a CONSUME action (copy a blueprint onto your own canvas) — it does NOT
+# mutate the registry entry's ownership (the increment_usage bump is incidental
+# telemetry). So it needs registry:READ, not write; otherwise the very users the
+# org catalog exists to serve (browse + reuse) couldn't clone. Publish/approve/
+# reject/update/delete remain registry:write (govern).
+@router.post("/{slug}/clone", response_model=CloneResponse, dependencies=[Depends(require_scopes("registry:read"))])
 async def clone(
     slug: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -354,7 +434,7 @@ async def clone(
     )
 
 
-@router.put("/{slug}", response_model=RegistryEntryResponse)
+@router.put("/{slug}", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:write"))])
 async def update_entry(
     slug: str,
     body: UpdateRequest,
@@ -384,7 +464,7 @@ async def update_entry(
     return RegistryEntryResponse.from_entry(updated, caller_sub)
 
 
-@router.delete("/{slug}")
+@router.delete("/{slug}", dependencies=[Depends(require_scopes("registry:write"))])
 async def delete_entry(
     slug: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -413,7 +493,7 @@ class RejectRequest(BaseModel):
     reason: Optional[str] = Field(default=None, max_length=2000)
 
 
-@router.post("/{slug}/approve", response_model=RegistryEntryResponse)
+@router.post("/{slug}/approve", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:write"))])
 async def approve_entry(
     slug: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -443,7 +523,7 @@ async def approve_entry(
     return RegistryEntryResponse.from_entry(updated, caller_sub)
 
 
-@router.post("/{slug}/reject", response_model=RegistryEntryResponse)
+@router.post("/{slug}/reject", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:write"))])
 async def reject_entry(
     slug: str,
     body: Optional[RejectRequest] = None,
@@ -472,3 +552,8 @@ async def reject_entry(
     if updated is None:
         raise HTTPException(status_code=404, detail="Not found")
     return RegistryEntryResponse.from_entry(updated, caller_sub)
+
+
+# (AWS Agent Registry federation routes are declared ABOVE the /{slug} routes —
+# see near the top of the endpoint section — so literal /aws-* paths aren't
+# swallowed by the /{slug} path parameter.)

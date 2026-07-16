@@ -60,9 +60,9 @@ def _event(**pc_extra):
 def _run(event):
     ctrl = _ctrl_with_persistent_create_failed()
     with patch.object(policy_step, "_get_deployment_store", return_value=MagicMock()), \
-         patch.object(policy_step, "boto3") as b3, \
+         patch.object(policy_step, "step_clients") as sc, \
          patch("time.sleep"):
-        b3.client.return_value = ctrl
+        sc.client.return_value = ctrl
         out = policy_step.handler(event, None)
     return out, ctrl
 
@@ -98,9 +98,9 @@ def test_enforce_happy_path_unchanged():
         "policies": [{"name": "x", "status": "ACTIVE", "policyId": "p1"}]
     }
     with patch.object(policy_step, "_get_deployment_store", return_value=MagicMock()), \
-         patch.object(policy_step, "boto3") as b3, \
+         patch.object(policy_step, "step_clients") as sc, \
          patch("time.sleep"):
-        b3.client.return_value = ctrl
+        sc.client.return_value = ctrl
         out = policy_step.handler(_event(), None)
     pr = out["policy_result"]
     assert pr["mode"] == "ENFORCE"

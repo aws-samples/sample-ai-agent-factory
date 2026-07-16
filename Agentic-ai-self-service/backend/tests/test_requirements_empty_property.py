@@ -27,10 +27,10 @@ _frameworks = st.just("strands_agents")
 
 _model_ids = st.sampled_from(
     [
-        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "us.anthropic.claude-sonnet-5",
         "us.anthropic.claude-haiku-4-5-20251001-v1:0",
         "us.amazon.nova-2-lite-v1:0",
-        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "us.anthropic.claude-sonnet-5",
     ]
 )
 

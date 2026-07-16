@@ -22,7 +22,7 @@ from app.models.deployment_models import (
     DeploymentStepName,
     RuntimeConfig,
 )
-from app.services import harness_deployer
+from app.services import harness_deployer, step_clients
 from app.services.deployment_state_store import DeploymentStateStore
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ def _get_deployment_store() -> DeploymentStateStore:
     )
 
 
-def _resolve_memory_arn(memory_result: dict, region: str) -> str:
+def _resolve_memory_arn(memory_result: dict, region: str, event: dict) -> str:
     """Resolve a memory ARN from the upstream memory_result.
 
     memory_step persists only ``memory_id`` (not the ARN), so when no explicit
@@ -53,7 +53,7 @@ def _resolve_memory_arn(memory_result: dict, region: str) -> str:
     if not memory_id:
         return ""
     try:
-        account_id = boto3.client("sts").get_caller_identity()["Account"]
+        account_id = step_clients.account_id_for_event(event)
         return f"arn:aws:bedrock-agentcore:{region}:{account_id}:memory/{memory_id}"
     except Exception:  # noqa: BLE001
         logger.warning("Could not resolve memory ARN from id %s", memory_id)
@@ -96,11 +96,11 @@ def handler(event: dict, context) -> dict:
         gateway_arn = gateway_result.get("gateway_arn") or gateway_result.get("arn") or None
 
         memory_result = event.get("memory_result") or {}
-        memory_arn = _resolve_memory_arn(memory_result, region) or None
+        memory_arn = _resolve_memory_arn(memory_result, region, event) or None
 
         # Build (or reuse the shared) harness execution role, scoped to the
         # connected model/memory/gateway ARNs for least privilege (Holmes IAM).
-        iam_client = boto3.client("iam")
+        iam_client = step_clients.client(event, "iam")
         role_arn = harness_deployer.get_shared_or_new_harness_role(
             iam_client,
             harness_name,
@@ -109,7 +109,7 @@ def handler(event: dict, context) -> dict:
             gateway_arn=gateway_arn,
         )
 
-        agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
+        agentcore_ctrl = step_clients.client(event, "bedrock-agentcore-control")
 
         # A platform gateway uses CUSTOM_JWT (Cognito) auth — the harness needs an
         # outbound OAuth credential provider to call it, or invoke fails with 401

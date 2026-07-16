@@ -20,6 +20,7 @@ import time
 import boto3
 
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
+from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,7 @@ def handler(event: dict, context) -> dict:
                 },
             }
 
-        agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
+        agentcore_ctrl = step_clients.client(event, "bedrock-agentcore-control")
 
         # Extract agent_id from runtime ARN
         # Format: arn:aws:bedrock-agentcore:{region}:{account}:runtime/{runtime_id}
@@ -96,7 +97,7 @@ def handler(event: dict, context) -> dict:
         )
 
         # Create IAM role for evaluation
-        iam_client = boto3.client("iam")
+        iam_client = step_clients.client(event, "iam")
         eval_role_name = f"AgentCoreEval-{agent_id[:32]}"
         trust_policy = {
             "Version": "2012-10-17",

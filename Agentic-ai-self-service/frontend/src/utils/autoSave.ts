@@ -400,7 +400,7 @@ export function createBackendSaveFunction(
             ? `Backend unavailable (${error.message}), saved locally`
             : 'Backend unavailable, saved locally',
         };
-      } catch (localError) {
+      } catch {
         return {
           success: false,
           timestamp: new Date(),

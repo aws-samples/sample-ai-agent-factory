@@ -52,7 +52,7 @@ from app.services.cost_tracking import (  # noqa: E402
 # compute_cost / price table
 # ---------------------------------------------------------------------------
 
-_SONNET = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+_SONNET = "us.anthropic.claude-sonnet-5"
 _HAIKU = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
@@ -72,14 +72,14 @@ def test_compute_cost_haiku_differs_from_sonnet():
 
 def test_compute_cost_eu_and_ap_prefixes_normalize_to_us_rate():
     base = compute_cost(_SONNET, 5000, 2000)
-    eu = compute_cost("eu.anthropic.claude-sonnet-4-5-20250929-v1:0", 5000, 2000)
-    ap = compute_cost("ap.anthropic.claude-sonnet-4-5-20250929-v1:0", 5000, 2000)
+    eu = compute_cost("eu.anthropic.claude-sonnet-5", 5000, 2000)
+    ap = compute_cost("ap.anthropic.claude-sonnet-5", 5000, 2000)
     assert eu == pytest.approx(base)
     assert ap == pytest.approx(base)
 
 
 def test_compute_cost_bare_model_id_form_resolves():
-    bare = compute_cost("anthropic.claude-sonnet-4-5-20250929-v1:0", 1000, 0)
+    bare = compute_cost("anthropic.claude-sonnet-5", 1000, 0)
     assert bare == pytest.approx(0.003)
 
 
@@ -99,7 +99,7 @@ def test_compute_cost_negative_tokens_clamped():
 
 
 def test_normalize_model_id_strips_prefix():
-    assert normalize_model_id(_SONNET) == "anthropic.claude-sonnet-4-5-20250929-v1:0"
+    assert normalize_model_id(_SONNET) == "anthropic.claude-sonnet-5"
     assert normalize_model_id("anthropic.foo") == "anthropic.foo"
     assert normalize_model_id(None) == ""
 

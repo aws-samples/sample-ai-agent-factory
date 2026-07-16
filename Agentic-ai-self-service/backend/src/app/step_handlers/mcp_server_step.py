@@ -22,6 +22,7 @@ import time
 import boto3
 
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
+from app.services import step_clients
 from app.services.deployment import generate_mcp_server_code
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.runtime_deployer import (
@@ -36,7 +37,7 @@ from app.services.runtime_deployer import (
 logger = logging.getLogger(__name__)
 
 
-def _prewarm_mcp_runtime(region: str, runtime_arn: str, attempts: int = 4) -> bool:
+def _prewarm_mcp_runtime(region: str, runtime_arn: str, event: dict, attempts: int = 4) -> bool:
     """Force the MCP server runtime container to fully initialize (Bug 171).
 
     The Gateway's MCP-target tool-discovery probe has a hard ~30s init ceiling on
@@ -55,9 +56,9 @@ def _prewarm_mcp_runtime(region: str, runtime_arn: str, attempts: int = 4) -> bo
 
     from botocore.config import Config as _Cfg
 
-    data = boto3.client(
+    data = step_clients.client(
+        event,
         "bedrock-agentcore",
-        region_name=region,
         config=_Cfg(read_timeout=120, connect_timeout=10, retries={"max_attempts": 0}),
     )
     handshake = _json.dumps(
@@ -136,7 +137,7 @@ def handler(event: dict, context) -> dict:
         # for rationale (AgentCore IAM cache is keyed on (role, S3 prefix)).
         mcp_s3_key = f"deployments/by-name/{sanitize_runtime_name(mcp_name)}/mcp-server-code.zip"
         if bucket:
-            s3_client = boto3.client("s3", region_name=region)
+            s3_client = step_clients.client(event, "s3")
 
             # Bug 171: prefer the LEAN mcp-only bundle (mcp + bedrock-agentcore +
             # boto3, NO strands/otel). The generated MCP server only imports
@@ -168,9 +169,9 @@ def handler(event: dict, context) -> dict:
             raise RuntimeError("No ARTIFACTS_BUCKET_NAME set")
 
         # 3. Create IAM role for MCP server runtime
-        sts = boto3.client("sts")
+        sts = step_clients.client(event, "sts")
         account_id = sts.get_caller_identity()["Account"]
-        iam_client = boto3.client("iam")
+        iam_client = step_clients.client(event, "iam")
         # Role name must start with "AgentCore" so the step Lambda's
         # iam:CreateRole resource scope (arn:aws:iam::*:role/AgentCore*)
         # in platform_stack.py matches. See tasks/lessons.md Bug 71.
@@ -191,7 +192,7 @@ def handler(event: dict, context) -> dict:
 
         # 4. Create Cognito pool for gateway-to-MCP-server OAuth auth
         gateway_name = event.get("gateway_config", {}).get("name", "mcp-gw")
-        cognito = boto3.client("cognito-idp", region_name=region)
+        cognito = step_clients.client(event, "cognito-idp")
 
         pool_name = f"AgentCore-mcp-{gateway_name}"
         resource_id = f"agentcore-mcp-{gateway_name}"
@@ -252,7 +253,7 @@ def handler(event: dict, context) -> dict:
         logger.info("Created MCP OAuth client: %s, scope: %s", mcp_client_id, full_scope)
 
         # 5. Create MCP server runtime (protocol=MCP) with JWT authorizer
-        agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
+        agentcore_ctrl = step_clients.client(event, "bedrock-agentcore-control")
         authorizer_config = {
             "customJWTAuthorizer": {
                 "discoveryUrl": discovery_url,
@@ -303,7 +304,7 @@ def handler(event: dict, context) -> dict:
         # never fails the deploy (the gateway-target retry still applies).
         mcp_server_runtime_arn = mcp_runtime_result.get("arn", "")
         try:
-            _prewarm_mcp_runtime(region, mcp_server_runtime_arn)
+            _prewarm_mcp_runtime(region, mcp_server_runtime_arn, event)
         except Exception as warm_exc:  # noqa: BLE001
             logger.warning("MCP runtime pre-warm skipped: %s", str(warm_exc)[:200])
 

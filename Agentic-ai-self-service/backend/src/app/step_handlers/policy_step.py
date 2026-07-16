@@ -19,6 +19,7 @@ import time
 import boto3
 
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
+from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
 
 logger = logging.getLogger(__name__)
@@ -239,13 +240,13 @@ def handler(event: dict, context) -> dict:
                 },
             }
 
-        agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
+        agentcore_ctrl = step_clients.client(event, "bedrock-agentcore-control")
 
         # Bug 134: deploy_gateway does not return the gateway ARN, but Cedar
         # `resource ==` needs it. Construct it (and verify via get_gateway).
         if not gateway_arn:
             try:
-                account_id = boto3.client("sts", region_name=region).get_caller_identity()["Account"]
+                account_id = step_clients.account_id_for_event(event)
                 gateway_arn = f"arn:aws:bedrock-agentcore:{region}:{account_id}:gateway/{gateway_id}"
             except Exception as e:  # noqa: BLE001
                 logger.warning("Could not construct gateway ARN: %s", e)
@@ -437,11 +438,29 @@ def handler(event: dict, context) -> dict:
             # whole thing at 48 chars to stay within the service limit.
             _eng_prefix = engine_name[:max(0, 48 - len(base_name) - 1)]
             pol_name = (f"{_eng_prefix}_{base_name}" if _eng_prefix else base_name)[:48]
+            # A statement-less explicit policy entry (e.g. {"effect":"permit"} with
+            # no Cedar text) must NOT fall back to `permit(principal, action,
+            # resource)` — that unconstrained wildcard is BOTH rejected by AgentCore
+            # analysis ("wildcard resource detected") AND a security hole (it would
+            # allow every principal→action→resource, defeating the constrained
+            # per-tool permit this step auto-builds). Skip it: the auto-built
+            # `allow_permitted_tools` permit (inserted above from the gateway
+            # manifest) is the correct constrained grant. Observed in the live
+            # matrix run (P-PLAT-027).
+            _stmt = pol.get("statement")
+            if not _stmt or not _stmt.strip():
+                logger.warning(
+                    "Skipping statement-less policy '%s' — would emit a wildcard "
+                    "permit (rejected + allow-all). The auto-built constrained "
+                    "permit over the gateway's allowed tools governs access instead.",
+                    pol_name,
+                )
+                continue
             try:
                 cp = _create_policy_when_engine_ready(
                     agentcore_ctrl, engine_id, pol_name,
                     pol.get("description", ""),
-                    pol.get("statement", "permit(principal, action, resource);"),
+                    _stmt,
                 )
                 # Bug 177 diagnostics: log the EXACT Cedar statement so a
                 # CREATE_FAILED reason can be matched to what we emitted (the

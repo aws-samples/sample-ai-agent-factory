@@ -14,7 +14,7 @@
  * the existing status polling / chat / monitor UI works unchanged.
  */
 
-import { useMemo, useState, useRef } from 'react';
+import { useMemo, useState, useRef, useEffect } from 'react';
 import { SelectField, TextField, TextArea, FormSection, Toggle } from '../modals/FormFields';
 import {
   PROVIDER_OPTIONS,
@@ -69,8 +69,15 @@ export function HarnessAuthoring() {
   const [connectorModalId, setConnectorModalId] = useState<string | null>(null);
   // Bump to force the connectors useMemo to recompute after a modal save.
   const [connectorRev, setConnectorRev] = useState(0);
+  // Snapshot of configs to avoid ref access during render
+  const [connectorConfigs, setConnectorConfigs] = useState<Record<string, ConnectorConfiguration>>({});
 
   const [showDeployPanel, setShowDeployPanel] = useState(false);
+
+  // Sync connectorConfigs state with ref whenever connectorRev changes
+  useEffect(() => {
+    setConnectorConfigs({ ...connectorConfigsRef.current });
+  }, [connectorRev]);
 
   const availableModels = useMemo(() => getModelsForProvider(provider), [provider]);
   const providerInfo = useMemo(
@@ -119,7 +126,7 @@ export function HarnessAuthoring() {
     () =>
       Array.from(selectedConnectors).map((id) => {
         const connectorId = id.slice(CONNECTOR_TOOL_PREFIX.length);
-        const cfg = connectorConfigsRef.current[id];
+        const cfg = connectorConfigs[id];
         const isOauth = cfg?.authMethod === 'oauth2_cc';
         return {
           connector_id: cfg?.connectorId || connectorId,
@@ -139,18 +146,17 @@ export function HarnessAuthoring() {
           credential_prefix: !isOauth ? (cfg?.credentialPrefix || undefined) : undefined,
         };
       }),
-    // connectorRev forces recompute after a modal save mutates the ref.
-    [selectedConnectors, connectorRev],
+    [selectedConnectors, connectorConfigs],
   );
 
   // Whether every selected connector has been configured with a credential.
   const connectorsNeedingConfig = useMemo(
     () =>
       Array.from(selectedConnectors).filter((id) => {
-        const cfg = connectorConfigsRef.current[id];
+        const cfg = connectorConfigs[id];
         return !cfg || (!cfg.secretValue && !cfg.secretArn);
       }),
-    [selectedConnectors, connectorRev],
+    [selectedConnectors, connectorConfigs],
   );
 
   const connectedTools = useMemo(() => {
@@ -294,7 +300,7 @@ export function HarnessAuthoring() {
                               : 'border-[#e9ebed] bg-white text-[#16191f] hover:border-[#0972d3]/40'
                           }`}
                         >
-                          <span className="text-base">{tool.icon}</span>
+                          <span className="text-base">{tool.customIcon || '🔧'}</span>
                           <span className="font-medium truncate">{tool.label}</span>
                         </button>
                       );
@@ -308,7 +314,7 @@ export function HarnessAuthoring() {
                     {CONNECTOR_TOOLS.map((tool) => {
                       const id = tool.toolId!;
                       const active = selectedConnectors.has(id);
-                      const cfg = connectorConfigsRef.current[id];
+                      const cfg = connectorConfigs[id];
                       const configured = !!(cfg && (cfg.secretValue || cfg.secretArn));
                       return (
                         <button
@@ -340,7 +346,7 @@ export function HarnessAuthoring() {
                           }`}
                           title={active && !configured ? 'Click to add credentials' : undefined}
                         >
-                          <span className="text-base">{tool.icon}</span>
+                          <span className="text-base">{tool.customIcon || '🧩'}</span>
                           <span className="font-medium truncate">{tool.label}</span>
                           {active && !configured && <span className="ml-auto text-[10px]">⚠ creds</span>}
                         </button>
@@ -372,7 +378,7 @@ export function HarnessAuthoring() {
         <ConnectorConfigModal
           isOpen={true}
           initialConfig={{
-            ...(connectorConfigsRef.current[connectorModalId] ?? {}),
+            ...(connectorConfigs[connectorModalId] ?? {}),
             connectorId: connectorModalId.slice(CONNECTOR_TOOL_PREFIX.length) as ConnectorConfiguration['connectorId'],
             toolId: connectorModalId,
           }}
@@ -384,7 +390,7 @@ export function HarnessAuthoring() {
           onClose={() => {
             // Cancelling without credentials de-selects the connector so the user
             // can't deploy an unconfigured connector by accident.
-            const cfg = connectorConfigsRef.current[connectorModalId];
+            const cfg = connectorConfigs[connectorModalId];
             if (!cfg || (!cfg.secretValue && !cfg.secretArn)) {
               setSelectedConnectors((prev) => {
                 const next = new Set(prev);

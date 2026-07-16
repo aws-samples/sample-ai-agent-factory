@@ -4,7 +4,7 @@
  * (create a guardrail with content filters, PII filters, denied topics, and word filters).
  */
 
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { ConfigurationModal, type ValidationError } from './ConfigurationModal';
 import { TextField, FormSection } from './FormFields';
 import type {
@@ -76,11 +76,12 @@ export function GuardrailsConfigurationModal({
     ...initialConfig,
   }));
 
-  useEffect(() => {
-    if (isOpen) {
-      setConfig({ ...DEFAULT_CONFIG, ...initialConfig });
-    }
-  }, [isOpen, initialConfig]);
+  // Reset config when modal opens with new initial config (adjust state during render pattern)
+  const [lastInitial, setLastInitial] = useState<typeof initialConfig | symbol>(Symbol('unset'));
+  if (isOpen && initialConfig !== lastInitial) {
+    setLastInitial(initialConfig);
+    setConfig({ ...DEFAULT_CONFIG, ...initialConfig });
+  }
 
   const updateField = useCallback(<K extends keyof GuardrailsConfiguration>(
     field: K,

@@ -38,7 +38,7 @@ def patched_boto(monkeypatch):
     ctrl.delete_gateway_target.side_effect = _del_target
 
     monkeypatch.setattr(dh, "time", types.SimpleNamespace(sleep=lambda *_: None))
-    monkeypatch.setattr("boto3.client", lambda *a, **k: ctrl)
+    monkeypatch.setattr("app.services.step_clients.client", lambda *a, **k: ctrl)
     return dh, ctrl
 
 
@@ -64,7 +64,7 @@ def test_gateway_target_conflict_is_not_treated_as_gone(monkeypatch):
         "An error occurred (ValidationException): Gateway has targets associated with it."
     )
     monkeypatch.setattr(dh, "time", types.SimpleNamespace(sleep=lambda *_: None))
-    monkeypatch.setattr("boto3.client", lambda *a, **k: ctrl)
+    monkeypatch.setattr("app.services.step_clients.client", lambda *a, **k: ctrl)
 
     with pytest.raises(Exception) as exc:
         dh._delete_managed_resource({"type": "gateway", "id": "gw-2", "region": "us-east-1"}, "us-east-1")
@@ -78,7 +78,7 @@ def test_genuine_not_found_gateway_is_gone(monkeypatch):
     ctrl.list_gateway_targets.return_value = {"items": []}
     ctrl.delete_gateway.side_effect = Exception("ResourceNotFoundException: gateway gone")
     monkeypatch.setattr(dh, "time", types.SimpleNamespace(sleep=lambda *_: None))
-    monkeypatch.setattr("boto3.client", lambda *a, **k: ctrl)
+    monkeypatch.setattr("app.services.step_clients.client", lambda *a, **k: ctrl)
     # A genuine not-found is idempotent success: the retry loop breaks on _gone
     # and the function returns normally (no raise). The key is it does NOT raise
     # and does NOT leave the gateway un-handled.

@@ -3,7 +3,7 @@
  * Supports "Use Existing KB" and "Create New KB" modes.
  */
 
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { ConfigurationModal, type ValidationError } from './ConfigurationModal';
 import { TextField, SelectField, NumberField, FormSection } from './FormFields';
 import { DATA_SOURCE_FIELDS_MAP } from './kb/DataSourceFields';
@@ -153,14 +153,12 @@ export function KnowledgeBaseConfigModal({
     ...initialConfig,
   }));
 
-  useEffect(() => {
-    if (isOpen) {
-      setConfig({
-        ...createDefaultKBConfig(),
-        ...initialConfig,
-      });
-    }
-  }, [isOpen, initialConfig]);
+  // Reset config when modal opens with new initial config (adjust state during render pattern)
+  const [lastInitial, setLastInitial] = useState<typeof initialConfig | symbol>(Symbol('unset'));
+  if (isOpen && initialConfig !== lastInitial) {
+    setLastInitial(initialConfig);
+    setConfig({ ...createDefaultKBConfig(), ...initialConfig });
+  }
 
   // ── Validation ──────────────────────────────────────────────────────────
 

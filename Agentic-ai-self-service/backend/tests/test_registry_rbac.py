@@ -425,3 +425,27 @@ def test_put_by_admin_preserves_status(store: RegistryStore):
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "approved"
     assert store.get(DEFAULT_ORG_ID, "admin-edit").status == "approved"
+
+
+# ---------------------------------------------------------------------------
+# Detail response carries the canvas snapshot; list does NOT (UI Components tab)
+# ---------------------------------------------------------------------------
+
+
+def test_detail_get_includes_canvas_snapshot_but_list_omits_it(store: RegistryStore):
+    """GET /{slug} returns canvas_snapshot (for the detail Components tab); the
+    list response omits it (null) to keep the browse-grid payload lean."""
+    alice = _client("alice", admin=True)
+    _publish(alice, "snap-bot")
+    alice.post("/api/registry/snap-bot/approve")
+
+    detail = alice.get("/api/registry/snap-bot")
+    assert detail.status_code == 200, detail.text
+    snap = detail.json()["canvas_snapshot"]
+    assert snap is not None
+    assert snap["nodes"] == [{"type": "runtime"}]
+
+    listing = alice.get("/api/registry?scope=all").json()
+    row = next(e for e in listing if e["agent_slug"] == "snap-bot")
+    # List rows must NOT carry the (potentially large) snapshot.
+    assert row["canvas_snapshot"] is None

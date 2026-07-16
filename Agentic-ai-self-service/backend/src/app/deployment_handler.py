@@ -35,6 +35,7 @@ from app.models.deployment_models import (
     DeployRequest,
     DeployResponse,
     DeleteResponse,
+    ImportRuntimeRequest,
     TestRequest,
     TestResponse,
 )
@@ -170,6 +171,7 @@ def _gateway_implied(
     gateway_tools: Optional[list],
     connectors: Optional[list],
     connected_tools: Optional[list],
+    external_mcp_servers: Optional[list] = None,
 ) -> bool:
     """Whether a gateway must be deployed even if no explicit ``gateway_config`` was sent.
 
@@ -185,7 +187,12 @@ def _gateway_implied(
     from ``"gateway" in connected_tools`` and synthesizes ``{"name": ...}``
     itself — this mirrors that so BOTH paths behave identically.
     """
-    return bool(gateway_tools or connectors or "gateway" in (connected_tools or []))
+    return bool(
+        gateway_tools
+        or connectors
+        or external_mcp_servers
+        or "gateway" in (connected_tools or [])
+    )
 
 
 def _maybe_promote_policy(deployment_state: Optional[dict], region: str) -> bool:
@@ -265,6 +272,49 @@ deployment_app.add_middleware(
     allow_headers=["Content-Type", "Authorization", "X-Amz-Date", "X-Api-Key"],
 )
 
+
+# Phase 5 (Loom) audit trail — record WRITE-ish control-plane actions to the
+# audit store for the admin dashboard. Fixed action vocabulary (audit_store.
+# classify_action); reads are ignored. Best-effort: an audit failure NEVER
+# affects the underlying response (wrapped, logged, swallowed).
+@deployment_app.middleware("http")
+async def _audit_middleware(request, call_next):
+    response = await call_next(request)
+    try:
+        from app.services.audit_store import (
+            AuditEvent,
+            classify_action,
+            get_audit_store,
+        )
+
+        action = classify_action(request.method, request.url.path)
+        if action is not None:
+            from app.services.auth import get_caller_sub as _gcs
+
+            try:
+                actor = _gcs(request)
+            except Exception:  # noqa: BLE001
+                actor = "unknown"
+            # Loom-study 0.5: populate session_uuid from the per-browser-session
+            # id the frontend sends as X-Session-Id (was always empty). Lets admin
+            # analytics distinguish activity streams on a shared account and build
+            # a per-session timeline. Bounded to avoid unbounded header abuse.
+            _sid = (request.headers.get("x-session-id") or "")[:128] or None
+            get_audit_store().record(
+                AuditEvent(
+                    org_id="default",
+                    actor_sub=actor,
+                    action=action,
+                    method=request.method,
+                    path=request.url.path,
+                    status_code=getattr(response, "status_code", 0),
+                    session_uuid=_sid,
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("audit middleware skipped: %s", exc)
+    return response
+
 # Phase 1 Gap 1A — version + slot management endpoints. Mounted on the
 # deployment Lambda because the versions table belongs to the runtime-control
 # plane (same data plane as /api/deploy and /api/test-runtime). API GW routes
@@ -274,10 +324,19 @@ from app.routers.versions import router as versions_router  # noqa: E402
 from app.routers.evaluations import router as evaluations_router  # noqa: E402
 from app.routers.registry import router as registry_router  # noqa: E402
 from app.routers.cost import router as cost_router  # noqa: E402
+from app.routers.cost import budgets_router  # noqa: E402  # Phase 4 FinOps budgets
 from app.routers.hitl import router as hitl_router  # noqa: E402
 from app.routers.prompts import router as prompts_router  # noqa: E402  # Phase 3 Gap 3H
 from app.routers.connectors import router as connectors_router  # noqa: E402
+from app.routers.identity import router as identity_router  # noqa: E402
+from app.routers.permissions import router as permissions_router  # noqa: E402
+from app.routers.approvals import router as approvals_router  # noqa: E402
+from app.routers.vpc_profiles import router as vpc_profiles_router  # noqa: E402
+from app.routers.models import router as models_router  # noqa: E402
+from app.routers.mcp_servers import router as mcp_servers_router  # noqa: E402
 from app.routers.triggers import router as triggers_router  # noqa: E402
+from app.routers.tags import router as tags_router  # noqa: E402  # Phase 2 governance tagging
+from app.routers.admin import router as admin_router  # noqa: E402  # Phase 5 audit dashboard
 
 deployment_app.include_router(versions_router)
 # Phase 1 Gap 1C — evaluation results endpoint. Mounted on the deployment
@@ -290,6 +349,9 @@ deployment_app.include_router(registry_router)
 # Phase 2 Gap 2B — cost analytics. Queries CloudWatch Logs Insights for
 # per-runtime token/cost rollups (same grant set as evaluations).
 deployment_app.include_router(cost_router)
+# Phase 4 (Loom) FinOps — cost budgets (/api/cost/budgets). Reads spend from the
+# same CloudWatch cost pipeline; owns the Budget DDB table grant.
+deployment_app.include_router(budgets_router)
 # Phase 2 Gap 2D — human-in-the-loop approval queue. Reads the HITL table's
 # owner_sub GSI and decides requests; deployment Lambda has the table grant.
 deployment_app.include_router(hitl_router)
@@ -302,10 +364,36 @@ deployment_app.include_router(prompts_router)
 # /api/connectors + /api/connectors/{proxy+} are added in platform_stack.py per
 # the Bug 21 router-enumeration rule.
 deployment_app.include_router(connectors_router)
+# Verified external MCP-server catalog (browsable in the Registry UI). Read-only,
+# no tenant data — mounted alongside the connector catalog. Routes
+# /api/mcp-servers + /api/mcp-servers/{proxy+} are added in platform_stack.py per
+# the Bug 21 router-enumeration rule.
+deployment_app.include_router(mcp_servers_router)
+# Phase 1 (Loom-study 1.2/1.3) — identity inspection + OBO verification. Read
+# endpoints (token-info + test-obo) on the deployment Lambda (owns the
+# bedrock-agentcore identity permissions via harness/gateway steps' grants).
+deployment_app.include_router(identity_router)
+# Loom-study 1.6 — JIT IAM permission-request workflow (request/approve/reject).
+deployment_app.include_router(permissions_router)
+# Loom-study 2.2 — HITL approval-policy CRUD (/api/settings/approval-policies).
+deployment_app.include_router(approvals_router)
+# Loom-study 4.2 — named VPC config profiles (/api/settings/vpc-profiles).
+deployment_app.include_router(vpc_profiles_router)
+# Loom-study 5.1 — live model catalog (/api/models).
+deployment_app.include_router(models_router)
 # Phase 3 Gap 3F — scheduled / event triggers registry. Mounted here because
 # the deployment Lambda owns the TriggersTable grant + the agentcore-trigger/*
 # Secrets Manager grant and already has the get_caller_sub auth helper.
 deployment_app.include_router(triggers_router)
+# Phase 2 governance tagging — tag policies + tag profiles. Mounted on the
+# deployment Lambda because the deploy hook resolves tags in this same process
+# and the Lambda owns the TagPolicy table grant. API-GW routes for
+# /api/settings/tags + /api/settings/tag-profiles are added in platform_stack.py
+# (Bug 21 router-enumeration rule: HTTP API needs explicit routes per path).
+deployment_app.include_router(tags_router)
+# Phase 5 (Loom) audit dashboard — /api/admin/audit (admin scope). Reads the
+# audit store the middleware writes to.
+deployment_app.include_router(admin_router)
 
 
 @deployment_app.get("/health")
@@ -334,6 +422,67 @@ async def health_check() -> dict:
 )
 async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployResponse:
     """Start a Step Functions execution for a new deployment."""
+    # Non-Bedrock providers reference a Secrets Manager secret for their API key.
+    # Lock tenant-supplied ARNs to the agentcore-provider/ namespace — the same
+    # discipline as the OTEL secret — so a tenant cannot make the deploy step read
+    # an arbitrary foreign secret. The runtime_configure step role only grants
+    # GetSecretValue on this namespace, so this validation keeps the two aligned.
+    _key_ref = getattr(request.config, "provider_api_key_ref", None)
+    if _key_ref and ":secret:agentcore-provider/" not in _key_ref:
+        raise HTTPException(
+            status_code=400,
+            detail="provider_api_key_ref must be a Secrets Manager ARN in the agentcore-provider/ namespace",
+        )
+
+    # Loom-study 4.2 — resolve a named VPC profile to a concrete vpc_config before
+    # the SFN starts, so runtime_configure_step sees the subnets/SGs (Phase-0 0.1).
+    # An explicit vpc_config wins; an unknown profile name is a loud 400.
+    _vpc_profile = getattr(request.config, "vpc_profile", None)
+    if _vpc_profile and not getattr(request.config, "vpc_config", None):
+        try:
+            from app.services.vpc_profile_store import resolve_vpc_config
+            _resolved = resolve_vpc_config(
+                "default", _vpc_profile,
+                os.environ.get("TAG_POLICY_TABLE_NAME", ""),
+                os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")),
+            )
+        except Exception:  # noqa: BLE001
+            _resolved = None
+        if _resolved is None:
+            raise HTTPException(status_code=400, detail=f"Unknown VPC profile: {_vpc_profile}")
+        request.config.vpc_config = _resolved
+
+    # Integration gating (Loom-study 1.4): when AWS Agent Registry federation is
+    # enabled, an agent may only be wired to APPROVED external MCP servers / A2A
+    # peers. Collect the connected external identifiers (endpoint URLs / names)
+    # and reject the deploy if any is not APPROVED. No-op when federation is off.
+    try:
+        from app.services.aws_agent_registry import unapproved_integrations
+
+        _idents: list[str] = []
+        _mcp = request.mcp_server_config or {}
+        if isinstance(_mcp, dict):
+            for k in ("endpoint", "url", "name", "server_url", "serverUrl"):
+                if _mcp.get(k):
+                    _idents.append(str(_mcp[k]))
+        _a2a = request.a2a_config or {}
+        if isinstance(_a2a, dict):
+            for u in (_a2a.get("peer_allowlist") or _a2a.get("peerAllowlist") or []):
+                _idents.append(str(u))
+        _blocked = unapproved_integrations(_idents)
+        if _blocked:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "These integrations are not APPROVED in the Agent Registry and "
+                    f"cannot be used in a deployment: {_blocked}"
+                ),
+            )
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001 — gating must not crash deploy on a registry hiccup
+        logger.warning("integration gating skipped (registry check errored)")
+
     deployment_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     user_id = _get_user_id(raw_request)
@@ -450,6 +599,11 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         # Phase B — persist the chosen path up-front so the delete/test handlers
         # know whether to route to harness_deployer even on partial-failed deploys.
         deployment_mode=request.deployment_mode or "runtime",
+        # Phase 7 (opt-in) — persist the deploy target so the SEPARATE delete
+        # request can assume the same cross-account role to tear down. None →
+        # home account (unchanged). Validated below before the SFN starts.
+        target_account_id=request.target_account_id,
+        target_region=request.target_region,
     )
 
     store = _get_state_store()
@@ -500,12 +654,91 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     if request.observability_config and "observability" not in auto_connected:
         auto_connected.append("observability")
 
+    # Phase 2 (Loom) governance tagging — resolve the org's tag policies against
+    # the caller's supplied tags / selected profile BEFORE starting the deploy.
+    # A missing REQUIRED tag fails fast with HTTP 400 (rather than dying mid-SFN).
+    # Resolution is best-effort tolerant of a missing table (fresh stack): only a
+    # genuine required-tag violation blocks the deploy.
+    resolved_tags: dict = {}
+    try:
+        from app.services.tag_policy_store import (
+            TagResolutionError,
+            get_tag_policy_store,
+        )
+
+        tag_store = get_tag_policy_store()
+        tag_store.ensure_platform_policies("default")
+        resolved_tags = tag_store.resolve_tags(
+            "default",
+            supplied=request.resource_tags or {},
+            profile_name=request.tag_profile,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # A required-tag violation is a caller error → 400. Any other failure
+        # (e.g. table absent on a fresh stack) must NOT block deploys.
+        from app.services.tag_policy_store import TagResolutionError
+
+        if isinstance(exc, TagResolutionError):
+            raise HTTPException(status_code=400, detail=str(exc))
+        logger.warning("Tag resolution skipped (non-fatal): %s", exc)
+
+    # Phase 7 (opt-in) deployment targets — resolve the target account/region
+    # BEFORE starting the deploy so a disabled feature / bad target / non-allowed
+    # region fails fast with HTTP 400 (rather than mid-SFN). Default (no target)
+    # → home account + region, threaded as None so step_clients uses the default
+    # session (unchanged path). A registered target is validated (assumable +
+    # landed-account) at registration time; here we only enforce the gate.
+    target_account_id: Optional[str] = None
+    target_region: Optional[str] = None
+    target_role_arn: Optional[str] = None
+    if request.target_account_id or request.target_region:
+        from app.services.deploy_target import (
+            TargetError,
+            get_account,
+            resolve_region,
+            targets_enabled,
+        )
+
+        if not targets_enabled():
+            raise HTTPException(
+                status_code=400,
+                detail="Deployment targets are disabled; enable them (admin) before targeting an account/region",
+            )
+        try:
+            target_region = resolve_region(request.target_region)
+            target_account_id = request.target_account_id
+        except TargetError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        # Resolve the target account's role ARN HERE (the deployment Lambda has
+        # the Settings table) and thread it on the SFN event, so the step
+        # Lambdas assume the role without needing a Settings lookup.
+        if target_account_id:
+            tgt = get_account(target_account_id)
+            if tgt is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Account '{target_account_id}' is not a registered deployment target",
+                )
+            target_role_arn = tgt.get("role_arn")
+
     sfn_input = {
         "deployment_id": deployment_id,
         "workflow_id": request.node_id,
         "config": request.config.model_dump(mode="json", by_alias=True),
         "connected_tools": auto_connected,
         "template_id": request.template_id,
+        # Phase 2 (Loom) governance tagging — resolved tag set applied to every
+        # AWS resource the step handlers create (threaded via sfn_input).
+        "resource_tags": resolved_tags,
+        # Phase 7 (opt-in) — target account/region/role for the deploy's boto3
+        # clients (services/step_clients reads these). None → home (unchanged).
+        # The role ARN is resolved here (deployment Lambda has the Settings
+        # table) so step Lambdas assume it without a Settings lookup.
+        "target_account_id": target_account_id,
+        "target_region": target_region,
+        "target_role_arn": target_role_arn,
         # Phase 1 Gap 1A — every step handler keys S3 paths and AgentCore
         # runtime names off the version. friendly_runtime_name is the user's
         # input; agentcore_runtime_name is what we actually pass to AgentCore.
@@ -526,7 +759,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     # gateway step actually runs. See _gateway_implied for the full rationale.
     if request.gateway_config:
         sfn_input["gateway_config"] = request.gateway_config
-    elif _gateway_implied(request.gateway_tools, request.connectors, auto_connected):
+    elif _gateway_implied(request.gateway_tools, request.connectors, auto_connected, request.external_mcp_servers):
         # deploy_gateway only requires `name`; it fills the rest. Reuse the
         # friendly runtime/harness name so the gateway is recognizably paired
         # with its agent.
@@ -550,6 +783,11 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
             if c.secret_value:
                 conn["secret_value"] = c.secret_value
             sfn_input["connectors"].append(conn)
+    if request.external_mcp_servers:
+        # External MCP catalog targets. Same secret-hygiene as connectors: the
+        # transient raw api key rides ONLY on the SFN input so the gateway step
+        # can mint the secret and thread back the ARN — never persisted/logged.
+        sfn_input["external_mcp_servers"] = request.external_mcp_servers
     if request.memory_config:
         sfn_input["memory_config"] = request.memory_config
     if request.evaluation_config:
@@ -1081,13 +1319,35 @@ def _delete_managed_resource(res: dict, region: str) -> str:
     Type-dispatched + idempotent (NotFound is treated as success). Returns a
     human log line, or "" for an unknown type (so older/foreign entries no-op
     rather than fail the whole teardown).
+
+    Phase 7 (opt-in) cross-account teardown: when the manifest recorded an
+    ``account`` for this resource, we assume the same cross-account deployment
+    role to delete it. All the ``boto3.client(...)`` calls below transparently
+    route through that session because ``boto3`` is rebound to a target-aware
+    shim. Same-account resources (no recorded account) use the default session —
+    unchanged behavior.
     """
-    import boto3
+    import boto3 as _boto3_real
 
     rtype = res.get("type", "")
     rid = res.get("id") or res.get("name") or ""
     rname = res.get("name") or ""
     res_region = res.get("region") or region
+    res_account = res.get("account")
+
+    class _TargetBoto3:
+        """Minimal boto3 shim: routes .client() through the resource's target."""
+        def __init__(self, account, region_):
+            self._event = (
+                {"target_account_id": account, "target_region": region_}
+                if account else {}
+            )
+
+        def client(self, service, **kwargs):
+            from app.services import step_clients
+            return step_clients.client(self._event, service, **kwargs)
+
+    boto3 = _TargetBoto3(res_account, res_region)
 
     def _gone(e: Exception) -> bool:
         s = str(e)
@@ -1326,6 +1586,64 @@ def _delete_managed_resource(res: dict, region: str) -> str:
         raise
 
 
+@deployment_app.post("/api/runtime/import", status_code=201)
+async def handle_import_runtime(request: ImportRuntimeRequest, raw_request: Request) -> dict:
+    """Import (adopt) an externally-built AgentCore Runtime into the platform.
+
+    Loom-study 1.5. Describes the runtime by ARN and records it as a SUCCEEDED,
+    caller-owned deployment WITHOUT any codegen/deploy — so a team can bring a
+    pre-existing runtime under the platform's observability/cost/registry
+    governance. Does NOT create AWS resources; teardown of an imported runtime is
+    the same DELETE path (the caller opts in there).
+    """
+    arn = request.runtime_arn
+    m = re.match(r"^arn:aws:bedrock-agentcore:([a-z0-9-]+):(\d{12}):runtime/([A-Za-z0-9_-]+)$", arn)
+    if not m:
+        raise HTTPException(status_code=400, detail="Invalid AgentCore Runtime ARN")
+    region = request.aws_region or m.group(1)
+    runtime_id = m.group(3)
+    user_id = _get_user_id(raw_request)
+
+    try:
+        ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
+        rt = ctrl.get_agent_runtime(agentRuntimeId=runtime_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail=f"Runtime not found or not describable: {exc}")
+
+    store = _get_state_store()
+    # Idempotency + tenant safety: if this runtime is already recorded by another
+    # owner, refuse (mirrors the deploy-time cross-tenant guard).
+    existing = _scan_for_runtime(store._table, runtime_id)
+    if existing and existing.get("user_id") and existing.get("user_id") != user_id:
+        raise HTTPException(status_code=409, detail="Runtime already imported by another user")
+
+    now = datetime.now(timezone.utc)
+    deployment_id = str(uuid.uuid4())
+    endpoint = f"{arn}/runtime-endpoint/DEFAULT"
+    state = DeploymentState(
+        deployment_id=deployment_id,
+        workflow_id=f"imported-{runtime_id[:32]}",
+        user_id=user_id,
+        status=DeploymentStatusEnum.SUCCEEDED,
+        started_at=now,
+        completed_at=now,
+        runtime_id=runtime_id,
+        runtime_arn=arn,
+        runtime_endpoint=endpoint,
+        agentcore_runtime_name=rt.get("agentRuntimeName") or runtime_id,
+        deployment_mode="runtime",
+    )
+    store.create(state)
+    logger.info("Imported external runtime %s as deployment %s", runtime_id, deployment_id)
+    return {
+        "deploymentId": deployment_id,
+        "runtimeId": runtime_id,
+        "runtimeArn": arn,
+        "status": rt.get("status", "READY"),
+        "imported": True,
+    }
+
+
 @deployment_app.delete(
     "/api/runtime/{runtime_id}",
     response_model=DeleteResponse,
@@ -1373,6 +1691,19 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
     except Exception as exc:
         cleanup_messages.append(f"State lookup error: {exc}")
 
+    # Loom-study 0.7: delete the AWS Agent Registry record this deploy auto-created
+    # (0.4), so teardown doesn't leave a stale/orphaned governance record pointing
+    # at a runtime that no longer exists. Best-effort — never blocks teardown.
+    _aws_rec_id = (deployment_record or {}).get("aws_registry_record_id")
+    if _aws_rec_id:
+        try:
+            from app.services.aws_agent_registry import get_registry
+            _reg = get_registry()
+            if _reg is not None and _reg.delete(_aws_rec_id):
+                cleanup_messages.append(f"AWS registry record {_aws_rec_id} deleted")
+        except Exception as exc:  # noqa: BLE001
+            cleanup_messages.append(f"AWS registry record delete error: {exc}")
+
     # Step 0a: GENERIC manifest-driven teardown. Iterate created_resources[] and
     # delete every recorded sub-resource by type. This is the primary teardown
     # path that makes cleanup complete-by-construction (no orphans when a new
@@ -1418,8 +1749,14 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
             deployment_record.get("created_resources") or [],
             key=lambda r: _DELETE_PRIORITY.get(str(r.get("type")), 4),
         )
+        # Phase 7 (opt-in) — if this deploy targeted another account, inject that
+        # account onto each manifest resource that didn't record its own, so
+        # _delete_managed_resource assumes the same cross-account role to delete.
+        _dep_target_account = deployment_record.get("target_account_id")
         for _res in _ordered:
             try:
+                if _dep_target_account and not _res.get("account"):
+                    _res = {**_res, "account": _dep_target_account}
                 key = (str(_res.get("type")), str(_res.get("id") or _res.get("name")))
                 if key in seen_mres:
                     continue
@@ -1577,8 +1914,14 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
     # Step 1.5: Clean up Knowledge Base resources
     kb_result = (deployment_record or {}).get("knowledge_base_result") or {}
     dep_id = (deployment_record or {}).get("deployment_id", "")
+    # NOTE: run this EVEN WHEN manifest_used. The KB-as-gateway-tool Lambda and
+    # its execution role (AgentCoreKBToolRole-<dep8>) are created by the gateway
+    # deployer with deterministic names derived from the deployment id, but they
+    # are NOT recorded in the teardown manifest — so manifest-driven teardown
+    # would orphan the IAM role (observed live in the E2E matrix run). Deleting
+    # by deterministic name is idempotent and safe in both paths.
     kb_lambda_suffix = dep_id[:8] if dep_id else ""
-    if kb_lambda_suffix and not manifest_used:
+    if kb_lambda_suffix:
         try:
             lambda_client = boto3.client("lambda", region_name=region)
             kb_fn_name = f"AgentCore-KBTool-{kb_lambda_suffix}"
@@ -1609,7 +1952,16 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
             kb_id = kb_result.get("kb_id")
             ds_id = kb_result.get("data_source_id")
             if ds_id and kb_id:
-                bedrock_agent.delete_data_source(knowledgeBaseId=kb_id, dataSourceId=ds_id)
+                # A KB delete with dataDeletionPolicy=DELETE cascades and removes
+                # the data source first, so an explicit DeleteDataSource can race
+                # to ResourceNotFoundException. That is SUCCESS (the DS is gone),
+                # not a cleanup failure — swallow not-found so the KB leg isn't
+                # falsely reported success=false while everything actually deleted.
+                try:
+                    bedrock_agent.delete_data_source(knowledgeBaseId=kb_id, dataSourceId=ds_id)
+                except Exception as ds_exc:  # noqa: BLE001
+                    if "NotFound" not in str(ds_exc) and "does not exist" not in str(ds_exc).lower():
+                        raise
             if kb_id:
                 bedrock_agent.delete_knowledge_base(knowledgeBaseId=kb_id)
                 cleanup_messages.append(f"Knowledge Base deleted: {kb_id}")
@@ -2097,6 +2449,19 @@ def handler(event, context):
             return _handle_async_test(event)
         if event.get("_async_generate"):
             return _handle_async_generate(event)
+        # EventBridge-scheduled Cedar-ENFORCE promotion sweep (Loom-study 0.6):
+        # self-drives pending permits to ACTIVE without a user touchpoint.
+        if event.get("policy_sweep") or (event.get("source") == "aws.events"
+                                         and event.get("detail-type") == "policy-sweep"):
+            from app.step_handlers.policy_sweep_step import handler as _sweep
+            return _sweep(event, context)
+        # EventBridge-scheduled FinOps cost reconciliation (Loom-study 5.3):
+        # self-drives budget-breach detection for idle-but-overspending agents
+        # that no human has opened the cost panel for.
+        if event.get("cost_reconcile") or (event.get("source") == "aws.events"
+                                           and event.get("detail-type") == "cost-reconcile"):
+            from app.step_handlers.cost_reconcile_step import handler as _reconcile
+            return _reconcile(event, context)
 
     # Normal API Gateway request → Mangum/FastAPI
     return _mangum_handler(event, context)

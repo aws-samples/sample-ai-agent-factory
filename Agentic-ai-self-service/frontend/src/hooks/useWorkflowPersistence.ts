@@ -4,7 +4,7 @@
  * Requirements: 9.1, 9.2, 9.3, 9.4, 9.5
  */
 
-import { useEffect, useCallback, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useWorkflowStore } from '../store/workflowStore';
 import {
   createAutoSaveService,
@@ -79,11 +79,11 @@ export function useWorkflowPersistence(
   });
 
   // Handle workflow ID changes
-  const handleWorkflowIdChange = useCallback((id: string) => {
+  const handleWorkflowIdChange = (id: string) => {
     setStoredWorkflowId(id);
     setState((prev) => ({ ...prev, workflowId: id }));
     onWorkflowIdChange?.(id);
-  }, [onWorkflowIdChange]);
+  };
 
   // Create save function based on configuration
   const saveFn = useBackend
@@ -110,9 +110,14 @@ export function useWorkflowPersistence(
   // Update save function when backend mode changes
   useEffect(() => {
     if (useBackend) {
+      const handleIdChange = (id: string) => {
+        setStoredWorkflowId(id);
+        setState((prev) => ({ ...prev, workflowId: id }));
+        onWorkflowIdChange?.(id);
+      };
       const newSaveFn = createBackendSaveFunction(
         state.workflowId ?? undefined,
-        handleWorkflowIdChange
+        handleIdChange
       );
       autoSaveServiceRef.current = createAutoSaveService({
         saveDelay: autoSaveDelay,
@@ -128,7 +133,7 @@ export function useWorkflowPersistence(
         },
       });
     }
-  }, [useBackend, state.workflowId, autoSaveDelay, handleWorkflowIdChange, onSaveStatusChange]);
+  }, [useBackend, state.workflowId, autoSaveDelay, onWorkflowIdChange, onSaveStatusChange]);
 
   // Track previous state for change detection
   const prevStateRef = useRef({ nodes, edges, viewport });
@@ -136,36 +141,44 @@ export function useWorkflowPersistence(
   /**
    * Loads workflow from backend by ID.
    */
-  const loadFromBackend = useCallback(async (workflowId: string): Promise<boolean> => {
+  const loadFromBackend = async (workflowId: string): Promise<boolean> => {
     try {
       const apiClient = getApiClient();
       const workflow = await apiClient.getWorkflow(workflowId);
 
       // Convert backend workflow to frontend format
-      const restoredNodes = workflow.nodes.map((node: any) => ({
-        id: node.id,
-        type: node.type,
-        position: { x: node.position.x, y: node.position.y },
-        data: {
-          label: node.data?.label ?? node.type,
-          componentType: node.type,
-          configuration: node.data?.configuration,
-          validationStatus: node.data?.validationStatus ?? 'pending',
-        },
-        selected: false,
-      }));
+      const restoredNodes = workflow.nodes.map((node) => {
+        const n = node as unknown as Record<string, unknown>;
+        const nodeData = n.data as Record<string, unknown> | undefined;
+        const pos = n.position as { x: number; y: number } | undefined;
+        return {
+          id: String(n.id),
+          type: n.type,
+          position: { x: pos?.x ?? 0, y: pos?.y ?? 0 },
+          data: {
+            label: (nodeData?.label as string) ?? (n.type as string),
+            componentType: n.type,
+            configuration: nodeData?.configuration,
+            validationStatus: (nodeData?.validationStatus ?? 'pending'),
+          },
+          selected: false,
+        };
+      }) as unknown[];
 
-      const restoredEdges = workflow.edges.map((edge: any) => ({
-        id: edge.id,
-        source: edge.source,
-        target: edge.target,
-        sourceHandle: edge.source_handle ?? edge.sourceHandle ?? null,
-        targetHandle: edge.target_handle ?? edge.targetHandle ?? null,
-        type: edge.type ?? edge.connection_type,
-        animated: edge.animated ?? false,
-        data: edge.data,
-        selected: false,
-      }));
+      const restoredEdges = workflow.edges.map((edge) => {
+        const e = edge as unknown as Record<string, unknown>;
+        return {
+          id: String(e.id),
+          source: String(e.source),
+          target: String(e.target),
+          sourceHandle: (e.source_handle ?? e.sourceHandle ?? null),
+          targetHandle: (e.target_handle ?? e.targetHandle ?? null),
+          type: (e.type ?? e.connection_type),
+          animated: Boolean(e.animated ?? false),
+          data: (e.data ?? {}) as Record<string, unknown>,
+          selected: false,
+        };
+      }) as unknown[];
 
       const restoredViewport = {
         x: workflow.viewport.x,
@@ -173,8 +186,8 @@ export function useWorkflowPersistence(
         zoom: Math.max(0.1, Math.min(4, workflow.viewport.zoom)),
       };
 
-      setNodes(restoredNodes);
-      setEdges(restoredEdges);
+      setNodes(restoredNodes as never);
+      setEdges(restoredEdges as never);
       setViewport(restoredViewport);
 
       setStoredWorkflowId(workflowId);
@@ -199,13 +212,13 @@ export function useWorkflowPersistence(
       onRestoreError?.(errorMessage);
       return false;
     }
-  }, [setNodes, setEdges, setViewport, onRestoreComplete, onRestoreError]);
+  };
 
   /**
    * Restores workflow from local storage or backend.
    * Requirement 9.5: WHEN the application loads, THE Workflow_Canvas SHALL restore the last saved workflow state
    */
-  const restoreWorkflow = useCallback(async (): Promise<boolean> => {
+  const restoreWorkflow = async (): Promise<boolean> => {
     // First, try to restore from backend if we have a workflow ID
     const storedWorkflowId = getStoredWorkflowId();
     if (useBackend && storedWorkflowId) {
@@ -241,8 +254,8 @@ export function useWorkflowPersistence(
       const { nodes: restoredNodes, edges: restoredEdges, viewport: restoredViewport } =
         WorkflowSerializer.deserialize(savedJson);
 
-      setNodes(restoredNodes);
-      setEdges(restoredEdges);
+      setNodes(restoredNodes as never);
+      setEdges(restoredEdges as never);
       setViewport(restoredViewport);
 
       setState((prev) => ({ ...prev, isRestored: true, error: null }));
@@ -254,19 +267,19 @@ export function useWorkflowPersistence(
       onRestoreError?.(errorMessage);
       return false;
     }
-  }, [useBackend, loadFromBackend, setNodes, setEdges, setViewport, onRestoreComplete, onRestoreError]);
+  };
 
   /**
    * Forces an immediate save.
    */
-  const saveNow = useCallback(async (): Promise<void> => {
+  const saveNow = async (): Promise<void> => {
     await autoSaveServiceRef.current.saveNow(nodes, edges, viewport);
-  }, [nodes, edges, viewport]);
+  };
 
   /**
    * Clears saved workflow from storage.
    */
-  const clearSavedWorkflow = useCallback((): void => {
+  const clearSavedWorkflow = (): void => {
     try {
       localStorage.removeItem('agentcore-workflow');
       localStorage.removeItem('agentcore-workflow-id');
@@ -274,14 +287,12 @@ export function useWorkflowPersistence(
     } catch {
       // Ignore errors
     }
-  }, []);
+  };
 
-  // Restore workflow on mount
-  useEffect(() => {
-    if (!state.isRestored) {
-      restoreWorkflow();
-    }
-  }, [state.isRestored, restoreWorkflow]);
+  // Restore workflow on mount (adjust state during render pattern)
+  if (!state.isRestored) {
+    restoreWorkflow();
+  }
 
   // Auto-save on changes
   useEffect(() => {

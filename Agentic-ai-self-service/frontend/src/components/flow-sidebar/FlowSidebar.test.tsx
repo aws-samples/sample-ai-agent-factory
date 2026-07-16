@@ -30,7 +30,7 @@ const mockStoreState: Record<string, unknown> = {
 };
 
 vi.mock('../../store/flowStore', () => ({
-  useFlowStore: vi.fn((selector?: (state: any) => any) => {
+  useFlowStore: vi.fn((selector) => {
     if (selector) return selector(mockStoreState);
     return mockStoreState;
   }),

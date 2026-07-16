@@ -43,7 +43,7 @@ from app.services.code_generator import generate_agent_code
 def _cfg(protocol: str = "A2A"):
     return RuntimeConfig(
         name="a2a_t",
-        model={"modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0"},
+        model={"modelId": "us.anthropic.claude-sonnet-5"},
         systemPrompt="You collaborate with other agents.",
         modelProvider="bedrock",
         protocol=protocol,
@@ -173,7 +173,7 @@ def test_a2a_branch_emits_card_and_tool():
     """_generate_a2a_agent emits the agent-card route + call_a2a_peer."""
     code = _generate_a2a_agent(
         "You collaborate.",
-        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "us.anthropic.claude-sonnet-5",
         "us-east-1",
         {"capabilities": ["chat"], "advertised_description": "test", "peer_allowlist": []},
     )
@@ -227,7 +227,7 @@ def test_non_a2a_templates_not_regressed():
 def test_generated_a2a_module_execs_no_nameerror():
     code = _generate_a2a_agent(
         "You collaborate.",
-        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "us.anthropic.claude-sonnet-5",
         "us-east-1",
         {"capabilities": ["chat", "summarize"], "advertised_description": "An A2A peer.",
          "peer_allowlist": ["peer.example.com"]},
@@ -251,7 +251,7 @@ def test_agent_card_reflects_peer_config():
     g = _exec_module(
         _generate_a2a_agent(
             "sp",
-            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "us.anthropic.claude-sonnet-5",
             "us-east-1",
             {"capabilities": ["translate", "research"],
              "advertised_description": "A multilingual research agent.",
@@ -277,7 +277,7 @@ def _make_agent(allowlist=None, capabilities=None):
     g = _exec_module(
         _generate_a2a_agent(
             "sp",
-            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "us.anthropic.claude-sonnet-5",
             "us-east-1",
             {"capabilities": capabilities or ["chat"],
              "advertised_description": "peer",
@@ -377,7 +377,7 @@ def test_ssrf_rejects_non_http_scheme():
 
 def test_no_a2a_sdk_import_in_generated_source():
     code = _generate_a2a_agent(
-        "sp", "us.anthropic.claude-sonnet-4-5-20250929-v1:0", "us-east-1", {}
+        "sp", "us.anthropic.claude-sonnet-5", "us-east-1", {}
     )
     assert "from a2a" not in code, "a2a-sdk is NOT bundled — must not be imported"
     assert "import a2a" not in code
@@ -395,7 +395,7 @@ def test_injection_safe_peer_config_compiles():
         "peer_allowlist": ['host"; import os', "ok.example.com"],
     }
     code = _generate_a2a_agent(
-        "sp", "us.anthropic.claude-sonnet-4-5-20250929-v1:0", "us-east-1", nasty
+        "sp", "us.anthropic.claude-sonnet-5", "us-east-1", nasty
     )
     # Must still compile and exec with no SyntaxError / injection.
     compile(code, "<a2a_inject.py>", "exec")

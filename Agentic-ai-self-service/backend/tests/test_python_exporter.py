@@ -30,7 +30,7 @@ def _make_runtime_config(**overrides) -> RuntimeConfig:
     defaults = {
         "name": "test-agent",
         "framework": "strands_agents",
-        "model": {"modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0"},
+        "model": {"modelId": "us.anthropic.claude-sonnet-5"},
         "systemPrompt": "You are a helpful assistant.",
     }
     defaults.update(overrides)
@@ -256,7 +256,7 @@ def test_env_example_observability_adds_blank_otlp_vars():
 
 def test_env_example_model_id_is_the_configured_id():
     config = _make_runtime_config(
-        model={"modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0"}
+        model={"modelId": "us.anthropic.claude-sonnet-5"}
     )
     env = build_env_example(config)
-    assert "MODEL_ID=us.anthropic.claude-sonnet-4-5-20250929-v1:0" in env
+    assert "MODEL_ID=us.anthropic.claude-sonnet-5" in env

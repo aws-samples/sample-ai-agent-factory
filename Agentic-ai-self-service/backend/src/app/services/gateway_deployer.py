@@ -446,6 +446,18 @@ def _ensure_api_key_credential_provider(
         raise
 
 
+# Phase 3 (Loom) OBO — on-behalf-of token-exchange grant types (RFC 8693 /
+# RFC 7523) and their AgentCore client-auth pairing. Verified against the live
+# bedrock-agentcore-control service model (boto3 1.43.8):
+#   TOKEN_EXCHANGE (RFC 8693, e.g. Okta) → CLIENT_SECRET_BASIC + actorTokenContent NONE
+#   JWT_AUTHORIZATION_GRANT (RFC 7523, e.g. Entra ID) → CLIENT_SECRET_POST
+_OBO_GRANT_TYPES = ("TOKEN_EXCHANGE", "JWT_AUTHORIZATION_GRANT")
+_OBO_CLIENT_AUTH = {
+    "TOKEN_EXCHANGE": "CLIENT_SECRET_BASIC",
+    "JWT_AUTHORIZATION_GRANT": "CLIENT_SECRET_POST",
+}
+
+
 def _ensure_oauth2_credential_provider(
     agentcore_ctrl,
     name: str,
@@ -455,6 +467,8 @@ def _ensure_oauth2_credential_provider(
     client_secret_arn: str,
     json_key: str = "clientSecret",
     discovery_url: Optional[str] = None,
+    delegation_mode: str = "m2m",
+    obo_grant_type: Optional[str] = None,
 ) -> str:
     """Create (or reuse) an OAuth2 credential provider for a connector.
 
@@ -464,11 +478,23 @@ def _ensure_oauth2_credential_provider(
     ``discovery_url`` is required. The client secret is referenced from our own
     Secrets Manager secret (``clientSecretSource="EXTERNAL"``). Returns the
     credential provider ARN. Idempotent on conflict.
+
+    Phase 3 (Loom) OBO: when ``delegation_mode="obo"`` the provider is configured
+    for on-behalf-of token exchange (RFC 8693) so the agent calls downstream
+    services AS THE END-USER, preserving the delegation chain and least-privilege
+    — rather than a shared machine-to-machine identity. OBO requires the
+    ``CustomOauth2`` vendor (the branded vendor configs don't expose the
+    exchange config) and a token-exchange-capable IdP (Entra/Okta/Auth0/OIDC).
     """
     from app.services.connectors import vendor_config_key
 
     provider_name = _sanitize_provider_name(name)
     config_key = vendor_config_key(vendor)
+
+    _obo = str(delegation_mode or "m2m").lower() == "obo"
+    if _obo and vendor != "CustomOauth2":
+        # OBO exchange config only exists on customOauth2ProviderConfig.
+        raise ValueError("OBO delegation requires the CustomOauth2 vendor (custom OIDC provider)")
 
     if vendor == "CustomOauth2":
         if not discovery_url:
@@ -479,6 +505,16 @@ def _ensure_oauth2_credential_provider(
             "clientSecretConfig": {"secretId": client_secret_arn, "jsonKey": json_key},
             "clientSecretSource": "EXTERNAL",
         }
+        if _obo:
+            grant = (obo_grant_type or "TOKEN_EXCHANGE").upper()
+            if grant not in _OBO_GRANT_TYPES:
+                raise ValueError(f"obo_grant_type must be one of {_OBO_GRANT_TYPES}")
+            provider_config["clientAuthenticationMethod"] = _OBO_CLIENT_AUTH[grant]
+            obo_cfg: dict = {"grantType": grant}
+            if grant == "TOKEN_EXCHANGE":
+                # RFC 8693: no actor token — the user's subject token carries identity.
+                obo_cfg["tokenExchangeGrantTypeConfig"] = {"actorTokenContent": "NONE"}
+            provider_config["onBehalfOfTokenExchangeConfig"] = obo_cfg
     else:
         provider_config = {
             "clientId": client_id,
@@ -951,9 +987,25 @@ def lambda_handler(event, context):
                     "text": ref.get("content", {}).get("text", "")[:200],
                     "source": loc.get("s3Location", {}).get("uri", "") or loc.get("webLocation", {}).get("url", ""),
                 })
+        # No citations => the KB retrieved nothing. Right after deploy this almost
+        # always means ingestion has not yet produced queryable vectors (eventual
+        # consistency), not that the fact is absent. Return a RETRYABLE signal so
+        # the agent/caller retries instead of reporting a hard failure (P-E2E fix).
+        if not citations:
+            return {"statusCode": 200, "body": json.dumps({
+                "answer": answer,
+                "citations": [],
+                "still_ingesting": True,
+                "retryable": True,
+                "message": "Knowledge base returned no matches yet — it may still be ingesting. Retry shortly.",
+            })}
         return {"statusCode": 200, "body": json.dumps({"answer": answer, "citations": citations})}
     except Exception as e:
-        return {"statusCode": 200, "body": json.dumps({"error": str(e)})}
+        # Distinguish an ingestion-in-progress error from a real failure so the
+        # caller can retry the former.
+        msg = str(e)
+        retryable = any(s in msg for s in ("still", "ingest", "no data", "empty", "ResourceNotReady"))
+        return {"statusCode": 200, "body": json.dumps({"error": msg, "retryable": retryable})}
 '''
 
 
@@ -2442,6 +2494,11 @@ def _deploy_connector_targets_inner(
                 or "CustomOauth2"
             )
             discovery_url = conn.get("discovery_url") or conn.get("discoveryUrl")
+            # Phase 3 (Loom) OBO — carry delegation mode + grant type from the
+            # connector payload so the credential provider is minted for
+            # on-behalf-of token exchange when requested.
+            delegation_mode = (conn.get("delegation_mode") or conn.get("delegationMode") or "m2m")
+            obo_grant_type = conn.get("obo_grant_type") or conn.get("oboGrantType")
             provider_arn = _ensure_oauth2_credential_provider(
                 agentcore_ctrl,
                 provider_name,
@@ -2449,14 +2506,25 @@ def _deploy_connector_targets_inner(
                 client_id=conn.get("client_id") or conn.get("clientId") or "",
                 client_secret_arn=secret_arn,
                 discovery_url=discovery_url,
+                delegation_mode=delegation_mode,
+                obo_grant_type=obo_grant_type,
             )
+            # OBO fix (Loom-study 0.3): the credential PROVIDER is minted for
+            # on-behalf-of exchange when delegation_mode=obo, but the target's
+            # oauthCredentialProvider previously ALWAYS requested CLIENT_CREDENTIALS
+            # — so the downstream call ran as the shared M2M identity, never as the
+            # end user. The OAuthCredentialProvider.grantType enum is
+            # {CLIENT_CREDENTIALS, AUTHORIZATION_CODE, TOKEN_EXCHANGE}; OBO must
+            # request TOKEN_EXCHANGE so AgentCore Identity performs the RFC 8693
+            # exchange and the downstream token carries the user's identity+scopes.
+            _target_grant = "TOKEN_EXCHANGE" if str(delegation_mode).lower() == "obo" else "CLIENT_CREDENTIALS"
             cred_cfg = {
                 "credentialProviderType": "OAUTH",
                 "credentialProvider": {
                     "oauthCredentialProvider": {
                         "providerArn": provider_arn,
                         "scopes": conn.get("scopes") or catalog.get("default_scopes") or [],
-                        "grantType": "CLIENT_CREDENTIALS",
+                        "grantType": _target_grant,
                     }
                 },
             }
@@ -2526,6 +2594,7 @@ def deploy_gateway(
     deployment_id: Optional[str] = None,
     gateway_retry: int = 0,
     connectors: Optional[list[dict]] = None,
+    external_mcp_servers: Optional[list[dict]] = None,
     owner_sub: str = "",
 ) -> dict:
     """Deploy a Gateway using pure boto3 APIs.
@@ -2546,6 +2615,7 @@ def deploy_gateway(
         gateway_tools = gateway_tools or []
         custom_tools = custom_tools or []
         connectors = connectors or []
+        external_mcp_servers = external_mcp_servers or []
         agentcore_ctrl = _create_agentcore_control_client(region)
         cognito_client = _create_cognito_client(region)
 
@@ -3013,6 +3083,26 @@ def deploy_gateway(
             connector_secret_arns = conn_result["secret_arns"]
             connector_spec_s3_uris = conn_result.get("spec_s3_uris", [])
 
+        # Step 4d: Wire external MCP catalog servers as `mcpServer` gateway targets
+        # (Tier 1 no-auth / Tier 2 API-key / Tier 3 OAuth-CC / SigV4). Their
+        # credential providers + secrets are captured for teardown alongside the
+        # connector refs (same cleanup path).
+        mcp_credential_providers: list[str] = []
+        mcp_secret_arns: list[str] = []
+        if external_mcp_servers:
+            mcp_result = _deploy_external_mcp_targets(
+                agentcore_ctrl,
+                gateway["gatewayId"],
+                region,
+                external_mcp_servers,
+                owner_sub=owner_sub,
+            )
+            mcp_credential_providers = mcp_result["credential_provider_names"]
+            mcp_secret_arns = mcp_result["secret_arns"]
+            # Fold into the connector teardown refs so DELETE cleans them up.
+            connector_credential_providers = connector_credential_providers + mcp_credential_providers
+            connector_secret_arns = connector_secret_arns + mcp_secret_arns
+
         # Step 5: Synchronize NON-LAMBDA targets (OpenAPI / external MCP) so their
         # tools are crawled into the servable MCP plane. Bug 134:
         # synchronize_gateway_targets REQUIRES a targetIdList (the old call omitted
@@ -3021,7 +3111,7 @@ def deploy_gateway(
         # tools directly. Connector (OpenAPI) targets MUST be crawled regardless of
         # the semantic-search toggle, so we always sync the non-lambda set whenever
         # any crawled target exists (or semantic search was explicitly requested).
-        if connectors or mcp_server_runtime_arn or gateway_config.get("semanticSearchEnabled"):
+        if connectors or external_mcp_servers or mcp_server_runtime_arn or gateway_config.get("semanticSearchEnabled"):
             try:
                 _sync_ids = []
                 for _t in _get_targets_from_response(
@@ -3407,3 +3497,292 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: Opti
         cleanup_log.append(f"Connector spec object {uri} deleted")
 
     return cleanup_log
+
+
+# ---------------------------------------------------------------------------
+# External MCP-server Gateway targets (Tiers 1-3 of docs/MCP_GATEWAY_INTEGRATION)
+# ---------------------------------------------------------------------------
+#
+# Unlike the platform-deployed Runtime-MCP target (which builds its endpoint from
+# an AgentCore Runtime ARN and authenticates with the platform's own Cognito),
+# these functions wire an ARBITRARY EXTERNAL remote MCP endpoint from the MCP
+# catalog (services/mcp_catalog.py) as a `mcp.mcpServer` target, selecting the
+# outbound credential provider from the entry's `auth_type`:
+#
+#   none                       → no credential provider (Tier 1)
+#   api_key                    → API_KEY provider (header/query/bearer)   (Tier 2)
+#   oauth2_client_credentials  → OAUTH provider, CLIENT_CREDENTIALS grant (Tier 3)
+#   iam_sigv4                  → GATEWAY_IAM_ROLE (SigV4 outbound)         (Tier 3)
+#
+# `adapter-3lo` / `adapter-stdio` tiers are NOT handled here — they require the
+# platform to host an MCP proxy on Runtime first (that adapter is then wired via
+# the existing `mcp_server_runtime_arn` path). Passing such an entry raises.
+#
+# Verified against the live bedrock-agentcore-control model (boto3 1.43.8):
+# McpServerTargetConfiguration requires only `endpoint`; credentialProvider-
+# Configurations is OPTIONAL, so a no-auth target is valid.
+
+
+def _mcp_api_key_cred_config(provider_arn: str, descriptor: dict) -> dict:
+    """Build an API_KEY credentialProviderConfiguration from a catalog descriptor.
+
+    ``descriptor`` = {location: HEADER|QUERY_PARAMETER, parameter_name, prefix}.
+    """
+    api_key_cfg: dict = {
+        "providerArn": provider_arn,
+        "credentialParameterName": descriptor.get("parameter_name") or "Authorization",
+        "credentialLocation": descriptor.get("location") or "HEADER",
+    }
+    prefix = descriptor.get("prefix")
+    if prefix:
+        api_key_cfg["credentialPrefix"] = prefix
+    return {
+        "credentialProviderType": "API_KEY",
+        "credentialProvider": {"apiKeyCredentialProvider": api_key_cfg},
+    }
+
+
+def build_external_mcp_target_params(
+    agentcore_ctrl,
+    *,
+    gateway_id: str,
+    target_name: str,
+    catalog_entry: dict,
+    endpoint: str,
+    secret_arn: Optional[str] = None,
+    oauth_provider_arn: Optional[str] = None,
+    oauth_scopes: Optional[list] = None,
+) -> dict:
+    """Assemble CreateGatewayTarget params for an external MCP catalog entry.
+
+    Pure w.r.t. AWS EXCEPT it may create an API_KEY credential provider (Tier 2)
+    from ``secret_arn``. OAuth providers (Tier 3) are expected to be created by
+    the caller and passed as ``oauth_provider_arn`` (they need client-id/secret
+    wiring the caller owns). Raises for adapter-* tiers.
+    """
+    tier = catalog_entry.get("tier", "")
+    auth_type = catalog_entry.get("auth_type", "none")
+
+    if tier.startswith("adapter"):
+        raise ValueError(
+            f"MCP '{catalog_entry.get('id')}' is tier '{tier}' — it requires a hosted "
+            "adapter (Runtime/container) and cannot be wired as a direct external target. "
+            "See docs/MCP_GATEWAY_INTEGRATION.md."
+        )
+    if not re.match(r"^https://", endpoint or ""):
+        raise ValueError(f"MCP endpoint must be an https:// URL, got: {endpoint!r}")
+
+    params: dict = {
+        "gatewayIdentifier": gateway_id,
+        "name": target_name,
+        # Gateway crawls tools/list dynamically — no mcpToolSchema required.
+        "targetConfiguration": {"mcp": {"mcpServer": {"endpoint": endpoint}}},
+    }
+
+    cred_configs: list = []
+    if auth_type == "none":
+        pass  # Tier 1 — no credential provider (valid per API model).
+    elif auth_type == "api_key":
+        if not secret_arn:
+            raise RuntimeError(
+                f"MCP '{catalog_entry.get('id')}' needs an API key — provide a secret_arn."
+            )
+        descriptor = catalog_entry.get("api_key_descriptor") or {}
+        provider_arn = _ensure_api_key_credential_provider(
+            agentcore_ctrl, f"mcp-{target_name}", secret_arn=secret_arn
+        )
+        cred_configs.append(_mcp_api_key_cred_config(provider_arn, descriptor))
+    elif auth_type == "oauth2_client_credentials":
+        if not oauth_provider_arn:
+            raise RuntimeError(
+                f"MCP '{catalog_entry.get('id')}' needs an OAuth provider ARN (client-credentials)."
+            )
+        cred_configs.append(
+            {
+                "credentialProviderType": "OAUTH",
+                "credentialProvider": {
+                    "oauthCredentialProvider": {
+                        "providerArn": oauth_provider_arn,
+                        "scopes": oauth_scopes or [],
+                    }
+                },
+            }
+        )
+    elif auth_type == "iam_sigv4":
+        # SigV4 outbound signed by the gateway's own execution role.
+        cred_configs.append({"credentialProviderType": "GATEWAY_IAM_ROLE"})
+    else:
+        raise ValueError(f"Unsupported MCP auth_type: {auth_type!r}")
+
+    if cred_configs:
+        params["credentialProviderConfigurations"] = cred_configs
+    return params
+
+
+def deploy_external_mcp_target(
+    agentcore_ctrl,
+    *,
+    gateway_id: str,
+    catalog_entry: dict,
+    endpoint: Optional[str] = None,
+    secret_arn: Optional[str] = None,
+    oauth_provider_arn: Optional[str] = None,
+    oauth_scopes: Optional[list] = None,
+    target_name: Optional[str] = None,
+) -> Optional[dict]:
+    """Create a Gateway `mcpServer` target for an external MCP catalog entry.
+
+    ``endpoint`` overrides the catalog endpoint (needed when the catalog URL has
+    ``{placeholders}`` like a Databricks workspace or a Shopify store domain).
+    Returns the created/reused target dict, or None if creation was non-fatally
+    skipped. Target name is derived from the catalog id (kept short so the
+    resulting ``<target>___<tool>`` qualified names stay under 64 chars).
+    """
+    ep = endpoint or catalog_entry.get("endpoint")
+    name = target_name or _sanitize_provider_name(f"mcp-{catalog_entry.get('id', 'ext')}")[:48]
+    params = build_external_mcp_target_params(
+        agentcore_ctrl,
+        gateway_id=gateway_id,
+        target_name=name,
+        catalog_entry=catalog_entry,
+        endpoint=ep,
+        secret_arn=secret_arn,
+        oauth_provider_arn=oauth_provider_arn,
+        oauth_scopes=oauth_scopes,
+    )
+    logger.info(
+        "Creating external MCP target '%s' (tier=%s, auth=%s)",
+        name, catalog_entry.get("tier"), catalog_entry.get("auth_type"),
+    )
+    return _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, name, params)
+
+
+def _fill_endpoint_placeholders(endpoint: str, endpoint_vars: dict) -> str:
+    """Substitute ``{placeholder}`` tokens in a catalog endpoint from user input.
+
+    Catalog endpoints like ``https://{store_domain}/api/mcp`` carry per-deploy
+    placeholders the UI collects. Every ``{name}`` must be supplied, else the
+    unresolved endpoint would fail the ``https://`` validation downstream. Values
+    are lightly sanitized (no scheme, no path-escaping) so a value can't inject a
+    different host segment.
+    """
+    filled = endpoint or ""
+    for token in re.findall(r"\{([a-zA-Z0-9_]+)\}", endpoint or ""):
+        val = str((endpoint_vars or {}).get(token, "")).strip()
+        if not val:
+            raise RuntimeError(f"External MCP endpoint needs a value for '{token}'.")
+        # Placeholders are host/segment tokens (e.g. a store domain), never a
+        # scheme or path — reject a value carrying "/", "://", or whitespace so it
+        # can't rewrite the endpoint's host/path structure.
+        if "://" in val or "/" in val or any(c in val for c in (" ", "\t", "\n")):
+            raise RuntimeError(f"Invalid value for MCP placeholder '{token}'.")
+        filled = filled.replace("{" + token + "}", val)
+    return filled
+
+
+def _deploy_external_mcp_targets(
+    agentcore_ctrl,
+    gateway_id: str,
+    region: str,
+    external_mcp_servers: list[dict],
+    owner_sub: str = "",
+) -> dict:
+    """Wire external MCP catalog servers as Gateway ``mcpServer`` targets.
+
+    Mirrors ``_deploy_connector_targets``: each selection dict carries
+    ``server_id`` (catalog key), optional ``endpoint_vars`` (fills ``{...}``
+    placeholders), optional ``secret_value`` (Tier-2 API key — minted here) or
+    ``secret_arn`` (pre-minted), and optional ``oauth`` ``{client_id, client_secret,
+    token_url, scopes}`` for Tier-3 client-credentials. ``adapter-*`` tiers are
+    rejected up front (they need a hosted proxy).
+
+    Returns ``{credential_provider_names, secret_arns}`` for teardown. Partial
+    resources are rolled back best-effort on a mid-loop failure before re-raising.
+    """
+    from app.services.mcp_catalog import get_mcp_server
+
+    created_providers: list[str] = []
+    created_secrets: list[str] = []
+
+    def _rollback_partial() -> None:
+        for pname in created_providers:
+            _delete_connector_credential_provider(agentcore_ctrl, pname)
+        if created_secrets:
+            sm = _create_secrets_client(region)
+            for sarn in created_secrets:
+                try:
+                    sm.delete_secret(SecretId=sarn, ForceDeleteWithoutRecovery=True)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    try:
+        for sel in external_mcp_servers:
+            server_id = (sel or {}).get("server_id") or (sel or {}).get("serverId")
+            if not server_id:
+                raise RuntimeError("External MCP selection missing 'server_id'.")
+            entry = get_mcp_server(server_id)
+            if entry is None:
+                raise RuntimeError(f"Unknown MCP server id: {server_id}")
+
+            endpoint = _fill_endpoint_placeholders(
+                entry.get("endpoint") or "", sel.get("endpoint_vars") or sel.get("endpointVars") or {}
+            )
+            auth_type = entry.get("auth_type", "none")
+
+            secret_arn = sel.get("secret_arn") or sel.get("secretArn")
+            oauth_provider_arn = None
+            oauth_scopes = None
+
+            # Tier 2 — mint an owner-scoped secret for a raw API key.
+            if auth_type == "api_key" and not secret_arn:
+                raw_key = sel.get("secret_value") or sel.get("secretValue")
+                if not raw_key:
+                    raise RuntimeError(f"MCP '{server_id}' needs an API key (secret_value).")
+                secret_arn = _put_connector_secret(region, owner_sub, {"apiKey": raw_key})
+                created_secrets.append(secret_arn)
+
+            # Tier 3 — create the OAuth2 client-credentials provider from user creds.
+            if auth_type == "oauth2_client_credentials":
+                oauth = sel.get("oauth") or {}
+                client_id = oauth.get("client_id") or oauth.get("clientId")
+                client_secret = oauth.get("client_secret") or oauth.get("clientSecret")
+                # A CustomOauth2 client-credentials provider resolves its token
+                # endpoint from the IdP's OIDC discovery document.
+                discovery_url = (
+                    oauth.get("discovery_url") or oauth.get("discoveryUrl")
+                    or oauth.get("token_url") or oauth.get("tokenUrl")
+                )
+                if not (client_id and client_secret and discovery_url):
+                    raise RuntimeError(
+                        f"MCP '{server_id}' needs oauth {{client_id, client_secret, discovery_url}}."
+                    )
+                cs_arn = _put_connector_secret(region, owner_sub, {"clientSecret": client_secret})
+                created_secrets.append(cs_arn)
+                oauth_provider_arn = _ensure_oauth2_credential_provider(
+                    agentcore_ctrl, f"mcp-{server_id}",
+                    vendor="CustomOauth2", client_id=client_id,
+                    client_secret_arn=cs_arn, discovery_url=discovery_url,
+                )
+                created_providers.append(_sanitize_provider_name(f"mcp-{server_id}"))
+                oauth_scopes = oauth.get("scopes") or (entry.get("oauth_descriptor") or {}).get("scopes")
+
+            # Tier-2's API-key provider is created inside deploy_external_mcp_target;
+            # track its name so teardown can remove it (target_name → mcp-<id>).
+            if auth_type == "api_key":
+                created_providers.append(_sanitize_provider_name(f"mcp-mcp-{server_id}"))
+
+            deploy_external_mcp_target(
+                agentcore_ctrl,
+                gateway_id=gateway_id,
+                catalog_entry=entry,
+                endpoint=endpoint,
+                secret_arn=secret_arn,
+                oauth_provider_arn=oauth_provider_arn,
+                oauth_scopes=oauth_scopes,
+            )
+    except Exception:
+        logger.error("External MCP deploy failed mid-loop; rolling back partial resources")
+        _rollback_partial()
+        raise
+
+    return {"credential_provider_names": created_providers, "secret_arns": created_secrets}
