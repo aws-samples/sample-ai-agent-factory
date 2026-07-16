@@ -117,7 +117,15 @@ def dry_run_obo_exchange(
         result["exchanged_claims"] = annotate_claims(decode_jwt_claims(access_token))
         result["ok"] = True
     except Exception as e:  # noqa: BLE001
-        # Message only — never the token. Surfaces e.g. "audience required" from Okta.
-        result["error"] = type(e).__name__ + ": " + str(e)[:200]
-        logger.info("OBO dry-run exchange failed: %s", result["error"])
+        # Return a CONTROLLED error to the caller — never the raw exception string
+        # (CodeQL py/stack-trace-exposure). For botocore ClientErrors we surface the
+        # AWS error CODE (a safe enum-like field, e.g. "ValidationException"), which
+        # keeps the dry-run diagnostic without leaking internal detail; the full
+        # message is logged server-side only.
+        aws_code = ""
+        resp = getattr(e, "response", None)
+        if isinstance(resp, dict):
+            aws_code = (resp.get("Error") or {}).get("Code") or ""
+        result["error"] = f"{type(e).__name__}{': ' + aws_code if aws_code else ''}"
+        logger.info("OBO dry-run exchange failed: %s (%s)", result["error"], str(e)[:200])
     return result

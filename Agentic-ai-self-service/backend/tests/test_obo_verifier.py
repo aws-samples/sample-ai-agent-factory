@@ -81,6 +81,30 @@ def test_dry_run_failure_is_captured_not_raised():
         idc, workload_name="wl", user_token=user_tok, resource_provider_name="prov",
     )
     assert out["ok"] is False
-    assert "audience required" in out["error"]
+    # Sanitized error contract (CodeQL py/stack-trace-exposure): the exception
+    # TYPE is surfaced for diagnostics, but the raw exception MESSAGE must never
+    # reach the caller — it's logged server-side only.
+    assert out["error"] == "RuntimeError"
+    assert "audience required" not in out["error"]
     # user claims still decoded even when the exchange fails.
     assert any(c["claim"] == "sub" for c in out["user_claims"])
+
+
+def test_dry_run_botocore_error_surfaces_safe_code_only():
+    """A botocore ClientError surfaces the AWS error CODE (safe), not str(e)."""
+    class _ClientErr(Exception):
+        def __init__(self):
+            super().__init__("An error occurred (ValidationException): secret internal detail 12345")
+            self.response = {"Error": {"Code": "ValidationException", "Message": "secret internal detail 12345"}}
+
+    class _BotoIdc(_FakeIdentity):
+        def get_resource_oauth2_token(self, **kw):  # noqa: ARG002
+            raise _ClientErr()
+
+    out = dry_run_obo_exchange(
+        _BotoIdc(fail=True), workload_name="wl",
+        user_token=_make_jwt({"sub": "bob"}), resource_provider_name="prov",
+    )
+    assert out["ok"] is False
+    assert out["error"] == "_ClientErr: ValidationException"
+    assert "secret internal detail" not in out["error"]  # raw message not leaked

@@ -10,10 +10,18 @@ let _sessionId: string | null = null;
 function browserSessionId(): string {
   if (_sessionId) return _sessionId;
   try {
-    _sessionId =
-      (globalThis.crypto && 'randomUUID' in globalThis.crypto)
-        ? globalThis.crypto.randomUUID()
-        : `sess-${Date.now()}-${Math.floor(Math.random() * 1e9).toString(36)}`;
+    if (globalThis.crypto && 'randomUUID' in globalThis.crypto) {
+      _sessionId = globalThis.crypto.randomUUID();
+    } else if (globalThis.crypto && 'getRandomValues' in globalThis.crypto) {
+      // Cryptographically-secure fallback for older runtimes without randomUUID.
+      // NEVER Math.random() — a session-correlation id lives in a security
+      // context (CodeQL js/insecure-randomness).
+      const b = new Uint8Array(16);
+      globalThis.crypto.getRandomValues(b);
+      _sessionId = `sess-${Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('')}`;
+    } else {
+      _sessionId = `sess-${Date.now()}`;
+    }
   } catch {
     _sessionId = `sess-${Date.now()}`;
   }
