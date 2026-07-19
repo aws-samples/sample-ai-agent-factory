@@ -6,8 +6,6 @@ import json
 import sys
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 sys.path.insert(0, "src")
 
 from app.services.observability_dashboard import (  # noqa: E402
@@ -42,7 +40,7 @@ def test_console_url_includes_region_and_dashboard():
     # unparsed URL is the py/incomplete-url-substring-sanitization anti-pattern
     # (a host could appear at an arbitrary position), so we verify the netloc
     # exactly via urlparse.
-    from urllib.parse import urlparse, parse_qs
+    from urllib.parse import parse_qs, urlparse
 
     url = dashboard_console_url("us-east-1", "agentcore-myagent")
     parsed = urlparse(url)
@@ -72,11 +70,7 @@ def test_dashboard_body_includes_eval_widget_when_log_group_present():
         eval_log_group_name="/aws/bedrock-agentcore/evaluations/results/eval_X",
     )
     parsed = json.loads(body)
-    titles = [
-        w["properties"].get("title", "")
-        for w in parsed["widgets"]
-        if w.get("type") == "log"
-    ]
+    titles = [w["properties"].get("title", "") for w in parsed["widgets"] if w.get("type") == "log"]
     assert any("Evaluator" in t for t in titles)
 
 
@@ -87,18 +81,12 @@ def test_dashboard_body_omits_eval_widget_by_default():
         region="us-east-1",
     )
     parsed = json.loads(body)
-    titles = [
-        w["properties"].get("title", "")
-        for w in parsed["widgets"]
-        if w.get("type") == "log"
-    ]
+    titles = [w["properties"].get("title", "") for w in parsed["widgets"] if w.get("type") == "log"]
     assert not any("Evaluator" in t for t in titles)
 
 
 def test_put_dashboard_calls_cloudwatch():
-    with patch(
-        "app.services.observability_dashboard.boto3.client"
-    ) as boto_mock:
+    with patch("app.services.observability_dashboard.boto3.client") as boto_mock:
         cw = MagicMock()
         boto_mock.return_value = cw
         name, url = put_dashboard_for_runtime(
@@ -120,22 +108,16 @@ def test_put_dashboard_calls_cloudwatch():
 
 
 def test_delete_dashboard_swallows_not_found():
-    with patch(
-        "app.services.observability_dashboard.boto3.client"
-    ) as boto_mock:
+    with patch("app.services.observability_dashboard.boto3.client") as boto_mock:
         cw = MagicMock()
-        cw.delete_dashboards.side_effect = Exception(
-            "DashboardNotFoundError: dashboard does not exist"
-        )
+        cw.delete_dashboards.side_effect = Exception("DashboardNotFoundError: dashboard does not exist")
         boto_mock.return_value = cw
         ok = delete_dashboard_for_runtime("myagent_v1-AbCdEfGh01", "us-east-1")
     assert ok is True
 
 
 def test_delete_dashboard_returns_false_on_other_error():
-    with patch(
-        "app.services.observability_dashboard.boto3.client"
-    ) as boto_mock:
+    with patch("app.services.observability_dashboard.boto3.client") as boto_mock:
         cw = MagicMock()
         cw.delete_dashboards.side_effect = Exception("ThrottlingException")
         boto_mock.return_value = cw

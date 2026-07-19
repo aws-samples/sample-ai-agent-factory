@@ -5,18 +5,17 @@ evaluate_budget + month_window are pure (no AWS); the store is moto-backed.
 
 from __future__ import annotations
 
-from typing import Iterator
+from collections.abc import Iterator
 
 import boto3
 import pytest
-
+from app.services import budget_store as bs_mod
 from app.services.budget_store import (
     Budget,
     BudgetStore,
     evaluate_budget,
     month_window,
 )
-from app.services import budget_store as bs_mod
 
 moto = pytest.importorskip("moto")
 from moto import mock_aws  # noqa: E402
@@ -84,6 +83,7 @@ def test_zero_limit_is_ok():
 def test_month_window_bounds():
     # 2026-07-15T12:00:00Z → window is [Jul 1, Aug 1)
     import datetime as dt
+
     now = int(dt.datetime(2026, 7, 15, 12, 0, 0, tzinfo=dt.timezone.utc).timestamp())
     start, end = month_window(now)
     assert dt.datetime.fromtimestamp(start, dt.timezone.utc).day == 1
@@ -93,6 +93,7 @@ def test_month_window_bounds():
 
 def test_month_window_december_rolls_to_january():
     import datetime as dt
+
     now = int(dt.datetime(2026, 12, 20, tzinfo=dt.timezone.utc).timestamp())
     _, end = month_window(now)
     end_dt = dt.datetime.fromtimestamp(end, dt.timezone.utc)

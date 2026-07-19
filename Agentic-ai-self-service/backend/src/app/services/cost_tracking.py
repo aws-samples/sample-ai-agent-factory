@@ -38,7 +38,6 @@ import secrets
 import time
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -85,7 +84,7 @@ _INFERENCE_PROFILE_PREFIX = re.compile(r"^(us|eu|ap|us-gov)\.")
 _EVENT_TTL_SECONDS = 90 * 24 * 3600
 
 
-def normalize_model_id(model_id: Optional[str]) -> str:
+def normalize_model_id(model_id: str | None) -> str:
     """Strip the inference-profile region prefix from a bedrock model id.
 
     ``us.anthropic.claude-sonnet-4-5-...`` -> ``anthropic.claude-sonnet-4-5-...``
@@ -96,9 +95,7 @@ def normalize_model_id(model_id: Optional[str]) -> str:
     return _INFERENCE_PROFILE_PREFIX.sub("", str(model_id).strip())
 
 
-def compute_cost(
-    model_id: Optional[str], input_tokens: int, output_tokens: int
-) -> float:
+def compute_cost(model_id: str | None, input_tokens: int, output_tokens: int) -> float:
     """Return the USD cost for *input_tokens*/*output_tokens* of *model_id*.
 
     Normalizes the model id (drops ``us.``/``eu.``/``ap.`` inference-profile
@@ -114,8 +111,7 @@ def compute_cost(
     rate = _PRICE_PER_1K.get(normalized)
     if rate is None:
         logger.warning(
-            "Unknown bedrock model for pricing: %r (normalized=%r); "
-            "falling back to default rate",
+            "Unknown bedrock model for pricing: %r (normalized=%r); falling back to default rate",
             model_id,
             normalized,
         )
@@ -126,7 +122,7 @@ def compute_cost(
     return round(cost, 8)
 
 
-def extract_usage_from_otel_span(span_attrs: Optional[dict]) -> dict:
+def extract_usage_from_otel_span(span_attrs: dict | None) -> dict:
     """Pull token usage + model from a GenAI-semconv span's attributes.
 
     Reads ``gen_ai.usage.input_tokens`` / ``gen_ai.usage.output_tokens`` and
@@ -147,9 +143,7 @@ def extract_usage_from_otel_span(span_attrs: Optional[dict]) -> dict:
 
     input_tokens = _to_int(attrs.get("gen_ai.usage.input_tokens"))
     output_tokens = _to_int(attrs.get("gen_ai.usage.output_tokens"))
-    model_id = attrs.get("gen_ai.request.model") or attrs.get(
-        "gen_ai.response.model"
-    )
+    model_id = attrs.get("gen_ai.request.model") or attrs.get("gen_ai.response.model")
     if model_id is not None:
         model_id = str(model_id)
     return {
@@ -229,8 +223,8 @@ class UsageEvent:
     output_tokens: int
     cost_usd: float
     ts: str  # ISO 8601
-    version_id: Optional[str] = None
-    ttl: Optional[int] = None
+    version_id: str | None = None
+    ttl: int | None = None
 
     def to_item(self) -> dict:
         item: dict = {
@@ -251,7 +245,7 @@ class UsageEvent:
         return _floats_to_decimals(item)
 
     @classmethod
-    def from_item(cls, item: dict) -> "UsageEvent":
+    def from_item(cls, item: dict) -> UsageEvent:
         item = _decimals_to_floats(dict(item))
         return cls(
             runtime_id=item["runtime_id"],
@@ -323,18 +317,16 @@ class UsageEventsStore:
             event.cost_usd,
         )
 
-    def get(self, runtime_id: str, event_id: str) -> Optional[UsageEvent]:
-        resp = self._table.get_item(
-            Key={"runtime_id": runtime_id, "event_id": event_id}
-        )
+    def get(self, runtime_id: str, event_id: str) -> UsageEvent | None:
+        resp = self._table.get_item(Key={"runtime_id": runtime_id, "event_id": event_id})
         item = resp.get("Item")
         return UsageEvent.from_item(item) if item else None
 
     def query_for_runtime(
         self,
         runtime_id: str,
-        from_ts: Optional[int] = None,
-        to_ts: Optional[int] = None,
+        from_ts: int | None = None,
+        to_ts: int | None = None,
     ) -> list[UsageEvent]:
         """Return events for *runtime_id*, newest-first.
 
@@ -475,8 +467,8 @@ def summarize_from_logs(
     if status == "Running":
         try:
             logs_client.stop_query(queryId=query_id)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — best-effort cancel; partial results are still returned
+            logger.debug("stop_query %s failed", query_id, exc_info=True)
 
     total_cost = 0.0
     total_in = 0
@@ -519,7 +511,7 @@ def summarize_from_logs(
 # Lazy singleton from env.
 # ---------------------------------------------------------------------------
 
-_usage_events_store: Optional[UsageEventsStore] = None
+_usage_events_store: UsageEventsStore | None = None
 
 
 def get_usage_events_store() -> UsageEventsStore:
@@ -527,8 +519,6 @@ def get_usage_events_store() -> UsageEventsStore:
     if _usage_events_store is None:
         _usage_events_store = UsageEventsStore(
             table_name=os.environ.get("USAGE_EVENTS_TABLE_NAME", "UsageEvents"),
-            region=os.environ.get(
-                "APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")
-            ),
+            region=os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")),
         )
     return _usage_events_store

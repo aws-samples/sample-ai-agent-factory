@@ -9,15 +9,13 @@ Updated for Strands-only framework with multi-provider support.
 """
 
 import pytest
-from hypothesis import given, settings
-from hypothesis import strategies as st
-
+from app.models.components import ModelConfiguration, RuntimeConfiguration
 from app.models.deployment_models import RuntimeConfig
-from app.models.components import RuntimeConfiguration, ModelConfiguration
 from app.models.enums import StrandsModelProvider
 from app.services import code_generator
 from app.services import deployment as legacy_deployment
-
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 # ---------------------------------------------------------------------------
 # Helpers — build minimal valid configs for each code path

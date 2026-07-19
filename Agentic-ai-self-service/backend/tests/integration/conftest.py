@@ -10,7 +10,7 @@ Requirements: 10.4, 10.5, 10.6
 import logging
 import os
 import time
-from typing import Generator
+from collections.abc import Generator
 
 import pytest
 import requests

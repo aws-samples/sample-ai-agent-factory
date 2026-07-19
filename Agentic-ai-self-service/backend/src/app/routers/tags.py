@@ -53,8 +53,7 @@ class TagProfileRequest(BaseModel):
 # -- policies ----------------------------------------------------------------
 
 
-@router.get("/tags", response_model=list[TagPolicy],
-            dependencies=[Depends(require_scopes("tag:read"))])
+@router.get("/tags", response_model=list[TagPolicy], dependencies=[Depends(require_scopes("tag:read"))])
 def list_policies(caller_sub: str = Depends(get_caller_sub)) -> list[TagPolicy]:
     store = get_tag_policy_store()
     org = _org(caller_sub)
@@ -62,11 +61,8 @@ def list_policies(caller_sub: str = Depends(get_caller_sub)) -> list[TagPolicy]:
     return store.list_policies(org)
 
 
-@router.post("/tags", response_model=TagPolicy,
-             dependencies=[Depends(require_scopes("tag:write"))])
-def upsert_policy(
-    body: TagPolicyRequest, caller_sub: str = Depends(get_caller_sub)
-) -> TagPolicy:
+@router.post("/tags", response_model=TagPolicy, dependencies=[Depends(require_scopes("tag:write"))])
+def upsert_policy(body: TagPolicyRequest, caller_sub: str = Depends(get_caller_sub)) -> TagPolicy:
     store = get_tag_policy_store()
     org = _org(caller_sub)
     if body.key.startswith("platform:"):
@@ -89,8 +85,7 @@ def upsert_policy(
     )
 
 
-@router.delete("/tags/{key}",
-               dependencies=[Depends(require_scopes("tag:write"))])
+@router.delete("/tags/{key}", dependencies=[Depends(require_scopes("tag:write"))])
 def delete_policy(key: str, caller_sub: str = Depends(get_caller_sub)) -> dict:
     if key.startswith("platform:"):
         raise HTTPException(status_code=400, detail="Cannot delete a platform-required tag")
@@ -102,24 +97,17 @@ def delete_policy(key: str, caller_sub: str = Depends(get_caller_sub)) -> dict:
 # -- profiles ----------------------------------------------------------------
 
 
-@router.get("/tag-profiles", response_model=list[TagProfile],
-            dependencies=[Depends(require_scopes("tag:read"))])
+@router.get("/tag-profiles", response_model=list[TagProfile], dependencies=[Depends(require_scopes("tag:read"))])
 def list_profiles(caller_sub: str = Depends(get_caller_sub)) -> list[TagProfile]:
     return get_tag_policy_store().list_profiles(_org(caller_sub))
 
 
-@router.post("/tag-profiles", response_model=TagProfile,
-             dependencies=[Depends(require_scopes("tag:write"))])
-def upsert_profile(
-    body: TagProfileRequest, caller_sub: str = Depends(get_caller_sub)
-) -> TagProfile:
-    return get_tag_policy_store().put_profile(
-        _org(caller_sub), TagProfile(name=body.name, values=body.values)
-    )
+@router.post("/tag-profiles", response_model=TagProfile, dependencies=[Depends(require_scopes("tag:write"))])
+def upsert_profile(body: TagProfileRequest, caller_sub: str = Depends(get_caller_sub)) -> TagProfile:
+    return get_tag_policy_store().put_profile(_org(caller_sub), TagProfile(name=body.name, values=body.values))
 
 
-@router.delete("/tag-profiles/{name}",
-               dependencies=[Depends(require_scopes("tag:write"))])
+@router.delete("/tag-profiles/{name}", dependencies=[Depends(require_scopes("tag:write"))])
 def delete_profile(name: str, caller_sub: str = Depends(get_caller_sub)) -> dict:
     get_tag_policy_store().delete_profile(_org(caller_sub), name)
     return {"deleted": name}

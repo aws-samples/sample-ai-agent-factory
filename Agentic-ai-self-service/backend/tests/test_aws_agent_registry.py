@@ -15,7 +15,6 @@ from app.services.aws_agent_registry import (
     build_custom_descriptor,
 )
 
-
 # -- pure helpers ------------------------------------------------------------
 
 
@@ -26,8 +25,7 @@ def test_record_id_from_arn():
 
 
 def test_a2a_descriptor_shape():
-    d = build_a2a_descriptor("bot", "does things", "https://x/invoke",
-                             skills=[{"id": "s1", "name": "search"}])
+    d = build_a2a_descriptor("bot", "does things", "https://x/invoke", skills=[{"id": "s1", "name": "search"}])
     # Wrapped under the "a2a" type key (API-required — caught live).
     assert set(d.keys()) == {"a2a"}
     ac = d["a2a"]["agentCard"]
@@ -63,8 +61,7 @@ class _FakeControl:
 
     def create_registry_record(self, **kw):
         self.calls.append(("create_registry_record", kw))
-        return {"recordArn": "arn:aws:bedrock-agentcore:us-east-1:1:registry/r/record/rec-1",
-                "status": "CREATING"}
+        return {"recordArn": "arn:aws:bedrock-agentcore:us-east-1:1:registry/r/record/rec-1", "status": "CREATING"}
 
     def submit_registry_record_for_approval(self, **kw):
         self.calls.append(("submit", kw))

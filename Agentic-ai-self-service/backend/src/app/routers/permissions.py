@@ -20,7 +20,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.routers.registry import caller_is_admin, _caller_org_id
+from app.routers.registry import _caller_org_id, caller_is_admin
 from app.services.auth import get_caller_sub
 from app.services.permission_request_store import (
     PermissionRequestNotPending,
@@ -92,8 +92,10 @@ async def list_pending(
 
 @router.post("/requests/{request_id}/approve", dependencies=[Depends(require_scopes("settings:write"))])
 async def approve(
-    request_id: str, body: DecideRequest,
-    caller_sub: str = Depends(get_caller_sub), is_admin: bool = Depends(caller_is_admin),
+    request_id: str,
+    body: DecideRequest,
+    caller_sub: str = Depends(get_caller_sub),
+    is_admin: bool = Depends(caller_is_admin),
 ) -> dict:
     """Approve a request AND widen the target role's inline policy."""
     if not is_admin:
@@ -118,33 +120,37 @@ async def approve(
         "Statement": [{"Effect": "Allow", "Action": req.actions, "Resource": req.resources}],
     }
     try:
-        _put_role_inline_policy(
-            _create_iam_client(), req.role_name, f"JIT-{request_id}", policy_doc
-        )
+        _put_role_inline_policy(_create_iam_client(), req.role_name, f"JIT-{request_id}", policy_doc)
     except Exception as exc:  # noqa: BLE001
         logger.warning("JIT approve: PutRolePolicy failed for %s: %s", req.role_name, exc)
-        raise HTTPException(status_code=502, detail="Could not apply the permission to the role")
+        raise HTTPException(status_code=502, detail="Could not apply the permission to the role") from exc
 
     try:
         decided = store.decide(org_id, request_id, status="APPROVED", decided_by=caller_sub, reason=body.reason)
     except PermissionRequestNotPending as e:
-        raise HTTPException(status_code=409, detail=f"Request already {e}")
+        raise HTTPException(status_code=409, detail=f"Request already {e}") from e
     return {"request_id": request_id, "status": decided.status}
 
 
 @router.post("/requests/{request_id}/reject", dependencies=[Depends(require_scopes("settings:write"))])
 async def reject(
-    request_id: str, body: DecideRequest,
-    caller_sub: str = Depends(get_caller_sub), is_admin: bool = Depends(caller_is_admin),
+    request_id: str,
+    body: DecideRequest,
+    caller_sub: str = Depends(get_caller_sub),
+    is_admin: bool = Depends(caller_is_admin),
 ) -> dict:
     if not is_admin:
         raise HTTPException(status_code=403, detail="Requires an admin persona")
     try:
         decided = _get_store().decide(
-            _caller_org_id(caller_sub), request_id, status="REJECTED", decided_by=caller_sub, reason=body.reason,
+            _caller_org_id(caller_sub),
+            request_id,
+            status="REJECTED",
+            decided_by=caller_sub,
+            reason=body.reason,
         )
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Not found")
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="Not found") from e
     except PermissionRequestNotPending as e:
-        raise HTTPException(status_code=409, detail=f"Request already {e}")
+        raise HTTPException(status_code=409, detail=f"Request already {e}") from e
     return {"request_id": request_id, "status": decided.status}

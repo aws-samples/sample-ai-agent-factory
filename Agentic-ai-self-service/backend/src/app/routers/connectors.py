@@ -116,7 +116,5 @@ async def get_catalog_entry(
         auth_type=entry["auth_type"],
         capabilities=entry["capabilities"],
         credential_schema=entry["credential_schema"],
-        tool_schemas=[
-            ConnectorToolSchema(**ts) for ts in entry["tool_schemas"]
-        ],
+        tool_schemas=[ConnectorToolSchema(**ts) for ts in entry["tool_schemas"]],
     )

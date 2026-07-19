@@ -27,7 +27,6 @@ import logging
 import re
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -56,19 +55,19 @@ class RegistryEntry(BaseModel):
     description: str = Field(default="", max_length=2000)
     tags: list[str] = Field(default_factory=list)
     visibility: str = Field(default="org")  # private | org | public
-    latest_version_id: Optional[str] = None
+    latest_version_id: str | None = None
     usage_count: int = 0
     canvas_snapshot: dict = Field(default_factory=dict)
-    source_runtime_name: Optional[str] = None
+    source_runtime_name: str | None = None
     created_at: str = ""
     updated_at: str = ""
     # Two-persona approval workflow. CRITICAL: status defaults to 'approved' so
     # pre-existing rows (which have no status attribute) deserialize as approved
     # and DO NOT disappear from listings. New publishes explicitly set 'pending'.
     status: str = "approved"  # pending | approved | rejected
-    reviewed_by: Optional[str] = None
-    reviewed_at: Optional[str] = None
-    rejection_reason: Optional[str] = None
+    reviewed_by: str | None = None
+    reviewed_at: str | None = None
+    rejection_reason: str | None = None
 
 
 def slugify(name: str) -> str:
@@ -149,7 +148,7 @@ class RegistryStore:
         )
         return entry
 
-    def update(self, org_id: str, agent_slug: str, updates: dict) -> Optional[RegistryEntry]:
+    def update(self, org_id: str, agent_slug: str, updates: dict) -> RegistryEntry | None:
         existing = self.get(org_id, agent_slug)
         if existing is None:
             return None
@@ -176,9 +175,7 @@ class RegistryStore:
                 ExpressionAttributeValues={":one": 1, ":zero": 0},
             )
         except Exception:
-            logger.warning(
-                "increment_usage failed for %s/%s", org_id, agent_slug, exc_info=True
-            )
+            logger.warning("increment_usage failed for %s/%s", org_id, agent_slug, exc_info=True)
 
     def delete(self, org_id: str, agent_slug: str) -> bool:
         try:
@@ -191,7 +188,7 @@ class RegistryStore:
 
     # -- reads -----------------------------------------------------------
 
-    def get(self, org_id: str, agent_slug: str) -> Optional[RegistryEntry]:
+    def get(self, org_id: str, agent_slug: str) -> RegistryEntry | None:
         resp = self._table.get_item(Key={"org_id": org_id, "agent_slug": agent_slug})
         item = resp.get("Item")
         return _deserialize(item) if item else None
@@ -248,7 +245,7 @@ class RegistryStore:
 # Lazy singleton from env
 # ---------------------------------------------------------------------------
 
-_registry_store: Optional[RegistryStore] = None
+_registry_store: RegistryStore | None = None
 
 
 def get_registry_store() -> RegistryStore:
@@ -258,8 +255,6 @@ def get_registry_store() -> RegistryStore:
 
         _registry_store = RegistryStore(
             table_name=os.environ.get("AGENT_REGISTRY_TABLE_NAME", "AgentRegistry"),
-            region=os.environ.get(
-                "APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")
-            ),
+            region=os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")),
         )
     return _registry_store

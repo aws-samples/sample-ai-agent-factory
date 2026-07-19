@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Optional
 
 import boto3
 
@@ -33,6 +32,20 @@ AGENT_GENERATOR_MODEL_ID = os.environ.get(
         "us.anthropic.claude-sonnet-5",
     ),
 )
+
+
+def _inference_config(model_id: str, max_tokens: int, temperature: float) -> dict:
+    """Build a Converse inferenceConfig, omitting temperature for models that
+    reject it. Claude Sonnet 5 / Opus 5 and later return
+    ``ValidationException: temperature is deprecated for this model`` — those
+    models only accept maxTokens here. (Mirrors the harness_deployer guard.)"""
+    cfg: dict = {"maxTokens": max_tokens}
+    mid = (model_id or "").lower()
+    if not any(
+        m in mid for m in ("claude-sonnet-5", "claude-opus-5", "claude-haiku-5", "claude-fable", "claude-mythos")
+    ):
+        cfg["temperature"] = temperature
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +74,11 @@ GENERATION_PROMPT = """Generate an AgentCore canvas spec from the conversation. 
      "systemPrompt": "<the agent's role and instructions>",
      "protocol": "HTTP", "pythonRuntime": "PYTHON_3_13", "enableOtel": false}
 - `gateway` (OPTIONAL): MCP gateway with predefined tools. Configuration:
-    {"name": "Gateway", "tools": [], "auth": "cognito"}
+    {"name": "Gateway", "targetType": "lambda", "targetConfig": {"type": "lambda"},
+     "enableSemanticSearch": true}
+  (targetType/targetConfig are REQUIRED by the canvas; "lambda" is correct when
+  the gateway's tools come from wired `tool` nodes — the deploy turns them into
+  Lambda targets automatically.)
 - `memory` (OPTIONAL): persistent memory. Configuration:
     {"name": "AgentMemory", "enabled": true, "eventExpiryDuration": 90,
      "strategies": [{"type": "semantic", "name": "semantic_strategy"}]}
@@ -234,7 +251,33 @@ _BUILTIN_TOOL_IDS = {
 }
 
 
-def _validate_spec(spec: dict) -> Optional[str]:
+def _normalize_spec(spec: dict) -> None:
+    """Deterministically repair well-known config gaps in a generated spec.
+
+    The canvas hard-requires `targetType` + `targetConfig` on every gateway node
+    (REQUIRED_FIELDS in frontend validation), but the model sometimes emits a
+    gateway with only {"name", "tools"} — leaving the applied canvas with
+    "Target Type is required / Target Config is required" errors the user must
+    fix by hand. When the gateway's tools come from wired `tool` nodes, the
+    correct family is `lambda` (the deploy turns tool nodes into Lambda
+    targets), so default the missing fields instead of relying on prompt
+    compliance. In-place; tolerant of malformed nodes (validation catches those).
+    """
+    for n in spec.get("nodes") or []:
+        if not isinstance(n, dict) or n.get("type") != "gateway":
+            continue
+        cfg = n.get("configuration")
+        if not isinstance(cfg, dict):
+            cfg = {}
+            n["configuration"] = cfg
+        if not cfg.get("targetType"):
+            cfg["targetType"] = "lambda"
+        if not isinstance(cfg.get("targetConfig"), dict) or not cfg["targetConfig"].get("type"):
+            cfg["targetConfig"] = {"type": cfg["targetType"]}
+        cfg.setdefault("enableSemanticSearch", True)
+
+
+def _validate_spec(spec: dict) -> str | None:
     """Return None if the spec is valid, else an error message string.
 
     Validates the structural invariants documented in GENERATION_PROMPT.
@@ -305,10 +348,7 @@ def _validate_spec(spec: dict) -> Optional[str]:
         if s == runtime_suffix:
             continue
         if s in tool_suffixes:
-            if not any(
-                e.get("sourceIdSuffix") == s and e.get("targetIdSuffix") in gateway_suffixes
-                for e in edges
-            ):
+            if not any(e.get("sourceIdSuffix") == s and e.get("targetIdSuffix") in gateway_suffixes for e in edges):
                 return f"tool node '{s}' has no edge to a gateway ('tool -> gateway')"
             continue
         # The gateway is a non-tool support node, so this also enforces the
@@ -351,7 +391,7 @@ def _validate_spec(spec: dict) -> Optional[str]:
 
 def generate_canvas(
     prompt: str,
-    conversation_history: Optional[list[dict]] = None,
+    conversation_history: list[dict] | None = None,
     region: str = "us-east-1",
     max_validation_retries: int = 2,
 ) -> dict:
@@ -384,7 +424,7 @@ def generate_canvas(
                 modelId=AGENT_GENERATOR_MODEL_ID,
                 messages=messages,
                 system=[{"text": CLARIFICATION_PROMPT}],
-                inferenceConfig={"maxTokens": 600, "temperature": 0.4},
+                inferenceConfig=_inference_config(AGENT_GENERATOR_MODEL_ID, 600, 0.4),
             )
             text_blocks = resp.get("output", {}).get("message", {}).get("content", [])
             text = next((b.get("text", "") for b in text_blocks if "text" in b), "")
@@ -396,14 +436,16 @@ def generate_canvas(
                         "responseType": "clarification",
                         "message": parsed.get("message", ""),
                     }
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001
+                # Model didn't return the clarification envelope (non-JSON text) —
+                # expected for most prompts; fall through to generation.
+                logger.debug("Clarification-envelope parse failed; proceeding to generation")
             # Model didn't return the clarification envelope — fall through
             # to generation. Better to attempt a spec than re-prompt.
             history = [{"role": "user", "content": prompt}]
 
         # Subsequent turns: tool-use generation with retry-on-validation.
-        validation_error: Optional[str] = None
+        validation_error: str | None = None
         for attempt in range(max_validation_retries + 1):
             attempt_messages = list(messages)
             if validation_error:
@@ -425,7 +467,7 @@ def generate_canvas(
                 modelId=AGENT_GENERATOR_MODEL_ID,
                 messages=attempt_messages,
                 system=[{"text": GENERATION_PROMPT}],
-                inferenceConfig={"maxTokens": 4000, "temperature": 0.3},
+                inferenceConfig=_inference_config(AGENT_GENERATOR_MODEL_ID, 4000, 0.3),
                 toolConfig={
                     "tools": [_SUBMIT_TOOL],
                     "toolChoice": {"tool": {"name": "submit_canvas"}},
@@ -434,13 +476,13 @@ def generate_canvas(
             content = resp.get("output", {}).get("message", {}).get("content", [])
             tool_use = next((b.get("toolUse") for b in content if "toolUse" in b), None)
             if not tool_use:
-                logger.warning(
-                    "agent_generator: no tool_use in response (attempt %d)", attempt + 1
-                )
+                logger.warning("agent_generator: no tool_use in response (attempt %d)", attempt + 1)
                 validation_error = "model did not call submit_canvas"
                 continue
 
             spec = tool_use.get("input") or {}
+            if isinstance(spec, dict):
+                _normalize_spec(spec)
             err = _validate_spec(spec)
             if err is None:
                 return {

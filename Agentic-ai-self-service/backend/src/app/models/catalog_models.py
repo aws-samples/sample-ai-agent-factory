@@ -6,10 +6,8 @@ create tools and submit them for admin review before they enter the shared palet
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
-
 
 # ============================================================================
 # Enums
@@ -50,10 +48,10 @@ class CatalogTool(BaseModel):
     created_by: str = Field(alias="createdBy")
     created_at: datetime = Field(alias="createdAt")
     updated_at: datetime = Field(alias="updatedAt")
-    submitted_at: Optional[datetime] = Field(alias="submittedAt", default=None)
-    reviewed_by: Optional[str] = Field(alias="reviewedBy", default=None)
-    reviewed_at: Optional[datetime] = Field(alias="reviewedAt", default=None)
-    review_comments: Optional[str] = Field(alias="reviewComments", default=None)
+    submitted_at: datetime | None = Field(alias="submittedAt", default=None)
+    reviewed_by: str | None = Field(alias="reviewedBy", default=None)
+    reviewed_at: datetime | None = Field(alias="reviewedAt", default=None)
+    review_comments: str | None = Field(alias="reviewComments", default=None)
     version: int = 1
     icon: str = "wrench"
     category: str = "custom"
@@ -83,10 +81,10 @@ class FlowSubmission(BaseModel):
     created_by: str = Field(alias="createdBy")
     created_at: datetime = Field(alias="createdAt")
     updated_at: datetime = Field(alias="updatedAt")
-    submitted_at: Optional[datetime] = Field(alias="submittedAt", default=None)
-    reviewed_by: Optional[str] = Field(alias="reviewedBy", default=None)
-    reviewed_at: Optional[datetime] = Field(alias="reviewedAt", default=None)
-    review_comments: Optional[str] = Field(alias="reviewComments", default=None)
+    submitted_at: datetime | None = Field(alias="submittedAt", default=None)
+    reviewed_by: str | None = Field(alias="reviewedBy", default=None)
+    reviewed_at: datetime | None = Field(alias="reviewedAt", default=None)
+    review_comments: str | None = Field(alias="reviewComments", default=None)
 
 
 # ============================================================================
@@ -114,13 +112,13 @@ class ToolUpdateRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    display_name: Optional[str] = Field(alias="displayName", default=None)
-    description: Optional[str] = None
-    lambda_code: Optional[str] = Field(alias="lambdaCode", default=None)
-    input_schema: Optional[dict] = Field(alias="inputSchema", default=None)
-    env_vars: Optional[dict] = Field(alias="envVars", default=None)
-    icon: Optional[str] = None
-    category: Optional[str] = None
+    display_name: str | None = Field(alias="displayName", default=None)
+    description: str | None = None
+    lambda_code: str | None = Field(alias="lambdaCode", default=None)
+    input_schema: dict | None = Field(alias="inputSchema", default=None)
+    env_vars: dict | None = Field(alias="envVars", default=None)
+    icon: str | None = None
+    category: str | None = None
 
 
 class ToolRejectRequest(BaseModel):
@@ -146,8 +144,8 @@ class ToolTestResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     success: bool
-    output: Optional[dict] = None
-    error: Optional[str] = None
+    output: dict | None = None
+    error: str | None = None
 
 
 # ============================================================================

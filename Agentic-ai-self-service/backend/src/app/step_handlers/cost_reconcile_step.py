@@ -71,16 +71,18 @@ def _emit_breach_metric(status: str, scope: str) -> None:
         env = os.environ.get("ENVIRONMENT", "dev")
         boto3.client("cloudwatch", region_name=_region()).put_metric_data(
             Namespace=f"{proj}/{env}/finops",
-            MetricData=[{
-                "MetricName": "BudgetBreach",
-                "Dimensions": [
-                    {"Name": "Status", "Value": status},
-                    {"Name": "Source", "Value": "reconcile"},
-                    {"Name": "Scope", "Value": scope},
-                ],
-                "Value": 1,
-                "Unit": "Count",
-            }],
+            MetricData=[
+                {
+                    "MetricName": "BudgetBreach",
+                    "Dimensions": [
+                        {"Name": "Status", "Value": status},
+                        {"Name": "Source", "Value": "reconcile"},
+                        {"Name": "Scope", "Value": scope},
+                    ],
+                    "Value": 1,
+                    "Unit": "Count",
+                }
+            ],
         )
     except Exception as exc:  # noqa: BLE001
         logger.info("reconcile breach metric emit skipped: %s", exc)
@@ -147,7 +149,11 @@ def handler(event: dict, context: object = None) -> dict:  # noqa: ARG001
                 breached += 1
                 logger.info(
                     "cost-reconcile: budget %s/%s at %s ($%.4f of $%.2f)",
-                    b.scope, b.key, verdict["status"], spend, b.limit_usd,
+                    b.scope,
+                    b.key,
+                    verdict["status"],
+                    spend,
+                    b.limit_usd,
                 )
         except Exception:  # noqa: BLE001
             failed += 1

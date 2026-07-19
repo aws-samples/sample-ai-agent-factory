@@ -106,13 +106,9 @@ def test_tool_schemas_only_use_bug10_allowed_keys():
             assert "name" in ts and ts["name"], f"{cid}: tool missing name"
             assert "description" in ts and ts["description"], f"{cid}: tool missing description"
             assert "inputSchema" in ts, f"{cid}: tool {ts.get('name')} missing inputSchema"
-            _assert_allowed_keys_recursive(
-                ts["inputSchema"], f"{cid}.{ts['name']}.inputSchema"
-            )
+            _assert_allowed_keys_recursive(ts["inputSchema"], f"{cid}.{ts['name']}.inputSchema")
         # credential_schema is also advertised-shaped; hold it to the same rule.
-        _assert_allowed_keys_recursive(
-            entry["credential_schema"], f"{cid}.credential_schema"
-        )
+        _assert_allowed_keys_recursive(entry["credential_schema"], f"{cid}.credential_schema")
 
 
 def test_tool_names_within_bug11_qualified_limit():

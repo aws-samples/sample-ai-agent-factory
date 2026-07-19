@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
 
 import boto3
 
@@ -64,9 +63,7 @@ def targets_enabled() -> bool:
     if os.environ.get("DEPLOY_TARGETS_ENABLED", "").strip().lower() in ("1", "true", "yes", "on"):
         return True
     try:
-        item = _settings_table().get_item(
-            Key={"org_id": "default", "sk": _ENABLED_SK}
-        ).get("Item")
+        item = _settings_table().get_item(Key={"org_id": "default", "sk": _ENABLED_SK}).get("Item")
         return bool(item and str(item.get("value", "")).lower() == "true")
     except Exception as e:  # noqa: BLE001
         logger.info("targets_enabled check failed (default false): %s", e)
@@ -74,24 +71,19 @@ def targets_enabled() -> bool:
 
 
 def set_targets_enabled(enabled: bool) -> None:
-    _settings_table().put_item(
-        Item={"org_id": "default", "sk": _ENABLED_SK,
-              "value": "true" if enabled else "false"}
-    )
+    _settings_table().put_item(Item={"org_id": "default", "sk": _ENABLED_SK, "value": "true" if enabled else "false"})
 
 
 def add_region(region: str) -> None:
-    _settings_table().put_item(
-        Item={"org_id": "default", "sk": _REGION_PREFIX + region, "region": region}
-    )
+    _settings_table().put_item(Item={"org_id": "default", "sk": _REGION_PREFIX + region, "region": region})
 
 
 def list_regions() -> list[str]:
     from boto3.dynamodb.conditions import Key
+
     try:
         resp = _settings_table().query(
-            KeyConditionExpression=Key("org_id").eq("default")
-            & Key("sk").begins_with(_REGION_PREFIX)
+            KeyConditionExpression=Key("org_id").eq("default") & Key("sk").begins_with(_REGION_PREFIX)
         )
         return [i["region"] for i in resp.get("Items", [])]
     except Exception:  # noqa: BLE001
@@ -100,24 +92,27 @@ def list_regions() -> list[str]:
 
 def add_account(account_id: str, role_arn: str, region: str) -> None:
     _settings_table().put_item(
-        Item={"org_id": "default", "sk": _ACCOUNT_PREFIX + account_id,
-              "account_id": account_id, "role_arn": role_arn, "region": region}
+        Item={
+            "org_id": "default",
+            "sk": _ACCOUNT_PREFIX + account_id,
+            "account_id": account_id,
+            "role_arn": role_arn,
+            "region": region,
+        }
     )
 
 
-def get_account(account_id: str) -> Optional[dict]:
-    item = _settings_table().get_item(
-        Key={"org_id": "default", "sk": _ACCOUNT_PREFIX + account_id}
-    ).get("Item")
+def get_account(account_id: str) -> dict | None:
+    item = _settings_table().get_item(Key={"org_id": "default", "sk": _ACCOUNT_PREFIX + account_id}).get("Item")
     return dict(item) if item else None
 
 
 def list_accounts() -> list[dict]:
     from boto3.dynamodb.conditions import Key
+
     try:
         resp = _settings_table().query(
-            KeyConditionExpression=Key("org_id").eq("default")
-            & Key("sk").begins_with(_ACCOUNT_PREFIX)
+            KeyConditionExpression=Key("org_id").eq("default") & Key("sk").begins_with(_ACCOUNT_PREFIX)
         )
         return [dict(i) for i in resp.get("Items", [])]
     except Exception:  # noqa: BLE001
@@ -133,7 +128,7 @@ class TargetError(ValueError):
     """Raised when a requested deploy target is invalid / disabled / unreachable."""
 
 
-def resolve_region(requested: Optional[str]) -> str:
+def resolve_region(requested: str | None) -> str:
     """Return the region to deploy to, enforcing the allowlist when targeting.
 
     No requested region → home region (unchanged). A requested region is only
@@ -150,8 +145,11 @@ def resolve_region(requested: Optional[str]) -> str:
 
 
 def session_for_target(
-    account_id: Optional[str] = None, region: Optional[str] = None,
-    *, require_gate: bool = True, role_arn: Optional[str] = None,
+    account_id: str | None = None,
+    region: str | None = None,
+    *,
+    require_gate: bool = True,
+    role_arn: str | None = None,
 ) -> boto3.Session:
     """Return a boto3 Session for the deploy target.
 
@@ -171,8 +169,10 @@ def session_for_target(
     Raises TargetError when targeting is disabled (gated path only), the account
     is unregistered, the role can't be assumed, or the landed account mismatches.
     """
-    resolved_region = resolve_region(region) if require_gate else (
-        region or os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", HOME_REGION_DEFAULT))
+    resolved_region = (
+        resolve_region(region)
+        if require_gate
+        else (region or os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", HOME_REGION_DEFAULT)))
     )
     if not account_id:
         return boto3.Session(region_name=resolved_region)
@@ -187,11 +187,9 @@ def session_for_target(
         role_arn = target["role_arn"]
     sts = boto3.client("sts", region_name=resolved_region)
     try:
-        creds = sts.assume_role(
-            RoleArn=role_arn, RoleSessionName="agentcore-flows-deploy"
-        )["Credentials"]
+        creds = sts.assume_role(RoleArn=role_arn, RoleSessionName="agentcore-flows-deploy")["Credentials"]
     except Exception as e:  # noqa: BLE001
-        raise TargetError(f"Cannot assume deployment role in {account_id}: {str(e)[:160]}")
+        raise TargetError(f"Cannot assume deployment role in {account_id}: {str(e)[:160]}") from e
 
     session = boto3.Session(
         aws_access_key_id=creds["AccessKeyId"],
@@ -202,7 +200,5 @@ def session_for_target(
     # Dry-run: confirm we actually landed in the expected account.
     landed = session.client("sts").get_caller_identity()["Account"]
     if landed != account_id:
-        raise TargetError(
-            f"Assumed role landed in account {landed}, expected {account_id}"
-        )
+        raise TargetError(f"Assumed role landed in account {landed}, expected {account_id}")
     return session

@@ -8,8 +8,6 @@ With a target, it delegates to deploy_target.session_for_target.
 from __future__ import annotations
 
 import boto3
-import pytest
-
 from app.services import step_clients as sc
 
 
@@ -54,14 +52,14 @@ def test_target_account_delegates_to_deploy_target(monkeypatch):
         called["role_arn"] = role_arn
         return boto3.Session(region_name=region or "us-east-1")
 
-    monkeypatch.setattr(
-        "app.services.deploy_target.session_for_target", _fake_session_for_target
+    monkeypatch.setattr("app.services.deploy_target.session_for_target", _fake_session_for_target)
+    sc.session_for_event(
+        {
+            "target_account_id": "986177197847",
+            "target_region": "us-east-1",
+            "target_role_arn": "arn:aws:iam::986177197847:role/AgentCoreFlowsDeploymentRole",
+        }
     )
-    sc.session_for_event({
-        "target_account_id": "986177197847",
-        "target_region": "us-east-1",
-        "target_role_arn": "arn:aws:iam::986177197847:role/AgentCoreFlowsDeploymentRole",
-    })
     assert called["account_id"] == "986177197847"
     assert called["region"] == "us-east-1"
     assert called["require_gate"] is False  # step path trusts the deploy-time gate

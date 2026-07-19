@@ -465,6 +465,11 @@ function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
   const parts = path.split('.');
   let current: unknown = obj;
   for (const part of parts) {
+    // Reject prototype-chain keys so a crafted path can't walk into
+    // Object.prototype (prototype-pollution read guard).
+    if (part === '__proto__' || part === 'constructor' || part === 'prototype') {
+      return undefined;
+    }
     if (current === null || current === undefined) {
       return undefined;
     }

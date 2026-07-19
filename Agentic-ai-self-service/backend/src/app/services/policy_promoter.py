@@ -29,15 +29,21 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
 
 import boto3
+
+from app.services.aws_errors import is_error
 
 logger = logging.getLogger(__name__)
 
 
 def _ctrl(region: str):
     return boto3.client("bedrock-agentcore-control", region_name=region)
+
+
+def _get_policies_from_response(resp: dict) -> list:
+    """Extract the policies list from a list_policies response (SDK-key tolerant)."""
+    return resp.get("policies", resp.get("items", resp.get("policySummaries", [])))
 
 
 def _active_policy_count(ctrl, engine_id: str) -> int:
@@ -68,9 +74,13 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
     for pol in policies or []:
         name = pol.get("name")
         stmt = pol.get("statement", "")
-        if not name or not stmt:
-            continue
         cur = existing.get(name)
+        # A reconcile-class payload (see try_promote_to_enforce) carries no
+        # statement because the policy already exists — recover it in place
+        # using its own live definition. A brand-new policy still needs a
+        # statement to create.
+        if not name or (not stmt and not cur):
+            continue
         status = (cur or {}).get("status", "")
         if status == "ACTIVE":
             active += 1
@@ -91,7 +101,18 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
             logger.info("promote: policy %s is %s (another run owns it) — skipping", name, status)
             continue
         _desc = pol.get("description") or "Auto-permit for allowed gateway tools (ENFORCE)."
-        _defn = {"cedar": {"statement": stmt}}
+        # Reconcile-in-place with no supplied statement: re-drive the policy's
+        # OWN live definition (fetched via get_policy) so a regressed
+        # UPDATE_FAILED policy re-validates without needing the original Cedar.
+        _defn = {"cedar": {"statement": stmt}} if stmt else None
+        if _defn is None and cur:
+            try:
+                _live = ctrl.get_policy(engineId=engine_id, policyId=cur.get("policyId") or cur.get("id"))
+            except TypeError:
+                _live = ctrl.get_policy(policyEngineId=engine_id, policyId=cur.get("policyId") or cur.get("id"))
+            _defn = _live.get("definition")
+        if _defn is None:
+            continue
         try:
             if cur:
                 # RECOVER IN PLACE (the elegant race-free fix): a CREATE_FAILED
@@ -112,15 +133,19 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
                 # silently left the policy CREATE_FAILED forever. Proven live: with
                 # the correct shape the stuck policy flips ACTIVE on the first poll.
                 ctrl.update_policy(
-                    policyEngineId=engine_id, policyId=pid,
-                    description={"optionalValue": _desc}, definition=_defn,
+                    policyEngineId=engine_id,
+                    policyId=pid,
+                    description={"optionalValue": _desc},
+                    definition=_defn,
                     validationMode="IGNORE_ALL_FINDINGS",
                 )
             else:
                 cp = ctrl.create_policy(
-                    policyEngineId=engine_id, name=name,
+                    policyEngineId=engine_id,
+                    name=name,
                     # create_policy requires a NON-EMPTY description (min length 1).
-                    description=_desc, definition=_defn,
+                    description=_desc,
+                    definition=_defn,
                     # IGNORE_ALL_FINDINGS: skip the gateway-calling validation that
                     # fails "Insufficient permissions to call gateway" on fresh
                     # gateways (proven live). Enforcement preserved via default-deny.
@@ -150,16 +175,17 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
             # is in UPDATING status" (concurrent update). In BOTH cases another run
             # owns the transition — do NOT delete or retry destructively here; the
             # next poll sees it CREATING/UPDATING/ACTIVE and converges.
-            if "ConflictException" in type(e).__name__ or "already exists" in str(e):
-                logger.info("promote: %s owned by a concurrent run (%s) — leaving it",
-                            name, str(e)[:80])
+            # "already exists" fallback kept: the concurrent-create form was seen
+            # live as a message, not always a ConflictException code.
+            if is_error(e, "ConflictException") or "already exists" in str(e):
+                logger.info("promote: %s owned by a concurrent run (%s) — leaving it", name, str(e)[:80])
             else:
                 logger.info("promote: recreate of %s not yet valid: %s", name, str(e)[:120])
 
     return active
 
 
-def try_promote_to_enforce(deployment_state: dict, region: str) -> Optional[dict]:
+def try_promote_to_enforce(deployment_state: dict, region: str) -> dict | None:
     """Promote a pending LOG_ONLY engine to ENFORCE if the gateway has converged.
 
     Returns a dict describing the outcome, or None when there is nothing to do
@@ -168,14 +194,47 @@ def try_promote_to_enforce(deployment_state: dict, region: str) -> Optional[dict
     """
     pr = (deployment_state or {}).get("policy_result") or {}
     pending = pr.get("enforce_pending")
-    # Nothing pending → no-op. Note: mode == ENFORCE alone is NOT a no-op
-    # anymore — the fail-closed path (P-PLAT-027) attaches in ENFORCE with the
-    # permit policies still pending (default-deny bricks the tool plane), and
-    # this promoter is what creates them to restore the permitted tools.
-    if not pending:
-        return None
     already_enforcing = pr.get("mode") == "ENFORCE"
-    if already_enforcing and not pr.get("enforce_validation_pending"):
+
+    # RECONCILE class: mode is already ENFORCE and enforce_pending was cleared
+    # (policy once reached ACTIVE), but AgentCore's gateway-authz plane can
+    # REGRESS a policy back to UPDATE_FAILED afterward. With the pending payload
+    # gone, no touchpoint would ever re-drive it and the tool plane silently
+    # goes deny-all forever (found live in production-readiness testing: a
+    # policy stuck UPDATE_FAILED >2h that flipped ACTIVE instantly on a single
+    # update_policy re-drive). If any policy on the engine is not ACTIVE,
+    # reconstruct a minimal pending payload from the live engine so the
+    # re-drive below runs. When everything is ACTIVE this is a cheap no-op.
+    if not pending:
+        if not already_enforcing:
+            return None
+        engine_id = pr.get("engine_id")
+        if not engine_id:
+            return None
+        try:
+            _ctrl_r = _ctrl(region)
+            _pols = _get_policies_from_response(_ctrl_r.list_policies(policyEngineId=engine_id, maxResults=100))
+            _unhealthy = [p for p in _pols if p.get("status") not in ("ACTIVE", "CREATING", "UPDATING", "DELETING")]
+            if not _unhealthy:
+                return None  # all healthy — nothing to reconcile
+            logger.warning(
+                "policy reconcile: engine %s has %d non-ACTIVE policy(ies) under ENFORCE — re-driving",
+                engine_id,
+                len(_unhealthy),
+            )
+            # Reconstruct just enough pending payload for the re-drive path. The
+            # policies already exist (RECOVER-IN-PLACE update_policy uses their
+            # live definition), so statements can be empty here.
+            pending = {
+                "engine_id": engine_id,
+                "gateway_id": pr.get("gateway_id") or (pr.get("engine_arn") or ""),
+                "policies": [{"name": p.get("name", ""), "statement": ""} for p in _unhealthy],
+                "_reconcile": True,
+            }
+        except Exception:  # noqa: BLE001
+            logger.debug("policy reconcile: list_policies failed for %s", pr.get("engine_id"), exc_info=True)
+            return None
+    elif already_enforcing and not pr.get("enforce_validation_pending"):
         return None
 
     engine_id = pending.get("engine_id")
@@ -189,16 +248,22 @@ def try_promote_to_enforce(deployment_state: dict, region: str) -> Optional[dict
         #    only now converged). If none are ACTIVE, stay LOG_ONLY (never deny-all).
         active = _ensure_policies_active(ctrl, engine_id, pending.get("policies") or [])
         if active == 0:
-            return {"promoted": False, "mode": pr.get("mode") or "LOG_ONLY",
-                    "reason": "policies not ACTIVE yet (gateway still converging)"}
+            return {
+                "promoted": False,
+                "mode": pr.get("mode") or "LOG_ONLY",
+                "reason": "policies not ACTIVE yet (gateway still converging)",
+            }
 
         # Fail-closed path (P-PLAT-027): the gateway is ALREADY in ENFORCE; the
         # pending policies just became ACTIVE, which un-bricks the permitted
         # tools. No gateway update needed.
         if already_enforcing:
             logger.info("promote: engine %s policies now ACTIVE under ENFORCE", engine_id)
-            return {"promoted": True, "mode": "ENFORCE",
-                    "reason": f"{active} ACTIVE policy(ies); fail-closed ENFORCE now serving permitted tools"}
+            return {
+                "promoted": True,
+                "mode": "ENFORCE",
+                "reason": f"{active} ACTIVE policy(ies); fail-closed ENFORCE now serving permitted tools",
+            }
 
         # 2. Flip the gateway's engine config to ENFORCE, preserving other fields.
         gw = ctrl.get_gateway(gatewayIdentifier=gateway_id)
@@ -209,8 +274,7 @@ def try_promote_to_enforce(deployment_state: dict, region: str) -> Optional[dict
         rec_arn = pr.get("engine_arn")
         engine_arn = gw_arn or (rec_arn if str(rec_arn).startswith("arn:") else None)
         if not engine_arn:
-            return {"promoted": False, "mode": pr.get("mode"),
-                    "reason": "no valid engine arn to attach"}
+            return {"promoted": False, "mode": pr.get("mode"), "reason": "no valid engine arn to attach"}
         update = {
             "gatewayIdentifier": gateway_id,
             "name": gw.get("name", ""),
@@ -218,15 +282,12 @@ def try_promote_to_enforce(deployment_state: dict, region: str) -> Optional[dict
             "protocolType": gw.get("protocolType", "MCP"),
             "policyEngineConfiguration": {"arn": engine_arn, "mode": "ENFORCE"},
         }
-        for opt in ("description", "authorizerType", "authorizerConfiguration",
-                    "protocolConfiguration", "kmsKeyArn"):
+        for opt in ("description", "authorizerType", "authorizerConfiguration", "protocolConfiguration", "kmsKeyArn"):
             if gw.get(opt):
                 update[opt] = gw[opt]
         ctrl.update_gateway(**update)
         logger.info("promote: flipped gateway %s engine %s to ENFORCE", gateway_id, engine_id)
-        return {"promoted": True, "mode": "ENFORCE",
-                "reason": f"{active} ACTIVE policy(ies); gateway converged"}
+        return {"promoted": True, "mode": "ENFORCE", "reason": f"{active} ACTIVE policy(ies); gateway converged"}
     except Exception as e:  # noqa: BLE001
         logger.warning("promote: could not flip to ENFORCE (will retry next call): %s", str(e)[:200])
-        return {"promoted": False, "mode": pr.get("mode"),
-                "reason": f"transient: {str(e)[:120]}"}
+        return {"promoted": False, "mode": pr.get("mode"), "reason": f"transient: {str(e)[:120]}"}

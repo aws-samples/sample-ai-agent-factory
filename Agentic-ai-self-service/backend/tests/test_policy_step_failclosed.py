@@ -26,7 +26,8 @@ def _ctrl_with_persistent_create_failed():
     ctrl = MagicMock()
     ctrl.list_policy_engines.return_value = {"policyEngines": []}
     ctrl.create_policy_engine.return_value = {
-        "policyEngineId": "eng-1", "policyEngineArn": "arn:aws:bedrock-agentcore:us-east-1:1:policy-engine/eng-1",
+        "policyEngineId": "eng-1",
+        "policyEngineArn": "arn:aws:bedrock-agentcore:us-east-1:1:policy-engine/eng-1",
     }
     ctrl.get_policy_engine.return_value = {"status": "ACTIVE"}
     ctrl.create_policy.return_value = {"policyId": "p1"}
@@ -36,14 +37,16 @@ def _ctrl_with_persistent_create_failed():
     }
     ctrl.list_policies.return_value = {"policies": []}
     ctrl.get_gateway.return_value = {
-        "name": "gw", "roleArn": "arn:role", "protocolType": "MCP", "status": "READY",
+        "name": "gw",
+        "roleArn": "arn:role",
+        "protocolType": "MCP",
+        "status": "READY",
     }
     return ctrl
 
 
 def _event(**pc_extra):
-    pc = {"enabled": True, "mode": "ENFORCE",
-          "rules": [{"effect": "forbid", "action": "get_secret"}]}
+    pc = {"enabled": True, "mode": "ENFORCE", "rules": [{"effect": "forbid", "action": "get_secret"}]}
     pc.update(pc_extra)
     return {
         "deployment_id": "d1",
@@ -59,9 +62,11 @@ def _event(**pc_extra):
 
 def _run(event):
     ctrl = _ctrl_with_persistent_create_failed()
-    with patch.object(policy_step, "_get_deployment_store", return_value=MagicMock()), \
-         patch.object(policy_step, "step_clients") as sc, \
-         patch("time.sleep"):
+    with (
+        patch.object(policy_step, "_get_deployment_store", return_value=MagicMock()),
+        patch.object(policy_step, "step_clients") as sc,
+        patch("time.sleep"),
+    ):
         sc.client.return_value = ctrl
         out = policy_step.handler(event, None)
     return out, ctrl
@@ -94,12 +99,12 @@ def test_enforce_happy_path_unchanged():
     """When the permit validates ACTIVE, ENFORCE attaches with no pending flag."""
     ctrl = _ctrl_with_persistent_create_failed()
     ctrl.get_policy.return_value = {"status": "ACTIVE"}
-    ctrl.list_policies.return_value = {
-        "policies": [{"name": "x", "status": "ACTIVE", "policyId": "p1"}]
-    }
-    with patch.object(policy_step, "_get_deployment_store", return_value=MagicMock()), \
-         patch.object(policy_step, "step_clients") as sc, \
-         patch("time.sleep"):
+    ctrl.list_policies.return_value = {"policies": [{"name": "x", "status": "ACTIVE", "policyId": "p1"}]}
+    with (
+        patch.object(policy_step, "_get_deployment_store", return_value=MagicMock()),
+        patch.object(policy_step, "step_clients") as sc,
+        patch("time.sleep"),
+    ):
         sc.client.return_value = ctrl
         out = policy_step.handler(_event(), None)
     pr = out["policy_result"]

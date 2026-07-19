@@ -10,9 +10,8 @@ import boto3
 import pytest
 
 moto = pytest.importorskip("moto")
-from moto import mock_aws  # noqa: E402
-
 from app.services.runtime_deployer import create_runtime_iam_role  # noqa: E402
+from moto import mock_aws  # noqa: E402
 
 
 @mock_aws
@@ -25,8 +24,7 @@ def test_resource_tags_applied_to_role():
         region="us-east-1",
         resource_tags={"platform:owner": "alice", "cost-center": "cc-42"},
     )
-    tags = {t["Key"]: t["Value"] for t in
-            iam.list_role_tags(RoleName="agentcore-tagtest-role")["Tags"]}
+    tags = {t["Key"]: t["Value"] for t in iam.list_role_tags(RoleName="agentcore-tagtest-role")["Tags"]}
     assert tags["platform:owner"] == "alice"
     assert tags["cost-center"] == "cc-42"
     assert tags["ManagedBy"] == "agentcore-flows"  # mandatory tag preserved
@@ -42,8 +40,7 @@ def test_managed_by_not_overridable():
         region="us-east-1",
         resource_tags={"ManagedBy": "attacker"},  # must be ignored
     )
-    tags = {t["Key"]: t["Value"] for t in
-            iam.list_role_tags(RoleName="agentcore-tagtest-role2")["Tags"]}
+    tags = {t["Key"]: t["Value"] for t in iam.list_role_tags(RoleName="agentcore-tagtest-role2")["Tags"]}
     assert tags["ManagedBy"] == "agentcore-flows"
 
 
@@ -56,6 +53,5 @@ def test_no_tags_still_gets_managed_by():
         account_id="123456789012",
         region="us-east-1",
     )
-    tags = {t["Key"]: t["Value"] for t in
-            iam.list_role_tags(RoleName="agentcore-tagtest-role3")["Tags"]}
+    tags = {t["Key"]: t["Value"] for t in iam.list_role_tags(RoleName="agentcore-tagtest-role3")["Tags"]}
     assert tags == {"ManagedBy": "agentcore-flows"}

@@ -23,7 +23,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Optional
 
 import boto3
 
@@ -41,8 +40,7 @@ def _record_id_from_arn(arn: str) -> str:
     return arn.rsplit("/", 1)[-1] if arn else ""
 
 
-def build_a2a_descriptor(name: str, description: str, url: str,
-                         skills: Optional[list] = None) -> dict:
+def build_a2a_descriptor(name: str, description: str, url: str, skills: list | None = None) -> dict:
     """A2A agentCard descriptor (schemaVersion 0.3) as an inlineContent JSON.
 
     Reuses the shape our runtime already serves at /.well-known/agent-card.json.
@@ -62,8 +60,7 @@ def build_a2a_descriptor(name: str, description: str, url: str,
     # {"a2a": {"agentCard": {...}}} — NOT a bare agentCard. (Caught live: passing
     # the inner structure fails with "Unknown parameter in descriptors:
     # agentCard, must be one of: mcp, a2a, custom, agentSkills".)
-    return {"a2a": {"agentCard": {"schemaVersion": A2A_CARD_SCHEMA_VERSION,
-                                  "inlineContent": json.dumps(card)}}}
+    return {"a2a": {"agentCard": {"schemaVersion": A2A_CARD_SCHEMA_VERSION, "inlineContent": json.dumps(card)}}}
 
 
 def build_custom_descriptor(payload: dict) -> dict:
@@ -77,7 +74,7 @@ def build_custom_descriptor(payload: dict) -> dict:
 class AwsAgentRegistry:
     """Thin adapter over the AWS Agent Registry control + data planes."""
 
-    def __init__(self, registry_id: str, region: Optional[str] = None) -> None:
+    def __init__(self, registry_id: str, region: str | None = None) -> None:
         self.registry_id = registry_id
         region = region or _region()
         self.control = boto3.client("bedrock-agentcore-control", region_name=region)
@@ -96,8 +93,9 @@ class AwsAgentRegistry:
 
     # -- records ---------------------------------------------------------
 
-    def register(self, name: str, descriptor_type: str, descriptors: dict,
-                 description: str = "", record_version: str = "1") -> dict:
+    def register(
+        self, name: str, descriptor_type: str, descriptors: dict, description: str = "", record_version: str = "1"
+    ) -> dict:
         """Create a record (DRAFT/CREATING) and return {record_id, arn, status}."""
         resp = self.control.create_registry_record(
             registryId=self.registry_id,
@@ -115,22 +113,20 @@ class AwsAgentRegistry:
         }
 
     def submit_for_approval(self, record_id: str) -> None:
-        self.control.submit_registry_record_for_approval(
-            registryId=self.registry_id, recordId=record_id
-        )
+        self.control.submit_registry_record_for_approval(registryId=self.registry_id, recordId=record_id)
 
     def set_status(self, record_id: str, status: str, reason: str) -> None:
         """APPROVED / REJECTED / DEPRECATED — statusReason is required by the API."""
         self.control.update_registry_record_status(
-            registryId=self.registry_id, recordId=record_id,
-            status=status, statusReason=reason,
+            registryId=self.registry_id,
+            recordId=record_id,
+            status=status,
+            statusReason=reason,
         )
 
-    def get(self, record_id: str) -> Optional[dict]:
+    def get(self, record_id: str) -> dict | None:
         try:
-            return self.control.get_registry_record(
-                registryId=self.registry_id, recordId=record_id
-            )
+            return self.control.get_registry_record(registryId=self.registry_id, recordId=record_id)
         except Exception as e:  # noqa: BLE001
             logger.info("get_registry_record failed: %s", str(e)[:120])
             return None
@@ -145,9 +141,7 @@ class AwsAgentRegistry:
 
     def delete(self, record_id: str) -> bool:
         try:
-            self.control.delete_registry_record(
-                registryId=self.registry_id, recordId=record_id
-            )
+            self.control.delete_registry_record(registryId=self.registry_id, recordId=record_id)
             return True
         except Exception as e:  # noqa: BLE001
             logger.warning("delete_registry_record failed: %s", str(e)[:120])
@@ -174,7 +168,7 @@ class AwsAgentRegistry:
 _SETTINGS_SK = "SETTING#aws_registry_id"
 
 
-def get_configured_registry_id() -> Optional[str]:
+def get_configured_registry_id() -> str | None:
     """Return the configured AWS registryId, or None (feature disabled).
 
     Env override AWS_AGENT_REGISTRY_ID wins (useful for tests / static config);
@@ -199,7 +193,7 @@ def set_configured_registry_id(registry_id: str) -> None:
     table.put_item(Item={"org_id": "default", "sk": _SETTINGS_SK, "value": registry_id})
 
 
-def get_registry() -> Optional[AwsAgentRegistry]:
+def get_registry() -> AwsAgentRegistry | None:
     """Return a configured adapter, or None when the feature is disabled."""
     rid = get_configured_registry_id()
     if not rid:

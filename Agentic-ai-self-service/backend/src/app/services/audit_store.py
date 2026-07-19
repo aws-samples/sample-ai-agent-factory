@@ -22,7 +22,6 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -38,7 +37,7 @@ ACTION_ROUTES: tuple[tuple[str, str, str], ...] = (
     ("POST", "/api/deploy", "agent.deploy"),
     ("DELETE", "/api/runtime", "agent.delete"),
     ("POST", "/api/registry", "registry.publish"),
-    ("POST", "/api/registry", "registry.action"),   # approve/reject/clone (sub-path)
+    ("POST", "/api/registry", "registry.action"),  # approve/reject/clone (sub-path)
     ("PUT", "/api/registry", "registry.update"),
     ("DELETE", "/api/registry", "registry.delete"),
     ("POST", "/api/settings/tags", "tag.policy.write"),
@@ -50,14 +49,14 @@ ACTION_ROUTES: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def classify_action(method: str, path: str) -> Optional[str]:
+def classify_action(method: str, path: str) -> str | None:
     """Return a fixed action label for an auditable (method, path), else None.
 
     Longest-prefix match so /api/settings/tag-profiles beats /api/settings.
     Only WRITE-ish routes are audited (reads are noise).
     """
     method = (method or "").upper()
-    best: Optional[str] = None
+    best: str | None = None
     best_len = -1
     for m, prefix, action in ACTION_ROUTES:
         if m == method and path.startswith(prefix) and len(prefix) > best_len:
@@ -75,7 +74,7 @@ class AuditEvent:
     status_code: int
     ts: str = ""
     event_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    session_uuid: Optional[str] = None
+    session_uuid: str | None = None
 
     @property
     def sk(self) -> str:
@@ -97,7 +96,7 @@ class AuditEvent:
         }
 
     @classmethod
-    def from_item(cls, item: dict) -> "AuditEvent":
+    def from_item(cls, item: dict) -> AuditEvent:
         return cls(
             org_id=item["org_id"],
             actor_sub=item.get("actor_sub", ""),
@@ -163,7 +162,7 @@ class AuditStore:
         }
 
 
-_store: Optional[AuditStore] = None
+_store: AuditStore | None = None
 
 
 def get_audit_store() -> AuditStore:

@@ -19,7 +19,6 @@ import types
 sys.path.insert(0, "src")
 
 import pytest
-
 from app.models.deployment_models import RuntimeConfig
 from app.services.code_generator import generate_agent_code
 

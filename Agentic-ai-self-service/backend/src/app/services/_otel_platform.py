@@ -37,6 +37,7 @@ def _resolve_auth_header() -> None:
         return  # already set by another bootstrap path; don't overwrite
     try:
         import boto3
+
         sm = boto3.client("secretsmanager")
         value = sm.get_secret_value(SecretId=secret_arn).get("SecretString", "").strip()
         if value:
@@ -61,25 +62,24 @@ def _setup_tracer_provider() -> None:
         return
     try:
         from opentelemetry import trace
-        from opentelemetry.sdk.resources import Resource, SERVICE_NAME
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.resources import SERVICE_NAME, Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     except ImportError as e:
         logger.warning(
             "OpenTelemetry SDK not installed in this Lambda layer; "
             "platform OTEL will be skipped. Add opentelemetry-sdk and "
             "opentelemetry-exporter-otlp-proto-http to requirements-lambda.txt. "
-            "Detail: %s", e,
+            "Detail: %s",
+            e,
         )
         return
 
     try:
         # SDK auto-builds the resource from OTEL_SERVICE_NAME +
         # OTEL_RESOURCE_ATTRIBUTES env vars when we call Resource.create().
-        resource = Resource.create(
-            {SERVICE_NAME: os.environ.get("OTEL_SERVICE_NAME", "agentcore-platform")}
-        )
+        resource = Resource.create({SERVICE_NAME: os.environ.get("OTEL_SERVICE_NAME", "agentcore-platform")})
         provider = TracerProvider(resource=resource)
         # OTLPSpanExporter reads endpoint + headers from env vars by default.
         provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
@@ -90,13 +90,15 @@ def _setup_tracer_provider() -> None:
         # as a span. Optional — soft-fail if the package isn't bundled.
         try:
             from opentelemetry.instrumentation.botocore import BotocoreInstrumentor
+
             BotocoreInstrumentor().instrument()
         except ImportError:
             logger.info("botocore instrumentor not bundled; AWS SDK calls won't auto-span.")
 
         logger.warning(
             "Platform OTEL bootstrap complete (endpoint=%s, service=%s).",
-            endpoint, os.environ.get("OTEL_SERVICE_NAME", "?"),
+            endpoint,
+            os.environ.get("OTEL_SERVICE_NAME", "?"),
         )
     except Exception as e:
         logger.warning("Platform OTEL bootstrap failed (continuing without traces): %s", e)

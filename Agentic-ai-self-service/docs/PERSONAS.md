@@ -1,5 +1,7 @@
 # Personas & Access (RBAC/ABAC)
 
+[← Back to README](../README.md)
+
 Who can do what on the platform is driven by **AWS Cognito groups** on the
 signed-in user's JWT. There is no in-app user-management screen by design —
 identity + group assignment is an AWS/IdP responsibility; the platform only

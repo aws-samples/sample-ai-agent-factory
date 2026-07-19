@@ -8,10 +8,9 @@ services.auth.extract_cognito_groups reads. No real Cognito needed.
 from __future__ import annotations
 
 import pytest
+from app.services import rbac
 from fastapi import HTTPException
 from starlette.requests import Request
-
-from app.services import rbac
 
 
 def _request(groups=None, *, in_lambda: bool = True) -> Request:
@@ -25,9 +24,7 @@ def _request(groups=None, *, in_lambda: bool = True) -> Request:
         claims = {}
         if groups is not None:
             claims["cognito:groups"] = groups
-        scope["aws.event"] = {
-            "requestContext": {"authorizer": {"jwt": {"claims": claims}}}
-        }
+        scope["aws.event"] = {"requestContext": {"authorizer": {"jwt": {"claims": claims}}}}
     return Request(scope)
 
 
@@ -80,10 +77,10 @@ def test_viewer_is_read_only():
 @pytest.mark.parametrize(
     "raw",
     [
-        ["g-admins-registry"],            # list
-        '["g-admins-registry"]',          # JSON-array string
-        "g-admins-registry",              # bare string
-        "[g-admins-registry]",            # bracketed
+        ["g-admins-registry"],  # list
+        '["g-admins-registry"]',  # JSON-array string
+        "g-admins-registry",  # bare string
+        "[g-admins-registry]",  # bracketed
     ],
 )
 def test_group_claim_serialization_shapes(raw):

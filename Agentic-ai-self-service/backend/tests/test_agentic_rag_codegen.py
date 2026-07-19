@@ -29,7 +29,6 @@ import types
 sys.path.insert(0, "src")
 
 import pytest
-
 from app.models.deployment_models import RuntimeConfig
 from app.services.agentic_rag_codegen import (
     STRATEGY_TOOL_NAMES,
@@ -48,17 +47,11 @@ def _restore_boto3():
     downstream tests. Snapshot the real boto3 (+ submodules) before each test and
     restore it after, so the swap is strictly local to this file.
     """
-    saved = {
-        name: mod
-        for name, mod in list(sys.modules.items())
-        if name == "boto3" or name.startswith("boto3.")
-    }
+    saved = {name: mod for name, mod in list(sys.modules.items()) if name == "boto3" or name.startswith("boto3.")}
     try:
         yield
     finally:
-        for name in [
-            n for n in list(sys.modules) if n == "boto3" or n.startswith("boto3.")
-        ]:
+        for name in [n for n in list(sys.modules) if n == "boto3" or n.startswith("boto3.")]:
             del sys.modules[name]
         sys.modules.update(saved)
 
@@ -82,9 +75,9 @@ class _FakeKBClient:
         return {
             "retrievalResults": [
                 {
-                    "content": {"text": "passage-%d for %s" % (i, kwargs["retrievalQuery"]["text"])},
+                    "content": {"text": f"passage-{i} for {kwargs['retrievalQuery']['text']}"},
                     "score": 1.0 - i * 0.01,
-                    "location": {"type": "S3", "s3Location": {"uri": "s3://b/doc%d" % i}},
+                    "location": {"type": "S3", "s3Location": {"uri": f"s3://b/doc{i}"}},
                 }
                 for i in range(n)
             ]
@@ -115,7 +108,7 @@ def _make_fake_boto3(recorder, converse_texts=None, fail_hybrid=False):
             return kb
         if service == "bedrock-runtime":
             return rt
-        raise AssertionError("unexpected client: %s" % service)
+        raise AssertionError(f"unexpected client: {service}")
 
     fake.client = client
     return fake
@@ -127,7 +120,7 @@ def _exec_tool_source(strategy, recorder, converse_texts=None, fail_hybrid=False
     callable tool function. NameError here = a forward/module-symbol dependency
     (Bug 125)."""
     src = agentic_rag_tool_source(strategy)
-    assert src, "expected non-empty source for %s" % strategy
+    assert src, f"expected non-empty source for {strategy}"
 
     fake_boto3 = _make_fake_boto3(recorder, converse_texts, fail_hybrid)
     sys.modules["boto3"] = fake_boto3
@@ -139,7 +132,7 @@ def _exec_tool_source(strategy, recorder, converse_texts=None, fail_hybrid=False
     exec(compile(src, "<rag_tool.py>", "exec"), ns)
     name = STRATEGY_TOOL_NAMES[strategy]
     fn = ns.get(name)
-    assert callable(fn), "%s not defined at module scope" % name
+    assert callable(fn), f"{name} not defined at module scope"
     return fn
 
 
@@ -271,7 +264,10 @@ def test_hybrid_falls_back_to_semantic_on_validation_exception(monkeypatch):
     out = json.loads(fn("q"))
     # Two retrieve calls: first HYBRID (raises), second SEMANTIC (no override).
     assert len(rec["retrieve_calls"]) == 2
-    assert rec["retrieve_calls"][0]["retrievalConfiguration"]["vectorSearchConfiguration"].get("overrideSearchType") == "HYBRID"
+    assert (
+        rec["retrieve_calls"][0]["retrievalConfiguration"]["vectorSearchConfiguration"].get("overrideSearchType")
+        == "HYBRID"
+    )
     assert "overrideSearchType" not in rec["retrieve_calls"][1]["retrievalConfiguration"]["vectorSearchConfiguration"]
     assert out["strategy"] == "hybrid_fallback_semantic"
     assert "error" not in out
@@ -313,9 +309,7 @@ def test_multi_hop_respects_max_hops_cap(monkeypatch):
     monkeypatch.setenv("KB_ID", "ABCDE12345")
     rec = _new_recorder()
     # Decomposer never says DONE — cap must stop at max_hops retrieves.
-    fn = _exec_tool_source(
-        "multi_hop", rec, converse_texts=["q1", "q2", "q3", "q4", "q5", "q6"]
-    )
+    fn = _exec_tool_source("multi_hop", rec, converse_texts=["q1", "q2", "q3", "q4", "q5", "q6"])
     out = json.loads(fn("q", max_hops=2))
     assert len(rec["retrieve_calls"]) == 2
     assert out["hops"] == 2
@@ -363,7 +357,7 @@ def test_generate_agent_code_swaps_in_strategy_tool(strategy):
     )
     tool_name = STRATEGY_TOOL_NAMES[strategy]
     # Strategy tool defined AND inlined into the Agent(...) tools=[...] arg.
-    assert "def %s" % tool_name in code
+    assert f"def {tool_name}" in code
     assert tool_name in _agent_constructor_args(code)
     # SWAP, not add: retrieve_from_kb must be gone.
     assert "def retrieve_from_kb" not in code
@@ -371,13 +365,11 @@ def test_generate_agent_code_swaps_in_strategy_tool(strategy):
 
 def test_generate_agent_code_simple_keeps_retrieve_from_kb():
     for kb_config in (None, {}, {"retrievalStrategy": "simple"}):
-        code = generate_agent_code(
-            config=_cfg(), tools=["knowledge_base"], kb_config=kb_config
-        )
+        code = generate_agent_code(config=_cfg(), tools=["knowledge_base"], kb_config=kb_config)
         assert "def retrieve_from_kb" in code
         assert "retrieve_from_kb" in _agent_constructor_args(code)
         for tool_name in STRATEGY_TOOL_NAMES.values():
-            assert "def %s" % tool_name not in code
+            assert f"def {tool_name}" not in code
 
 
 def test_generate_agent_code_snake_case_strategy_key():

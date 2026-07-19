@@ -10,9 +10,9 @@ let _sessionId: string | null = null;
 function browserSessionId(): string {
   if (_sessionId) return _sessionId;
   try {
-    if (globalThis.crypto && 'randomUUID' in globalThis.crypto) {
+    if (typeof globalThis.crypto?.randomUUID === 'function') {
       _sessionId = globalThis.crypto.randomUUID();
-    } else if (globalThis.crypto && 'getRandomValues' in globalThis.crypto) {
+    } else if (typeof globalThis.crypto?.getRandomValues === 'function') {
       // Cryptographically-secure fallback for older runtimes without randomUUID.
       // NEVER Math.random() — a session-correlation id lives in a security
       // context (CodeQL js/insecure-randomness).

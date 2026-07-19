@@ -37,7 +37,6 @@ from app.services.connectors import (  # noqa: E402
     vendor_config_key,
 )
 
-
 # ---------------------------------------------------------------------------
 # Catalog data contract
 # ---------------------------------------------------------------------------
@@ -145,6 +144,7 @@ def test_jira_api_key_uses_basic_prefix():
     static 'Basic ' prefix (not Bearer). The catalog advertises api_key and the
     credential prefix is Basic."""
     from app.services.connectors import get_connector
+
     assert supports_auth("jira", AUTH_API_KEY) is True
     assert get_connector("jira")["credential_prefix"] == "Basic"
 
@@ -242,9 +242,7 @@ def test_deploy_connector_target_api_key_builds_correct_shapes():
     ctrl.create_gateway_target.assert_called_once()
     params = ctrl.create_gateway_target.call_args.kwargs
     assert params["gatewayIdentifier"] == "gw-1"
-    assert params["targetConfiguration"]["mcp"]["openApiSchema"]["inlinePayload"] == (
-        '{"openapi": "3.0.0"}'
-    )
+    assert params["targetConfiguration"]["mcp"]["openApiSchema"]["inlinePayload"] == ('{"openapi": "3.0.0"}')
     cpc = params["credentialProviderConfigurations"]
     assert len(cpc) == 1
     assert cpc[0]["credentialProviderType"] == "API_KEY"
@@ -356,9 +354,7 @@ def test_deploy_generic_oauth_falls_back_to_custom_vendor_with_discovery():
     op = ctrl.create_oauth2_credential_provider.call_args.kwargs
     assert op["credentialProviderVendor"] == "CustomOauth2"
     cfg = op["oauth2ProviderConfigInput"]["customOauth2ProviderConfig"]
-    assert cfg["oauthDiscovery"]["discoveryUrl"] == (
-        "https://issuer/.well-known/openid-configuration"
-    )
+    assert cfg["oauthDiscovery"]["discoveryUrl"] == ("https://issuer/.well-known/openid-configuration")
 
 
 # ---------------------------------------------------------------------------
@@ -410,15 +406,16 @@ def test_deploy_connector_rollback_on_midloop_failure():
 def test_connector_config_rejects_bad_credential_location(bad):
     """A bad credential_location is a clean 422 at the API boundary, not a
     mid-deploy boto3 ValidationException."""
-    from pydantic import ValidationError
-
     from app.models.components import ConnectorConfig
+    from pydantic import ValidationError
 
     with pytest.raises(ValidationError):
         ConnectorConfig(connector_id="github", auth_method="api_key", credential_location=bad)
 
 
-@pytest.mark.parametrize("good,expected", [("header", "HEADER"), ("Query_Parameter", "QUERY_PARAMETER"), ("HEADER", "HEADER")])
+@pytest.mark.parametrize(
+    "good,expected", [("header", "HEADER"), ("Query_Parameter", "QUERY_PARAMETER"), ("HEADER", "HEADER")]
+)
 def test_connector_config_normalizes_credential_location(good, expected):
     from app.models.components import ConnectorConfig
 
@@ -450,11 +447,14 @@ def test_connector_providers_recorded_with_type_prefix():
     from app.services import gateway_deployer as gd
 
     ctrl = _fake_ctrl()
-    connectors = [{
-        "connector_id": "github", "auth_method": "api_key",
-        "secret_arn": "arn:aws:secretsmanager:us-west-2:1:secret:agentcore-connector/o/x",
-        "spec_inline": '{"openapi": "3.0.0"}',
-    }]
+    connectors = [
+        {
+            "connector_id": "github",
+            "auth_method": "api_key",
+            "secret_arn": "arn:aws:secretsmanager:us-west-2:1:secret:agentcore-connector/o/x",
+            "spec_inline": '{"openapi": "3.0.0"}',
+        }
+    ]
     result = gd._deploy_connector_targets(ctrl, "gw-1", "us-west-2", connectors, owner_sub="o")
     assert result["credential_provider_names"] == ["API_KEY:acc-github-0"]
 
@@ -508,8 +508,9 @@ def test_catalog_connector_spec_fetched_against_spec_host_not_api_host():
         def read(self_inner):
             return b'{"openapi": "3.0.0"}'
 
-    with patch.object(gd, "_validate_outbound_url", side_effect=_fake_validate), patch.object(
-        gd.urllib.request, "urlopen", return_value=_Resp()
+    with (
+        patch.object(gd, "_validate_outbound_url", side_effect=_fake_validate),
+        patch.object(gd.urllib.request, "urlopen", return_value=_Resp()),
     ):
         gd._deploy_connector_targets(ctrl, "gw-1", "us-west-2", connectors, owner_sub="o")
 
@@ -518,6 +519,7 @@ def test_catalog_connector_spec_fetched_against_spec_host_not_api_host():
     # Compare the parsed HOST exactly (not a substring check, which CodeQL flags
     # as py/incomplete-url-substring-sanitization).
     from urllib.parse import urlparse as _urlparse
+
     assert _urlparse(captured["url"]).hostname == "raw.githubusercontent.com"
     # ...and validated against the SPEC-host allowlist, NOT the API allowlist.
     assert captured["allowlist"] == ["raw.githubusercontent.com"]
@@ -531,9 +533,7 @@ def test_catalog_connectors_with_default_spec_url_have_spec_host_allowlist():
     are exempt."""
     for cid, entry in CONNECTOR_CATALOG.items():
         if entry.get("spec_url"):
-            assert entry.get("spec_host_allowlist"), (
-                f"{cid} ships a default spec_url but no spec_host_allowlist"
-            )
+            assert entry.get("spec_host_allowlist"), f"{cid} ships a default spec_url but no spec_host_allowlist"
 
 
 # ---------------------------------------------------------------------------
@@ -543,8 +543,9 @@ def test_catalog_connectors_with_default_spec_url_have_spec_host_allowlist():
 
 
 def test_slim_openapi_spec_preserves_operations_and_shrinks():
-    from app.services import gateway_deployer as gd
     import json as _json
+
+    from app.services import gateway_deployer as gd
 
     spec = {
         "openapi": "3.0.0",
@@ -558,10 +559,14 @@ def test_slim_openapi_spec_preserves_operations_and_shrinks():
                     "operationId": "listThings",
                     "summary": "List things",
                     "description": "keep-op-desc",
-                    "responses": {"200": {"description": "ok",
-                                           "content": {"application/json": {
-                                               "example": {"a": "b" * 9000},
-                                               "examples": {"e": "c" * 9000}}}}},
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {"example": {"a": "b" * 9000}, "examples": {"e": "c" * 9000}}
+                            },
+                        }
+                    },
                 },
                 "post": {"operationId": "createThing", "responses": {"200": {"description": "ok"}}},
             }
@@ -588,14 +593,24 @@ def test_slim_openapi_spec_preserves_operations_and_shrinks():
 
 
 def test_build_openapi_schema_slims_when_over_s3_cap(monkeypatch):
-    from app.services import gateway_deployer as gd
     import json as _json
 
+    from app.services import gateway_deployer as gd
+
     # Build a spec just over the slim target via a giant description.
-    big = {"openapi": "3.0.0", "info": {"title": "B"},
-           "paths": {"/x": {"get": {"operationId": "getX",
-                                     "description": "d" * (gd._S3_SPEC_SLIM_TARGET + 1000),
-                                     "responses": {"200": {"description": "ok"}}}}}}
+    big = {
+        "openapi": "3.0.0",
+        "info": {"title": "B"},
+        "paths": {
+            "/x": {
+                "get": {
+                    "operationId": "getX",
+                    "description": "d" * (gd._S3_SPEC_SLIM_TARGET + 1000),
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    }
     raw = _json.dumps(big)
     assert len(raw.encode()) > gd._S3_SPEC_SLIM_TARGET
 
@@ -621,21 +636,36 @@ def test_build_openapi_schema_slims_when_over_s3_cap(monkeypatch):
 
 
 def test_sanitize_openapi_drops_unsupported_media_types():
-    from app.services import gateway_deployer as gd
     import json as _json
 
+    from app.services import gateway_deployer as gd
+
     spec = {
-        "openapi": "3.0.0", "info": {"title": "x"},
-        "paths": {"/x": {"get": {"operationId": "getX", "responses": {
-            "200": {"description": "ok", "content": {
-                "application/json": {"schema": {"type": "object"}},
-                "application/scim+json": {"schema": {"type": "object"}},
-                "text/html": {"schema": {"type": "string"}},
-            }},
-            "400": {"description": "bad", "content": {
-                "application/vnd.github.diff": {"schema": {"type": "string"}},
-            }},
-        }}}},
+        "openapi": "3.0.0",
+        "info": {"title": "x"},
+        "paths": {
+            "/x": {
+                "get": {
+                    "operationId": "getX",
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {
+                                "application/json": {"schema": {"type": "object"}},
+                                "application/scim+json": {"schema": {"type": "object"}},
+                                "text/html": {"schema": {"type": "string"}},
+                            },
+                        },
+                        "400": {
+                            "description": "bad",
+                            "content": {
+                                "application/vnd.github.diff": {"schema": {"type": "string"}},
+                            },
+                        },
+                    },
+                }
+            }
+        },
     }
     out = _json.loads(gd._sanitize_openapi_for_gateway(_json.dumps(spec)))
     r200 = out["paths"]["/x"]["get"]["responses"]["200"]
@@ -652,16 +682,30 @@ def test_sanitize_openapi_drops_unsupported_media_types():
 def test_sanitize_drops_operations_using_oneof():
     """Bug 189c: the gateway rejects 'oneOf' schemas; drop just those operations
     (keep the rest of the connector working)."""
-    from app.services import gateway_deployer as gd
     import json as _json
-    spec = {"openapi":"3.0.0","info":{"title":"x"},"paths":{
-        "/keep":{"get":{"operationId":"keep","responses":{"200":{"description":"ok"}}}},
-        "/drop":{"post":{"operationId":"drop","requestBody":{"content":{"application/json":{
-            "schema":{"oneOf":[{"type":"string"},{"type":"integer"}]}}}},
-            "responses":{"200":{"description":"ok"}}}},
-    }}
-    out=_json.loads(gd._sanitize_openapi_for_gateway(_json.dumps(spec)))
-    assert "/keep" in out["paths"] and out["paths"]["/keep"]["get"]["operationId"]=="keep"
+
+    from app.services import gateway_deployer as gd
+
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "x"},
+        "paths": {
+            "/keep": {"get": {"operationId": "keep", "responses": {"200": {"description": "ok"}}}},
+            "/drop": {
+                "post": {
+                    "operationId": "drop",
+                    "requestBody": {
+                        "content": {
+                            "application/json": {"schema": {"oneOf": [{"type": "string"}, {"type": "integer"}]}}
+                        }
+                    },
+                    "responses": {"200": {"description": "ok"}},
+                }
+            },
+        },
+    }
+    out = _json.loads(gd._sanitize_openapi_for_gateway(_json.dumps(spec)))
+    assert "/keep" in out["paths"] and out["paths"]["/keep"]["get"]["operationId"] == "keep"
     # the oneOf operation (and now-empty path) is removed
     assert "/drop" not in out["paths"]
     assert "oneOf" not in _json.dumps(out["paths"])
@@ -671,12 +715,23 @@ def test_sanitize_drops_requestbody_when_only_unsupported_media(monkeypatch):
     """Bug 189b follow-up: if a requestBody has ONLY unsupported media types,
     sanitizing removes its content -> the requestBody would be invalid
     (requestBody requires content). The whole requestBody must be dropped."""
-    from app.services import gateway_deployer as gd
     import json as _json
-    spec = {"openapi": "3.0.0", "info": {"title": "x"}, "paths": {"/markdown/raw": {"post": {
-        "operationId": "render", "requestBody": {"required": True, "content": {
-            "text/x-markdown": {"schema": {"type": "string"}}}},
-        "responses": {"200": {"description": "ok"}}}}}}
+
+    from app.services import gateway_deployer as gd
+
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "x"},
+        "paths": {
+            "/markdown/raw": {
+                "post": {
+                    "operationId": "render",
+                    "requestBody": {"required": True, "content": {"text/x-markdown": {"schema": {"type": "string"}}}},
+                    "responses": {"200": {"description": "ok"}},
+                }
+            }
+        },
+    }
     out = _json.loads(gd._sanitize_openapi_for_gateway(_json.dumps(spec)))
     op = out["paths"]["/markdown/raw"]["post"]
     assert "requestBody" not in op  # dropped (was content-less after sanitize)
@@ -684,13 +739,26 @@ def test_sanitize_drops_requestbody_when_only_unsupported_media(monkeypatch):
 
 
 def test_build_openapi_schema_sanitizes_inline_spec(monkeypatch):
-    from app.services import gateway_deployer as gd
     import json as _json
-    spec = _json.dumps({
-        "openapi": "3.0.0", "info": {"title": "x"},
-        "paths": {"/x": {"get": {"operationId": "g", "responses": {
-            "200": {"description": "ok", "content": {"application/scim+json": {"schema": {}}}}}}}},
-    })
+
+    from app.services import gateway_deployer as gd
+
+    spec = _json.dumps(
+        {
+            "openapi": "3.0.0",
+            "info": {"title": "x"},
+            "paths": {
+                "/x": {
+                    "get": {
+                        "operationId": "g",
+                        "responses": {
+                            "200": {"description": "ok", "content": {"application/scim+json": {"schema": {}}}}
+                        },
+                    }
+                }
+            },
+        }
+    )
     block = gd._build_openapi_schema(spec, connector_id="github", region="us-east-1")
     # small spec -> inline; the inline payload must have the unsupported type stripped
     assert "inlinePayload" in block
@@ -699,32 +767,64 @@ def test_build_openapi_schema_sanitizes_inline_spec(monkeypatch):
 
 def test_cap_openapi_operations_limits_count():
     """Bug 189d: cap operations so the gateway tool-plane can materialize them."""
-    from app.services import gateway_deployer as gd
     import json as _json
-    paths={f"/p{i}":{"get":{"operationId":f"op{i}","responses":{"200":{"description":"ok"}}}} for i in range(50)}
-    spec={"openapi":"3.0.0","info":{"title":"x"},"paths":paths,"components":{"schemas":{"S":{"type":"object"}}}}
-    out=_json.loads(gd._cap_openapi_operations(_json.dumps(spec), max_ops=10))
-    ops=sum(1 for p,ms in out["paths"].items() for m in ms if m in ("get","post","put","delete","patch"))
-    assert ops==10
+
+    from app.services import gateway_deployer as gd
+
+    paths = {
+        f"/p{i}": {"get": {"operationId": f"op{i}", "responses": {"200": {"description": "ok"}}}} for i in range(50)
+    }
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "x"},
+        "paths": paths,
+        "components": {"schemas": {"S": {"type": "object"}}},
+    }
+    out = _json.loads(gd._cap_openapi_operations(_json.dumps(spec), max_ops=10))
+    ops = sum(1 for p, ms in out["paths"].items() for m in ms if m in ("get", "post", "put", "delete", "patch"))
+    assert ops == 10
     assert "schemas" in out["components"]  # components preserved
     # under the cap -> unchanged string
-    small=_json.dumps({"openapi":"3.0.0","info":{"title":"x"},"paths":{"/a":{"get":{"operationId":"a","responses":{"200":{"description":"ok"}}}}}})
+    small = _json.dumps(
+        {
+            "openapi": "3.0.0",
+            "info": {"title": "x"},
+            "paths": {"/a": {"get": {"operationId": "a", "responses": {"200": {"description": "ok"}}}}},
+        }
+    )
     assert gd._cap_openapi_operations(small, max_ops=10) == small
 
 
 def test_sanitize_rewrites_operationids_for_bedrock_tool_names():
     """Bug 191: operationIds become tool names <target>___<opId> which Bedrock
     requires to match [a-zA-Z0-9_-]+ and be <=64 chars. Rewrite slashes/long ids."""
+    import json as _json
+    import re as _re
+
     from app.services import gateway_deployer as gd
-    import json as _json, re as _re
-    spec={"openapi":"3.0.0","info":{"title":"x"},"paths":{
-        "/a":{"get":{"operationId":"meta/root","responses":{"200":{"description":"ok"}}}},
-        "/b":{"get":{"operationId":"actions/this-is-a-really-really-really-long-operation-id-exceeding-limit","responses":{"200":{"description":"ok"}}}},
-        "/c":{"get":{"operationId":"meta/root","responses":{"200":{"description":"ok"}}}},
-    }}
-    out=_json.loads(gd._sanitize_openapi_for_gateway(_json.dumps(spec)))
-    ids=[op["operationId"] for pth,ms in out["paths"].items() for m,op in ms.items() if isinstance(op,dict) and "operationId" in op]
+
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "x"},
+        "paths": {
+            "/a": {"get": {"operationId": "meta/root", "responses": {"200": {"description": "ok"}}}},
+            "/b": {
+                "get": {
+                    "operationId": "actions/this-is-a-really-really-really-long-operation-id-exceeding-limit",
+                    "responses": {"200": {"description": "ok"}},
+                }
+            },
+            "/c": {"get": {"operationId": "meta/root", "responses": {"200": {"description": "ok"}}}},
+        },
+    }
+    out = _json.loads(gd._sanitize_openapi_for_gateway(_json.dumps(spec)))
+    ids = [
+        op["operationId"]
+        for pth, ms in out["paths"].items()
+        for m, op in ms.items()
+        if isinstance(op, dict) and "operationId" in op
+    ]
     for i in ids:
         assert _re.fullmatch(r"[a-zA-Z0-9_-]+", i), i
         assert len(i) <= 44, i
-    assert len(ids)==len(set(ids))  # de-duplicated (two meta/root -> distinct)
+    assert len(ids) == len(set(ids))  # de-duplicated (two meta/root -> distinct)

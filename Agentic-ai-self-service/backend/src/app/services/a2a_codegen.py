@@ -41,8 +41,6 @@ module is import-safe on any template. Config values are escaped through the
 same sanitizers code_generator.py uses to prevent f-string injection.
 """
 
-from typing import Optional
-
 from app.services.code_generator import (
     _escape_triple_quotes,
     _sanitize_string_literal,
@@ -69,7 +67,7 @@ def _generate_a2a_agent(
     system_prompt: str,
     model_id: str,
     region: str,
-    peer_config: Optional[dict] = None,
+    peer_config: dict | None = None,
 ) -> str:
     """Return Python source for a self-contained A2A interop agent.
 
@@ -89,9 +87,11 @@ def _generate_a2a_agent(
     """
     peer_config = peer_config or {}
     capabilities = peer_config.get("capabilities") or []
-    advertised_description = peer_config.get("advertised_description") or peer_config.get(
-        "advertisedDescription"
-    ) or "An AgentCore agent exposing the A2A interop protocol."
+    advertised_description = (
+        peer_config.get("advertised_description")
+        or peer_config.get("advertisedDescription")
+        or "An AgentCore agent exposing the A2A interop protocol."
+    )
     peer_allowlist = peer_config.get("peer_allowlist") or peer_config.get("peerAllowlist") or []
 
     # Injection-safe literals baked in as fallback defaults.

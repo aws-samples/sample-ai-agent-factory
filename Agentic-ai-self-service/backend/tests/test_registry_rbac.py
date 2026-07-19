@@ -18,7 +18,7 @@ Covers:
 from __future__ import annotations
 
 import sys
-from typing import Iterator
+from collections.abc import Iterator
 
 import boto3
 import pytest
@@ -28,17 +28,15 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, "src")
 
 moto = pytest.importorskip("moto")
-from moto import mock_aws  # noqa: E402
-
 from app.routers import registry as registry_router_mod  # noqa: E402
 from app.routers.registry import caller_is_admin  # noqa: E402
 from app.services import registry_store as rs_mod  # noqa: E402
 from app.services.auth import get_caller_sub  # noqa: E402
 from app.services.registry_store import (  # noqa: E402
     DEFAULT_ORG_ID,
-    RegistryEntry,
     RegistryStore,
 )
+from moto import mock_aws  # noqa: E402
 
 
 def _create_table() -> None:

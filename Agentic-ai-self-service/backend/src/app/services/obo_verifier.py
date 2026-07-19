@@ -22,7 +22,6 @@ import base64
 import binascii
 import json
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +79,8 @@ def dry_run_obo_exchange(
     workload_name: str,
     user_token: str,
     resource_provider_name: str,
-    scopes: Optional[list] = None,
-    audience: Optional[str] = None,
+    scopes: list | None = None,
+    audience: str | None = None,
 ) -> dict:
     """Perform the OBO exchange as a dry-run and return decoded before/after claims.
 
@@ -100,9 +99,7 @@ def dry_run_obo_exchange(
         "error": None,
     }
     try:
-        wat = identity_client.get_workload_access_token_for_jwt(
-            workloadName=workload_name, userToken=user_token
-        )
+        wat = identity_client.get_workload_access_token_for_jwt(workloadName=workload_name, userToken=user_token)
         workload_token = wat.get("workloadAccessToken") or wat.get("workloadIdentityToken") or ""
         params = {
             "workloadIdentityToken": workload_token,

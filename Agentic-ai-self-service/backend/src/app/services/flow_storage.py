@@ -7,23 +7,21 @@ and dynamodb_storage.py for workflows.
 Requirements: 1.1, 2.1, 6.2, 6.4, 7.1, 7.2
 """
 
-from datetime import datetime, timezone
-from typing import Optional
-import uuid
 import logging
-
-import boto3
+import uuid
+from datetime import datetime, timezone
 
 from app.models import Flow
 from app.models.enums import DeploymentStatus
+
 from .dynamodb_storage import (
-    _convert_floats_to_decimals,
     _convert_decimals_to_floats,
+    _convert_floats_to_decimals,
+    _delete_item,
     _get_dynamodb_resource,
+    _get_item,
     _get_table,
     _put_item,
-    _get_item,
-    _delete_item,
     _scan_table,
 )
 
@@ -115,7 +113,7 @@ class FlowStorage:
         """Initialize empty storage."""
         self._flows: dict[str, Flow] = {}
 
-    def create(self, name: str, owner_sub: Optional[str] = None) -> Flow:
+    def create(self, name: str, owner_sub: str | None = None) -> Flow:
         """Create a new flow with an empty workflow.
 
         Args:
@@ -145,7 +143,7 @@ class FlowStorage:
         self._flows[flow_id] = flow
         return flow
 
-    def get(self, flow_id: str) -> Optional[Flow]:
+    def get(self, flow_id: str) -> Flow | None:
         """Get a flow by ID.
 
         Args:
@@ -159,9 +157,9 @@ class FlowStorage:
     def update(
         self,
         flow_id: str,
-        name: Optional[str] = None,
-        workflow: Optional[dict] = None,
-    ) -> Optional[Flow]:
+        name: str | None = None,
+        workflow: dict | None = None,
+    ) -> Flow | None:
         """Update an existing flow with partial fields.
 
         Preserves unchanged fields and advances updated_at.
@@ -250,7 +248,6 @@ def set_flow_storage(storage):
     _active_storage = storage
 
 
-
 # ============================================================================
 # DynamoDB Flow Storage
 # ============================================================================
@@ -282,7 +279,7 @@ class DynamoDBFlowStorage:
             region,
         )
 
-    def create(self, name: str, owner_sub: Optional[str] = None) -> Flow:
+    def create(self, name: str, owner_sub: str | None = None) -> Flow:
         """Create a new flow in DynamoDB.
 
         Generates a UUID, creates a Flow with an empty workflow,
@@ -314,7 +311,7 @@ class DynamoDBFlowStorage:
         logger.info("Created flow: %s", flow_id)
         return flow
 
-    def get(self, flow_id: str) -> Optional[Flow]:
+    def get(self, flow_id: str) -> Flow | None:
         """Get a flow by ID from DynamoDB.
 
         Args:
@@ -331,9 +328,9 @@ class DynamoDBFlowStorage:
     def update(
         self,
         flow_id: str,
-        name: Optional[str] = None,
-        workflow: Optional[dict] = None,
-    ) -> Optional[Flow]:
+        name: str | None = None,
+        workflow: dict | None = None,
+    ) -> Flow | None:
         """Update an existing flow in DynamoDB.
 
         Accepts partial fields, preserves unchanged fields,
@@ -424,9 +421,7 @@ class DynamoDBFlowStorage:
         response = self._table.scan(**scan_kwargs)
         items.extend(response.get("Items", []))
         while "LastEvaluatedKey" in response:
-            response = self._table.scan(
-                ExclusiveStartKey=response["LastEvaluatedKey"], **scan_kwargs
-            )
+            response = self._table.scan(ExclusiveStartKey=response["LastEvaluatedKey"], **scan_kwargs)
             items.extend(response.get("Items", []))
 
         flows = []

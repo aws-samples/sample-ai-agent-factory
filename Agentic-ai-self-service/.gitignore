@@ -118,7 +118,6 @@ backend/lib/
 .dsr/
 .envrc
 *tmp*
-package-lock.json
 
 # Local-only development-process folder — planning notes, lessons, e2e test
 # harness, live tokens, scratch evidence. Never committed to the public sample.
@@ -131,3 +130,10 @@ docs/decks/
 # Frontend source lib/ is real source, not a Python build artifact
 !frontend/src/lib/
 !frontend/src/lib/**
+
+# Local agent config — personal working notes, not part of the sample
+CLAUDE.md
+
+# CDK runs via npx; no local npm project in infra/ — don't recreate the empty stub
+infra/package-lock.json
+/package-lock.json

@@ -17,10 +17,9 @@ import zipfile
 
 sys.path.insert(0, "src")
 
-from hypothesis import given, settings, strategies as st
-
 from app.services.runtime_deployer import _merge_deps_into_zip
-
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 # ---------------------------------------------------------------------------
 # Strategies

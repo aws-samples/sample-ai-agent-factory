@@ -25,9 +25,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Literal, Optional
-
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -103,15 +102,15 @@ class PublishRequest(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=20)
     visibility: Literal["private", "org", "public"] = "org"
     canvas_snapshot: dict
-    source_runtime_name: Optional[str] = None
-    latest_version_id: Optional[str] = None
+    source_runtime_name: str | None = None
+    latest_version_id: str | None = None
 
 
 class UpdateRequest(BaseModel):
-    display_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
-    description: Optional[str] = Field(default=None, max_length=2000)
-    tags: Optional[list[str]] = Field(default=None, max_length=20)
-    visibility: Optional[Literal["private", "org", "public"]] = None
+    display_name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    tags: list[str] | None = Field(default=None, max_length=20)
+    visibility: Literal["private", "org", "public"] | None = None
 
 
 class RegistryEntryResponse(BaseModel):
@@ -121,20 +120,20 @@ class RegistryEntryResponse(BaseModel):
     description: str
     tags: list[str]
     visibility: str
-    latest_version_id: Optional[str] = None
+    latest_version_id: str | None = None
     usage_count: int
-    source_runtime_name: Optional[str] = None
+    source_runtime_name: str | None = None
     created_at: str
     updated_at: str
     is_owner: bool = False
     status: str = "approved"
-    reviewed_by: Optional[str] = None
-    reviewed_at: Optional[str] = None
-    rejection_reason: Optional[str] = None
+    reviewed_by: str | None = None
+    reviewed_at: str | None = None
+    rejection_reason: str | None = None
     # Populated ONLY on single-entry GET (detail view's Components tab), never in
     # the list response — including the full snapshot in every browse-grid card
     # would bloat the list payload. None on list items by design.
-    canvas_snapshot: Optional[dict] = None
+    canvas_snapshot: dict | None = None
 
     @classmethod
     def from_entry(
@@ -143,7 +142,7 @@ class RegistryEntryResponse(BaseModel):
         caller_sub: str,
         *,
         include_snapshot: bool = False,
-    ) -> "RegistryEntryResponse":
+    ) -> RegistryEntryResponse:
         return cls(
             org_id=e.org_id,
             agent_slug=e.agent_slug,
@@ -253,8 +252,8 @@ async def publish(
 
 @router.get("", response_model=list[RegistryEntryResponse], dependencies=[Depends(require_scopes("registry:read"))])
 async def search(
-    q: Optional[str] = Query(default=None, max_length=200),
-    tag: Optional[str] = Query(default=None, max_length=64),
+    q: str | None = Query(default=None, max_length=200),
+    tag: str | None = Query(default=None, max_length=64),
     scope: Literal["all", "mine", "public", "pending"] = Query(default="all"),
     caller_sub: str = Depends(get_caller_sub),
     is_admin: bool = Depends(caller_is_admin),
@@ -276,9 +275,7 @@ async def search(
             entries = store.list_pending(org_id)
         else:
             # Developers only ever see their OWN pending submissions.
-            entries = [
-                e for e in store.list_for_owner(caller_sub) if e.status == "pending"
-            ]
+            entries = [e for e in store.list_for_owner(caller_sub) if e.status == "pending"]
         visible = entries
     else:
         if scope == "mine":
@@ -303,11 +300,7 @@ async def search(
 
     if q:
         ql = q.lower()
-        visible = [
-            e
-            for e in visible
-            if ql in e.display_name.lower() or ql in e.description.lower()
-        ]
+        visible = [e for e in visible if ql in e.display_name.lower() or ql in e.description.lower()]
     if tag:
         visible = [e for e in visible if tag in e.tags]
 
@@ -345,8 +338,7 @@ async def aws_registry_config(caller_sub: str = Depends(get_caller_sub)) -> dict
     if not rid:
         return {"enabled": False, "registry_id": None, "available": False}
     reg = get_registry()
-    return {"enabled": True, "registry_id": rid,
-            "available": bool(reg and reg.available())}
+    return {"enabled": True, "registry_id": rid, "available": bool(reg and reg.available())}
 
 
 @router.post("/aws-config", dependencies=[Depends(require_scopes("registry:write"))])
@@ -490,10 +482,12 @@ async def delete_entry(
 
 
 class RejectRequest(BaseModel):
-    reason: Optional[str] = Field(default=None, max_length=2000)
+    reason: str | None = Field(default=None, max_length=2000)
 
 
-@router.post("/{slug}/approve", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:write"))])
+@router.post(
+    "/{slug}/approve", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:write"))]
+)
 async def approve_entry(
     slug: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -523,10 +517,12 @@ async def approve_entry(
     return RegistryEntryResponse.from_entry(updated, caller_sub)
 
 
-@router.post("/{slug}/reject", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:write"))])
+@router.post(
+    "/{slug}/reject", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:write"))]
+)
 async def reject_entry(
     slug: str,
-    body: Optional[RejectRequest] = None,
+    body: RejectRequest | None = None,
     caller_sub: str = Depends(get_caller_sub),
     is_admin: bool = Depends(caller_is_admin),
 ) -> RegistryEntryResponse:

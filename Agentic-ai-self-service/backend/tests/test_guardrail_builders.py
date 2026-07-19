@@ -19,7 +19,6 @@ from app.services.guardrail_builders import (  # noqa: E402
     build_regex_filters,
 )
 
-
 # ---------------------------------------------------------------------------
 # build_contextual_grounding_config
 # ---------------------------------------------------------------------------
@@ -95,14 +94,8 @@ def test_contextual_grounding_numeric_strings_coerce():
 
 
 def test_regex_basic_shape():
-    out = build_regex_filters(
-        [{"name": "ticket", "pattern": r"TICKET-\d+", "action": "BLOCK"}]
-    )
-    assert out == {
-        "regexesConfig": [
-            {"name": "ticket", "pattern": r"TICKET-\d+", "action": "BLOCK"}
-        ]
-    }
+    out = build_regex_filters([{"name": "ticket", "pattern": r"TICKET-\d+", "action": "BLOCK"}])
+    assert out == {"regexesConfig": [{"name": "ticket", "pattern": r"TICKET-\d+", "action": "BLOCK"}]}
 
 
 def test_regex_defaults_action_to_anonymize_when_missing():
@@ -155,9 +148,7 @@ def test_regex_none_returns_empty():
 
 
 def test_regex_includes_optional_description():
-    out = build_regex_filters(
-        [{"name": "x", "pattern": "foo", "description": "match foo"}]
-    )
+    out = build_regex_filters([{"name": "x", "pattern": "foo", "description": "match foo"}])
     assert out["regexesConfig"][0]["description"] == "match foo"
 
 
@@ -170,9 +161,9 @@ def test_regex_keeps_valid_drops_invalid_in_mixed_batch():
     out = build_regex_filters(
         [
             {"name": "good1", "pattern": r"\d{3}", "action": "BLOCK"},
-            {"name": "", "pattern": "x"},          # dropped: empty name
-            {"name": "bad", "pattern": "([a-z"},   # dropped: uncompilable
-            {"name": "good2", "pattern": "abc"},   # kept, default action
+            {"name": "", "pattern": "x"},  # dropped: empty name
+            {"name": "bad", "pattern": "([a-z"},  # dropped: uncompilable
+            {"name": "good2", "pattern": "abc"},  # kept, default action
         ]
     )
     names = [r["name"] for r in out["regexesConfig"]]

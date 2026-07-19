@@ -55,10 +55,9 @@ export function McpServersPanel() {
   }, []);
 
   useEffect(() => {
-    if (!selectedId) {
-      setDetail(null);
-      return;
-    }
+    // No synchronous state reset here — staleness is derived at render time by
+    // comparing detail.id to selectedId, so deselecting needs no effect work.
+    if (!selectedId) return;
     let cancelled = false;
     getMcpServerApi(selectedId)
       .then((d) => {
@@ -92,7 +91,7 @@ export function McpServersPanel() {
   }
 
   // Detail view
-  if (selectedId && detail) {
+  if (selectedId && detail && detail.id === selectedId) {
     return <McpDetail detail={detail} onBack={() => setSelectedId(null)} />;
   }
 

@@ -69,8 +69,8 @@ def resolve_system_prompt(config: Any, caller_sub: str | None) -> None:
         name, version = ref
 
         # Import lazily so this module stays import-safe without the store env.
-        from app.services.prompt_library_store import DEFAULT_ORG_ID, slugify
         from app.routers.prompts import resolve_visible_body
+        from app.services.prompt_library_store import DEFAULT_ORG_ID, slugify
 
         resolved = resolve_visible_body(
             org_id=DEFAULT_ORG_ID,
@@ -80,8 +80,7 @@ def resolve_system_prompt(config: Any, caller_sub: str | None) -> None:
         )
         if not resolved:
             logger.warning(
-                "Prompt ref %r could not be resolved for caller %s; keeping "
-                "original systemPrompt value.",
+                "Prompt ref %r could not be resolved for caller %s; keeping original systemPrompt value.",
                 raw,
                 caller_sub,
             )
@@ -89,8 +88,7 @@ def resolve_system_prompt(config: Any, caller_sub: str | None) -> None:
         _version_id, body = resolved
         if not isinstance(body, str) or not body.strip():
             logger.warning(
-                "Resolved prompt ref %r produced an empty body; keeping "
-                "original systemPrompt value.",
+                "Resolved prompt ref %r produced an empty body; keeping original systemPrompt value.",
                 raw,
             )
             return

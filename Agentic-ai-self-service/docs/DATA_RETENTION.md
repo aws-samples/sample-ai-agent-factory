@@ -1,5 +1,7 @@
 # Data Retention & PII Notes
 
+[← Back to README](../README.md)
+
 Covers the governance data stores added in the enterprise/governance layer.
 
 ## Audit trail (`services/audit_store.py`, table `*-audit`)

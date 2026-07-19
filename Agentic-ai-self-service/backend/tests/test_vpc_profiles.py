@@ -39,12 +39,15 @@ def _make_table():
 def test_crud_and_resolve():
     _make_table()
     store = VpcProfileStore(TABLE, "us-east-1")
-    store.put("org1", VpcProfile(
-        name="prod-private",
-        subnet_ids=["subnet-0123456789abcdef0"],
-        security_group_ids=["sg-0123456789abcdef0"],
-        description="private egress",
-    ))
+    store.put(
+        "org1",
+        VpcProfile(
+            name="prod-private",
+            subnet_ids=["subnet-0123456789abcdef0"],
+            security_group_ids=["sg-0123456789abcdef0"],
+            description="private egress",
+        ),
+    )
     got = store.get("org1", "prod-private")
     assert got is not None and got.subnet_ids == ["subnet-0123456789abcdef0"]
     assert {p.name for p in store.list("org1")} == {"prod-private"}
@@ -59,10 +62,20 @@ def test_crud_and_resolve():
 
 def test_validate_rejects_bad_ids():
     with pytest.raises(ValueError, match="profile name"):
-        validate_profile(VpcProfile(name="bad name!", subnet_ids=["subnet-0123456789abcdef0"], security_group_ids=["sg-0123456789abcdef0"]))
+        validate_profile(
+            VpcProfile(
+                name="bad name!", subnet_ids=["subnet-0123456789abcdef0"], security_group_ids=["sg-0123456789abcdef0"]
+            )
+        )
     with pytest.raises(ValueError, match="subnet"):
-        validate_profile(VpcProfile(name="ok", subnet_ids=["not-a-subnet"], security_group_ids=["sg-0123456789abcdef0"]))
+        validate_profile(
+            VpcProfile(name="ok", subnet_ids=["not-a-subnet"], security_group_ids=["sg-0123456789abcdef0"])
+        )
     with pytest.raises(ValueError, match="security group"):
-        validate_profile(VpcProfile(name="ok", subnet_ids=["subnet-0123456789abcdef0"], security_group_ids=["not-a-sg"]))
+        validate_profile(
+            VpcProfile(name="ok", subnet_ids=["subnet-0123456789abcdef0"], security_group_ids=["not-a-sg"])
+        )
     # a valid one does not raise
-    validate_profile(VpcProfile(name="ok-1", subnet_ids=["subnet-0123456789abcdef0"], security_group_ids=["sg-0123456789abcdef0"]))
+    validate_profile(
+        VpcProfile(name="ok-1", subnet_ids=["subnet-0123456789abcdef0"], security_group_ids=["sg-0123456789abcdef0"])
+    )

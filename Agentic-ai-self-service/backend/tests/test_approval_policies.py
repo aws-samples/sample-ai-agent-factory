@@ -6,7 +6,6 @@ import ast
 import sys
 
 import boto3
-import pytest
 from moto import mock_aws
 
 sys.path.insert(0, "src")
@@ -53,9 +52,10 @@ def test_serialize_only_enabled_with_matches():
     pols = [
         ApprovalPolicy(name="a", tool_match=["x_*"], mode="require", enabled=True),
         ApprovalPolicy(name="b", tool_match=["y_*"], mode="notify", enabled=False),  # disabled
-        ApprovalPolicy(name="c", tool_match=[], mode="require", enabled=True),        # no patterns
+        ApprovalPolicy(name="c", tool_match=[], mode="require", enabled=True),  # no patterns
     ]
     import json
+
     out = json.loads(serialize_for_agent(pols))
     assert [p["name"] for p in out] == ["a"]
     # empty when nothing to enforce
@@ -65,6 +65,7 @@ def test_serialize_only_enabled_with_matches():
 def test_generated_hook_matching_logic_is_valid_and_correct():
     """The in-agent policy match uses fnmatch; verify the semantics we rely on."""
     import fnmatch
+
     policies = [{"name": "danger", "tool_match": ["delete_*", "*___send_email"], "mode": "require"}]
 
     def matches(tool_name):
@@ -81,6 +82,7 @@ def test_generated_hook_matching_logic_is_valid_and_correct():
 
 def test_hook_source_block_is_valid_python():
     from app.services.code_generator import _HITL_TOOL_SRC
+
     ast.parse(_HITL_TOOL_SRC)
     assert "_ApprovalHook" in _HITL_TOOL_SRC
     assert "BeforeToolInvocationEvent" in _HITL_TOOL_SRC

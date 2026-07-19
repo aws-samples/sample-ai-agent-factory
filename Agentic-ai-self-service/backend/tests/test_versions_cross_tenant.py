@@ -17,7 +17,7 @@ ownership check that deployment_handler now performs.
 from __future__ import annotations
 
 import sys
-from typing import Iterator
+from collections.abc import Iterator
 
 import boto3
 import pytest
@@ -25,8 +25,6 @@ import pytest
 sys.path.insert(0, "src")
 
 moto = pytest.importorskip("moto")
-from moto import mock_aws  # noqa: E402
-
 from app.services.agent_versions_store import (  # noqa: E402
     AgentVersion,
     AgentVersionsStore,
@@ -34,6 +32,7 @@ from app.services.agent_versions_store import (  # noqa: E402
     RuntimeSlotsStore,
     new_version_id,
 )
+from moto import mock_aws  # noqa: E402
 
 
 @pytest.fixture
@@ -124,15 +123,11 @@ def _deploy_handler_ownership_check(
     """
     slots = slots_store.get(friendly_runtime_name)
     if slots is not None and slots.owner_sub and slots.owner_sub != user_id:
-        raise PermissionError(
-            f"Runtime name '{friendly_runtime_name}' is already in use by another tenant."
-        )
+        raise PermissionError(f"Runtime name '{friendly_runtime_name}' is already in use by another tenant.")
     versions = versions_store.list_for_runtime(friendly_runtime_name)
     for v in versions:
         if v.owner_sub and v.owner_sub != user_id and (v.status or "pending") in {"pending", "succeeded"}:
-            raise PermissionError(
-                f"Runtime name '{friendly_runtime_name}' is already in use by another tenant."
-            )
+            raise PermissionError(f"Runtime name '{friendly_runtime_name}' is already in use by another tenant.")
 
 
 def test_alice_can_redeploy_her_own_runtime(stores):
@@ -258,20 +253,14 @@ def test_teardown_releases_name_so_redeploy_works(stores):
     _seed_alice(versions_store, slots_store)
     # Pre-condition: Bob is blocked while Alice's rows exist.
     with pytest.raises(PermissionError):
-        _deploy_handler_ownership_check(
-            versions_store, slots_store, friendly_runtime_name="alice_bot", user_id="bob"
-        )
+        _deploy_handler_ownership_check(versions_store, slots_store, friendly_runtime_name="alice_bot", user_id="bob")
     # Alice tears down her deployment.
-    _teardown_release_name(
-        versions_store, slots_store, friendly_runtime_name="alice_bot", caller_sub="alice"
-    )
+    _teardown_release_name(versions_store, slots_store, friendly_runtime_name="alice_bot", caller_sub="alice")
     # Rows are gone.
     assert slots_store.get("alice_bot") is None
     assert versions_store.list_for_runtime("alice_bot") == []
     # Now anyone can deploy the name again — no 409.
-    _deploy_handler_ownership_check(
-        versions_store, slots_store, friendly_runtime_name="alice_bot", user_id="bob"
-    )
+    _deploy_handler_ownership_check(versions_store, slots_store, friendly_runtime_name="alice_bot", user_id="bob")
 
 
 def test_teardown_release_is_tenant_scoped(stores):
@@ -279,9 +268,7 @@ def test_teardown_release_is_tenant_scoped(stores):
     versions_store, slots_store = stores
     _seed_alice(versions_store, slots_store)
     # Bob's teardown attempt must not delete Alice's rows.
-    _teardown_release_name(
-        versions_store, slots_store, friendly_runtime_name="alice_bot", caller_sub="bob"
-    )
+    _teardown_release_name(versions_store, slots_store, friendly_runtime_name="alice_bot", caller_sub="bob")
     assert slots_store.get("alice_bot") is not None
     assert len(versions_store.list_for_runtime("alice_bot")) == 1
 
@@ -328,6 +315,4 @@ def test_succeeded_foreign_deploy_still_locks_name(stores):
         )
     )
     with pytest.raises(PermissionError):
-        _deploy_handler_ownership_check(
-            versions_store, slots_store, friendly_runtime_name="live_bot", user_id="bob"
-        )
+        _deploy_handler_ownership_check(versions_store, slots_store, friendly_runtime_name="live_bot", user_id="bob")

@@ -4,10 +4,9 @@ Provides CRUD operations and GSI queries for ``CatalogTool`` records.
 Follows the same patterns as ``deployment_state_store.py``.
 """
 
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional
-import logging
 
 import boto3
 
@@ -33,7 +32,7 @@ def _put_item(table, item: dict) -> dict:
     return table.put_item(Item=item)
 
 
-def _get_item(table, key: dict) -> Optional[dict]:
+def _get_item(table, key: dict) -> dict | None:
     response = table.get_item(Key=key)
     return response.get("Item")
 
@@ -43,8 +42,8 @@ def _update_item(
     key: dict,
     update_expr: str,
     expr_values: dict,
-    expr_names: Optional[dict] = None,
-    condition_expr: Optional[str] = None,
+    expr_names: dict | None = None,
+    condition_expr: str | None = None,
 ) -> dict:
     kwargs = {
         "Key": key,
@@ -143,13 +142,13 @@ class ToolCatalogStore:
         logger.info("Created catalog tool: %s (%s)", tool.tool_id, tool.tool_name)
         return tool
 
-    def get(self, tool_id: str) -> Optional[CatalogTool]:
+    def get(self, tool_id: str) -> CatalogTool | None:
         item = _get_item(self._table, {"tool_id": tool_id})
         if item is None:
             return None
         return deserialize_catalog_tool(item)
 
-    def update(self, tool_id: str, updates: dict) -> Optional[CatalogTool]:
+    def update(self, tool_id: str, updates: dict) -> CatalogTool | None:
         """Update specific fields on a catalog tool.
 
         Args:
@@ -189,7 +188,7 @@ class ToolCatalogStore:
         logger.info("Updated catalog tool: %s", tool_id)
         return self.get(tool_id)
 
-    def update_with_condition(self, tool_id: str, updates: dict, expected_status: ToolStatus) -> Optional[CatalogTool]:
+    def update_with_condition(self, tool_id: str, updates: dict, expected_status: ToolStatus) -> CatalogTool | None:
         """Update a tool only if its current status matches expected_status.
 
         Uses DynamoDB ConditionExpression to prevent race conditions on

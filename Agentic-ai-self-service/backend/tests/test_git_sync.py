@@ -18,18 +18,15 @@ import io
 import json
 import socket
 import sys
+from collections.abc import Iterator
 from datetime import datetime, timezone
-from typing import Iterator
 from unittest.mock import patch
 
 import pytest
 
 sys.path.insert(0, "src")
 
-from fastapi import FastAPI  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app.models import WorkflowDefinition, WorkflowMetadata, Viewport  # noqa: E402
+from app.models import Viewport, WorkflowDefinition, WorkflowMetadata  # noqa: E402
 from app.services import git_sync  # noqa: E402
 from app.services.auth import get_caller_sub  # noqa: E402
 from app.services.git_sync import (  # noqa: E402
@@ -39,11 +36,12 @@ from app.services.git_sync import (  # noqa: E402
     store_git_token,
     validate_git_source,
 )
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
 moto = pytest.importorskip("moto")
-from moto import mock_aws  # noqa: E402
 import boto3  # noqa: E402
-
+from moto import mock_aws  # noqa: E402
 
 REGION = "us-east-1"
 ALICE = "alice-sub"
@@ -123,13 +121,13 @@ def test_non_https_scheme_rejected_before_dns(scheme: str) -> None:
     "blocked_ip",
     [
         "169.254.169.254",  # IMDS
-        "169.254.170.2",    # Lambda creds
-        "127.0.0.1",        # loopback
-        "10.0.0.1",         # RFC1918
-        "172.16.5.5",       # RFC1918
-        "192.168.1.1",      # RFC1918
-        "100.64.0.1",       # CGNAT
-        "0.0.0.0",          # this network
+        "169.254.170.2",  # Lambda creds
+        "127.0.0.1",  # loopback
+        "10.0.0.1",  # RFC1918
+        "172.16.5.5",  # RFC1918
+        "192.168.1.1",  # RFC1918
+        "100.64.0.1",  # CGNAT
+        "0.0.0.0",  # this network
     ],
 )
 def test_repo_host_resolving_to_private_ipv4_rejected(blocked_ip: str) -> None:
@@ -257,8 +255,9 @@ def test_fetch_valid_spec_roundtrips() -> None:
         "branch": "main",
         "path": "agent.json",
     }
-    with patch("socket.getaddrinfo", return_value=_addrinfo_for("140.82.112.3")), patch(
-        "app.services.git_sync._NO_REDIRECT_OPENER.open", return_value=_FakeResponse(body)
+    with (
+        patch("socket.getaddrinfo", return_value=_addrinfo_for("140.82.112.3")),
+        patch("app.services.git_sync._NO_REDIRECT_OPENER.open", return_value=_FakeResponse(body)),
     ):
         out = fetch_workflow_spec(git_source, token_ref=None)
     assert out["name"] == "Synced Agent"
@@ -273,8 +272,9 @@ def test_fetch_invalid_spec_raises() -> None:
         "branch": "main",
         "path": "agent.json",
     }
-    with patch("socket.getaddrinfo", return_value=_addrinfo_for("140.82.112.3")), patch(
-        "app.services.git_sync._NO_REDIRECT_OPENER.open", return_value=_FakeResponse(body)
+    with (
+        patch("socket.getaddrinfo", return_value=_addrinfo_for("140.82.112.3")),
+        patch("app.services.git_sync._NO_REDIRECT_OPENER.open", return_value=_FakeResponse(body)),
     ):
         with pytest.raises(_GitSourceInvalid) as exc:
             fetch_workflow_spec(git_source, token_ref=None)
@@ -287,8 +287,9 @@ def test_fetch_non_json_raises() -> None:
         "branch": "main",
         "path": "agent.json",
     }
-    with patch("socket.getaddrinfo", return_value=_addrinfo_for("140.82.112.3")), patch(
-        "app.services.git_sync._NO_REDIRECT_OPENER.open", return_value=_FakeResponse(b"<<<not json>>>")
+    with (
+        patch("socket.getaddrinfo", return_value=_addrinfo_for("140.82.112.3")),
+        patch("app.services.git_sync._NO_REDIRECT_OPENER.open", return_value=_FakeResponse(b"<<<not json>>>")),
     ):
         with pytest.raises(_GitSourceInvalid):
             fetch_workflow_spec(git_source, token_ref=None)
@@ -302,8 +303,9 @@ def test_fetch_oversized_body_rejected() -> None:
         "branch": "main",
         "path": "agent.json",
     }
-    with patch("socket.getaddrinfo", return_value=_addrinfo_for("140.82.112.3")), patch(
-        "app.services.git_sync._NO_REDIRECT_OPENER.open", return_value=_FakeResponse(big)
+    with (
+        patch("socket.getaddrinfo", return_value=_addrinfo_for("140.82.112.3")),
+        patch("app.services.git_sync._NO_REDIRECT_OPENER.open", return_value=_FakeResponse(big)),
     ):
         with pytest.raises(_GitSourceInvalid) as exc:
             fetch_workflow_spec(git_source, token_ref=None)
@@ -326,9 +328,11 @@ def test_fetch_builds_authorization_header_from_token() -> None:
         captured["url"] = req.full_url
         return _FakeResponse(body)
 
-    with patch("socket.getaddrinfo", return_value=_addrinfo_for("140.82.112.3")), patch(
-        "app.services.git_sync._resolve_token", return_value="ghp_secrettoken"
-    ), patch("app.services.git_sync._NO_REDIRECT_OPENER.open", side_effect=_fake_urlopen):
+    with (
+        patch("socket.getaddrinfo", return_value=_addrinfo_for("140.82.112.3")),
+        patch("app.services.git_sync._resolve_token", return_value="ghp_secrettoken"),
+        patch("app.services.git_sync._NO_REDIRECT_OPENER.open", side_effect=_fake_urlopen),
+    ):
         fetch_workflow_spec(git_source, token_ref="arn:fake")
     # urllib title-cases header keys.
     assert captured["headers"].get("Authorization") == "Bearer ghp_secrettoken"
@@ -352,8 +356,9 @@ def test_fetch_base64_envelope_fallback() -> None:
         "branch": "main",
         "path": "agent.json",
     }
-    with patch("socket.getaddrinfo", return_value=_addrinfo_for("140.82.112.3")), patch(
-        "app.services.git_sync._NO_REDIRECT_OPENER.open", return_value=_FakeResponse(body)
+    with (
+        patch("socket.getaddrinfo", return_value=_addrinfo_for("140.82.112.3")),
+        patch("app.services.git_sync._NO_REDIRECT_OPENER.open", return_value=_FakeResponse(body)),
     ):
         out = fetch_workflow_spec(git_source, token_ref=None)
     assert out["name"] == "Synced Agent"
@@ -386,9 +391,7 @@ def test_resolve_token_rejects_arn_outside_namespace(aws: None) -> None:
     """An ARN outside agentcore-git/ must be rejected WITHOUT a GetSecretValue call."""
     sm = boto3.client("secretsmanager", region_name=REGION)
     other = sm.create_secret(Name="agentcore-otel/x-123", SecretString="nope")["ARN"]
-    with patch.object(
-        boto3, "client", side_effect=AssertionError("must not create a client")
-    ):
+    with patch.object(boto3, "client", side_effect=AssertionError("must not create a client")):
         with pytest.raises(_GitSourceInvalid):
             git_sync._resolve_token(other)
 
@@ -495,9 +498,11 @@ def test_owner_git_sync_updates_nodes_preserves_owner(storage) -> None:
     malicious["nodes"] = []
     body = json.dumps(malicious).encode()
 
-    with patch("socket.getaddrinfo", return_value=_addrinfo_for("140.82.112.3")), patch(
-        "app.services.git_sync._resolve_token", return_value="ghp_x"
-    ), patch("app.services.git_sync._NO_REDIRECT_OPENER.open", return_value=_FakeResponse(body)):
+    with (
+        patch("socket.getaddrinfo", return_value=_addrinfo_for("140.82.112.3")),
+        patch("app.services.git_sync._resolve_token", return_value="ghp_x"),
+        patch("app.services.git_sync._NO_REDIRECT_OPENER.open", return_value=_FakeResponse(body)),
+    ):
         resp = _client(ALICE).post("/api/workflows/wf1/git-sync")
     assert resp.status_code == 200, resp.text
     out = resp.json()
@@ -511,7 +516,7 @@ def test_owner_git_sync_updates_nodes_preserves_owner(storage) -> None:
     stored = storage.get("wf1")
     assert stored.owner_sub == ALICE
     assert getattr(stored, "acl", None) != malicious["acl"]
-    assert getattr(stored, "git_source")["token_ref"] == _GIT_SOURCE["token_ref"]
+    assert stored.git_source["token_ref"] == _GIT_SOURCE["token_ref"]
 
 
 def test_owner_git_sync_with_invalid_repo_url_returns_400(storage) -> None:
@@ -543,7 +548,7 @@ def test_git_token_endpoint_stores_and_attaches(storage, aws: None) -> None:
     # serialization (post-edit the response will also carry it). model_copy still
     # carries the value onto the stored object — same contract as acl.
     stored = storage.get("wf1")
-    git_source = getattr(stored, "git_source")
+    git_source = stored.git_source
     assert git_source["repo_url"] == "https://github.com/octo/agents"
     assert ":secret:agentcore-git/" in git_source["token_ref"]
     # The raw PAT is NEVER persisted on the row — only the ARN.

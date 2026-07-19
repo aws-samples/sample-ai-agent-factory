@@ -17,6 +17,11 @@ import json
 from unittest.mock import MagicMock, patch
 
 from app.services import gateway_deployer as gd
+from botocore.exceptions import ClientError
+
+
+def _client_error(code, msg, op="Op"):
+    return ClientError({"Error": {"Code": code, "Message": msg}}, op)
 
 
 def _policy(*sids):
@@ -29,7 +34,7 @@ def _iam_with_existing(existing_roles):
     def _get_role(RoleName):
         if RoleName in existing_roles:
             return {"Role": {"RoleName": RoleName}}
-        raise Exception(f"NoSuchEntity: role {RoleName} not found")
+        raise _client_error("NoSuchEntity", f"role {RoleName} not found", "GetRole")
 
     iam.get_role.side_effect = _get_role
     return iam
@@ -39,8 +44,8 @@ def test_prunes_statement_for_deleted_role():
     lam = MagicMock()
     lam.get_policy.return_value = {
         "Policy": _policy(
-            "AllowAgentCoreInvoke-AgentCoreGateway-gone",   # role deleted
-            "AllowAgentCoreInvoke-AgentCoreGateway-live",   # role exists
+            "AllowAgentCoreInvoke-AgentCoreGateway-gone",  # role deleted
+            "AllowAgentCoreInvoke-AgentCoreGateway-live",  # role exists
         )
     }
     iam = _iam_with_existing({"AgentCoreGateway-live"})

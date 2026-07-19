@@ -7,24 +7,21 @@ Requirements: 3.6
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import logging
 import os
 import time
 from datetime import datetime, timezone
-from typing import Optional
 
-import boto3
-
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
+from app.services import step_clients
 from app.services.agent_versions_store import (
     RuntimeSlots,
     get_slots_store,
     get_versions_store,
 )
-from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
+from app.services.gateway_deployer import _SHARED_TOOL_LAMBDAS, _release_shared_tool_lambda
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +54,21 @@ def _auto_cleanup_on_failure(store: DeploymentStateStore, deployment_id: str, ev
 
         # Priority order: delete primary resources first, then backing stores
         priority = {
-            "knowledge_base": 0, "agent_runtime": 1, "harness": 1, "gateway": 2,
-            "policy_engine": 2, "lambda": 5, "memory": 6, "guardrail": 6,
-            "oauth2_credential_provider": 7, "api_key_credential_provider": 7,
-            "s3_vectors_bucket": 8, "iam_role": 9, "cognito_user_pool": 9,
-            "secret": 9, "s3_object": 9,
+            "knowledge_base": 0,
+            "agent_runtime": 1,
+            "harness": 1,
+            "gateway": 2,
+            "policy_engine": 2,
+            "lambda": 5,
+            "memory": 6,
+            "guardrail": 6,
+            "oauth2_credential_provider": 7,
+            "api_key_credential_provider": 7,
+            "s3_vectors_bucket": 8,
+            "iam_role": 9,
+            "cognito_user_pool": 9,
+            "secret": 9,
+            "s3_object": 9,
         }
         ordered = sorted(resources, key=lambda r: priority.get(str(r.get("type")), 4))
         cleaned = 0
@@ -103,6 +110,18 @@ def _cleanup_resource(res: dict, region: str, event: dict) -> None:
 
     if rtype == "gateway":
         ctrl = step_clients.client(event, "bedrock-agentcore-control", region_name=res_region)
+        # DeleteGateway rejects gateways that still have targets ("has targets
+        # associated with it") — a failed deploy that got past target creation
+        # would leak the gateway forever. Delete targets first.
+        try:
+            targets = ctrl.list_gateway_targets(gatewayIdentifier=rid, maxResults=100).get("items", [])
+            for t in targets:
+                try:
+                    ctrl.delete_gateway_target(gatewayIdentifier=rid, targetId=t["targetId"])
+                except Exception:
+                    logger.debug("delete_gateway_target %s on %s failed", t.get("targetId"), rid, exc_info=True)
+        except Exception:
+            logger.debug("list_gateway_targets on %s failed", rid, exc_info=True)
         ctrl.delete_gateway(gatewayIdentifier=rid)
     elif rtype == "agent_runtime":
         ctrl = step_clients.client(event, "bedrock-agentcore-control", region_name=res_region)
@@ -118,10 +137,10 @@ def _cleanup_resource(res: dict, region: str, event: dict) -> None:
             for p in pols:
                 try:
                     ctrl.delete_policy(policyEngineId=rid, policyId=p.get("policyId"))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception:  # noqa: BLE001 — engine delete below surfaces real failures
+                    logger.debug("delete_policy on engine %s failed", rid, exc_info=True)
+        except Exception:  # noqa: BLE001 — best-effort pre-clean; engine delete surfaces real failures
+            logger.debug("list_policies on engine %s failed", rid, exc_info=True)
         time.sleep(2)
         ctrl.delete_policy_engine(policyEngineId=rid)
     elif rtype == "guardrail":
@@ -133,10 +152,10 @@ def _cleanup_resource(res: dict, region: str, event: dict) -> None:
             for ds in ba.list_data_sources(knowledgeBaseId=rid).get("dataSourceSummaries", []):
                 try:
                     ba.delete_data_source(knowledgeBaseId=rid, dataSourceId=ds["dataSourceId"])
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception:  # noqa: BLE001 — KB cascade delete removes remaining data sources
+                    logger.debug("delete_data_source on KB %s failed", rid, exc_info=True)
+        except Exception:  # noqa: BLE001 — best-effort pre-clean; KB delete surfaces real failures
+            logger.debug("list_data_sources on KB %s failed", rid, exc_info=True)
         ba.delete_knowledge_base(knowledgeBaseId=rid)
         # Poll until deleted
         for _ in range(24):
@@ -153,10 +172,10 @@ def _cleanup_resource(res: dict, region: str, event: dict) -> None:
             for ix in s3v.list_indexes(vectorBucketName=bname).get("indexes", []):
                 try:
                     s3v.delete_index(vectorBucketName=bname, indexName=ix["indexName"])
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception:  # noqa: BLE001 — bucket delete below surfaces a still-populated bucket
+                    logger.debug("delete_index on vector bucket %s failed", bname, exc_info=True)
+        except Exception:  # noqa: BLE001 — best-effort pre-clean; bucket delete surfaces real failures
+            logger.debug("list_indexes on vector bucket %s failed", bname, exc_info=True)
         s3v.delete_vector_bucket(vectorBucketName=bname)
     elif rtype == "cognito_user_pool":
         cog = step_clients.client(event, "cognito-idp", region_name=res_region)
@@ -173,8 +192,8 @@ def _cleanup_resource(res: dict, region: str, event: dict) -> None:
                     if not still:
                         break
                     time.sleep(5)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — pool delete below retries + surfaces real failures
+            logger.debug("Cognito domain pre-delete for pool %s failed", rid, exc_info=True)
         # Retry pool delete in case domain teardown is still settling
         for _attempt in range(6):
             try:
@@ -189,7 +208,15 @@ def _cleanup_resource(res: dict, region: str, event: dict) -> None:
         ctrl = step_clients.client(event, "bedrock-agentcore-control", region_name=res_region)
         ctrl.delete_memory(memoryId=rid)
     elif rtype == "lambda":
-        step_clients.client(event, "lambda", region_name=res_region).delete_function(FunctionName=rname or rid)
+        _fn = rname or rid
+        _lam = step_clients.client(event, "lambda", region_name=res_region)
+        # Defect C (failure-path manifest teardown): shared singleton tool
+        # Lambdas are released by reference count, never hard-deleted while
+        # another live gateway still holds an invoke grant on them.
+        if _fn in _SHARED_TOOL_LAMBDAS:
+            logger.info(_release_shared_tool_lambda(_lam, _fn, res.get("gateway_role")))
+        else:
+            _lam.delete_function(FunctionName=_fn)
     elif rtype == "iam_role":
         iam = step_clients.client(event, "iam")
         role_name = rname or rid
@@ -197,13 +224,13 @@ def _cleanup_resource(res: dict, region: str, event: dict) -> None:
         try:
             for pol in iam.list_attached_role_policies(RoleName=role_name).get("AttachedPolicies", []):
                 iam.detach_role_policy(RoleName=role_name, PolicyArn=pol["PolicyArn"])
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — delete_role below surfaces a still-attached policy
+            logger.debug("Detach attached policies on role %s failed", role_name, exc_info=True)
         try:
             for pol in iam.list_role_policies(RoleName=role_name).get("PolicyNames", []):
                 iam.delete_role_policy(RoleName=role_name, PolicyName=pol)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — delete_role below surfaces a remaining inline policy
+            logger.debug("Delete inline policies on role %s failed", role_name, exc_info=True)
         iam.delete_role(RoleName=role_name)
     elif rtype == "secret":
         step_clients.client(event, "secretsmanager", region_name=res_region).delete_secret(
@@ -234,8 +261,8 @@ def _auto_register_in_aws_registry(
     *,
     store: DeploymentStateStore,
     deployment_id: str,
-    runtime_arn: Optional[str],
-    runtime_endpoint: Optional[str],
+    runtime_arn: str | None,
+    runtime_endpoint: str | None,
     friendly_runtime_name: str,
     is_a2a: bool,
 ) -> None:
@@ -288,7 +315,9 @@ def _auto_register_in_aws_registry(
         store.set_registry_record(deployment_id, record_id, result.get("status") or "DRAFT")
         logger.info(
             "AWS Agent Registry: registered %s as %s (%s)",
-            friendly_runtime_name, record_id, result.get("status"),
+            friendly_runtime_name,
+            record_id,
+            result.get("status"),
         )
 
 
@@ -451,11 +480,7 @@ def handler(event: dict, context) -> dict:
                 # rejects mismatched-owner deploys at the API boundary, but in
                 # case a bug or race lets one through, refuse to overwrite a
                 # slot row owned by a different sub. See lessons.md Bug 122.
-                if (
-                    existing is not None
-                    and existing.owner_sub
-                    and existing.owner_sub != owner_sub
-                ):
+                if existing is not None and existing.owner_sub and existing.owner_sub != owner_sub:
                     logger.warning(
                         "Refusing to update RuntimeSlots for %s/%s: existing "
                         "slot owned by %s, deploy caller is %s. This should "
@@ -473,20 +498,14 @@ def handler(event: dict, context) -> dict:
                         new_slots = RuntimeSlots(
                             runtime_name=friendly_runtime_name,
                             owner_sub=owner_sub,
-                            production_version_id=(
-                                version_id if deployment_slot == "production" else None
-                            ),
-                            staging_version_id=(
-                                version_id if deployment_slot == "staging" else None
-                            ),
+                            production_version_id=(version_id if deployment_slot == "production" else None),
+                            staging_version_id=(version_id if deployment_slot == "staging" else None),
                             last_promoted_at=now.isoformat(),
                         )
                     else:
                         new_slots = existing
                         if deployment_slot == "production":
-                            new_slots.previous_production_version_id = (
-                                existing.production_version_id
-                            )
+                            new_slots.previous_production_version_id = existing.production_version_id
                             new_slots.production_version_id = version_id
                             new_slots.last_promoted_at = now.isoformat()
                         elif deployment_slot == "staging":

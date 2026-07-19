@@ -99,13 +99,17 @@ def _send_cfn_response(event: dict, context, status: str, physical_id: str, reas
         }
     ).encode("utf-8")
 
+    # ResponseURL is a CloudFormation-issued pre-signed S3 URL; enforce https
+    # so a forged event can't make urlopen dereference file:// or similar.
+    if not event["ResponseURL"].startswith("https://"):
+        raise ValueError("ResponseURL must be https")
     req = urllib.request.Request(
         event["ResponseURL"],
         data=body,
         method="PUT",
         headers={"Content-Type": "", "Content-Length": str(len(body))},
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310  # https enforced above
         resp.read()
 
 
@@ -121,7 +125,9 @@ def handler(event: dict, context) -> None:
         elif event["RequestType"] == "Delete":
             _delete_user(user_pool_id, email)
         else:
-            _send_cfn_response(event, context, "FAILED", physical_id, reason=f"Unknown RequestType: {event['RequestType']}")
+            _send_cfn_response(
+                event, context, "FAILED", physical_id, reason=f"Unknown RequestType: {event['RequestType']}"
+            )
             return
 
         _send_cfn_response(event, context, "SUCCESS", physical_id)

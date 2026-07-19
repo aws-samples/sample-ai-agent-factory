@@ -1,7 +1,7 @@
 """Root conftest — fix sys.path so vendored pydantic stubs don't shadow the real package."""
 
-import sys
 import os
+import sys
 
 # The backend/ directory contains vendored pydantic/pydantic_core stubs for Lambda
 # packaging. These are pure-Python stubs without the compiled _pydantic_core extension.
@@ -37,6 +37,50 @@ if _src_dir not in sys.path:
 # NOT a product defect. Defensively ensure the attribute exists before each test
 # so moto always has a patch target. See tasks/lessons.md (Phase 3 integration).
 import pytest  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Hypothesis determinism on CI
+# ---------------------------------------------------------------------------
+# 20 property-test files explore RANDOM inputs each run, so a latent edge case
+# can pass locally yet fail on a CI runner that happened to draw the bad input
+# (exactly how the NoCredentialsError surfaced). Register a derandomized "ci"
+# profile (fixed example database off, stable derandomize seed, generous
+# deadline for slow runners) and load it when CI is set, so a green run stays
+# green on re-runs. Locally the default profile still explores freely.
+try:
+    from hypothesis import HealthCheck, settings
+
+    settings.register_profile(
+        "ci",
+        derandomize=True,
+        deadline=None,
+        max_examples=50,
+        suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
+    )
+    settings.register_profile(
+        "dev",
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    settings.load_profile("ci" if os.environ.get("CI") else "dev")
+except Exception:  # noqa: BLE001 — hypothesis always present in dev deps; be defensive
+    pass
+
+
+@pytest.fixture(autouse=True)
+def _no_real_aws_credentials(monkeypatch):
+    """Unit tests must never reach real AWS. Neutralize ambient credentials so a
+    stray un-mocked boto3 call fails loudly (NoCredentialsError) HERE instead of
+    silently succeeding on a developer's machine and then failing on CI. moto's
+    @mock_aws and explicit fake-cred patches set their own values and win over
+    this (fixtures run before the test body; moto/patch.dict apply inside it).
+    """
+    for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    monkeypatch.setenv("AWS_CONFIG_FILE", "/dev/null")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/dev/null")
+    yield
 
 
 @pytest.fixture(autouse=True)

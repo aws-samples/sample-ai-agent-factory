@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Literal, Optional
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -68,7 +68,7 @@ def _validate_sub(sub: str) -> str:
     return sub
 
 
-def _workflow_acl(workflow) -> Optional[dict]:
+def _workflow_acl(workflow) -> dict | None:
     """Read the embedded acl dict (None on legacy rows or pre-shared-edit models)."""
     return getattr(workflow, "acl", None)
 
@@ -103,13 +103,13 @@ class ShareRequest(BaseModel):
 
 class AclResponse(BaseModel):
     workflow_id: str
-    owner_sub: Optional[str] = None
+    owner_sub: str | None = None
     editors: list[str] = Field(default_factory=list)
     viewers: list[str] = Field(default_factory=list)
-    workspace_id: Optional[str] = None
+    workspace_id: str | None = None
 
     @classmethod
-    def from_acl(cls, workflow_id: str, acl: Acl) -> "AclResponse":
+    def from_acl(cls, workflow_id: str, acl: Acl) -> AclResponse:
         return cls(
             workflow_id=workflow_id,
             owner_sub=acl.owner_sub,
@@ -124,9 +124,9 @@ class WorkspaceWorkflowResponse(BaseModel):
 
     workflow_id: str
     name: str
-    workspace_id: Optional[str] = None
+    workspace_id: str | None = None
     role: str  # one of owner | editor | viewer
-    owner_sub: Optional[str] = None
+    owner_sub: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +134,11 @@ class WorkspaceWorkflowResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-@router.post("/workflows/{workflow_id}/share", response_model=AclResponse, dependencies=[Depends(require_scopes("workspace:write"))])
+@router.post(
+    "/workflows/{workflow_id}/share",
+    response_model=AclResponse,
+    dependencies=[Depends(require_scopes("workspace:write"))],
+)
 async def share_workflow(
     workflow_id: str,
     body: ShareRequest,
@@ -156,16 +160,12 @@ async def share_workflow(
 
     # Owner cannot add itself — its access is implicit.
     if sub == owner_sub:
-        raise HTTPException(
-            status_code=400, detail="Cannot share a workflow with its owner"
-        )
+        raise HTTPException(status_code=400, detail="Cannot share a workflow with its owner")
 
     try:
-        new_acl = add_member(
-            _workflow_acl(workflow), sub, body.role, owner_sub=owner_sub
-        )
+        new_acl = add_member(_workflow_acl(workflow), sub, body.role, owner_sub=owner_sub)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     self_owner = owner_sub  # capture before persist for re-normalisation
     self_persisted = _persist_acl(workflow_id, workflow, new_acl)
@@ -182,7 +182,11 @@ async def share_workflow(
     )
 
 
-@router.delete("/workflows/{workflow_id}/share/{sub}", response_model=AclResponse, dependencies=[Depends(require_scopes("workspace:write"))])
+@router.delete(
+    "/workflows/{workflow_id}/share/{sub}",
+    response_model=AclResponse,
+    dependencies=[Depends(require_scopes("workspace:write"))],
+)
 async def unshare_workflow(
     workflow_id: str,
     sub: str,
@@ -200,9 +204,7 @@ async def unshare_workflow(
 
     if sub == owner_sub:
         # The owner can never be removed from its own workflow.
-        raise HTTPException(
-            status_code=400, detail="Cannot remove the workflow owner"
-        )
+        raise HTTPException(status_code=400, detail="Cannot remove the workflow owner")
 
     new_acl = remove_member(_workflow_acl(workflow), sub, owner_sub=owner_sub)
     persisted = _persist_acl(workflow_id, workflow, new_acl)
@@ -213,7 +215,11 @@ async def unshare_workflow(
     )
 
 
-@router.get("/workspaces", response_model=list[WorkspaceWorkflowResponse], dependencies=[Depends(require_scopes("workspace:read"))])
+@router.get(
+    "/workspaces",
+    response_model=list[WorkspaceWorkflowResponse],
+    dependencies=[Depends(require_scopes("workspace:read"))],
+)
 async def list_workspaces(
     caller_sub: str = Depends(get_caller_sub),
 ) -> list[WorkspaceWorkflowResponse]:

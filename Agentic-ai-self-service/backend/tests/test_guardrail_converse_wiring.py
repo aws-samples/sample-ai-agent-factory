@@ -107,9 +107,7 @@ def test_no_tool_converse_template_also_wires_guardrail():
     """The lightweight no-tools converse template has no toolConfig anchor; it
     must still wire guardrails via its inferenceConfig line (low-risk coverage
     gap), and the result must compile with single braces."""
-    code = _inject_guardrails(
-        _generate_default_agent("You are an agent.", "model-id", "us-east-1")
-    )
+    code = _inject_guardrails(_generate_default_agent("You are an agent.", "model-id", "us-east-1"))
     assert "{{" not in code
     assert _VALID_SPLAT in code
     assert code.count("guardrailConfig") == 1

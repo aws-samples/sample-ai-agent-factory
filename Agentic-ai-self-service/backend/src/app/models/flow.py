@@ -4,13 +4,12 @@ Requirements: 1.1, 1.2, 1.3, 6.4, 7.1
 """
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from .enums import DeploymentStatus
-from .workflow import WorkflowDefinition, to_camel
-
+from .workflow import to_camel
 
 # ============================================================================
 # Flow Models
@@ -38,7 +37,7 @@ class Flow(BaseModel):
     updated_at: datetime
     # Cognito sub of the user who created this flow. None for pre-tenancy
     # records. See services/auth.py + tasks/lessons.md Bug 37.
-    owner_sub: Optional[str] = None
+    owner_sub: str | None = None
 
 
 class FlowCreateRequest(BaseModel):
@@ -60,8 +59,8 @@ class FlowUpdateRequest(BaseModel):
         alias_generator=to_camel,
     )
 
-    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
-    workflow: Optional[dict[str, Any]] = None
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    workflow: dict[str, Any] | None = None
 
 
 class FlowSummary(BaseModel):

@@ -8,14 +8,10 @@ Requirements: 3.3
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import logging
 import os
-from typing import Optional
 
-import boto3
-
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import (
     DeploymentStatusEnum,
     DeploymentStepName,
@@ -57,7 +53,7 @@ def _needs_strands_bundle(agent_code: str) -> bool:
     return "from strands " in agent_code or "import strands" in agent_code
 
 
-def _download_bundle(s3_client, bucket: str, bundle_key: str) -> Optional[bytes]:
+def _download_bundle(s3_client, bucket: str, bundle_key: str) -> bytes | None:
     """Download pre-built dependency bundle from S3."""
     try:
         logger.info("Downloading dependency bundle s3://%s/%s", bucket, bundle_key)
@@ -106,6 +102,7 @@ def handler(event: dict, context) -> dict:
         #   - observability_config supplied directly
         #   - legacy enable_otel flag set
         from app.services.observability import get_platform_observability_defaults
+
         obs_cfg = event.get("observability_config") or {}
         observability_enabled = bool(
             get_platform_observability_defaults()
@@ -165,10 +162,7 @@ def handler(event: dict, context) -> dict:
         # platform bucket (cross-account read, granted to the Deployment role).
         # Same-account is unchanged: everything uses the platform bucket.
         _target_account = event.get("target_account_id")
-        upload_bucket = (
-            f"agentcore-flows-artifacts-{_target_account}-{region}"
-            if _target_account else platform_bucket
-        )
+        upload_bucket = f"agentcore-flows-artifacts-{_target_account}-{region}" if _target_account else platform_bucket
 
         # Select bundle based on generated code: strands-mcp.zip (43MB) only
         # when code imports strands, otherwise base.zip (18MB) to stay within
@@ -180,6 +174,7 @@ def handler(event: dict, context) -> dict:
             # so it's read with the HOME/default session (never the target).
             upload_s3 = step_clients.client(event, "s3")
             import boto3 as _boto3
+
             deps_s3 = _boto3.client("s3", region_name=_get_env("APP_AWS_REGION", "us-east-1"))
 
             bundle_key = STRANDS_BUNDLE_KEY if _needs_strands_bundle(agent_code) else BASE_BUNDLE_KEY

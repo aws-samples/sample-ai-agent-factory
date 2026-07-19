@@ -35,12 +35,9 @@ The module is import-safe: no boto3 / no AWS clients are created at import.
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Optional
 
 # JSON-Schema keys the gateway accepts on a tool inputSchema (Bug 10).
-ALLOWED_SCHEMA_KEYS: frozenset[str] = frozenset(
-    {"type", "properties", "required", "items", "description"}
-)
+ALLOWED_SCHEMA_KEYS: frozenset[str] = frozenset({"type", "properties", "required", "items", "description"})
 
 
 # ---------------------------------------------------------------------------
@@ -553,7 +550,7 @@ CONNECTORS: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 
 
-def get_connector(connector_id: str) -> Optional[dict]:
+def get_connector(connector_id: str) -> dict | None:
     """Return a deep copy of one connector entry, or ``None`` if unknown.
 
     A copy is returned so callers can never mutate the module-level catalog.

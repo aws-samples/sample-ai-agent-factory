@@ -22,11 +22,11 @@ def _build_strands_config() -> dict:
     return {
         "name": "integ-lifecycle-test",
         "entrypoint": "agent.py",
-        "framework": "strands-agents",
+        "framework": "strands_agents",
         "model": {"modelId": "us.anthropic.claude-sonnet-5"},
         "systemPrompt": "You are a helpful assistant used for integration testing.",
         "deploymentType": "agentcore",
-        "pythonRuntime": "python3.13",
+        "pythonRuntime": "PYTHON_3_13",
         "protocol": "HTTP",
         "idleTimeout": 900,
         "maxLifetime": 28800,

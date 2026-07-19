@@ -15,27 +15,26 @@ sys.path.insert(0, "src")
 from datetime import datetime, timezone
 
 import pytest
-from hypothesis import given, settings, strategies as st
-
 from app.models import (
     AgentFramework,
     DeploymentConfig,
     ModelConfiguration,
     RuntimeConfiguration,
     Viewport,
-    WorkflowMetadata,
     WorkflowDefinition,
+    WorkflowMetadata,
 )
 from app.models.enums import StrandsModelProvider
 from app.services.deployment import (
-    WorkflowExecutor,
     VALID_AWS_REGIONS,
     DeploymentPhase,
     DeploymentState,
+    WorkflowExecutor,
     generate_agent_code,
     generate_requirements,
 )
-
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 # ============================================================================
 # Hypothesis Strategies

@@ -4,13 +4,10 @@ Requirements: 3.5
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import logging
 import os
 
-import boto3
-
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
@@ -72,13 +69,9 @@ def handler(event: dict, context) -> dict:
         # endpoint here so a deploy never reports success while the agent is
         # still uninvokable (the old code silently fell back to the bare runtime
         # ARN, which surfaced to users as "Runtime not found." on first invoke).
-        ep_result = wait_for_default_endpoint_ready(
-            agentcore_ctrl, runtime_id, timeout=180
-        )
+        ep_result = wait_for_default_endpoint_ready(agentcore_ctrl, runtime_id, timeout=180)
         if not ep_result.get("success"):
-            raise RuntimeError(
-                f"Runtime launch failed: {ep_result.get('error', 'DEFAULT endpoint not READY')}"
-            )
+            raise RuntimeError(f"Runtime launch failed: {ep_result.get('error', 'DEFAULT endpoint not READY')}")
         endpoint_url = ep_result.get("endpoint_arn") or result.get("arn", "")
 
         # Phase 1 Gap 1D — every successful runtime gets a CloudWatch

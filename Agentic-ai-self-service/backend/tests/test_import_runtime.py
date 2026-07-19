@@ -65,8 +65,7 @@ def test_import_rejects_bad_arn(client):
     # Long enough to pass min_length, but not a valid AgentCore runtime ARN → 400
     # from the endpoint's regex (a too-short string is a 422 model-validation
     # reject, also correct — both refuse the import).
-    r = client.post("/api/runtime/import",
-                    json={"runtimeArn": "arn:aws:s3:::some-bucket-that-is-not-a-runtime-arn"})
+    r = client.post("/api/runtime/import", json={"runtimeArn": "arn:aws:s3:::some-bucket-that-is-not-a-runtime-arn"})
     assert r.status_code == 400
     assert client.post("/api/runtime/import", json={"runtimeArn": "short"}).status_code == 422
 

@@ -43,9 +43,9 @@ def test_endpoint_polls_until_ready():
     """CREATING first, then READY — must keep polling, not bail."""
     ctrl = MagicMock()
     ctrl.list_agent_runtime_endpoints.side_effect = [
-        {"runtimeEndpoints": []},          # not listed yet
-        _ep("CREATING"),                    # provisioning
-        _ep("READY"),                       # ready
+        {"runtimeEndpoints": []},  # not listed yet
+        _ep("CREATING"),  # provisioning
+        _ep("READY"),  # ready
     ]
     with patch("app.services.runtime_deployer.time.sleep"):
         result = wait_for_default_endpoint_ready(ctrl, "r-1", timeout=60)

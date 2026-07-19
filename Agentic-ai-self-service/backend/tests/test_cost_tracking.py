@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import Iterator
+from collections.abc import Iterator
 from unittest.mock import MagicMock, patch
 
 import boto3
@@ -32,8 +32,6 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, "src")
 
 moto = pytest.importorskip("moto")
-from moto import mock_aws  # noqa: E402  — import after the importorskip
-
 from app.routers.cost import router as cost_router  # noqa: E402
 from app.services.agent_versions_store import AgentVersion, RuntimeSlots  # noqa: E402
 from app.services.auth import _LOCAL_DEV_SUB, get_caller_sub  # noqa: E402
@@ -46,7 +44,7 @@ from app.services.cost_tracking import (  # noqa: E402
     normalize_model_id,
     summarize,
 )
-
+from moto import mock_aws  # noqa: E402  — import after the importorskip
 
 # ---------------------------------------------------------------------------
 # compute_cost / price table
@@ -350,9 +348,10 @@ def test_cost_endpoint_404_when_no_production_slot(client: TestClient):
 
 def test_cost_endpoint_cross_tenant_404(client: TestClient):
     """Slot owned by someone else → 404 (existence non-disclosure)."""
-    with patch("app.routers.cost.get_slots_store") as slots_store_mock, patch(
-        "app.routers.cost.get_versions_store"
-    ) as versions_store_mock:
+    with (
+        patch("app.routers.cost.get_slots_store") as slots_store_mock,
+        patch("app.routers.cost.get_versions_store") as versions_store_mock,
+    ):
         slots_store_mock.return_value.get.return_value = RuntimeSlots(
             runtime_name="myagent",
             owner_sub="someone-else",
@@ -375,9 +374,11 @@ def test_cost_endpoint_cross_tenant_404(client: TestClient):
 
 def test_cost_endpoint_empty_summary_when_log_group_missing(client: TestClient):
     """ResourceNotFoundException (log group not created yet) → empty, not 500."""
-    with patch("app.routers.cost.get_slots_store") as slots_store_mock, patch(
-        "app.routers.cost.get_versions_store"
-    ) as versions_store_mock, patch("boto3.client") as boto_mock:
+    with (
+        patch("app.routers.cost.get_slots_store") as slots_store_mock,
+        patch("app.routers.cost.get_versions_store") as versions_store_mock,
+        patch("boto3.client") as boto_mock,
+    ):
         slots_store_mock.return_value.get.return_value = RuntimeSlots(
             runtime_name="myagent",
             owner_sub=_LOCAL_DEV_SUB,
@@ -412,9 +413,11 @@ def test_cost_endpoint_empty_summary_when_log_group_missing(client: TestClient):
 def test_cost_endpoint_happy_path_cost_matches_price_table(client: TestClient):
     """Mocked logs client returns gen_ai.usage rows; response cost matches the
     price table applied to the mocked token sums."""
-    with patch("app.routers.cost.get_slots_store") as slots_store_mock, patch(
-        "app.routers.cost.get_versions_store"
-    ) as versions_store_mock, patch("boto3.client") as boto_mock:
+    with (
+        patch("app.routers.cost.get_slots_store") as slots_store_mock,
+        patch("app.routers.cost.get_versions_store") as versions_store_mock,
+        patch("boto3.client") as boto_mock,
+    ):
         slots_store_mock.return_value.get.return_value = RuntimeSlots(
             runtime_name="myagent",
             owner_sub=_LOCAL_DEV_SUB,

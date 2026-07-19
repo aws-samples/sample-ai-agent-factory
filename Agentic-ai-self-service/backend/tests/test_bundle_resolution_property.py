@@ -13,12 +13,11 @@ import sys
 
 sys.path.insert(0, "src")
 
-from hypothesis import given, settings, strategies as st
-
 from app.models.deployment_models import RuntimeConfig
 from app.services.code_generator import generate_requirements
 from app.step_handlers.codegen_step import _needs_strands_bundle
-
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 # ---------------------------------------------------------------------------
 # Strategies

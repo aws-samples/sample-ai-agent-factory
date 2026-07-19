@@ -13,22 +13,22 @@ Requirements: 1.1, 1.2, 1.3, 1.4, 2.1, 3.2, 3.3, 4.2, 4.3, 4.5, 6.2, 6.4, 7.4
 import logging
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, status
 from botocore.exceptions import ClientError
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import ValidationError
-
-logger = logging.getLogger(__name__)
 
 from app.models import (
     Flow,
     FlowCreateRequest,
-    FlowUpdateRequest,
-    FlowSummary,
     FlowListResponse,
     FlowResponse,
+    FlowSummary,
+    FlowUpdateRequest,
 )
 from app.services.auth import assert_owner, get_caller_sub
 from app.services.flow_storage import get_flow_storage
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/flows", tags=["flows"])
@@ -74,18 +74,18 @@ async def create_flow(
             flow=flow,
             message="Flow created successfully",
         )
-    except ClientError:
+    except ClientError as exc:
         logger.exception("DynamoDB error in create_flow")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Storage service unavailable",
-        )
-    except ValidationError:
+        ) from exc
+    except ValidationError as exc:
         logger.exception("Validation error in create_flow")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process flow data",
-        )
+        ) from exc
 
 
 @router.get("", response_model=FlowListResponse)
@@ -110,10 +110,7 @@ async def list_flows(
         if callable(list_by_owner):
             flows = list_by_owner(caller_sub)
         else:
-            flows = [
-                c for c in storage.list_all()
-                if getattr(c, "owner_sub", None) == caller_sub
-            ]
+            flows = [c for c in storage.list_all() if getattr(c, "owner_sub", None) == caller_sub]
         summaries = [
             FlowSummary(
                 id=c.id,
@@ -125,16 +122,16 @@ async def list_flows(
             for c in flows
         ]
         return FlowListResponse(flows=summaries)
-    except ClientError as e:
+    except ClientError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Storage service unavailable",
-        )
-    except ValidationError as e:
+        ) from exc
+    except ValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process flow data",
-        )
+        ) from exc
 
 
 @router.get("/{flow_id}", response_model=Flow)
@@ -158,16 +155,16 @@ async def get_flow(
         return flow
     except HTTPException:
         raise
-    except ClientError as e:
+    except ClientError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Storage service unavailable",
-        )
-    except ValidationError as e:
+        ) from exc
+    except ValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process flow data",
-        )
+        ) from exc
 
 
 @router.put("/{flow_id}", response_model=FlowResponse)
@@ -205,16 +202,16 @@ async def update_flow(
         )
     except HTTPException:
         raise
-    except ClientError as e:
+    except ClientError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Storage service unavailable",
-        )
-    except ValidationError as e:
+        ) from exc
+    except ValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process flow data",
-        )
+        ) from exc
 
 
 @router.delete("/{flow_id}")
@@ -244,13 +241,13 @@ async def delete_flow(
         return {"message": f"Flow '{flow_id}' deleted successfully"}
     except HTTPException:
         raise
-    except ClientError as e:
+    except ClientError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Storage service unavailable",
-        )
-    except ValidationError as e:
+        ) from exc
+    except ValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process flow data",
-        )
+        ) from exc

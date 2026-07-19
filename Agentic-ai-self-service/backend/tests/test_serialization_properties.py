@@ -16,29 +16,28 @@ sys.path.insert(0, "src")
 
 from datetime import datetime, timezone
 
-from hypothesis import given, settings, strategies as st
-
-from app.models.workflow import (
-    WorkflowDefinition,
-    WorkflowMetadata,
-    Viewport,
-    Position,
-    ComponentNode,
-)
 from app.models.components import (
-    RuntimeConfiguration,
     ModelConfiguration,
+    RuntimeConfiguration,
 )
 from app.models.enums import (
     AgentCoreComponentType,
     AgentFramework,
-    ModelProvider,
-    DeploymentStatus,
-    PythonRuntime,
-    DeploymentType,
     AgentServerProtocol,
+    DeploymentStatus,
+    DeploymentType,
+    ModelProvider,
+    PythonRuntime,
 )
-
+from app.models.workflow import (
+    ComponentNode,
+    Position,
+    Viewport,
+    WorkflowDefinition,
+    WorkflowMetadata,
+)
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 # ============================================================================
 # Hypothesis Strategies (adapted from test_workflow_crud_properties.py)
@@ -250,7 +249,7 @@ class TestProperty8WorkflowDefinitionJSONRoundTrip:
 
         # Nodes
         assert len(restored.nodes) == len(workflow.nodes)
-        for orig_node, restored_node in zip(workflow.nodes, restored.nodes):
+        for orig_node, restored_node in zip(workflow.nodes, restored.nodes, strict=True):
             assert restored_node.id == orig_node.id
             assert restored_node.type == orig_node.type
             assert restored_node.position.x == orig_node.position.x
@@ -278,37 +277,36 @@ class TestProperty8WorkflowDefinitionJSONRoundTrip:
 
 
 from app.models.components import (
-    ComponentConfiguration,
-    GatewayConfiguration,
-    MemoryConfiguration,
-    CodeInterpreterConfiguration,
-    BrowserConfiguration,
-    ObservabilityConfiguration,
-    IdentityConfiguration,
-    EvaluationConfiguration,
-    PolicyConfiguration,
-    AdvancedMemoryConfiguration,
     A2AConfiguration,
-    LambdaTargetConfig,
-    SmithyTargetConfig,
-    MCPServerTargetConfig,
-    OpenAPITargetConfig,
-    APIKeyConfiguration,
-    EvaluatorConfig,
-    PolicyRule,
-    PolicyCondition,
+    AdvancedMemoryConfiguration,
     AgentEndpoint,
+    APIKeyConfiguration,
+    BrowserConfiguration,
+    CodeInterpreterConfiguration,
+    ComponentConfiguration,
+    EvaluationConfiguration,
+    EvaluatorConfig,
+    GatewayConfiguration,
+    IdentityConfiguration,
+    LambdaTargetConfig,
+    MemoryConfiguration,
+    ObservabilityConfiguration,
+    OpenAPITargetConfig,
+    PolicyCondition,
+    PolicyConfiguration,
+    PolicyRule,
+    SmithyTargetConfig,
 )
 from app.models.enums import (
-    GatewayTargetType,
+    A2ACommunicationPattern,
     EvaluatorType,
     ExtractionStrategy,
+    GatewayTargetType,
     PolicyEffect,
-    A2ACommunicationPattern,
 )
 from app.services.deployment_state_store import (
-    _convert_floats_to_decimals,
     _convert_decimals_to_floats,
+    _convert_floats_to_decimals,
 )
 
 # --- Hypothesis strategies for each ComponentConfiguration variant ---

@@ -25,14 +25,14 @@ import sys
 sys.path.insert(0, "src")
 
 import pytest
-from hypothesis import given, settings, strategies as st
-
 from app.services.per_agent_identity import (
     BEDROCK_AGENTCORE_TRUST_POLICY,
     build_per_agent_role_name,
     build_scoped_runtime_policy,
     build_trust_policy,
 )
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 # ============================================================================
 # Constants / strategies
@@ -167,9 +167,7 @@ def test_arn_scoped_tools_carry_supplied_arn():
 
 
 def test_gateway_only_excludes_memory_and_kb():
-    policy = build_scoped_runtime_policy(
-        ["gateway"], gateway_arn=GW_ARN, memory_arn=MEM_ARN, kb_arn=KB_ARN
-    )
+    policy = build_scoped_runtime_policy(["gateway"], gateway_arn=GW_ARN, memory_arn=MEM_ARN, kb_arn=KB_ARN)
     sids = _sids(policy)
     assert "GatewayAccess" in sids
     assert "MemoryAccess" not in sids
@@ -185,9 +183,7 @@ def test_gateway_only_excludes_memory_and_kb():
 
 
 def test_memory_only_excludes_gateway_and_kb():
-    policy = build_scoped_runtime_policy(
-        ["memory"], gateway_arn=GW_ARN, memory_arn=MEM_ARN, kb_arn=KB_ARN
-    )
+    policy = build_scoped_runtime_policy(["memory"], gateway_arn=GW_ARN, memory_arn=MEM_ARN, kb_arn=KB_ARN)
     sids = _sids(policy)
     assert "MemoryAccess" in sids
     assert "GatewayAccess" not in sids
@@ -202,9 +198,7 @@ def test_memory_only_excludes_gateway_and_kb():
 
 
 def test_kb_only_excludes_gateway_and_memory():
-    policy = build_scoped_runtime_policy(
-        ["knowledge_base"], gateway_arn=GW_ARN, memory_arn=MEM_ARN, kb_arn=KB_ARN
-    )
+    policy = build_scoped_runtime_policy(["knowledge_base"], gateway_arn=GW_ARN, memory_arn=MEM_ARN, kb_arn=KB_ARN)
     sids = _sids(policy)
     assert "KnowledgeBaseAccess" in sids
     assert "GatewayAccess" not in sids
@@ -266,9 +260,7 @@ def test_no_unexpected_wildcard_resources_when_all_arns_supplied(tools):
     }
     for stmt in policy["Statement"]:
         if stmt["Resource"] == "*":
-            assert stmt["Sid"] in allowed_wildcard_sids, (
-                f"Unexpected wildcard Resource on {stmt['Sid']}"
-            )
+            assert stmt["Sid"] in allowed_wildcard_sids, f"Unexpected wildcard Resource on {stmt['Sid']}"
         # S3 must always be bucket-scoped here (bucket supplied).
         if stmt["Sid"] == "S3CodeAccess":
             assert stmt["Resource"] != "*"
@@ -381,12 +373,11 @@ def test_per_tool_map_in_sync_with_shared_role():
     # Tools the shared role branches on, e.g. `if tool == "gateway":`.
     shared_tools = set(re.findall(r'tool == ["\']([a-z_]+)["\']', src))
     # Tuple-membership branches, e.g. `elif tool in ("evaluation", "observability"):`.
-    for group in re.findall(r'tool in \(([^)]*)\)', src):
+    for group in re.findall(r"tool in \(([^)]*)\)", src):
         shared_tools.update(re.findall(r'["\']([a-z_]+)["\']', group))
     missing = shared_tools - set(_TOOL_BUILDERS.keys())
     assert not missing, (
-        f"Shared role grants tools {missing} that per_agent builder lacks — "
-        "ACL drift. Add them to _TOOL_BUILDERS."
+        f"Shared role grants tools {missing} that per_agent builder lacks — ACL drift. Add them to _TOOL_BUILDERS."
     )
 
 

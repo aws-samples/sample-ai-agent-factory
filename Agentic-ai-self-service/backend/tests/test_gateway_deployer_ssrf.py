@@ -17,7 +17,6 @@ import socket
 from unittest.mock import patch
 
 import pytest
-
 from app.services.gateway_deployer import (
     _DiscoveryUrlBlocked,
     _DiscoveryUrlInvalid,
@@ -42,15 +41,15 @@ def _addrinfo_for(ip: str, family: int = socket.AF_INET):
 @pytest.mark.parametrize(
     "blocked_ip",
     [
-        "169.254.169.254",   # AWS IMDS
-        "169.254.170.2",     # Lambda credentials endpoint
-        "127.0.0.1",         # loopback
-        "10.0.0.1",          # RFC1918
-        "172.16.5.5",        # RFC1918
-        "192.168.1.1",       # RFC1918
-        "100.64.0.1",        # CGNAT
-        "224.0.0.1",         # multicast
-        "0.0.0.0",           # this network
+        "169.254.169.254",  # AWS IMDS
+        "169.254.170.2",  # Lambda credentials endpoint
+        "127.0.0.1",  # loopback
+        "10.0.0.1",  # RFC1918
+        "172.16.5.5",  # RFC1918
+        "192.168.1.1",  # RFC1918
+        "100.64.0.1",  # CGNAT
+        "224.0.0.1",  # multicast
+        "0.0.0.0",  # this network
     ],
 )
 def test_dns_rebind_to_blocked_ipv4_is_rejected(blocked_ip: str) -> None:
@@ -67,9 +66,9 @@ def test_dns_rebind_to_blocked_ipv4_is_rejected(blocked_ip: str) -> None:
 @pytest.mark.parametrize(
     "blocked_ipv6",
     [
-        "::1",         # loopback
-        "fe80::1",     # link-local
-        "fc00::1",     # ULA
+        "::1",  # loopback
+        "fe80::1",  # link-local
+        "fc00::1",  # ULA
     ],
 )
 def test_dns_rebind_to_blocked_ipv6_is_rejected(blocked_ipv6: str) -> None:
@@ -102,10 +101,7 @@ def test_literal_imds_ip_url_is_rejected() -> None:
 
 def test_multi_record_dns_with_one_blocked_ip_is_rejected() -> None:
     """If ANY resolved A record points at a private IP, reject — DNS rebinding can pick whichever."""
-    multi = (
-        _addrinfo_for("8.8.8.8")
-        + _addrinfo_for("169.254.169.254")
-    )
+    multi = _addrinfo_for("8.8.8.8") + _addrinfo_for("169.254.169.254")
     with patch("socket.getaddrinfo", return_value=multi):
         with pytest.raises(_DiscoveryUrlBlocked):
             _validate_discovery_url("https://mixed.attacker.example/.well-known/openid-configuration")
@@ -166,9 +162,7 @@ def test_public_okta_endpoint_passes() -> None:
         "socket.getaddrinfo",
         return_value=_addrinfo_for("99.84.10.20"),
     ):
-        out = _validate_discovery_url(
-            "https://acme.okta.com/.well-known/openid-configuration"
-        )
+        out = _validate_discovery_url("https://acme.okta.com/.well-known/openid-configuration")
         assert out == "https://acme.okta.com/.well-known/openid-configuration"
 
 
@@ -186,9 +180,7 @@ def test_allowlist_matching_host_passes(monkeypatch: pytest.MonkeyPatch) -> None
         "socket.getaddrinfo",
         return_value=_addrinfo_for("52.84.10.10"),
     ):
-        out = _validate_discovery_url(
-            "https://acme.okta.com/.well-known/openid-configuration"
-        )
+        out = _validate_discovery_url("https://acme.okta.com/.well-known/openid-configuration")
         assert out == "https://acme.okta.com/.well-known/openid-configuration"
 
 
@@ -203,9 +195,7 @@ def test_allowlist_non_matching_host_is_rejected(monkeypatch: pytest.MonkeyPatch
         return_value=_addrinfo_for("99.99.99.99"),
     ):
         with pytest.raises(_DiscoveryUrlBlocked) as exc:
-            _validate_discovery_url(
-                "https://login.evil-idp.example/.well-known/openid-configuration"
-            )
+            _validate_discovery_url("https://login.evil-idp.example/.well-known/openid-configuration")
         assert "allowlist" in str(exc.value).lower() or "OIDC_DISCOVERY_HOST_ALLOWLIST" in str(exc.value)
 
 
@@ -216,9 +206,7 @@ def test_allowlist_unset_does_not_filter_hosts(monkeypatch: pytest.MonkeyPatch) 
         return_value=_addrinfo_for("99.99.99.99"),
     ):
         # Should not raise on host alone (only IP-denylist applies).
-        out = _validate_discovery_url(
-            "https://login.evil-idp.example/.well-known/openid-configuration"
-        )
+        out = _validate_discovery_url("https://login.evil-idp.example/.well-known/openid-configuration")
         assert out
 
 

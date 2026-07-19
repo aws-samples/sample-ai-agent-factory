@@ -25,7 +25,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Literal, Optional
+from typing import Literal
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -66,7 +66,7 @@ class Budget:
         }
 
     @classmethod
-    def from_item(cls, item: dict) -> "Budget":
+    def from_item(cls, item: dict) -> Budget:
         return cls(
             org_id=item["org_id"],
             scope=item.get("scope", "owner"),
@@ -94,8 +94,7 @@ def evaluate_budget(limit_usd: float, warn_pct: int, spend_usd: float) -> dict:
         status = "warn"
     else:
         status = "ok"
-    return {"spend": round(spend, 6), "limit": round(limit, 6),
-            "used_pct": used_pct, "status": status}
+    return {"spend": round(spend, 6), "limit": round(limit, 6), "used_pct": used_pct, "status": status}
 
 
 def month_window(now_epoch: int) -> tuple[int, int]:
@@ -127,25 +126,18 @@ class BudgetStore:
         self._table.put_item(Item=budget.to_item())
         return budget
 
-    def get(self, org_id: str, scope: BudgetScope, key: str) -> Optional[Budget]:
-        resp = self._table.get_item(
-            Key={"org_id": org_id, "sk": f"{_BUDGET_PREFIX}{scope}#{key}"}
-        )
+    def get(self, org_id: str, scope: BudgetScope, key: str) -> Budget | None:
+        resp = self._table.get_item(Key={"org_id": org_id, "sk": f"{_BUDGET_PREFIX}{scope}#{key}"})
         item = resp.get("Item")
         return Budget.from_item(item) if item else None
 
     def delete(self, org_id: str, scope: BudgetScope, key: str) -> bool:
-        self._table.delete_item(
-            Key={"org_id": org_id, "sk": f"{_BUDGET_PREFIX}{scope}#{key}"}
-        )
+        self._table.delete_item(Key={"org_id": org_id, "sk": f"{_BUDGET_PREFIX}{scope}#{key}"})
         return True
 
     def list_all(self, org_id: str) -> list[Budget]:
         items: list[dict] = []
-        kwargs: dict = {
-            "KeyConditionExpression": Key("org_id").eq(org_id)
-            & Key("sk").begins_with(_BUDGET_PREFIX)
-        }
+        kwargs: dict = {"KeyConditionExpression": Key("org_id").eq(org_id) & Key("sk").begins_with(_BUDGET_PREFIX)}
         while True:
             resp = self._table.query(**kwargs)
             items.extend(resp.get("Items", []))
@@ -155,7 +147,7 @@ class BudgetStore:
         return [Budget.from_item(i) for i in items]
 
 
-_store: Optional[BudgetStore] = None
+_store: BudgetStore | None = None
 
 
 def get_budget_store() -> BudgetStore:

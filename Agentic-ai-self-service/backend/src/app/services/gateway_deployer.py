@@ -18,9 +18,11 @@ import socket
 import time
 import urllib.parse
 import zipfile
-from typing import Optional
 
 import boto3
+
+from app.services import codegen_templates
+from app.services.aws_errors import is_error
 
 logger = logging.getLogger(__name__)
 
@@ -62,34 +64,34 @@ _DISALLOWED_NETWORKS: tuple[ipaddress._BaseNetwork, ...] = tuple(
     ipaddress.ip_network(cidr)
     for cidr in (
         # IPv4
-        "0.0.0.0/8",         # "this network"
-        "10.0.0.0/8",        # RFC1918
-        "100.64.0.0/10",     # CGNAT
-        "127.0.0.0/8",       # loopback
-        "169.254.0.0/16",    # link-local (IMDS, Lambda creds)
-        "172.16.0.0/12",     # RFC1918
-        "192.0.0.0/24",      # IETF
-        "192.0.2.0/24",      # TEST-NET-1
-        "192.168.0.0/16",    # RFC1918
-        "198.18.0.0/15",     # benchmark
-        "198.51.100.0/24",   # TEST-NET-2
-        "203.0.113.0/24",    # TEST-NET-3
-        "224.0.0.0/4",       # multicast
-        "240.0.0.0/4",       # reserved (incl. 255.255.255.255)
+        "0.0.0.0/8",  # "this network"
+        "10.0.0.0/8",  # RFC1918
+        "100.64.0.0/10",  # CGNAT
+        "127.0.0.0/8",  # loopback
+        "169.254.0.0/16",  # link-local (IMDS, Lambda creds)
+        "172.16.0.0/12",  # RFC1918
+        "192.0.0.0/24",  # IETF
+        "192.0.2.0/24",  # TEST-NET-1
+        "192.168.0.0/16",  # RFC1918
+        "198.18.0.0/15",  # benchmark
+        "198.51.100.0/24",  # TEST-NET-2
+        "203.0.113.0/24",  # TEST-NET-3
+        "224.0.0.0/4",  # multicast
+        "240.0.0.0/4",  # reserved (incl. 255.255.255.255)
         # IPv6
-        "::1/128",           # loopback
-        "::/128",            # unspecified
-        "::ffff:0:0/96",     # IPv4-mapped (so an IPv4 RFC1918 mapped into v6 is also blocked
-                             # via the v4 check, but we keep this for belt-and-braces)
-        "fc00::/7",          # ULA (private)
-        "fe80::/10",         # link-local
-        "ff00::/8",          # multicast
-        "2001:db8::/32",     # documentation
+        "::1/128",  # loopback
+        "::/128",  # unspecified
+        "::ffff:0:0/96",  # IPv4-mapped (so an IPv4 RFC1918 mapped into v6 is also blocked
+        # via the v4 check, but we keep this for belt-and-braces)
+        "fc00::/7",  # ULA (private)
+        "fe80::/10",  # link-local
+        "ff00::/8",  # multicast
+        "2001:db8::/32",  # documentation
     )
 )
 
 
-def _load_oidc_host_allowlist() -> Optional[tuple[str, ...]]:
+def _load_oidc_host_allowlist() -> tuple[str, ...] | None:
     """Return tuple of allowed host glob patterns from env, or None if no allowlist set.
 
     Env var: OIDC_DISCOVERY_HOST_ALLOWLIST=*.okta.com,*.auth0.com,*.amazoncognito.com
@@ -125,18 +127,14 @@ def _validate_discovery_url(url: str) -> str:
 
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme != "https":
-        raise _DiscoveryUrlInvalid(
-            f"OIDC discovery URL must use https scheme (got '{parsed.scheme}')"
-        )
+        raise _DiscoveryUrlInvalid(f"OIDC discovery URL must use https scheme (got '{parsed.scheme}')")
     host = parsed.hostname
     if not host:
         raise _DiscoveryUrlInvalid("OIDC discovery URL has no host component")
 
     allowlist = _load_oidc_host_allowlist()
     if allowlist is not None and not _host_matches_allowlist(host, allowlist):
-        raise _DiscoveryUrlBlocked(
-            f"OIDC discovery host '{host}' is not on OIDC_DISCOVERY_HOST_ALLOWLIST"
-        )
+        raise _DiscoveryUrlBlocked(f"OIDC discovery host '{host}' is not on OIDC_DISCOVERY_HOST_ALLOWLIST")
 
     # Resolve every A/AAAA record under a strict timeout so an attacker cannot stall
     # us on DNS to keep a half-validated socket alive.
@@ -144,20 +142,14 @@ def _validate_discovery_url(url: str) -> str:
     socket.setdefaulttimeout(5)
     try:
         try:
-            infos = socket.getaddrinfo(
-                host, 443, socket.AF_UNSPEC, socket.SOCK_STREAM
-            )
-        except (socket.gaierror, socket.timeout, OSError) as e:
-            raise _DiscoveryUrlBlocked(
-                f"OIDC discovery URL host '{host}' could not be resolved: {e}"
-            ) from e
+            infos = socket.getaddrinfo(host, 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        except (TimeoutError, socket.gaierror, OSError) as e:
+            raise _DiscoveryUrlBlocked(f"OIDC discovery URL host '{host}' could not be resolved: {e}") from e
     finally:
         socket.setdefaulttimeout(prev_timeout)
 
     if not infos:
-        raise _DiscoveryUrlBlocked(
-            f"OIDC discovery URL host '{host}' returned no DNS records"
-        )
+        raise _DiscoveryUrlBlocked(f"OIDC discovery URL host '{host}' returned no DNS records")
 
     for info in infos:
         sockaddr = info[4]
@@ -168,25 +160,18 @@ def _validate_discovery_url(url: str) -> str:
         try:
             ip_obj = ipaddress.ip_address(ip_str)
         except ValueError as e:
-            raise _DiscoveryUrlBlocked(
-                f"OIDC discovery URL resolved to unparseable IP '{ip_str}': {e}"
-            ) from e
+            raise _DiscoveryUrlBlocked(f"OIDC discovery URL resolved to unparseable IP '{ip_str}': {e}") from e
         for net in _DISALLOWED_NETWORKS:
             # ip_address(v4) in ip_network(v6) raises TypeError, so guard on family.
             if ip_obj.version != net.version:
                 continue
             if ip_obj in net:
-                raise _DiscoveryUrlBlocked(
-                    "OIDC discovery URL resolves to disallowed IP "
-                    f"({ip_str} in {net})"
-                )
+                raise _DiscoveryUrlBlocked(f"OIDC discovery URL resolves to disallowed IP ({ip_str} in {net})")
 
     return url
 
 
-def _validate_outbound_url(
-    url: str, allowlist_hosts: Optional[tuple[str, ...]] = None
-) -> str:
+def _validate_outbound_url(url: str, allowlist_hosts: tuple[str, ...] | None = None) -> str:
     """Validate any user-supplied outbound URL (e.g. a connector OpenAPI spec URL).
 
     Generalizes :func:`_validate_discovery_url` (same https-only + DNS-resolved
@@ -209,9 +194,7 @@ def _validate_outbound_url(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_gateway_tool_actions(
-    agentcore_ctrl, gateway_id: str, timeout: int = 180
-) -> tuple[list, int]:
+def _resolve_gateway_tool_actions(agentcore_ctrl, gateway_id: str, timeout: int = 180) -> tuple[list, int]:
     """Return (qualified Cedar action names, expected_tool_count) for a gateway,
     waiting up to *timeout*s for EACH target to be truly SYNCED into the gateway's
     servable MCP tool plane.
@@ -230,9 +213,7 @@ def _resolve_gateway_tool_actions(
 
     def _list_target_ids() -> list:
         try:
-            resp = agentcore_ctrl.list_gateway_targets(
-                gatewayIdentifier=gateway_id, maxResults=50
-            )
+            resp = agentcore_ctrl.list_gateway_targets(gatewayIdentifier=gateway_id, maxResults=50)
             items = resp.get("items", resp.get("gatewayTargetSummaries", []))
             return [
                 (t.get("name", ""), t.get("targetId") or t.get("gatewayTargetId"))
@@ -254,9 +235,7 @@ def _resolve_gateway_tool_actions(
     pre_sync = {}
     for _tname, tid in _list_target_ids():
         try:
-            d = agentcore_ctrl.get_gateway_target(
-                gatewayIdentifier=gateway_id, targetId=tid
-            )
+            d = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway_id, targetId=tid)
             pre_sync[tid] = d.get("lastSynchronizedAt")
         except Exception:  # noqa: BLE001
             pre_sync[tid] = None
@@ -278,9 +257,7 @@ def _resolve_gateway_tool_actions(
             all_synced = False
         for tname, tid in ids:
             try:
-                detail = agentcore_ctrl.get_gateway_target(
-                    gatewayIdentifier=gateway_id, targetId=tid
-                )
+                detail = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway_id, targetId=tid)
             except Exception:  # noqa: BLE001
                 all_synced = False
                 continue
@@ -303,9 +280,7 @@ def _resolve_gateway_tool_actions(
                 target_synced = tstatus == "READY"
             else:
                 target_synced = (
-                    tstatus in ("READY", "ACTIVE")
-                    and synced_at is not None
-                    and synced_at != pre_sync.get(tid)
+                    tstatus in ("READY", "ACTIVE") and synced_at is not None and synced_at != pre_sync.get(tid)
                 )
             if not target_synced:
                 all_synced = False
@@ -317,15 +292,16 @@ def _resolve_gateway_tool_actions(
         # Done when every configured target is synced AND every configured tool
         # is present in the action list.
         if ids and all_synced and len(actions) == expected and expected > 0:
-            logger.warning(
-                "Gateway %s tool plane synced: %d/%d tools", gateway_id, len(actions), expected
-            )
+            logger.warning("Gateway %s tool plane synced: %d/%d tools", gateway_id, len(actions), expected)
             return actions, expected
         _t.sleep(5)
 
     logger.warning(
         "Gateway %s tool plane not fully synced within %ds; %d/%d tools synced",
-        gateway_id, timeout, len(actions), expected,
+        gateway_id,
+        timeout,
+        len(actions),
+        expected,
     )
     return actions, expected
 
@@ -341,6 +317,24 @@ def _get_targets_from_response(response: dict) -> list:
 def _get_gateways_from_response(response: dict) -> list:
     """Extract gateways list from list_gateways response."""
     return response.get("items", response.get("gateways", response.get("gatewaySummaries", [])))
+
+
+def _list_all_gateways(agentcore_ctrl) -> list:
+    """List EVERY gateway, following pagination.
+
+    The conflict-recovery path matches an existing gateway by name; a single
+    unpaginated ``list_gateways()`` silently misses gateways past the first
+    page, so a redeploy into a busy account fails to find its own gateway and
+    raises "exists but not found via list". Follow nextToken to completion.
+    """
+    gateways: list = []
+    next_token = None
+    while True:
+        resp = agentcore_ctrl.list_gateways(nextToken=next_token) if next_token else agentcore_ctrl.list_gateways()
+        gateways.extend(_get_gateways_from_response(resp))
+        next_token = resp.get("nextToken")
+        if not next_token:
+            return gateways
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +375,7 @@ def _create_secrets_client(region: str):
 # in our own Secrets Manager secret (owner-scoped name) and the provider is
 # created with apiKeySecretSource/clientSecretSource="EXTERNAL" referencing that
 # secret — so the raw value never lands in DynamoDB, canvas JSON, or logs.
+
 
 # Provider names are derived from the connector + deployment so teardown can find
 # them. AgentCore provider names must match ^[a-zA-Z0-9_-]+$ and are <=64 chars.
@@ -437,12 +432,17 @@ def _ensure_api_key_credential_provider(
         logger.info("Created API-key credential provider")
         return arn
     except Exception as e:  # noqa: BLE001
-        if "ConflictException" in str(e) or "already exists" in str(e):
+        # "already exists" fallback kept deliberately: the service reports an
+        # existing provider as a ValidationException whose message says
+        # "already exists" (verified live in cfn_provider), not only as a
+        # ConflictException — the code check alone would miss it.
+        if is_error(e, "ConflictException") or "already exists" in str(e):
             try:
                 got = agentcore_ctrl.get_api_key_credential_provider(name=provider_name)
                 return got.get("credentialProviderArn") or got.get("apiKeyCredentialProviderArn", "")
             except Exception:  # noqa: BLE001
-                pass
+                # SECURITY: constant only — provider_name is taint-flagged (see above).
+                logger.debug("API-key provider conflict lookup failed; re-raising original error")
         raise
 
 
@@ -466,9 +466,9 @@ def _ensure_oauth2_credential_provider(
     client_id: str,
     client_secret_arn: str,
     json_key: str = "clientSecret",
-    discovery_url: Optional[str] = None,
+    discovery_url: str | None = None,
     delegation_mode: str = "m2m",
-    obo_grant_type: Optional[str] = None,
+    obo_grant_type: str | None = None,
 ) -> str:
     """Create (or reuse) an OAuth2 credential provider for a connector.
 
@@ -532,12 +532,16 @@ def _ensure_oauth2_credential_provider(
         logger.info("Created OAuth2 credential provider")
         return resp["credentialProviderArn"]
     except Exception as e:  # noqa: BLE001
-        if "ConflictException" in str(e) or "already exists" in str(e):
+        # "already exists" fallback kept: existing providers can surface as a
+        # ValidationException with an "already exists" message, not only a
+        # ConflictException (see _ensure_api_key_credential_provider).
+        if is_error(e, "ConflictException") or "already exists" in str(e):
             try:
                 got = agentcore_ctrl.get_oauth2_credential_provider(name=provider_name)
                 return got.get("credentialProviderArn", "")
             except Exception:  # noqa: BLE001
-                pass
+                # SECURITY: constant only — provider_name is taint-flagged.
+                logger.debug("OAuth2 provider conflict lookup failed; re-raising original error")
         raise
 
 
@@ -545,66 +549,9 @@ def _ensure_oauth2_credential_provider(
 # Lambda code constants (embedded Lambda source for gateway targets)
 # ---------------------------------------------------------------------------
 
-CUSTOMER_SUPPORT_LAMBDA_CODE = """
-import json
-
-def lambda_handler(event, context):
-    tool_name = context.client_context.custom.get('bedrockAgentCoreToolName', 'unknown')
-
-    if 'check_order_status' in tool_name:
-        order_id = event.get('order_id', '').upper()
-        orders = {
-            'ORD-12345': {'order_id': 'ORD-12345', 'status': 'Shipped', 'tracking_number': '1Z999AA10123456784', 'estimated_delivery': '2025-02-10', 'items': [{'name': 'Laptop Pro 15', 'qty': 1, 'price': '$1,299.00'}, {'name': 'USB-C Charger', 'qty': 1, 'price': '$49.99'}], 'total': '$1,348.99'},
-            'ORD-67890': {'order_id': 'ORD-67890', 'status': 'Processing', 'tracking_number': None, 'estimated_delivery': '2025-02-15', 'items': [{'name': 'Wireless Mouse', 'qty': 1, 'price': '$29.99'}, {'name': 'Mechanical Keyboard', 'qty': 1, 'price': '$89.99'}], 'total': '$119.98'},
-            'ORD-11111': {'order_id': 'ORD-11111', 'status': 'Delivered', 'tracking_number': '1Z999AA10123456785', 'delivered_date': '2025-01-28', 'items': [{'name': '27 inch 4K Monitor', 'qty': 1, 'price': '$449.00'}], 'total': '$449.00'},
-            'ORD-22222': {'order_id': 'ORD-22222', 'status': 'Cancelled', 'reason': 'Customer requested cancellation', 'refund_status': 'Refund processed', 'items': [{'name': 'Noise-Cancelling Headphones', 'qty': 1, 'price': '$199.00'}], 'total': '$199.00'},
-        }
-        order = orders.get(order_id)
-        if not order:
-            return {'statusCode': 200, 'body': json.dumps({'error': f'Order {order_id} not found. Valid demo order IDs: ORD-12345, ORD-67890, ORD-11111, ORD-22222'})}
-        return {'statusCode': 200, 'body': json.dumps(order)}
-
-    elif 'lookup_customer' in tool_name:
-        email = event.get('email', '').lower()
-        customers = {
-            'john@example.com': {'name': 'John Smith', 'customer_id': 'CUST-001', 'email': 'john@example.com', 'membership_tier': 'Gold', 'member_since': '2022-03-15', 'orders': ['ORD-12345', 'ORD-11111'], 'total_spent': '$1,797.99'},
-            'jane@example.com': {'name': 'Jane Doe', 'customer_id': 'CUST-002', 'email': 'jane@example.com', 'membership_tier': 'Silver', 'member_since': '2023-06-20', 'orders': ['ORD-67890'], 'total_spent': '$119.98'},
-            'bob@example.com': {'name': 'Bob Wilson', 'customer_id': 'CUST-003', 'email': 'bob@example.com', 'membership_tier': 'Platinum', 'member_since': '2021-01-10', 'orders': ['ORD-22222'], 'total_spent': '$4,599.00'},
-        }
-        customer = customers.get(email)
-        if not customer:
-            return {'statusCode': 200, 'body': json.dumps({'error': f'No customer found with email {email}. Try: john@example.com, jane@example.com, bob@example.com'})}
-        return {'statusCode': 200, 'body': json.dumps(customer)}
-
-    elif 'search_knowledge_base' in tool_name:
-        query = event.get('query', '').lower()
-        articles = [
-            {'id': 'KB-001', 'title': 'How to Reset Your Account Password', 'summary': 'Go to Settings > Security > Reset Password.'},
-            {'id': 'KB-002', 'title': 'Return and Refund Policy', 'summary': 'Items can be returned within 30 days of delivery.'},
-            {'id': 'KB-003', 'title': 'Shipping and Delivery Information', 'summary': 'Standard shipping: 5-7 business days.'},
-            {'id': 'KB-004', 'title': 'Warranty Coverage Details', 'summary': 'All electronics include 1-year manufacturer warranty.'},
-            {'id': 'KB-005', 'title': 'Troubleshooting Blue Screen Errors', 'summary': 'Common causes: outdated drivers, hardware failure.'},
-            {'id': 'KB-006', 'title': 'How to Track Your Order', 'summary': 'Log in to your account > My Orders.'},
-            {'id': 'KB-007', 'title': 'Membership Tiers and Benefits', 'summary': 'Silver: free standard shipping. Gold: free express.'},
-        ]
-        matches = [a for a in articles if query in a['title'].lower() or query in a['summary'].lower()]
-        if not matches:
-            matches = articles[:3]
-        return {'statusCode': 200, 'body': json.dumps({'results': matches, 'total_found': len(matches)})}
-
-    elif 'get_return_policy' in tool_name:
-        category = event.get('product_category', 'general').lower()
-        policies = {
-            'electronics': {'category': 'Electronics', 'return_window': '30 days', 'condition': 'Must be in original packaging'},
-            'accessories': {'category': 'Accessories', 'return_window': '60 days', 'condition': 'Must be unused'},
-            'software': {'category': 'Software', 'return_window': '14 days', 'condition': 'Physical media only'},
-            'general': {'category': 'General', 'return_window': '30 days', 'condition': 'Item must be in resalable condition'},
-        }
-        policy = policies.get(category, policies['general'])
-        return {'statusCode': 200, 'body': json.dumps(policy)}
-
-    return {'statusCode': 200, 'body': json.dumps({'message': f'Unknown tool: {tool_name}'})}
-"""
+# Standalone customer-support demo Lambda. Canonical source lives in
+# app/services/codegen_templates/customer_support_lambda.py.
+CUSTOMER_SUPPORT_LAMBDA_CODE = codegen_templates.load_impl("customer_support_lambda")
 
 CUSTOMER_SUPPORT_TOOLS_SCHEMA = {
     "inlinePayload": [
@@ -657,190 +604,10 @@ CUSTOMER_SUPPORT_TOOLS_SCHEMA = {
     ]
 }
 
-DYNAMIC_TOOLS_LAMBDA_CODE = """
-import ipaddress
-import json
-import time
-import urllib.request
-import urllib.parse
-
-UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0"
-WMO_CODES = {0:"Clear sky",1:"Mainly clear",2:"Partly cloudy",3:"Overcast",45:"Foggy",48:"Rime fog",51:"Light drizzle",53:"Moderate drizzle",55:"Dense drizzle",61:"Slight rain",63:"Moderate rain",65:"Heavy rain",71:"Slight snow",73:"Moderate snow",75:"Heavy snow",80:"Slight rain showers",81:"Moderate rain showers",82:"Violent rain showers",95:"Thunderstorm",96:"Thunderstorm with hail",99:"Thunderstorm with heavy hail"}
-
-class ToolUnavailable(Exception):
-    # Raised when an external dependency (web/api) can't be reached after retries.
-    # The dispatcher turns this into a STRUCTURED {"error":"tool_unavailable",...}
-    # body so the agent (and tests) can distinguish "the tool failed" from
-    # "the tool ran and found nothing".
-    pass
-
-def _http_get(url, timeout=10, retries=2):
-    last_err = None
-    for attempt in range(retries + 1):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.read()
-        except Exception as e:
-            last_err = e
-            if attempt < retries:
-                time.sleep(1 * (attempt + 1))
-    raise ToolUnavailable(str(last_err))
-
-def _do_duckduckgo_search(query):
-    url = "https://api.duckduckgo.com/?" + urllib.parse.urlencode({"q": query, "format": "json", "no_html": "1"})
-    data = json.loads(_http_get(url, timeout=12).decode())
-    results = []
-    if data.get("Abstract"):
-        results.append({"title": data.get("Heading", query), "snippet": data["Abstract"], "url": data.get("AbstractURL", "")})
-    for topic in data.get("RelatedTopics", [])[:5]:
-        if isinstance(topic, dict) and topic.get("Text"):
-            results.append({"title": topic.get("Text", "")[:80], "snippet": topic.get("Text", ""), "url": topic.get("FirstURL", "")})
-    return json.dumps(results) if results else json.dumps({"message": f"No results found for: {query}"})
-
-def _do_wikipedia_search(query):
-    url = "https://en.wikipedia.org/api/rest_v1/page/summary/" + urllib.parse.quote(query)
-    try:
-        data = json.loads(_http_get(url, timeout=10).decode())
-        return json.dumps({"title": data.get("title", query), "summary": data.get("extract", ""), "url": data.get("content_urls", {}).get("desktop", {}).get("page", "")})
-    except Exception:
-        return json.dumps({"error": f"No Wikipedia article found for: {query}"})
-
-def _do_weather(location):
-    geo_url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode({"name": location, "count": 1})
-    geo = json.loads(_http_get(geo_url, timeout=8).decode())
-    results = geo.get("results", [])
-    if not results:
-        return json.dumps({"error": f"Location not found: {location}"})
-    lat, lon = results[0]["latitude"], results[0]["longitude"]
-    place = results[0].get("name", location)
-    country = results[0].get("country", "")
-    wx_url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode({
-        "latitude": lat, "longitude": lon,
-        "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code",
-        "temperature_unit": "fahrenheit",
-        "wind_speed_unit": "mph",
-    })
-    wx = json.loads(_http_get(wx_url, timeout=8).decode())
-    cur = wx.get("current", {})
-    code = cur.get("weather_code", -1)
-    desc = WMO_CODES.get(code, f"Code {code}")
-    return json.dumps({"location": f"{place}, {country}", "description": desc, "temperature_F": cur.get("temperature_2m"), "humidity_pct": cur.get("relative_humidity_2m"), "wind_mph": cur.get("wind_speed_10m")})
-
-_FETCH_BLOCKED_NETS = [ipaddress.ip_network(n) for n in (
-    "0.0.0.0/8","10.0.0.0/8","100.64.0.0/10","127.0.0.0/8","169.254.0.0/16",
-    "172.16.0.0/12","192.0.0.0/24","192.168.0.0/16","198.18.0.0/15","224.0.0.0/4",
-    "240.0.0.0/4","::1/128","::/128","::ffff:0:0/96","fc00::/7","fe80::/10","ff00::/8",
-)]
-
-def _do_fetch_webpage(url):
-    # SECURITY: Validate scheme + DNS-resolve host and block private/link-local/IMDS
-    # ranges. Substring/literal-host denylists are bypassable via DNS rebinding.
-    import socket as _socket
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return json.dumps({"error": "Only http/https URLs are allowed"})
-    host = (parsed.hostname or "").lower()
-    if not host:
-        return json.dumps({"error": "URL has no host component"})
-    try:
-        infos = _socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), _socket.AF_UNSPEC, _socket.SOCK_STREAM)
-    except Exception as e:
-        return json.dumps({"error": f"DNS resolution failed: {e}"})
-    for info in infos:
-        ip_str = info[4][0].split("%", 1)[0]
-        try:
-            ip_obj = ipaddress.ip_address(ip_str)
-        except ValueError:
-            return json.dumps({"error": f"Unparseable resolved IP: {ip_str}"})
-        for net in _FETCH_BLOCKED_NETS:
-            if ip_obj.version == net.version and ip_obj in net:
-                return json.dumps({"error": "Requests to internal/private endpoints are blocked"})
-    text = _http_get(url, timeout=12).decode(errors="replace")
-    return json.dumps({"url": url, "content": text[:8000]})
-
-CUSTOMERS = {
-    "CUST-001": {"customer_id": "CUST-001", "name": "John Doe", "email": "john@example.com", "member_since": "2023-06-01"},
-    "CUST-002": {"customer_id": "CUST-002", "name": "Jane Smith", "email": "jane@example.com", "member_since": "2024-01-15"},
-}
-
-ORDERS = {
-    "ORD-12345": {"order_id": "ORD-12345", "customer_id": "CUST-001", "status": "delivered", "items": [{"name": "Wireless Headphones", "quantity": 1, "price": 79.99}], "total": 79.99, "order_date": "2025-01-15", "delivery_date": "2025-01-20"},
-    "ORD-12300": {"order_id": "ORD-12300", "customer_id": "CUST-001", "status": "delivered", "items": [{"name": "Running Shoes", "quantity": 1, "price": 249.00}], "total": 249.00, "order_date": "2025-01-02", "delivery_date": "2025-01-08"},
-    "ORD-12400": {"order_id": "ORD-12400", "customer_id": "CUST-001", "status": "delivered", "items": [{"name": "USB-C Charging Cable", "quantity": 2, "price": 12.99}], "total": 25.98, "order_date": "2025-01-20", "delivery_date": "2025-01-23"},
-    "ORD-99000": {"order_id": "ORD-99000", "customer_id": "CUST-002", "status": "delivered", "items": [{"name": "Premium Laptop", "quantity": 1, "price": 1299.00}], "total": 1299.00, "order_date": "2025-01-10", "delivery_date": "2025-01-15"},
-    "ORD-99010": {"order_id": "ORD-99010", "customer_id": "CUST-002", "status": "delivered", "items": [{"name": "Yoga Mat", "quantity": 1, "price": 45.00}], "total": 45.00, "order_date": "2025-01-18", "delivery_date": "2025-01-21"},
-}
-
-REFUNDS = {}
-
-def _do_get_order(event):
-    order_id = event.get("order_id", "")
-    order = ORDERS.get(order_id)
-    if not order:
-        return json.dumps({"error": f"Order {order_id} not found. Valid IDs: {', '.join(ORDERS.keys())}"})
-    return json.dumps(order)
-
-def _do_get_customer(event):
-    customer_id = event.get("customer_id", "")
-    customer = CUSTOMERS.get(customer_id)
-    if not customer:
-        return json.dumps({"error": f"Customer {customer_id} not found. Valid IDs: {', '.join(CUSTOMERS.keys())}"})
-    customer_orders = [o for o in ORDERS.values() if o["customer_id"] == customer_id]
-    return json.dumps({**customer, "total_orders": len(customer_orders), "total_spent": round(sum(o["total"] for o in customer_orders), 2)})
-
-def _do_list_orders(event):
-    customer_id = event.get("customer_id", "")
-    limit = event.get("limit", 10)
-    if customer_id not in CUSTOMERS:
-        return json.dumps({"error": f"Customer {customer_id} not found"})
-    orders = [{"order_id": o["order_id"], "total": o["total"], "status": o["status"], "order_date": o["order_date"]} for o in ORDERS.values() if o["customer_id"] == customer_id]
-    orders.sort(key=lambda x: x["order_date"], reverse=True)
-    return json.dumps({"customer_id": customer_id, "orders": orders[:limit]})
-
-def _do_process_refund(event):
-    import uuid as _uuid
-    order_id = event.get("order_id", "")
-    amount = event.get("amount")
-    reason = event.get("reason", "")
-    order = ORDERS.get(order_id)
-    if not order:
-        return json.dumps({"error": f"Order {order_id} not found"})
-    if amount is None or amount <= 0:
-        return json.dumps({"error": "Refund amount must be positive"})
-    if amount > order["total"]:
-        return json.dumps({"error": f"Refund amount ${amount} exceeds order total ${order['total']}"})
-    refund_id = f"REF-{_uuid.uuid4().hex[:5].upper()}"
-    return json.dumps({"success": True, "refund_id": refund_id, "order_id": order_id, "amount": amount, "reason": reason, "status": "processed", "message": f"Refund of ${amount:.2f} processed. Customer will receive funds in 3-5 business days."})
-
-def lambda_handler(event, context):
-    tool_name = context.client_context.custom.get("bedrockAgentCoreToolName", "unknown")
-    try:
-        if "duckduckgo_search" in tool_name:
-            return {"statusCode": 200, "body": _do_duckduckgo_search(event.get("query", ""))}
-        elif "wikipedia_search" in tool_name:
-            return {"statusCode": 200, "body": _do_wikipedia_search(event.get("query", ""))}
-        elif "weather_api" in tool_name or "get_weather" in tool_name:
-            return {"statusCode": 200, "body": _do_weather(event.get("location", ""))}
-        elif "web_page_fetcher" in tool_name or "fetch_webpage" in tool_name:
-            return {"statusCode": 200, "body": _do_fetch_webpage(event.get("url", ""))}
-        elif "get_order" in tool_name and "list_orders" not in tool_name:
-            return {"statusCode": 200, "body": _do_get_order(event)}
-        elif "get_customer" in tool_name:
-            return {"statusCode": 200, "body": _do_get_customer(event)}
-        elif "list_orders" in tool_name:
-            return {"statusCode": 200, "body": _do_list_orders(event)}
-        elif "process_refund" in tool_name:
-            return {"statusCode": 200, "body": _do_process_refund(event)}
-        else:
-            return {"statusCode": 200, "body": json.dumps({"error": f"Unknown tool: {tool_name}"})}
-    except ToolUnavailable as e:
-        # External dependency unreachable after retries — return a STRUCTURED
-        # error so the agent + tests can tell "tool failed" from "no results".
-        return {"statusCode": 200, "body": json.dumps({"error": "tool_unavailable", "detail": str(e), "tool": tool_name})}
-    except Exception as e:
-        return {"statusCode": 200, "body": json.dumps({"error": str(e)})}
-"""
+# Dynamic tools Lambda (search/wikipedia/weather/fetch + customer-support demo
+# handlers + dispatcher). Canonical source lives in app/services/codegen_templates/
+# (dynamic_tools_impl.py + customer_support_impl.py + dynamic_tools_handler.py).
+DYNAMIC_TOOLS_LAMBDA_CODE = codegen_templates.dynamic_tools_lambda_source()
 
 GATEWAY_TOOL_SCHEMAS: dict[str, dict] = {
     "duckduckgo_search": {
@@ -954,59 +721,9 @@ GATEWAY_TOOL_SCHEMAS: dict[str, dict] = {
 # Knowledge Base Tool Lambda
 # ---------------------------------------------------------------------------
 
-KNOWLEDGE_BASE_LAMBDA_TEMPLATE = '''
-import json
-import os
-import boto3
-
-bedrock_runtime = boto3.client("bedrock-agent-runtime", region_name=os.environ.get("AWS_REGION", "us-east-1"))
-
-def lambda_handler(event, context):
-    query = event.get("query", "")
-    kb_id = os.environ["KNOWLEDGE_BASE_ID"]
-    model_arn = os.environ["FOUNDATION_MODEL_ARN"]
-
-    try:
-        resp = bedrock_runtime.retrieve_and_generate(
-            input={"text": query},
-            retrieveAndGenerateConfiguration={
-                "type": "KNOWLEDGE_BASE",
-                "knowledgeBaseConfiguration": {
-                    "knowledgeBaseId": kb_id,
-                    "modelArn": model_arn,
-                }
-            }
-        )
-        answer = resp.get("output", {}).get("text", "No answer found.")
-        citations = []
-        for c in resp.get("citations", [])[:5]:
-            refs = c.get("retrievedReferences", [])
-            for ref in refs[:2]:
-                loc = ref.get("location", {})
-                citations.append({
-                    "text": ref.get("content", {}).get("text", "")[:200],
-                    "source": loc.get("s3Location", {}).get("uri", "") or loc.get("webLocation", {}).get("url", ""),
-                })
-        # No citations => the KB retrieved nothing. Right after deploy this almost
-        # always means ingestion has not yet produced queryable vectors (eventual
-        # consistency), not that the fact is absent. Return a RETRYABLE signal so
-        # the agent/caller retries instead of reporting a hard failure (P-E2E fix).
-        if not citations:
-            return {"statusCode": 200, "body": json.dumps({
-                "answer": answer,
-                "citations": [],
-                "still_ingesting": True,
-                "retryable": True,
-                "message": "Knowledge base returned no matches yet — it may still be ingesting. Retry shortly.",
-            })}
-        return {"statusCode": 200, "body": json.dumps({"answer": answer, "citations": citations})}
-    except Exception as e:
-        # Distinguish an ingestion-in-progress error from a real failure so the
-        # caller can retry the former.
-        msg = str(e)
-        retryable = any(s in msg for s in ("still", "ingest", "no data", "empty", "ResourceNotReady"))
-        return {"statusCode": 200, "body": json.dumps({"error": msg, "retryable": retryable})}
-'''
+# Knowledge Base RAG query Lambda. Canonical source lives in
+# app/services/codegen_templates/kb_lambda.py.
+KNOWLEDGE_BASE_LAMBDA_TEMPLATE = codegen_templates.load_impl("kb_lambda")
 
 
 def create_knowledge_base_lambda(
@@ -1030,18 +747,22 @@ def create_knowledge_base_lambda(
     iam_client.put_role_policy(
         RoleName=role_name,
         PolicyName="BedrockKBAccess",
-        PolicyDocument=json.dumps({
-            "Version": "2012-10-17",
-            "Statement": [{
-                "Effect": "Allow",
-                "Action": [
-                    "bedrock:Retrieve",
-                    "bedrock:RetrieveAndGenerate",
-                    "bedrock:InvokeModel",
+        PolicyDocument=json.dumps(
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "bedrock:Retrieve",
+                            "bedrock:RetrieveAndGenerate",
+                            "bedrock:InvokeModel",
+                        ],
+                        "Resource": "*",
+                    }
                 ],
-                "Resource": "*",
-            }],
-        }),
+            }
+        ),
     )
 
     zip_bytes = _create_lambda_zip(KNOWLEDGE_BASE_LAMBDA_TEMPLATE)
@@ -1231,7 +952,22 @@ def _prune_orphaned_lambda_permissions(lambda_client, function_name: str) -> int
     """
     try:
         pol_raw = lambda_client.get_policy(FunctionName=function_name).get("Policy")
-    except Exception:  # noqa: BLE001 — no policy yet / NotFound: nothing to prune
+    except Exception as e:  # noqa: BLE001
+        # ResourceNotFound => the function simply has no resource policy yet:
+        # nothing to prune, genuinely benign.
+        if is_error(e, "ResourceNotFoundException", "ResourceNotFound"):
+            return 0
+        # Anything else (notably AccessDenied when the caller role lacks
+        # lambda:GetPolicy) means the prune is INERT — it can never remove a
+        # dangling principal, so the reused-Lambda AddPermission failure would
+        # silently return. Surface it loudly (Defect A) instead of swallowing.
+        logger.warning(
+            "Orphan-permission prune could not read the policy of %s (%s); "
+            "dangling gateway-role principals will NOT be cleaned — check that "
+            "the deploy role has lambda:GetPolicy on function:AgentCore*",
+            function_name,
+            type(e).__name__,
+        )
         return 0
     try:
         statements = json.loads(pol_raw).get("Statement", []) or []
@@ -1245,15 +981,16 @@ def _prune_orphaned_lambda_permissions(lambda_client, function_name: str) -> int
         # Only touch the per-gateway-role invoke grants we manage.
         if not sid.startswith("AllowAgentCoreInvoke-"):
             continue
-        role_name = sid[len("AllowAgentCoreInvoke-"):]
+        role_name = sid[len("AllowAgentCoreInvoke-") :]
         if not role_name:
             continue
         try:
             iam.get_role(RoleName=role_name)
             continue  # role still exists — keep the statement
         except Exception as e:  # noqa: BLE001
-            if "NoSuchEntity" not in str(e) and "NotFound" not in str(e):
+            if not is_error(e, "NoSuchEntity", "NoSuchEntityException"):
                 # Unknown IAM error — don't risk removing a valid grant.
+                logger.debug("get_role(%s) failed with a non-NoSuchEntity error; keeping statement", role_name)
                 continue
         # Role is gone: remove the dangling statement.
         try:
@@ -1261,10 +998,11 @@ def _prune_orphaned_lambda_permissions(lambda_client, function_name: str) -> int
             pruned += 1
             logger.info(
                 "Pruned orphaned invoke permission %s from %s (role deleted)",
-                sid, function_name,
+                sid,
+                function_name,
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 — best-effort by contract (caller retries its add)
+            logger.debug("Could not prune permission %s from %s", sid, function_name, exc_info=True)
     return pruned
 
 
@@ -1274,7 +1012,7 @@ def _create_or_update_lambda(
     role_arn: str,
     zip_bytes: bytes,
     description: str,
-    gateway_role_arn: Optional[str] = None,
+    gateway_role_arn: str | None = None,
 ) -> str:
     """Create or update a Lambda function. Returns the function ARN.
 
@@ -1370,7 +1108,8 @@ def _create_or_update_lambda(
                 last_exc = e
                 logger.warning(
                     "add_permission principal not yet propagated (attempt %d/8): %s",
-                    attempt + 1, str(e)[:160],
+                    attempt + 1,
+                    str(e)[:160],
                 )
                 time.sleep(8)
         if last_exc is not None:
@@ -1553,15 +1292,15 @@ def _create_external_oauth_config(identity_config: dict, region: str) -> dict:
             # Strict 10s timeout so an attacker can't burn CPU by stalling us on
             # the actual fetch. The host has been validated above; the residual
             # DNS-rebinding race window is bounded by this timeout.
-            with urllib.request.urlopen(req, timeout=10) as resp:  # nosemgrep: dynamic-urllib-use-detected -- URL validated by _validate_discovery_url (scheme=https + IP denylist + optional allowlist)
+            with (
+                urllib.request.urlopen(req, timeout=10) as resp
+            ):  # nosemgrep: dynamic-urllib-use-detected -- URL validated by _validate_discovery_url (scheme=https + IP denylist + optional allowlist)
                 discovery_doc = json.loads(resp.read().decode())
                 token_endpoint = discovery_doc.get("token_endpoint", "")
         except Exception as e:
             # Re-raise: a transient discovery-doc fetch failure must fail the
             # deploy, not silently produce a gateway with empty token_endpoint.
-            raise RuntimeError(
-                f"Failed to fetch OIDC discovery document from {validated_url}: {e}"
-            ) from e
+            raise RuntimeError(f"Failed to fetch OIDC discovery document from {validated_url}: {e}") from e
 
     authorizer_config = {
         "customJWTAuthorizer": {
@@ -1590,6 +1329,7 @@ def _create_external_oauth_config(identity_config: dict, region: str) -> dict:
 def get_cognito_token(client_info: dict) -> str:
     """Get OAuth access token using client_credentials grant. Supports Cognito and external IDPs."""
     import urllib.parse
+
     import urllib3
 
     client_id = client_info.get("client_id", "")
@@ -1642,8 +1382,10 @@ def _count_served_tools(gateway_url: str, client_info: dict) -> int:
     transport/auth error (caller treats as not-yet-ready, keeps polling).
     """
     import urllib3
+
     try:
         import certifi
+
         http = urllib3.PoolManager(ca_certs=certifi.where())
     except ImportError:
         http = urllib3.PoolManager()
@@ -1651,7 +1393,9 @@ def _count_served_tools(gateway_url: str, client_info: dict) -> int:
         token = get_cognito_token(client_info)
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
         resp = http.request(
-            "POST", gateway_url, body=body,
+            "POST",
+            gateway_url,
+            body=body,
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
@@ -1695,6 +1439,7 @@ def _qualified_tools_from_served(gateway_url: str, client_info: dict) -> list:
 
     try:
         import certifi
+
         http = urllib3.PoolManager(ca_certs=certifi.where())
     except ImportError:
         http = urllib3.PoolManager()
@@ -1702,7 +1447,9 @@ def _qualified_tools_from_served(gateway_url: str, client_info: dict) -> list:
         token = get_cognito_token(client_info)
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
         resp = http.request(
-            "POST", gateway_url, body=body,
+            "POST",
+            gateway_url,
+            body=body,
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
@@ -1735,15 +1482,14 @@ def _qualified_tools_from_served(gateway_url: str, client_info: dict) -> list:
         return []
 
 
-def _wait_for_gateway_to_serve_tools(
-    gateway_url: str, client_info: dict, expected: int, timeout: int = 90
-) -> int:
+def _wait_for_gateway_to_serve_tools(gateway_url: str, client_info: dict, expected: int, timeout: int = 90) -> int:
     """Poll the gateway's MCP tools/list until it serves >= 1 tool (ideally
     `expected`), or *timeout*. Returns the served count (0 if it never serves).
     This is the authoritative deploy-time readiness signal — it matches exactly
     what the deployed agent will discover.
     """
     import time as _t
+
     deadline = _t.time() + timeout
     served = 0
     while _t.time() < deadline:
@@ -1881,7 +1627,7 @@ def _create_gateway_target_with_retry(
     target_name: str,
     create_params: dict,
     max_retries: int = 5,
-) -> Optional[dict]:
+) -> dict | None:
     """Create a gateway target with retry logic. Reuses existing target on conflict."""
     for attempt in range(max_retries):
         try:
@@ -1895,8 +1641,10 @@ def _create_gateway_target_with_retry(
             return target
         except Exception as e:
             err_str = str(e)
-            # If the target already exists, look it up and reuse it
-            if "ConflictException" in err_str or "already exists" in err_str:
+            # If the target already exists, look it up and reuse it.
+            # "already exists" message fallback kept: conflicts can surface as a
+            # ValidationException whose message says "already exists".
+            if is_error(e, "ConflictException") or "already exists" in err_str:
                 logger.info("Gateway target '%s' already exists, reusing", target_name)
                 try:
                     targets_resp = agentcore_ctrl.list_gateway_targets(gatewayIdentifier=gateway_id)
@@ -1962,7 +1710,7 @@ def _build_gateway_role_policy() -> dict:
     }
 
 
-def _fetch_openapi_spec(spec_url: str, allowlist_hosts: Optional[list] = None) -> str:
+def _fetch_openapi_spec(spec_url: str, allowlist_hosts: list | None = None) -> str:
     """Fetch a connector's OpenAPI spec from *spec_url* and return it as a string.
 
     The URL is validated (https-only, private/IMDS denylist, connector allowlist)
@@ -1971,11 +1719,11 @@ def _fetch_openapi_spec(spec_url: str, allowlist_hosts: Optional[list] = None) -
     """
     import urllib.request
 
-    validated = _validate_outbound_url(
-        spec_url, tuple(allowlist_hosts) if allowlist_hosts else None
-    )
+    validated = _validate_outbound_url(spec_url, tuple(allowlist_hosts) if allowlist_hosts else None)
     req = urllib.request.Request(validated, headers={"Accept": "application/json, application/yaml, text/yaml"})
-    with urllib.request.urlopen(req, timeout=30) as resp:  # nosemgrep: dynamic-urllib-use-detected -- URL validated by _validate_outbound_url (https + IP denylist + host allowlist)
+    with (
+        urllib.request.urlopen(req, timeout=30) as resp
+    ):  # nosemgrep: dynamic-urllib-use-detected -- URL validated by _validate_outbound_url (https + IP denylist + host allowlist)
         return resp.read().decode("utf-8", errors="replace")
 
 
@@ -2073,11 +1821,7 @@ def _sanitize_openapi_for_gateway(spec_str: str) -> str:
             out = {}
             for k, v in node.items():
                 if k == "content" and isinstance(v, dict):
-                    kept = {
-                        mt: walk(mv)
-                        for mt, mv in v.items()
-                        if mt in _GATEWAY_SUPPORTED_MEDIA_TYPES
-                    }
+                    kept = {mt: walk(mv) for mt, mv in v.items() if mt in _GATEWAY_SUPPORTED_MEDIA_TYPES}
                     if len(kept) != len(v):
                         changed = True
                     # Drop an empty content map so the parent (response/requestBody)
@@ -2090,8 +1834,7 @@ def _sanitize_openapi_for_gateway(spec_str: str) -> str:
             # media types the requestBody is now invalid ("requestBody.content is
             # missing"). Signal removal so the operation drops the whole
             # requestBody (the operation stays valid — body just becomes optional).
-            if "requestBody" in out and isinstance(out["requestBody"], dict) \
-                    and "content" not in out["requestBody"]:
+            if "requestBody" in out and isinstance(out["requestBody"], dict) and "content" not in out["requestBody"]:
                 del out["requestBody"]
                 changed = True
             return out
@@ -2160,7 +1903,7 @@ def _sanitize_openapi_for_gateway(spec_str: str) -> str:
             return cand
 
         renamed = 0
-        for path, item in paths.items():
+        for item in paths.values():
             if not isinstance(item, dict):
                 continue
             for method, op in item.items():
@@ -2206,8 +1949,7 @@ def _cap_openapi_operations(spec_str: str, *, max_ops: int) -> str:
     if not isinstance(paths, dict):
         return spec_str
     _METHODS = ("get", "post", "put", "delete", "patch", "head", "options", "trace")
-    total = sum(1 for _p, item in paths.items() if isinstance(item, dict)
-                for m in item if m.lower() in _METHODS)
+    total = sum(1 for _p, item in paths.items() if isinstance(item, dict) for m in item if m.lower() in _METHODS)
     if total <= max_ops:
         return spec_str
     kept = 0
@@ -2258,7 +2000,9 @@ def _build_openapi_schema(spec_str: str, *, connector_id: str, region: str) -> d
         if after < before:
             logger.info(
                 "Slimmed connector '%s' spec %d -> %d bytes to fit the 10 MB cap",
-                connector_id, before, after,
+                connector_id,
+                before,
+                after,
             )
             spec_str = slim
 
@@ -2269,7 +2013,8 @@ def _build_openapi_schema(spec_str: str, *, connector_id: str, region: str) -> d
         logger.warning(
             "Spec for connector '%s' is %d bytes (>inline cap) but ARTIFACTS_BUCKET_NAME "
             "is unset; falling back to inlinePayload (may fail).",
-            connector_id, len(spec_str),
+            connector_id,
+            len(spec_str),
         )
         return {"inlinePayload": spec_str}
 
@@ -2278,16 +2023,16 @@ def _build_openapi_schema(spec_str: str, *, connector_id: str, region: str) -> d
     safe = re.sub(r"[^a-zA-Z0-9_-]", "-", connector_id or "generic")[:32]
     key = f"connector-specs/{safe}/{_uuid.uuid4().hex[:12]}.json"
     boto3.client("s3", region_name=region).put_object(
-        Bucket=bucket, Key=key, Body=spec_str.encode("utf-8"),
+        Bucket=bucket,
+        Key=key,
+        Body=spec_str.encode("utf-8"),
         ContentType="application/json",
     )
     account_id = os.environ.get("AWS_ACCOUNT_ID", "")
     s3_block: dict = {"uri": f"s3://{bucket}/{key}"}
     if account_id:
         s3_block["bucketOwnerAccountId"] = account_id
-    logger.info(
-        "Staged connector '%s' spec (%d bytes) to s3://%s/%s", connector_id, len(spec_str), bucket, key
-    )
+    logger.info("Staged connector '%s' spec (%d bytes) to s3://%s/%s", connector_id, len(spec_str), bucket, key)
     return {"s3": s3_block}
 
 
@@ -2311,14 +2056,14 @@ def _delete_connector_credential_provider(agentcore_ctrl, entry: str) -> tuple[b
             get_fn(name=name)
             return False
         except Exception as e:  # noqa: BLE001
-            return "ResourceNotFound" in str(e) or "NotFound" in str(e)
+            return is_error(e, "ResourceNotFoundException", "NotFoundException")
 
     if ptype == "API_KEY":
         try:
             agentcore_ctrl.delete_api_key_credential_provider(name=name)
             return True, f"API_KEY credential provider {name} deleted"
         except Exception as e:  # noqa: BLE001
-            if "ResourceNotFound" in str(e) or "NotFound" in str(e):
+            if is_error(e, "ResourceNotFoundException", "NotFoundException"):
                 return True, f"Credential provider {name} already gone"
             return False, f"API_KEY provider {name} delete error: {e}"
     if ptype == "OAUTH":
@@ -2326,7 +2071,7 @@ def _delete_connector_credential_provider(agentcore_ctrl, entry: str) -> tuple[b
             agentcore_ctrl.delete_oauth2_credential_provider(name=name)
             return True, f"OAUTH credential provider {name} deleted"
         except Exception as e:  # noqa: BLE001
-            if "ResourceNotFound" in str(e) or "NotFound" in str(e):
+            if is_error(e, "ResourceNotFoundException", "NotFoundException"):
                 return True, f"Credential provider {name} already gone"
             return False, f"OAUTH provider {name} delete error: {e}"
 
@@ -2338,7 +2083,7 @@ def _delete_connector_credential_provider(agentcore_ctrl, entry: str) -> tuple[b
         try:
             getattr(agentcore_ctrl, deleter)(name=name)
         except Exception as e:  # noqa: BLE001
-            if "ResourceNotFound" in str(e) or "NotFound" in str(e):
+            if is_error(e, "ResourceNotFoundException", "NotFoundException"):
                 continue
         # Verify the provider of THIS type is actually gone.
         if _is_gone(getattr(agentcore_ctrl, getter)):
@@ -2379,18 +2124,27 @@ def _deploy_connector_targets(
             _delete_connector_credential_provider(agentcore_ctrl, entry)
         if created_secrets:
             sm = _create_secrets_client(region)
-            for sarn in created_secrets:
+            for _sidx, sarn in enumerate(created_secrets):
                 try:
                     sm.delete_secret(SecretId=sarn, ForceDeleteWithoutRecovery=True)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception:  # noqa: BLE001 — best-effort rollback
+                    # Log NOTHING from the secret-bearing scope (no ARN/value):
+                    # CodeQL py/clear-text-logging taints created_secrets; a
+                    # positional index is enough to correlate with the create log.
+                    logger.warning("Rollback: could not delete connector secret #%d", _sidx)
         for uri in created_spec_s3_uris:
             _delete_spec_s3_object(uri, region)
 
     try:
         _deploy_connector_targets_inner(
-            agentcore_ctrl, gateway_id, region, connectors, owner_sub,
-            created_providers, created_secrets, created_spec_s3_uris,
+            agentcore_ctrl,
+            gateway_id,
+            region,
+            connectors,
+            owner_sub,
+            created_providers,
+            created_secrets,
+            created_spec_s3_uris,
         )
     except Exception:
         logger.error("Connector deploy failed mid-loop; rolling back partial resources")
@@ -2409,12 +2163,12 @@ def _delete_spec_s3_object(uri: str, region: str) -> None:
     if not uri.startswith("s3://"):
         return
     try:
-        rest = uri[len("s3://"):]
+        rest = uri[len("s3://") :]
         bucket, _, key = rest.partition("/")
         if bucket and key:
             boto3.client("s3", region_name=region).delete_object(Bucket=bucket, Key=key)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:  # noqa: BLE001 — best-effort by contract (docstring)
+        logger.debug("Could not delete connector spec object %s", _safe_log_token(uri), exc_info=True)
 
 
 def _deploy_connector_targets_inner(
@@ -2453,15 +2207,14 @@ def _deploy_connector_targets_inner(
         # spec_host_allowlist is still SSRF-guarded (https + private-IP denylist via
         # _validate_outbound_url) even with no host allowlist.
         from urllib.parse import urlparse as _urlparse
+
         spec_allowlist = conn.get("spec_host_allowlist") or catalog.get("spec_host_allowlist")
         if not spec_allowlist and spec_url and spec_url == catalog.get("spec_url"):
             _h = _urlparse(spec_url).hostname
             spec_allowlist = [_h] if _h else None
         if not spec_inline:
             if not spec_url:
-                raise RuntimeError(
-                    f"Connector '{connector_id}' has no OpenAPI spec (provide spec_url or spec_inline)"
-                )
+                raise RuntimeError(f"Connector '{connector_id}' has no OpenAPI spec (provide spec_url or spec_inline)")
             spec_inline = _fetch_openapi_spec(spec_url, spec_allowlist)
 
         # Mint the secret here if the caller passed a raw value (direct-deploy path);
@@ -2488,16 +2241,13 @@ def _deploy_connector_targets_inner(
 
         if auth_method == AUTH_OAUTH2_CC:
             vendor = (
-                conn.get("oauth_vendor")
-                or conn.get("oauthVendor")
-                or oauth_vendor_for(connector_id)
-                or "CustomOauth2"
+                conn.get("oauth_vendor") or conn.get("oauthVendor") or oauth_vendor_for(connector_id) or "CustomOauth2"
             )
             discovery_url = conn.get("discovery_url") or conn.get("discoveryUrl")
             # Phase 3 (Loom) OBO — carry delegation mode + grant type from the
             # connector payload so the credential provider is minted for
             # on-behalf-of token exchange when requested.
-            delegation_mode = (conn.get("delegation_mode") or conn.get("delegationMode") or "m2m")
+            delegation_mode = conn.get("delegation_mode") or conn.get("delegationMode") or "m2m"
             obo_grant_type = conn.get("obo_grant_type") or conn.get("oboGrantType")
             provider_arn = _ensure_oauth2_credential_provider(
                 agentcore_ctrl,
@@ -2530,12 +2280,8 @@ def _deploy_connector_targets_inner(
             }
         else:  # API_KEY
             if not secret_arn:
-                raise RuntimeError(
-                    f"Connector '{connector_id}' api_key auth requires a secret_arn or secret_value"
-                )
-            provider_arn = _ensure_api_key_credential_provider(
-                agentcore_ctrl, provider_name, secret_arn=secret_arn
-            )
+                raise RuntimeError(f"Connector '{connector_id}' api_key auth requires a secret_arn or secret_value")
+            provider_arn = _ensure_api_key_credential_provider(agentcore_ctrl, provider_name, secret_arn=secret_arn)
             cred_cfg = {
                 "credentialProviderType": "API_KEY",
                 "credentialProvider": {
@@ -2555,18 +2301,18 @@ def _deploy_connector_targets_inner(
             prefix = (
                 conn.get("credential_prefix")
                 if conn.get("credential_prefix") is not None
-                else (conn.get("credentialPrefix")
-                      if conn.get("credentialPrefix") is not None
-                      else catalog.get("credential_prefix"))
+                else (
+                    conn.get("credentialPrefix")
+                    if conn.get("credentialPrefix") is not None
+                    else catalog.get("credential_prefix")
+                )
             )
             if prefix:
                 cred_cfg["credentialProvider"]["apiKeyCredentialProvider"]["credentialPrefix"] = prefix
 
         created_providers.append(f"{provider_type}:{provider_name}")
 
-        openapi_schema = _build_openapi_schema(
-            spec_inline, connector_id=connector_id or "generic", region=region
-        )
+        openapi_schema = _build_openapi_schema(spec_inline, connector_id=connector_id or "generic", region=region)
         # If the spec was staged to S3, remember the key so teardown deletes it.
         _s3_uri = openapi_schema.get("s3", {}).get("uri", "")
         if _s3_uri:
@@ -2578,23 +2324,27 @@ def _deploy_connector_targets_inner(
             "credentialProviderConfigurations": [cred_cfg],
         }
         _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, target_name, create_params)
-        logger.info("Connector '%s' deployed as OpenAPI gateway target %s", _safe_log_token(connector_id), _safe_log_token(target_name))
+        logger.info(
+            "Connector '%s' deployed as OpenAPI gateway target %s",
+            _safe_log_token(connector_id),
+            _safe_log_token(target_name),
+        )
 
 
 def deploy_gateway(
     gateway_config: dict,
     region: str,
-    template_id: Optional[str] = None,
-    gateway_tools: Optional[list] = None,
-    identity_config: Optional[dict] = None,
-    custom_tools: Optional[list[dict]] = None,
-    mcp_server_runtime_arn: Optional[str] = None,
-    mcp_oauth: Optional[dict] = None,
-    knowledge_base_result: Optional[dict] = None,
-    deployment_id: Optional[str] = None,
+    template_id: str | None = None,
+    gateway_tools: list | None = None,
+    identity_config: dict | None = None,
+    custom_tools: list[dict] | None = None,
+    mcp_server_runtime_arn: str | None = None,
+    mcp_oauth: dict | None = None,
+    knowledge_base_result: dict | None = None,
+    deployment_id: str | None = None,
     gateway_retry: int = 0,
-    connectors: Optional[list[dict]] = None,
-    external_mcp_servers: Optional[list[dict]] = None,
+    connectors: list[dict] | None = None,
+    external_mcp_servers: list[dict] | None = None,
     owner_sub: str = "",
 ) -> dict:
     """Deploy a Gateway using pure boto3 APIs.
@@ -2706,10 +2456,10 @@ def deploy_gateway(
             gateway["roleArn"] = gw_ready.get("roleArn", gateway["roleArn"])
         except Exception as create_err:
             err_str = str(create_err)
-            if "ConflictException" in err_str or "already exists" in err_str:
+            # "already exists" message fallback kept (ValidationException shape).
+            if is_error(create_err, "ConflictException") or "already exists" in err_str:
                 logger.info("Gateway '%s' already exists, looking up", gateway_name)
-                existing = agentcore_ctrl.list_gateways()
-                for gw in _get_gateways_from_response(existing):
+                for gw in _list_all_gateways(agentcore_ctrl):
                     if gw.get("name") == gateway_name:
                         gw_id = gw["gatewayId"]
                         gw_detail = agentcore_ctrl.get_gateway(gatewayIdentifier=gw_id)
@@ -2738,7 +2488,7 @@ def deploy_gateway(
                         logger.info("Reusing gateway %s, url=%s", gw_id, gateway["gatewayUrl"])
                         break
                 if gateway is None:
-                    raise RuntimeError(f"Gateway '{gateway_name}' exists but not found via list")
+                    raise RuntimeError(f"Gateway '{gateway_name}' exists but not found via list") from create_err
             else:
                 raise
 
@@ -2854,7 +2604,9 @@ def deploy_gateway(
                 },
             )
             mcp_cred_provider_arn = cred_provider_resp["credentialProviderArn"]
-            logger.info("Created OAuth2 credential provider: %s", mcp_cred_provider_arn)  # nosemgrep: python-logger-credential-disclosure -- logs resource ARN, not secret
+            logger.info(
+                "Created OAuth2 credential provider: %s", mcp_cred_provider_arn
+            )  # nosemgrep: python-logger-credential-disclosure -- logs resource ARN, not secret
 
             mcp_target_params = {
                 "gatewayIdentifier": gateway["gatewayId"],
@@ -3042,7 +2794,11 @@ def deploy_gateway(
                 kb_model_arn = knowledge_base_result.get("foundation_model_arn", "")
                 dep_id = deployment_id or "unknown"
                 kb_lambda_arn = create_knowledge_base_lambda(
-                    region, gateway.get("roleArn", ""), kb_id, kb_model_arn, dep_id,
+                    region,
+                    gateway.get("roleArn", ""),
+                    kb_id,
+                    kb_model_arn,
+                    dep_id,
                 )
                 kb_lambda_name = f"AgentCore-KBTool-{dep_id[:8]}"
                 kb_schema = GATEWAY_TOOL_SCHEMAS["knowledge_base"]
@@ -3060,7 +2816,9 @@ def deploy_gateway(
                     },
                     "credentialProviderConfigurations": [{"credentialProviderType": "GATEWAY_IAM_ROLE"}],
                 }
-                _create_gateway_target_with_retry(agentcore_ctrl, gateway["gatewayId"], kb_target_name, kb_target_params)
+                _create_gateway_target_with_retry(
+                    agentcore_ctrl, gateway["gatewayId"], kb_target_name, kb_target_params
+                )
                 logger.info("Knowledge Base tool deployed as gateway target: %s", kb_target_name)
             except Exception as kb_err:
                 logger.error("Failed to deploy KB tool: %s", kb_err)
@@ -3103,6 +2861,25 @@ def deploy_gateway(
             connector_credential_providers = connector_credential_providers + mcp_credential_providers
             connector_secret_arns = connector_secret_arns + mcp_secret_arns
 
+        # Step 4e: Deploy explicit gateway_config.targets of the NON-MCP families
+        # (openapi / lambda / smithy) as individual gateway targets on THIS same
+        # gateway. This is what lets a user wire e.g. two MCP servers + a Lambda +
+        # an OpenAPI spec to one gateway node: the mcp_server entries flow through
+        # external_mcp_servers above, and the rest flow here. Each gets a unique
+        # name. mcp_server entries present in `targets` are skipped by the helper
+        # (already handled) to avoid double-deploy.
+        config_targets = gateway_config.get("targets") or []
+        _config_target_families = {(t or {}).get("type") for t in config_targets}
+        _has_crawled_config_target = bool(_config_target_families & {"openapi", "smithy"})
+        if config_targets:
+            _deploy_config_targets(
+                agentcore_ctrl,
+                gateway["gatewayId"],
+                region,
+                config_targets,
+                gateway_role_arn=gateway.get("roleArn", ""),
+            )
+
         # Step 5: Synchronize NON-LAMBDA targets (OpenAPI / external MCP) so their
         # tools are crawled into the servable MCP plane. Bug 134:
         # synchronize_gateway_targets REQUIRES a targetIdList (the old call omitted
@@ -3111,7 +2888,13 @@ def deploy_gateway(
         # tools directly. Connector (OpenAPI) targets MUST be crawled regardless of
         # the semantic-search toggle, so we always sync the non-lambda set whenever
         # any crawled target exists (or semantic search was explicitly requested).
-        if connectors or external_mcp_servers or mcp_server_runtime_arn or gateway_config.get("semanticSearchEnabled"):
+        if (
+            connectors
+            or external_mcp_servers
+            or mcp_server_runtime_arn
+            or _has_crawled_config_target
+            or gateway_config.get("semanticSearchEnabled")
+        ):
             try:
                 _sync_ids = []
                 for _t in _get_targets_from_response(
@@ -3123,7 +2906,9 @@ def deploy_gateway(
                     if _tid and "lambda" not in _tc:
                         _sync_ids.append(_tid)
                 if _sync_ids:
-                    logger.warning("Synchronizing %d non-lambda target(s) on gateway %s", len(_sync_ids), gateway["gatewayId"])
+                    logger.warning(
+                        "Synchronizing %d non-lambda target(s) on gateway %s", len(_sync_ids), gateway["gatewayId"]
+                    )
                     agentcore_ctrl.synchronize_gateway_targets(
                         gatewayIdentifier=gateway["gatewayId"], targetIdList=_sync_ids
                     )
@@ -3171,11 +2956,9 @@ def deploy_gateway(
             try:
                 _gw = agentcore_ctrl.get_gateway(gatewayIdentifier=gateway["gatewayId"])
                 gateway_arn = _gw.get("gatewayArn", "")
-            except Exception:  # noqa: BLE001
-                pass
-        qualified_tools, expected_tool_count = _resolve_gateway_tool_actions(
-            agentcore_ctrl, gateway["gatewayId"]
-        )
+            except Exception:  # noqa: BLE001 — optional enrichment; policy_step tolerates a missing ARN
+                logger.debug("Could not resolve gateway ARN for %s", gateway["gatewayId"], exc_info=True)
+        qualified_tools, expected_tool_count = _resolve_gateway_tool_actions(agentcore_ctrl, gateway["gatewayId"])
 
         gateway_url = gateway.get("gatewayUrl", "")
         client_info = cognito_response["client_info"]
@@ -3188,9 +2971,7 @@ def deploy_gateway(
         # live MCP tools/list probe. Require the connector gateway to serve >=1 tool;
         # fail closed otherwise (never ship a connector gateway that serves nothing).
         if connectors and expected_tool_count == 0:
-            served = _wait_for_gateway_to_serve_tools(
-                gateway_url, client_info, expected=1, timeout=120
-            )
+            served = _wait_for_gateway_to_serve_tools(gateway_url, client_info, expected=1, timeout=120)
             if served < 1:
                 # Surface the REAL reason: a FAILED OpenAPI target carries an
                 # actionable statusReason (e.g. "Invalid OpenAPI schema: ...items
@@ -3205,16 +2986,15 @@ def deploy_gateway(
                         _tid = _t.get("targetId") or _t.get("gatewayTargetId")
                         if not _tid:
                             continue
-                        _d = agentcore_ctrl.get_gateway_target(
-                            gatewayIdentifier=gateway["gatewayId"], targetId=_tid
-                        )
+                        _d = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway["gatewayId"], targetId=_tid)
                         if (_d.get("status") or "").upper() == "FAILED":
                             _r = _d.get("statusReasons") or _d.get("statusReason") or "unknown"
                             target_reasons.append(f"{_tid}: {_r}")
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception:  # noqa: BLE001 — diagnostics enrichment only; the deploy still fails below
+                    logger.debug("Could not collect FAILED-target reasons", exc_info=True)
                 detail = (
-                    f" Target failure(s): {target_reasons}" if target_reasons
+                    f" Target failure(s): {target_reasons}"
+                    if target_reasons
                     else " No target reported FAILED — likely the AgentCore empty-tool-plane "
                     "provisioning flake (retry the deploy)."
                 )
@@ -3247,9 +3027,7 @@ def deploy_gateway(
             # Backfill qualified_tools from the live plane so the policy step (if any)
             # has the connector's tool actions.
             qualified_tools = _qualified_tools_from_served(gateway_url, client_info)
-            logger.warning(
-                "Connector gateway %s serves %d tool(s) over MCP", gateway["gatewayId"], served
-            )
+            logger.warning("Connector gateway %s serves %d tool(s) over MCP", gateway["gatewayId"], served)
 
         # Bug 134 (THE stability fix): a Lambda gateway target can be status=READY
         # with a full inline schema yet the gateway's MCP plane serves an EMPTY
@@ -3262,16 +3040,17 @@ def deploy_gateway(
         # working tool plane. Bounded retries; if none serve, fail the deploy
         # (never ship a runtime against a 0-tool gateway).
         if expected_tool_count > 0:
-            served = _wait_for_gateway_to_serve_tools(
-                gateway_url, client_info, expected_tool_count, timeout=90
-            )
+            served = _wait_for_gateway_to_serve_tools(gateway_url, client_info, expected_tool_count, timeout=90)
             if served < expected_tool_count:
                 if gateway_retry < 2:
                     logger.warning(
                         "Gateway %s serves %d/%d tools over MCP — likely the "
                         "AgentCore empty-tool-plane flake. Tearing it down and "
                         "recreating (attempt %d/3).",
-                        gateway["gatewayId"], served, expected_tool_count, gateway_retry + 2,
+                        gateway["gatewayId"],
+                        served,
+                        expected_tool_count,
+                        gateway_retry + 2,
                     )
                     try:
                         for _t in _get_targets_from_response(
@@ -3288,11 +3067,17 @@ def deploy_gateway(
                         logger.warning("Cleanup before gateway retry (non-fatal): %s", del_err)
                     time.sleep(8)
                     return deploy_gateway(
-                        gateway_config, region, template_id=template_id,
-                        gateway_tools=gateway_tools, identity_config=identity_config,
-                        custom_tools=custom_tools, mcp_server_runtime_arn=mcp_server_runtime_arn,
-                        mcp_oauth=mcp_oauth, knowledge_base_result=knowledge_base_result,
-                        deployment_id=deployment_id, gateway_retry=gateway_retry + 1,
+                        gateway_config,
+                        region,
+                        template_id=template_id,
+                        gateway_tools=gateway_tools,
+                        identity_config=identity_config,
+                        custom_tools=custom_tools,
+                        mcp_server_runtime_arn=mcp_server_runtime_arn,
+                        mcp_oauth=mcp_oauth,
+                        knowledge_base_result=knowledge_base_result,
+                        deployment_id=deployment_id,
+                        gateway_retry=gateway_retry + 1,
                     )
                 # Exhausted retries — fail closed rather than ship a broken gateway.
                 return {
@@ -3339,6 +3124,31 @@ def deploy_gateway(
 
     except Exception as e:
         logger.error("Gateway deployment failed: %s", e)
+        # Defect D: a gateway-step failure AFTER the gateway/role/targets were
+        # created but BEFORE the runtime exists leaks those resources — the
+        # deployment manifest only records them on the success path, so nothing
+        # ever tears them down (no runtime → no cleanup; no standalone delete
+        # route). Best-effort release of whatever we provisioned before failing,
+        # so a failed deploy leaves no orphan gateway/role/Lambda-grant behind.
+        _leaked_gateway = locals().get("gateway") or {}
+        _leaked_gw_id = _leaked_gateway.get("gatewayId") if isinstance(_leaked_gateway, dict) else None
+        if _leaked_gw_id:
+            try:
+                _abort_cfg = {
+                    "gateway_id": _leaked_gw_id,
+                    "gateway_name": locals().get("gateway_name"),
+                    "client_info": locals().get("client_info"),
+                    "lambda_function_name": locals().get("lambda_function_name") or "AgentCoreLambdaTestFunction",
+                    "custom_tool_lambdas": locals().get("custom_tool_lambdas") or [],
+                    "custom_tool_roles": locals().get("custom_tool_roles") or [],
+                    "connector_credential_providers": locals().get("connector_credential_providers") or [],
+                    "connector_secret_arns": locals().get("connector_secret_arns") or [],
+                    "connector_spec_s3_uris": locals().get("connector_spec_s3_uris") or [],
+                }
+                cleanup_gateway_resources("gateway-deploy-abort", region, _abort_cfg)
+                logger.info("Released leaked gateway %s after failed deploy", _leaked_gw_id)
+            except Exception as _ce:  # noqa: BLE001 — abort cleanup is best-effort
+                logger.warning("Abort-cleanup after failed gateway deploy failed: %s", str(_ce)[:160])
         return {"success": False, "error": str(e)}
 
 
@@ -3347,7 +3157,72 @@ def deploy_gateway(
 # ---------------------------------------------------------------------------
 
 
-def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: Optional[dict] = None) -> list[str]:
+# Tool Lambdas created once and reused by EVERY gateway deploy. They must never
+# be unconditionally deleted on a per-gateway teardown (Defect C) — doing so
+# bricks every other live gateway still wired to them. They are released by
+# reference count instead (see _release_shared_tool_lambda).
+_SHARED_TOOL_LAMBDAS = frozenset({"AgentCoreDynamicTools", "AgentCoreCustomerSupportTools"})
+
+
+def _release_shared_tool_lambda(lambda_client, function_name: str, gateway_role_name: str | None) -> str:
+    """Reference-counted teardown for a SHARED singleton tool Lambda (Defect C).
+
+    Remove only THIS gateway's ``AllowAgentCoreInvoke-<role>`` statement, then
+    delete the function ONLY when no such invoke statements remain (i.e. no other
+    live gateway still depends on it). Returns a human-readable log line.
+
+    A shared Lambda deleted while another gateway still uses it makes that
+    gateway serve 0 tools (its MCP ``tools/list`` hits a missing function) — the
+    "tear down A, B goes dead" failure the matrix run reproduced live.
+    """
+    if gateway_role_name:
+        stmt_id = re.sub(r"[^A-Za-z0-9_-]", "-", f"AllowAgentCoreInvoke-{gateway_role_name}")[:100]
+        try:
+            lambda_client.remove_permission(FunctionName=function_name, StatementId=stmt_id)
+        except Exception as e:  # noqa: BLE001 — statement may already be gone
+            if not is_error(e, "ResourceNotFoundException", "ResourceNotFound"):
+                logger.debug("remove_permission(%s) on shared lambda failed (continuing)", stmt_id, exc_info=True)
+
+    # Count remaining per-gateway invoke grants. If any survive, another gateway
+    # still needs the function — keep it. Also prune any now-orphaned statements
+    # so the policy stays clean for the next deploy.
+    try:
+        _prune_orphaned_lambda_permissions(lambda_client, function_name)
+        pol_raw = lambda_client.get_policy(FunctionName=function_name).get("Policy")
+        statements = json.loads(pol_raw).get("Statement", []) or []
+    except Exception as e:  # noqa: BLE001
+        if is_error(e, "ResourceNotFoundException", "ResourceNotFound"):
+            # AMBIGUOUS: GetPolicy raises the SAME ResourceNotFoundException for
+            # "function doesn't exist" AND "function exists but its resource
+            # policy is empty" — which is exactly the refcount-zero state after
+            # the last gateway's grant was removed above (verified live: the
+            # Lambda leaked as Active while teardown reported "already absent").
+            # Disambiguate with get_function: if the function still exists, an
+            # empty policy means zero grants remain → this WAS the last gateway,
+            # fall through to the delete below.
+            try:
+                lambda_client.get_function(FunctionName=function_name)
+            except Exception:  # noqa: BLE001 — genuinely gone (or unreadable: keep out)
+                return f"Shared tool Lambda {function_name} already absent"
+            statements = []
+        else:
+            # Can't read the policy (e.g. GetPolicy denied): DON'T risk deleting
+            # a Lambda other gateways may need. Leave it in place.
+            return f"Shared tool Lambda {function_name} kept (policy unreadable: {type(e).__name__})"
+
+    remaining = [s for s in statements if (s.get("Sid") or "").startswith("AllowAgentCoreInvoke-")]
+    if remaining:
+        return f"Shared tool Lambda {function_name} kept ({len(remaining)} other gateway grant(s) remain)"
+    try:
+        lambda_client.delete_function(FunctionName=function_name)
+        return f"Shared tool Lambda {function_name} deleted (last gateway released it)"
+    except Exception as e:  # noqa: BLE001
+        if is_error(e, "ResourceNotFoundException"):
+            return f"Shared tool Lambda {function_name} already absent"
+        return f"Shared tool Lambda delete error: {e}"
+
+
+def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: dict | None = None) -> list[str]:
     """Clean up all gateway resources: targets, Lambda, gateway, and Cognito."""
     cleanup_log: list[str] = []
 
@@ -3396,13 +3271,16 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: Opti
                         domain = pool_detail.get("UserPool", {}).get("Domain")
                         if domain:
                             cognito_client.delete_user_pool_domain(UserPoolId=user_pool_id, Domain=domain)
-                    except Exception:
-                        pass
+                    except Exception:  # noqa: BLE001 — pool delete below still surfaces real failures
+                        # No client_info-derived value in the log: that dict also
+                        # holds client_secret, so CodeQL py/clear-text-logging
+                        # taints user_pool_id/client_id too. Message only.
+                        logger.debug("Cognito domain delete failed (continuing)", exc_info=True)
                     if client_id_val:
                         try:
                             cognito_client.delete_user_pool_client(UserPoolId=user_pool_id, ClientId=client_id_val)
-                        except Exception:
-                            pass
+                        except Exception:  # noqa: BLE001 — client is cascade-deleted with the pool anyway
+                            logger.debug("Cognito client delete failed (continuing)", exc_info=True)
                     cognito_client.delete_user_pool(UserPoolId=user_pool_id)
                     cleanup_log.append(f"Cognito pool {user_pool_id} deleted")
             except Exception as e:
@@ -3410,13 +3288,24 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: Opti
         else:
             cleanup_log.append(f"External IDP ({idp_provider}) — no Cognito cleanup needed")
 
-    # Delete Lambda function
+    # Delete Lambda function. SHARED singleton tool Lambdas
+    # (AgentCoreDynamicTools / AgentCoreCustomerSupportTools) are reused by every
+    # gateway, so they are released by reference count — NOT unconditionally
+    # deleted (Defect C: deleting one kills every other live gateway wired to it).
+    # A per-gateway auto-created Lambda (AgentCoreLambdaTestFunction-* etc.) is not
+    # shared and is deleted outright.
+    lambda_client = None
     try:
         lambda_client = _create_lambda_client(region)
-        lambda_client.delete_function(FunctionName=lambda_name)
-        cleanup_log.append(f"Lambda {lambda_name} deleted")
+        if lambda_name in _SHARED_TOOL_LAMBDAS:
+            gw_name = gateway_config.get("gateway_name")
+            gw_role_name = f"AgentCoreGateway-{gw_name}" if gw_name else None
+            cleanup_log.append(_release_shared_tool_lambda(lambda_client, lambda_name, gw_role_name))
+        else:
+            lambda_client.delete_function(FunctionName=lambda_name)
+            cleanup_log.append(f"Lambda {lambda_name} deleted")
     except Exception as e:
-        if "ResourceNotFound" not in str(e):
+        if not is_error(e, "ResourceNotFoundException"):
             cleanup_log.append(f"Lambda delete error: {e}")
 
     # Delete custom tool Lambdas
@@ -3428,7 +3317,7 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: Opti
             lambda_client.delete_function(FunctionName=fn_name)
             cleanup_log.append(f"Custom tool Lambda {fn_name} deleted")
         except Exception as e:
-            if "ResourceNotFound" not in str(e):
+            if not is_error(e, "ResourceNotFoundException"):
                 cleanup_log.append(f"Custom tool Lambda delete error: {e}")
 
     # Delete custom tool IAM roles
@@ -3443,7 +3332,7 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: Opti
             iam_client.delete_role(RoleName=role_name)
             cleanup_log.append(f"IAM role {role_name} deleted")
         except Exception as e:
-            if "NoSuchEntity" not in str(e):
+            if not is_error(e, "NoSuchEntity", "NoSuchEntityException"):
                 cleanup_log.append(f"IAM role cleanup error for {role_name}: {e}")
 
     # Delete the gateway's own execution role (AgentCoreGateway-<gateway_name>).
@@ -3464,7 +3353,7 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: Opti
             iam_client.delete_role(RoleName=gw_role_name)
             cleanup_log.append(f"Gateway IAM role {gw_role_name} deleted")
         except Exception as e:  # noqa: BLE001
-            if "NoSuchEntity" not in str(e):
+            if not is_error(e, "NoSuchEntity", "NoSuchEntityException"):
                 cleanup_log.append(f"Gateway IAM role cleanup error: {e}")
 
     # Delete SaaS connector credential providers (API-key OR OAuth2 — try both,
@@ -3488,7 +3377,7 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: Opti
                 sm_client.delete_secret(SecretId=secret_arn, ForceDeleteWithoutRecovery=True)
                 cleanup_log.append(f"Connector secret {secret_arn} deleted")
             except Exception as e:  # noqa: BLE001
-                if "ResourceNotFound" not in str(e):
+                if not is_error(e, "ResourceNotFoundException"):
                     cleanup_log.append(f"Connector secret delete error: {e}")
 
     # Delete staged OpenAPI spec objects (large connector specs routed to S3).
@@ -3549,9 +3438,9 @@ def build_external_mcp_target_params(
     target_name: str,
     catalog_entry: dict,
     endpoint: str,
-    secret_arn: Optional[str] = None,
-    oauth_provider_arn: Optional[str] = None,
-    oauth_scopes: Optional[list] = None,
+    secret_arn: str | None = None,
+    oauth_provider_arn: str | None = None,
+    oauth_scopes: list | None = None,
 ) -> dict:
     """Assemble CreateGatewayTarget params for an external MCP catalog entry.
 
@@ -3584,19 +3473,13 @@ def build_external_mcp_target_params(
         pass  # Tier 1 — no credential provider (valid per API model).
     elif auth_type == "api_key":
         if not secret_arn:
-            raise RuntimeError(
-                f"MCP '{catalog_entry.get('id')}' needs an API key — provide a secret_arn."
-            )
+            raise RuntimeError(f"MCP '{catalog_entry.get('id')}' needs an API key — provide a secret_arn.")
         descriptor = catalog_entry.get("api_key_descriptor") or {}
-        provider_arn = _ensure_api_key_credential_provider(
-            agentcore_ctrl, f"mcp-{target_name}", secret_arn=secret_arn
-        )
+        provider_arn = _ensure_api_key_credential_provider(agentcore_ctrl, f"mcp-{target_name}", secret_arn=secret_arn)
         cred_configs.append(_mcp_api_key_cred_config(provider_arn, descriptor))
     elif auth_type == "oauth2_client_credentials":
         if not oauth_provider_arn:
-            raise RuntimeError(
-                f"MCP '{catalog_entry.get('id')}' needs an OAuth provider ARN (client-credentials)."
-            )
+            raise RuntimeError(f"MCP '{catalog_entry.get('id')}' needs an OAuth provider ARN (client-credentials).")
         cred_configs.append(
             {
                 "credentialProviderType": "OAUTH",
@@ -3624,12 +3507,12 @@ def deploy_external_mcp_target(
     *,
     gateway_id: str,
     catalog_entry: dict,
-    endpoint: Optional[str] = None,
-    secret_arn: Optional[str] = None,
-    oauth_provider_arn: Optional[str] = None,
-    oauth_scopes: Optional[list] = None,
-    target_name: Optional[str] = None,
-) -> Optional[dict]:
+    endpoint: str | None = None,
+    secret_arn: str | None = None,
+    oauth_provider_arn: str | None = None,
+    oauth_scopes: list | None = None,
+    target_name: str | None = None,
+) -> dict | None:
     """Create a Gateway `mcpServer` target for an external MCP catalog entry.
 
     ``endpoint`` overrides the catalog endpoint (needed when the catalog URL has
@@ -3652,7 +3535,9 @@ def deploy_external_mcp_target(
     )
     logger.info(
         "Creating external MCP target '%s' (tier=%s, auth=%s)",
-        name, catalog_entry.get("tier"), catalog_entry.get("auth_type"),
+        name,
+        catalog_entry.get("tier"),
+        catalog_entry.get("auth_type"),
     )
     return _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, name, params)
 
@@ -3709,20 +3594,52 @@ def _deploy_external_mcp_targets(
             _delete_connector_credential_provider(agentcore_ctrl, pname)
         if created_secrets:
             sm = _create_secrets_client(region)
-            for sarn in created_secrets:
+            for _sidx, sarn in enumerate(created_secrets):
                 try:
                     sm.delete_secret(SecretId=sarn, ForceDeleteWithoutRecovery=True)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception:  # noqa: BLE001 — best-effort rollback
+                    # No ARN/value in the log (CodeQL py/clear-text-logging taint).
+                    logger.warning("Rollback: could not delete MCP-server secret #%d", _sidx)
 
     try:
         for sel in external_mcp_servers:
             server_id = (sel or {}).get("server_id") or (sel or {}).get("serverId")
-            if not server_id:
-                raise RuntimeError("External MCP selection missing 'server_id'.")
-            entry = get_mcp_server(server_id)
-            if entry is None:
-                raise RuntimeError(f"Unknown MCP server id: {server_id}")
+            raw_endpoint = (sel or {}).get("endpoint") or (sel or {}).get("server_url") or (sel or {}).get("serverUrl")
+
+            # CUSTOM endpoint path: the caller supplied a raw https MCP endpoint
+            # not in the curated catalog. Synthesize an in-memory catalog entry
+            # from the selection's own fields (endpoint + auth_type) instead of
+            # a catalog lookup. The endpoint is SSRF-validated (https-only, DNS-
+            # resolved, private/IMDS ranges blocked) exactly like the OpenAPI
+            # spec-url path. Only the direct tiers are wireable (no adapter).
+            if not server_id and raw_endpoint:
+                custom_auth = (sel.get("auth_type") or sel.get("authType") or "none").lower()
+                if custom_auth not in ("none", "api_key", "oauth2_client_credentials", "iam_sigv4"):
+                    raise RuntimeError(
+                        f"Custom MCP auth_type '{custom_auth}' is not a direct tier "
+                        "(use none / api_key / oauth2_client_credentials / iam_sigv4)."
+                    )
+                validated_endpoint = _validate_outbound_url(raw_endpoint)
+                server_id = "custom-" + re.sub(r"[^a-z0-9]+", "-", (sel.get("name") or "mcp").lower()).strip("-")[:32]
+                entry = {
+                    "id": server_id,
+                    "display_name": sel.get("name") or "Custom MCP",
+                    "endpoint": validated_endpoint,
+                    "auth_type": custom_auth,
+                    "tier": {
+                        "none": "direct-none",
+                        "api_key": "direct-apikey",
+                        "oauth2_client_credentials": "direct-oauth",
+                        "iam_sigv4": "direct-iam",
+                    }[custom_auth],
+                    "api_key_descriptor": sel.get("api_key_descriptor") or {},
+                }
+            else:
+                if not server_id:
+                    raise RuntimeError("External MCP selection needs a 'server_id' or a custom 'endpoint'.")
+                entry = get_mcp_server(server_id)
+                if entry is None:
+                    raise RuntimeError(f"Unknown MCP server id: {server_id}")
 
             endpoint = _fill_endpoint_placeholders(
                 entry.get("endpoint") or "", sel.get("endpoint_vars") or sel.get("endpointVars") or {}
@@ -3749,19 +3666,22 @@ def _deploy_external_mcp_targets(
                 # A CustomOauth2 client-credentials provider resolves its token
                 # endpoint from the IdP's OIDC discovery document.
                 discovery_url = (
-                    oauth.get("discovery_url") or oauth.get("discoveryUrl")
-                    or oauth.get("token_url") or oauth.get("tokenUrl")
+                    oauth.get("discovery_url")
+                    or oauth.get("discoveryUrl")
+                    or oauth.get("token_url")
+                    or oauth.get("tokenUrl")
                 )
                 if not (client_id and client_secret and discovery_url):
-                    raise RuntimeError(
-                        f"MCP '{server_id}' needs oauth {{client_id, client_secret, discovery_url}}."
-                    )
+                    raise RuntimeError(f"MCP '{server_id}' needs oauth {{client_id, client_secret, discovery_url}}.")
                 cs_arn = _put_connector_secret(region, owner_sub, {"clientSecret": client_secret})
                 created_secrets.append(cs_arn)
                 oauth_provider_arn = _ensure_oauth2_credential_provider(
-                    agentcore_ctrl, f"mcp-{server_id}",
-                    vendor="CustomOauth2", client_id=client_id,
-                    client_secret_arn=cs_arn, discovery_url=discovery_url,
+                    agentcore_ctrl,
+                    f"mcp-{server_id}",
+                    vendor="CustomOauth2",
+                    client_id=client_id,
+                    client_secret_arn=cs_arn,
+                    discovery_url=discovery_url,
                 )
                 created_providers.append(_sanitize_provider_name(f"mcp-{server_id}"))
                 oauth_scopes = oauth.get("scopes") or (entry.get("oauth_descriptor") or {}).get("scopes")
@@ -3786,3 +3706,242 @@ def _deploy_external_mcp_targets(
         raise
 
     return {"credential_provider_names": created_providers, "secret_arns": created_secrets}
+
+
+def _grant_gateway_invoke_on_lambda(region: str, function_arn: str, gateway_role_arn: str) -> None:
+    """Grant the gateway execution role ``lambda:InvokeFunction`` on a
+    user-supplied Lambda ARN (idempotent, per-role StatementId).
+
+    Mirrors the grant `_create_or_update_lambda` applies to our managed tool
+    Lambdas, but targets a function we did NOT create (a raw ARN from a gateway
+    ``lambda`` target). Best-effort on propagation races; a conflicting statement
+    (already granted) is treated as success.
+    """
+    if not (function_arn and gateway_role_arn):
+        return
+    lambda_client = _create_lambda_client(region)
+    role_name = gateway_role_arn.rsplit("/", 1)[-1]
+    # PRUNE first: a prior (now-deleted) gateway role can leave a dangling
+    # principal (AROA...) in this function's resource policy, which makes EVERY
+    # subsequent add_permission reject with "The provided principal was invalid"
+    # — even a valid one. This is the root cause of multi-gateway deploy
+    # failures against a shared/reused Lambda (matches the managed-Lambda path).
+    _prune_orphaned_lambda_permissions(lambda_client, function_arn)
+    stmt_id = re.sub(r"[^A-Za-z0-9_-]", "-", f"AllowAgentCoreInvoke-{role_name}")[:100]
+    for attempt in range(8):
+        try:
+            lambda_client.add_permission(
+                FunctionName=function_arn,
+                StatementId=stmt_id,
+                Action="lambda:InvokeFunction",
+                Principal=gateway_role_arn,
+            )
+            logger.info("Granted %s invoke on user Lambda %s", role_name, _safe_log_token(function_arn))
+            return
+        except lambda_client.exceptions.ResourceConflictException:
+            return  # already permitted — fine
+        except lambda_client.exceptions.InvalidParameterValueException as e:
+            if "principal" not in str(e).lower() or attempt == 7:
+                raise
+            time.sleep(8)
+
+
+def _default_lambda_tool_schema(function_arn: str) -> dict:
+    """Build a generic single-tool schema for a bare Lambda ARN target.
+
+    AgentCore's ``McpLambdaTargetConfiguration`` REQUIRES a ``toolSchema``, but a
+    gateway ``lambda`` target only carries the function ARN. Derive a passthrough
+    tool named after the function that accepts a free-form object payload so the
+    target is valid and invocable.
+    """
+    fn_name = function_arn.rsplit(":function:", 1)[-1].split(":")[0] or "invoke"
+    tool_name = re.sub(r"[^a-zA-Z0-9_-]", "_", fn_name)[:60] or "invoke"
+    return {
+        "inlinePayload": [
+            {
+                "name": tool_name,
+                "description": f"Invoke the {fn_name} Lambda function.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            }
+        ]
+    }
+
+
+def _openapi_target_cred_config(agentcore_ctrl, target: dict, base_name: str) -> dict | None:
+    """Pick the outbound credential provider for an OpenAPI ``targets[]`` entry.
+
+    OpenAPI targets are arbitrary external HTTP APIs, so ``GATEWAY_IAM_ROLE``
+    (SigV4) is INVALID for them (Defect B). Valid options:
+
+      * ``none`` / unset  → return ``None`` (public spec — omit the block).
+      * ``api_key``       → API_KEY provider from a pre-minted ``secret_arn``.
+      * ``oauth2_client_credentials`` → OAUTH provider from a pre-minted
+        ``oauth_provider_arn``.
+
+    The multi-target modal currently collects only the spec (public is the
+    default), so ``None`` is the common path; the auth branches are honored when
+    a richer payload supplies them (keeps parity with the connector OpenAPI path).
+    """
+    auth_type = (target.get("auth_type") or target.get("authType") or "none").lower()
+    if auth_type in ("", "none"):
+        return None
+    if auth_type == "api_key":
+        secret_arn = target.get("secret_arn") or target.get("secretArn")
+        if not secret_arn:
+            logger.warning(
+                "OpenAPI target %s requests api_key auth but has no secret_arn; deploying as public",
+                base_name,
+            )
+            return None
+        provider_arn = _ensure_api_key_credential_provider(
+            agentcore_ctrl, f"openapi-{base_name}", secret_arn=secret_arn
+        )
+        descriptor = {
+            "parameter_name": target.get("credential_parameter_name") or target.get("credentialParameterName"),
+            "location": target.get("credential_location") or target.get("credentialLocation"),
+            "prefix": target.get("credential_prefix") or target.get("credentialPrefix"),
+        }
+        return _mcp_api_key_cred_config(provider_arn, descriptor)
+    if auth_type in ("oauth2_client_credentials", "oauth"):
+        provider_arn = target.get("oauth_provider_arn") or target.get("oauthProviderArn")
+        if not provider_arn:
+            logger.warning(
+                "OpenAPI target %s requests oauth but has no oauth_provider_arn; deploying as public",
+                base_name,
+            )
+            return None
+        return {
+            "credentialProviderType": "OAUTH",
+            "credentialProvider": {
+                "oauthCredentialProvider": {
+                    "providerArn": provider_arn,
+                    "scopes": target.get("scopes") or [],
+                }
+            },
+        }
+    logger.warning("OpenAPI target %s has unsupported auth_type %r; deploying as public", base_name, auth_type)
+    return None
+
+
+def _deploy_config_targets(
+    agentcore_ctrl,
+    gateway_id: str,
+    region: str,
+    targets: list[dict],
+    gateway_role_arn: str = "",
+    name_prefix: str = "cfgtgt",
+) -> dict:
+    """Deploy a mixed list of gateway ``targets`` (openapi / lambda / smithy) —
+    all on the SAME gateway — creating one gateway target per entry.
+
+    This is the multi-target counterpart to ``_deploy_connector_targets`` /
+    ``_deploy_external_mcp_targets``. It handles the NON-MCP families (mcp_server
+    entries are wired via ``external_mcp_servers``):
+
+      * ``lambda``  → ``targetConfiguration.mcp.lambda`` (+ gateway-role invoke
+        grant on the user-supplied ARN), using a generic passthrough toolSchema.
+      * ``openapi`` → ``targetConfiguration.mcp.openApiSchema`` (inline / staged),
+        mirroring the connector OpenAPI path (no credential provider — public /
+        gateway-IAM specs; auth'd specs should use the connector path).
+      * ``smithy``  → ``targetConfiguration.mcp.smithyModel`` from inline content.
+
+    Each target gets a UNIQUE ``name`` (``<prefix>-<family>-<index>``) on the
+    gateway. Returns ``{"target_names": [...]}`` for logging / assertions.
+    Unknown / unsupported families are skipped with a warning (never fatal).
+    """
+    created_target_names: list[str] = []
+
+    for idx, raw in enumerate(targets or []):
+        target = raw or {}
+        ttype = target.get("type") or target.get("target_type") or ""
+        base_name = re.sub(r"[^a-zA-Z0-9-]", "-", f"{name_prefix}-{ttype or 'x'}-{idx}")[:48]
+
+        if ttype == "lambda":
+            function_arn = target.get("function_arn") or target.get("functionArn")
+            if not function_arn:
+                logger.warning("Gateway lambda target #%d has no function_arn; skipping", idx)
+                continue
+            if gateway_role_arn:
+                _grant_gateway_invoke_on_lambda(region, function_arn, gateway_role_arn)
+            tool_schema = (
+                target.get("tool_schema") or target.get("toolSchema") or _default_lambda_tool_schema(function_arn)
+            )
+            create_params = {
+                "gatewayIdentifier": gateway_id,
+                "name": base_name,
+                "targetConfiguration": {"mcp": {"lambda": {"lambdaArn": function_arn, "toolSchema": tool_schema}}},
+                "credentialProviderConfigurations": [{"credentialProviderType": "GATEWAY_IAM_ROLE"}],
+            }
+            _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, base_name, create_params)
+            created_target_names.append(base_name)
+            logger.info("Deployed lambda gateway target %s -> %s", base_name, _safe_log_token(function_arn))
+
+        elif ttype == "openapi":
+            spec_inline = target.get("spec_content") or target.get("specContent")
+            spec_url = target.get("spec_url") or target.get("specUrl")
+            if not spec_inline:
+                if not spec_url:
+                    logger.warning("Gateway openapi target #%d has no spec_url/spec_content; skipping", idx)
+                    continue
+                spec_inline = _fetch_openapi_spec(spec_url)
+            openapi_schema = _build_openapi_schema(spec_inline, connector_id=base_name, region=region)
+            create_params = {
+                "gatewayIdentifier": gateway_id,
+                "name": base_name,
+                "targetConfiguration": {"mcp": {"openApiSchema": openapi_schema}},
+            }
+            # An OpenAPI target is an external HTTP API, NOT an AWS-native target:
+            # GATEWAY_IAM_ROLE (SigV4) is invalid for it (AgentCore rejects with
+            # "IamCredentialProvider is required for openApiSchema targets" — Defect
+            # B). Valid providers are API_KEY / OAUTH, or none at all for a public
+            # spec. The modal collects only the spec, so the default is public
+            # (omit the block); api_key/oauth are honored if present in the payload.
+            cred_cfg = _openapi_target_cred_config(agentcore_ctrl, target, base_name)
+            if cred_cfg is not None:
+                create_params["credentialProviderConfigurations"] = [cred_cfg]
+            _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, base_name, create_params)
+            created_target_names.append(base_name)
+            logger.info("Deployed openapi gateway target %s", base_name)
+
+        elif ttype == "smithy":
+            # AgentCore's smithyModel is an inline/staged API schema. The bare
+            # model_name ('dynamodb') carries no schema, so require inline content
+            # (model_content / spec_content) — skip loudly otherwise.
+            model_content = (
+                target.get("model_content")
+                or target.get("modelContent")
+                or target.get("spec_content")
+                or target.get("specContent")
+            )
+            if not model_content:
+                logger.warning(
+                    "Gateway smithy target #%d ('%s') has no inline model content; skipping",
+                    idx,
+                    target.get("model_name") or target.get("modelName"),
+                )
+                continue
+            create_params = {
+                "gatewayIdentifier": gateway_id,
+                "name": base_name,
+                "targetConfiguration": {"mcp": {"smithyModel": {"inlinePayload": model_content}}},
+                # Smithy models front AWS SDK services (e.g. DynamoDB): they ARE
+                # AWS-native, so GATEWAY_IAM_ROLE (SigV4 signed by the gateway
+                # execution role) is the correct provider here — unlike openapi.
+                "credentialProviderConfigurations": [{"credentialProviderType": "GATEWAY_IAM_ROLE"}],
+            }
+            _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, base_name, create_params)
+            created_target_names.append(base_name)
+            logger.info("Deployed smithy gateway target %s", base_name)
+
+        elif ttype == "mcp_server":
+            # mcp_server entries are wired via external_mcp_servers (secret hygiene
+            # + SSRF validation live there); ignore here to avoid double-deploy.
+            continue
+
+        else:
+            logger.warning("Unknown gateway target family '%s' (#%d); skipping", ttype, idx)
+
+    return {"target_names": created_target_names}

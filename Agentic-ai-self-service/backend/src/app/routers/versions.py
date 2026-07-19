@@ -13,9 +13,9 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Literal, Optional
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.services.agent_versions_store import (
@@ -36,10 +36,7 @@ def _validate_runtime_name(runtime_name: str) -> str:
     if not re.match(r"^[a-zA-Z][a-zA-Z0-9_]*$", runtime_name):
         raise HTTPException(
             status_code=400,
-            detail=(
-                "runtime_name must match [a-zA-Z][a-zA-Z0-9_]* "
-                "(AgentCore naming rules)"
-            ),
+            detail=("runtime_name must match [a-zA-Z][a-zA-Z0-9_]* (AgentCore naming rules)"),
         )
     return runtime_name
 
@@ -69,15 +66,15 @@ class VersionResponse(BaseModel):
     created_at: str
     deployment_id: str
     agentcore_runtime_name: str
-    runtime_id: Optional[str] = None
-    runtime_arn: Optional[str] = None
-    runtime_endpoint: Optional[str] = None
-    parent_version_id: Optional[str] = None
+    runtime_id: str | None = None
+    runtime_arn: str | None = None
+    runtime_endpoint: str | None = None
+    parent_version_id: str | None = None
     status: str
-    description: Optional[str] = None
+    description: str | None = None
 
     @classmethod
-    def from_model(cls, v: AgentVersion) -> "VersionResponse":
+    def from_model(cls, v: AgentVersion) -> VersionResponse:
         return cls(
             runtime_name=v.runtime_name,
             version_id=v.version_id,
@@ -95,10 +92,10 @@ class VersionResponse(BaseModel):
 
 class SlotsResponse(BaseModel):
     runtime_name: str
-    production_version_id: Optional[str] = None
-    staging_version_id: Optional[str] = None
-    previous_production_version_id: Optional[str] = None
-    last_promoted_at: Optional[str] = None
+    production_version_id: str | None = None
+    staging_version_id: str | None = None
+    previous_production_version_id: str | None = None
+    last_promoted_at: str | None = None
 
 
 class PromoteResponse(BaseModel):
@@ -106,7 +103,7 @@ class PromoteResponse(BaseModel):
     runtime_name: str
     promoted_version_id: str
     slot: str
-    previous_version_id: Optional[str] = None
+    previous_version_id: str | None = None
     message: str
 
 
@@ -119,7 +116,11 @@ class PromoteRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-@router.get("/{runtime_name}/versions", response_model=list[VersionResponse], dependencies=[Depends(require_scopes("agent:read"))])
+@router.get(
+    "/{runtime_name}/versions",
+    response_model=list[VersionResponse],
+    dependencies=[Depends(require_scopes("agent:read"))],
+)
 async def list_versions(
     runtime_name: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -134,11 +135,7 @@ async def list_versions(
         # filter yields an empty list which is indistinguishable from
         # "no versions" — that's intentional (existence-non-disclosure).
         return []
-    return [
-        VersionResponse.from_model(v)
-        for v in versions
-        if v.owner_sub == caller_sub
-    ]
+    return [VersionResponse.from_model(v) for v in versions if v.owner_sub == caller_sub]
 
 
 @router.get("/{runtime_name}/slots", response_model=SlotsResponse, dependencies=[Depends(require_scopes("agent:read"))])
@@ -169,7 +166,7 @@ async def get_slots(
 async def promote_version(
     runtime_name: str,
     version_id: str,
-    body: PromoteRequest = PromoteRequest(),
+    body: PromoteRequest = PromoteRequest(),  # noqa: B008 — FastAPI optional-body idiom (validated per request)
     caller_sub: str = Depends(get_caller_sub),
 ) -> PromoteResponse:
     """Move *version_id* into the requested slot (default: production)."""
@@ -199,11 +196,7 @@ async def promote_version(
     else:
         existing = RuntimeSlots(runtime_name=runtime_name, owner_sub=caller_sub)
 
-    previous = (
-        existing.production_version_id
-        if body.slot == "production"
-        else existing.staging_version_id
-    )
+    previous = existing.production_version_id if body.slot == "production" else existing.staging_version_id
 
     if body.slot == "production":
         existing.previous_production_version_id = existing.production_version_id
@@ -232,7 +225,9 @@ async def promote_version(
     )
 
 
-@router.post("/{runtime_name}/rollback", response_model=PromoteResponse, dependencies=[Depends(require_scopes("agent:write"))])
+@router.post(
+    "/{runtime_name}/rollback", response_model=PromoteResponse, dependencies=[Depends(require_scopes("agent:write"))]
+)
 async def rollback_runtime(
     runtime_name: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -254,10 +249,7 @@ async def rollback_runtime(
     if not slots.previous_production_version_id:
         raise HTTPException(
             status_code=409,
-            detail=(
-                "No previous production version to roll back to — this is "
-                "the first deploy of this runtime."
-            ),
+            detail=("No previous production version to roll back to — this is the first deploy of this runtime."),
         )
 
     target_version = slots.previous_production_version_id
@@ -267,8 +259,7 @@ async def rollback_runtime(
         raise HTTPException(
             status_code=409,
             detail=(
-                f"Previous production version {target_version} is missing or "
-                f"not in succeeded state; cannot roll back."
+                f"Previous production version {target_version} is missing or not in succeeded state; cannot roll back."
             ),
         )
 

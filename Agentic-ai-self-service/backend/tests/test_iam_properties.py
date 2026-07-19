@@ -11,13 +11,12 @@ import sys
 
 sys.path.insert(0, "src")
 
-from hypothesis import given, settings, strategies as st
-
 from app.services.iam_manager import (
     TOOL_POLICY_STATEMENTS,
     build_tool_policy_statements,
 )
-
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 # ============================================================================
 # Hypothesis Strategies

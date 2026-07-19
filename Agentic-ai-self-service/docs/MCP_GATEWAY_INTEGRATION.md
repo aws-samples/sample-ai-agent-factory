@@ -1,5 +1,7 @@
 # External MCP → AgentCore Gateway: authorization architecture
 
+[← Back to README](../README.md)
+
 How the platform connects an **external MCP server** as a Gateway `mcpServer`
 target, with the correct outbound authorization for each auth style. Grounded in
 the live `bedrock-agentcore-control` API model (boto3 1.43.8):

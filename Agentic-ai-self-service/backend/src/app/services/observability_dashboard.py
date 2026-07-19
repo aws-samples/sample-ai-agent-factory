@@ -25,7 +25,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Optional
 
 import boto3
 
@@ -50,8 +49,7 @@ def dashboard_console_url(region: str, dashboard_name: str) -> str:
     region as the runtime.
     """
     return (
-        f"https://{region}.console.aws.amazon.com/cloudwatch/home"
-        f"?region={region}#dashboards/dashboard/{dashboard_name}"
+        f"https://{region}.console.aws.amazon.com/cloudwatch/home?region={region}#dashboards/dashboard/{dashboard_name}"
     )
 
 
@@ -59,8 +57,8 @@ def build_dashboard_body(
     runtime_id: str,
     runtime_name: str,
     region: str,
-    log_group_name: Optional[str] = None,
-    eval_log_group_name: Optional[str] = None,
+    log_group_name: str | None = None,
+    eval_log_group_name: str | None = None,
 ) -> str:
     """Return a CloudWatch dashboard JSON body for *runtime_id*.
 
@@ -77,16 +75,12 @@ def build_dashboard_body(
         eval_log_group_name: Optional eval-results log group; when present,
             an extra widget renders eval scores.
     """
-    log_group = log_group_name or (
-        f"/aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT"
-    )
+    log_group = log_group_name or (f"/aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT")
     # Insights queries are JSON-stringified into the widget properties.
     # Fields documented at:
     #   https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/CWL_QuerySyntax.html
     invocations_query = (
-        "fields @timestamp, @message"
-        "\n| filter @message like /invoke/"
-        "\n| stats count(*) as invocations by bin(5m)"
+        "fields @timestamp, @message\n| filter @message like /invoke/\n| stats count(*) as invocations by bin(5m)"
     )
     latency_query = (
         "fields @timestamp, @message, @duration"
@@ -94,11 +88,11 @@ def build_dashboard_body(
         "\n| stats pct(@duration, 50) as p50, pct(@duration, 95) as p95, "
         "pct(@duration, 99) as p99 by bin(5m)"
     )
-    token_query = (
+    token_query = (  # noqa: S105  # CloudWatch Logs Insights query text, not a credential
         "fields @timestamp, @message"
         "\n| filter @message like /gen_ai.usage/"
-        "\n| parse @message /\"gen_ai.usage.input_tokens\":\\s*(?<in_tok>\\d+)/"
-        "\n| parse @message /\"gen_ai.usage.output_tokens\":\\s*(?<out_tok>\\d+)/"
+        '\n| parse @message /"gen_ai.usage.input_tokens":\\s*(?<in_tok>\\d+)/'
+        '\n| parse @message /"gen_ai.usage.output_tokens":\\s*(?<out_tok>\\d+)/'
         "\n| stats sum(in_tok) as input_tokens, sum(out_tok) as output_tokens "
         "by bin(5m)"
     )
@@ -214,7 +208,7 @@ def build_dashboard_body(
         eval_query = (
             "fields @timestamp, @message"
             "\n| filter @message like /evaluatorId/"
-            "\n| parse @message /\"evaluatorId\":\"(?<eid>[^\"]+)\".*\"score\":(?<sc>[0-9.]+)/"
+            '\n| parse @message /"evaluatorId":"(?<eid>[^"]+)".*"score":(?<sc>[0-9.]+)/'
             "\n| stats avg(sc) as avg_score by eid, bin(5m)"
         )
         widgets.append(
@@ -244,8 +238,8 @@ def put_dashboard_for_runtime(
     runtime_name: str,
     region: str,
     *,
-    log_group_name: Optional[str] = None,
-    eval_log_group_name: Optional[str] = None,
+    log_group_name: str | None = None,
+    eval_log_group_name: str | None = None,
 ) -> tuple[str, str]:
     """Create or update the CloudWatch dashboard for *runtime_id*.
 

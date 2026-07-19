@@ -40,14 +40,14 @@ def _store() -> ApprovalPolicyStore:
     )
 
 
-@router.get("/approval-policies", response_model=list[ApprovalPolicy],
-            dependencies=[Depends(require_scopes("hitl:read"))])
+@router.get(
+    "/approval-policies", response_model=list[ApprovalPolicy], dependencies=[Depends(require_scopes("hitl:read"))]
+)
 def list_policies(caller_sub: str = Depends(get_caller_sub)) -> list[ApprovalPolicy]:
     return _store().list(_org(caller_sub))
 
 
-@router.post("/approval-policies", response_model=ApprovalPolicy,
-             dependencies=[Depends(require_scopes("hitl:write"))])
+@router.post("/approval-policies", response_model=ApprovalPolicy, dependencies=[Depends(require_scopes("hitl:write"))])
 def upsert_policy(body: ApprovalPolicy, caller_sub: str = Depends(get_caller_sub)) -> ApprovalPolicy:
     if not _NAME_RE.match(body.name):
         raise HTTPException(status_code=400, detail="Invalid policy name")
@@ -56,8 +56,7 @@ def upsert_policy(body: ApprovalPolicy, caller_sub: str = Depends(get_caller_sub
     return _store().put(_org(caller_sub), body)
 
 
-@router.delete("/approval-policies/{name}",
-               dependencies=[Depends(require_scopes("hitl:write"))])
+@router.delete("/approval-policies/{name}", dependencies=[Depends(require_scopes("hitl:write"))])
 def delete_policy(name: str, caller_sub: str = Depends(get_caller_sub)) -> dict:
     if not _NAME_RE.match(name):
         raise HTTPException(status_code=400, detail="Invalid policy name")

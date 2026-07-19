@@ -19,7 +19,7 @@ No AWS, no inline Cognito auth — unit only.
 from __future__ import annotations
 
 import sys
-from typing import Iterator
+from collections.abc import Iterator
 from unittest.mock import patch
 
 import boto3
@@ -30,8 +30,6 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, "src")
 
 moto = pytest.importorskip("moto")
-from moto import mock_aws  # noqa: E402
-
 from app.services.agent_versions_store import AgentVersion, RuntimeSlots  # noqa: E402
 from app.services.auth import get_caller_sub  # noqa: E402
 from app.services.trigger_store import (  # noqa: E402
@@ -41,6 +39,7 @@ from app.services.trigger_store import (  # noqa: E402
     TriggerStore,
     new_trigger_id,
 )
+from moto import mock_aws  # noqa: E402
 
 TABLE_NAME = "Triggers"
 GSI_NAME = "owner_sub-trigger_id-index"
@@ -278,12 +277,10 @@ def _seed_slot(owner_sub: str, runtime_name: str = "alice_bot"):
 def test_create_stamps_owner_and_server_derived_arn(store: TriggerStore):
     slots, version = _seed_slot(ALICE)
     client = _make_client(ALICE)
-    with patch(
-        "app.routers.triggers.get_slots_store"
-    ) as slots_mock, patch(
-        "app.routers.triggers.get_versions_store"
-    ) as versions_mock, patch(
-        "app.routers.triggers.get_trigger_store", return_value=store
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
     ):
         slots_mock.return_value.get.return_value = slots
         versions_mock.return_value.get.return_value = version
@@ -299,9 +296,7 @@ def test_create_stamps_owner_and_server_derived_arn(store: TriggerStore):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     # Server derived the ARN from the owned version; the body value is ignored.
-    assert body["target_runtime_arn"] == (
-        "arn:aws:bedrock-agentcore:us-east-1:1:runtime/alice_bot"
-    )
+    assert body["target_runtime_arn"] == ("arn:aws:bedrock-agentcore:us-east-1:1:runtime/alice_bot")
     assert "evil" not in body["target_runtime_arn"]
     # owner_sub is stamped on the persisted row.
     stored = store.get("alice_bot", body["trigger_id"])
@@ -313,12 +308,10 @@ def test_bug122_bob_cannot_create_trigger_on_alices_runtime(store: TriggerStore)
     """Bob POSTs to Alice's runtime_name -> 404 and no DDB row is written."""
     slots, version = _seed_slot(ALICE)  # slot owned by alice
     client = _make_client(BOB)
-    with patch(
-        "app.routers.triggers.get_slots_store"
-    ) as slots_mock, patch(
-        "app.routers.triggers.get_versions_store"
-    ) as versions_mock, patch(
-        "app.routers.triggers.get_trigger_store", return_value=store
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
     ):
         slots_mock.return_value.get.return_value = slots
         versions_mock.return_value.get.return_value = version
@@ -333,10 +326,9 @@ def test_bug122_bob_cannot_create_trigger_on_alices_runtime(store: TriggerStore)
 
 def test_create_404_when_no_slot(store: TriggerStore):
     client = _make_client(ALICE)
-    with patch(
-        "app.routers.triggers.get_slots_store"
-    ) as slots_mock, patch(
-        "app.routers.triggers.get_trigger_store", return_value=store
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
     ):
         slots_mock.return_value.get.return_value = None
         resp = client.post(
@@ -364,12 +356,10 @@ def test_list_only_returns_callers_triggers(store: TriggerStore):
     )
     slots, version = _seed_slot(ALICE)
     client = _make_client(ALICE)
-    with patch(
-        "app.routers.triggers.get_slots_store"
-    ) as slots_mock, patch(
-        "app.routers.triggers.get_versions_store"
-    ) as versions_mock, patch(
-        "app.routers.triggers.get_trigger_store", return_value=store
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
     ):
         slots_mock.return_value.get.return_value = slots
         versions_mock.return_value.get.return_value = version
@@ -390,12 +380,10 @@ def test_delete_own_trigger_succeeds(store: TriggerStore):
     )
     slots, version = _seed_slot(ALICE)
     client = _make_client(ALICE)
-    with patch(
-        "app.routers.triggers.get_slots_store"
-    ) as slots_mock, patch(
-        "app.routers.triggers.get_versions_store"
-    ) as versions_mock, patch(
-        "app.routers.triggers.get_trigger_store", return_value=store
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
     ):
         slots_mock.return_value.get.return_value = slots
         versions_mock.return_value.get.return_value = version
@@ -416,12 +404,10 @@ def test_delete_cross_tenant_trigger_returns_404(store: TriggerStore):
     )
     slots, version = _seed_slot(ALICE)
     client = _make_client(ALICE)
-    with patch(
-        "app.routers.triggers.get_slots_store"
-    ) as slots_mock, patch(
-        "app.routers.triggers.get_versions_store"
-    ) as versions_mock, patch(
-        "app.routers.triggers.get_trigger_store", return_value=store
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
     ):
         slots_mock.return_value.get.return_value = slots
         versions_mock.return_value.get.return_value = version
@@ -443,12 +429,10 @@ def test_invalid_runtime_name_rejected(store: TriggerStore):
 def test_invalid_trigger_id_rejected_on_delete(store: TriggerStore):
     slots, version = _seed_slot(ALICE)
     client = _make_client(ALICE)
-    with patch(
-        "app.routers.triggers.get_slots_store"
-    ) as slots_mock, patch(
-        "app.routers.triggers.get_versions_store"
-    ) as versions_mock, patch(
-        "app.routers.triggers.get_trigger_store", return_value=store
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
     ):
         slots_mock.return_value.get.return_value = slots
         versions_mock.return_value.get.return_value = version
@@ -459,12 +443,10 @@ def test_invalid_trigger_id_rejected_on_delete(store: TriggerStore):
 def test_malformed_cron_rejected(store: TriggerStore):
     slots, version = _seed_slot(ALICE)
     client = _make_client(ALICE)
-    with patch(
-        "app.routers.triggers.get_slots_store"
-    ) as slots_mock, patch(
-        "app.routers.triggers.get_versions_store"
-    ) as versions_mock, patch(
-        "app.routers.triggers.get_trigger_store", return_value=store
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
     ):
         slots_mock.return_value.get.return_value = slots
         versions_mock.return_value.get.return_value = version
@@ -480,12 +462,10 @@ def test_oversized_pattern_rejected(store: TriggerStore):
     slots, version = _seed_slot(ALICE)
     client = _make_client(ALICE)
     big_pattern = {"detail": {"k": ["x" * 5000]}}  # > 4096 bytes serialized
-    with patch(
-        "app.routers.triggers.get_slots_store"
-    ) as slots_mock, patch(
-        "app.routers.triggers.get_versions_store"
-    ) as versions_mock, patch(
-        "app.routers.triggers.get_trigger_store", return_value=store
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
     ):
         slots_mock.return_value.get.return_value = slots
         versions_mock.return_value.get.return_value = version
@@ -499,12 +479,10 @@ def test_oversized_pattern_rejected(store: TriggerStore):
 def test_cron_missing_schedule_rejected(store: TriggerStore):
     slots, version = _seed_slot(ALICE)
     client = _make_client(ALICE)
-    with patch(
-        "app.routers.triggers.get_slots_store"
-    ) as slots_mock, patch(
-        "app.routers.triggers.get_versions_store"
-    ) as versions_mock, patch(
-        "app.routers.triggers.get_trigger_store", return_value=store
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
     ):
         slots_mock.return_value.get.return_value = slots
         versions_mock.return_value.get.return_value = version
@@ -534,12 +512,10 @@ def test_cron_missing_schedule_rejected(store: TriggerStore):
 def test_webhook_out_url_ssrf_rejected(store: TriggerStore, bad_url: str):
     slots, version = _seed_slot(ALICE)
     client = _make_client(ALICE)
-    with patch(
-        "app.routers.triggers.get_slots_store"
-    ) as slots_mock, patch(
-        "app.routers.triggers.get_versions_store"
-    ) as versions_mock, patch(
-        "app.routers.triggers.get_trigger_store", return_value=store
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
     ):
         slots_mock.return_value.get.return_value = slots
         versions_mock.return_value.get.return_value = version
@@ -560,14 +536,11 @@ def test_webhook_out_url_private_dns_rejected(store: TriggerStore):
     """A public-looking host that DNS-resolves to a private IP is rejected."""
     slots, version = _seed_slot(ALICE)
     client = _make_client(ALICE)
-    with patch(
-        "app.routers.triggers.get_slots_store"
-    ) as slots_mock, patch(
-        "app.routers.triggers.get_versions_store"
-    ) as versions_mock, patch(
-        "app.services.gateway_deployer.socket.getaddrinfo"
-    ) as gai_mock, patch(
-        "app.routers.triggers.get_trigger_store", return_value=store
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.services.gateway_deployer.socket.getaddrinfo") as gai_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
     ):
         slots_mock.return_value.get.return_value = slots
         versions_mock.return_value.get.return_value = version
@@ -591,14 +564,11 @@ def test_webhook_out_url_valid_public_accepted(store: TriggerStore):
     """A public host that resolves to a public IP is accepted and stored."""
     slots, version = _seed_slot(ALICE)
     client = _make_client(ALICE)
-    with patch(
-        "app.routers.triggers.get_slots_store"
-    ) as slots_mock, patch(
-        "app.routers.triggers.get_versions_store"
-    ) as versions_mock, patch(
-        "app.services.gateway_deployer.socket.getaddrinfo"
-    ) as gai_mock, patch(
-        "app.routers.triggers.get_trigger_store", return_value=store
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.services.gateway_deployer.socket.getaddrinfo") as gai_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
     ):
         slots_mock.return_value.get.return_value = slots
         versions_mock.return_value.get.return_value = version
@@ -622,14 +592,11 @@ def test_webhook_type_creates_owner_scoped_secret(store: TriggerStore):
     """A webhook trigger mints a Secrets Manager secret; only the ARN is stored."""
     slots, version = _seed_slot(ALICE)
     client = _make_client(ALICE)
-    with patch(
-        "app.routers.triggers.get_slots_store"
-    ) as slots_mock, patch(
-        "app.routers.triggers.get_versions_store"
-    ) as versions_mock, patch(
-        "app.routers.triggers.boto3.client"
-    ) as boto_mock, patch(
-        "app.routers.triggers.get_trigger_store", return_value=store
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.routers.triggers.boto3.client") as boto_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
     ):
         slots_mock.return_value.get.return_value = slots
         versions_mock.return_value.get.return_value = version

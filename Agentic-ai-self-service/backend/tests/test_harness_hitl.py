@@ -19,16 +19,17 @@ def _patch(monkeypatch, policies, recorded):
     class _Store:
         def __init__(self, *a, **k):
             pass
+
         def list(self, org):  # noqa: ARG002
             return policies
 
     # _harness_approval_check imports ApprovalPolicyStore locally, so patch it on
     # the SOURCE module (that's what the local import resolves).
     import app.services.approval_policy_store as aps
+
     monkeypatch.setattr(aps, "ApprovalPolicyStore", _Store)
     # capture pending records instead of hitting DDB
-    monkeypatch.setattr(hd, "_record_harness_pending",
-                        lambda region, table, name, sid: recorded.append(name))
+    monkeypatch.setattr(hd, "_record_harness_pending", lambda region, table, name, sid: recorded.append(name))
     monkeypatch.setenv("TAG_POLICY_TABLE_NAME", "tp")
     monkeypatch.setenv("HITL_REQUESTS_TABLE_NAME", "hitl")
 
@@ -52,8 +53,8 @@ def test_notify_match_flags_but_does_not_record(monkeypatch):
     recorded: list = []
     _patch(monkeypatch, [ApprovalPolicy(name="watch", tool_match=["send_*"], mode="notify")], recorded)
     matched = hd._harness_approval_check("us-east-1", ["send_email"], "sess")
-    assert matched == ["send_email"]      # surfaced as approval_required
-    assert recorded == []                  # notify mode does not record a PENDING
+    assert matched == ["send_email"]  # surfaced as approval_required
+    assert recorded == []  # notify mode does not record a PENDING
 
 
 def test_no_policy_table_is_noop(monkeypatch):

@@ -34,9 +34,42 @@ def test_summarize_adds_by_day_and_distinct_counts():
     _make_table()
     store = AuditStore(TABLE, "us-east-1")
     # two days, two actors, two sessions
-    store.record(AuditEvent(org_id="default", actor_sub="alice", action="deploy", method="POST", path="/x", status_code=200, ts="2026-07-15T10:00:00Z", session_uuid="s1"))
-    store.record(AuditEvent(org_id="default", actor_sub="alice", action="deploy", method="POST", path="/x", status_code=200, ts="2026-07-15T11:00:00Z", session_uuid="s1"))
-    store.record(AuditEvent(org_id="default", actor_sub="bob", action="delete", method="DELETE", path="/y", status_code=200, ts="2026-07-16T09:00:00Z", session_uuid="s2"))
+    store.record(
+        AuditEvent(
+            org_id="default",
+            actor_sub="alice",
+            action="deploy",
+            method="POST",
+            path="/x",
+            status_code=200,
+            ts="2026-07-15T10:00:00Z",
+            session_uuid="s1",
+        )
+    )
+    store.record(
+        AuditEvent(
+            org_id="default",
+            actor_sub="alice",
+            action="deploy",
+            method="POST",
+            path="/x",
+            status_code=200,
+            ts="2026-07-15T11:00:00Z",
+            session_uuid="s1",
+        )
+    )
+    store.record(
+        AuditEvent(
+            org_id="default",
+            actor_sub="bob",
+            action="delete",
+            method="DELETE",
+            path="/y",
+            status_code=200,
+            ts="2026-07-16T09:00:00Z",
+            session_uuid="s2",
+        )
+    )
 
     s = store.summarize("default")
     assert s["total"] == 3

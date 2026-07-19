@@ -19,8 +19,8 @@ from __future__ import annotations
 import re
 
 # Max length is service-specific; these are the conservative documented caps.
-MAX_UNDERSCORE = 48   # runtime/harness names cap at 48; memory allows 48 too
-MAX_HYPHEN = 48       # gateway names cap at 48
+MAX_UNDERSCORE = 48  # runtime/harness names cap at 48; memory allows 48 too
+MAX_HYPHEN = 48  # gateway names cap at 48
 
 
 def sanitize_agentcore_name(
@@ -69,4 +69,4 @@ def is_valid_agentcore_name(name: str, *, style: str = "underscore") -> bool:
         return False
     if style == "hyphen":
         return bool(re.fullmatch(r"[0-9a-zA-Z]([-]?[0-9a-zA-Z])*", name)) and len(name) <= MAX_HYPHEN
-    return bool(re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_]{0,%d}" % (MAX_UNDERSCORE - 1), name))
+    return bool(re.fullmatch(rf"[a-zA-Z][a-zA-Z0-9_]{{0,{MAX_UNDERSCORE - 1}}}", name))

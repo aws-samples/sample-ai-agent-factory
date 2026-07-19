@@ -10,13 +10,10 @@ Requirements: 3.5 (Phase B)
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import logging
 import os
 
-import boto3
-
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import (
     DeploymentStatusEnum,
     DeploymentStepName,
@@ -87,9 +84,7 @@ def handler(event: dict, context) -> dict:
 
         # Use the version-suffixed AgentCore name when present (deployment_handler
         # mints it); fall back to the friendly config name for direct callers.
-        harness_name = harness_deployer.sanitize_harness_name(
-            event.get("agentcore_runtime_name") or config.name
-        )
+        harness_name = harness_deployer.sanitize_harness_name(event.get("agentcore_runtime_name") or config.name)
 
         # Wire a connected gateway + memory if the shared steps deployed them.
         gateway_result = event.get("gateway_result") or {}
@@ -124,9 +119,7 @@ def handler(event: dict, context) -> dict:
             if gw_provider_arn:
                 import re as _re
 
-                gw_provider_name = (
-                    _re.sub(r"[^a-zA-Z0-9_-]", "-", f"harness-gw-{harness_name}")[:60]
-                )
+                gw_provider_name = _re.sub(r"[^a-zA-Z0-9_-]", "-", f"harness-gw-{harness_name}")[:60]
 
         create_result = harness_deployer.create_harness(
             agentcore_ctrl,
@@ -147,9 +140,7 @@ def handler(event: dict, context) -> dict:
         # Manifest: record the harness + its side-resources for generic teardown
         # right after create succeeds (wait_for_harness_ready can be killed
         # mid-poll, otherwise leaking these). Types match _delete_managed_resource.
-        store.record_resource(
-            deployment_id, {"type": "harness", "id": harness_id, "region": region}
-        )
+        store.record_resource(deployment_id, {"type": "harness", "id": harness_id, "region": region})
         # Per-harness exec role only — never record the shared role (it is reused
         # across every harness and must not be torn down on a single delete).
         if not os.environ.get("SHARED_HARNESS_ROLE_ARN", ""):
@@ -199,9 +190,7 @@ def handler(event: dict, context) -> dict:
 
         ready = harness_deployer.wait_for_harness_ready(agentcore_ctrl, harness_id)
         if not ready.get("success"):
-            raise RuntimeError(
-                f"Harness failed to become ready: {ready.get('error', 'unknown error')}"
-            )
+            raise RuntimeError(f"Harness failed to become ready: {ready.get('error', 'unknown error')}")
 
         harness_arn = ready.get("arn") or create_result.get("arn", "")
 

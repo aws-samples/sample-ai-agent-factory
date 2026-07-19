@@ -31,39 +31,63 @@ def test_disabled_federation_is_noop(monkeypatch):
 
 
 def test_approved_by_name_passes(monkeypatch):
-    _patch(monkeypatch, _FakeRegistry([
-        {"name": "notion-mcp", "status": "APPROVED"},
-    ]))
+    _patch(
+        monkeypatch,
+        _FakeRegistry(
+            [
+                {"name": "notion-mcp", "status": "APPROVED"},
+            ]
+        ),
+    )
     assert reg.unapproved_integrations(["notion-mcp"]) == []
 
 
 def test_approved_by_url_substring_passes(monkeypatch):
-    _patch(monkeypatch, _FakeRegistry([
-        {"name": "notion", "status": "APPROVED",
-         "descriptors": {"mcp": {"url": "https://mcp.notion.com/mcp"}}},
-    ]))
+    _patch(
+        monkeypatch,
+        _FakeRegistry(
+            [
+                {"name": "notion", "status": "APPROVED", "descriptors": {"mcp": {"url": "https://mcp.notion.com/mcp"}}},
+            ]
+        ),
+    )
     assert reg.unapproved_integrations(["https://mcp.notion.com/mcp"]) == []
 
 
 def test_unapproved_status_is_blocked(monkeypatch):
-    _patch(monkeypatch, _FakeRegistry([
-        {"name": "notion-mcp", "status": "PENDING_APPROVAL"},
-    ]))
+    _patch(
+        monkeypatch,
+        _FakeRegistry(
+            [
+                {"name": "notion-mcp", "status": "PENDING_APPROVAL"},
+            ]
+        ),
+    )
     assert reg.unapproved_integrations(["notion-mcp"]) == ["notion-mcp"]
 
 
 def test_unknown_integration_is_blocked_fail_closed(monkeypatch):
-    _patch(monkeypatch, _FakeRegistry([
-        {"name": "something-else", "status": "APPROVED"},
-    ]))
+    _patch(
+        monkeypatch,
+        _FakeRegistry(
+            [
+                {"name": "something-else", "status": "APPROVED"},
+            ]
+        ),
+    )
     # No record names/points-at this one → fail-closed (blocked).
     assert reg.unapproved_integrations(["https://evil.example/mcp"]) == ["https://evil.example/mcp"]
 
 
 def test_mixed(monkeypatch):
-    _patch(monkeypatch, _FakeRegistry([
-        {"name": "ok-mcp", "status": "APPROVED"},
-        {"name": "pending-mcp", "status": "DRAFT"},
-    ]))
+    _patch(
+        monkeypatch,
+        _FakeRegistry(
+            [
+                {"name": "ok-mcp", "status": "APPROVED"},
+                {"name": "pending-mcp", "status": "DRAFT"},
+            ]
+        ),
+    )
     blocked = reg.unapproved_integrations(["ok-mcp", "pending-mcp", "ghost-mcp"])
     assert set(blocked) == {"pending-mcp", "ghost-mcp"}

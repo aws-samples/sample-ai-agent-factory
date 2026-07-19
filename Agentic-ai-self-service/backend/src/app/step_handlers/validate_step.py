@@ -8,11 +8,10 @@ Requirements: 3.2
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import logging
 import os
 
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.dynamodb_storage import DynamoDBWorkflowStorage

@@ -25,14 +25,12 @@ sys.path.insert(0, "src")
 from datetime import datetime, timezone
 
 import pytest
-from fastapi.testclient import TestClient
-
 from app.main import app
 from app.models import Flow
 from app.models.enums import DeploymentStatus
 from app.services.auth import _LOCAL_DEV_SUB, get_caller_sub
 from app.services.flow_storage import FlowStorage, get_flow_storage, set_flow_storage
-
+from fastapi.testclient import TestClient
 
 client = TestClient(app)
 
@@ -115,14 +113,10 @@ def test_x_test_sub_header_is_ignored(isolated_storage, caller_alice):
     response = client.get("/api/flows", headers={"X-Test-Sub": "bob-sub"})
     assert response.status_code == 200
     flow_ids = {f["id"] for f in response.json()["flows"]}
-    assert flow_ids == {"f-alice"}, (
-        f"X-Test-Sub header leaked cross-tenant rows: {flow_ids}"
-    )
+    assert flow_ids == {"f-alice"}, f"X-Test-Sub header leaked cross-tenant rows: {flow_ids}"
 
 
-def test_x_test_sub_header_does_not_grant_access_to_other_records(
-    isolated_storage, caller_alice
-):
+def test_x_test_sub_header_does_not_grant_access_to_other_records(isolated_storage, caller_alice):
     """``GET /api/flows/{bobs_flow}`` with ``X-Test-Sub: bob-sub`` must 404 —
     the override (alice) is the trusted identity, not the header."""
     isolated_storage._flows["f-bob"] = _make_flow("f-bob", "bob-sub")
@@ -155,9 +149,7 @@ def test_get_legacy_none_owner_flow_returns_404(isolated_storage, caller_alice):
     assert response.status_code == 404
 
 
-def test_get_legacy_none_owner_flow_returns_404_for_bob_too(
-    isolated_storage, caller_bob
-):
+def test_get_legacy_none_owner_flow_returns_404_for_bob_too(isolated_storage, caller_bob):
     """No magic caller can access legacy rows — even ``local-dev`` /
     ``bob-sub`` must 404. Backfill is the only fix."""
     isolated_storage._flows["f-legacy"] = _make_flow("f-legacy", None)
@@ -181,9 +173,7 @@ def test_list_flows_excludes_legacy_and_other_tenant(isolated_storage, caller_al
     response = client.get("/api/flows")
     assert response.status_code == 200
     flow_ids = {f["id"] for f in response.json()["flows"]}
-    assert flow_ids == {"f-alice-1", "f-alice-2"}, (
-        "list_flows leaked cross-tenant or legacy rows: " + str(flow_ids)
-    )
+    assert flow_ids == {"f-alice-1", "f-alice-2"}, "list_flows leaked cross-tenant or legacy rows: " + str(flow_ids)
 
 
 def test_list_flows_empty_when_caller_owns_nothing(isolated_storage, caller_bob):
@@ -203,9 +193,8 @@ def test_list_flows_empty_when_caller_owns_nothing(isolated_storage, caller_bob)
 
 def test_assert_owner_rejects_none_owner():
     """Direct unit test: legacy / un-owned records must 404."""
-    from fastapi import HTTPException
-
     from app.services.auth import assert_owner
+    from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as exc:
         assert_owner(None, "alice-sub")
@@ -214,9 +203,8 @@ def test_assert_owner_rejects_none_owner():
 
 def test_assert_owner_rejects_local_dev_owner_for_real_caller():
     """A row owned by ``_LOCAL_DEV_SUB`` does not match a real Cognito sub."""
-    from fastapi import HTTPException
-
     from app.services.auth import _LOCAL_DEV_SUB, assert_owner
+    from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as exc:
         assert_owner(_LOCAL_DEV_SUB, "alice-cognito-sub")

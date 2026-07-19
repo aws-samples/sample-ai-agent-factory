@@ -29,11 +29,9 @@ import types
 sys.path.insert(0, "src")
 
 import pytest
-
 from app.models.deployment_models import RuntimeConfig
 from app.services.a2a_codegen import _generate_a2a_agent
 from app.services.code_generator import generate_agent_code
-
 
 # ---------------------------------------------------------------------------
 # Config + stub helpers
@@ -67,11 +65,11 @@ class _RecordingHttpxClient:
 
     def get(self, url, *a, **k):
         _RecordingHttpxClient.calls.append(("GET", url))
-        raise AssertionError("httpx GET should not be reached: %s" % url)
+        raise AssertionError(f"httpx GET should not be reached: {url}")
 
     def post(self, url, *a, **k):
         _RecordingHttpxClient.calls.append(("POST", url))
-        raise AssertionError("httpx POST should not be reached: %s" % url)
+        raise AssertionError(f"httpx POST should not be reached: {url}")
 
 
 def _install_a2a_stubs():
@@ -229,8 +227,11 @@ def test_generated_a2a_module_execs_no_nameerror():
         "You collaborate.",
         "us.anthropic.claude-sonnet-5",
         "us-east-1",
-        {"capabilities": ["chat", "summarize"], "advertised_description": "An A2A peer.",
-         "peer_allowlist": ["peer.example.com"]},
+        {
+            "capabilities": ["chat", "summarize"],
+            "advertised_description": "An A2A peer.",
+            "peer_allowlist": ["peer.example.com"],
+        },
     )
     g = _exec_module(code)
     assert callable(g.get("call_a2a_peer")), "call_a2a_peer not defined at module scope"
@@ -253,9 +254,11 @@ def test_agent_card_reflects_peer_config():
             "sp",
             "us.anthropic.claude-sonnet-5",
             "us-east-1",
-            {"capabilities": ["translate", "research"],
-             "advertised_description": "A multilingual research agent.",
-             "peer_allowlist": ["peer.example.com"]},
+            {
+                "capabilities": ["translate", "research"],
+                "advertised_description": "A multilingual research agent.",
+                "peer_allowlist": ["peer.example.com"],
+            },
         )
     )
     card = g["_build_agent_card"]()
@@ -279,9 +282,11 @@ def _make_agent(allowlist=None, capabilities=None):
             "sp",
             "us.anthropic.claude-sonnet-5",
             "us-east-1",
-            {"capabilities": capabilities or ["chat"],
-             "advertised_description": "peer",
-             "peer_allowlist": allowlist or []},
+            {
+                "capabilities": capabilities or ["chat"],
+                "advertised_description": "peer",
+                "peer_allowlist": allowlist or [],
+            },
         )
     )
     return g
@@ -376,9 +381,7 @@ def test_ssrf_rejects_non_http_scheme():
 
 
 def test_no_a2a_sdk_import_in_generated_source():
-    code = _generate_a2a_agent(
-        "sp", "us.anthropic.claude-sonnet-5", "us-east-1", {}
-    )
+    code = _generate_a2a_agent("sp", "us.anthropic.claude-sonnet-5", "us-east-1", {})
     assert "from a2a" not in code, "a2a-sdk is NOT bundled — must not be imported"
     assert "import a2a" not in code
 
@@ -391,12 +394,10 @@ def test_no_a2a_sdk_import_in_generated_source():
 def test_injection_safe_peer_config_compiles():
     nasty = {
         "advertised_description": 'desc """ with triple quotes and \\ backslash and {curly}',
-        "capabilities": ['cap"break', "ok\\path", "trip\"\"\"le"],
+        "capabilities": ['cap"break', "ok\\path", 'trip"""le'],
         "peer_allowlist": ['host"; import os', "ok.example.com"],
     }
-    code = _generate_a2a_agent(
-        "sp", "us.anthropic.claude-sonnet-5", "us-east-1", nasty
-    )
+    code = _generate_a2a_agent("sp", "us.anthropic.claude-sonnet-5", "us-east-1", nasty)
     # Must still compile and exec with no SyntaxError / injection.
     compile(code, "<a2a_inject.py>", "exec")
     g = _exec_module(code)

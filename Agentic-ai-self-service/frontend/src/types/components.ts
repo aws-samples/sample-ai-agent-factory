@@ -90,8 +90,19 @@ export interface VPCConfiguration {
 
 export interface GatewayConfiguration {
   name: string;
+  /**
+   * Single-target legacy fields. Kept for backward compatibility with saved
+   * canvases and existing tests. When `targets` is present and non-empty it is
+   * the source of truth and these are ignored; otherwise they are the target.
+   */
   targetType: GatewayTargetType;
   targetConfig: GatewayTargetConfig;
+  /**
+   * Multiple targets of different families on ONE gateway. Each entry is a
+   * discriminated union on `.type`. When present and non-empty this supersedes
+   * the single `targetType`/`targetConfig` pair above.
+   */
+  targets?: GatewayTargetConfig[];
   enableSemanticSearch: boolean;
   apiKeyCredentials?: APIKeyCredentials;
   oauth2Credentials?: OAuth2Credentials;
@@ -124,10 +135,15 @@ export interface SmithyTargetConfig {
 
 export interface MCPServerTargetConfig {
   type: 'mcp_server';
-  /** Catalog server id (e.g. "aws-knowledge") from GET /api/mcp-servers. */
+  /** Catalog server id (e.g. "aws-knowledge") from GET /api/mcp-servers, or the
+   *  sentinel "__custom__" to wire a raw endpoint not in the catalog. */
   serverId?: string;
-  /** Optional raw MCP endpoint (advanced; catalog serverId is preferred). */
+  /** Raw MCP endpoint URL — used for the "__custom__" selection. */
   serverUrl?: string;
+  /** Label for a custom target (a safe id is derived from it server-side). */
+  customName?: string;
+  /** Outbound auth for a custom endpoint (catalog entries carry their own). */
+  authType?: 'none' | 'api_key' | 'oauth2_client_credentials' | 'iam_sigv4';
   /** Fills `{placeholder}` tokens in a catalog endpoint (e.g. store_domain). */
   endpointVars?: Record<string, string>;
   /** Tier-2 API key (write-only — minted into Secrets Manager, never persisted). */

@@ -9,16 +9,12 @@ Requirements: 3.x (guardrails integration)
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import logging
 import os
 import time
 import uuid
-from typing import Optional
 
-import boto3
-
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
@@ -49,14 +45,36 @@ _FILTER_STRENGTHS = {"NONE", "LOW", "MEDIUM", "HIGH"}
 
 # PII entity types supported by Bedrock Guardrails
 _PII_TYPES = {
-    "ADDRESS", "AGE", "AWS_ACCESS_KEY", "AWS_SECRET_KEY", "CA_HEALTH_NUMBER",
-    "CA_SOCIAL_INSURANCE_NUMBER", "CREDIT_DEBIT_CARD_CVV", "CREDIT_DEBIT_CARD_EXPIRY",
-    "CREDIT_DEBIT_CARD_NUMBER", "DRIVER_ID", "EMAIL", "INTERNATIONAL_BANK_ACCOUNT_NUMBER",
-    "IP_ADDRESS", "LICENSE_PLATE", "MAC_ADDRESS", "NAME", "PASSWORD", "PHONE",
-    "PIN", "SSN", "URL", "UK_NATIONAL_HEALTH_SERVICE_NUMBER",
-    "UK_NATIONAL_INSURANCE_NUMBER", "UK_UNIQUE_TAXPAYER_REFERENCE_NUMBER",
-    "US_BANK_ACCOUNT_NUMBER", "US_BANK_ROUTING_NUMBER", "US_INDIVIDUAL_TAX_IDENTIFICATION_NUMBER",
-    "US_PASSPORT_NUMBER", "US_SOCIAL_SECURITY_NUMBER", "VEHICLE_IDENTIFICATION_NUMBER",
+    "ADDRESS",
+    "AGE",
+    "AWS_ACCESS_KEY",
+    "AWS_SECRET_KEY",
+    "CA_HEALTH_NUMBER",
+    "CA_SOCIAL_INSURANCE_NUMBER",
+    "CREDIT_DEBIT_CARD_CVV",
+    "CREDIT_DEBIT_CARD_EXPIRY",
+    "CREDIT_DEBIT_CARD_NUMBER",
+    "DRIVER_ID",
+    "EMAIL",
+    "INTERNATIONAL_BANK_ACCOUNT_NUMBER",
+    "IP_ADDRESS",
+    "LICENSE_PLATE",
+    "MAC_ADDRESS",
+    "NAME",
+    "PASSWORD",
+    "PHONE",
+    "PIN",
+    "SSN",
+    "URL",
+    "UK_NATIONAL_HEALTH_SERVICE_NUMBER",
+    "UK_NATIONAL_INSURANCE_NUMBER",
+    "UK_UNIQUE_TAXPAYER_REFERENCE_NUMBER",
+    "US_BANK_ACCOUNT_NUMBER",
+    "US_BANK_ROUTING_NUMBER",
+    "US_INDIVIDUAL_TAX_IDENTIFICATION_NUMBER",
+    "US_PASSPORT_NUMBER",
+    "US_SOCIAL_SECURITY_NUMBER",
+    "VEHICLE_IDENTIFICATION_NUMBER",
     "USERNAME",
 }
 
@@ -135,11 +153,13 @@ def _build_topic_config(denied_topics: list) -> dict:
         definition = topic.get("definition", "").strip()
         if not name or not definition:
             continue
-        topics.append({
-            "name": name,
-            "definition": definition,
-            "type": "DENY",
-        })
+        topics.append(
+            {
+                "name": name,
+                "definition": definition,
+                "type": "DENY",
+            }
+        )
     if not topics:
         return {}
     return {"topicsConfig": topics}
@@ -153,7 +173,7 @@ def _build_word_config(word_filters: list) -> dict:
     return {"wordsConfig": words}
 
 
-def _find_guardrail_id_by_name(bedrock, name: str) -> Optional[str]:
+def _find_guardrail_id_by_name(bedrock, name: str) -> str | None:
     """Return the guardrailId of a guardrail with the given name, or None.
 
     Used for idempotent upsert when ``create_guardrail`` raises
@@ -193,7 +213,9 @@ def handler(event: dict, context) -> dict:
         if mode == "existing":
             # Validate existing guardrail
             guardrail_id = guardrails_config.get("guardrailId") or guardrails_config.get("guardrail_id", "")
-            guardrail_version = guardrails_config.get("guardrailVersion") or guardrails_config.get("guardrail_version", "DRAFT")
+            guardrail_version = guardrails_config.get("guardrailVersion") or guardrails_config.get(
+                "guardrail_version", "DRAFT"
+            )
             if not guardrail_id:
                 raise ValueError("guardrailId is required in existing mode")
 
@@ -282,8 +304,11 @@ def handler(event: dict, context) -> dict:
         # empty hits exactly that. Surface it here as an actionable error
         # (verified live in the free-form matrix).
         _policy_keys = (
-            "contentPolicyConfig", "sensitiveInformationPolicyConfig",
-            "topicPolicyConfig", "wordPolicyConfig", "contextualGroundingPolicyConfig",
+            "contentPolicyConfig",
+            "sensitiveInformationPolicyConfig",
+            "topicPolicyConfig",
+            "wordPolicyConfig",
+            "contextualGroundingPolicyConfig",
         )
         if not any(k in create_params for k in _policy_keys):
             raise ValueError(
@@ -298,7 +323,7 @@ def handler(event: dict, context) -> dict:
         # ResourceAlreadyExistsException. Look up the existing guardrail by
         # name and update_guardrail in place, falling back to a UUID-suffixed
         # rename if the name lookup races.
-        guardrail_id: Optional[str] = None
+        guardrail_id: str | None = None
         try:
             resp = bedrock.create_guardrail(**create_params)
             guardrail_id = resp["guardrailId"]
@@ -308,10 +333,16 @@ def handler(event: dict, context) -> dict:
             # name surfaces as ConflictException / ResourceInUseException (verified
             # live: referencing the nonexistent attribute itself crashed the step).
             # Match on the error code, and re-raise anything that isn't a name clash.
-            _code = getattr(getattr(_ce, "response", {}), "get", lambda *_: {})("Error", {}).get("Code", "") \
-                if hasattr(_ce, "response") else ""
-            if _code not in ("ConflictException", "ResourceInUseException") and \
-               "already" not in str(_ce).lower() and "conflict" not in str(_ce).lower():
+            _code = (
+                getattr(getattr(_ce, "response", {}), "get", lambda *_: {})("Error", {}).get("Code", "")
+                if hasattr(_ce, "response")
+                else ""
+            )
+            if (
+                _code not in ("ConflictException", "ResourceInUseException")
+                and "already" not in str(_ce).lower()
+                and "conflict" not in str(_ce).lower()
+            ):
                 raise
             existing_id = _find_guardrail_id_by_name(bedrock, name)
             if existing_id:
@@ -333,9 +364,7 @@ def handler(event: dict, context) -> dict:
         # Manifest: record the flow-created guardrail immediately (before the
         # READY poll, which can be killed mid-flight) so teardown never orphans it.
         if guardrail_id:
-            store.record_resource(
-                deployment_id, {"type": "guardrail", "id": guardrail_id, "region": region}
-            )
+            store.record_resource(deployment_id, {"type": "guardrail", "id": guardrail_id, "region": region})
 
         # Wait for guardrail to be READY
         for attempt in range(24):  # 120s max

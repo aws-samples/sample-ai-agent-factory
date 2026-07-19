@@ -39,7 +39,6 @@ import secrets
 import time
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -123,9 +122,9 @@ class HitlRequest:
     reason: str = ""
     created_at: int = 0  # epoch milliseconds
     ttl: int = 0  # epoch seconds (DynamoDB TTL)
-    comment: Optional[str] = None
-    decided_at: Optional[str] = None  # ISO 8601
-    decided_by: Optional[str] = None
+    comment: str | None = None
+    decided_at: str | None = None  # ISO 8601
+    decided_by: str | None = None
 
     def to_item(self) -> dict:
         item = {
@@ -145,7 +144,7 @@ class HitlRequest:
         return _floats_to_decimals(item)
 
     @classmethod
-    def from_item(cls, item: dict) -> "HitlRequest":
+    def from_item(cls, item: dict) -> HitlRequest:
         item = _decimals_to_floats(dict(item))
         return cls(
             runtime_id=item["runtime_id"],
@@ -201,7 +200,7 @@ class HitlRequestsStore:
         owner_sub: str,
         action: str,
         reason: str = "",
-        request_id: Optional[str] = None,
+        request_id: str | None = None,
     ) -> HitlRequest:
         """Write a PENDING request and return it.
 
@@ -227,10 +226,8 @@ class HitlRequestsStore:
         )
         return req
 
-    def get(self, runtime_id: str, request_id: str) -> Optional[HitlRequest]:
-        resp = self._table.get_item(
-            Key={"runtime_id": runtime_id, "request_id": request_id}
-        )
+    def get(self, runtime_id: str, request_id: str) -> HitlRequest | None:
+        resp = self._table.get_item(Key={"runtime_id": runtime_id, "request_id": request_id})
         item = resp.get("Item")
         if not item:
             return None
@@ -264,7 +261,7 @@ class HitlRequestsStore:
         request_id: str,
         decision: str,  # STATUS_APPROVED | STATUS_REJECTED
         decided_by: str,
-        comment: Optional[str] = None,
+        comment: str | None = None,
     ) -> HitlRequest:
         """Transition a PENDING request to APPROVED / REJECTED.
 
@@ -306,9 +303,7 @@ class HitlRequestsStore:
         except ClientError as e:
             if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
                 current = self.get(runtime_id, request_id)
-                raise HitlNotPending(
-                    request_id, current.status if current else "MISSING"
-                ) from e
+                raise HitlNotPending(request_id, current.status if current else "MISSING") from e
             raise
 
         logger.info(
@@ -331,7 +326,7 @@ def _iso_now() -> str:
 # Convenience singleton (lazy-init from env)
 # ---------------------------------------------------------------------------
 
-_hitl_store: Optional[HitlRequestsStore] = None
+_hitl_store: HitlRequestsStore | None = None
 
 
 def get_hitl_store() -> HitlRequestsStore:
@@ -339,8 +334,6 @@ def get_hitl_store() -> HitlRequestsStore:
     if _hitl_store is None:
         _hitl_store = HitlRequestsStore(
             table_name=os.environ.get("HITL_REQUESTS_TABLE_NAME", "HitlRequests"),
-            region=os.environ.get(
-                "APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")
-            ),
+            region=os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")),
         )
     return _hitl_store

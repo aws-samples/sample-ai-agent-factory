@@ -45,7 +45,6 @@ import secrets
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -88,7 +87,7 @@ class PromptEntry(BaseModel):
     description: str = Field(default="", max_length=2000)
     tags: list[str] = Field(default_factory=list)
     versions: list[PromptVersion] = Field(default_factory=list)
-    default_version_id: Optional[str] = None
+    default_version_id: str | None = None
     created_at: str = ""
     updated_at: str = ""
 
@@ -182,9 +181,7 @@ class PromptLibraryStore:
         )
         return entry
 
-    def update(
-        self, org_id: str, prompt_name: str, updates: dict
-    ) -> Optional[PromptEntry]:
+    def update(self, org_id: str, prompt_name: str, updates: dict) -> PromptEntry | None:
         """Patch top-level metadata fields (display_name/description/tags)."""
         existing = self.get(org_id, prompt_name)
         if existing is None:
@@ -203,9 +200,7 @@ class PromptLibraryStore:
         )
         return self.get(org_id, prompt_name)
 
-    def add_version(
-        self, org_id: str, prompt_name: str, body: str, created_by: str
-    ) -> Optional[str]:
+    def add_version(self, org_id: str, prompt_name: str, body: str, created_by: str) -> str | None:
         """Append a new version and return its version_id.
 
         Read-modify-write on the inline ``versions`` list (last-writer-wins
@@ -245,23 +240,17 @@ class PromptLibraryStore:
 
     def delete(self, org_id: str, prompt_name: str) -> bool:
         try:
-            self._table.delete_item(
-                Key={"org_id": org_id, "prompt_name": prompt_name}
-            )
+            self._table.delete_item(Key={"org_id": org_id, "prompt_name": prompt_name})
             logger.info("Deleted prompt %s/%s", org_id, prompt_name)
             return True
         except Exception as e:
-            logger.warning(
-                "Failed to delete prompt %s/%s: %s", org_id, prompt_name, e
-            )
+            logger.warning("Failed to delete prompt %s/%s: %s", org_id, prompt_name, e)
             return False
 
     # -- reads -----------------------------------------------------------
 
-    def get(self, org_id: str, prompt_name: str) -> Optional[PromptEntry]:
-        resp = self._table.get_item(
-            Key={"org_id": org_id, "prompt_name": prompt_name}
-        )
+    def get(self, org_id: str, prompt_name: str) -> PromptEntry | None:
+        resp = self._table.get_item(Key={"org_id": org_id, "prompt_name": prompt_name})
         item = resp.get("Item")
         return _deserialize(item) if item else None
 
@@ -291,9 +280,7 @@ class PromptLibraryStore:
             kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
         return [_deserialize(i) for i in items]
 
-    def resolve_body(
-        self, org_id: str, prompt_name: str, version_id: Optional[str] = None
-    ) -> Optional[str]:
+    def resolve_body(self, org_id: str, prompt_name: str, version_id: str | None = None) -> str | None:
         """Return the body for *version_id* (or the default version).
 
         Returns ``None`` if the prompt, the requested version, or the default
@@ -317,7 +304,7 @@ class PromptLibraryStore:
 # Lazy singleton from env
 # ---------------------------------------------------------------------------
 
-_prompt_library_store: Optional[PromptLibraryStore] = None
+_prompt_library_store: PromptLibraryStore | None = None
 
 
 def get_prompt_library_store() -> PromptLibraryStore:
@@ -327,8 +314,6 @@ def get_prompt_library_store() -> PromptLibraryStore:
 
         _prompt_library_store = PromptLibraryStore(
             table_name=os.environ.get("PROMPT_LIBRARY_TABLE_NAME", "PromptLibrary"),
-            region=os.environ.get(
-                "APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")
-            ),
+            region=os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")),
         )
     return _prompt_library_store

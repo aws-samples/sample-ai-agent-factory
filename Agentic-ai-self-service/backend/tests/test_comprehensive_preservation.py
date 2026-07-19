@@ -18,21 +18,19 @@ preserved during the comprehensive platform fix. They cover:
 import os
 
 import pytest
-from hypothesis import given, settings
-from hypothesis import strategies as st
-
+from app.models.components import ModelConfiguration, RuntimeConfiguration
 from app.models.deployment_models import RuntimeConfig
 from app.models.enums import AgentFramework, ModelProvider
-from app.models.components import RuntimeConfiguration, ModelConfiguration
 from app.services import code_generator
-from app.services.deployment import (
-    generate_agent_code as deployment_generate_agent_code,
-)
 from app.services.code_generator import (
     generate_requirements as cg_generate_requirements,
 )
+from app.services.deployment import (
+    generate_agent_code as deployment_generate_agent_code,
+)
 from app.step_handlers.codegen_step import _needs_strands_bundle
-
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -493,7 +491,7 @@ class TestTemplates2And3Preservation:
             "data",
             "templates.ts",
         )
-        with open(ts_path, "r") as f:
+        with open(ts_path) as f:
             return f.read()
 
     def test_template2_id_is_strands_gateway_agent(self):
@@ -581,7 +579,7 @@ class TestFrontendRetryLogicPreservation:
             "deploy",
             "DeployPanel.tsx",
         )
-        with open(tsx_path, "r") as f:
+        with open(tsx_path) as f:
             return f.read()
 
     def test_max_retries_is_5(self):
@@ -658,7 +656,7 @@ class TestGatewayDeployerPreservation:
             "services",
             "deployment.py",
         )
-        with open(path, "r") as f:
+        with open(path) as f:
             return f.read()
 
     def test_deploy_gateway_uses_boto3_deployer(self):

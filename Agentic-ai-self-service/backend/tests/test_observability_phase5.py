@@ -5,29 +5,30 @@ build_waterfall + classify_action are pure; AuditStore is moto-backed.
 
 from __future__ import annotations
 
-from typing import Iterator
+from collections.abc import Iterator
 
 import boto3
 import pytest
-
-from app.services.trace_query import build_waterfall
+from app.services import audit_store as as_mod
 from app.services.audit_store import (
     AuditEvent,
     AuditStore,
     classify_action,
 )
-from app.services import audit_store as as_mod
+from app.services.trace_query import build_waterfall
 
 moto = pytest.importorskip("moto")
 from moto import mock_aws  # noqa: E402
-
 
 # -- build_waterfall (pure) --------------------------------------------------
 
 
 def _span(sid, parent, name, start_ms, dur_ms):
     return {
-        "spanId": sid, "parentSpanId": parent, "name": name, "traceId": "t1",
+        "spanId": sid,
+        "parentSpanId": parent,
+        "name": name,
+        "traceId": "t1",
         "startTimeUnixNano": str(start_ms * 1_000_000),
         "endTimeUnixNano": str((start_ms + dur_ms) * 1_000_000),
     }
@@ -46,15 +47,15 @@ def test_waterfall_nesting_and_offsets():
     ]
     wf = build_waterfall(spans)
     assert wf["trace_id"] == "t1"
-    assert len(wf["spans"]) == 1               # one root
+    assert len(wf["spans"]) == 1  # one root
     root = wf["spans"][0]
     assert root["name"] == "invoke" and root["offset_ms"] == 0.0
     assert root["duration_ms"] == 500.0
     assert len(root["children"]) == 2
     # children offsets are relative to the earliest start (root @1000ms)
-    assert root["children"][0]["offset_ms"] == 100.0   # child1 @1100
+    assert root["children"][0]["offset_ms"] == 100.0  # child1 @1100
     assert root["children"][0]["depth"] == 1
-    assert root["children"][1]["offset_ms"] == 350.0   # child2 @1350
+    assert root["children"][1]["offset_ms"] == 350.0  # child2 @1350
     assert wf["total_ms"] == 500.0
 
 
@@ -126,14 +127,28 @@ def store() -> Iterator[AuditStore]:
 
 def test_record_and_summarize(store: AuditStore):
     for i in range(3):
-        store.record(AuditEvent(org_id="default", actor_sub="alice",
-                                action="agent.deploy", method="POST",
-                                path="/api/deploy", status_code=202,
-                                ts=f"2026-07-15T10:0{i}:00Z"))
-    store.record(AuditEvent(org_id="default", actor_sub="bob",
-                            action="budget.write", method="POST",
-                            path="/api/cost/budgets", status_code=200,
-                            ts="2026-07-15T10:05:00Z"))
+        store.record(
+            AuditEvent(
+                org_id="default",
+                actor_sub="alice",
+                action="agent.deploy",
+                method="POST",
+                path="/api/deploy",
+                status_code=202,
+                ts=f"2026-07-15T10:0{i}:00Z",
+            )
+        )
+    store.record(
+        AuditEvent(
+            org_id="default",
+            actor_sub="bob",
+            action="budget.write",
+            method="POST",
+            path="/api/cost/budgets",
+            status_code=200,
+            ts="2026-07-15T10:05:00Z",
+        )
+    )
     summ = store.summarize("default")
     assert summ["total"] == 4
     assert summ["by_action"]["agent.deploy"] == 3
@@ -141,11 +156,27 @@ def test_record_and_summarize(store: AuditStore):
 
 
 def test_list_recent_newest_first(store: AuditStore):
-    store.record(AuditEvent(org_id="default", actor_sub="a", action="x",
-                            method="POST", path="/p", status_code=200,
-                            ts="2026-07-15T10:00:00Z"))
-    store.record(AuditEvent(org_id="default", actor_sub="a", action="y",
-                            method="POST", path="/p", status_code=200,
-                            ts="2026-07-15T11:00:00Z"))
+    store.record(
+        AuditEvent(
+            org_id="default",
+            actor_sub="a",
+            action="x",
+            method="POST",
+            path="/p",
+            status_code=200,
+            ts="2026-07-15T10:00:00Z",
+        )
+    )
+    store.record(
+        AuditEvent(
+            org_id="default",
+            actor_sub="a",
+            action="y",
+            method="POST",
+            path="/p",
+            status_code=200,
+            ts="2026-07-15T11:00:00Z",
+        )
+    )
     recent = store.list_recent("default")
     assert recent[0].action == "y"  # newest first

@@ -90,10 +90,7 @@ def _wiring_present(guardrails_step) -> bool:
     import inspect
 
     src = inspect.getsource(guardrails_step)
-    return (
-        "build_contextual_grounding_config" in src
-        and "build_regex_filters" in src
-    )
+    return "build_contextual_grounding_config" in src and "build_regex_filters" in src
 
 
 # ---------------------------------------------------------------------------

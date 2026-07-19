@@ -9,7 +9,6 @@ AWS (a fake control client captures the kwargs).
 from __future__ import annotations
 
 import pytest
-
 from app.services import gateway_deployer as gd
 
 
@@ -32,8 +31,12 @@ def _config(ctrl):
 def test_m2m_has_no_obo_config():
     ctrl = _FakeCtrl()
     gd._ensure_oauth2_credential_provider(
-        ctrl, "conn", vendor="CustomOauth2", client_id="cid",
-        client_secret_arn="arn:secret", discovery_url="https://idp/.well-known/openid-configuration",
+        ctrl,
+        "conn",
+        vendor="CustomOauth2",
+        client_id="cid",
+        client_secret_arn="arn:secret",
+        discovery_url="https://idp/.well-known/openid-configuration",
         delegation_mode="m2m",
     )
     cfg = _config(ctrl)
@@ -44,9 +47,14 @@ def test_m2m_has_no_obo_config():
 def test_token_exchange_grant():
     ctrl = _FakeCtrl()
     gd._ensure_oauth2_credential_provider(
-        ctrl, "conn", vendor="CustomOauth2", client_id="cid",
-        client_secret_arn="arn:secret", discovery_url="https://idp/.well-known/openid-configuration",
-        delegation_mode="obo", obo_grant_type="TOKEN_EXCHANGE",
+        ctrl,
+        "conn",
+        vendor="CustomOauth2",
+        client_id="cid",
+        client_secret_arn="arn:secret",
+        discovery_url="https://idp/.well-known/openid-configuration",
+        delegation_mode="obo",
+        obo_grant_type="TOKEN_EXCHANGE",
     )
     cfg = _config(ctrl)
     assert cfg["clientAuthenticationMethod"] == "CLIENT_SECRET_BASIC"
@@ -58,9 +66,14 @@ def test_token_exchange_grant():
 def test_jwt_authorization_grant():
     ctrl = _FakeCtrl()
     gd._ensure_oauth2_credential_provider(
-        ctrl, "conn", vendor="CustomOauth2", client_id="cid",
-        client_secret_arn="arn:secret", discovery_url="https://idp/.well-known/openid-configuration",
-        delegation_mode="obo", obo_grant_type="JWT_AUTHORIZATION_GRANT",
+        ctrl,
+        "conn",
+        vendor="CustomOauth2",
+        client_id="cid",
+        client_secret_arn="arn:secret",
+        discovery_url="https://idp/.well-known/openid-configuration",
+        delegation_mode="obo",
+        obo_grant_type="JWT_AUTHORIZATION_GRANT",
     )
     cfg = _config(ctrl)
     assert cfg["clientAuthenticationMethod"] == "CLIENT_SECRET_POST"
@@ -72,8 +85,12 @@ def test_jwt_authorization_grant():
 def test_obo_default_grant_is_token_exchange():
     ctrl = _FakeCtrl()
     gd._ensure_oauth2_credential_provider(
-        ctrl, "conn", vendor="CustomOauth2", client_id="cid",
-        client_secret_arn="arn:secret", discovery_url="https://idp/.well-known/openid-configuration",
+        ctrl,
+        "conn",
+        vendor="CustomOauth2",
+        client_id="cid",
+        client_secret_arn="arn:secret",
+        discovery_url="https://idp/.well-known/openid-configuration",
         delegation_mode="obo",  # no grant type → defaults to TOKEN_EXCHANGE
     )
     assert _config(ctrl)["onBehalfOfTokenExchangeConfig"]["grantType"] == "TOKEN_EXCHANGE"
@@ -83,8 +100,12 @@ def test_obo_requires_custom_vendor():
     ctrl = _FakeCtrl()
     with pytest.raises(ValueError, match="CustomOauth2"):
         gd._ensure_oauth2_credential_provider(
-            ctrl, "conn", vendor="GithubOauth2", client_id="cid",
-            client_secret_arn="arn:secret", delegation_mode="obo",
+            ctrl,
+            "conn",
+            vendor="GithubOauth2",
+            client_id="cid",
+            client_secret_arn="arn:secret",
+            delegation_mode="obo",
         )
 
 
@@ -92,9 +113,14 @@ def test_obo_rejects_bad_grant_type():
     ctrl = _FakeCtrl()
     with pytest.raises(ValueError, match="obo_grant_type"):
         gd._ensure_oauth2_credential_provider(
-            ctrl, "conn", vendor="CustomOauth2", client_id="cid",
-            client_secret_arn="arn:secret", discovery_url="https://idp/x",
-            delegation_mode="obo", obo_grant_type="BOGUS",
+            ctrl,
+            "conn",
+            vendor="CustomOauth2",
+            client_id="cid",
+            client_secret_arn="arn:secret",
+            discovery_url="https://idp/x",
+            delegation_mode="obo",
+            obo_grant_type="BOGUS",
         )
 
 
@@ -110,15 +136,20 @@ def test_target_grant_type_is_token_exchange_for_obo():
 
     src = inspect.getsource(gd)
     # The old unconditional hardcode must be gone from the connector target block.
-    assert '"grantType": "CLIENT_CREDENTIALS",\n                    }\n                },\n            }\n        else:  # API_KEY' not in src
+    assert (
+        '"grantType": "CLIENT_CREDENTIALS",\n                    }\n                },\n            }\n        else:  # API_KEY'
+        not in src
+    )
     # The conditional must exist.
     assert '"TOKEN_EXCHANGE" if str(delegation_mode).lower() == "obo" else "CLIENT_CREDENTIALS"' in src
 
 
 def test_target_grant_derivation_logic():
     """Unit-check the exact derivation the fix uses."""
+
     def _grant(delegation_mode):
         return "TOKEN_EXCHANGE" if str(delegation_mode).lower() == "obo" else "CLIENT_CREDENTIALS"
+
     assert _grant("obo") == "TOKEN_EXCHANGE"
     assert _grant("OBO") == "TOKEN_EXCHANGE"
     assert _grant("m2m") == "CLIENT_CREDENTIALS"

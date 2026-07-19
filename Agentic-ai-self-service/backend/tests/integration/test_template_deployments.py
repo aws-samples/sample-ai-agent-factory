@@ -30,7 +30,7 @@ def _build_runtime_config(name: str, framework: str) -> dict:
         "model": {"modelId": "us.anthropic.claude-sonnet-5"},
         "systemPrompt": "You are a helpful assistant.",
         "deploymentType": "agentcore",
-        "pythonRuntime": "python3.13",
+        "pythonRuntime": "PYTHON_3_13",
         "protocol": "HTTP",
         "idleTimeout": 900,
         "maxLifetime": 28800,
@@ -168,7 +168,7 @@ class TestStrandsGateway:
         # -- Deploy --
         config = _build_runtime_config(
             name="integ-strands-gateway",
-            framework="strands-agents",
+            framework="strands_agents",
         )
         gateway_config = {
             "enabled": True,
@@ -241,7 +241,7 @@ class TestCustomerSupportAssistant:
         # -- Deploy --
         config = _build_runtime_config(
             name="integ-customer-support",
-            framework="strands-agents",
+            framework="strands_agents",
         )
         config["systemPrompt"] = (
             "You are a customer support assistant. Help users with their questions "

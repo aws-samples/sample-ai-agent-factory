@@ -31,13 +31,12 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Literal, Optional
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.services.auth import assert_owner, get_caller_sub
-from app.services.rbac import require_scopes
 from app.services.prompt_library_store import (
     DEFAULT_ORG_ID,
     MAX_BODY_LEN,
@@ -46,6 +45,7 @@ from app.services.prompt_library_store import (
     get_prompt_library_store,
     slugify,
 )
+from app.services.rbac import require_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +80,9 @@ class CreatePromptRequest(BaseModel):
 
 
 class UpdatePromptRequest(BaseModel):
-    display_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
-    description: Optional[str] = Field(default=None, max_length=2000)
-    tags: Optional[list[str]] = Field(default=None, max_length=20)
+    display_name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    tags: list[str] | None = Field(default=None, max_length=20)
 
 
 class AddPromptVersionRequest(BaseModel):
@@ -96,7 +96,7 @@ class PromptVersionResponse(BaseModel):
     created_by: str
 
     @classmethod
-    def from_model(cls, v: PromptVersion) -> "PromptVersionResponse":
+    def from_model(cls, v: PromptVersion) -> PromptVersionResponse:
         return cls(
             version_id=v.version_id,
             body=v.body,
@@ -112,13 +112,13 @@ class PromptEntryResponse(BaseModel):
     description: str
     tags: list[str]
     versions: list[PromptVersionResponse]
-    default_version_id: Optional[str] = None
+    default_version_id: str | None = None
     created_at: str
     updated_at: str
     is_owner: bool = False
 
     @classmethod
-    def from_entry(cls, e: PromptEntry, caller_sub: str) -> "PromptEntryResponse":
+    def from_entry(cls, e: PromptEntry, caller_sub: str) -> PromptEntryResponse:
         return cls(
             org_id=e.org_id,
             prompt_name=e.prompt_name,
@@ -136,7 +136,7 @@ class PromptEntryResponse(BaseModel):
 class AddVersionResponse(BaseModel):
     prompt_name: str
     version_id: str
-    default_version_id: Optional[str] = None
+    default_version_id: str | None = None
 
 
 class PromoteResponse(BaseModel):
@@ -168,9 +168,9 @@ def _visible_to(entry: PromptEntry, caller_sub: str, caller_org: str) -> bool:
 def resolve_visible_body(
     org_id: str,
     prompt_name: str,
-    version_id: Optional[str],
+    version_id: str | None,
     caller_sub: str,
-) -> Optional[tuple[str, str]]:
+) -> tuple[str, str] | None:
     """Resolve a prompt body for a caller, enforcing org/owner visibility.
 
     Shared by the ``/resolve`` endpoint and the deploy-time resolution hook so
@@ -218,8 +218,9 @@ async def create_prompt(
         # Collision with another owner — disambiguate with a sub-derived suffix.
         slug = f"{base_slug}-{caller_sub[:6]}"[:128]
 
-    from app.services.prompt_library_store import new_prompt_version_id
     from datetime import datetime, timezone
+
+    from app.services.prompt_library_store import new_prompt_version_id
 
     version_id = new_prompt_version_id()
     initial = PromptVersion(
@@ -244,8 +245,8 @@ async def create_prompt(
 
 @router.get("", response_model=list[PromptEntryResponse], dependencies=[Depends(require_scopes("prompt:read"))])
 async def list_prompts(
-    q: Optional[str] = Query(default=None, max_length=200),
-    tag: Optional[str] = Query(default=None, max_length=64),
+    q: str | None = Query(default=None, max_length=200),
+    tag: str | None = Query(default=None, max_length=64),
     scope: Literal["all", "mine"] = Query(default="all"),
     caller_sub: str = Depends(get_caller_sub),
 ) -> list[PromptEntryResponse]:
@@ -262,11 +263,7 @@ async def list_prompts(
 
     if q:
         ql = q.lower()
-        visible = [
-            e
-            for e in visible
-            if ql in e.display_name.lower() or ql in e.description.lower()
-        ]
+        visible = [e for e in visible if ql in e.display_name.lower() or ql in e.description.lower()]
     if tag:
         visible = [e for e in visible if tag in e.tags]
 
@@ -327,7 +324,9 @@ async def delete_prompt(
     return {"success": ok, "prompt_name": name}
 
 
-@router.post("/{name}/versions", response_model=AddVersionResponse, dependencies=[Depends(require_scopes("prompt:write"))])
+@router.post(
+    "/{name}/versions", response_model=AddVersionResponse, dependencies=[Depends(require_scopes("prompt:write"))]
+)
 async def add_prompt_version(
     name: str,
     body: AddPromptVersionRequest,
@@ -351,7 +350,11 @@ async def add_prompt_version(
     )
 
 
-@router.post("/{name}/promote/{version_id}", response_model=PromoteResponse, dependencies=[Depends(require_scopes("prompt:write"))])
+@router.post(
+    "/{name}/promote/{version_id}",
+    response_model=PromoteResponse,
+    dependencies=[Depends(require_scopes("prompt:write"))],
+)
 async def promote_prompt_version(
     name: str,
     version_id: str,
@@ -372,15 +375,15 @@ async def promote_prompt_version(
             status_code=409,
             detail=f"Unknown version_id '{version_id}' for prompt '{name}'.",
         )
-    return PromoteResponse(
-        success=True, prompt_name=name, default_version_id=version_id
-    )
+    return PromoteResponse(success=True, prompt_name=name, default_version_id=version_id)
 
 
-@router.get("/{name}/resolve", response_model=ResolvePromptResponse, dependencies=[Depends(require_scopes("prompt:read"))])
+@router.get(
+    "/{name}/resolve", response_model=ResolvePromptResponse, dependencies=[Depends(require_scopes("prompt:read"))]
+)
 async def resolve_prompt(
     name: str,
-    version: Optional[str] = Query(default=None, max_length=64),
+    version: str | None = Query(default=None, max_length=64),
     caller_sub: str = Depends(get_caller_sub),
 ) -> ResolvePromptResponse:
     """Resolve a prompt body. Visibility-checked but NOT owner-only, so an
@@ -391,6 +394,4 @@ async def resolve_prompt(
     if resolved is None:
         raise HTTPException(status_code=404, detail="Not found")
     version_id, prompt_body = resolved
-    return ResolvePromptResponse(
-        prompt_name=name, version_id=version_id, body=prompt_body
-    )
+    return ResolvePromptResponse(prompt_name=name, version_id=version_id, body=prompt_body)

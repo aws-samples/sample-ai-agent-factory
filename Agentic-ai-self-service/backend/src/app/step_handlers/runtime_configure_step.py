@@ -4,14 +4,11 @@ Requirements: 3.5
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import logging
 import os
 import re
 
-import boto3
-
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import (
     DeploymentStatusEnum,
     DeploymentStepName,
@@ -43,11 +40,7 @@ def _to_cross_region_model_id(model_id: str) -> str:
     if not model_id.startswith(("us.", "global.", "eu.", "ap.")):
         model_id = f"us.{model_id}"
     # Only legacy DATED inference profiles require a -v1:0 version suffix.
-    if (
-        "anthropic." in model_id
-        and re.search(r"-\d{8}$", model_id)
-        and not re.search(r"-v\d+:\d+$", model_id)
-    ):
+    if "anthropic." in model_id and re.search(r"-\d{8}$", model_id) and not re.search(r"-v\d+:\d+$", model_id):
         model_id = f"{model_id}-v1:0"
     return model_id
 
@@ -180,9 +173,8 @@ def handler(event: dict, context) -> dict:
         # configured (SSM /agentcore-workflow/{env}/otel/*), per-canvas values
         # for endpoint/secret/sample are dropped and platform values win.
         otel_env = build_otel_env_vars(
-            event.get("observability_config") or (
-                config.observability.model_dump() if getattr(config, "observability", None) else None
-            ),
+            event.get("observability_config")
+            or (config.observability.model_dump() if getattr(config, "observability", None) else None),
             runtime_name=runtime_name,
             deployment_id=deployment_id,
             enable_otel_legacy=bool(getattr(config, "enable_otel", False)),
@@ -210,12 +202,11 @@ def handler(event: dict, context) -> dict:
         # "hitl" tool node isn't wired, so set the table when policies exist.
         try:
             from app.services.approval_policy_store import ApprovalPolicyStore, serialize_for_agent
+
             _pol_table = _get_env("TAG_POLICY_TABLE_NAME", "")
             if _pol_table:
                 _region = _get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1"))
-                _policies = ApprovalPolicyStore(_pol_table, _region).list(
-                    event.get("owner_org") or "default"
-                )
+                _policies = ApprovalPolicyStore(_pol_table, _region).list(event.get("owner_org") or "default")
                 _serialized = serialize_for_agent(_policies)
                 if _serialized:
                     env_vars["LOOM_APPROVAL_POLICIES"] = _serialized
@@ -231,9 +222,7 @@ def handler(event: dict, context) -> dict:
         # is A2A (by protocol OR by an 'a2a' tool node). The self-contained
         # agent reads these at runtime; absent vars fail-closed (no allowlist =>
         # all peers refused).
-        is_a2a = (config.protocol or "HTTP").upper() == "A2A" or "a2a" in (
-            event.get("connected_tools") or []
-        )
+        is_a2a = (config.protocol or "HTTP").upper() == "A2A" or "a2a" in (event.get("connected_tools") or [])
         if is_a2a:
             a2a_cfg = event.get("a2a_config") or {}
             caps = a2a_cfg.get("capabilities") or []

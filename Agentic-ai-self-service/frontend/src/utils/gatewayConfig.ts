@@ -14,6 +14,76 @@ import type {
 } from '../types/components';
 
 // ============================================================================
+// Deploy mapping — split mixed targets[] into backend-shaped arrays
+// ============================================================================
+
+/** One external MCP server entry, as the deploy API expects it (snake_case). */
+export interface McpServerDeployEntry {
+  server_id?: string;
+  endpoint?: string;
+  auth_type?: string;
+  name?: string;
+  endpoint_vars?: Record<string, string>;
+  secret_value?: string;
+  oauth?: { client_id?: string; client_secret?: string; discovery_url?: string; scopes?: string[] };
+}
+
+export interface GatewayDeployTargets {
+  /** All `mcp_server` targets, mapped for the deploy request (secret-carrying). */
+  externalMcpServers: McpServerDeployEntry[];
+  /** All non-MCP targets (openapi / lambda / smithy) — carried inside
+   *  gateway_config.targets to the backend deploy loop. */
+  gatewayTargets: GatewayTargetConfig[];
+}
+
+/** Map a single MCP-server target config into the deploy entry shape, or
+ *  `null` if it isn't wireable yet (no catalog id and no custom URL). */
+export function mapMcpTargetToDeployEntry(tc: MCPServerTargetConfig): McpServerDeployEntry | null {
+  if (!tc.serverId) return null;
+  const isCustom = tc.serverId === '__custom__';
+  if (isCustom && !tc.serverUrl) return null;
+
+  const entry: McpServerDeployEntry = isCustom
+    ? { endpoint: tc.serverUrl, auth_type: tc.authType || 'none', name: tc.customName || 'custom-mcp' }
+    : { server_id: tc.serverId };
+
+  if (tc.endpointVars && Object.keys(tc.endpointVars).length) entry.endpoint_vars = tc.endpointVars;
+  if (tc.apiKey) entry.secret_value = tc.apiKey;
+  if (tc.oauth?.clientId) {
+    entry.oauth = {
+      client_id: tc.oauth.clientId,
+      client_secret: tc.oauth.clientSecret,
+      discovery_url: tc.oauth.discoveryUrl,
+      scopes: tc.oauth.scopes,
+    };
+  }
+  return entry;
+}
+
+/**
+ * Split a gateway config's effective targets into the arrays the deploy path
+ * needs: `externalMcpServers` (mcp_server family, secret-carrying, minted
+ * backend-side) and `gatewayTargets` (openapi / lambda / smithy, threaded
+ * inside gateway_config.targets for the backend target loop).
+ */
+export function mapGatewayDeployTargets(
+  config: GatewayConfiguration | null | undefined,
+): GatewayDeployTargets {
+  if (!config) return { externalMcpServers: [], gatewayTargets: [] };
+  const externalMcpServers: McpServerDeployEntry[] = [];
+  const gatewayTargets: GatewayTargetConfig[] = [];
+  for (const target of resolveGatewayTargets(config)) {
+    if (target.type === 'mcp_server') {
+      const entry = mapMcpTargetToDeployEntry(target as MCPServerTargetConfig);
+      if (entry) externalMcpServers.push(entry);
+    } else {
+      gatewayTargets.push(target);
+    }
+  }
+  return { externalMcpServers, gatewayTargets };
+}
+
+// ============================================================================
 // Target Type Options
 // ============================================================================
 
@@ -72,4 +142,17 @@ export function createDefaultGatewayConfig(): GatewayConfiguration {
     targetConfig: createDefaultTargetConfig('lambda'),
     enableSemanticSearch: true,
   };
+}
+
+/**
+ * Resolve the effective list of gateway targets. When `targets[]` is present
+ * and non-empty it is the source of truth; otherwise fall back to the single
+ * legacy `targetConfig`. This keeps existing single-target canvases working
+ * while letting a gateway wire multiple targets of different families.
+ */
+export function resolveGatewayTargets(config: GatewayConfiguration): GatewayTargetConfig[] {
+  if (config.targets && config.targets.length > 0) {
+    return config.targets;
+  }
+  return config.targetConfig ? [config.targetConfig] : [];
 }

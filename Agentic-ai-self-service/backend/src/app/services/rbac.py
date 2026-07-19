@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Callable
+from collections.abc import Callable
 
 from fastapi import HTTPException, Request
 
@@ -70,9 +70,7 @@ _RESOURCES = (
 
 # Every resource gets a read + write scope; plus the two standalone scopes.
 SCOPES: frozenset[str] = frozenset(
-    [SCOPE_INVOKE, SCOPE_ADMIN]
-    + [f"{r}:read" for r in _RESOURCES]
-    + [f"{r}:write" for r in _RESOURCES]
+    [SCOPE_INVOKE, SCOPE_ADMIN] + [f"{r}:read" for r in _RESOURCES] + [f"{r}:write" for r in _RESOURCES]
 )
 
 
@@ -164,7 +162,9 @@ def require_scopes(*required: str) -> Callable[[Request], None]:
         if rbac_enforcing():
             logger.warning(
                 "RBAC deny: caller lacks %s (held=%s) path=%s",
-                list(required), held, request.scope.get("path"),
+                list(required),
+                held,
+                request.scope.get("path"),
             )
             raise HTTPException(
                 status_code=403,
@@ -176,7 +176,9 @@ def require_scopes(*required: str) -> Callable[[Request], None]:
         # this line being emitted at Lambda's default log level (INFO is filtered).
         logger.warning(
             "RBAC advisory (would-deny): caller lacks %s (held=%s) path=%s",
-            list(required), held, request.scope.get("path"),
+            list(required),
+            held,
+            request.scope.get("path"),
         )
 
     return _dep

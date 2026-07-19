@@ -34,16 +34,29 @@ import zipfile
 from urllib.parse import quote
 
 import boto3
-
 import cfn_response  # absolute import — this file is packaged as a flat Lambda zip, not a package
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
+def _error_code(exc: BaseException) -> str:
+    """AWS error code from a ClientError ('' for non-ClientError).
+
+    Local copy of app.services.aws_errors.error_code — this module is packaged
+    as a flat Lambda zip (handler.py + cfn_response.py only, see
+    cfn_template_generator._package_cfn_provider) and cannot import app.*.
+    """
+    if isinstance(exc, ClientError):
+        return exc.response.get("Error", {}).get("Code", "")
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Custom::AgentCodePackage
 # ---------------------------------------------------------------------------
+
 
 def _merge_deps_into_zip(target_zf: zipfile.ZipFile, bundle_bytes: bytes) -> None:
     """Extract dependency bundle into target zip, excluding __pycache__/.pyc."""
@@ -121,6 +134,7 @@ def _handle_code_package_delete(event: dict) -> tuple[dict, str]:
 # Custom::OAuth2CredentialProvider
 # ---------------------------------------------------------------------------
 
+
 def _get_agentcore_ctrl():
     """Get bedrock-agentcore-control client."""
     return boto3.client("bedrock-agentcore-control")
@@ -136,7 +150,9 @@ def _handle_oauth2_cred_create(event: dict) -> tuple[dict, str]:
 
     ctrl = _get_agentcore_ctrl()
 
-    logger.info("Creating OAuth2 credential provider: %s", name)  # nosemgrep: python-logger-credential-disclosure -- logs resource name, not secret
+    logger.info(
+        "Creating OAuth2 credential provider: %s", name
+    )  # nosemgrep: python-logger-credential-disclosure -- logs resource name, not secret
     try:
         resp = ctrl.create_oauth2_credential_provider(
             name=name,
@@ -154,12 +170,16 @@ def _handle_oauth2_cred_create(event: dict) -> tuple[dict, str]:
         cred_arn = resp.get("credentialProviderArn", "")
     except ctrl.exceptions.ValidationException as e:
         if "already exists" in str(e):
-            logger.info("Credential provider %s already exists, fetching ARN", name)  # nosemgrep: python-logger-credential-disclosure -- logs resource name, not secret
+            logger.info(
+                "Credential provider %s already exists, fetching ARN", name
+            )  # nosemgrep: python-logger-credential-disclosure -- logs resource name, not secret
             resp = ctrl.get_oauth2_credential_provider(name=name)
             cred_arn = resp.get("credentialProviderArn", "")
         else:
             raise
-    logger.info("Created OAuth2 credential provider: %s", cred_arn)  # nosemgrep: python-logger-credential-disclosure -- logs resource ARN, not secret
+    logger.info(
+        "Created OAuth2 credential provider: %s", cred_arn
+    )  # nosemgrep: python-logger-credential-disclosure -- logs resource ARN, not secret
 
     # Wait a few seconds for IAM propagation
     time.sleep(5)
@@ -171,7 +191,9 @@ def _handle_oauth2_cred_create(event: dict) -> tuple[dict, str]:
     if runtime_arn:
         region = runtime_arn.split(":")[3] if ":" in runtime_arn else "us-east-1"
         encoded_arn = quote(runtime_arn, safe="")
-        endpoint_url = f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encoded_arn}/invocations?qualifier=DEFAULT"
+        endpoint_url = (
+            f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encoded_arn}/invocations?qualifier=DEFAULT"
+        )
         data["McpEndpointUrl"] = endpoint_url
         logger.info("MCP endpoint URL: %s", endpoint_url)
 
@@ -194,7 +216,9 @@ def _delete_oauth2_cred(cred_arn: str) -> None:
     cred_name = cred_arn.rsplit("/", 1)[-1] if "/" in cred_arn else cred_arn
     try:
         ctrl.delete_oauth2_credential_provider(name=cred_name)
-        logger.info("Deleted OAuth2 credential provider: %s", cred_arn)  # nosemgrep: python-logger-credential-disclosure -- logs resource ARN, not secret
+        logger.info(
+            "Deleted OAuth2 credential provider: %s", cred_arn
+        )  # nosemgrep: python-logger-credential-disclosure -- logs resource ARN, not secret
     except Exception as e:
         logger.warning("Failed to delete credential provider %s: %s", cred_name, type(e).__name__)
 
@@ -214,6 +238,7 @@ def _handle_oauth2_cred_delete(event: dict) -> tuple[dict, str]:
 # fires before the policy engine is ready in fresh accounts (Bug 72). This
 # Custom Resource gives us a longer wait + retries on the bind step.
 # ---------------------------------------------------------------------------
+
 
 def _handle_policy_create_update(event: dict) -> tuple[dict, str]:
     props = event["ResourceProperties"]
@@ -294,7 +319,11 @@ def _handle_policy_create_update(event: dict) -> tuple[dict, str]:
                 break
             except Exception as e:
                 err = str(e)
-                if "ResourceNotFoundException" in err or "PolicyEngine" in err and "not found" in err.lower():
+                # Message fallback kept: the propagation race can also surface as a
+                # ValidationException saying "PolicyEngine ... not found".
+                if _error_code(e) == "ResourceNotFoundException" or (
+                    "PolicyEngine" in err and "not found" in err.lower()
+                ):
                     logger.info("PolicyEngine still propagating (attempt %d): %s", attempt + 1, err[:200])
                     time.sleep(10)
                     continue
@@ -324,6 +353,7 @@ def _handle_policy_delete(event: dict) -> tuple[dict, str]:
 # ---------------------------------------------------------------------------
 # Router — dispatches by resource type
 # ---------------------------------------------------------------------------
+
 
 def _get_resource_type(event: dict) -> str:
     """Determine the custom resource type from the event."""
@@ -364,7 +394,8 @@ def handler(event: dict, context) -> None:
                 raise ValueError(f"Unknown RequestType: {request_type}")
 
         cfn_response.send(
-            event, context,
+            event,
+            context,
             cfn_response.SUCCESS,
             data=data,
             physical_resource_id=physical_id,
@@ -373,7 +404,8 @@ def handler(event: dict, context) -> None:
     except Exception as e:
         logger.exception("Custom resource handler failed")
         cfn_response.send(
-            event, context,
+            event,
+            context,
             cfn_response.FAILED,
             reason=str(e),
             physical_resource_id=event.get("PhysicalResourceId", logical_id),

@@ -15,14 +15,12 @@ Groups:
 import inspect
 
 import pytest
-
-from app.models.components import RuntimeConfiguration, ModelConfiguration
-from app.models.enums import AgentFramework, ModelProvider, AgentServerProtocol
+from app.models.components import ModelConfiguration, RuntimeConfiguration
+from app.models.enums import AgentFramework, AgentServerProtocol, ModelProvider
 from app.services.deployment import (
-    generate_requirements,
     WorkflowExecutor,
+    generate_requirements,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

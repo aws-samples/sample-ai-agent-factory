@@ -4,14 +4,13 @@ Requirements: 3.4
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import logging
 import os
 
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services.deployment_state_store import DeploymentStateStore
-from app.services.gateway_deployer import _put_connector_secret, deploy_gateway
+from app.services.gateway_deployer import _SHARED_TOOL_LAMBDAS, _put_connector_secret, deploy_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +36,7 @@ def _record_gateway_resources(
     gateway / cognito_user_pool / lambda / iam_role / secret /
     api_key_credential_provider / oauth2_credential_provider.
     """
+
     def _rec(resource: dict) -> None:
         resource["region"] = region
         store.record_resource(deployment_id, resource)
@@ -57,10 +57,18 @@ def _record_gateway_resources(
         _rec({"type": "cognito_user_pool", "id": pool_id})
 
     # Tool Lambdas + their exec roles (built-in dynamic-tools / customer-support,
-    # KB query tool, and per-custom-tool lambdas/roles).
+    # KB query tool, and per-custom-tool lambdas/roles). SHARED singleton tool
+    # Lambdas (AgentCoreDynamicTools / AgentCoreCustomerSupportTools) are reused
+    # by every gateway, so their manifest entry also records WHICH gateway role
+    # owns this deployment's invoke grant — the teardown dispatchers use it to
+    # release the Lambda by reference count instead of hard-deleting it out from
+    # under other live gateways (Defect C, manifest path).
     for fn in [gateway_result.get("lambda_function_name"), gateway_result.get("kb_lambda_name")]:
         if fn:
-            _rec({"type": "lambda", "name": fn})
+            entry = {"type": "lambda", "name": fn}
+            if fn in _SHARED_TOOL_LAMBDAS and gw_name:
+                entry["gateway_role"] = f"AgentCoreGateway-{gw_name}"
+            _rec(entry)
     for fn in gateway_result.get("custom_tool_lambdas") or []:
         if fn:
             _rec({"type": "lambda", "name": fn})
@@ -82,11 +90,7 @@ def _record_gateway_resources(
         if not prov_name:
             # Legacy bare name (no type prefix) — default to oauth2 provider.
             kind, prov_name = "OAUTH", str(entry)
-        res_type = (
-            "api_key_credential_provider"
-            if kind.upper() == "API_KEY"
-            else "oauth2_credential_provider"
-        )
+        res_type = "api_key_credential_provider" if kind.upper() == "API_KEY" else "oauth2_credential_provider"
         _rec({"type": res_type, "name": prov_name})
 
     # Staged OpenAPI spec objects (large connector specs routed to S3, not inline).
@@ -127,9 +131,7 @@ def handler(event: dict, context) -> dict:
                     if (connector.get("auth_method") or connector.get("authMethod")) == "oauth2_cc"
                     else "apiKey"
                 )
-                connector["secret_arn"] = _put_connector_secret(
-                    region, owner_sub, {payload_key: raw}
-                )
+                connector["secret_arn"] = _put_connector_secret(region, owner_sub, {payload_key: raw})
             # ALWAYS drop the raw value once we've passed the mint point — even in
             # the edge case where BOTH secret_arn and secret_value arrived on the
             # input — so the plaintext never survives the step into the re-emitted
@@ -182,15 +184,9 @@ def handler(event: dict, context) -> dict:
         # Persist connector cleanup handles (provider NAMES + secret ARNs) into
         # the gateway_result that gets written to the deployment record so
         # cleanup.sh can tear down credential providers and secrets later.
-        gateway_result["connector_credential_providers"] = gateway_result.get(
-            "connector_credential_providers", []
-        )
-        gateway_result["connector_secret_arns"] = gateway_result.get(
-            "connector_secret_arns", []
-        )
-        gateway_result["connector_spec_s3_uris"] = gateway_result.get(
-            "connector_spec_s3_uris", []
-        )
+        gateway_result["connector_credential_providers"] = gateway_result.get("connector_credential_providers", [])
+        gateway_result["connector_secret_arns"] = gateway_result.get("connector_secret_arns", [])
+        gateway_result["connector_spec_s3_uris"] = gateway_result.get("connector_spec_s3_uris", [])
 
         return {
             **event,

@@ -11,8 +11,6 @@ from unittest.mock import patch
 
 import boto3
 import pytest
-from moto import mock_aws
-
 from app.services.config import (
     AppConfig,
     _build_ssm_parameter_path,
@@ -22,7 +20,7 @@ from app.services.config import (
     _parse_cors_origins,
     load_config,
 )
-
+from moto import mock_aws
 
 # ============================================================================
 # Unit tests for helper functions
@@ -162,6 +160,13 @@ class TestLoadConfigDeployed:
         {
             "ENVIRONMENT": "dev",
             "AWS_REGION": "us-east-1",
+            # clear=True wipes the ambient AWS creds that let moto's SSM mock
+            # intercept the call; without dummy creds the boto3 SSM client
+            # escapes to REAL AWS and fails NoCredentialsError on a runner with
+            # no credentials (CI). Supply fakes so moto stays in control.
+            "AWS_ACCESS_KEY_ID": "testing",
+            "AWS_SECRET_ACCESS_KEY": "testing",
+            "AWS_SESSION_TOKEN": "testing",
         },
         clear=True,
     )
@@ -196,6 +201,11 @@ class TestLoadConfigDeployed:
             "ENVIRONMENT": "dev",
             "AWS_REGION": "us-east-1",
             "CORS_ORIGINS": "http://fallback.com",
+            # See test_reads_from_ssm: fake creds keep moto in control after
+            # clear=True (otherwise the SSM probe hits real AWS on CI).
+            "AWS_ACCESS_KEY_ID": "testing",
+            "AWS_SECRET_ACCESS_KEY": "testing",
+            "AWS_SESSION_TOKEN": "testing",
         },
         clear=True,
     )

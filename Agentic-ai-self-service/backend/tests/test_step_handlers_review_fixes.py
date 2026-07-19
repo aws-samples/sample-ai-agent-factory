@@ -30,7 +30,6 @@ Tests are pure unit tests — they patch ``boto3.client`` to drive the
 handler, then assert on the captured kwargs.
 """
 
-import os
 import sys
 import types
 from unittest.mock import MagicMock, patch
@@ -53,9 +52,7 @@ def _stub_otel_platform(monkeypatch):
     no-op and we don't hit AWS.
     """
     if "app.services._otel_platform" not in sys.modules:
-        sys.modules["app.services._otel_platform"] = types.ModuleType(
-            "app.services._otel_platform"
-        )
+        sys.modules["app.services._otel_platform"] = types.ModuleType("app.services._otel_platform")
 
 
 @pytest.fixture
@@ -103,9 +100,7 @@ def test_update_guardrail_includes_required_name_field(deployment_store_stub, mo
     bedrock.create_guardrail.side_effect = _AlreadyExists("already there")
 
     paginator = MagicMock()
-    paginator.paginate.return_value = [
-        {"guardrails": [{"name": "my-guardrail", "id": "gr-existing-123"}]}
-    ]
+    paginator.paginate.return_value = [{"guardrails": [{"name": "my-guardrail", "id": "gr-existing-123"}]}]
     bedrock.get_paginator.return_value = paginator
 
     bedrock.update_guardrail.return_value = {"guardrailId": "gr-existing-123"}
@@ -198,12 +193,8 @@ def test_create_data_source_does_not_leak_bda_sentinel(deployment_store_stub, mo
     )
 
     bedrock_agent = MagicMock()
-    bedrock_agent.create_knowledge_base.return_value = {
-        "knowledgeBase": {"knowledgeBaseId": "kb-abc"}
-    }
-    bedrock_agent.create_data_source.return_value = {
-        "dataSource": {"dataSourceId": "ds-xyz"}
-    }
+    bedrock_agent.create_knowledge_base.return_value = {"knowledgeBase": {"knowledgeBaseId": "kb-abc"}}
+    bedrock_agent.create_data_source.return_value = {"dataSource": {"dataSourceId": "ds-xyz"}}
 
     iam = MagicMock()
     s3v = MagicMock()
@@ -334,6 +325,4 @@ def test_update_gateway_detach_path_validates_against_service_model():
     client = boto3.client("bedrock-agentcore-control", region_name="us-east-1")
     op = client.meta.service_model.operation_model("UpdateGateway")
     errors = ParamValidator().validate(update_params, op.input_shape)
-    assert not errors.has_errors(), (
-        f"update_gateway kwargs failed botocore validation: {errors.generate_report()}"
-    )
+    assert not errors.has_errors(), f"update_gateway kwargs failed botocore validation: {errors.generate_report()}"

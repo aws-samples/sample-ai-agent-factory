@@ -7,20 +7,18 @@ References:
 - https://github.com/awslabs/amazon-bedrock-agentcore-samples/tree/main/01-tutorials/09-AgentCore-E2E/lab-05-agentcore-evals.ipynb
 - https://github.com/aws/bedrock-agentcore-starter-toolkit (operations/evaluation/)
 """
+
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
-import re
-
 import json
 import logging
 import os
+import re
 import time
 
-import boto3
-
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services import step_clients
+from app.services.aws_errors import is_error
 from app.services.deployment_state_store import DeploymentStateStore
 
 logger = logging.getLogger(__name__)
@@ -49,7 +47,6 @@ def handler(event: dict, context) -> dict:
         )
 
         evaluation_config = event.get("evaluation_config") or {}
-        region = _get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1"))
         runtime_arn = event.get("runtime_arn", "")
         runtime_id = event.get("runtime_id", "")
 
@@ -124,28 +121,73 @@ def handler(event: dict, context) -> dict:
                         "Version": "2012-10-17",
                         "Statement": [
                             {
+                                # LLM-judge evaluator model calls. Resource "*"
+                                # required: cross-region inference profiles route
+                                # to foundation-model ARNs in other regions and
+                                # the evaluator model is service-selected.
+                                "Sid": "EvaluatorModelAccess",
                                 "Effect": "Allow",
                                 "Action": [
                                     "bedrock:InvokeModel",
                                     "bedrock:InvokeModelWithResponseStream",
-                                    "bedrock-agentcore:*",
-                                    "bedrock-agentcore-control:*",
+                                ],
+                                "Resource": "*",
+                            },
+                            {
+                                # Exact AgentCore evaluation verbs (previously
+                                # bedrock-agentcore:* + -control:* — HIGH IAM
+                                # finding). Eval-config/evaluator ids are minted
+                                # by the service, so ARNs are unknowable here —
+                                # scoped by the exact action list instead.
+                                "Sid": "AgentCoreEvaluation",
+                                "Effect": "Allow",
+                                "Action": [
+                                    "bedrock-agentcore:Evaluate",
+                                    "bedrock-agentcore:GetOnlineEvaluationConfig",
+                                    "bedrock-agentcore:ListOnlineEvaluationConfigs",
+                                    "bedrock-agentcore:ListEvaluators",
+                                    "bedrock-agentcore:GetEvaluator",
+                                ],
+                                "Resource": "*",
+                            },
+                            {
+                                # Read runtime spans/logs + write eval results —
+                                # scoped to the AgentCore runtime log-group
+                                # namespace plus the aws/spans trace-index group
+                                # (Bug 119/139) instead of "*".
+                                "Sid": "EvaluationLogsScoped",
+                                "Effect": "Allow",
+                                "Action": [
                                     "logs:StartQuery",
                                     "logs:GetQueryResults",
                                     "logs:GetLogEvents",
-                                    "logs:DescribeLogGroups",
                                     "logs:DescribeLogStreams",
                                     "logs:FilterLogEvents",
                                     "logs:CreateLogGroup",
                                     "logs:PutLogEvents",
                                     "logs:CreateLogStream",
-                                    # AgentCore Online Evaluation reads X-Ray
-                                    # spans (aws/spans index) and CloudWatch
-                                    # Application Signals to extract per-step
-                                    # traces. Without these, CreateOnlineEvaluationConfig
-                                    # returns AccessDeniedException with
-                                    # "Access denied when accessing index policy
-                                    # for aws/spans". See lessons.md Bug 119.
+                                ],
+                                "Resource": [
+                                    "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/*",
+                                    "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/*:log-stream:*",
+                                    "arn:aws:logs:*:*:log-group:aws/spans",
+                                    "arn:aws:logs:*:*:log-group:aws/spans:log-stream:*",
+                                ],
+                            },
+                            {
+                                # Account-level discovery/trace APIs with no
+                                # resource-ARN form. AgentCore Online Evaluation
+                                # reads X-Ray spans (aws/spans index) and
+                                # CloudWatch Application Signals to extract
+                                # per-step traces. Without these,
+                                # CreateOnlineEvaluationConfig returns
+                                # AccessDeniedException "Access denied when
+                                # accessing index policy for aws/spans". See
+                                # lessons.md Bug 119.
+                                "Sid": "EvaluationTraceDiscovery",
+                                "Effect": "Allow",
+                                "Action": [
+                                    "logs:DescribeLogGroups",
                                     "xray:GetIndexingRules",
                                     "xray:GetTraceSummaries",
                                     "xray:BatchGetTraces",
@@ -159,7 +201,7 @@ def handler(event: dict, context) -> dict:
                                     "application-signals:BatchGet*",
                                 ],
                                 "Resource": "*",
-                            }
+                            },
                         ],
                     }
                 ),
@@ -196,7 +238,9 @@ def handler(event: dict, context) -> dict:
             config_id = resp.get("onlineEvaluationConfigId", "")
             logger.info("Created online evaluation config: %s", config_id)
         except Exception as e:
-            if "ConflictException" in str(e) or "already exists" in str(e):
+            # "already exists" fallback kept: conflicts can surface as a
+            # ValidationException whose message says "already exists".
+            if is_error(e, "ConflictException") or "already exists" in str(e):
                 logger.info("Evaluation config already exists, looking up")
                 configs = agentcore_ctrl.list_online_evaluation_configs(agentId=agent_id)
                 config_id = ""

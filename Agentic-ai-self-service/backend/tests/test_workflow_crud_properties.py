@@ -18,35 +18,34 @@ import sys
 
 sys.path.insert(0, "src")
 
-from datetime import datetime, timezone
 from copy import deepcopy
+from datetime import datetime, timezone
 
 import pytest
-from hypothesis import given, settings, strategies as st
-from pydantic import ValidationError
-
-from app.models.workflow import (
-    WorkflowDefinition,
-    WorkflowMetadata,
-    Viewport,
-    Position,
-    ComponentNode,
-)
 from app.models.components import (
-    RuntimeConfiguration,
     ModelConfiguration,
+    RuntimeConfiguration,
 )
 from app.models.enums import (
     AgentCoreComponentType,
     AgentFramework,
-    ModelProvider,
-    DeploymentStatus,
-    PythonRuntime,
-    DeploymentType,
     AgentServerProtocol,
+    DeploymentStatus,
+    DeploymentType,
+    ModelProvider,
+    PythonRuntime,
+)
+from app.models.workflow import (
+    ComponentNode,
+    Position,
+    Viewport,
+    WorkflowDefinition,
+    WorkflowMetadata,
 )
 from app.services.storage import WorkflowStorage
-
+from hypothesis import given, settings
+from hypothesis import strategies as st
+from pydantic import ValidationError
 
 # ============================================================================
 # Hypothesis Strategies
@@ -379,7 +378,7 @@ class TestProperty2PartialUpdatePreservesUnmodifiedFields:
                 assert result.version == original.version
             elif field == "nodes":
                 assert len(result.nodes) == len(original.nodes)
-                for orig_node, res_node in zip(original.nodes, result.nodes):
+                for orig_node, res_node in zip(original.nodes, result.nodes, strict=True):
                     assert orig_node.id == res_node.id
             elif field == "edges":
                 assert result.edges == original.edges
@@ -550,9 +549,9 @@ class TestProperty3InvalidWorkflowImportRejection:
         This tests the full API path: POST /api/workflows/import with an
         invalid workflow_json should return HTTP 400 with error details.
         """
-        from fastapi.testclient import TestClient
         from app.main import app
         from app.services.storage import get_workflow_storage
+        from fastapi.testclient import TestClient
 
         client = TestClient(app)
         get_workflow_storage().clear()

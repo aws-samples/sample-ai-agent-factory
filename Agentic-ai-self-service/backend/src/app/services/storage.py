@@ -6,9 +6,8 @@ In production, this would be replaced with a database.
 Requirements: 9.1, 9.5
 """
 
-from datetime import datetime, timezone
-from typing import Optional
 import uuid
+from datetime import datetime, timezone
 
 from app.models import WorkflowDefinition
 
@@ -53,7 +52,7 @@ class WorkflowStorage:
         self._workflows[workflow.id] = workflow
         return workflow
 
-    def get(self, workflow_id: str) -> Optional[WorkflowDefinition]:
+    def get(self, workflow_id: str) -> WorkflowDefinition | None:
         """Get a workflow by ID.
 
         Args:
@@ -64,7 +63,7 @@ class WorkflowStorage:
         """
         return self._workflows.get(workflow_id)
 
-    def update(self, workflow_id: str, workflow: WorkflowDefinition) -> Optional[WorkflowDefinition]:
+    def update(self, workflow_id: str, workflow: WorkflowDefinition) -> WorkflowDefinition | None:
         """Update an existing workflow.
 
         Args:

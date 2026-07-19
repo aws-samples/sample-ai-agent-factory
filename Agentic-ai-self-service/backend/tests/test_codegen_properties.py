@@ -12,15 +12,14 @@ import sys
 
 sys.path.insert(0, "src")
 
-from hypothesis import given, settings, strategies as st
-
 from app.models.deployment_models import RuntimeConfig
 from app.services.code_generator import (
     PROVIDER_PACKAGES,
     generate_agent_code,
     generate_requirements,
 )
-
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 # ============================================================================
 # Hypothesis Strategies

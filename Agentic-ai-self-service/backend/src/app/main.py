@@ -12,9 +12,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import workflows_router
 from app.routers.flows import router as flows_router
+from app.routers.git_sync import router as git_sync_router
 from app.routers.observability import router as observability_router
 from app.routers.workspaces import router as workspaces_router
-from app.routers.git_sync import router as git_sync_router
+
 # routers/deployment.py and routers/tools.py used to mount /api/deploy + tool
 # routes here, but API Gateway routes those endpoints directly to the
 # Deployment Lambda (deployment_handler.py). The router files were dead code
@@ -46,14 +47,14 @@ if config.dynamodb_table_name:
         config.dynamodb_table_name,
         config.aws_region,
     )
-    set_workflow_storage(DynamoDBWorkflowStorage(
-        table_name=config.dynamodb_table_name,
-        region=config.aws_region,
-    ))
-elif _IS_LAMBDA:
-    raise RuntimeError(
-        "Storage misconfigured: DYNAMODB_TABLE_NAME unset in Lambda environment"
+    set_workflow_storage(
+        DynamoDBWorkflowStorage(
+            table_name=config.dynamodb_table_name,
+            region=config.aws_region,
+        )
     )
+elif _IS_LAMBDA:
+    raise RuntimeError("Storage misconfigured: DYNAMODB_TABLE_NAME unset in Lambda environment")
 else:
     logger.info("Local mode: using in-memory workflow storage (no DYNAMODB_TABLE_NAME set)")
 
@@ -64,14 +65,14 @@ if config.dynamodb_flows_table_name:
         config.dynamodb_flows_table_name,
         config.aws_region,
     )
-    set_flow_storage(DynamoDBFlowStorage(
-        table_name=config.dynamodb_flows_table_name,
-        region=config.aws_region,
-    ))
-elif _IS_LAMBDA:
-    raise RuntimeError(
-        "Storage misconfigured: DYNAMODB_FLOWS_TABLE_NAME unset in Lambda environment"
+    set_flow_storage(
+        DynamoDBFlowStorage(
+            table_name=config.dynamodb_flows_table_name,
+            region=config.aws_region,
+        )
     )
+elif _IS_LAMBDA:
+    raise RuntimeError("Storage misconfigured: DYNAMODB_FLOWS_TABLE_NAME unset in Lambda environment")
 else:
     logger.info("Local mode: using in-memory flow storage (no DYNAMODB_FLOWS_TABLE_NAME set)")
 

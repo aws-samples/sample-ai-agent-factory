@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
 
 import boto3
 
@@ -37,7 +36,12 @@ _CURATED: dict[str, dict] = {
 _FALLBACK: list[dict] = [
     {"provider": "bedrock", "modelId": "us.anthropic.claude-sonnet-5", "label": "Claude Sonnet 5", "maxTokens": 200000},
     {"provider": "bedrock", "modelId": "us.anthropic.claude-opus-4-8", "label": "Claude Opus 4.8", "maxTokens": 200000},
-    {"provider": "bedrock", "modelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0", "label": "Claude Haiku 4.5", "maxTokens": 200000},
+    {
+        "provider": "bedrock",
+        "modelId": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "label": "Claude Haiku 4.5",
+        "maxTokens": 200000,
+    },
 ]
 
 
@@ -53,7 +57,7 @@ def _friendly_label(model_id: str, fallback_name: str) -> str:
     return meta.get("label") or fallback_name or model_id
 
 
-def list_models(region: Optional[str] = None) -> list[dict]:
+def list_models(region: str | None = None) -> list[dict]:
     """Return the merged, deduped live model catalog for the picker.
 
     Each entry: {provider, modelId, label, maxTokens, source}. TEXT models only

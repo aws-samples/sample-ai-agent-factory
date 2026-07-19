@@ -40,9 +40,7 @@ def test_normal_category_keeps_input_equals_output():
 
 
 def test_mixed_categories_only_prompt_attack_is_special_cased():
-    cfg = _build_content_filter_config(
-        {"hate": "MEDIUM", "prompt_attack": "MEDIUM"}
-    )
+    cfg = _build_content_filter_config({"hate": "MEDIUM", "prompt_attack": "MEDIUM"})
     by_type = _by_type(cfg)
     assert by_type["HATE"]["inputStrength"] == "MEDIUM"
     assert by_type["HATE"]["outputStrength"] == "MEDIUM"

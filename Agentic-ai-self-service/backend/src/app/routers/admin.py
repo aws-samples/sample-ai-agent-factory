@@ -68,17 +68,14 @@ async def get_deploy_targets(_caller_sub: str = Depends(get_caller_sub)) -> dict
         "enabled": dt.targets_enabled(),
         "regions": dt.list_regions(),
         "accounts": [
-            {"account_id": a.get("account_id"), "role_arn": a.get("role_arn"),
-             "region": a.get("region")}
+            {"account_id": a.get("account_id"), "role_arn": a.get("role_arn"), "region": a.get("region")}
             for a in dt.list_accounts()
         ],
     }
 
 
 @router.post("/deploy-targets/enable", dependencies=[Depends(require_scopes("admin"))])
-async def enable_deploy_targets(
-    body: EnableTargetsRequest, _caller_sub: str = Depends(get_caller_sub)
-) -> dict:
+async def enable_deploy_targets(body: EnableTargetsRequest, _caller_sub: str = Depends(get_caller_sub)) -> dict:
     """Explicitly enable/disable multi-region/account deployment (default off)."""
     from app.services import deploy_target as dt
 
@@ -87,9 +84,7 @@ async def enable_deploy_targets(
 
 
 @router.post("/deploy-targets/regions", dependencies=[Depends(require_scopes("admin"))])
-async def add_region_target(
-    body: RegionTargetRequest, _caller_sub: str = Depends(get_caller_sub)
-) -> dict:
+async def add_region_target(body: RegionTargetRequest, _caller_sub: str = Depends(get_caller_sub)) -> dict:
     from app.services import deploy_target as dt
 
     dt.add_region(body.region)
@@ -97,9 +92,7 @@ async def add_region_target(
 
 
 @router.post("/deploy-targets/accounts", dependencies=[Depends(require_scopes("admin"))])
-async def add_account_target(
-    body: AccountTargetRequest, _caller_sub: str = Depends(get_caller_sub)
-) -> dict:
+async def add_account_target(body: AccountTargetRequest, _caller_sub: str = Depends(get_caller_sub)) -> dict:
     """Register a cross-account deployment target. Validates the role is
     assumable + lands in the expected account BEFORE persisting (so a bad role
     ARN fails loudly here, not mid-deploy)."""
@@ -111,5 +104,5 @@ async def add_account_target(
     try:
         dt.session_for_target(account_id=body.account_id, region=body.region)
     except dt.TargetError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return {"account_id": body.account_id, "validated": True}

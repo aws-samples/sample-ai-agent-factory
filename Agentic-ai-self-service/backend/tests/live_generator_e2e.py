@@ -19,12 +19,22 @@ import sys
 
 sys.path.insert(0, "src")
 
-from app.services.agent_generator import generate_canvas, _validate_spec  # noqa: E402
+from app.services.agent_generator import _validate_spec, generate_canvas  # noqa: E402
 
 # Mirror of frontend/src/types/validation.ts CONNECTION_COMPATIBILITY.
 CONNECTION_COMPATIBILITY = {
-    "runtime": ["gateway", "memory", "code_interpreter", "browser", "observability",
-                "identity", "evaluation", "policy", "guardrails", "a2a"],
+    "runtime": [
+        "gateway",
+        "memory",
+        "code_interpreter",
+        "browser",
+        "observability",
+        "identity",
+        "evaluation",
+        "policy",
+        "guardrails",
+        "a2a",
+    ],
     "gateway": ["runtime", "identity", "policy", "tool"],
     "memory": ["runtime"],
     "code_interpreter": ["runtime"],
@@ -38,8 +48,10 @@ CONNECTION_COMPATIBILITY = {
     "tool": ["gateway"],
 }
 
-PROMPT = ("create an agent that takes looks at slack messages and check for the "
-          "issues. After the issue is confirmed, it creates a Jira ticket.")
+PROMPT = (
+    "create an agent that takes looks at slack messages and check for the "
+    "issues. After the issue is confirmed, it creates a Jira ticket."
+)
 
 REGION = "us-east-1"
 
@@ -70,9 +82,11 @@ def main() -> int:
         {"role": "user", "content": PROMPT},
         {"role": "assistant", "content": turn1.get("message", "(questions)")},
     ]
-    answer = ("Read from a Slack channel via the Slack API. Confirm issues with the "
-              "model. Create Jira tickets via a custom tool. No persistent memory "
-              "needed. Invoke on demand.")
+    answer = (
+        "Read from a Slack channel via the Slack API. Confirm issues with the "
+        "model. Create Jira tickets via a custom tool. No persistent memory "
+        "needed. Invoke on demand."
+    )
     print("\n=== Turn 2 (generation) ===")
     turn2 = generate_canvas(answer, conversation_history=history, region=REGION)
     print(json.dumps(turn2, indent=2)[:2000])
@@ -102,8 +116,7 @@ def main() -> int:
         assert "gateway" in node_types, "tool present but no gateway node"
         rt = next(n["idSuffix"] for n in spec["nodes"] if n["type"] == "runtime")
         tools = {n["idSuffix"] for n in spec["nodes"] if n["type"] == "tool"}
-        bad = [e for e in spec["edges"]
-               if e["sourceIdSuffix"] in tools and e["targetIdSuffix"] == rt]
+        bad = [e for e in spec["edges"] if e["sourceIdSuffix"] in tools and e["targetIdSuffix"] == rt]
         assert not bad, f"tool->runtime edge present: {bad}"
         print("[PASS] tool nodes route through a gateway (tool -> gateway -> runtime)")
     else:

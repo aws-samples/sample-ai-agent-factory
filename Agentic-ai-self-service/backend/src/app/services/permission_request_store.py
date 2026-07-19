@@ -16,7 +16,6 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
 
 import boto3
 
@@ -37,9 +36,9 @@ class PermissionRequest:
     justification: str
     status: str = "PENDING"  # PENDING | APPROVED | REJECTED
     created_at: str = ""
-    decided_by: Optional[str] = None
-    decided_at: Optional[str] = None
-    decision_reason: Optional[str] = None
+    decided_by: str | None = None
+    decided_at: str | None = None
+    decision_reason: str | None = None
     extra: dict = field(default_factory=dict)
 
     def to_item(self) -> dict:
@@ -59,7 +58,7 @@ class PermissionRequest:
         }
 
     @classmethod
-    def from_item(cls, item: dict) -> "PermissionRequest":
+    def from_item(cls, item: dict) -> PermissionRequest:
         return cls(
             org_id=item.get("org_id", ""),
             request_id=item.get("request_id", ""),
@@ -112,7 +111,7 @@ class PermissionRequestStore:
         self._table.put_item(Item=req.to_item())
         return req
 
-    def get(self, org_id: str, request_id: str) -> Optional[PermissionRequest]:
+    def get(self, org_id: str, request_id: str) -> PermissionRequest | None:
         item = self._table.get_item(Key={"org_id": org_id, "request_id": request_id}).get("Item")
         return PermissionRequest.from_item(item) if item else None
 

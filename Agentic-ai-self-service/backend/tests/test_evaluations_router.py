@@ -34,9 +34,7 @@ def client(app_with_router: FastAPI) -> TestClient:
 
 
 def test_evaluation_config_404_when_no_slot(client: TestClient):
-    with patch(
-        "app.routers.evaluations.get_slots_store"
-    ) as slots_store_mock:
+    with patch("app.routers.evaluations.get_slots_store") as slots_store_mock:
         slots_store_mock.return_value.get.return_value = None
         resp = client.get("/api/runtimes/myagent/evaluation-config")
     assert resp.status_code == 404
@@ -44,11 +42,10 @@ def test_evaluation_config_404_when_no_slot(client: TestClient):
 
 def test_evaluation_config_cross_tenant_returns_404(client: TestClient):
     """Different owner_sub on the slot row → 404 (existence non-disclosure)."""
-    with patch(
-        "app.routers.evaluations.get_slots_store"
-    ) as slots_store_mock, patch(
-        "app.routers.evaluations.get_versions_store"
-    ) as versions_store_mock:
+    with (
+        patch("app.routers.evaluations.get_slots_store") as slots_store_mock,
+        patch("app.routers.evaluations.get_versions_store") as versions_store_mock,
+    ):
         slots_store_mock.return_value.get.return_value = RuntimeSlots(
             runtime_name="myagent",
             owner_sub="someone-else",
@@ -72,11 +69,11 @@ def test_evaluation_config_cross_tenant_returns_404(client: TestClient):
 def test_evaluation_config_match_by_runtime_id_substring(client: TestClient):
     """Matched configs are returned with evaluators + sampling rate."""
     runtime_id = "myagent_abcd1234-runtime-abcd1234"
-    with patch(
-        "app.routers.evaluations.get_slots_store"
-    ) as slots_store_mock, patch(
-        "app.routers.evaluations.get_versions_store"
-    ) as versions_store_mock, patch("boto3.client") as boto_mock:
+    with (
+        patch("app.routers.evaluations.get_slots_store") as slots_store_mock,
+        patch("app.routers.evaluations.get_versions_store") as versions_store_mock,
+        patch("boto3.client") as boto_mock,
+    ):
         slots_store_mock.return_value.get.return_value = RuntimeSlots(
             runtime_name="myagent",
             owner_sub=_LOCAL_DEV_SUB,
@@ -124,13 +121,149 @@ def test_evaluation_config_match_by_runtime_id_substring(client: TestClient):
     assert body["config_id"] == "ec-1"
 
 
+def test_evaluation_config_fallback_resolves_custom_named_config(client: TestClient):
+    """A config created with a custom name (evaluationConfig.configName on
+    deploy) never matches the `eval_<agent_id>` heuristic. The endpoint must
+    fall back to describing each config and matching on the runtime the config
+    targets (dataSourceConfig.cloudWatchLogs serviceNames / logGroupNames) —
+    live-verified 404 without this."""
+    runtime_id = "myagent_abcd1234-runtime-abcd1234"
+    with (
+        patch("app.routers.evaluations.get_slots_store") as slots_store_mock,
+        patch("app.routers.evaluations.get_versions_store") as versions_store_mock,
+        patch("boto3.client") as boto_mock,
+    ):
+        slots_store_mock.return_value.get.return_value = RuntimeSlots(
+            runtime_name="myagent",
+            owner_sub=_LOCAL_DEV_SUB,
+            production_version_id="v1",
+        )
+        versions_store_mock.return_value.get.return_value = AgentVersion(
+            runtime_name="myagent",
+            version_id="v1",
+            owner_sub=_LOCAL_DEV_SUB,
+            created_at="2026-05-28T00:00:00+00:00",
+            deployment_id="d1",
+            agentcore_runtime_name="myagent_abcd1234",
+            runtime_id=runtime_id,
+        )
+        ctrl_client = MagicMock()
+        # Two configs: one unrelated, one custom-named targeting OUR runtime.
+        ctrl_client.list_online_evaluation_configs.return_value = {
+            "onlineEvaluationConfigs": [
+                {
+                    "onlineEvaluationConfigName": "someone_elses_evals",
+                    "onlineEvaluationConfigId": "ec-other",
+                },
+                {
+                    "onlineEvaluationConfigName": "my_custom_eval_name",
+                    "onlineEvaluationConfigId": "ec-custom",
+                },
+            ]
+        }
+
+        def _get_cfg(onlineEvaluationConfigId):  # noqa: N803
+            if onlineEvaluationConfigId == "ec-custom":
+                return {
+                    "onlineEvaluationConfigName": "my_custom_eval_name",
+                    "onlineEvaluationConfigId": "ec-custom",
+                    "dataSourceConfig": {
+                        "cloudWatchLogs": {
+                            "logGroupNames": [f"/aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT"],
+                            "serviceNames": [runtime_id],
+                        }
+                    },
+                    "evaluators": [{"evaluatorId": "Builtin.Correctness"}],
+                    "rule": {"samplingConfig": {"samplingPercentage": 25}},
+                    "status": "ACTIVE",
+                }
+            return {
+                "onlineEvaluationConfigName": "someone_elses_evals",
+                "onlineEvaluationConfigId": "ec-other",
+                "dataSourceConfig": {
+                    "cloudWatchLogs": {
+                        "logGroupNames": ["/aws/bedrock-agentcore/runtimes/other_rt-DEFAULT"],
+                        "serviceNames": ["other_rt"],
+                    }
+                },
+                "evaluators": [],
+                "rule": {},
+                "status": "ACTIVE",
+            }
+
+        ctrl_client.get_online_evaluation_config.side_effect = _get_cfg
+        boto_mock.return_value = ctrl_client
+
+        resp = client.get("/api/runtimes/myagent/evaluation-config")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["config_id"] == "ec-custom"
+    assert body["config_name"] == "my_custom_eval_name"
+    assert body["evaluators"] == ["Builtin.Correctness"]
+    assert body["sampling_rate"] == 25
+    assert body["status"] == "ACTIVE"
+
+
+def test_evaluation_config_prefers_eval_heuristic_name_over_fallback(client: TestClient):
+    """When an `eval_`-heuristic-named config exists, it wins WITHOUT the
+    fallback describing other configs."""
+    runtime_id = "myagent_abcd1234-runtime-abcd1234"
+    with (
+        patch("app.routers.evaluations.get_slots_store") as slots_store_mock,
+        patch("app.routers.evaluations.get_versions_store") as versions_store_mock,
+        patch("boto3.client") as boto_mock,
+    ):
+        slots_store_mock.return_value.get.return_value = RuntimeSlots(
+            runtime_name="myagent",
+            owner_sub=_LOCAL_DEV_SUB,
+            production_version_id="v1",
+        )
+        versions_store_mock.return_value.get.return_value = AgentVersion(
+            runtime_name="myagent",
+            version_id="v1",
+            owner_sub=_LOCAL_DEV_SUB,
+            created_at="2026-05-28T00:00:00+00:00",
+            deployment_id="d1",
+            agentcore_runtime_name="myagent_abcd1234",
+            runtime_id=runtime_id,
+        )
+        ctrl_client = MagicMock()
+        ctrl_client.list_online_evaluation_configs.return_value = {
+            "onlineEvaluationConfigs": [
+                {
+                    "onlineEvaluationConfigName": "my_custom_eval_name",
+                    "onlineEvaluationConfigId": "ec-custom",
+                },
+                {
+                    "onlineEvaluationConfigName": f"eval_{runtime_id[:32]}",
+                    "onlineEvaluationConfigId": "ec-heuristic",
+                },
+            ]
+        }
+        ctrl_client.get_online_evaluation_config.return_value = {
+            "onlineEvaluationConfigName": f"eval_{runtime_id[:32]}",
+            "evaluators": [{"evaluatorId": "Builtin.GoalSuccessRate"}],
+            "rule": {"samplingConfig": {"samplingPercentage": 100}},
+            "status": "ACTIVE",
+        }
+        boto_mock.return_value = ctrl_client
+
+        resp = client.get("/api/runtimes/myagent/evaluation-config")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["config_id"] == "ec-heuristic"
+    # Only the single detail Get for the matched config — no fallback sweep.
+    ctrl_client.get_online_evaluation_config.assert_called_once_with(onlineEvaluationConfigId="ec-heuristic")
+
+
 def test_evaluation_config_404_when_no_match(client: TestClient):
     """No matching config → 404 (not 500)."""
-    with patch(
-        "app.routers.evaluations.get_slots_store"
-    ) as slots_store_mock, patch(
-        "app.routers.evaluations.get_versions_store"
-    ) as versions_store_mock, patch("boto3.client") as boto_mock:
+    with (
+        patch("app.routers.evaluations.get_slots_store") as slots_store_mock,
+        patch("app.routers.evaluations.get_versions_store") as versions_store_mock,
+        patch("boto3.client") as boto_mock,
+    ):
         slots_store_mock.return_value.get.return_value = RuntimeSlots(
             runtime_name="myagent",
             owner_sub=_LOCAL_DEV_SUB,
@@ -168,11 +301,11 @@ def test_invalid_runtime_name_rejected(client: TestClient):
 def test_evaluation_results_handles_missing_log_group(client: TestClient):
     """If the runtime hasn't received traffic yet, the log group doesn't exist
     yet — treat that as "no results", not a 500."""
-    with patch(
-        "app.routers.evaluations.get_slots_store"
-    ) as slots_store_mock, patch(
-        "app.routers.evaluations.get_versions_store"
-    ) as versions_store_mock, patch("boto3.client") as boto_mock:
+    with (
+        patch("app.routers.evaluations.get_slots_store") as slots_store_mock,
+        patch("app.routers.evaluations.get_versions_store") as versions_store_mock,
+        patch("boto3.client") as boto_mock,
+    ):
         slots_store_mock.return_value.get.return_value = RuntimeSlots(
             runtime_name="myagent",
             owner_sub=_LOCAL_DEV_SUB,

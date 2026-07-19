@@ -35,6 +35,10 @@ def send(
 
     body = json.dumps(response_body).encode("utf-8")
     url = event["ResponseURL"]
+    # The ResponseURL is a CloudFormation-issued pre-signed S3 URL, but enforce
+    # https anyway so a forged event can't make urlopen dereference file:// etc.
+    if not url.startswith("https://"):
+        raise ValueError("ResponseURL must be https")
 
     logger.info("Sending %s to %s (physical_id=%s)", status, url[:80], physical_resource_id)
 
@@ -43,7 +47,9 @@ def send(
     req.add_header("Content-Length", str(len(body)))
 
     try:
-        with urlopen(req) as resp:  # nosemgrep: dynamic-urllib-use-detected -- URL from CloudFormation ResponseURL (AWS-controlled, not user input)
+        with (
+            urlopen(req) as resp
+        ):  # nosemgrep: dynamic-urllib-use-detected -- URL from CloudFormation ResponseURL (AWS-controlled, not user input)
             logger.info("CFN response status: %s", resp.status)
     except Exception:
         logger.exception("Failed to send CFN response")

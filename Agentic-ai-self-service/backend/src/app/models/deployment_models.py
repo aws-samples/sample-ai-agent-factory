@@ -4,7 +4,6 @@ These models support the serverless deployment orchestration via Step Functions,
 deployment state persistence in DynamoDB, and the Deployment Lambda API surface.
 """
 
-import re
 from datetime import datetime
 from enum import Enum
 from typing import Literal, Optional
@@ -12,7 +11,6 @@ from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .components import ConnectorConfig
-
 
 # Bedrock models published between October 2025 and May 2026 — the policy
 # window enforced by this platform. Anything matching one of these substrings
@@ -63,9 +61,7 @@ def _validate_bedrock_model_id(model_id: str) -> None:
     if not model_id or not isinstance(model_id, str):
         raise ValueError("model.modelId is required")
     if "." not in model_id:
-        raise ValueError(
-            f"Bedrock model ID '{model_id}' is malformed (expected provider.model-name format)"
-        )
+        raise ValueError(f"Bedrock model ID '{model_id}' is malformed (expected provider.model-name format)")
     # Explicit Legacy guard for the most common foot-guns. The substring list
     # below catches the IDs that ship in older sample/blueprint code and that
     # Bedrock now responds to with `ResourceNotFoundException: ... marked by
@@ -73,17 +69,17 @@ def _validate_bedrock_model_id(model_id: str) -> None:
     # than letting the deploy succeed and the runtime explode at first
     # invocation. Policy: only Bedrock models published Oct 2025 – May 2026.
     _LEGACY_SUBSTRINGS = (
-        "claude-3-",                      # Claude 3.x (early 2024)
-        "claude-sonnet-4-2",              # Claude Sonnet 4 dated IDs (May 2025) — pre-cutoff
-        "claude-opus-4-1",                # Claude Opus 4.1 (Aug 2025) — pre-cutoff
-        "amazon.nova-pro-v1",             # Nova v1 (Dec 2024) — pre-cutoff
+        "claude-3-",  # Claude 3.x (early 2024)
+        "claude-sonnet-4-2",  # Claude Sonnet 4 dated IDs (May 2025) — pre-cutoff
+        "claude-opus-4-1",  # Claude Opus 4.1 (Aug 2025) — pre-cutoff
+        "amazon.nova-pro-v1",  # Nova v1 (Dec 2024) — pre-cutoff
         "amazon.nova-lite-v1",
         "amazon.nova-micro-v1",
-        "amazon.titan-",                  # Titan family — pre-cutoff
-        "meta.llama3-",                   # Llama 3.x — pre-cutoff
-        "mistral.mistral-large-2407",     # Mistral Large 2407 — pre-cutoff
-        "mistral.mistral-small-2402",     # Mistral Small 2402 — pre-cutoff
-        "cohere.command-r",               # Cohere Command R/R+ — pre-cutoff
+        "amazon.titan-",  # Titan family — pre-cutoff
+        "meta.llama3-",  # Llama 3.x — pre-cutoff
+        "mistral.mistral-large-2407",  # Mistral Large 2407 — pre-cutoff
+        "mistral.mistral-small-2402",  # Mistral Small 2402 — pre-cutoff
+        "cohere.command-r",  # Cohere Command R/R+ — pre-cutoff
     )
     for legacy in _LEGACY_SUBSTRINGS:
         if legacy in model_id:
@@ -156,44 +152,44 @@ class DeploymentState(BaseModel):
 
     deployment_id: str
     workflow_id: str
-    user_id: Optional[str] = None
-    execution_arn: Optional[str] = None
+    user_id: str | None = None
+    execution_arn: str | None = None
     status: DeploymentStatusEnum = DeploymentStatusEnum.PENDING
-    current_step: Optional[DeploymentStepName] = None
+    current_step: DeploymentStepName | None = None
     started_at: datetime
-    completed_at: Optional[datetime] = None
-    runtime_endpoint: Optional[str] = None
-    runtime_id: Optional[str] = None
-    gateway_url: Optional[str] = None
-    gateway_result: Optional[dict] = None  # Full gateway deployment result for cleanup
-    policy_result: Optional[dict] = None  # Policy engine result for cleanup
-    knowledge_base_result: Optional[dict] = None  # KB result for cleanup
-    guardrails_result: Optional[dict] = None  # Guardrails result for cleanup
-    mcp_server_runtime_id: Optional[str] = None
-    memory_result: Optional[dict] = None  # Memory deployment result for cleanup
-    runtime_arn: Optional[str] = None  # Full ARN of the deployed runtime
+    completed_at: datetime | None = None
+    runtime_endpoint: str | None = None
+    runtime_id: str | None = None
+    gateway_url: str | None = None
+    gateway_result: dict | None = None  # Full gateway deployment result for cleanup
+    policy_result: dict | None = None  # Policy engine result for cleanup
+    knowledge_base_result: dict | None = None  # KB result for cleanup
+    guardrails_result: dict | None = None  # Guardrails result for cleanup
+    mcp_server_runtime_id: str | None = None
+    memory_result: dict | None = None  # Memory deployment result for cleanup
+    runtime_arn: str | None = None  # Full ARN of the deployed runtime
     # Phase B — AgentCore Harness (parallel authoring path). When
     # ``deployment_mode == "harness"`` the runtime_*/codegen fields are unused
     # and the harness id/arn below identify the deployed managed harness so the
     # delete/test paths can route to harness_deployer instead of runtime ops.
-    harness_id: Optional[str] = None
-    harness_arn: Optional[str] = None
-    deployment_mode: Optional[str] = None  # "runtime" (default) | "harness"
-    error_details: Optional[str] = None
-    ttl: Optional[int] = None  # Unix epoch for DynamoDB TTL (30 days from started_at)
+    harness_id: str | None = None
+    harness_arn: str | None = None
+    deployment_mode: str | None = None  # "runtime" (default) | "harness"
+    error_details: str | None = None
+    ttl: int | None = None  # Unix epoch for DynamoDB TTL (30 days from started_at)
     # Phase 1 Gap 1A — versioning. Every deploy mints a sortable version_id.
     # ``parent_version_id`` is the version this deploy supersedes (None for the
     # first deploy of a friendly runtime name). ``deployment_slot`` is the
     # slot the user requested for this version; the actual production slot is
     # the source-of-truth in RuntimeSlotsTable, mutable via /promote /rollback.
-    version_id: Optional[str] = None
-    parent_version_id: Optional[str] = None
-    deployment_slot: Optional[Literal["staging", "production"]] = None
+    version_id: str | None = None
+    parent_version_id: str | None = None
+    deployment_slot: Literal["staging", "production"] | None = None
     # The AgentCore-side runtime name (friendly + version suffix). Distinct
     # from ``runtime_id`` (the AgentCore-assigned id) and ``RuntimeConfig.name``
     # (the user-facing friendly name). Stored explicitly so the delete path
     # can resolve it without reconstructing the suffix.
-    agentcore_runtime_name: Optional[str] = None
+    agentcore_runtime_name: str | None = None
     # Generic teardown manifest: every deploy step appends the sub-resources it
     # creates here as {"type","id","region",...optional}. The delete path iterates
     # this to tear down EVERY created resource generically, instead of relying on
@@ -201,12 +197,20 @@ class DeploymentState(BaseModel):
     # (the root cause of orphan Bugs 154/158). Additive + idempotent: each entry
     # carries enough to delete it; the type-dispatched deleter no-ops on unknown
     # types so older records (no manifest) still fall back to *_result cleanup.
-    created_resources: Optional[list[dict]] = None
+    created_resources: list[dict] | None = None
     # Phase 7 (opt-in) — the account/region this deploy targeted (None → home).
     # Recorded so the SEPARATE delete request can assume the same cross-account
     # role to tear down, without the original SFN event.
-    target_account_id: Optional[str] = None
-    target_region: Optional[str] = None
+    target_account_id: str | None = None
+    target_region: str | None = None
+    # Async (slow-class) teardown tracking. KB-backed deletes exceed API
+    # Gateway's 29s integration cap, so DELETE /api/runtime/{id} dispatches
+    # them to a background self-invoke and the caller polls
+    # GET /api/deploy/{deployment_id} for these fields.
+    # "deleting" → "deleted" | "delete_failed"; delete_message carries the
+    # final cleanup summary (truncated to ~1KB).
+    delete_status: str | None = None
+    delete_message: str | None = None
 
 
 # ============================================================================
@@ -243,24 +247,34 @@ class RuntimeConfig(BaseModel):
     observability: Optional["ObservabilityConfig"] = Field(default=None)
     # Strands model provider
     model_provider: Literal[
-        "bedrock", "openai", "anthropic", "gemini", "litellm",
-        "mistral", "ollama", "sagemaker", "writer", "llamaapi",
-        "deepseek", "groq", "together",
+        "bedrock",
+        "openai",
+        "anthropic",
+        "gemini",
+        "litellm",
+        "mistral",
+        "ollama",
+        "sagemaker",
+        "writer",
+        "llamaapi",
+        "deepseek",
+        "groq",
+        "together",
     ] = Field(alias="modelProvider", default="bedrock")
-    provider_api_key_ref: Optional[str] = Field(alias="providerApiKeyRef", default=None)
+    provider_api_key_ref: str | None = Field(alias="providerApiKeyRef", default=None)
     # Optional base URL for OpenAI-compatible providers / a self-hosted LiteLLM
     # proxy. Injected as PROVIDER_BASE_URL and read by the generated model init.
-    provider_base_url: Optional[str] = Field(alias="providerBaseUrl", default=None, max_length=512)
+    provider_base_url: str | None = Field(alias="providerBaseUrl", default=None, max_length=512)
     # VPC egress (Loom-study 0.1). When set, the runtime is created in VPC network
     # mode with these subnets/SGs so it can reach VPC-private resources. Accepts a
     # {subnet_ids, security_group_ids} dict; None → PUBLIC network mode.
-    vpc_config: Optional[dict] = Field(alias="vpcConfig", default=None)
+    vpc_config: dict | None = Field(alias="vpcConfig", default=None)
     # Loom-study 4.2 — a named VPC profile (subnets/SGs defined once, picked here).
     # Resolved to vpc_config at the deploy boundary; explicit vpc_config wins.
-    vpc_profile: Optional[str] = Field(alias="vpcProfile", default=None, max_length=64)
+    vpc_profile: str | None = Field(alias="vpcProfile", default=None, max_length=64)
     # Multi-agent pattern
     multi_agent_pattern: str = Field(alias="multiAgentPattern", default="none")
-    multi_agent_config: Optional[dict] = Field(alias="multiAgentConfig", default=None)
+    multi_agent_config: dict | None = Field(alias="multiAgentConfig", default=None)
 
     @field_validator("name")
     @classmethod
@@ -319,10 +333,7 @@ class RuntimeConfig(BaseModel):
             if not isinstance(ag, dict):
                 raise ValueError(f"multiAgentConfig.agents[{i}] must be an object")
             if not ag.get("agentId"):
-                raise ValueError(
-                    f"multiAgentConfig.agents[{i}].agentId is required "
-                    f"(got keys: {sorted(ag.keys())})"
-                )
+                raise ValueError(f"multiAgentConfig.agents[{i}].agentId is required (got keys: {sorted(ag.keys())})")
         edges = cfg.get("edges") or []
         if not isinstance(edges, list):
             raise ValueError("multiAgentConfig.edges must be a list")
@@ -331,8 +342,7 @@ class RuntimeConfig(BaseModel):
                 raise ValueError(f"multiAgentConfig.edges[{i}] must be an object")
             if not e.get("source") or not e.get("target"):
                 raise ValueError(
-                    f"multiAgentConfig.edges[{i}] requires source and target "
-                    f"(got keys: {sorted(e.keys())})"
+                    f"multiAgentConfig.edges[{i}] requires source and target (got keys: {sorted(e.keys())})"
                 )
         return self
 
@@ -355,18 +365,12 @@ class ObservabilityConfig(BaseModel):
         "langfuse",
         "custom",
     ] = "langfuse"
-    otlp_endpoint: Optional[str] = Field(alias="otlpEndpoint", default=None)
-    otlp_protocol: Literal["http/protobuf", "grpc"] = Field(
-        alias="otlpProtocol", default="http/protobuf"
-    )
-    service_name: Optional[str] = Field(alias="serviceName", default=None)
+    otlp_endpoint: str | None = Field(alias="otlpEndpoint", default=None)
+    otlp_protocol: Literal["http/protobuf", "grpc"] = Field(alias="otlpProtocol", default="http/protobuf")
+    service_name: str | None = Field(alias="serviceName", default=None)
     sample_rate: float = Field(alias="sampleRate", ge=0.0, le=1.0, default=1.0)
-    resource_attributes: dict[str, str] = Field(
-        alias="resourceAttributes", default_factory=dict
-    )
-    auth_header_secret_arn: Optional[str] = Field(
-        alias="authHeaderSecretArn", default=None
-    )
+    resource_attributes: dict[str, str] = Field(alias="resourceAttributes", default_factory=dict)
+    auth_header_secret_arn: str | None = Field(alias="authHeaderSecretArn", default=None)
     extra_headers: dict[str, str] = Field(alias="extraHeaders", default_factory=dict)
 
 
@@ -391,11 +395,11 @@ class IdentityConfig(BaseModel):
     # mode == 'shared' (the default) keeps the Bug-60 stack shared role. The
     # 'shared' default guarantees absent/legacy callers are unaffected.
     mode: Literal["shared", "per_agent"] = "shared"
-    scope: Optional[str] = None
+    scope: str | None = None
     client_secret_ref: str = Field(alias="clientSecretRef", default="")
     discovery_url: str = Field(alias="discoveryUrl", default="")
     scopes: list[str] = Field(default_factory=list)
-    audience: Optional[str] = None
+    audience: str | None = None
 
 
 class CustomToolDefinition(BaseModel):
@@ -420,7 +424,7 @@ class ImportRuntimeRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     runtime_arn: str = Field(alias="runtimeArn", min_length=20, max_length=2048)
-    aws_region: Optional[str] = Field(alias="awsRegion", default=None, max_length=30)
+    aws_region: str | None = Field(alias="awsRegion", default=None, max_length=30)
 
 
 class DeployRequest(BaseModel):
@@ -433,58 +437,48 @@ class DeployRequest(BaseModel):
     # Phase B — selects the authoring/deploy path. "runtime" (default) keeps the
     # existing visual-canvas code-generated AgentCore Runtime UNCHANGED; "harness"
     # declares a managed AgentCore Harness instead (no codegen / S3 / runtime).
-    deployment_mode: Optional[Literal["runtime", "harness"]] = Field(
-        alias="deploymentMode", default="runtime"
-    )
-    connected_tools: Optional[list] = Field(alias="connectedTools", default=None, max_length=20)
-    gateway_config: Optional[dict] = Field(alias="gatewayConfig", default=None)
-    gateway_tools: Optional[list] = Field(alias="gatewayTools", default=None, max_length=20)
-    template_id: Optional[str] = Field(alias="templateId", default=None, max_length=128)
-    identity_config: Optional[IdentityConfig] = Field(alias="identityConfig", default=None)
-    custom_tools: Optional[list[CustomToolDefinition]] = Field(alias="customTools", default=None)
+    deployment_mode: Literal["runtime", "harness"] | None = Field(alias="deploymentMode", default="runtime")
+    connected_tools: list | None = Field(alias="connectedTools", default=None, max_length=20)
+    gateway_config: dict | None = Field(alias="gatewayConfig", default=None)
+    gateway_tools: list | None = Field(alias="gatewayTools", default=None, max_length=20)
+    template_id: str | None = Field(alias="templateId", default=None, max_length=128)
+    identity_config: IdentityConfig | None = Field(alias="identityConfig", default=None)
+    custom_tools: list[CustomToolDefinition] | None = Field(alias="customTools", default=None)
     # SaaS connectors (Phase A) — deployed as Gateway OpenAPI targets. Each
     # entry's secret_value is write-only (minted into Secrets Manager in the
     # gateway step, then dropped); only secret_arn is ever persisted.
-    connectors: Optional[list[ConnectorConfig]] = Field(default=None, max_length=20)
+    connectors: list[ConnectorConfig] | None = Field(default=None, max_length=20)
     # External MCP catalog servers wired as Gateway `mcpServer` targets (Loom
     # external-MCP path). Each entry: {server_id, endpoint_vars?, secret_value?
     # (write-only, minted then dropped), secret_arn?, oauth?}. Only direct-* tier
     # catalog entries are wireable; adapter-* are rejected server-side.
-    external_mcp_servers: Optional[list[dict]] = Field(alias="externalMcpServers", default=None, max_length=20)
-    memory_config: Optional[dict] = Field(alias="memoryConfig", default=None)
-    evaluation_config: Optional[dict] = Field(alias="evaluationConfig", default=None)
-    policy_config: Optional[dict] = Field(alias="policyConfig", default=None)
-    mcp_server_config: Optional[dict] = Field(alias="mcpServerConfig", default=None)
-    knowledge_base_config: Optional[dict] = Field(alias="knowledgeBaseConfig", default=None)
-    guardrails_config: Optional[dict] = Field(alias="guardrailsConfig", default=None)
-    observability_config: Optional[dict] = Field(alias="observabilityConfig", default=None)
-    a2a_config: Optional[dict] = Field(alias="a2aConfig", default=None)
+    external_mcp_servers: list[dict] | None = Field(alias="externalMcpServers", default=None, max_length=20)
+    memory_config: dict | None = Field(alias="memoryConfig", default=None)
+    evaluation_config: dict | None = Field(alias="evaluationConfig", default=None)
+    policy_config: dict | None = Field(alias="policyConfig", default=None)
+    mcp_server_config: dict | None = Field(alias="mcpServerConfig", default=None)
+    knowledge_base_config: dict | None = Field(alias="knowledgeBaseConfig", default=None)
+    guardrails_config: dict | None = Field(alias="guardrailsConfig", default=None)
+    observability_config: dict | None = Field(alias="observabilityConfig", default=None)
+    a2a_config: dict | None = Field(alias="a2aConfig", default=None)
     # Phase 1 Gap 1A — versioning. Caller can pin the slot this deploy lands
     # on; default is "production". Version_id is server-minted (we never trust
     # client-supplied ids) but ``description`` is captured for the version
     # history UI.
-    deployment_slot: Optional[Literal["staging", "production"]] = Field(
-        alias="deploymentSlot", default="production"
-    )
-    version_description: Optional[str] = Field(
-        alias="versionDescription", default=None, max_length=500
-    )
+    deployment_slot: Literal["staging", "production"] | None = Field(alias="deploymentSlot", default="production")
+    version_description: str | None = Field(alias="versionDescription", default=None, max_length=500)
     # Phase 2 (Loom) governance tagging. Caller supplies ad-hoc tag values
     # and/or selects a named tag profile; the deploy handler resolves them
     # against the org's tag policies (required-tag enforcement → HTTP 400) and
     # applies the resolved set to every AWS resource the deploy creates.
-    resource_tags: Optional[dict] = Field(alias="resourceTags", default=None)
-    tag_profile: Optional[str] = Field(alias="tagProfile", default=None, max_length=128)
+    resource_tags: dict | None = Field(alias="resourceTags", default=None)
+    tag_profile: str | None = Field(alias="tagProfile", default=None, max_length=128)
     # Phase 7 (opt-in) deployment targets. Default None → deploy to the
     # platform's home account + region (unchanged). When multi-region/account is
     # enabled, targetAccountId routes the deploy through a cross-account
     # sts:AssumeRole and targetRegion selects an allowlisted region.
-    target_account_id: Optional[str] = Field(
-        alias="targetAccountId", default=None, pattern=r"^\d{12}$"
-    )
-    target_region: Optional[str] = Field(
-        alias="targetRegion", default=None, max_length=32
-    )
+    target_account_id: str | None = Field(alias="targetAccountId", default=None, pattern=r"^\d{12}$")
+    target_region: str | None = Field(alias="targetRegion", default=None, max_length=32)
 
     @model_validator(mode="after")
     def _check_kb_config(self) -> "DeployRequest":
@@ -507,13 +501,9 @@ class DeployRequest(BaseModel):
             # Minimum viable create config: a data source pointer.
             ds_type = kb.get("dataSourceType") or kb.get("data_source_type") or ""
             if not ds_type:
-                raise ValueError(
-                    "knowledgeBaseConfig.dataSourceType is required when kbMode is 'create_new'."
-                )
+                raise ValueError("knowledgeBaseConfig.dataSourceType is required when kbMode is 'create_new'.")
         else:
-            raise ValueError(
-                f"knowledgeBaseConfig.kbMode must be 'existing' or 'create_new', got '{kb_mode}'."
-            )
+            raise ValueError(f"knowledgeBaseConfig.kbMode must be 'existing' or 'create_new', got '{kb_mode}'.")
         return self
 
 
@@ -523,7 +513,7 @@ class DeployResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     deployment_id: str = Field(alias="deploymentId")
-    execution_arn: Optional[str] = Field(alias="executionArn", default=None)
+    execution_arn: str | None = Field(alias="executionArn", default=None)
     status: DeploymentStatusEnum = DeploymentStatusEnum.PENDING
     message: str = "Deployment started"
 
@@ -533,12 +523,12 @@ class TestRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    endpoint: Optional[str] = None
+    endpoint: str | None = None
     input: str = Field(max_length=10000)
     simulated: bool = False
-    runtime_id: Optional[str] = Field(alias="runtimeId", default=None, max_length=256)
-    session_id: Optional[str] = Field(alias="sessionId", default=None, max_length=256)
-    history: Optional[list] = Field(default=None, max_length=50)
+    runtime_id: str | None = Field(alias="runtimeId", default=None, max_length=256)
+    session_id: str | None = Field(alias="sessionId", default=None, max_length=256)
+    history: list | None = Field(default=None, max_length=50)
 
 
 class TestResponse(BaseModel):
@@ -547,12 +537,12 @@ class TestResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     success: bool
-    response: Optional[str] = None
-    error: Optional[str] = None
-    session_id: Optional[str] = Field(alias="sessionId", default=None)
-    request_id: Optional[str] = Field(alias="requestId", default=None)
-    arn: Optional[str] = None
-    logs: Optional[str] = None
+    response: str | None = None
+    error: str | None = None
+    session_id: str | None = Field(alias="sessionId", default=None)
+    request_id: str | None = Field(alias="requestId", default=None)
+    arn: str | None = None
+    logs: str | None = None
 
 
 class DeleteResponse(BaseModel):

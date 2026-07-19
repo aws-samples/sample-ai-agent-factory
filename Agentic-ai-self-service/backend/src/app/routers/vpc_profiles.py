@@ -28,24 +28,21 @@ def _org(_caller_sub: str) -> str:
     return DEFAULT_ORG_ID
 
 
-@router.get("/vpc-profiles", response_model=list[VpcProfile],
-            dependencies=[Depends(require_scopes("settings:read"))])
+@router.get("/vpc-profiles", response_model=list[VpcProfile], dependencies=[Depends(require_scopes("settings:read"))])
 def list_profiles(caller_sub: str = Depends(get_caller_sub)) -> list[VpcProfile]:
     return get_vpc_profile_store().list(_org(caller_sub))
 
 
-@router.post("/vpc-profiles", response_model=VpcProfile,
-             dependencies=[Depends(require_scopes("settings:write"))])
+@router.post("/vpc-profiles", response_model=VpcProfile, dependencies=[Depends(require_scopes("settings:write"))])
 def upsert_profile(body: VpcProfile, caller_sub: str = Depends(get_caller_sub)) -> VpcProfile:
     try:
         validate_profile(body)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return get_vpc_profile_store().put(_org(caller_sub), body)
 
 
-@router.delete("/vpc-profiles/{name}",
-               dependencies=[Depends(require_scopes("settings:write"))])
+@router.delete("/vpc-profiles/{name}", dependencies=[Depends(require_scopes("settings:write"))])
 def delete_profile(name: str, caller_sub: str = Depends(get_caller_sub)) -> dict:
     get_vpc_profile_store().delete(_org(caller_sub), name)
     return {"deleted": name}

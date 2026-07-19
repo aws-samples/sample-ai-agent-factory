@@ -16,8 +16,7 @@ contract the router relies on, so the tests pass before the shared edit lands.
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field, replace
-from typing import Optional
+from dataclasses import dataclass, replace
 
 import pytest
 from fastapi import FastAPI
@@ -34,7 +33,6 @@ from app.services.workspace_acl import (  # noqa: E402
     can_view,
     remove_member,
 )
-
 
 OWNER = "alice"
 BOB = "bob"
@@ -140,9 +138,7 @@ def test_remove_member_never_removes_owner():
 
 
 def test_normalize_scrubs_owner_from_lists():
-    acl = Acl.normalize(
-        {"editors": [OWNER, BOB], "viewers": [OWNER, CAROL]}, owner_sub=OWNER
-    )
+    acl = Acl.normalize({"editors": [OWNER, BOB], "viewers": [OWNER, CAROL]}, owner_sub=OWNER)
     assert OWNER not in acl.editors
     assert OWNER not in acl.viewers
     assert BOB in acl.editors
@@ -182,10 +178,10 @@ class FakeWorkflow:
 
     id: str
     name: str
-    owner_sub: Optional[str] = None
-    acl: Optional[dict] = None
+    owner_sub: str | None = None
+    acl: dict | None = None
 
-    def model_copy(self, update: Optional[dict] = None) -> "FakeWorkflow":
+    def model_copy(self, update: dict | None = None) -> FakeWorkflow:
         update = update or {}
         # Deep-ish copy of acl so callers can't alias our stored dict.
         new = replace(self, **update)
@@ -203,10 +199,10 @@ class FakeStorage:
     def put(self, wf: FakeWorkflow) -> None:
         self._rows[wf.id] = wf
 
-    def get(self, workflow_id: str) -> Optional[FakeWorkflow]:
+    def get(self, workflow_id: str) -> FakeWorkflow | None:
         return self._rows.get(workflow_id)
 
-    def update(self, workflow_id: str, wf: FakeWorkflow) -> Optional[FakeWorkflow]:
+    def update(self, workflow_id: str, wf: FakeWorkflow) -> FakeWorkflow | None:
         if workflow_id not in self._rows:
             return None
         stored = wf.model_copy(update={"id": workflow_id})
@@ -272,9 +268,7 @@ def test_viewer_promoted_to_editor_via_second_post(storage: FakeStorage):
     storage.put(FakeWorkflow(id="wf1", name="Alice WF", owner_sub=OWNER))
     owner_client = _client(OWNER)
     owner_client.post("/api/workflows/wf1/share", json={"sub": BOB, "role": "viewer"})
-    resp = owner_client.post(
-        "/api/workflows/wf1/share", json={"sub": BOB, "role": "editor"}
-    )
+    resp = owner_client.post("/api/workflows/wf1/share", json={"sub": BOB, "role": "editor"})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert BOB in body["editors"]
@@ -301,25 +295,19 @@ def test_unshare_removes_access(storage: FakeStorage):
 
 def test_unknown_role_returns_400(storage: FakeStorage):
     storage.put(FakeWorkflow(id="wf1", name="Alice WF", owner_sub=OWNER))
-    resp = _client(OWNER).post(
-        "/api/workflows/wf1/share", json={"sub": BOB, "role": "admin"}
-    )
+    resp = _client(OWNER).post("/api/workflows/wf1/share", json={"sub": BOB, "role": "admin"})
     # Pydantic Literal rejects "admin" at request validation → 422.
     assert resp.status_code == 422
 
 
 def test_share_nonexistent_workflow_returns_404(storage: FakeStorage):
-    resp = _client(OWNER).post(
-        "/api/workflows/missing/share", json={"sub": BOB, "role": "viewer"}
-    )
+    resp = _client(OWNER).post("/api/workflows/missing/share", json={"sub": BOB, "role": "viewer"})
     assert resp.status_code == 404
 
 
 def test_owner_cannot_share_with_self(storage: FakeStorage):
     storage.put(FakeWorkflow(id="wf1", name="Alice WF", owner_sub=OWNER))
-    resp = _client(OWNER).post(
-        "/api/workflows/wf1/share", json={"sub": OWNER, "role": "editor"}
-    )
+    resp = _client(OWNER).post("/api/workflows/wf1/share", json={"sub": OWNER, "role": "editor"})
     assert resp.status_code == 400
 
 
@@ -344,9 +332,7 @@ def test_workspaces_excludes_unrelated_workflows(storage: FakeStorage):
 
 def test_non_owner_cannot_share_returns_404(storage: FakeStorage):
     storage.put(FakeWorkflow(id="wf1", name="Alice WF", owner_sub=OWNER))
-    resp = _client(CAROL).post(
-        "/api/workflows/wf1/share", json={"sub": BOB, "role": "viewer"}
-    )
+    resp = _client(CAROL).post("/api/workflows/wf1/share", json={"sub": BOB, "role": "viewer"})
     assert resp.status_code == 404
 
 
@@ -370,9 +356,7 @@ def test_shared_editor_cannot_reshare_returns_404(storage: FakeStorage):
         )
     )
     # Bob (editor) tries to grant Carol access — assert_owner rejects with 404.
-    resp = _client(BOB).post(
-        "/api/workflows/wf1/share", json={"sub": CAROL, "role": "editor"}
-    )
+    resp = _client(BOB).post("/api/workflows/wf1/share", json={"sub": CAROL, "role": "editor"})
     assert resp.status_code == 404
     # ACL unchanged.
     assert CAROL not in storage.get("wf1").acl.get("editors", [])
@@ -424,7 +408,7 @@ def test_real_workflow_model_copy_carries_acl_when_field_exists():
         pytest.skip("acl shared edit not applied yet — covered by FakeWorkflow path")
     from datetime import datetime, timezone
 
-    from app.models import WorkflowMetadata, Viewport
+    from app.models import Viewport, WorkflowMetadata
 
     now = datetime.now(timezone.utc)
     wf = WorkflowDefinition(
@@ -451,8 +435,8 @@ def test_real_workflow_model_copy_carries_acl_when_field_exists():
 
 
 def _workflows_app(caller_sub: str):
-    from fastapi import FastAPI
     from app.routers import workflows_router
+    from fastapi import FastAPI
 
     app = FastAPI()
     app.include_router(workflows_router)
@@ -462,7 +446,8 @@ def _workflows_app(caller_sub: str):
 
 def _real_wf(wid: str, owner: str, acl=None):
     from datetime import datetime, timezone
-    from app.models import WorkflowDefinition, WorkflowMetadata, Viewport
+
+    from app.models import Viewport, WorkflowDefinition, WorkflowMetadata
 
     now = datetime.now(timezone.utc)
     return WorkflowDefinition(

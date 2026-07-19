@@ -14,7 +14,6 @@ import json
 import aws_cdk as cdk
 import pytest
 from aws_cdk.assertions import Match, Template
-
 from stacks.platform_stack import PlatformStack
 
 
@@ -57,11 +56,14 @@ class TestServerlessResourcesPresent:
     def test_has_step_functions_state_machine(self, template):
         template.resource_count_is("AWS::StepFunctions::StateMachine", 1)
 
-    def test_has_two_dynamodb_tables(self, template):
-        template.resource_count_is("AWS::DynamoDB::Table", 2)
+    def test_has_dynamodb_tables(self, template):
+        # Core tables (workflows, deployments) plus governance/feature tables
+        # (approvals, cost, evaluations, registry, tags, triggers, ...). Exact
+        # count so an accidental table addition/removal is caught in review.
+        template.resource_count_is("AWS::DynamoDB::Table", 14)
 
-    def test_has_s3_bucket(self, template):
-        template.resource_count_is("AWS::S3::Bucket", 2)
+    def test_has_s3_buckets(self, template):
+        template.resource_count_is("AWS::S3::Bucket", 3)
 
     def test_has_cloudfront_distribution(self, template):
         template.resource_count_is("AWS::CloudFront::Distribution", 1)
@@ -212,7 +214,7 @@ class TestStepFunctionsConfig:
     def test_state_machine_definition_has_retry(self, template_json):
         """At least one state in the definition should have Retry config."""
         resources = template_json.get("Resources", {})
-        for logical_id, resource in resources.items():
+        for resource in resources.values():
             if resource.get("Type") != "AWS::StepFunctions::StateMachine":
                 continue
             props = resource.get("Properties", {})
@@ -228,7 +230,7 @@ class TestStepFunctionsConfig:
     def test_state_machine_definition_has_catch(self, template_json):
         """At least one state in the definition should have Catch config."""
         resources = template_json.get("Resources", {})
-        for logical_id, resource in resources.items():
+        for resource in resources.values():
             if resource.get("Type") != "AWS::StepFunctions::StateMachine":
                 continue
             props = resource.get("Properties", {})
@@ -256,7 +258,7 @@ class TestStepFunctionsConfig:
     def test_state_machine_retry_has_exponential_backoff(self, template_json):
         """Retry config should use exponential backoff (BackoffRate > 1)."""
         resources = template_json.get("Resources", {})
-        for logical_id, resource in resources.items():
+        for resource in resources.values():
             if resource.get("Type") != "AWS::StepFunctions::StateMachine":
                 continue
             props = resource.get("Properties", {})
@@ -265,9 +267,14 @@ class TestStepFunctionsConfig:
             assert "BackoffRate" in raw, "Retry configuration should include BackoffRate for exponential backoff"
 
     def test_state_machine_retry_max_attempts(self, template_json):
-        """Retry config should have MaxAttempts of 3 for States.TaskFailed errors."""
+        """Retry only transient infra errors — NEVER the States.TaskFailed wildcard.
+
+        Bug 134: retrying States.TaskFailed masked deterministic handler errors
+        (a Cedar-validation failure could "succeed" on a lucky retry). The stack
+        now retries only Lambda service/throttle/timeout errors.
+        """
         resources = template_json.get("Resources", {})
-        for logical_id, resource in resources.items():
+        for resource in resources.values():
             if resource.get("Type") != "AWS::StepFunctions::StateMachine":
                 continue
             props = resource.get("Properties", {})
@@ -275,8 +282,10 @@ class TestStepFunctionsConfig:
             raw = json.dumps(definition_str) if isinstance(definition_str, dict) else definition_str
             # The definition is escaped JSON inside Fn::Join — MaxAttempts appears as \\"MaxAttempts\\":3
             assert "MaxAttempts" in raw, "Retry configuration should have MaxAttempts"
-            # Verify our custom retry has MaxAttempts 3 (appears alongside States.TaskFailed)
-            assert "States.TaskFailed" in raw, "Retry should handle States.TaskFailed errors"
+            assert "Lambda.TooManyRequestsException" in raw, "Retry should cover transient Lambda throttling"
+            assert "States.TaskFailed" not in raw, (
+                "States.TaskFailed must NOT be retried — the wildcard masks deterministic handler errors (Bug 134)"
+            )
 
 
 # ---------------------------------------------------------------
@@ -479,33 +488,31 @@ class TestCloudFront:
             ),
         )
 
-    def test_spa_error_responses(self, template):
-        """CloudFront should have custom error responses for SPA routing."""
-        template.has_resource_properties(
-            "AWS::CloudFront::Distribution",
-            Match.object_like(
-                {
-                    "DistributionConfig": {
-                        "CustomErrorResponses": Match.array_with(
-                            [
-                                Match.object_like(
-                                    {
-                                        "ErrorCode": 403,
-                                        "ResponseCode": 200,
-                                        "ResponsePagePath": "/index.html",
-                                    }
-                                ),
-                            ]
-                        ),
-                    },
-                }
-            ),
-        )
+    def test_spa_routing_without_error_response_masking(self, template, template_json):
+        """SPA deep links are handled by a CloudFront Function, NOT error responses.
+
+        Bug 138: distribution-wide CustomErrorResponses (404→/index.html) also
+        rewrote /api/* 4xx into 200 text/html pages, breaking the frontend's
+        404→empty-state logic. The stack must use a viewer-request CloudFront
+        Function on the default (S3) behavior instead.
+        """
+        template.resource_count_is("AWS::CloudFront::Function", 1)
+        for resource in template_json.get("Resources", {}).values():
+            if resource.get("Type") != "AWS::CloudFront::Distribution":
+                continue
+            config = resource.get("Properties", {}).get("DistributionConfig", {})
+            assert "CustomErrorResponses" not in config, (
+                "CustomErrorResponses must NOT be set — they re-mask /api/* 4xx (Bug 138)"
+            )
+            associations = config.get("DefaultCacheBehavior", {}).get("FunctionAssociations", [])
+            assert any(a.get("EventType") == "viewer-request" for a in associations), (
+                "Default behavior should attach the SPA router function on viewer-request"
+            )
 
     def test_has_api_origin_behavior(self, template_json):
         """CloudFront should have an additional cache behavior for /api/*."""
         resources = template_json.get("Resources", {})
-        for logical_id, resource in resources.items():
+        for resource in resources.values():
             if resource.get("Type") != "AWS::CloudFront::Distribution":
                 continue
             config = resource["Properties"]["DistributionConfig"]

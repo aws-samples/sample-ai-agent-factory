@@ -13,33 +13,32 @@ sys.path.insert(0, "src")
 from datetime import datetime, timezone
 
 import pytest
-from hypothesis import given, settings, strategies as st
-from pydantic import ValidationError
-
 from app.models import (
     # Enums
     AgentCoreComponentType,
     AgentFramework,
-    ConnectionType,
-    ModelProvider,
-    OAuth2Provider,
-    ModelConfiguration,
-    RuntimeConfiguration,
-    OpenAPITargetConfig,
-    LambdaTargetConfig,
-    SmithyTargetConfig,
-    OAuth2Configuration,
     APIKeyConfiguration,
-    IdentityConfiguration,
-    MemoryConfiguration,
-    Position,
-    Viewport,
-    ConnectionEdge,
     ComponentNode,
-    WorkflowMetadata,
+    ConnectionEdge,
+    ConnectionType,
+    IdentityConfiguration,
+    LambdaTargetConfig,
+    MemoryConfiguration,
+    ModelConfiguration,
+    ModelProvider,
+    OAuth2Configuration,
+    OAuth2Provider,
+    OpenAPITargetConfig,
+    Position,
+    RuntimeConfiguration,
+    SmithyTargetConfig,
+    Viewport,
     WorkflowDefinition,
+    WorkflowMetadata,
 )
-
+from hypothesis import given, settings
+from hypothesis import strategies as st
+from pydantic import ValidationError
 
 # ============================================================================
 # Hypothesis Strategies for Valid Data Generation

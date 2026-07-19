@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
 
 from fastapi import HTTPException, Request
 
@@ -63,15 +62,13 @@ def get_caller_sub(request: Request) -> str:
         except (KeyError, TypeError, AttributeError) as e:
             logger.warning("Could not extract sub from request authorizer: %s", e)
         # In Lambda but no sub → reject. Don't silently fall back.
-        raise HTTPException(
-            status_code=401, detail="Caller identity not available"
-        )
+        raise HTTPException(status_code=401, detail="Caller identity not available")
 
     # Local dev path. No header injection — tests use dependency_overrides.
     return _LOCAL_DEV_SUB
 
 
-def assert_owner(record_owner_sub: Optional[str], caller_sub: str) -> None:
+def assert_owner(record_owner_sub: str | None, caller_sub: str) -> None:
     """Raise 404 when the caller doesn't own a record (existence-non-disclosure).
 
     404 hides existence — a 403 would tell an attacker the record exists.

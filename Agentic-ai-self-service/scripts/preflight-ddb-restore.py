@@ -39,9 +39,7 @@ def get_deployed_table_specs(cfn, stack_name):
     in the *deployed* stack template. Empty dict if the stack doesn't exist
     (fresh deploy — nothing to reconcile)."""
     try:
-        template = cfn.get_template(
-            StackName=stack_name, TemplateStage="Processed"
-        )["TemplateBody"]
+        template = cfn.get_template(StackName=stack_name, TemplateStage="Processed")["TemplateBody"]
     except ClientError as exc:
         if "does not exist" in str(exc):
             return {}
@@ -49,6 +47,7 @@ def get_deployed_table_specs(cfn, stack_name):
 
     if not isinstance(template, dict):  # YAML-bodied templates arrive as str
         import json
+
         template = json.loads(template)
 
     logical_specs = {
@@ -92,8 +91,7 @@ def create_table_from_spec(ddb, name, props):
     if props.get("GlobalSecondaryIndexes"):
         # CFN GSI shape matches create_table for on-demand tables.
         kwargs["GlobalSecondaryIndexes"] = [
-            {k: v for k, v in gsi.items()
-             if k in ("IndexName", "KeySchema", "Projection")}
+            {k: v for k, v in gsi.items() if k in ("IndexName", "KeySchema", "Projection")}
             for gsi in props["GlobalSecondaryIndexes"]
         ]
     sse = props.get("SSESpecification")
@@ -109,9 +107,7 @@ def create_table_from_spec(ddb, name, props):
         kwargs["DeletionProtectionEnabled"] = True
 
     ddb.create_table(**kwargs)
-    ddb.get_waiter("table_exists").wait(
-        TableName=name, WaiterConfig={"Delay": 5, "MaxAttempts": 60}
-    )
+    ddb.get_waiter("table_exists").wait(TableName=name, WaiterConfig={"Delay": 5, "MaxAttempts": 60})
 
     # TTL and PITR can't be set at create time — re-apply post-ACTIVE.
     ttl = props.get("TimeToLiveSpecification")
@@ -131,9 +127,7 @@ def create_table_from_spec(ddb, name, props):
             try:
                 ddb.update_continuous_backups(
                     TableName=name,
-                    PointInTimeRecoverySpecification={
-                        "PointInTimeRecoveryEnabled": True
-                    },
+                    PointInTimeRecoverySpecification={"PointInTimeRecoveryEnabled": True},
                 )
                 break
             except ClientError as exc:
@@ -155,8 +149,9 @@ def main():
 
     specs = get_deployed_table_specs(cfn, args.stack_name)
     if not specs:
-        print(f"[preflight] Stack '{args.stack_name}' has no deployed "
-              "DynamoDB tables (fresh deploy?) — nothing to check.")
+        print(
+            f"[preflight] Stack '{args.stack_name}' has no deployed DynamoDB tables (fresh deploy?) — nothing to check."
+        )
         return 0
 
     missing = {n: p for n, p in specs.items() if not table_exists(ddb, n)}
@@ -164,8 +159,10 @@ def main():
         print(f"[preflight] All {len(specs)} DynamoDB tables present — OK.")
         return 0
 
-    print(f"[preflight] {len(missing)}/{len(specs)} tables deleted "
-          "out-of-band; recreating empty with the deployed schema:")
+    print(
+        f"[preflight] {len(missing)}/{len(specs)} tables deleted "
+        "out-of-band; recreating empty with the deployed schema:"
+    )
     failures = []
     for name, props in sorted(missing.items()):
         print(f"[preflight]   restoring {name} ...", flush=True)
@@ -173,17 +170,17 @@ def main():
             create_table_from_spec(ddb, name, props)
             print(f"[preflight]   {name} ACTIVE.")
         except ClientError as exc:
-            print(f"[preflight]   FAILED to restore {name}: {exc}",
-                  file=sys.stderr)
+            print(f"[preflight]   FAILED to restore {name}: {exc}", file=sys.stderr)
             failures.append(name)
 
     if failures:
-        print(f"[preflight] Restore failed for: {', '.join(failures)}",
-              file=sys.stderr)
+        print(f"[preflight] Restore failed for: {', '.join(failures)}", file=sys.stderr)
         return 1
-    print(f"[preflight] Restored {len(missing)} table(s). "
-          "Note: table data was lost when the tables were deleted; "
-          "they have been recreated empty.")
+    print(
+        f"[preflight] Restored {len(missing)} table(s). "
+        "Note: table data was lost when the tables were deleted; "
+        "they have been recreated empty."
+    )
     return 0
 
 

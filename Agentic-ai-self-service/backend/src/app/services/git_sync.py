@@ -41,7 +41,6 @@ import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
 
 import boto3
 
@@ -59,9 +58,7 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     as a hard failure instead (SSRF defence-in-depth)."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
-        raise _GitSourceBlocked(
-            f"git host returned an unexpected redirect ({code}) to '{newurl}'"
-        )
+        raise _GitSourceBlocked(f"git host returned an unexpected redirect ({code}) to '{newurl}'")
 
 
 # Built once: a urllib opener that never follows redirects. Used for the
@@ -105,9 +102,7 @@ _REPO_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 
 # Token-ref ARNs MUST live in the owner-scoped agentcore-git/ namespace — mirrors
 # observability._validate_user_otel_secret_arn (agentcore-otel/).
-_GIT_SECRET_ARN_RE = re.compile(
-    r"^arn:aws:secretsmanager:[a-z0-9-]+:\d{12}:secret:agentcore-git/[A-Za-z0-9_/-]+"
-)
+_GIT_SECRET_ARN_RE = re.compile(r"^arn:aws:secretsmanager:[a-z0-9-]+:\d{12}:secret:agentcore-git/[A-Za-z0-9_/-]+")
 
 # Cap the fetched body so a malicious/compromised repo can't OOM the Lambda.
 _MAX_SPEC_BYTES = 1 * 1024 * 1024  # 1 MiB
@@ -152,10 +147,8 @@ def _assert_host_resolves_to_public_ip(host: str) -> None:
     try:
         try:
             infos = socket.getaddrinfo(host, 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
-        except (socket.gaierror, socket.timeout, OSError) as e:
-            raise _GitSourceBlocked(
-                f"git host '{host}' could not be resolved: {e}"
-            ) from e
+        except (TimeoutError, socket.gaierror, OSError) as e:
+            raise _GitSourceBlocked(f"git host '{host}' could not be resolved: {e}") from e
     finally:
         socket.setdefaulttimeout(prev_timeout)
 
@@ -172,16 +165,12 @@ def _assert_host_resolves_to_public_ip(host: str) -> None:
         try:
             ip_obj = ipaddress.ip_address(ip_str)
         except ValueError as e:
-            raise _GitSourceBlocked(
-                f"git host resolved to unparseable IP '{ip_str}': {e}"
-            ) from e
+            raise _GitSourceBlocked(f"git host resolved to unparseable IP '{ip_str}': {e}") from e
         for net in _DISALLOWED_NETWORKS:
             if ip_obj.version != net.version:
                 continue
             if ip_obj in net:
-                raise _GitSourceBlocked(
-                    f"git host resolves to disallowed IP ({ip_str} in {net})"
-                )
+                raise _GitSourceBlocked(f"git host resolves to disallowed IP ({ip_str} in {net})")
 
 
 def _validate_fetch_url(url: str) -> str:
@@ -198,9 +187,7 @@ def _validate_fetch_url(url: str) -> str:
 
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme != "https":
-        raise _GitSourceInvalid(
-            f"git repo_url must use https scheme (got '{parsed.scheme}')"
-        )
+        raise _GitSourceInvalid(f"git repo_url must use https scheme (got '{parsed.scheme}')")
     host = parsed.hostname
     if not host:
         raise _GitSourceInvalid("git repo_url has no host component")
@@ -251,9 +238,7 @@ def _parse_github_repo(repo_url: str) -> tuple[str, str]:
     parsed = urllib.parse.urlparse(repo_url)
     segments = [s for s in parsed.path.split("/") if s]
     if len(segments) < 2:
-        raise _GitSourceInvalid(
-            "git repo_url must be of the form https://github.com/<owner>/<repo>"
-        )
+        raise _GitSourceInvalid("git repo_url must be of the form https://github.com/<owner>/<repo>")
     owner, repo = segments[0], segments[1]
     if repo.endswith(".git"):
         repo = repo[:-4]
@@ -315,13 +300,11 @@ def _validate_token_ref(token_ref: str) -> str:
     malicious git_source can't exfiltrate an unrelated secret).
     """
     if not isinstance(token_ref, str) or not _GIT_SECRET_ARN_RE.match(token_ref):
-        raise _GitSourceInvalid(
-            "git token_ref must be a Secrets Manager ARN in the agentcore-git/ namespace"
-        )
+        raise _GitSourceInvalid("git token_ref must be a Secrets Manager ARN in the agentcore-git/ namespace")
     return token_ref
 
 
-def _resolve_token(token_ref: Optional[str]) -> Optional[str]:
+def _resolve_token(token_ref: str | None) -> str | None:
     """Resolve a git PAT from its Secrets Manager ARN. Returns None when unset.
 
     Validates the ARN namespace BEFORE any GetSecretValue call so we never read
@@ -343,13 +326,11 @@ def _read_capped(response, limit: int = _MAX_SPEC_BYTES) -> bytes:
     """
     data = response.read(limit + 1)
     if len(data) > limit:
-        raise _GitSourceInvalid(
-            f"git spec exceeds the {limit}-byte size cap"
-        )
+        raise _GitSourceInvalid(f"git spec exceeds the {limit}-byte size cap")
     return data
 
 
-def fetch_workflow_spec(git_source: dict, token_ref: Optional[str]) -> dict:
+def fetch_workflow_spec(git_source: dict, token_ref: str | None) -> dict:
     """Fetch + validate the workflow JSON spec referenced by ``git_source``.
 
     Re-validates ``git_source`` (never trust the stored dict shape — see RULE 1
@@ -414,20 +395,14 @@ def fetch_workflow_spec(git_source: dict, token_ref: Optional[str]) -> dict:
         raise _GitSourceInvalid(f"git spec is not valid JSON: {e}") from e
 
     # Fallback: GitHub default envelope (base64 content) if raw media not honored.
-    if (
-        isinstance(parsed, dict)
-        and parsed.get("encoding") == "base64"
-        and isinstance(parsed.get("content"), str)
-    ):
+    if isinstance(parsed, dict) and parsed.get("encoding") == "base64" and isinstance(parsed.get("content"), str):
         import base64
 
         try:
             decoded = base64.b64decode(parsed["content"])
             parsed = json.loads(decoded.decode("utf-8"))
         except Exception as e:
-            raise _GitSourceInvalid(
-                f"git spec base64 envelope could not be decoded: {e}"
-            ) from e
+            raise _GitSourceInvalid(f"git spec base64 envelope could not be decoded: {e}") from e
 
     if not isinstance(parsed, dict):
         raise _GitSourceInvalid("git spec must be a JSON object")
@@ -435,8 +410,6 @@ def fetch_workflow_spec(git_source: dict, token_ref: Optional[str]) -> dict:
     try:
         WorkflowDefinition.model_validate(parsed)
     except Exception as e:
-        raise _GitSourceInvalid(
-            f"git spec does not match the workflow schema: {e}"
-        ) from e
+        raise _GitSourceInvalid(f"git spec does not match the workflow schema: {e}") from e
 
     return parsed

@@ -125,10 +125,10 @@ def build_dockerfile() -> str:
         "\n"
         "# Config is supplied via environment variables at run time.\n"
         "# See .env.example for the full list. Never bake secrets into the image.\n"
-        "ENV AWS_REGION=\"\"\n"
-        "ENV MODEL_ID=\"\"\n"
+        'ENV AWS_REGION=""\n'
+        'ENV MODEL_ID=""\n'
         "\n"
-        "CMD [\"python\", \"agent.py\"]\n"
+        'CMD ["python", "agent.py"]\n'
     )
 
 
@@ -204,7 +204,7 @@ def build_readme(deployment_name: str, config: RuntimeConfig) -> str:
         "```bash\n"
         "curl -s localhost:8080/invocations \\\n"
         "  -H 'Content-Type: application/json' \\\n"
-        "  -d '{\"prompt\": \"hello\"}'\n"
+        '  -d \'{"prompt": "hello"}\'\n'
         "```\n"
         "\n"
         "> **macOS note:** the built-in tools make outbound HTTPS calls with the\n"
@@ -271,9 +271,7 @@ def build_python_project(deploy_request: DeployRequest) -> dict:
         gateway_config=None,
         template_id=deploy_request.template_id,
         gateway_tools=deploy_request.gateway_tools or [],
-        custom_tools=[
-            ct.model_dump() if hasattr(ct, "model_dump") else ct for ct in custom_tools
-        ],
+        custom_tools=[ct.model_dump() if hasattr(ct, "model_dump") else ct for ct in custom_tools],
         portable=True,
         observability_enabled=_observability_enabled(config, connected_tools),
     )

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import Iterator
+from collections.abc import Iterator
 
 import boto3
 import pytest
@@ -23,8 +23,6 @@ sys.path.insert(0, "src")
 # moto is a transitive test dependency; skip if unavailable rather than
 # breaking the rest of the test suite.
 moto = pytest.importorskip("moto")
-from moto import mock_aws  # noqa: E402  — import after the importorskip
-
 from app.routers import hitl as hitl_router_mod  # noqa: E402
 from app.services import hitl_store as hs_mod  # noqa: E402
 from app.services.auth import get_caller_sub  # noqa: E402
@@ -36,6 +34,7 @@ from app.services.hitl_store import (  # noqa: E402
     HitlRequestsStore,
     new_request_id,
 )
+from moto import mock_aws  # noqa: E402  — import after the importorskip
 
 TABLE_NAME = "HitlRequests"
 

@@ -1,7 +1,7 @@
 """Pydantic models for workflow structure and definitions."""
 
 from datetime import datetime
-from typing import Annotated, Optional
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -34,7 +34,6 @@ from .enums import (
     ValidationStatus,
 )
 
-
 # ============================================================================
 # Position and Viewport Models
 # ============================================================================
@@ -63,7 +62,7 @@ class Viewport(BaseModel):
 class EdgeData(BaseModel):
     """Additional data for connection edges."""
 
-    label: Optional[str] = None
+    label: str | None = None
     validation_status: ValidationStatus = ValidationStatus.PENDING
 
 
@@ -161,8 +160,8 @@ class WorkflowMetadata(BaseModel):
     tags: list[str] = Field(default_factory=list)
     aws_region: str = Field(min_length=1, max_length=50)
     deployment_status: DeploymentStatus = DeploymentStatus.NOT_DEPLOYED
-    last_deployed_at: Optional[datetime] = None
-    endpoint_url: Optional[str] = None
+    last_deployed_at: datetime | None = None
+    endpoint_url: str | None = None
 
     @field_validator("aws_region")
     @classmethod
@@ -196,18 +195,18 @@ class WorkflowDefinition(BaseModel):
     updated_at: datetime
     # Cognito sub of the user who created this workflow. None for pre-tenancy
     # records (legacy data). See services/auth.py + tasks/lessons.md Bug 37.
-    owner_sub: Optional[str] = None
+    owner_sub: str | None = None
     # Gap 2E team collaboration: optional shared-workspace id + ACL.
     # acl shape: {"owner_sub": str, "editors": [sub], "viewers": [sub]}.
     # None == legacy/owner-only. Parsed via services.workspace_acl.Acl.
-    workspace_id: Optional[str] = None
-    acl: Optional[dict] = None
+    workspace_id: str | None = None
+    acl: dict | None = None
     # Gap 3D GitOps: {repo_url, branch, path, token_ref}. token_ref is a Secrets
     # Manager ARN in the owner-scoped agentcore-git/ namespace; the raw PAT is
     # NEVER stored here. None == not git-backed. Kept a loose dict (like acl) so
     # model_validate of legacy rows never breaks; git_sync.validate_git_source
     # does the structural validation server-side before any fetch.
-    git_source: Optional[dict] = None
+    git_source: dict | None = None
 
     @model_validator(mode="after")
     def validate_edge_references(self) -> "WorkflowDefinition":
@@ -247,7 +246,7 @@ class WorkflowDefinition(BaseModel):
 class ValidationError(BaseModel):
     """Validation error for a component or edge."""
 
-    component_id: Optional[str] = None
+    component_id: str | None = None
     field: str
     message: str
     severity: str = Field(pattern=r"^(error|warning)$")
@@ -270,7 +269,7 @@ class DeploymentConfig(BaseModel):
     """Configuration for workflow deployment."""
 
     aws_region: str
-    vpc_config: Optional[dict] = None
+    vpc_config: dict | None = None
     enable_cloudwatch: bool = True
     enable_cloudtrail: bool = True
 
@@ -291,10 +290,10 @@ class DeploymentResult(BaseModel):
 
     deployment_id: str
     status: str = Field(pattern=r"^(success|failed|in_progress)$")
-    endpoint_url: Optional[str] = None
-    error_message: Optional[str] = None
+    endpoint_url: str | None = None
+    error_message: str | None = None
     created_resources: list[str] = Field(default_factory=list)
-    runtime_id: Optional[str] = None
+    runtime_id: str | None = None
 
 
 class RollbackError(BaseModel):

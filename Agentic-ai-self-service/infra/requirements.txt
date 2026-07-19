@@ -1,3 +1,9 @@
-aws-cdk-lib>=2.150.0
-constructs>=10.0.0
-cdk-nag>=2.28.0
+# Pinned to the versions verified against this stack. cdk-nag in particular
+# is import-fragile across minor releases (NagSuppressions availability moved
+# between versions and broke CI on an unpinned `>=` floor), so pin exactly and
+# let Dependabot propose bumps that CI then re-verifies.
+# NOTE: cdk-nag stays on 2.x — 3.0 removed the NagSuppressions API this stack
+# uses (see stacks/platform/nag_suppressions.py).
+aws-cdk-lib==2.261.0
+constructs==10.6.0
+cdk-nag==2.37.55

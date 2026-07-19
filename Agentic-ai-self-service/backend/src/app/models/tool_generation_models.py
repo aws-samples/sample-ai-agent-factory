@@ -4,8 +4,6 @@ Request/response types for POST /api/generate-tool, which uses Claude Sonnet
 on Bedrock to generate Lambda tool code from natural language descriptions.
 """
 
-from typing import Optional
-
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -16,7 +14,7 @@ class ToolGenerateRequest(BaseModel):
 
     prompt: str
     conversation_history: list[dict] = Field(alias="conversationHistory", default_factory=list)
-    existing_tool: Optional[dict] = Field(alias="existingTool", default=None)
+    existing_tool: dict | None = Field(alias="existingTool", default=None)
 
 
 class GeneratedTool(BaseModel):
@@ -49,8 +47,8 @@ class TestResult(BaseModel):
 
     test_case_name: str = Field(alias="testCaseName")
     passed: bool
-    actual_output: Optional[dict] = Field(alias="actualOutput", default=None)
-    error: Optional[str] = None
+    actual_output: dict | None = Field(alias="actualOutput", default=None)
+    error: str | None = None
     duration_ms: int = Field(alias="durationMs", default=0)
 
 
@@ -71,7 +69,7 @@ class ToolTestResponse(BaseModel):
     success: bool
     results: list[TestResult] = Field(default_factory=list)
     all_passed: bool = Field(alias="allPassed", default=False)
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class ToolGenerateResponse(BaseModel):
@@ -80,11 +78,11 @@ class ToolGenerateResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     success: bool
-    tool: Optional[GeneratedTool] = None
+    tool: GeneratedTool | None = None
     message: str = ""
-    error: Optional[str] = None
+    error: str | None = None
     response_type: str = Field(alias="responseType", default="generation")
-    test_cases: Optional[list[TestCase]] = Field(alias="testCases", default=None)
+    test_cases: list[TestCase] | None = Field(alias="testCases", default=None)
 
 
 # ============================================================================
@@ -98,9 +96,7 @@ class AgentGenerateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     prompt: str = Field(min_length=1, max_length=4000)
-    conversation_history: list[dict] = Field(
-        alias="conversationHistory", default_factory=list, max_length=20
-    )
+    conversation_history: list[dict] = Field(alias="conversationHistory", default_factory=list, max_length=20)
 
 
 class AgentGenerateResponse(BaseModel):
@@ -114,6 +110,6 @@ class AgentGenerateResponse(BaseModel):
 
     success: bool
     response_type: str = Field(alias="responseType", default="spec")
-    message: Optional[str] = None
-    spec: Optional[dict] = None
-    error: Optional[str] = None
+    message: str | None = None
+    spec: dict | None = None
+    error: str | None = None

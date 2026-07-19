@@ -20,7 +20,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 import boto3
 
@@ -29,21 +28,21 @@ from app.models import (
     ComponentNode,
     DeploymentConfig,
     DeploymentResult,
+    GatewayConfiguration,
     RollbackError,
     RollbackResult,
     RuntimeConfiguration,
-    GatewayConfiguration,
     WorkflowDefinition,
 )
 from app.models.enums import StrandsModelProvider
 from app.services import runtime_deployer
 from app.services.observability import build_otel_env_vars, get_platform_observability_defaults
 from app.services.runtime_deployer import (
-    upload_code_to_s3,
     create_agent_runtime,
     create_runtime_iam_role,
-    wait_for_runtime_ready,
     destroy_runtime,
+    upload_code_to_s3,
+    wait_for_runtime_ready,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,14 +148,14 @@ class DeploymentState:
     deployment_id: str
     workflow_id: str
     phase: DeploymentPhase = DeploymentPhase.INITIALIZING
-    agent_name: Optional[str] = None
-    runtime_id: Optional[str] = None
-    gateway_name: Optional[str] = None
-    endpoint_url: Optional[str] = None
-    error_message: Optional[str] = None
-    work_dir: Optional[str] = None
+    agent_name: str | None = None
+    runtime_id: str | None = None
+    gateway_name: str | None = None
+    endpoint_url: str | None = None
+    error_message: str | None = None
+    work_dir: str | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    completed_at: Optional[datetime] = None
+    completed_at: datetime | None = None
 
 
 # ============================================================================
@@ -198,9 +197,9 @@ def generate_gateway_agent_code(
 def generate_unified_agent_code(
     runtime_config: RuntimeConfiguration,
     connected_tools: list[str],
-    gateway_result: Optional[dict] = None,
-    memory_id: Optional[str] = None,
-    region: Optional[str] = None,
+    gateway_result: dict | None = None,
+    memory_id: str | None = None,
+    region: str | None = None,
 ) -> str:
     """Generate agent.py that integrates ALL connected AgentCore components.
 
@@ -398,7 +397,8 @@ def browse_web(url: str, task: str = "") -> str:
         local_tools.append("browse_web")
     local_tools_str = ", ".join(local_tools)
 
-    lazy_init_lines = ["""
+    lazy_init_lines = [
+        """
 # Lazy init — boto3/MCP clients may not have valid creds at module load time
 _model = None
 _gateway_tools = None
@@ -407,7 +407,8 @@ def _get_model():
     global _model
     if _model is None:
         _model = load_model()
-    return _model"""]
+    return _model"""
+    ]
 
     if has_gateway:
         lazy_init_lines.append("""
@@ -420,7 +421,11 @@ def _get_gateway_tools():
             mcp_client.start()
             _gateway_tools = get_full_tools_list(mcp_client)
     return _gateway_tools""")
-        all_tools_expr = f"[{local_tools_str}{',' if local_tools_str else ''}] + list(_get_gateway_tools())" if local_tools_str else "list(_get_gateway_tools())"
+        all_tools_expr = (
+            f"[{local_tools_str}{',' if local_tools_str else ''}] + list(_get_gateway_tools())"
+            if local_tools_str
+            else "list(_get_gateway_tools())"
+        )
     else:
         all_tools_expr = f"[{local_tools_str}]"
 
@@ -481,7 +486,7 @@ if __name__ == "__main__":
 
 def generate_mcp_server_code(
     server_name: str = "MCP Server Agent",
-    tools: Optional[list[str]] = None,
+    tools: list[str] | None = None,
     system_prompt: str = "",
 ) -> str:
     """Generate FastMCP server code for an MCP Server Runtime.
@@ -613,7 +618,7 @@ def wikipedia_search(query: str) -> str:
         ct_name = re.sub(r"[^a-zA-Z0-9_]", "_", ct_name_raw)
         if not ct_name or not ct_name[0].isalpha():
             ct_name = "tool_" + ct_name
-        ct_desc = ct.get("description", "A custom tool").replace('"""', r'\"\"\"')
+        ct_desc = ct.get("description", "A custom tool").replace('"""', r"\"\"\"")
         # Bug 174: the body can arrive as `implementation` (a function BODY) or as
         # `code` (often a COMPLETE `def name(...): ...`). If `code` already defines
         # the function, emit it verbatim under @mcp.tool() (just ensure the def name
@@ -736,7 +741,7 @@ class WorkflowExecutor:
     Uses the bedrock-agentcore-starter-toolkit CLI for deployment.
     """
 
-    def __init__(self, region: str = "us-west-2"):
+    def __init__(self, region: str = "us-east-1"):
         """Initialize the executor with target region."""
         if region not in VALID_AWS_REGIONS:
             raise ValueError(f"Invalid AWS region: {region}")
@@ -754,19 +759,19 @@ class WorkflowExecutor:
         self,
         workflow: WorkflowDefinition,
         config: DeploymentConfig,
-        template_id: Optional[str] = None,
-        connected_tools: Optional[list] = None,
-        gateway_tools: Optional[list] = None,
-        custom_tools: Optional[list] = None,
-        identity_config: Optional[dict] = None,
-        mcp_server_config: Optional[dict] = None,
-        memory_config: Optional[dict] = None,
-        evaluation_config: Optional[dict] = None,
-        policy_config: Optional[dict] = None,
-        guardrails_config: Optional[dict] = None,
-        knowledge_base_config: Optional[dict] = None,
-        observability_config: Optional[dict] = None,
-        connectors: Optional[list] = None,
+        template_id: str | None = None,
+        connected_tools: list | None = None,
+        gateway_tools: list | None = None,
+        custom_tools: list | None = None,
+        identity_config: dict | None = None,
+        mcp_server_config: dict | None = None,
+        memory_config: dict | None = None,
+        evaluation_config: dict | None = None,
+        policy_config: dict | None = None,
+        guardrails_config: dict | None = None,
+        knowledge_base_config: dict | None = None,
+        observability_config: dict | None = None,
+        connectors: list | None = None,
         owner_sub: str = "",
         deployment_mode: str = "runtime",
     ) -> DeploymentResult:
@@ -826,8 +831,8 @@ class WorkflowExecutor:
             # When a second Runtime is connected to the Gateway as a target,
             # deploy it first so we can use its endpoint as a gateway target.
             # ------------------------------------------------------------------
-            mcp_server_runtime_arn: Optional[str] = None
-            mcp_server_runtime_id: Optional[str] = None
+            mcp_server_runtime_arn: str | None = None
+            mcp_server_runtime_id: str | None = None
 
             if mcp_server_config:
                 logger.info(
@@ -850,7 +855,9 @@ class WorkflowExecutor:
                 # runtime name (Bug 61) — AgentCore IAM cache is keyed on
                 # (role, S3 prefix) so per-deploy prefixes hit a 17-20 min race.
                 bucket = os.environ.get("ARTIFACTS_BUCKET_NAME", "")
-                mcp_s3_key = f"deployments/by-name/{runtime_deployer.sanitize_runtime_name(mcp_name)}/mcp-server-code.zip"
+                mcp_s3_key = (
+                    f"deployments/by-name/{runtime_deployer.sanitize_runtime_name(mcp_name)}/mcp-server-code.zip"
+                )
                 if bucket:
                     s3_client = boto3.client("s3", region_name=self.region)
                     # Use strands-mcp.zip bundle (includes mcp package with FastMCP)
@@ -885,7 +892,8 @@ class WorkflowExecutor:
                     [],  # MCP server doesn't need extra tool permissions
                 )
                 _record_resource_best_effort(
-                    deployment_id, self.region,
+                    deployment_id,
+                    self.region,
                     {"type": "iam_role", "name": _mcp_role_name},
                 )
 
@@ -905,7 +913,8 @@ class WorkflowExecutor:
                 mcp_server_runtime_id = mcp_runtime_result["runtime_id"]
                 logger.info("Created MCP server runtime: %s", mcp_server_runtime_id)
                 _record_resource_best_effort(
-                    deployment_id, self.region,
+                    deployment_id,
+                    self.region,
                     {"type": "agent_runtime", "id": mcp_server_runtime_id},
                 )
 
@@ -925,7 +934,7 @@ class WorkflowExecutor:
             # We need the gateway URL and Cognito credentials before generating
             # agent code so the Runtime can connect to it.
             # ------------------------------------------------------------------
-            gateway_result: Optional[dict] = None
+            gateway_result: dict | None = None
             gateway_node = self._find_component(workflow, AgentCoreComponentType.GATEWAY)
             has_gateway = gateway_node is not None or "gateway" in connected_tools
 
@@ -972,13 +981,25 @@ class WorkflowExecutor:
                 # path too. Types match _delete_managed_resource exactly.
                 _gw = gateway_result
                 if _gw.get("gateway_id"):
-                    _record_resource_best_effort(deployment_id, self.region, {"type": "gateway", "id": _gw["gateway_id"]})
+                    _record_resource_best_effort(
+                        deployment_id, self.region, {"type": "gateway", "id": _gw["gateway_id"]}
+                    )
                 if _gw.get("gateway_name"):
-                    _record_resource_best_effort(deployment_id, self.region, {"type": "iam_role", "name": f"AgentCoreGateway-{_gw['gateway_name']}"})
+                    _record_resource_best_effort(
+                        deployment_id,
+                        self.region,
+                        {"type": "iam_role", "name": f"AgentCoreGateway-{_gw['gateway_name']}"},
+                    )
                 _gw_pool = (_gw.get("client_info") or {}).get("user_pool_id")
                 if _gw_pool:
-                    _record_resource_best_effort(deployment_id, self.region, {"type": "cognito_user_pool", "id": _gw_pool})
-                for _fn in [_gw.get("lambda_function_name"), _gw.get("kb_lambda_name"), *( _gw.get("custom_tool_lambdas") or [])]:
+                    _record_resource_best_effort(
+                        deployment_id, self.region, {"type": "cognito_user_pool", "id": _gw_pool}
+                    )
+                for _fn in [
+                    _gw.get("lambda_function_name"),
+                    _gw.get("kb_lambda_name"),
+                    *(_gw.get("custom_tool_lambdas") or []),
+                ]:
                     if _fn:
                         _record_resource_best_effort(deployment_id, self.region, {"type": "lambda", "name": _fn})
                 for _rn in _gw.get("custom_tool_roles") or []:
@@ -993,7 +1014,9 @@ class WorkflowExecutor:
                     _kind, _, _pname = str(_entry).partition(":")
                     if not _pname:
                         _kind, _pname = "OAUTH", str(_entry)
-                    _ptype = "api_key_credential_provider" if _kind.upper() == "API_KEY" else "oauth2_credential_provider"
+                    _ptype = (
+                        "api_key_credential_provider" if _kind.upper() == "API_KEY" else "oauth2_credential_provider"
+                    )
                     _record_resource_best_effort(deployment_id, self.region, {"type": _ptype, "name": _pname})
 
             # ------------------------------------------------------------------
@@ -1066,7 +1089,7 @@ class WorkflowExecutor:
                             default_statement = (
                                 f'permit(principal, action, resource == AgentCore::Gateway::"{gateway_arn}")\nwhen {{ true }};'
                                 if gateway_arn
-                                else 'permit(principal, action, resource is AgentCore::Gateway)\nwhen { true };'
+                                else "permit(principal, action, resource is AgentCore::Gateway)\nwhen { true };"
                             )
                             try:
                                 agentcore_ctrl_policy.create_policy(
@@ -1132,32 +1155,58 @@ class WorkflowExecutor:
 
                     if gc_mode == "existing":
                         gid = guardrails_config.get("guardrailId", guardrails_config.get("guardrail_id", ""))
-                        gver = guardrails_config.get("guardrailVersion", guardrails_config.get("guardrail_version", "DRAFT"))
+                        gver = guardrails_config.get(
+                            "guardrailVersion", guardrails_config.get("guardrail_version", "DRAFT")
+                        )
                         if gid:
                             bedrock_guardrails.get_guardrail(guardrailIdentifier=gid, guardrailVersion=gver)
-                            guardrails_result = {"guardrail_id": gid, "guardrail_version": gver, "created_by_flow": False}
+                            guardrails_result = {
+                                "guardrail_id": gid,
+                                "guardrail_version": gver,
+                                "created_by_flow": False,
+                            }
                             logger.warning("Validated existing guardrail: %s (v%s)", gid, gver)
                     elif gc_mode == "create_new":
-                        from app.step_handlers.guardrails_step import _build_content_filter_config, _build_pii_config, _build_topic_config, _build_word_config
                         import re as _re_gr
+
+                        from app.step_handlers.guardrails_step import (
+                            _build_content_filter_config,
+                            _build_pii_config,
+                            _build_topic_config,
+                            _build_word_config,
+                        )
+
                         gr_name = _re_gr.sub(r"[^a-zA-Z0-9_-]", "-", f"agentcore-{runtime_config.name}-guardrail")[:64]
-                        create_params: dict = {"name": gr_name, "blockedInputMessaging": "Request blocked by guardrail.", "blockedOutputsMessaging": "Response blocked by guardrail."}
-                        cf = _build_content_filter_config(guardrails_config.get("contentFilters") or guardrails_config.get("content_filters") or {})
+                        create_params: dict = {
+                            "name": gr_name,
+                            "blockedInputMessaging": "Request blocked by guardrail.",
+                            "blockedOutputsMessaging": "Response blocked by guardrail.",
+                        }
+                        cf = _build_content_filter_config(
+                            guardrails_config.get("contentFilters") or guardrails_config.get("content_filters") or {}
+                        )
                         if cf:
                             create_params["contentPolicyConfig"] = cf
-                        pii = _build_pii_config(guardrails_config.get("piiFilters") or guardrails_config.get("pii_filters") or [])
+                        pii = _build_pii_config(
+                            guardrails_config.get("piiFilters") or guardrails_config.get("pii_filters") or []
+                        )
                         if pii:
                             create_params["sensitiveInformationPolicyConfig"] = pii
-                        topics = _build_topic_config(guardrails_config.get("deniedTopics") or guardrails_config.get("denied_topics") or [])
+                        topics = _build_topic_config(
+                            guardrails_config.get("deniedTopics") or guardrails_config.get("denied_topics") or []
+                        )
                         if topics:
                             create_params["topicPolicyConfig"] = topics
-                        words = _build_word_config(guardrails_config.get("wordFilters") or guardrails_config.get("word_filters") or [])
+                        words = _build_word_config(
+                            guardrails_config.get("wordFilters") or guardrails_config.get("word_filters") or []
+                        )
                         if words:
                             create_params["wordPolicyConfig"] = words
                         cr_resp = bedrock_guardrails.create_guardrail(**create_params)
                         gid = cr_resp.get("guardrailId", "")
                         # Wait for READY
                         import time as _time_gr
+
                         for _ in range(24):
                             gs = bedrock_guardrails.get_guardrail(guardrailIdentifier=gid)
                             if gs.get("status") == "READY":
@@ -1179,7 +1228,7 @@ class WorkflowExecutor:
             state.work_dir = work_dir
 
             # Create memory resource if memory is connected
-            memory_id: Optional[str] = None
+            memory_id: str | None = None
             if "memory" in connected_tools:
                 try:
                     import json as _json
@@ -1275,7 +1324,8 @@ class WorkflowExecutor:
 
                             _time.sleep(10)  # IAM propagation
                             _record_resource_best_effort(
-                                deployment_id, self.region,
+                                deployment_id,
+                                self.region,
                                 {"type": "iam_role", "name": memory_role_name},
                             )
                         except iam_client.exceptions.EntityAlreadyExistsException:
@@ -1364,7 +1414,8 @@ class WorkflowExecutor:
                         logger.info("Created memory resource: %s", memory_id)
                         if memory_id:
                             _record_resource_best_effort(
-                                deployment_id, self.region,
+                                deployment_id,
+                                self.region,
                                 {"type": "memory", "id": memory_id},
                             )
 
@@ -1450,15 +1501,20 @@ class WorkflowExecutor:
                     try:
                         sts = boto3.client("sts")
                         account_id = sts.get_caller_identity()["Account"]
-                        memory_arn = (
-                            f"arn:aws:bedrock-agentcore:{self.region}:{account_id}:memory/{memory_id}"
-                        )
+                        memory_arn = f"arn:aws:bedrock-agentcore:{self.region}:{account_id}:memory/{memory_id}"
                     except Exception:
                         logger.warning("Could not resolve memory ARN for harness")
 
                 iam_client = boto3.client("iam")
+                # Thread the connected model/memory/gateway ARNs so the harness
+                # exec role is scoped to those resources (least privilege) —
+                # parity with harness_step.py on the SFN path.
                 harness_role_arn = harness_deployer.get_shared_or_new_harness_role(
-                    iam_client, harness_name
+                    iam_client,
+                    harness_name,
+                    model_id=runtime_config.model.model_id or None,
+                    memory_arn=memory_arn,
+                    gateway_arn=gateway_arn,
                 )
 
                 agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=self.region)
@@ -1478,12 +1534,14 @@ class WorkflowExecutor:
 
                 # Bug 9 parity: mirror harness_step's manifest writes.
                 _record_resource_best_effort(
-                    deployment_id, self.region,
+                    deployment_id,
+                    self.region,
                     {"type": "harness", "id": harness_id},
                 )
                 if not os.environ.get("SHARED_HARNESS_ROLE_ARN", ""):
                     _record_resource_best_effort(
-                        deployment_id, self.region,
+                        deployment_id,
+                        self.region,
                         {"type": "iam_role", "name": f"AgentCoreHarness-{harness_name}"},
                     )
 
@@ -1524,9 +1582,7 @@ class WorkflowExecutor:
 
                 ready = harness_deployer.wait_for_harness_ready(agentcore_ctrl, harness_id)
                 if not ready.get("success"):
-                    raise RuntimeError(
-                        f"Harness failed to become ready: {ready.get('error', 'unknown error')}"
-                    )
+                    raise RuntimeError(f"Harness failed to become ready: {ready.get('error', 'unknown error')}")
                 harness_arn = ready.get("arn") or create_result.get("arn", "")
 
                 state.phase = DeploymentPhase.COMPLETED
@@ -1570,9 +1626,7 @@ class WorkflowExecutor:
                             gateway_result=gateway_result or None,
                         )
                 except Exception:
-                    logger.warning(
-                        "Could not persist harness record for %s", deployment_id, exc_info=True
-                    )
+                    logger.warning("Could not persist harness record for %s", deployment_id, exc_info=True)
 
                 return DeploymentResult(
                     deployment_id=deployment_id,
@@ -1583,11 +1637,11 @@ class WorkflowExecutor:
                 )
 
             if template_id:
-                from app.services.code_generator import (
-                    generate_agent_code as cg_generate_agent_code,
-                )
                 from app.models.deployment_models import (
                     RuntimeConfig as CgRuntimeConfig,
+                )
+                from app.services.code_generator import (
+                    generate_agent_code as cg_generate_agent_code,
                 )
 
                 cg_config = CgRuntimeConfig(
@@ -1640,6 +1694,7 @@ class WorkflowExecutor:
                     or getattr(runtime_config, "enable_otel", False)
                 ):
                     from app.services.code_generator import _inject_otel
+
                     agent_code = _inject_otel(agent_code)
 
             # Write agent code to temp dir
@@ -1656,8 +1711,8 @@ class WorkflowExecutor:
             bucket = os.environ.get("ARTIFACTS_BUCKET_NAME", "")
             s3_key = f"deployments/by-name/{runtime_deployer.sanitize_runtime_name(runtime_config.name)}/code.zip"
 
-            from app.services.code_generator import generate_requirements as cg_gen_reqs
             from app.models.deployment_models import RuntimeConfig as ReqsConfig
+            from app.services.code_generator import generate_requirements as cg_gen_reqs
 
             reqs_config = ReqsConfig.model_validate(
                 {
@@ -1717,8 +1772,9 @@ class WorkflowExecutor:
             if _platform and _platform.get("auth_header_secret_arn"):
                 _otel_secret = _platform["auth_header_secret_arn"]
             else:
-                _otel_secret = (observability_config or {}).get("auth_header_secret_arn") \
-                    or (observability_config or {}).get("authHeaderSecretArn")
+                _otel_secret = (observability_config or {}).get("auth_header_secret_arn") or (
+                    observability_config or {}
+                ).get("authHeaderSecretArn")
             _runtime_role_name = f"{runtime_config.name}-role"
             role_arn = create_runtime_iam_role(
                 iam_client,
@@ -1729,7 +1785,8 @@ class WorkflowExecutor:
                 otel_secret_arn=_otel_secret,
             )
             _record_resource_best_effort(
-                deployment_id, self.region,
+                deployment_id,
+                self.region,
                 {"type": "iam_role", "name": _runtime_role_name},
             )
 
@@ -1787,7 +1844,8 @@ class WorkflowExecutor:
             )
             state.runtime_id = runtime_result["runtime_id"]
             _record_resource_best_effort(
-                deployment_id, self.region,
+                deployment_id,
+                self.region,
                 {"type": "agent_runtime", "id": state.runtime_id},
             )
 
@@ -1842,7 +1900,7 @@ class WorkflowExecutor:
 
     def _find_component(
         self, workflow: WorkflowDefinition, component_type: AgentCoreComponentType
-    ) -> Optional[ComponentNode]:
+    ) -> ComponentNode | None:
         """Find a component of the specified type in the workflow."""
         for node in workflow.nodes:
             if node.type == component_type:
@@ -1926,6 +1984,6 @@ class WorkflowExecutor:
             errors=errors,
         )
 
-    def get_deployment_status(self, deployment_id: str) -> Optional[DeploymentState]:
+    def get_deployment_status(self, deployment_id: str) -> DeploymentState | None:
         """Get the current status of a deployment."""
         return self._deployments.get(deployment_id)

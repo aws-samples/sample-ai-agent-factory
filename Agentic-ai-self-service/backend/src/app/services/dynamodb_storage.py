@@ -6,11 +6,10 @@ replacing the in-memory WorkflowStorage when deployed to AWS.
 Requirements: 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.9
 """
 
+import logging
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional
-import uuid
-import logging
 
 import boto3
 
@@ -65,7 +64,7 @@ def _put_item(table, item: dict) -> dict:
     return table.put_item(Item=item)
 
 
-def _get_item(table, key: dict) -> Optional[dict]:
+def _get_item(table, key: dict) -> dict | None:
     """Read an item from the DynamoDB table by key.
 
     Args:
@@ -273,7 +272,7 @@ class DynamoDBWorkflowStorage:
         logger.info("Created workflow: %s", workflow.id)
         return workflow
 
-    def get(self, workflow_id: str) -> Optional[WorkflowDefinition]:
+    def get(self, workflow_id: str) -> WorkflowDefinition | None:
         """Get a workflow by ID from DynamoDB.
 
         Args:
@@ -287,7 +286,7 @@ class DynamoDBWorkflowStorage:
             return None
         return _deserialize_workflow(item)
 
-    def update(self, workflow_id: str, workflow: WorkflowDefinition) -> Optional[WorkflowDefinition]:
+    def update(self, workflow_id: str, workflow: WorkflowDefinition) -> WorkflowDefinition | None:
         """Update an existing workflow in DynamoDB.
 
         Preserves the original workflow_id and created_at, updates

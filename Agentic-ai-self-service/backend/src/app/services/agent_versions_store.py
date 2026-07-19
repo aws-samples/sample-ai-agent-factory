@@ -25,7 +25,6 @@ import secrets
 import time
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -107,15 +106,15 @@ class AgentVersion:
     created_at: str  # ISO 8601
     deployment_id: str
     agentcore_runtime_name: str  # versioned AgentCore name (with suffix)
-    runtime_id: Optional[str] = None
-    runtime_arn: Optional[str] = None
-    runtime_endpoint: Optional[str] = None
-    code_s3_key: Optional[str] = None
-    parent_version_id: Optional[str] = None
-    canvas_snapshot: Optional[dict] = None
-    deploy_request_snapshot: Optional[dict] = None
+    runtime_id: str | None = None
+    runtime_arn: str | None = None
+    runtime_endpoint: str | None = None
+    code_s3_key: str | None = None
+    parent_version_id: str | None = None
+    canvas_snapshot: dict | None = None
+    deploy_request_snapshot: dict | None = None
     status: str = "pending"  # pending | succeeded | failed | superseded
-    description: Optional[str] = None
+    description: str | None = None
 
     def to_item(self) -> dict:
         item = {
@@ -143,7 +142,7 @@ class AgentVersion:
         return _floats_to_decimals(item)
 
     @classmethod
-    def from_item(cls, item: dict) -> "AgentVersion":
+    def from_item(cls, item: dict) -> AgentVersion:
         item = _decimals_to_floats(dict(item))
         return cls(
             runtime_name=item["runtime_name"],
@@ -168,10 +167,10 @@ class AgentVersion:
 class RuntimeSlots:
     runtime_name: str
     owner_sub: str
-    production_version_id: Optional[str] = None
-    staging_version_id: Optional[str] = None
-    previous_production_version_id: Optional[str] = None
-    last_promoted_at: Optional[str] = None
+    production_version_id: str | None = None
+    staging_version_id: str | None = None
+    previous_production_version_id: str | None = None
+    last_promoted_at: str | None = None
 
     def to_item(self) -> dict:
         item = {"runtime_name": self.runtime_name, "owner_sub": self.owner_sub}
@@ -187,7 +186,7 @@ class RuntimeSlots:
         return item
 
     @classmethod
-    def from_item(cls, item: dict) -> "RuntimeSlots":
+    def from_item(cls, item: dict) -> RuntimeSlots:
         return cls(
             runtime_name=item["runtime_name"],
             owner_sub=item.get("owner_sub", ""),
@@ -219,10 +218,8 @@ class AgentVersionsStore:
             version.status,
         )
 
-    def get(self, runtime_name: str, version_id: str) -> Optional[AgentVersion]:
-        resp = self._table.get_item(
-            Key={"runtime_name": runtime_name, "version_id": version_id}
-        )
+    def get(self, runtime_name: str, version_id: str) -> AgentVersion | None:
+        resp = self._table.get_item(Key={"runtime_name": runtime_name, "version_id": version_id})
         item = resp.get("Item")
         if not item:
             return None
@@ -269,10 +266,10 @@ class AgentVersionsStore:
         version_id: str,
         *,
         status: str,
-        runtime_id: Optional[str] = None,
-        runtime_arn: Optional[str] = None,
-        runtime_endpoint: Optional[str] = None,
-        code_s3_key: Optional[str] = None,
+        runtime_id: str | None = None,
+        runtime_arn: str | None = None,
+        runtime_endpoint: str | None = None,
+        code_s3_key: str | None = None,
     ) -> None:
         set_parts = ["#s = :s"]
         names: dict[str, str] = {"#s": "status"}
@@ -294,9 +291,7 @@ class AgentVersionsStore:
         )
 
     def delete(self, runtime_name: str, version_id: str) -> None:
-        self._table.delete_item(
-            Key={"runtime_name": runtime_name, "version_id": version_id}
-        )
+        self._table.delete_item(Key={"runtime_name": runtime_name, "version_id": version_id})
 
 
 class RuntimeSlotsStore:
@@ -306,7 +301,7 @@ class RuntimeSlotsStore:
         self._table_name = table_name
         self._table = boto3.resource("dynamodb", region_name=region).Table(table_name)
 
-    def get(self, runtime_name: str) -> Optional[RuntimeSlots]:
+    def get(self, runtime_name: str) -> RuntimeSlots | None:
         resp = self._table.get_item(Key={"runtime_name": runtime_name})
         item = resp.get("Item")
         if not item:
@@ -330,8 +325,8 @@ class RuntimeSlotsStore:
 # Convenience singletons (lazy-init from env)
 # ---------------------------------------------------------------------------
 
-_versions_store: Optional[AgentVersionsStore] = None
-_slots_store: Optional[RuntimeSlotsStore] = None
+_versions_store: AgentVersionsStore | None = None
+_slots_store: RuntimeSlotsStore | None = None
 
 
 def get_versions_store() -> AgentVersionsStore:
@@ -339,9 +334,7 @@ def get_versions_store() -> AgentVersionsStore:
     if _versions_store is None:
         _versions_store = AgentVersionsStore(
             table_name=os.environ.get("AGENT_VERSIONS_TABLE_NAME", "AgentVersions"),
-            region=os.environ.get(
-                "APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")
-            ),
+            region=os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")),
         )
     return _versions_store
 
@@ -351,8 +344,6 @@ def get_slots_store() -> RuntimeSlotsStore:
     if _slots_store is None:
         _slots_store = RuntimeSlotsStore(
             table_name=os.environ.get("RUNTIME_SLOTS_TABLE_NAME", "RuntimeSlots"),
-            region=os.environ.get(
-                "APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")
-            ),
+            region=os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")),
         )
     return _slots_store

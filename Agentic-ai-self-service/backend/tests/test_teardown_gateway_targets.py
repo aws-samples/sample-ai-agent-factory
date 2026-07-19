@@ -3,6 +3,7 @@ gateway, and must NOT mis-classify the 'has targets associated' ValidationExcept
 as 'already gone' (which silently orphaned the gateway on every gateway-bearing
 deployment).
 """
+
 import sys
 import types
 from unittest.mock import MagicMock
@@ -44,9 +45,7 @@ def patched_boto(monkeypatch):
 
 def test_gateway_teardown_deletes_targets_first(patched_boto):
     dh, ctrl = patched_boto
-    msg = dh._delete_managed_resource(
-        {"type": "gateway", "id": "gw-1", "region": "us-east-1"}, "us-east-1"
-    )
+    msg = dh._delete_managed_resource({"type": "gateway", "id": "gw-1", "region": "us-east-1"}, "us-east-1")
     # target deleted, THEN gateway deleted
     ctrl.delete_gateway_target.assert_called_once_with(gatewayIdentifier="gw-1", targetId="tgt-1")
     assert ctrl.delete_gateway.called

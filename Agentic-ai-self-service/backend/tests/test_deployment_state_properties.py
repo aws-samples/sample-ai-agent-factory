@@ -17,18 +17,17 @@ sys.path.insert(0, "src")
 
 from datetime import datetime, timezone
 
-from hypothesis import given, settings, strategies as st
-
 from app.models.deployment_models import (
     DeploymentState,
     DeploymentStatusEnum,
     DeploymentStepName,
 )
 from app.services.deployment_state_store import (
-    serialize_deployment_state,
     deserialize_deployment_state,
+    serialize_deployment_state,
 )
-
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 # ============================================================================
 # Hypothesis Strategies
@@ -147,6 +146,7 @@ class TestDeploymentStateRoundTrip:
         optional fields (runtime_id, gateway_url, completed_at, error_details).
         DynamoDB GSIs key on runtime_id and reject NULL writes."""
         from datetime import datetime, timezone
+
         from app.models.deployment_models import DeploymentStatusEnum
 
         state = DeploymentState(

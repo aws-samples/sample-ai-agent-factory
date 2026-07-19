@@ -32,7 +32,7 @@ def handler(event: dict, context: object = None) -> dict:  # noqa: ARG001
     region = os.environ.get("APP_AWS_REGION") or os.environ.get("AWS_REGION", "us-east-1")
 
     # Import here (not at module top) so the module is import-safe without AWS.
-    from app.deployment_handler import _maybe_promote_policy, _get_state_store
+    from app.deployment_handler import _get_state_store, _maybe_promote_policy
 
     store = _get_state_store()
     try:

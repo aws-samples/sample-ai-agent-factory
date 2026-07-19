@@ -25,14 +25,14 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
 import boto3
 
 logger = logging.getLogger(__name__)
 
 
-def _home_region(event: Optional[dict] = None) -> str:
+def _home_region(event: dict | None = None) -> str:
     if event:
         r = event.get("target_region") or event.get("region")
         if r:
@@ -40,7 +40,7 @@ def _home_region(event: Optional[dict] = None) -> str:
     return os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1"))
 
 
-def session_for_event(event: Optional[dict]) -> boto3.Session:
+def session_for_event(event: dict | None) -> boto3.Session:
     """Return the boto3 Session a step should use for its target.
 
     Default session (home account) when the event carries no target account;
@@ -70,7 +70,7 @@ def session_for_event(event: Optional[dict]) -> boto3.Session:
     )
 
 
-def client(event: Optional[dict], service: str, **kwargs: Any):
+def client(event: dict | None, service: str, **kwargs: Any):
     """boto3 client for *service* targeting the deploy's account/region.
 
     Drop-in for ``boto3.client(service, region_name=region)``: pass the SFN
@@ -79,12 +79,12 @@ def client(event: Optional[dict], service: str, **kwargs: Any):
     return session_for_event(event).client(service, **kwargs)
 
 
-def resource(event: Optional[dict], service: str, **kwargs: Any):
+def resource(event: dict | None, service: str, **kwargs: Any):
     """boto3 resource for *service* targeting the deploy's account/region."""
     return session_for_event(event).resource(service, **kwargs)
 
 
-def account_id_for_event(event: Optional[dict]) -> str:
+def account_id_for_event(event: dict | None) -> str:
     """The account id the deploy targets (the TARGET account, cross-account-aware).
 
     Handlers that build ARNs must use THIS (not a home-account

@@ -13,7 +13,6 @@ BeforeToolInvocation hook (services/code_generator) reads to gate tools.
 from __future__ import annotations
 
 import json
-from typing import Optional
 
 import boto3
 from pydantic import BaseModel, Field
@@ -48,7 +47,7 @@ class ApprovalPolicyStore:
         self._table.put_item(Item=item)
         return policy
 
-    def get(self, org_id: str, name: str) -> Optional[ApprovalPolicy]:
+    def get(self, org_id: str, name: str) -> ApprovalPolicy | None:
         resp = self._table.get_item(Key={"org_id": org_id, "sk": _APPROVAL_PREFIX + name})
         item = resp.get("Item")
         return _to_policy(item) if item else None
@@ -82,7 +81,6 @@ def serialize_for_agent(policies: list[ApprovalPolicy]) -> str:
     string when there are no enabled policies (hook then no-ops).
     """
     payload = [
-        {"name": p.name, "tool_match": p.tool_match, "mode": p.mode}
-        for p in policies if p.enabled and p.tool_match
+        {"name": p.name, "tool_match": p.tool_match, "mode": p.mode} for p in policies if p.enabled and p.tool_match
     ]
     return json.dumps(payload) if payload else ""

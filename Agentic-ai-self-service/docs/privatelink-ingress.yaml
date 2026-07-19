@@ -41,17 +41,20 @@ Resources:
       GroupDescription: PrivateLink ingress for AgentCore agents (per-protocol)
       VpcId: !Ref VpcId
       SecurityGroupIngress:
-        - IpProtocol: tcp  # HTTPS
+        - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
           CidrIp: !Ref IngressCidr
-        - IpProtocol: tcp  # runtime/MCP/A2A default
+          Description: HTTPS from the consumer CIDR
+        - IpProtocol: tcp
           FromPort: !Ref TargetPort
           ToPort: !Ref TargetPort
           CidrIp: !Ref IngressCidr
+          Description: Runtime/MCP/A2A target port from the consumer CIDR
       SecurityGroupEgress:
         - IpProtocol: "-1"
           CidrIp: 0.0.0.0/0
+          Description: All egress (agent outbound calls)
       Tags:
         - Key: loom:application
           Value: agentcore-privatelink
@@ -64,6 +67,12 @@ Resources:
       Type: network
       Scheme: internal
       Subnets: !Ref SubnetIds
+      # NLB access logging (CKV_AWS_91) requires an S3 bucket; enable it by
+      # adding load_balancing.log.enabled + an S3 bucket attribute for
+      # production deployments of this reference template.
+      LoadBalancerAttributes:
+        - Key: deletion_protection.enabled
+          Value: "false"
 
   IngressTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup

@@ -44,11 +44,20 @@ If you are tempted to convert this to Jinja or a code-AST builder, please:
 """
 
 import os
-from typing import Optional
 
 from app.models.deployment_models import RuntimeConfig
+from app.services import codegen_templates
 from app.services.agentic_rag_codegen import agentic_rag_tool_name, agentic_rag_tool_source
 
+# Canonical built-in tool implementations (single source of truth, shared with
+# gateway_deployer and cfn_template_generator). Injected into generated agent
+# code AFTER f-string evaluation via a plain ``.replace`` on the
+# ``__TOOL_IMPL__`` marker — never inside an f-string — so the canonical
+# source needs no brace escaping.
+_TOOL_IMPL_MARKER = "__TOOL_IMPL__"
+_TOOL_IMPL_BLOCK = (
+    codegen_templates.load_impl("dynamic_tools_impl") + "\n\n" + codegen_templates.load_impl("agent_tools_adapter")
+)
 
 # Provider to package mapping (Strands-only)
 PROVIDER_PACKAGES: dict[str, str] = {
@@ -91,11 +100,7 @@ def _to_cross_region_model_id(model_id: str) -> str:
         model_id = f"us.{model_id}"
     # Only legacy DATED Bedrock inference profiles require a -v1:0 style
     # version suffix. Dateless current-generation IDs must NOT get one.
-    if (
-        "anthropic." in model_id
-        and _has_date_suffix(model_id)
-        and not _has_version_suffix(model_id)
-    ):
+    if "anthropic." in model_id and _has_date_suffix(model_id) and not _has_version_suffix(model_id):
         model_id = f"{model_id}-v1:0"
     return model_id
 
@@ -103,6 +108,7 @@ def _to_cross_region_model_id(model_id: str) -> str:
 def _has_version_suffix(model_id: str) -> bool:
     """Check if model ID already has a version suffix like -v1:0 or -v2:0."""
     import re
+
     return bool(re.search(r"-v\d+:\d+$", model_id))
 
 
@@ -113,6 +119,7 @@ def _has_date_suffix(model_id: str) -> bool:
     have no date segment and must not receive a ``-v1:0`` suffix.
     """
     import re
+
     return bool(re.search(r"-\d{8}$", model_id))
 
 
@@ -207,7 +214,7 @@ def _escape_triple_quotes(text: str) -> str:
     return text
 
 
-def _extract_gateway_credentials(gateway_config: Optional[dict]) -> dict:
+def _extract_gateway_credentials(gateway_config: dict | None) -> dict:
     """Pull Cognito credentials out of a gateway_config dict.
 
     SECURITY: All values are sanitized for safe embedding in double-quoted
@@ -241,8 +248,10 @@ def _generate_langchain_web_search(system_prompt: str, model_id: str, region: st
     """Generate Web Search agent using BedrockAgentCoreApp + boto3 Converse API.
 
     Uses DuckDuckGo + Open-Meteo weather via stdlib urllib (zero extra deps beyond boto3).
+    Tool implementations come from the canonical ``codegen_templates`` package and
+    are spliced in AFTER f-string evaluation (see ``_TOOL_IMPL_BLOCK``).
     """
-    return f'''"""AgentCore Runtime - Web Search Agent
+    code = f'''"""AgentCore Runtime - Web Search Agent
 
 Uses BedrockAgentCoreApp SDK for AgentCore Runtime protocol.
 Lightweight tool-calling loop via boto3 Converse API.
@@ -261,10 +270,6 @@ app = BedrockAgentCoreApp()
 SYSTEM_PROMPT = """{system_prompt}"""
 MODEL_ID = os.environ.get("MODEL_ID", "{model_id}")
 REGION = os.environ.get("AWS_REGION", "{region}")
-
-UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0"
-
-WMO_CODES = {{0:"Clear sky",1:"Mainly clear",2:"Partly cloudy",3:"Overcast",45:"Foggy",48:"Rime fog",51:"Light drizzle",53:"Moderate drizzle",55:"Dense drizzle",61:"Slight rain",63:"Moderate rain",65:"Heavy rain",71:"Slight snow",73:"Moderate snow",75:"Heavy snow",80:"Slight rain showers",81:"Moderate rain showers",82:"Violent rain showers",95:"Thunderstorm",96:"Thunderstorm with hail",99:"Thunderstorm with heavy hail"}}
 
 TOOL_CONFIG = {{
     "tools": [
@@ -317,98 +322,12 @@ TOOL_CONFIG = {{
 }}
 
 
-def _http_get(url: str, timeout: int = 12, retries: int = 2) -> bytes:
-    """HTTP GET with retry logic."""
-    last_err = None
-    for attempt in range(retries + 1):
-        try:
-            req = urllib.request.Request(url, headers={{"User-Agent": UA}})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.read()
-        except Exception as e:
-            last_err = e
-            if attempt < retries:
-                time.sleep(1 * (attempt + 1))
-    raise last_err
-
-
-def _do_search(query: str) -> str:
-    """Run a DuckDuckGo text search via the Instant Answer API (stdlib only)."""
-    try:
-        url = "https://api.duckduckgo.com/?" + urllib.parse.urlencode({{"q": query, "format": "json", "no_html": "1"}})
-        data = json.loads(_http_get(url).decode())
-        results = []
-        if data.get("Abstract"):
-            results.append({{"title": data.get("Heading", query), "snippet": data["Abstract"], "url": data.get("AbstractURL", "")}})
-        for topic in data.get("RelatedTopics", [])[:5]:
-            if isinstance(topic, dict) and topic.get("Text"):
-                results.append({{"title": topic.get("Text", "")[:80], "snippet": topic.get("Text", ""), "url": topic.get("FirstURL", "")}})
-        return json.dumps(results) if results else json.dumps({{"message": f"No results found for: {{query}}"}})
-    except Exception as e:
-        return json.dumps({{"error": str(e)}})
-
-
-def _do_weather(location: str) -> str:
-    """Get current weather using Open-Meteo API (free, no API key, reliable from AWS)."""
-    try:
-        geo_url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode({{"name": location, "count": 1}})
-        geo = json.loads(_http_get(geo_url, timeout=8).decode())
-        results = geo.get("results", [])
-        if not results:
-            return json.dumps({{"error": f"Location not found: {{location}}"}})
-        lat, lon = results[0]["latitude"], results[0]["longitude"]
-        place = results[0].get("name", location)
-        country = results[0].get("country", "")
-        wx_url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode({{
-            "latitude": lat, "longitude": lon,
-            "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code",
-            "temperature_unit": "fahrenheit", "wind_speed_unit": "mph",
-        }})
-        wx = json.loads(_http_get(wx_url, timeout=8).decode())
-        cur = wx.get("current", {{}})
-        code = cur.get("weather_code", -1)
-        desc = WMO_CODES.get(code, f"Code {{code}}")
-        return json.dumps({{
-            "location": f"{{place}}, {{country}}",
-            "description": desc,
-            "temperature_F": cur.get("temperature_2m"),
-            "humidity_pct": cur.get("relative_humidity_2m"),
-            "wind_mph": cur.get("wind_speed_10m"),
-        }})
-    except Exception as e:
-        return json.dumps({{"error": str(e)}})
-
-
-def _do_fetch(url: str) -> str:
-    """Fetch a webpage and return its text content.
-
-    SECURITY: Only allows http/https URLs to prevent SSRF via file://, gopher://, etc.
-    Blocks requests to private/internal IP ranges (169.254.x.x, 10.x.x.x, etc.).
-    """
-    try:
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return json.dumps({{"error": "Only http and https URLs are allowed"}})
-        # Block requests to metadata endpoints and private IPs
-        hostname = parsed.hostname or ""
-        if hostname in ("169.254.169.254", "metadata.google.internal", "localhost", "127.0.0.1", "0.0.0.0", "::1"):
-            return json.dumps({{"error": "Requests to internal/metadata endpoints are blocked"}})
-        if hostname.startswith("10.") or hostname.startswith("172.") or hostname.startswith("192.168."):
-            return json.dumps({{"error": "Requests to private IP ranges are blocked"}})
-        html = _http_get(url, timeout=12).decode("utf-8", errors="replace")
-        text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = re.sub(r"\\s+", " ", text).strip()
-        return text[:8000]
-    except Exception as e:
-        return f"Error fetching {{url}}: {{e}}"
-
+__TOOL_IMPL__
 
 TOOL_HANDLERS = {{
-    "duckduckgo_search": lambda args: _do_search(args.get("query", "")),
-    "get_weather": lambda args: _do_weather(args.get("location", "")),
-    "fetch_webpage": lambda args: _do_fetch(args.get("url", "")),
+    "duckduckgo_search": lambda args: _tool_safe(_do_duckduckgo_search, args.get("query", "")),
+    "get_weather": lambda args: _tool_safe(_do_weather, args.get("location", "")),
+    "fetch_webpage": lambda args: _tool_safe(_do_fetch_webpage, args.get("url", "")),
 }}
 
 _bedrock = None
@@ -467,6 +386,7 @@ def invoke(payload):
 if __name__ == "__main__":
     app.run()
 '''
+    return code.replace(_TOOL_IMPL_MARKER, _TOOL_IMPL_BLOCK)
 
 
 def _generate_strands_gateway(system_prompt: str, model_id: str, creds: dict) -> str:
@@ -688,74 +608,10 @@ def _generate_gateway_agent(system_prompt: str, model_id: str, creds: dict) -> s
     return _generate_strands_gateway(system_prompt, model_id, creds)
 
 
-def _generate_tools_agent(
-    system_prompt: str,
-    model_id: str,
-    region: str,
-    has_browser: bool,
-    has_code_interpreter: bool,
-    has_kb: bool = False,
-    kb_config: Optional[dict] = None,
-) -> str:
-    """Generate agent with built-in tools (code interpreter, browser, KB retrieve)."""
-    # When the code interpreter is available, the model must ACTUALLY CALL
-    # execute_python for any computation rather than answering from its own
-    # reasoning (which produces fabricated/incorrect results for non-trivial
-    # arithmetic — the tool exists precisely so results are computed, not guessed).
-    # Prepend a hard directive so the tool is used deterministically.
-    if has_code_interpreter:
-        system_prompt = (
-            "You have an execute_python tool that runs code in a real sandbox. "
-            "For ANY computation, data processing, hashing, or arithmetic beyond "
-            "trivial single-digit sums, you MUST call execute_python and report the "
-            "tool's actual stdout VERBATIM. NEVER compute or guess results yourself "
-            "and NEVER describe calling the tool without actually calling it.\n\n"
-        ) + system_prompt
-    imports = [
-        '"""AgentCore Runtime Agent — Strands Agent with Built-in Tools"""',
-        "import os",
-        "import json",
-        "",
-        "from strands import Agent, tool",
-        "from strands.models.bedrock import BedrockModel",
-        "from bedrock_agentcore.runtime import BedrockAgentCoreApp",
-    ]
-    tools_list = []
-
-    if has_code_interpreter:
-        imports.append("from bedrock_agentcore.tools.code_interpreter_client import code_session")
-    if has_browser:
-        imports.append("from bedrock_agentcore.tools.browser_client import browser_session")
-    if has_kb:
-        imports.append("import boto3")
-
-    tool_defs = ""
-
-    if has_kb:
-        # KB_ID is injected as env var by runtime_configure_step. The agent
-        # calls bedrock-agent-runtime:Retrieve to query the knowledge base.
-        # See tasks/lessons.md Bug 87.
-        #
-        # Gap 3C — agentic retrieval. When the KB config declares a non-trivial
-        # retrievalStrategy (multi_hop / hybrid / reranked), SWAP the single-shot
-        # retrieve_from_kb for a strategy-specific @tool. The agentic tool source
-        # is fully self-contained (its own boto3/os/json imports, env-driven
-        # region/KB_ID/judge model — no dependency on the host REGION/MODEL_ID
-        # symbols) and is concatenated BEFORE the Agent(...) constructor with its
-        # name inlined into tools=[...], so it is injection-safe (Bug 125).
-        _kb_cfg = kb_config or {}
-        _strategy = (
-            _kb_cfg.get("retrievalStrategy")
-            or _kb_cfg.get("retrieval_strategy")
-            or "simple"
-        )
-        _agentic_name = agentic_rag_tool_name(_strategy)
-        if _agentic_name:
-            tools_list.append(_agentic_name)
-            tool_defs += agentic_rag_tool_source(_strategy)
-        else:
-            tools_list.append("retrieve_from_kb")
-            tool_defs += '''
+# Single-shot KB retrieval tool source, shared by the tools-agent and the
+# memory-agent generators (a memory+KB canvas must not silently drop KB
+# retrieval - matrix-run finding P-E2E-029).
+_RETRIEVE_FROM_KB_TOOL_SRC = '''
 _kb_client = None
 def _get_kb_client():
     global _kb_client
@@ -804,6 +660,72 @@ def retrieve_from_kb(query: str, num_results: int = 5) -> str:
     except Exception as e:
         return json.dumps({"error": "KB retrieve failed: %s" % str(e), "query": query})
 '''
+
+
+def _generate_tools_agent(
+    system_prompt: str,
+    model_id: str,
+    region: str,
+    has_browser: bool,
+    has_code_interpreter: bool,
+    has_kb: bool = False,
+    kb_config: dict | None = None,
+) -> str:
+    """Generate agent with built-in tools (code interpreter, browser, KB retrieve)."""
+    # When the code interpreter is available, the model must ACTUALLY CALL
+    # execute_python for any computation rather than answering from its own
+    # reasoning (which produces fabricated/incorrect results for non-trivial
+    # arithmetic — the tool exists precisely so results are computed, not guessed).
+    # Prepend a hard directive so the tool is used deterministically.
+    if has_code_interpreter:
+        system_prompt = (
+            "You have an execute_python tool that runs code in a real sandbox. "
+            "For ANY computation, data processing, hashing, or arithmetic beyond "
+            "trivial single-digit sums, you MUST call execute_python and report the "
+            "tool's actual stdout VERBATIM. NEVER compute or guess results yourself "
+            "and NEVER describe calling the tool without actually calling it.\n\n"
+        ) + system_prompt
+    imports = [
+        '"""AgentCore Runtime Agent — Strands Agent with Built-in Tools"""',
+        "import os",
+        "import json",
+        "",
+        "from strands import Agent, tool",
+        "from strands.models.bedrock import BedrockModel",
+        "from bedrock_agentcore.runtime import BedrockAgentCoreApp",
+    ]
+    tools_list = []
+
+    if has_code_interpreter:
+        imports.append("from bedrock_agentcore.tools.code_interpreter_client import code_session")
+    if has_browser:
+        imports.append("from bedrock_agentcore.tools.browser_client import browser_session")
+    if has_kb:
+        imports.append("import boto3")
+
+    tool_defs = ""
+
+    if has_kb:
+        # KB_ID is injected as env var by runtime_configure_step. The agent
+        # calls bedrock-agent-runtime:Retrieve to query the knowledge base.
+        # See tasks/lessons.md Bug 87.
+        #
+        # Gap 3C — agentic retrieval. When the KB config declares a non-trivial
+        # retrievalStrategy (multi_hop / hybrid / reranked), SWAP the single-shot
+        # retrieve_from_kb for a strategy-specific @tool. The agentic tool source
+        # is fully self-contained (its own boto3/os/json imports, env-driven
+        # region/KB_ID/judge model — no dependency on the host REGION/MODEL_ID
+        # symbols) and is concatenated BEFORE the Agent(...) constructor with its
+        # name inlined into tools=[...], so it is injection-safe (Bug 125).
+        _kb_cfg = kb_config or {}
+        _strategy = _kb_cfg.get("retrievalStrategy") or _kb_cfg.get("retrieval_strategy") or "simple"
+        _agentic_name = agentic_rag_tool_name(_strategy)
+        if _agentic_name:
+            tools_list.append(_agentic_name)
+            tool_defs += agentic_rag_tool_source(_strategy)
+        else:
+            tools_list.append("retrieve_from_kb")
+            tool_defs += _RETRIEVE_FROM_KB_TOOL_SRC
     if has_code_interpreter:
         tools_list.append("execute_python")
         tool_defs += '''
@@ -941,7 +863,7 @@ def _forced_execute(prompt):
             return stdout
     return None
 '''
-        ci_forced_call = '''    import logging as _fl
+        ci_forced_call = """    import logging as _fl
     _cilog = _fl.getLogger("agentcore.ci")
     _pl = (prompt or "").lower()
     _compute_intent = any(k in _pl for k in (
@@ -957,7 +879,7 @@ def _forced_execute(prompt):
             else:
                 _cilog.warning("forced execute returned None")
         except Exception as _fe:
-            _cilog.warning("forced execute failed: %s", _fe)'''
+            _cilog.warning("forced execute failed: %s", _fe)"""
     else:
         ci_forced_helper = ""
         ci_forced_call = "    pass"
@@ -1021,9 +943,11 @@ def _generate_mcp_server_runtime(system_prompt: str, model_id: str, region: str)
     """Generate MCP Server Runtime — tools hosted directly on the runtime via MCP protocol.
 
     No Gateway or Lambda needed. Tools are embedded Python functions served
-    via BedrockAgentCoreApp with MCP protocol handlers.
+    via BedrockAgentCoreApp with MCP protocol handlers. Tool implementations
+    come from the canonical ``codegen_templates`` package and are spliced in
+    AFTER f-string evaluation (see ``_TOOL_IMPL_BLOCK``).
     """
-    return f'''"""AgentCore Runtime - MCP Server with Embedded Tools
+    code = f'''"""AgentCore Runtime - MCP Server with Embedded Tools
 
 Hosts tools directly on the runtime via MCP protocol.
 No Gateway or Lambda needed — tools are Python functions served inline.
@@ -1053,99 +977,23 @@ def _get_bedrock():
 
 
 # ── Embedded Tool Definitions ────────────────────────────────────────────
+# Canonical implementations injected from app/services/codegen_templates.
 
-
-UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0"
-WMO_CODES = {{0:"Clear sky",1:"Mainly clear",2:"Partly cloudy",3:"Overcast",45:"Foggy",48:"Rime fog",51:"Light drizzle",53:"Moderate drizzle",55:"Dense drizzle",61:"Slight rain",63:"Moderate rain",65:"Heavy rain",71:"Slight snow",73:"Moderate snow",75:"Heavy snow",80:"Slight rain showers",81:"Moderate rain showers",82:"Violent rain showers",95:"Thunderstorm",96:"Thunderstorm with hail",99:"Thunderstorm with heavy hail"}}
-
-
-def _http_get(url: str, timeout: int = 10, retries: int = 2) -> bytes:
-    """HTTP GET with retry logic."""
-    import time as _time
-    last_err = None
-    for attempt in range(retries + 1):
-        try:
-            req = urllib.request.Request(url, headers={{"User-Agent": UA}})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.read()
-        except Exception as e:
-            last_err = e
-            if attempt < retries:
-                _time.sleep(1 * (attempt + 1))
-    raise last_err
-
+__TOOL_IMPL__
 
 def tool_get_weather(city: str) -> str:
     """Get current weather using Open-Meteo API (free, no API key, reliable from AWS)."""
-    try:
-        geo_url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode({{"name": city, "count": 1}})
-        geo = json.loads(_http_get(geo_url, timeout=8).decode())
-        results = geo.get("results", [])
-        if not results:
-            return json.dumps({{"error": f"Location not found: {{city}}"}})
-        lat, lon = results[0]["latitude"], results[0]["longitude"]
-        place = results[0].get("name", city)
-        country = results[0].get("country", "")
-        wx_url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode({{
-            "latitude": lat, "longitude": lon,
-            "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code",
-            "temperature_unit": "fahrenheit", "wind_speed_unit": "mph",
-        }})
-        wx = json.loads(_http_get(wx_url, timeout=8).decode())
-        cur = wx.get("current", {{}})
-        code = cur.get("weather_code", -1)
-        desc = WMO_CODES.get(code, f"Code {{code}}")
-        return json.dumps({{
-            "city": f"{{place}}, {{country}}",
-            "temperature_f": cur.get("temperature_2m"),
-            "humidity_pct": cur.get("relative_humidity_2m"),
-            "wind_mph": cur.get("wind_speed_10m"),
-            "description": desc,
-        }})
-    except Exception as e:
-        return json.dumps({{"error": str(e)}})
+    return _tool_safe(_do_weather, city)
 
 
 def tool_search_web(query: str) -> str:
     """Search the web using DuckDuckGo Instant Answer API."""
-    try:
-        url = "https://api.duckduckgo.com/?" + urllib.parse.urlencode(
-            {{"q": query, "format": "json", "no_html": "1"}}
-        )
-        data = json.loads(_http_get(url, timeout=12).decode())
-        results = []
-        if data.get("Abstract"):
-            results.append({{"title": data.get("Heading", query), "snippet": data["Abstract"], "url": data.get("AbstractURL", "")}})
-        for topic in data.get("RelatedTopics", [])[:5]:
-            if isinstance(topic, dict) and topic.get("Text"):
-                results.append({{"title": topic.get("Text", "")[:80], "snippet": topic.get("Text", ""), "url": topic.get("FirstURL", "")}})
-        return json.dumps(results) if results else json.dumps({{"message": f"No results for: {{query}}"}})
-    except Exception as e:
-        return json.dumps({{"error": str(e)}})
+    return _tool_safe(_do_duckduckgo_search, query)
 
 
 def tool_fetch_url(url: str) -> str:
-    """Fetch and extract text content from a URL.
-
-    SECURITY: Validates URL scheme and blocks internal/metadata endpoints.
-    """
-    try:
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return json.dumps({{"error": "Only http/https URLs are allowed"}})
-        hostname = (parsed.hostname or "").lower()
-        if hostname in ("169.254.169.254", "metadata.google.internal", "localhost", "127.0.0.1", "0.0.0.0", "::1"):
-            return json.dumps({{"error": "Requests to internal endpoints are blocked"}})
-        if hostname.startswith("10.") or hostname.startswith("172.") or hostname.startswith("192.168."):
-            return json.dumps({{"error": "Requests to private IP ranges are blocked"}})
-        html = _http_get(url, timeout=12).decode("utf-8", errors="replace")
-        text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = re.sub(r"\\s+", " ", text).strip()
-        return text[:8000]
-    except Exception as e:
-        return json.dumps({{"error": str(e)}})
+    """Fetch text content from a URL (SSRF-guarded: DNS-resolves and blocks private ranges)."""
+    return _tool_safe(_do_fetch_webpage, url)
 
 
 # ── Tool Registry ────────────────────────────────────────────────────────
@@ -1260,6 +1108,7 @@ def invoke(payload):
 if __name__ == "__main__":
     app.run()
 '''
+    return code.replace(_TOOL_IMPL_MARKER, _TOOL_IMPL_BLOCK)
 
 
 def _generate_memory_agent(
@@ -1268,6 +1117,8 @@ def _generate_memory_agent(
     region: str,
     has_gateway: bool = False,
     creds: dict = None,
+    has_kb: bool = False,
+    kb_config: dict | None = None,
 ) -> str:
     """Generate agent with AgentCore Memory integration + optional Gateway tools.
 
@@ -1279,12 +1130,12 @@ def _generate_memory_agent(
     if has_gateway and creds:
         gateway_imports = """from strands.tools.mcp.mcp_client import MCPClient
 from mcp.client.streamable_http import streamablehttp_client"""
-        gateway_env = '''
+        gateway_env = """
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID") or os.environ.get("OAUTH_CLIENT_ID", "")
 COGNITO_CLIENT_SECRET = os.environ.get("COGNITO_CLIENT_SECRET") or os.environ.get("OAUTH_CLIENT_SECRET", "")
 COGNITO_TOKEN_ENDPOINT = os.environ.get("COGNITO_TOKEN_ENDPOINT") or os.environ.get("OAUTH_TOKEN_ENDPOINT", "")
-COGNITO_SCOPE = os.environ.get("COGNITO_SCOPE") or os.environ.get("OAUTH_SCOPE", "")'''
+COGNITO_SCOPE = os.environ.get("COGNITO_SCOPE") or os.environ.get("OAUTH_SCOPE", "")"""
         gateway_functions = '''
 
 def _get_gateway_token():
@@ -1408,6 +1259,28 @@ def _get_gateway_tools():
         gateway_init = ""
         agent_tools = ""
 
+    # KB + Memory combined canvas: this generator wins the dispatch, so it must
+    # carry the KB retrieval tool itself or the KB edge is silently dropped
+    # (matrix-run finding P-E2E-029). Reuses the same tool sources as the
+    # tools-agent generator; the agentic variants are self-contained.
+    kb_tool_defs = ""
+    kb_imports = ""
+    if has_kb:
+        kb_imports = "import boto3\nfrom strands import tool"
+        _kb_cfg = kb_config or {}
+        _strategy = _kb_cfg.get("retrievalStrategy") or _kb_cfg.get("retrieval_strategy") or "simple"
+        _agentic_name = agentic_rag_tool_name(_strategy)
+        if _agentic_name:
+            kb_tool_defs = agentic_rag_tool_source(_strategy)
+            kb_tool_name = _agentic_name
+        else:
+            kb_tool_defs = _RETRIEVE_FROM_KB_TOOL_SRC
+            kb_tool_name = "retrieve_from_kb"
+        if agent_tools:
+            agent_tools = f"tools=_get_gateway_tools() + [{kb_tool_name}], "
+        else:
+            agent_tools = f"tools=[{kb_tool_name}], "
+
     return f'''"""AgentCore Runtime - Agent with Memory Integration
 
 Uses Strands Agent + BedrockAgentCoreApp SDK + MemoryClient for conversation persistence.
@@ -1421,6 +1294,7 @@ import os
 import urllib.request
 import urllib.parse
 {gateway_imports}
+{kb_imports}
 
 app = BedrockAgentCoreApp()
 
@@ -1431,6 +1305,7 @@ MEMORY_ID = os.environ.get("MEMORY_ID", "")
 {gateway_env}
 {gateway_functions}
 {gateway_init}
+{kb_tool_defs}
 
 # Lazy init: boto3 clients may not have valid creds at module load time
 _model = None
@@ -1456,6 +1331,48 @@ def _get_memory_client():
         except ImportError:
             _memory_client = None
     return _memory_client
+
+
+_memory_strategies_cache = None
+
+
+def _get_long_term_context(actor_id, session_id, query, top_k=3):
+    """Retrieve long-term memory records extracted by the memory strategies.
+
+    get_last_k_turns only sees the CURRENT session's raw events; facts a
+    strategy (semantic/summary/userPreference/episodic) extracted from EARLIER
+    sessions live in strategy namespaces and must be fetched with
+    retrieve_memories. Namespace templates are resolved per strategy.
+    """
+    global _memory_strategies_cache
+    client = _get_memory_client()
+    if not client or not MEMORY_ID:
+        return ""
+    try:
+        if _memory_strategies_cache is None:
+            _memory_strategies_cache = client.get_memory_strategies(MEMORY_ID) or []
+        lines = []
+        for strat in _memory_strategies_cache:
+            sid = strat.get("strategyId") or strat.get("memoryStrategyId") or ""
+            for ns_tpl in strat.get("namespaces") or []:
+                ns = (
+                    ns_tpl.replace("{{memoryStrategyId}}", sid)
+                    .replace("{{actorId}}", actor_id)
+                    .replace("{{sessionId}}", session_id)
+                )
+                if "{{" in ns:
+                    continue  # unresolved template variable — skip
+                for rec in client.retrieve_memories(
+                    memory_id=MEMORY_ID, namespace=ns, query=query, top_k=top_k,
+                ):
+                    content = rec.get("content", {{}})
+                    text = content.get("text", "") if isinstance(content, dict) else str(content)
+                    if text:
+                        lines.append(text)
+        return "\\n".join(lines)
+    except Exception as e:
+        print(f"Warning: Could not retrieve long-term memory: {{e}}")
+        return ""
 
 
 def _get_recent_context(actor_id, session_id, k=5):
@@ -1511,11 +1428,19 @@ def invoke(payload):
     session_id = payload.get("session_id", "default")
     actor_id = payload.get("actor_id", "user")
 
-    # Retrieve recent context from memory
+    # Retrieve recent context (this session) + long-term records (extracted
+    # from prior sessions by the configured memory strategies).
     recent_context = _get_recent_context(actor_id, session_id)
-    enriched_prompt = message
+    long_term_context = _get_long_term_context(actor_id, session_id, message)
+    context_parts = []
+    if long_term_context:
+        context_parts.append(f"Relevant long-term memory:\\n{{long_term_context}}")
     if recent_context:
-        enriched_prompt = f"Previous conversation context:\\n{{recent_context}}\\n\\nCurrent message: {{message}}"
+        context_parts.append(f"Previous conversation context:\\n{{recent_context}}")
+    enriched_prompt = message
+    if context_parts:
+        joined = "\\n\\n".join(context_parts)
+        enriched_prompt = f"{{joined}}\\n\\nCurrent message: {{message}}"
 
     # Strands Agent handles tool discovery + calling via MCPClient automatically
     result = _get_agent()(enriched_prompt)
@@ -1717,9 +1642,7 @@ def _collect_multi_agent_imports(parent_provider: str, agents: list, model_id: s
     """
     seen: set[str] = set()
     lines: list[str] = []
-    providers = [parent_provider] + [
-        ag.get("modelProvider", parent_provider) for ag in agents
-    ]
+    providers = [parent_provider] + [ag.get("modelProvider", parent_provider) for ag in agents]
     for prov in providers:
         if prov in seen:
             continue
@@ -2103,7 +2026,7 @@ def _inject_otel(code: str) -> str:
     # via a try/finally around the existing return. We do this conservatively
     # by appending a top-level decorator that wraps the invoke function.
     if "@app.entrypoint" in code and "_otel_invoke_wrap" not in code:
-        wrap_block = '''
+        wrap_block = """
 # Wrap invoke() so spans flush before AgentCore idle-stop kills the runtime.
 _otel_inner_invoke = invoke
 def _otel_invoke_wrap(payload):
@@ -2112,7 +2035,7 @@ def _otel_invoke_wrap(payload):
     finally:
         _otel_force_flush()
 invoke = _otel_invoke_wrap
-'''
+"""
         # Append after the file's existing __main__ block check, or at end.
         if 'if __name__ == "__main__":' in code:
             code = code.replace(
@@ -2149,7 +2072,7 @@ def _maybe_inject_hitl(code: str) -> str:
         if m:
             names = [n.strip() for n in m.group(1).split(",")]
             if "tool" not in names:
-                code = code[: m.start()] + "from strands import " + m.group(1).rstrip() + ", tool" + code[m.end():]
+                code = code[: m.start()] + "from strands import " + m.group(1).rstrip() + ", tool" + code[m.end() :]
         else:
             code = code.rstrip("\n") + "\nfrom strands import tool\n"
 
@@ -2165,7 +2088,7 @@ def _maybe_inject_hitl(code: str) -> str:
     if not am:
         am = _re.search(r"(?m)^def invoke\b", code)
     if am:
-        code = code[: am.start()] + _HITL_TOOL_SRC.strip("\n") + "\n\n\n" + code[am.start():]
+        code = code[: am.start()] + _HITL_TOOL_SRC.strip("\n") + "\n\n\n" + code[am.start() :]
     else:
         code = code.rstrip("\n") + "\n" + _HITL_TOOL_SRC + "\n"
 
@@ -2181,7 +2104,7 @@ def _maybe_inject_hitl(code: str) -> str:
         if not mm:
             out.append(code[i:])
             break
-        out.append(code[i:mm.end()])
+        out.append(code[i : mm.end()])
         start = mm.end()
         depth = 1
         j = start
@@ -2192,7 +2115,7 @@ def _maybe_inject_hitl(code: str) -> str:
             elif c == ")":
                 depth -= 1
             j += 1
-        args = code[start:j - 1]
+        args = code[start : j - 1]
         if "human_approval" in args:
             new_args = args  # idempotent
         elif "tools=[" in args:
@@ -2209,10 +2132,8 @@ def _maybe_inject_hitl(code: str) -> str:
                 new_args = args
             else:
                 _inner = args[_open:_close].strip().rstrip(",")
-                _replacement = (
-                    "tools=[%s]" % (_inner + ", human_approval" if _inner else "human_approval")
-                )
-                new_args = args[:_ts] + _replacement + args[_close + 1:]
+                _replacement = "tools=[%s]" % (_inner + ", human_approval" if _inner else "human_approval")
+                new_args = args[:_ts] + _replacement + args[_close + 1 :]
         elif _re.search(r"tools=\S", args):
             # Existing tools=<expr> (a var/list-comp) → concat with our list.
             new_args = _re.sub(r"(tools=)([^,\n]+)", r"\1list(\2) + [human_approval]", args, count=1)
@@ -2412,7 +2333,7 @@ def _strip_env_block(code: str) -> str:
     line before the membership test to avoid a false positive that would skip
     injection.
     """
-    return code.replace(_GUARDRAIL_KWARGS_ASSIGN, '')
+    return code.replace(_GUARDRAIL_KWARGS_ASSIGN, "")
 
 
 def _append_kwarg_to_calls(code: str, call_prefix: str, kwarg: str) -> str:
@@ -2444,9 +2365,9 @@ def _append_kwarg_to_calls(code: str, call_prefix: str, kwarg: str) -> str:
         close = -1
         for i in range(open_paren, len(code)):
             ch = code[i]
-            if ch == '(':
+            if ch == "(":
                 depth += 1
-            elif ch == ')':
+            elif ch == ")":
                 depth -= 1
                 if depth == 0:
                     # i is the matching closing paren of this constructor call.
@@ -2456,10 +2377,10 @@ def _append_kwarg_to_calls(code: str, call_prefix: str, kwarg: str) -> str:
             # Unbalanced call — emit the rest unchanged and stop.
             out.append(code[pos:])
             break
-        args = code[open_paren + 1:close]
+        args = code[open_paren + 1 : close]
         if kwarg in args:
             # Per-call idempotency: this constructor is already patched.
-            out.append(code[pos:close + 1])
+            out.append(code[pos : close + 1])
         else:
             out.append(f"{code[pos:close]}, {kwarg}{code[close]}")
         pos = close + 1
@@ -2478,10 +2399,9 @@ def _inject_guardrails(code: str) -> str:
     The injection is string-based to keep generation functions simple.
     """
     guardrail_env_block = (
-        '\n# Guardrails configuration (injected by AgentCore Flows)\n'
+        "\n# Guardrails configuration (injected by AgentCore Flows)\n"
         'GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID", "")\n'
-        'GUARDRAIL_VERSION = os.environ.get("GUARDRAIL_VERSION", "")\n'
-        + _GUARDRAIL_KWARGS_ASSIGN + '\n'
+        'GUARDRAIL_VERSION = os.environ.get("GUARDRAIL_VERSION", "")\n' + _GUARDRAIL_KWARGS_ASSIGN + "\n"
     )
 
     # Inject env vars after the last top-level import or constant.
@@ -2497,14 +2417,14 @@ def _inject_guardrails(code: str) -> str:
     # env assignment is unguarded — gate the whole block on the GUARDRAIL_ID
     # assignment not already being present.
     already_has_env_block = 'GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID"' in code
-    for marker in ([] if already_has_env_block else ['MODEL_ID = os.environ', 'SYSTEM_PROMPT = """']):
+    for marker in [] if already_has_env_block else ["MODEL_ID = os.environ", 'SYSTEM_PROMPT = """']:
         idx = code.find(marker)
         if idx >= 0:
             # Find end of that line
-            eol = code.find('\n', idx)
+            eol = code.find("\n", idx)
             if eol >= 0:
                 # For SYSTEM_PROMPT, find the CLOSING triple-quote.
-                if 'SYSTEM_PROMPT' in marker:
+                if "SYSTEM_PROMPT" in marker:
                     # Position right after the opening """
                     open_tq = code.find('"""', idx)
                     after_open = open_tq + 3
@@ -2512,8 +2432,8 @@ def _inject_guardrails(code: str) -> str:
                     close_idx = code.find('"""', after_open)
                     if close_idx >= 0:
                         # eol = end of the line containing the closing """
-                        eol = code.find('\n', close_idx)
-                code = code[:eol + 1] + guardrail_env_block + code[eol + 1:]
+                        eol = code.find("\n", close_idx)
+                code = code[: eol + 1] + guardrail_env_block + code[eol + 1 :]
                 break
 
     # Inject into Strands BedrockModel: splat the flat guardrail kwargs.
@@ -2527,10 +2447,8 @@ def _inject_guardrails(code: str) -> str:
     # READY but never wired into the model, silently disabling INPUT blocking
     # on the most common pattern. Balance-match the constructor's parens and
     # append the kwarg before the closing ``)`` so every shape is covered.
-    if 'BedrockModel(' in code and '**_GUARDRAIL_KWARGS' not in _strip_env_block(code):
-        code = _append_kwarg_to_calls(
-            code, 'BedrockModel(', '**_GUARDRAIL_KWARGS'
-        )
+    if "BedrockModel(" in code and "**_GUARDRAIL_KWARGS" not in _strip_env_block(code):
+        code = _append_kwarg_to_calls(code, "BedrockModel(", "**_GUARDRAIL_KWARGS")
 
     # Inject into boto3 converse() calls: add guardrailConfig parameter.
     #
@@ -2540,17 +2458,17 @@ def _inject_guardrails(code: str) -> str:
     # SINGLE braces. Using ``{{...}}`` here would land LITERAL double braces in
     # the deployed file, which Python parses as a set literal of an unhashable
     # dict (``TypeError: unhashable type: 'dict'``) and crashes at runtime.
-    if '.converse(' in code and 'guardrailConfig' not in code:
+    if ".converse(" in code and "guardrailConfig" not in code:
         guardrail_splat = (
             '\n            **({"guardrailConfig": {"guardrailIdentifier": '
             'GUARDRAIL_ID, "guardrailVersion": GUARDRAIL_VERSION}} '
-            'if GUARDRAIL_ID else {}),'
+            "if GUARDRAIL_ID else {}),"
         )
         # Tool-using converse templates anchor on toolConfig=TOOL_CONFIG,.
-        if 'toolConfig=TOOL_CONFIG,' in code:
+        if "toolConfig=TOOL_CONFIG," in code:
             code = code.replace(
-                'toolConfig=TOOL_CONFIG,',
-                'toolConfig=TOOL_CONFIG,' + guardrail_splat,
+                "toolConfig=TOOL_CONFIG,",
+                "toolConfig=TOOL_CONFIG," + guardrail_splat,
             )
         # The lightweight no-tools converse template has no toolConfig anchor;
         # wire guardrails in via its inferenceConfig line instead so guardrails
@@ -2566,15 +2484,15 @@ def _inject_guardrails(code: str) -> str:
 
 def generate_agent_code(
     config: RuntimeConfig,
-    tools: Optional[list] = None,
-    gateway_config: Optional[dict] = None,
-    template_id: Optional[str] = None,
-    gateway_tools: Optional[list] = None,
-    custom_tools: Optional[list[dict]] = None,
+    tools: list | None = None,
+    gateway_config: dict | None = None,
+    template_id: str | None = None,
+    gateway_tools: list | None = None,
+    custom_tools: list[dict] | None = None,
     portable: bool = False,
     observability_enabled: bool = False,
-    kb_config: Optional[dict] = None,
-    a2a_config: Optional[dict] = None,
+    kb_config: dict | None = None,
+    a2a_config: dict | None = None,
 ) -> str:
     """Generate agent Python code for the given configuration.
 
@@ -2672,6 +2590,7 @@ def generate_agent_code(
     protocol = (getattr(config, "protocol", "HTTP") or "HTTP").upper()
     if protocol == "A2A" or "a2a" in tools:
         from app.services.a2a_codegen import _generate_a2a_agent
+
         return _maybe_inject_guardrails(_generate_a2a_agent(system_prompt, model_id, region, a2a_config))
 
     # Template-specific code generation
@@ -2713,18 +2632,36 @@ def generate_agent_code(
     multi_agent_config_data = getattr(config, "multi_agent_config", None)
     if multi_agent_pattern != "none" and multi_agent_config_data:
         if multi_agent_pattern == "graph":
-            return _maybe_inject_guardrails(_generate_graph_agent(system_prompt, model_id, region, provider, multi_agent_config_data))
+            return _maybe_inject_guardrails(
+                _generate_graph_agent(system_prompt, model_id, region, provider, multi_agent_config_data)
+            )
         elif multi_agent_pattern == "swarm":
-            return _maybe_inject_guardrails(_generate_swarm_agent(system_prompt, model_id, region, provider, multi_agent_config_data))
+            return _maybe_inject_guardrails(
+                _generate_swarm_agent(system_prompt, model_id, region, provider, multi_agent_config_data)
+            )
         elif multi_agent_pattern == "workflow":
-            return _maybe_inject_guardrails(_generate_workflow_agent(system_prompt, model_id, region, provider, multi_agent_config_data))
+            return _maybe_inject_guardrails(
+                _generate_workflow_agent(system_prompt, model_id, region, provider, multi_agent_config_data)
+            )
 
-    # Memory-connected agent (with optional gateway)
+    # Memory-connected agent (with optional gateway and/or knowledge base)
     if has_memory:
         if has_gateway:
             creds = _extract_gateway_credentials(gateway_config)
-            return _maybe_inject_guardrails(_generate_memory_agent(system_prompt, model_id, region, has_gateway=True, creds=creds))
-        return _maybe_inject_guardrails(_generate_memory_agent(system_prompt, model_id, region))
+            return _maybe_inject_guardrails(
+                _generate_memory_agent(
+                    system_prompt,
+                    model_id,
+                    region,
+                    has_gateway=True,
+                    creds=creds,
+                    has_kb=has_kb,
+                    kb_config=kb_config,
+                )
+            )
+        return _maybe_inject_guardrails(
+            _generate_memory_agent(system_prompt, model_id, region, has_kb=has_kb, kb_config=kb_config)
+        )
 
     # Gateway-connected agent
     if has_gateway:
@@ -2733,7 +2670,11 @@ def generate_agent_code(
 
     # Built-in tools agent (handles browser, code interpreter, knowledge base)
     if has_browser or has_code_interpreter or has_kb:
-        return _maybe_inject_guardrails(_generate_tools_agent(system_prompt, model_id, region, has_browser, has_code_interpreter, has_kb=has_kb, kb_config=kb_config))
+        return _maybe_inject_guardrails(
+            _generate_tools_agent(
+                system_prompt, model_id, region, has_browser, has_code_interpreter, has_kb=has_kb, kb_config=kb_config
+            )
+        )
 
     # Default Strands agent with provider-aware model
     return _maybe_inject_guardrails(_generate_strands_default(system_prompt, model_id, region, provider))
@@ -2741,9 +2682,9 @@ def generate_agent_code(
 
 def generate_requirements(
     config: RuntimeConfig,
-    tools: Optional[list] = None,
-    template_id: Optional[str] = None,
-    gateway_tools: Optional[list] = None,
+    tools: list | None = None,
+    template_id: str | None = None,
+    gateway_tools: list | None = None,
 ) -> str:
     """Generate requirements.txt content for the given configuration.
 

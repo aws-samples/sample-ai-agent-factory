@@ -1,10 +1,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { streamInvokeApi } from './api';
 
+type AuthFetchStub = (...args: unknown[]) => Promise<Response>;
+const globals = globalThis as typeof globalThis & { __authFetch?: AuthFetchStub };
+
 // authFetch is what streamInvokeApi calls; mock it to return a scripted SSE body
 // or a JSON fallback response.
 vi.mock('../auth/authFetch', () => ({
-  authFetch: (...args: unknown[]) => (globalThis as any).__authFetch(...args),
+  authFetch: (...args: unknown[]) => globals.__authFetch!(...args),
 }));
 
 function sseResponse(chunks: string[]): Response {
@@ -20,10 +23,10 @@ function sseResponse(chunks: string[]): Response {
 }
 
 describe('streamInvokeApi', () => {
-  afterEach(() => { delete (globalThis as any).__authFetch; });
+  afterEach(() => { delete globals.__authFetch; });
 
   it('accumulates tokens and captures the session id from the done event', async () => {
-    (globalThis as any).__authFetch = vi.fn(async () =>
+    globals.__authFetch = vi.fn(async () =>
       sseResponse([
         'data: {"type":"token","token":"Hello"}\n\n',
         'data: {"type":"token","token":" world"}\n\n',
@@ -41,7 +44,7 @@ describe('streamInvokeApi', () => {
 
   it('falls back to /api/test-runtime when the response is not an SSE stream', async () => {
     const calls: string[] = [];
-    (globalThis as any).__authFetch = vi.fn(async (url: string) => {
+    globals.__authFetch = vi.fn(async (url) => {
       calls.push(url);
       if (url.includes('test-runtime-stream')) {
         // Not an event-stream → triggers fallback.
@@ -59,7 +62,7 @@ describe('streamInvokeApi', () => {
   });
 
   it('throws on a stream error event', async () => {
-    (globalThis as any).__authFetch = vi.fn(async () =>
+    globals.__authFetch = vi.fn(async () =>
       sseResponse(['data: {"type":"error","error":"boom"}\n\n']),
     );
     await expect(

@@ -18,18 +18,17 @@ import uuid
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import boto3
-
+from app.models import ModelConfiguration, ModelProvider, RuntimeConfiguration
 from app.services.deployment import generate_unified_agent_code
 from app.services.gateway_deployer import deploy_gateway
 from app.services.runtime_deployer import (
-    upload_code_to_s3,
     create_agent_runtime,
     create_runtime_iam_role,
-    wait_for_runtime_ready,
     destroy_runtime,
     sanitize_runtime_name,
+    upload_code_to_s3,
+    wait_for_runtime_ready,
 )
-from app.models import RuntimeConfiguration, ModelConfiguration, ModelProvider
 
 REGION = os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1"))
 # Resolved lazily inside main() so this module imports cleanly under pytest
@@ -308,10 +307,12 @@ def main():
                 time.sleep(5)
 
         except Exception as mem_err:
-            log(f"Memory creation failed: {type(mem_err).__name__ if isinstance(mem_err, BaseException) else 'see status'}")
+            log(
+                f"Memory creation failed: {type(mem_err).__name__ if isinstance(mem_err, BaseException) else 'see status'}"
+            )
             traceback.print_exc()
             memory_id = None
-            raise RuntimeError(f"Memory creation failed: {mem_err}")
+            raise RuntimeError(f"Memory creation failed: {mem_err}") from mem_err
 
         code = generate_unified_agent_code(
             rc,

@@ -7,7 +7,6 @@ Covers the three paths that must stay in sync (Bug 9 in tasks/lessons.md):
 """
 
 import pytest
-
 from app.services.code_generator import _inject_otel
 from app.services.observability import (
     _validate_user_otel_secret_arn,
@@ -30,9 +29,7 @@ def test_legacy_enable_otel_without_observability_returns_empty():
     drops. Treat the legacy flag without explicit config as disabled.
     See tasks/lessons.md Bug 18.
     """
-    env = build_otel_env_vars(
-        None, runtime_name="agent-x", enable_otel_legacy=True
-    )
+    env = build_otel_env_vars(None, runtime_name="agent-x", enable_otel_legacy=True)
     assert env == {}
 
 
@@ -77,7 +74,10 @@ def test_camelcase_aliases_work():
     )
     assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "https://cloud.langfuse.com/api/public/otel"
     assert env["OTEL_TRACES_SAMPLER_ARG"] == "0.25"
-    assert env["OTEL_AUTH_SECRET_ARN"] == "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-otel/langfuse/u-camel-aabbccdd"
+    assert (
+        env["OTEL_AUTH_SECRET_ARN"]
+        == "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-otel/langfuse/u-camel-aabbccdd"
+    )
 
 
 def test_dual_export_native_field_is_ignored():
@@ -160,15 +160,12 @@ def test_langfuse_default_with_secret_uses_default_endpoint():
             "enabled": True,
             "provider": "langfuse",
             "auth_header_secret_arn": (
-                "arn:aws:secretsmanager:us-east-1:123456789012:secret:"
-                "agentcore-otel/langfuse/u-creds-abcdef123456"
+                "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-otel/langfuse/u-creds-abcdef123456"
             ),
         },
         runtime_name="agent",
     )
-    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == (
-        "https://cloud.langfuse.com/api/public/otel"
-    )
+    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == ("https://cloud.langfuse.com/api/public/otel")
 
 
 def test_langfuse_default_with_extra_headers_uses_default_endpoint():
@@ -181,9 +178,7 @@ def test_langfuse_default_with_extra_headers_uses_default_endpoint():
         },
         runtime_name="agent",
     )
-    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == (
-        "https://cloud.langfuse.com/api/public/otel"
-    )
+    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == ("https://cloud.langfuse.com/api/public/otel")
 
 
 def test_inject_otel_adds_bootstrap_after_app_init():
@@ -241,7 +236,10 @@ def test_platform_defaults_inject_when_no_canvas_config():
         platform_defaults=_PLATFORM_DEFAULTS,
     )
     assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "https://platform.langfuse.example/api/public/otel"
-    assert env["OTEL_AUTH_SECRET_ARN"] == "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-otel/platform/dev-platform0001"
+    assert (
+        env["OTEL_AUTH_SECRET_ARN"]
+        == "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-otel/platform/dev-platform0001"
+    )
     assert env["OTEL_TRACES_SAMPLER_ARG"] == "0.5"
     assert env["OTEL_SERVICE_NAME"] == "myplatform-agent-x"
     # Platform-supplied resource attributes flow through.
@@ -264,7 +262,10 @@ def test_platform_defaults_lock_endpoint_against_canvas_override():
     )
     # Platform values win.
     assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "https://platform.langfuse.example/api/public/otel"
-    assert env["OTEL_AUTH_SECRET_ARN"] == "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-otel/platform/dev-platform0001"
+    assert (
+        env["OTEL_AUTH_SECRET_ARN"]
+        == "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-otel/platform/dev-platform0001"
+    )
     assert env["OTEL_TRACES_SAMPLER_ARG"] == "0.5"
 
 
@@ -274,7 +275,7 @@ def test_platform_defaults_resource_attributes_merge_additively():
         {
             "enabled": True,
             "resource_attributes": {
-                "team": "ai-platform",          # adds new key
+                "team": "ai-platform",  # adds new key
                 "env": "prod-canvas-override",  # collides with platform "env"
             },
         },
@@ -327,10 +328,7 @@ def test_platform_defaults_enable_telemetry_even_with_disabled_canvas():
 
 def test_validate_user_otel_secret_arn_accepts_user_namespace():
     """ARNs in agentcore-otel/<provider>/<owner>-<rand> are valid."""
-    arn = (
-        "arn:aws:secretsmanager:us-east-1:123456789012:secret:"
-        "agentcore-otel/langfuse/u-xyz-abc123"
-    )
+    arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-otel/langfuse/u-xyz-abc123"
     assert _validate_user_otel_secret_arn(arn) == arn
 
 
@@ -338,10 +336,7 @@ def test_validate_user_otel_secret_arn_rejects_other_namespace():
     """An ARN outside agentcore-otel/ must be rejected — this is the
     cross-tenant exfiltration vector the Critic Finding 1 fix closes."""
     with pytest.raises(ValueError, match="agentcore-otel/"):
-        _validate_user_otel_secret_arn(
-            "arn:aws:secretsmanager:us-east-1:123456789012:secret:"
-            "billing-prod-AbCdEf"
-        )
+        _validate_user_otel_secret_arn("arn:aws:secretsmanager:us-east-1:123456789012:secret:billing-prod-AbCdEf")
 
 
 def test_validate_user_otel_secret_arn_accepts_platform_namespace():
@@ -349,10 +344,7 @@ def test_validate_user_otel_secret_arn_accepts_platform_namespace():
     share the same prefix — only the operator can name into this namespace,
     so we deliberately do not block it from the validator. The split between
     user and platform secrets is a naming convention, not a regex split."""
-    arn = (
-        "arn:aws:secretsmanager:us-east-1:123456789012:secret:"
-        "agentcore-otel/platform/dev-AbCdEf"
-    )
+    arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-otel/platform/dev-AbCdEf"
     assert _validate_user_otel_secret_arn(arn) == arn
 
 
@@ -366,10 +358,7 @@ def test_build_otel_env_vars_rejects_non_namespace_arn():
                 "enabled": True,
                 "provider": "langfuse",
                 "otlp_endpoint": "https://cloud.langfuse.com/api/public/otel",
-                "auth_header_secret_arn": (
-                    "arn:aws:secretsmanager:us-east-1:123456789012:secret:"
-                    "billing-prod-AbCdEf"
-                ),
+                "auth_header_secret_arn": ("arn:aws:secretsmanager:us-east-1:123456789012:secret:billing-prod-AbCdEf"),
             },
             runtime_name="agent-x",
         )

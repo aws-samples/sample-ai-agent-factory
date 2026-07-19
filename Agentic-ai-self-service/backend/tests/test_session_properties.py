@@ -14,8 +14,8 @@ import sys
 import types
 from unittest.mock import MagicMock, patch
 
-import pytest
-from hypothesis import HealthCheck, given, settings, strategies as st
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 sys.path.insert(0, "src")
 
@@ -25,10 +25,8 @@ if "mangum" not in sys.modules:
     sys.modules["mangum"] = types.ModuleType("mangum")
     sys.modules["mangum"].Mangum = MagicMock()  # type: ignore[attr-defined]
 
-from fastapi.testclient import TestClient
-
 from app.deployment_handler import deployment_app
-
+from fastapi.testclient import TestClient
 
 # ---------------------------------------------------------------------------
 # Strategies
@@ -49,11 +47,34 @@ prompt_st = st.text(min_size=1, max_size=200)
 # ---------------------------------------------------------------------------
 
 
+class _MultiPatch:
+    """Apply several patchers as one context manager."""
+
+    def __init__(self, *patchers):
+        self._patchers = patchers
+
+    def __enter__(self):
+        for p in self._patchers:
+            p.start()
+        return self
+
+    def __exit__(self, *exc):
+        for p in reversed(self._patchers):
+            p.stop()
+        return False
+
+
 def _capture_invoke_kwargs():
     """Patch _create_agentcore_client to return a mock that captures the
     last invoke_agent_runtime kwargs. Returns (patcher, captured_dict).
 
     The captured_dict will be populated with the kwargs dict on each call.
+
+    Also stubs boto3.client so the ARN-construction branch
+    (``sts.get_caller_identity()`` when the deployment record has no
+    ``runtime_arn``) is hermetic — otherwise the test makes a REAL AWS call
+    and fails NoCredentialsError on CI (the local pass was masked by ambient
+    credentials).
     """
     captured = {}
     mock_client = MagicMock()
@@ -68,9 +89,16 @@ def _capture_invoke_kwargs():
         }
 
     mock_client.invoke_agent_runtime.side_effect = _capture
-    patcher = patch(
-        "app.deployment_handler._create_agentcore_client",
-        return_value=mock_client,
+
+    _sts = MagicMock()
+    _sts.get_caller_identity.return_value = {"Account": "123456789012"}
+
+    def _boto3_client(service, *args, **kwargs):
+        return _sts if service == "sts" else MagicMock()
+
+    patcher = _MultiPatch(
+        patch("app.deployment_handler._create_agentcore_client", return_value=mock_client),
+        patch("app.deployment_handler.boto3.client", side_effect=_boto3_client),
     )
     return patcher, captured
 

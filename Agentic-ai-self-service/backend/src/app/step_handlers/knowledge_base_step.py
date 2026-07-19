@@ -6,17 +6,17 @@ Handles two modes:
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import json
 import logging
 import os
 import time
 
-import boto3
+from botocore.exceptions import ClientError
 
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services import step_clients
+from app.services.aws_errors import error_code
 from app.services.deployment_state_store import DeploymentStateStore
 
 logger = logging.getLogger(__name__)
@@ -69,6 +69,22 @@ def _create_kb_role(iam_client, role_name: str, kb_config: dict) -> str:
     except iam_client.exceptions.EntityAlreadyExistsException:
         role_arn = iam_client.get_role(RoleName=role_name)["Role"]["Arn"]
 
+    _put_kb_role_policy(iam_client, role_name, kb_config)
+
+    # IAM eventual consistency
+    time.sleep(10)
+    return role_arn
+
+
+def _put_kb_role_policy(iam_client, role_name: str, kb_config: dict) -> None:
+    """Build + put the KB role's inline policy from *kb_config*.
+
+    Separated from ``_create_kb_role`` so the handler can RE-put the policy
+    after auto-provisioning the vector store (S3 Vectors bucket / OSS
+    collection): the resource ARNs are unknowable before creation, so the
+    first put uses the tightest naming-convention pattern and the re-put
+    tightens each statement to the exact resource ARN (least privilege).
+    """
     statements: list[dict] = [
         {
             "Effect": "Allow",
@@ -85,11 +101,13 @@ def _create_kb_role(iam_client, role_name: str, kb_config: dict) -> str:
         s3_uri = kb_config.get("s3BucketUri", "")
         if s3_uri:
             bucket_arn = _parse_s3_bucket_arn(s3_uri)
-            statements.append({
-                "Effect": "Allow",
-                "Action": ["s3:GetObject", "s3:ListBucket"],
-                "Resource": [bucket_arn, f"{bucket_arn}/*"],
-            })
+            statements.append(
+                {
+                    "Effect": "Allow",
+                    "Action": ["s3:GetObject", "s3:ListBucket"],
+                    "Resource": [bucket_arn, f"{bucket_arn}/*"],
+                }
+            )
 
     # Credential-based data sources need Secrets Manager access
     secret_arns = []
@@ -100,13 +118,21 @@ def _create_kb_role(iam_client, role_name: str, kb_config: dict) -> str:
     elif data_source_type == "sharepoint":
         secret_arns.append(kb_config.get("sharePointCredentialsSecretArn", ""))
 
-    # OpenSearch Serverless permissions
+    # OpenSearch Serverless permissions. APIAccessAll is required for aoss
+    # DATA-PLANE access (index reads/writes) — but the Resource is scoped to
+    # the collection ARN. When the collection hasn't been created yet (the
+    # auto-provision path runs AFTER role creation because the data-access
+    # policy needs the role ARN), fall back to a collection/* pattern; the
+    # handler re-puts this policy with the exact collection ARN once
+    # _ensure_oss_collection returns it.
     if vector_store_type == "opensearch_serverless":
-        statements.append({
-            "Effect": "Allow",
-            "Action": ["aoss:APIAccessAll"],
-            "Resource": kb_config.get("opensearchCollectionArn", "*"),
-        })
+        statements.append(
+            {
+                "Effect": "Allow",
+                "Action": ["aoss:APIAccessAll"],
+                "Resource": kb_config.get("opensearchCollectionArn") or "arn:aws:aoss:*:*:collection/*",
+            }
+        )
 
     # S3 Vectors permissions (Bug 78). The role needs to provision and
     # interact with the auto-managed vector bucket+index that Bedrock KB
@@ -115,46 +141,77 @@ def _create_kb_role(iam_client, role_name: str, kb_config: dict) -> str:
     # the KB with `ValidationException: Bedrock Knowledge Base was unable
     # to assume the given role`.
     if vector_store_type == "s3_vectors":
-        s3v_arn = kb_config.get("s3VectorsBucketArn", "*")
+        s3v_arn = kb_config.get("s3VectorsBucketArn", "")
         # Some s3vectors verbs (QueryVectors, PutVectors, GetVectors,
         # DeleteVectors, DescribeIndex, ListIndexes) target the
         # `<bucket>/index/<idx>` sub-resource, not just the bucket.
         # Granting only the bucket ARN surfaces as a misleading
         # "Bedrock KB was unable to assume the given role" error.
         # See tasks/lessons.md Bug 84.
-        if s3v_arn == "*":
-            s3v_resources = ["*"]
+        if not s3v_arn:
+            # Auto-managed path: the handler creates the bucket AFTER this
+            # role exists (agentcore-kbvec-<deployment_id> naming convention,
+            # see the handler) and then RE-puts this policy with the exact
+            # bucket ARN. Scope the interim grant to the naming-convention
+            # prefix instead of "*".
+            s3v_resources = [
+                "arn:aws:s3vectors:*:*:bucket/agentcore-kbvec-*",
+                "arn:aws:s3vectors:*:*:bucket/agentcore-kbvec-*/index/*",
+            ]
         else:
             s3v_resources = [s3v_arn, f"{s3v_arn}/index/*"]
-        statements.append({
-            "Effect": "Allow",
-            "Action": [
-                "s3vectors:CreateVectorBucket",
-                "s3vectors:CreateIndex",
-                "s3vectors:PutVectors",
-                "s3vectors:GetVectors",
-                "s3vectors:ListVectors",
-                "s3vectors:QueryVectors",
-                "s3vectors:DeleteVectors",
-                "s3vectors:DescribeVectorBucket",
-                "s3vectors:DescribeIndex",
-                "s3vectors:GetIndex",
-                "s3vectors:GetVectorBucket",
-                "s3vectors:GetVectorBucketPolicy",
-                "s3vectors:PutVectorBucketPolicy",
-                "s3vectors:ListIndexes",
-                "s3vectors:ListVectorBuckets",
-            ],
-            "Resource": s3v_resources,
-        })
+        statements.append(
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "s3vectors:CreateVectorBucket",
+                    "s3vectors:CreateIndex",
+                    "s3vectors:PutVectors",
+                    "s3vectors:GetVectors",
+                    "s3vectors:ListVectors",
+                    "s3vectors:QueryVectors",
+                    "s3vectors:DeleteVectors",
+                    "s3vectors:DescribeVectorBucket",
+                    "s3vectors:DescribeIndex",
+                    "s3vectors:GetIndex",
+                    "s3vectors:GetVectorBucket",
+                    "s3vectors:GetVectorBucketPolicy",
+                    "s3vectors:PutVectorBucketPolicy",
+                    "s3vectors:ListIndexes",
+                ],
+                "Resource": s3v_resources,
+            }
+        )
+        # ListVectorBuckets is an account-level listing (no resource ARN
+        # form) — isolated so the "*" is visible and minimal.
+        statements.append(
+            {
+                "Effect": "Allow",
+                "Action": ["s3vectors:ListVectorBuckets"],
+                "Resource": "*",
+            }
+        )
 
-    # RDS permissions
+    # RDS permissions. The Aurora vector store CANNOT be auto-provisioned by
+    # this step (the cluster must pre-exist and _build_storage_config wires
+    # kb_config["rdsResourceArn"] straight into the Bedrock storage config),
+    # so the ARN is always knowable — a missing value is a caller error, not
+    # a reason to grant rds-data on "*".
     if vector_store_type == "rds":
-        statements.append({
-            "Effect": "Allow",
-            "Action": ["rds-data:ExecuteStatement", "rds-data:BatchExecuteStatement"],
-            "Resource": kb_config.get("rdsResourceArn", "*"),
-        })
+        rds_resource_arn = kb_config.get("rdsResourceArn", "")
+        if not rds_resource_arn:
+            raise ValueError(
+                "rdsResourceArn is required when vectorStoreType='rds' — the Aurora "
+                "cluster must pre-exist and its ARN is used both in the KB storage "
+                "configuration and to scope the KB role's rds-data permissions."
+            )
+        statements.append(
+            {
+                "Effect": "Allow",
+                "Action": ["rds-data:ExecuteStatement", "rds-data:BatchExecuteStatement"],
+                "Resource": rds_resource_arn,
+            }
+        )
         rds_secret = kb_config.get("rdsCredentialsSecretArn", "")
         if rds_secret:
             secret_arns.append(rds_secret)
@@ -162,41 +219,72 @@ def _create_kb_role(iam_client, role_name: str, kb_config: dict) -> str:
     # Custom transformation Lambda permissions
     transform_lambda = kb_config.get("transformationLambdaArn", "")
     if transform_lambda:
-        statements.append({
-            "Effect": "Allow",
-            "Action": ["lambda:InvokeFunction"],
-            "Resource": transform_lambda,
-        })
+        statements.append(
+            {
+                "Effect": "Allow",
+                "Action": ["lambda:InvokeFunction"],
+                "Resource": transform_lambda,
+            }
+        )
+
+    # BDA parsing writes intermediate output to the supplemental-storage
+    # bucket configured on the KB (supplementalDataStorageConfiguration) —
+    # without this grant CreateKnowledgeBase fails on role validation
+    # (matrix-run finding, P-KB-013 third-stage error).
+    if kb_config.get("parsingStrategy") == "bedrock_data_automation":
+        supp_uri = kb_config.get("bdaSupplementalS3Uri") or f"s3://{os.environ.get('ARTIFACTS_BUCKET_NAME', '')}"
+        if supp_uri.startswith("s3://"):
+            supp_bucket = supp_uri[5:].split("/")[0]
+            if supp_bucket:
+                supp_arn = f"arn:aws:s3:::{supp_bucket}"
+                statements.append(
+                    {
+                        "Effect": "Allow",
+                        "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
+                        "Resource": [supp_arn, f"{supp_arn}/*"],
+                    }
+                )
+        # BDA parsing also invokes Bedrock Data Automation on the KB's behalf.
+        statements.append(
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "bedrock:InvokeDataAutomationAsync",
+                    "bedrock:GetDataAutomationStatus",
+                ],
+                "Resource": "*",
+            }
+        )
 
     # S3 access for transformation intermediate storage
     transform_s3 = kb_config.get("transformationS3Uri", "")
     if transform_s3 and transform_s3.startswith("s3://"):
         t_bucket = transform_s3[5:].split("/")[0]
         t_bucket_arn = f"arn:aws:s3:::{t_bucket}"
-        statements.append({
-            "Effect": "Allow",
-            "Action": ["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
-            "Resource": [t_bucket_arn, f"{t_bucket_arn}/*"],
-        })
+        statements.append(
+            {
+                "Effect": "Allow",
+                "Action": ["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
+                "Resource": [t_bucket_arn, f"{t_bucket_arn}/*"],
+            }
+        )
 
     # Consolidate Secrets Manager permissions
     valid_secrets = [s for s in secret_arns if s]
     if valid_secrets:
-        statements.append({
-            "Effect": "Allow",
-            "Action": ["secretsmanager:GetSecretValue"],
-            "Resource": valid_secrets if len(valid_secrets) > 1 else valid_secrets[0],
-        })
+        statements.append(
+            {
+                "Effect": "Allow",
+                "Action": ["secretsmanager:GetSecretValue"],
+                "Resource": valid_secrets if len(valid_secrets) > 1 else valid_secrets[0],
+            }
+        )
 
     iam_client.put_role_policy(
         RoleName=role_name,
         PolicyName="BedrockKBAccess",
         PolicyDocument=json.dumps({"Version": "2012-10-17", "Statement": statements}),
     )
-
-    # IAM eventual consistency
-    time.sleep(10)
-    return role_arn
 
 
 def _wait_for_kb_active(bedrock_agent, kb_id: str, max_wait: int = 120) -> None:
@@ -228,12 +316,27 @@ def _start_and_wait_ingestion(bedrock_agent, kb_id: str, ds_id: str, max_wait: i
     status so the deploy result can tell the caller the KB is still ingesting
     instead of silently implying it's ready.
     """
-    resp = bedrock_agent.start_ingestion_job(
-        knowledgeBaseId=kb_id,
-        dataSourceId=ds_id,
-    )
-    job_id = resp["ingestionJob"]["ingestionJobId"]
-    logger.warning("Ingestion job started: %s for KB %s", job_id, kb_id)
+    try:
+        resp = bedrock_agent.start_ingestion_job(
+            knowledgeBaseId=kb_id,
+            dataSourceId=ds_id,
+        )
+        job_id = resp["ingestionJob"]["ingestionJobId"]
+        logger.warning("Ingestion job started: %s for KB %s", job_id, kb_id)
+    except ClientError as start_err:
+        # A Step Functions retry (or the idempotent data-source recovery) can
+        # find a job already ongoing — adopt it instead of failing the deploy
+        # (matrix-run finding, P-KB-008 secondary bug).
+        if error_code(start_err) != "ConflictException":
+            raise
+        jobs = bedrock_agent.list_ingestion_jobs(knowledgeBaseId=kb_id, dataSourceId=ds_id, maxResults=5).get(
+            "ingestionJobSummaries", []
+        )
+        ongoing = next((j for j in jobs if j.get("status") in ("STARTING", "IN_PROGRESS")), None)
+        if not ongoing:
+            raise
+        job_id = ongoing["ingestionJobId"]
+        logger.warning("Ingestion job %s already ongoing for KB %s, adopting", job_id, kb_id)
 
     for _ in range(max_wait // 5):
         job_resp = bedrock_agent.get_ingestion_job(
@@ -269,7 +372,9 @@ def _find_existing_kb(bedrock_agent, kb_name: str) -> str | None:
     return None
 
 
-def _ensure_oss_collection(region: str, deployment_id: str, kb_role_arn: str, kb_config: dict, store, dep_id: str, event: dict) -> str:
+def _ensure_oss_collection(
+    region: str, deployment_id: str, kb_role_arn: str, kb_config: dict, store, dep_id: str, event: dict
+) -> str:
     """Auto-provision an OpenSearch Serverless collection + vector index for a KB.
 
     Bedrock's CreateKnowledgeBase requires a PRE-EXISTING OSS collection ARN — unlike
@@ -300,18 +405,59 @@ def _ensure_oss_collection(region: str, deployment_id: str, kb_role_arn: str, kb
         try:
             return fn(*a, **kw)
         except botocore.exceptions.ClientError as e:
-            if e.response.get("Error", {}).get("Code") in ("ConflictException", "ValidationException") and "exist" in str(e).lower():
+            if (
+                e.response.get("Error", {}).get("Code") in ("ConflictException", "ValidationException")
+                and "exist" in str(e).lower()
+            ):
                 return None
             raise
 
     # 1+2. security policies (encryption + network), scoped to this collection.
-    _ignore_conflict(aoss.create_security_policy, name=f"{coll_name}-enc"[:32], type="encryption",
-        policy=json.dumps({"Rules": [{"ResourceType": "collection", "Resource": [f"collection/{coll_name}"]}], "AWSOwnedKey": True}))
-    _ignore_conflict(aoss.create_security_policy, name=f"{coll_name}-net"[:32], type="network",
-        policy=json.dumps([{"Rules": [
+    _ignore_conflict(
+        aoss.create_security_policy,
+        name=f"{coll_name}-enc"[:32],
+        type="encryption",
+        policy=json.dumps(
+            {"Rules": [{"ResourceType": "collection", "Resource": [f"collection/{coll_name}"]}], "AWSOwnedKey": True}
+        ),
+    )
+    # ── SECURITY TRADE-OFF (deliberate, sample platform) ────────────────
+    # The network security policy defaults to AllowFromPublic=True because
+    # the platform's Lambdas are NOT VPC-attached (matches the managed
+    # Bedrock-KB console default): with a private-only policy, neither the
+    # deployment Lambda's create_index call nor Bedrock's ingestion could
+    # reach the collection. Note the collection is still protected by the
+    # aoss DATA-ACCESS policy below (only the KB role + caller principal can
+    # touch it) — "public" here means network reachability, not open data.
+    #
+    # HARDENING: set kb_config["allowPublicNetwork"] = False and supply the
+    # OpenSearch Serverless VPC endpoint ids via
+    # kb_config["opensearchVpcEndpointIds"] (list). This requires the
+    # calling Lambdas to run inside that VPC (VPC-attach the platform's
+    # Lambda functions + create an aoss VPC endpoint) or KB creation will
+    # hang/fail on network access.
+    allow_public = kb_config.get("allowPublicNetwork", True)
+    net_rule: dict = {
+        "Rules": [
             {"ResourceType": "collection", "Resource": [f"collection/{coll_name}"]},
             {"ResourceType": "dashboard", "Resource": [f"collection/{coll_name}"]},
-        ], "AllowFromPublic": True}]))
+        ],
+        "AllowFromPublic": bool(allow_public),
+    }
+    if not allow_public:
+        vpce_ids = kb_config.get("opensearchVpcEndpointIds") or []
+        if not vpce_ids:
+            raise ValueError(
+                "allowPublicNetwork=False requires opensearchVpcEndpointIds "
+                "(the aoss VPC endpoint ids that should reach this collection)."
+            )
+        net_rule["SourceVPCEs"] = list(vpce_ids)
+    _ignore_conflict(
+        aoss.create_security_policy,
+        name=f"{coll_name}-net"[:32],
+        type="network",
+        policy=json.dumps([net_rule]),
+    )
 
     # 3. data-access policy: KB role + the caller (deployment Lambda) principal.
     caller_arn = ""
@@ -322,23 +468,52 @@ def _ensure_oss_collection(region: str, deployment_id: str, kb_role_arn: str, kb
             _, _, tail = caller_arn.partition(":assumed-role/")
             role = tail.split("/")[0]
             caller_arn = f"arn:aws:iam::{_get_account_id(event)}:role/{role}"
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:  # noqa: BLE001 — optional principal; the KB role alone is sufficient
+        logger.debug("Could not resolve caller ARN for OSS data-access policy", exc_info=True)
     principals = [p for p in [kb_role_arn, caller_arn] if p]
-    _ignore_conflict(aoss.create_access_policy, name=f"{coll_name}-acc"[:32], type="data",
-        policy=json.dumps([{
-            "Rules": [
-                {"ResourceType": "index", "Resource": [f"index/{coll_name}/*"],
-                 "Permission": ["aoss:CreateIndex", "aoss:DescribeIndex", "aoss:ReadDocument", "aoss:WriteDocument", "aoss:UpdateIndex", "aoss:DeleteIndex"]},
-                {"ResourceType": "collection", "Resource": [f"collection/{coll_name}"],
-                 "Permission": ["aoss:CreateCollectionItems", "aoss:DescribeCollectionItems", "aoss:UpdateCollectionItems"]},
-            ],
-            "Principal": principals,
-        }]))
+    _ignore_conflict(
+        aoss.create_access_policy,
+        name=f"{coll_name}-acc"[:32],
+        type="data",
+        policy=json.dumps(
+            [
+                {
+                    "Rules": [
+                        {
+                            "ResourceType": "index",
+                            "Resource": [f"index/{coll_name}/*"],
+                            "Permission": [
+                                "aoss:CreateIndex",
+                                "aoss:DescribeIndex",
+                                "aoss:ReadDocument",
+                                "aoss:WriteDocument",
+                                "aoss:UpdateIndex",
+                                "aoss:DeleteIndex",
+                            ],
+                        },
+                        {
+                            "ResourceType": "collection",
+                            "Resource": [f"collection/{coll_name}"],
+                            "Permission": [
+                                "aoss:CreateCollectionItems",
+                                "aoss:DescribeCollectionItems",
+                                "aoss:UpdateCollectionItems",
+                            ],
+                        },
+                    ],
+                    "Principal": principals,
+                }
+            ]
+        ),
+    )
 
     # 4. the collection.
-    _ignore_conflict(aoss.create_collection, name=coll_name, type="VECTORSEARCH",
-                     description=f"AgentCore KB vector store for {deployment_id[:12]}")
+    _ignore_conflict(
+        aoss.create_collection,
+        name=coll_name,
+        type="VECTORSEARCH",
+        description=f"AgentCore KB vector store for {deployment_id[:12]}",
+    )
     if store is not None:
         store.record_resource(dep_id, {"type": "oss_collection", "name": coll_name, "region": region})
 
@@ -349,7 +524,9 @@ def _ensure_oss_collection(region: str, deployment_id: str, kb_role_arn: str, kb
         if summ:
             st = summ[0].get("status")
             if st == "ACTIVE":
-                coll_id = summ[0]["id"]; coll_arn = summ[0]["arn"]; break
+                coll_id = summ[0]["id"]
+                coll_arn = summ[0]["arn"]
+                break
             if st == "FAILED":
                 raise RuntimeError(f"OSS collection {coll_name} creation FAILED")
         time.sleep(5)
@@ -361,17 +538,23 @@ def _ensure_oss_collection(region: str, deployment_id: str, kb_role_arn: str, kb
     # "spaceType") — the camelCase form fails "Invalid parameter: spaceType".
     index_schema = {
         "settings": {"index": {"knn": True}},
-        "mappings": {"properties": {
-            vec_field: {"type": "knn_vector", "dimension": 1024,
-                        "method": {"name": "hnsw", "engine": "faiss", "space_type": "l2"}},
-            txt_field: {"type": "text"},
-            meta_field: {"type": "text"},
-        }},
+        "mappings": {
+            "properties": {
+                vec_field: {
+                    "type": "knn_vector",
+                    "dimension": 1024,
+                    "method": {"name": "hnsw", "engine": "faiss", "space_type": "l2"},
+                },
+                txt_field: {"type": "text"},
+                meta_field: {"type": "text"},
+            }
+        },
     }
     # The data-access policy (step 3) is eventually-consistent: create_index can
     # race it and return AccessDenied "Access denied to create index" for the first
     # ~30-60s. Retry with backoff until the policy propagates.
     import botocore.exceptions as _bce
+
     created = False
     for attempt in range(12):
         try:
@@ -680,10 +863,7 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
             # ("bedrock-knowledge-base-default-index") or retrieval misses.
             if kb_config.get("vectorStoreType", "s3_vectors") == "s3_vectors":
                 vec_arn = kb_config.get("s3VectorsBucketArn", "")
-                vec_idx = (
-                    kb_config.get("s3VectorsIndexName")
-                    or "bedrock-knowledge-base-default-index"
-                )
+                vec_idx = kb_config.get("s3VectorsIndexName") or "bedrock-knowledge-base-default-index"
                 kb_config["s3VectorsIndexName"] = vec_idx
                 s3v = step_clients.client(event, "s3vectors")
                 if not vec_arn:
@@ -731,9 +911,21 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
             # (no auto-provision from storage config, unlike S3 Vectors). If the
             # caller didn't supply one, self-provision the collection + index here
             # and record it to the manifest for teardown (standing billable resource).
-            elif kb_config.get("vectorStoreType") == "opensearch_serverless" \
-                    and not kb_config.get("opensearchCollectionArn"):
+            elif kb_config.get("vectorStoreType") == "opensearch_serverless" and not kb_config.get(
+                "opensearchCollectionArn"
+            ):
                 _ensure_oss_collection(region, deployment_id, role_arn, kb_config, store, deployment_id, event)
+
+            # Least privilege: the role was created BEFORE the vector store
+            # existed, so its interim policy used naming-convention patterns
+            # (agentcore-kbvec-* / collection/*). Now that kb_config carries
+            # the exact bucket/collection ARN, re-put the policy so every
+            # statement is scoped to the real resource. Best-effort — the
+            # interim pattern is already functional.
+            try:
+                _put_kb_role_policy(iam_client, role_name, kb_config)
+            except Exception:  # noqa: BLE001
+                logger.warning("KB role policy tighten (re-put) skipped", exc_info=True)
 
             storage_config = _build_storage_config(kb_config)
             vector_kb_config: dict = {
@@ -742,13 +934,16 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
             # If BDA parsing is configured, attach supplementalDataStorage.
             # See tasks/lessons.md Bug 95.
             if kb_config.get("parsingStrategy") == "bedrock_data_automation":
+                # CreateKnowledgeBase rejects supplemental URIs with a key
+                # prefix ("S3 URI should only contain the bucket name") —
+                # bucket root only. Live-verified by the matrix run.
                 bda_supp_uri = kb_config.get("bdaSupplementalS3Uri") or (
-                    f"s3://{_get_env('ARTIFACTS_BUCKET_NAME','')}/kb-supplemental/{kb_name}/"
+                    f"s3://{_get_env('ARTIFACTS_BUCKET_NAME', '')}"
                 )
+                # API shape (botocore bedrock-agent model): storageLocations,
+                # each {type, s3Location} — live-verified by the matrix run.
                 vector_kb_config["supplementalDataStorageConfiguration"] = {
-                    "supplementalDataStorageLocations": [
-                        {"supplementalDataStorageLocationType": "S3", "s3Location": {"uri": bda_supp_uri}}
-                    ]
+                    "storageLocations": [{"type": "S3", "s3Location": {"uri": bda_supp_uri}}]
                 }
             kb_params = {
                 "name": kb_name,
@@ -787,7 +982,8 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
                         last_err = e
                         logger.warning(
                             "create_knowledge_base propagation race (attempt %d/12): %s",
-                            attempt + 1, str(e)[:200],
+                            attempt + 1,
+                            str(e)[:200],
                         )
                         time.sleep(15)
                         continue
@@ -905,16 +1101,37 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
         if kms_key:
             ds_params["serverSideEncryptionConfiguration"] = {"kmsKeyArn": kms_key}
 
-        ds_resp = bedrock_agent.create_data_source(**ds_params)
-        ds_id = ds_resp["dataSource"]["dataSourceId"]
-        logger.warning("Data source created: %s for KB %s", ds_id, kb_id)
+        # Idempotent create: a Step Functions retry (or a slow first attempt
+        # that timed out after the service-side create landed) hits
+        # ConflictException on the same name — recover the existing data
+        # source instead of failing the deploy (matrix-run finding, P-KB-008).
+        try:
+            ds_resp = bedrock_agent.create_data_source(**ds_params)
+            ds_id = ds_resp["dataSource"]["dataSourceId"]
+            logger.warning("Data source created: %s for KB %s", ds_id, kb_id)
+        except ClientError as ds_err:
+            if error_code(ds_err) != "ConflictException":
+                raise
+            existing = bedrock_agent.list_data_sources(knowledgeBaseId=kb_id, maxResults=50).get(
+                "dataSourceSummaries", []
+            )
+            match = next((d for d in existing if d.get("name") == ds_params["name"]), None)
+            if not match:
+                raise
+            ds_id = match["dataSourceId"]
+            logger.warning("Data source '%s' already exists (%s), reusing", ds_params["name"], ds_id)
 
-        # Step 5: Start ingestion. Wait up to 600s for queryable vectors; record
-        # the terminal status so a KB that's still ingesting is reported honestly
-        # rather than silently implied ready (P-E2E matrix finding).
-        _job_id, ingestion_status = _start_and_wait_ingestion(
-            bedrock_agent, kb_id, ds_id, max_wait=600
-        )
+        # Step 5: Start ingestion. Wait for queryable vectors; record the
+        # terminal status so a KB that's still ingesting is reported honestly
+        # rather than silently implied ready (P-E2E matrix finding). The wait is
+        # bounded to stay inside the SFN task timeout (600s) and the 30-min
+        # state-machine budget — an IN_PROGRESS return is NOT a failure: the KB
+        # exists and its vectors become queryable as the crawl finishes in the
+        # background (verified live for web_crawler P-KB-008: example.com
+        # dispatches + indexes shortly after this window, and the agent then
+        # retrieves the crawled content).
+        _ingest_wait = 540
+        _job_id, ingestion_status = _start_and_wait_ingestion(bedrock_agent, kb_id, ds_id, max_wait=_ingest_wait)
 
         event["knowledge_base_result"] = {
             "kb_id": kb_id,

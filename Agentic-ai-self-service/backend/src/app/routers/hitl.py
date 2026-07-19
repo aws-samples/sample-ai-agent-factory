@@ -27,13 +27,12 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Literal, Optional
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.services.auth import assert_owner, get_caller_sub
-from app.services.rbac import require_scopes
 from app.services.hitl_store import (
     STATUS_APPROVED,
     STATUS_REJECTED,
@@ -41,6 +40,7 @@ from app.services.hitl_store import (
     HitlRequest,
     get_hitl_store,
 )
+from app.services.rbac import require_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -93,11 +93,11 @@ class HitlRequestResponse(BaseModel):
     action: str
     reason: str
     created_at: int
-    comment: Optional[str] = None
-    decided_at: Optional[str] = None
+    comment: str | None = None
+    decided_at: str | None = None
 
     @classmethod
-    def from_model(cls, r: HitlRequest) -> "HitlRequestResponse":
+    def from_model(cls, r: HitlRequest) -> HitlRequestResponse:
         return cls(
             runtime_id=r.runtime_id,
             request_id=r.request_id,
@@ -137,7 +137,7 @@ async def list_pending(
 
 @router.get("/logs", dependencies=[Depends(require_scopes("hitl:read"))])
 async def approval_logs(
-    status: Optional[str] = None,
+    status: str | None = None,
     limit: int = 200,
     caller_sub: str = Depends(get_caller_sub),
 ) -> list[dict]:
@@ -166,7 +166,9 @@ async def approval_logs(
     ]
 
 
-@router.post("/{request_id}/decision", response_model=DecisionResponse, dependencies=[Depends(require_scopes("hitl:write"))])
+@router.post(
+    "/{request_id}/decision", response_model=DecisionResponse, dependencies=[Depends(require_scopes("hitl:write"))]
+)
 async def decide(
     request_id: str,
     body: DecisionRequest,
@@ -197,10 +199,7 @@ async def decide(
     except HitlNotPending as e:
         raise HTTPException(
             status_code=409,
-            detail=(
-                f"Request {request_id} is not PENDING (status={e.status}); "
-                f"it has already been decided."
-            ),
+            detail=(f"Request {request_id} is not PENDING (status={e.status}); it has already been decided."),
         ) from e
 
     logger.info(

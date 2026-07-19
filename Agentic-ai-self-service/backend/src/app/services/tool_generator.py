@@ -9,7 +9,6 @@ Requirements: Phase 3 (AI Tool Generator)
 import json
 import logging
 import os
-from typing import Optional
 
 import boto3
 
@@ -21,6 +20,20 @@ TOOL_GENERATOR_MODEL_ID = os.environ.get(
     # Use the current date-less generation. See tasks/lessons.md Bug 26.
     "us.anthropic.claude-sonnet-5",
 )
+
+
+def _inference_config(model_id: str, max_tokens: int, temperature: float) -> dict:
+    """Converse inferenceConfig omitting temperature for models that reject it.
+    Claude Sonnet 5 / Opus 5 and later raise ValidationException
+    'temperature is deprecated for this model'."""
+    cfg: dict = {"maxTokens": max_tokens}
+    mid = (model_id or "").lower()
+    if not any(
+        m in mid for m in ("claude-sonnet-5", "claude-opus-5", "claude-haiku-5", "claude-fable", "claude-mythos")
+    ):
+        cfg["temperature"] = temperature
+    return cfg
+
 
 # Compact prompt for clarification mode — fast, low tokens
 CLARIFICATION_PROMPT = """You help users create AWS Lambda tools. Ask 2-4 clarifying questions about their request.
@@ -55,8 +68,8 @@ RULES:
 
 def generate_tool(
     prompt: str,
-    conversation_history: Optional[list[dict]] = None,
-    existing_tool: Optional[dict] = None,
+    conversation_history: list[dict] | None = None,
+    existing_tool: dict | None = None,
     region: str = "us-east-1",
 ) -> dict:
     """Generate a Lambda tool using Claude Sonnet on Bedrock.
@@ -172,7 +185,7 @@ def generate_tool(
                 modelId=TOOL_GENERATOR_MODEL_ID,
                 system=[{"text": system_prompt}],
                 messages=messages,
-                inferenceConfig={"maxTokens": 8192, "temperature": 0},
+                inferenceConfig=_inference_config(TOOL_GENERATOR_MODEL_ID, 8192, 0),
                 toolConfig=tool_config,
             )
 
@@ -205,7 +218,7 @@ def generate_tool(
                 modelId=TOOL_GENERATOR_MODEL_ID,
                 system=[{"text": system_prompt}],
                 messages=messages,
-                inferenceConfig={"maxTokens": 1024, "temperature": 0},
+                inferenceConfig=_inference_config(TOOL_GENERATOR_MODEL_ID, 1024, 0),
             )
 
             output = response["output"]["message"]
@@ -314,7 +327,7 @@ def generate_tool(
         }
 
 
-def _parse_tool_response(text: str) -> Optional[dict]:
+def _parse_tool_response(text: str) -> dict | None:
     """Parse the model's JSON response, handling markdown fences if present."""
     text = text.strip()
 

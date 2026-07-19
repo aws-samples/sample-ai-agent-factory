@@ -12,7 +12,6 @@ Requirements: 1.1, 1.4
 
 import aws_cdk as cdk
 import cdk_nag
-
 from stacks.platform_stack import PlatformStack
 
 

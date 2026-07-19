@@ -1,5 +1,7 @@
 # RBAC Enforcement Rollout Runbook
 
+[← Back to README](../README.md)
+
 Scope-based RBAC (`services/rbac.py`) ships **advisory by default**
 (`RBAC_ENFORCE=false`): every request is allowed, but a request that *would* be
 denied logs `RBAC advisory (would-deny): ...`. This runbook takes an org from

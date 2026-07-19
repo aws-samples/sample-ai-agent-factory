@@ -8,10 +8,9 @@ cleaned up via DynamoDB TTL after 30 days.
 Requirements: 4.1, 4.2, 4.3
 """
 
+import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Optional
-import logging
 
 import boto3
 
@@ -70,7 +69,7 @@ def _put_item(table, item: dict) -> dict:
     return table.put_item(Item=item)
 
 
-def _get_item(table, key: dict) -> Optional[dict]:
+def _get_item(table, key: dict) -> dict | None:
     """Read an item from the DynamoDB table by key.
 
     Args:
@@ -89,7 +88,7 @@ def _update_item(
     key: dict,
     update_expr: str,
     expr_values: dict,
-    expr_names: Optional[dict] = None,
+    expr_names: dict | None = None,
 ) -> dict:
     """Update specific attributes of an item in the DynamoDB table.
 
@@ -270,7 +269,7 @@ class DeploymentStateStore:
         logger.info("Created deployment state: %s", state.deployment_id)
         return state
 
-    def get(self, deployment_id: str) -> Optional[DeploymentState]:
+    def get(self, deployment_id: str) -> DeploymentState | None:
         """Retrieve a deployment state record by deployment_id.
 
         Args:
@@ -342,10 +341,7 @@ class DeploymentStateStore:
             _update_item(
                 self._table,
                 key={"deployment_id": deployment_id},
-                update_expr=(
-                    "SET created_resources = "
-                    "list_append(if_not_exists(created_resources, :empty), :r)"
-                ),
+                update_expr=("SET created_resources = list_append(if_not_exists(created_resources, :empty), :r)"),
                 expr_values={
                     ":r": [_convert_floats_to_decimals(resource)],
                     ":empty": [],
@@ -368,21 +364,21 @@ class DeploymentStateStore:
         deployment_id: str,
         status: DeploymentStatusEnum,
         *,
-        completed_at: Optional[datetime] = None,
-        runtime_endpoint: Optional[str] = None,
-        runtime_id: Optional[str] = None,
-        runtime_arn: Optional[str] = None,
-        gateway_url: Optional[str] = None,
-        gateway_result: Optional[dict] = None,
-        policy_result: Optional[dict] = None,
-        memory_result: Optional[dict] = None,
-        knowledge_base_result: Optional[dict] = None,
-        guardrails_result: Optional[dict] = None,
-        mcp_server_runtime_id: Optional[str] = None,
-        harness_id: Optional[str] = None,
-        harness_arn: Optional[str] = None,
-        deployment_mode: Optional[str] = None,
-        error_details: Optional[str] = None,
+        completed_at: datetime | None = None,
+        runtime_endpoint: str | None = None,
+        runtime_id: str | None = None,
+        runtime_arn: str | None = None,
+        gateway_url: str | None = None,
+        gateway_result: dict | None = None,
+        policy_result: dict | None = None,
+        memory_result: dict | None = None,
+        knowledge_base_result: dict | None = None,
+        guardrails_result: dict | None = None,
+        mcp_server_runtime_id: str | None = None,
+        harness_id: str | None = None,
+        harness_arn: str | None = None,
+        deployment_mode: str | None = None,
+        error_details: str | None = None,
     ) -> None:
         """Update the status and optional output fields of a deployment.
 
@@ -496,7 +492,7 @@ class DeploymentStateStore:
     def query_by_workflow(
         self,
         workflow_id: str,
-        status_filter: Optional[str] = None,
+        status_filter: str | None = None,
     ) -> list[DeploymentState]:
         """Query deployments by workflow_id using the GSI.
 
@@ -530,7 +526,7 @@ class DeploymentStateStore:
     def query_by_user(
         self,
         user_id: str,
-        status_filter: Optional[str] = None,
+        status_filter: str | None = None,
     ) -> list[DeploymentState]:
         """Query deployments by user_id using the GSI."""
         kwargs: dict = {
@@ -553,9 +549,7 @@ class DeploymentStateStore:
 
         return [deserialize_deployment_state(_convert_decimals_to_floats(item)) for item in items]
 
-    def set_registry_record(
-        self, deployment_id: str, record_id: str, record_status: str
-    ) -> None:
+    def set_registry_record(self, deployment_id: str, record_id: str, record_status: str) -> None:
         """Persist the AWS Agent Registry record id + status onto a deployment.
 
         Written directly as top-level attributes (aws_registry_record_id /
@@ -570,7 +564,7 @@ class DeploymentStateStore:
             ExpressionAttributeValues={":r": record_id, ":s": record_status},
         )
 
-    def get_registry_record_id(self, deployment_id: str) -> Optional[str]:
+    def get_registry_record_id(self, deployment_id: str) -> str | None:
         """Return the stored AWS Agent Registry record id, or None."""
         try:
             item = self._table.get_item(Key={"deployment_id": deployment_id}).get("Item") or {}
@@ -579,7 +573,7 @@ class DeploymentStateStore:
             return None
 
     def scan_pending_enforce(self, max_items: int = 200) -> list[DeploymentState]:
-        """Return deployments whose Cedar ENFORCE promotion is still pending.
+        """Return deployments whose Cedar ENFORCE policy plane needs reconciling.
 
         Used by the scheduled policy-sweep (EventBridge) so a permit converges to
         ACTIVE even when NO user touchpoint (invoke/status poll) fires after the
@@ -587,16 +581,31 @@ class DeploymentStateStore:
         Without this self-drive, a deployed-and-idle ENFORCE agent's tool plane
         can stay fail-closed (deny-all) indefinitely (observed live in P-PLAT-027).
 
-        A bounded FilterExpression scan is acceptable here: pending-enforce rows
-        are rare and short-lived, and this runs on a schedule (not per-request).
-        `max_items` caps the sweep so a large table can't blow the Lambda budget;
-        the next tick picks up any remainder.
+        Two classes are returned:
+        1. ``enforce_pending`` set (non-null) — the classic pending-promotion row.
+        2. ``mode == "ENFORCE"`` with an ``engine_id`` — the reconcile class. A
+           policy that reached ACTIVE (so ``enforce_pending`` was cleared to null)
+           can REGRESS to UPDATE_FAILED when AgentCore's gateway-authz plane
+           re-validates it; once the pending payload is null, nothing would ever
+           re-drive it and the tool plane silently goes deny-all forever. The
+           promoter re-checks the live policy status for these and re-drives
+           ``update_policy`` if it is not ACTIVE (idempotent no-op when healthy).
+           This is the fix for the >2h non-convergence found in production-
+           readiness testing.
+
+        A bounded FilterExpression scan is acceptable here: ENFORCE rows are rare
+        and this runs on a schedule (not per-request). `max_items` caps the sweep
+        so a large table can't blow the Lambda budget; the next tick picks up any
+        remainder.
         """
         items: list[dict] = []
         kwargs: dict = {
-            "FilterExpression": "attribute_exists(policy_result.enforce_pending) "
-                                "AND policy_result.enforce_pending <> :null",
-            "ExpressionAttributeValues": {":null": None},
+            "FilterExpression": (
+                "(attribute_exists(policy_result.enforce_pending) AND policy_result.enforce_pending <> :null) "
+                "OR (policy_result.#m = :enforce AND attribute_exists(policy_result.engine_id))"
+            ),
+            "ExpressionAttributeNames": {"#m": "mode"},
+            "ExpressionAttributeValues": {":null": None, ":enforce": "ENFORCE"},
         }
         while len(items) < max_items:
             resp = self._table.scan(**kwargs)
@@ -605,7 +614,4 @@ class DeploymentStateStore:
                 break
             kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
-        return [
-            deserialize_deployment_state(_convert_decimals_to_floats(item))
-            for item in items[:max_items]
-        ]
+        return [deserialize_deployment_state(_convert_decimals_to_floats(item)) for item in items[:max_items]]

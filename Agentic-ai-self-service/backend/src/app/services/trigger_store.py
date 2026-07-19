@@ -42,7 +42,6 @@ import secrets
 import time
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -136,13 +135,13 @@ class Trigger:
     type: str  # cron | eventbridge | s3 | webhook
     target_runtime_arn: str
     status: str = STATUS_ACTIVE
-    schedule: Optional[str] = None  # cron expr (type=cron)
-    pattern: Optional[dict] = None  # event JSON (type=eventbridge/s3)
-    webhook_secret_ref: Optional[str] = None  # Secrets Manager ARN (never the secret)
-    webhook_out_url: Optional[str] = None  # validated outbound POST target
-    eventbridge_rule_arn: Optional[str] = None  # provisioned handle (cleanup)
-    scheduler_name: Optional[str] = None  # provisioned handle (cleanup)
-    function_url: Optional[str] = None  # webhook Function URL (cleanup)
+    schedule: str | None = None  # cron expr (type=cron)
+    pattern: dict | None = None  # event JSON (type=eventbridge/s3)
+    webhook_secret_ref: str | None = None  # Secrets Manager ARN (never the secret)
+    webhook_out_url: str | None = None  # validated outbound POST target
+    eventbridge_rule_arn: str | None = None  # provisioned handle (cleanup)
+    scheduler_name: str | None = None  # provisioned handle (cleanup)
+    function_url: str | None = None  # webhook Function URL (cleanup)
     created_at: int = 0  # epoch milliseconds
     updated_at: int = 0  # epoch milliseconds
 
@@ -172,7 +171,7 @@ class Trigger:
         return _floats_to_decimals(item)
 
     @classmethod
-    def from_item(cls, item: dict) -> "Trigger":
+    def from_item(cls, item: dict) -> Trigger:
         item = _decimals_to_floats(dict(item))
         return cls(
             runtime_name=item["runtime_name"],
@@ -215,14 +214,14 @@ class TriggerStore:
         type: str,
         target_runtime_arn: str,
         status: str = STATUS_REGISTERED,
-        schedule: Optional[str] = None,
-        pattern: Optional[dict] = None,
-        webhook_secret_ref: Optional[str] = None,
-        webhook_out_url: Optional[str] = None,
-        eventbridge_rule_arn: Optional[str] = None,
-        scheduler_name: Optional[str] = None,
-        function_url: Optional[str] = None,
-        trigger_id: Optional[str] = None,
+        schedule: str | None = None,
+        pattern: dict | None = None,
+        webhook_secret_ref: str | None = None,
+        webhook_out_url: str | None = None,
+        eventbridge_rule_arn: str | None = None,
+        scheduler_name: str | None = None,
+        function_url: str | None = None,
+        trigger_id: str | None = None,
     ) -> Trigger:
         """Write a trigger row and return it.
 
@@ -259,10 +258,8 @@ class TriggerStore:
         )
         return trig
 
-    def get(self, runtime_name: str, trigger_id: str) -> Optional[Trigger]:
-        resp = self._table.get_item(
-            Key={"runtime_name": runtime_name, "trigger_id": trigger_id}
-        )
+    def get(self, runtime_name: str, trigger_id: str) -> Trigger | None:
+        resp = self._table.get_item(Key={"runtime_name": runtime_name, "trigger_id": trigger_id})
         item = resp.get("Item")
         if not item:
             return None
@@ -315,10 +312,10 @@ class TriggerStore:
         runtime_name: str,
         trigger_id: str,
         status: str,
-        eventbridge_rule_arn: Optional[str] = None,
-        scheduler_name: Optional[str] = None,
-        function_url: Optional[str] = None,
-    ) -> Optional[Trigger]:
+        eventbridge_rule_arn: str | None = None,
+        scheduler_name: str | None = None,
+        function_url: str | None = None,
+    ) -> Trigger | None:
         """Flip a trigger's status (and optionally stamp provisioned handles).
 
         Returns the updated row, or None if the row doesn't exist (idempotent).
@@ -351,19 +348,14 @@ class TriggerStore:
                 ReturnValues="ALL_NEW",
             )
         except ClientError as e:
-            if (
-                e.response.get("Error", {}).get("Code")
-                == "ConditionalCheckFailedException"
-            ):
+            if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
                 return None
             raise
         return Trigger.from_item(resp["Attributes"])
 
     def delete(self, runtime_name: str, trigger_id: str) -> None:
         """Delete a trigger row. Idempotent (no-op if already gone)."""
-        self._table.delete_item(
-            Key={"runtime_name": runtime_name, "trigger_id": trigger_id}
-        )
+        self._table.delete_item(Key={"runtime_name": runtime_name, "trigger_id": trigger_id})
         logger.info("Deleted trigger %s/%s", runtime_name, trigger_id)
 
 
@@ -371,7 +363,7 @@ class TriggerStore:
 # Convenience singleton (lazy-init from env)
 # ---------------------------------------------------------------------------
 
-_trigger_store: Optional[TriggerStore] = None
+_trigger_store: TriggerStore | None = None
 
 
 def get_trigger_store() -> TriggerStore:
@@ -379,8 +371,6 @@ def get_trigger_store() -> TriggerStore:
     if _trigger_store is None:
         _trigger_store = TriggerStore(
             table_name=os.environ.get("TRIGGERS_TABLE_NAME", "Triggers"),
-            region=os.environ.get(
-                "APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")
-            ),
+            region=os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")),
         )
     return _trigger_store

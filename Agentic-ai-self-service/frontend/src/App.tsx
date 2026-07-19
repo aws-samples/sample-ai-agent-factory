@@ -1,16 +1,7 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import { m } from 'motion/react';
-import { signOut } from 'aws-amplify/auth';
-import { staggerContainer, fadeRise, pressable, spring } from './lib/motion';
-import { ThemeToggle } from './components/ThemeToggle';
-import WorkflowCanvas from './components/canvas/WorkflowCanvas';
 import { ComponentPalette } from './components/palette/ComponentPalette';
-import { RuntimeConfigurationModal } from './components/modals/RuntimeConfigurationModal';
-import { GatewayConfigurationModal } from './components/modals/GatewayConfigurationModal';
-import { IdentityConfigurationModal } from './components/modals/IdentityConfigurationModal';
-import { A2AConfigurationModal } from './components/modals/A2AConfigurationModal';
 import { DeployPanel } from './components/deploy/DeployPanel';
-import { ActiveDeploymentBanner } from './components/deploy/ActiveDeploymentBanner';
+import { CanvasArea } from './components/canvas/CanvasArea';
 import type { ActiveDeployment } from './components/deploy/ActiveDeploymentBanner';
 import { ToolGeneratorPanel } from './components/ai/ToolGeneratorPanel';
 import { AgentGeneratorPanel } from './components/ai/AgentGeneratorPanel';
@@ -18,29 +9,24 @@ import { HarnessAuthoring } from './components/harness/HarnessAuthoring';
 import type { GeneratedCanvasSpec, RegistryCanvasSnapshot } from './services/api';
 import { snapshotToCanvas } from './utils/cloneSnapshot';
 import { TemplateGallery } from './components/templates';
-import { MemoryConfigurationModal } from './components/modals/MemoryConfigurationModal';
-import { PolicyConfigurationModal } from './components/modals/PolicyConfigurationModal';
-import { KnowledgeBaseConfigModal } from './components/modals/KnowledgeBaseConfigModal';
-import { ToolConfigModal } from './components/modals/ToolConfigModal';
-import { ConnectorConfigModal } from './components/modals/ConnectorConfigModal';
-import { GuardrailsConfigurationModal } from './components/modals/GuardrailsConfigurationModal';
-import { ObservabilityConfigurationModal } from './components/modals/ObservabilityConfigurationModal';
-import { EvaluationConfigurationModal, type EvaluationNodeConfig } from './components/modals/EvaluationConfigurationModal';
 import { PromptLibraryModal, type PromptSelection } from './components/modals/PromptLibraryModal';
 import { RegistryModal } from './components/modals/RegistryModal';
 import { HitlInboxModal } from './components/modals/HitlInboxModal';
+import { ModalHost } from './components/modals/ModalHost';
+import { getModalKeyForComponentType } from './components/modals/modalRegistry';
 import { useWorkflowStore } from './store/workflowStore';
 import { useFlowStore } from './store/flowStore';
 import { useAutoSave } from './hooks/useAutoSave';
 import { instantiateTemplate } from './utils/templates';
 import type { AgentCoreComponentType } from './types/workflow';
 import type { WorkflowTemplate } from './types/templates';
-import type { RuntimeConfiguration, GatewayConfiguration, IdentityConfiguration, MemoryConfiguration, PolicyConfiguration, GuardrailsConfiguration, ObservabilityConfiguration, ComponentConfiguration, ToolConfiguration, KnowledgeBaseToolConfig, A2AConfiguration, ConnectorConfiguration } from './types/components';
+import type { ComponentConfiguration, RuntimeConfiguration, IdentityConfiguration, ToolConfiguration, ConnectorConfiguration } from './types/components';
 import { CONNECTOR_TOOL_PREFIX } from './types/components';
 import type { DeployConnector } from './components/deploy/DeployPanel';
 import type { GeneratedTool } from './services/api';
 import { useScopes } from './auth/scopes';
 import { ChatPage } from './components/chat/ChatPage';
+import { AppHeader } from './components/AppHeader';
 import './App.css';
 
 function App() {
@@ -104,7 +90,7 @@ function App() {
     setShowDeployPanel(true);
   }, []);
 
-  // Modal state
+  // Legacy state for extracting config - kept to avoid extensive refactor
   const [configModal, setConfigModal] = useState<{
     isOpen: boolean;
     nodeId: string | null;
@@ -322,6 +308,34 @@ function App() {
     return { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig, a2aConfig };
   }, [deployableNodeId, edges, nodes, connectorSecrets]);
 
+  // Close config modal
+  const handleCloseConfig = useCallback(() => {
+    setConfigModal({ isOpen: false, nodeId: null, componentType: null });
+  }, []);
+
+  // Save configuration and run validation.
+  // SECURITY: connector secrets are transient. The raw `secretValue` is stripped
+  // before the node is persisted so it never reaches the canvas JSON / DDB —
+  // only Secrets Manager holds it (backend mints from the deploy payload). The
+  // node keeps just `configured` + non-secret fields.
+  const handleSaveConfig = useCallback((config: ComponentConfiguration) => {
+    if (configModal.nodeId) {
+      const persisted = { ...config } as ComponentConfiguration & { secretValue?: string };
+      // Capture the transient secret into the in-memory map (keyed by nodeId)
+      // BEFORE stripping it from the persisted node — the deploy payload reads it
+      // back from here so the backend can mint the Secrets Manager secret.
+      if (persisted.secretValue) {
+        connectorSecretsRef.current[configModal.nodeId] = persisted.secretValue;
+        setConnectorSecretsRev(r => r + 1);
+      }
+      if ('secretValue' in persisted) delete persisted.secretValue;
+      updateNodeConfiguration(configModal.nodeId, persisted);
+      // Run validation after config update
+      setTimeout(() => runValidation(), 10);
+    }
+    handleCloseConfig();
+  }, [configModal.nodeId, updateNodeConfiguration, runValidation, handleCloseConfig]);
+
   // Handle pending node creation - open modal when node appears (adjust state during render pattern)
   if (pendingNodeConfig) {
     const newNode = nodes.find((n) =>
@@ -340,6 +354,29 @@ function App() {
       setPendingNodeConfig(null);
     }
   }
+
+  // Compute activeModal props from configModal state (no effect needed)
+  const activeModal = useMemo(() => {
+    if (!configModal.isOpen || !configModal.componentType || !configModal.nodeId) {
+      return { key: null, props: null };
+    }
+    const cfg = configModal.initialConfig as Record<string, unknown> | undefined;
+    const modalKey = getModalKeyForComponentType(configModal.componentType, cfg);
+    if (!modalKey) {
+      return { key: null, props: null };
+    }
+    return {
+      key: modalKey,
+      props: {
+        isOpen: true,
+        onClose: handleCloseConfig,
+        onSave: handleSaveConfig,
+        initialConfig: configModal.initialConfig,
+        // Observability needs apiBaseUrl
+        ...(modalKey === 'observability' ? { apiBaseUrl: import.meta.env.VITE_API_BASE_URL ?? '' } : {}),
+      },
+    };
+  }, [configModal.isOpen, configModal.componentType, configModal.nodeId, configModal.initialConfig, handleCloseConfig, handleSaveConfig]);
 
   const handleToggleCollapse = useCallback(() => {
     setPaletteCollapsed((prev) => !prev);
@@ -371,34 +408,6 @@ function App() {
     setPendingNodeConfig({ componentType, position });
   }, []);
 
-  // Close config modal
-  const handleCloseConfig = useCallback(() => {
-    setConfigModal({ isOpen: false, nodeId: null, componentType: null });
-  }, []);
-
-  // Save configuration and run validation.
-  // SECURITY: connector secrets are transient. The raw `secretValue` is stripped
-  // before the node is persisted so it never reaches the canvas JSON / DDB —
-  // only Secrets Manager holds it (backend mints from the deploy payload). The
-  // node keeps just `configured` + non-secret fields.
-  const handleSaveConfig = useCallback((config: ComponentConfiguration) => {
-    if (configModal.nodeId) {
-      const persisted = { ...config } as ComponentConfiguration & { secretValue?: string };
-      // Capture the transient secret into the in-memory map (keyed by nodeId)
-      // BEFORE stripping it from the persisted node — the deploy payload reads it
-      // back from here so the backend can mint the Secrets Manager secret.
-      if (persisted.secretValue) {
-        connectorSecretsRef.current[configModal.nodeId] = persisted.secretValue;
-        setConnectorSecretsRev(r => r + 1);
-      }
-      if ('secretValue' in persisted) delete persisted.secretValue;
-      updateNodeConfiguration(configModal.nodeId, persisted);
-      // Run validation after config update
-      setTimeout(() => runValidation(), 10);
-    }
-    handleCloseConfig();
-  }, [configModal.nodeId, updateNodeConfiguration, runValidation, handleCloseConfig]);
-
   // Handle template selection
   const handleSelectTemplate = useCallback((template: WorkflowTemplate) => {
     // New canvas content => drop any transient connector secrets from the old one.
@@ -427,7 +436,6 @@ function App() {
     if (!nodes.length) {
       // Defensive: an empty/legacy snapshot — surface it rather than silently
       // loading a blank canvas that then "generates an incorrect template".
-      // eslint-disable-next-line no-console
       console.warn('Clone: snapshot had no nodes; nothing to load', snapshot);
       return;
     }
@@ -502,41 +510,6 @@ function App() {
   // Check if we have a valid runtime to deploy
   const canDeploy = deployableConfig && deployableConfig.name && deployableConfig.systemPrompt;
 
-  // Phase B — segmented authoring-mode toggle, shared by both modes' top nav.
-  // MotionSites: glass badge with refined transitions.
-  const authoringToggle = (
-    <div className="no-darkmap flex items-center gap-0.5 p-0.5 backdrop-blur-sm rounded-md" style={{ background: 'rgba(255,255,255,0.08)' }} role="tablist" aria-label="Authoring mode">
-      <button
-        role="tab"
-        aria-selected={authoringMode === 'visual'}
-        onClick={() => setAuthoringMode('visual')}
-        className="no-darkmap px-2.5 py-1 rounded text-xs font-semibold transition-colors duration-200"
-        style={{
-          transitionTimingFunction: 'var(--ease-out-quint)',
-          background: authoringMode === 'visual' ? 'var(--accent)' : 'transparent',
-          color: authoringMode === 'visual' ? '#06080f' : 'rgba(255,255,255,0.88)',
-          boxShadow: authoringMode === 'visual' ? '0 0 14px -4px var(--accent)' : 'none',
-        }}
-      >
-        Visual Canvas
-      </button>
-      <button
-        role="tab"
-        aria-selected={authoringMode === 'harness'}
-        onClick={() => setAuthoringMode('harness')}
-        className="no-darkmap px-2.5 py-1 rounded text-xs font-semibold transition-colors duration-200"
-        style={{
-          transitionTimingFunction: 'var(--ease-out-quint)',
-          background: authoringMode === 'harness' ? 'var(--accent)' : 'transparent',
-          color: authoringMode === 'harness' ? '#06080f' : 'rgba(255,255,255,0.88)',
-          boxShadow: authoringMode === 'harness' ? '0 0 14px -4px var(--accent)' : 'none',
-        }}
-      >
-        Harness
-      </button>
-    </div>
-  );
-
   // Loom-study Phase 3 — end-user chat routing. A non-admin (t-user) lands on the
   // ChatPage; an admin can preview it via View-as. Wait for scopes to load so we
   // don't flash the builder before resolving the persona. (Local dev with no
@@ -553,22 +526,22 @@ function App() {
     return <ChatPage previewBanner={banner} />;
   }
 
-  // Harness mode swaps in the additive form-based authoring path. The visual
-  // canvas (palette + canvas + deploy) below is rendered UNCHANGED otherwise.
+  // Harness mode swaps in the additive form-based authoring path.
   if (authoringMode === 'harness') {
     return (
       <div className="w-screen h-screen flex flex-col bg-[#f2f3f3]">
-        <div className="h-12 bg-[#232f3e] flex items-center gap-4 px-4 z-20 border-b border-white/10 flex-shrink-0">
-          <div className="flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-md bg-[#ff9900] flex items-center justify-center">
-              <svg className="w-4 h-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-              </svg>
-            </div>
-            <span className="font-semibold text-white text-sm tracking-tight">AgentCore Flows</span>
-          </div>
-          {authoringToggle}
-        </div>
+        <AppHeader
+          activeFlowName={activeFlowName}
+          nodesCount={nodes.length}
+          deployableConfig={deployableConfig}
+          authoringMode={authoringMode}
+          onAuthoringModeChange={setAuthoringMode}
+          onDeploy={() => setShowDeployPanel(true)}
+          onOpenRegistry={() => setShowRegistry(true)}
+          onPreviewAsEndUser={() => setPreviewAsEndUser(true)}
+          onOpenHitlInbox={() => setShowHitlInbox(true)}
+          canDeploy={!!canDeploy}
+        />
         <HarnessAuthoring />
       </div>
     );
@@ -588,347 +561,31 @@ function App() {
       />
 
       <div className="flex-1 relative flex flex-col">
-        {/* Top Header Bar */}
-        <div
-          className="no-darkmap h-12 flex items-center justify-between px-4 z-20 relative"
-          style={{
-            background: 'var(--header-bg)',
-            backdropFilter: 'blur(12px)',
-            borderBottom: '1px solid var(--color-border)',
-            boxShadow: '0 1px 0 var(--header-hairline)',
-          }}
-        >
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2.5">
-              <div
-                className="w-7 h-7 rounded-md flex items-center justify-center"
-                style={{
-                  background: 'linear-gradient(135deg, var(--neon-cyan), var(--neon-violet))',
-                  boxShadow: '0 0 14px -2px var(--neon-cyan)',
-                }}
-              >
-                <svg className="w-4 h-4 text-[#06080f]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-                </svg>
-              </div>
-              <span className="font-semibold text-sm tracking-tight u-neon-text">AgentCore Flows</span>
-            </div>
-            <div className="h-5 w-px bg-white/25" />
-            <span className="font-medium text-white/95 text-sm">
-              {activeFlowName || 'Untitled Flow'}
-            </span>
-            <div className="h-5 w-px bg-white/25" />
-            <div className="flex items-center gap-2 text-xs text-white/80">
-              <span className="px-2 py-0.5 backdrop-blur-sm rounded font-normal" style={{ backgroundColor: 'rgba(255, 255, 255, 0.14)' }}>{nodes.length} node{nodes.length !== 1 ? 's' : ''}</span>
-            </div>
-            <div className="h-5 w-px bg-white/20" />
-            {authoringToggle}
-          </div>
+        <AppHeader
+          activeFlowName={activeFlowName}
+          nodesCount={nodes.length}
+          deployableConfig={deployableConfig}
+          authoringMode={authoringMode}
+          onAuthoringModeChange={setAuthoringMode}
+          onDeploy={() => setShowDeployPanel(true)}
+          onOpenRegistry={() => setShowRegistry(true)}
+          onPreviewAsEndUser={() => setPreviewAsEndUser(true)}
+          onOpenHitlInbox={() => setShowHitlInbox(true)}
+          canDeploy={!!canDeploy}
+        />
 
-          <div className="flex items-center gap-3">
-            {/* Status indicator - MotionSites glass badge */}
-            {deployableConfig && (
-              <m.div
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={spring.bouncy}
-                className="no-darkmap flex items-center gap-1.5 px-2.5 py-1 backdrop-blur-sm rounded-md text-xs font-semibold border" style={{ backgroundColor: 'rgba(52, 211, 153, 0.22)', color: '#6ee7b7', borderColor: 'rgba(52, 211, 153, 0.5)', boxShadow: '0 0 14px -4px rgba(52,211,153,0.7)' }}
-              >
-                <div className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: '#34d399', boxShadow: '0 0 8px #34d399' }} />
-                Ready to deploy
-              </m.div>
-            )}
-
-            {/* Phase 2 Gap 2A — Registry (browse/clone agents) */}
-            <button
-              onClick={() => setShowRegistry(true)}
-              className="px-3 py-1.5 rounded-md text-sm text-white/85 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
-              style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
-              title="Browse the agent registry"
-              aria-label="Browse agent registry"
-            >
-              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
-              </svg>
-              Registry
-            </button>
-            {/* Loom-study 3.2 — admin previews the end-user chat experience */}
-            <button
-              onClick={() => setPreviewAsEndUser(true)}
-              className="px-3 py-1.5 rounded-md text-sm text-white/85 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
-              style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
-              title="Preview the end-user chat experience"
-              aria-label="View as end-user"
-            >
-              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" />
-              </svg>
-              View as user
-            </button>
-            {/* Phase 2 Gap 2D — HITL approvals inbox */}
-            <button
-              onClick={() => setShowHitlInbox(true)}
-              className="px-3 py-1.5 rounded-md text-sm text-white/85 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
-              style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
-              title="Human-in-the-loop approvals"
-              aria-label="Human-in-the-loop approvals inbox"
-            >
-              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" />
-              </svg>
-              Approvals
-            </button>
-
-            {/* Deploy Button - MotionSites off-white CTA with rounded-[2px] */}
-            <m.button
-              onClick={() => setShowDeployPanel(true)}
-              disabled={!canDeploy}
-              whileHover={canDeploy ? { scale: 1.03 } : undefined}
-              whileTap={canDeploy ? { scale: 0.96 } : undefined}
-              transition={spring.snappy}
-              className={`
-                no-darkmap relative overflow-hidden px-4 py-1.5 font-semibold flex items-center gap-2 text-sm
-                ${canDeploy ? 'text-[#06080f]' : 'text-white/30 cursor-not-allowed'}
-                ${canDeploy ? 'u-gradient-anim' : ''}
-              `}
-              style={{
-                background: canDeploy
-                  ? 'linear-gradient(90deg, var(--neon-cyan), var(--neon-violet), var(--neon-magenta))'
-                  : 'rgba(255,255,255,0.06)',
-                borderRadius: '2px',
-                boxShadow: canDeploy ? '0 0 18px -4px var(--neon-cyan)' : 'none',
-              }}
-              title={!canDeploy ? 'Configure a Runtime node first' : 'Deploy to AgentCore'}
-              aria-label={!canDeploy ? 'Configure a Runtime node first' : 'Deploy agent to AgentCore'}
-            >
-              {/* sheen sweep on hover when enabled */}
-              {canDeploy && (
-                <span
-                  className="pointer-events-none absolute inset-y-0 -left-1/3 w-1/3 opacity-0 group-hover:opacity-100"
-                  style={{ background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.7), transparent)' }}
-                />
-              )}
-              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M22 2L11 13" /><path d="M22 2l-7 20-4-9-9-4 20-7z" />
-              </svg>
-              Deploy
-            </m.button>
-            <ThemeToggle />
-            <button
-              onClick={() => signOut()}
-              className="px-3 py-1.5 rounded-md text-sm text-white/80 hover:text-white hover:bg-white/10 transition-colors duration-200"
-              style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
-              title="Sign out"
-              aria-label="Sign out"
-            >
-              Sign out
-            </button>
-          </div>
-        </div>
-
-        {/* Canvas Area */}
-        <div className="flex-1 relative">
-          <WorkflowCanvas
-            onNodeCreate={handleNodeCreate}
-            onNodeDoubleClick={handleOpenConfig}
-          />
-
-          {/* Active Deployment Restore Banner */}
-          <ActiveDeploymentBanner
-            onRestore={handleRestoreDeployment}
-          />
-
-          {/* Auto-save error toast (audit issue #8) — appears bottom-right
-              so it doesn't collide with the selected-node info card on the
-              bottom-left. Dismissable; auto-cleared on next successful save. */}
-          {lastSaveError && (
-            <div
-              data-testid="autosave-error-toast"
-              role="alert"
-              className="absolute bottom-4 right-4 z-40 max-w-sm rounded-md border border-red-300 bg-red-50 shadow-md"
-            >
-              <div className="flex items-start gap-2 px-3 py-2.5">
-                <svg
-                  className="mt-0.5 h-4 w-4 shrink-0 text-red-500"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                  aria-hidden="true"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"
-                  />
-                </svg>
-                <div className="flex-1 min-w-0">
-                  <div className="text-[13px] font-semibold text-red-800">
-                    Auto-save failed
-                  </div>
-                  <div className="text-[12px] text-red-700 mt-0.5 break-words">
-                    Your recent changes have not been saved. Check your connection and try again.
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={clearLastSaveError}
-                  aria-label="Dismiss auto-save error"
-                  className="-mr-1 -mt-1 rounded p-1 text-red-500 hover:bg-red-100 hover:text-red-700"
-                >
-                  <svg
-                    className="h-3.5 w-3.5"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                    strokeWidth={2.5}
-                    aria-hidden="true"
-                  >
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Selected Node Info Card - MotionSites hover:scale */}
-          {selectedNode && (
-            <div
-              className="absolute bottom-4 left-4 z-30 bg-white rounded-xl border border-[#e9ebed] p-4 min-w-[240px] transition-transform duration-200"
-              style={{
-                boxShadow: 'var(--shadow-md)',
-                transitionTimingFunction: 'var(--ease-out-quint)',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.transform = 'scale(1.01)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.transform = 'scale(1)';
-              }}
-            >
-              <div className="flex items-start gap-3">
-                <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-[#232f3e] to-[#16191f] flex items-center justify-center text-white text-base flex-shrink-0 shadow-sm">
-                  {selectedNode.data.componentType === 'runtime' ? '🤖' :
-                   selectedNode.data.componentType === 'gateway' ? '🔌' :
-                   selectedNode.data.componentType === 'memory' ? '🧠' :
-                   selectedNode.data.componentType === 'code_interpreter' ? '💻' :
-                   selectedNode.data.componentType === 'browser' ? '🌐' :
-                   selectedNode.data.componentType === 'observability' ? '📊' :
-                   selectedNode.data.componentType === 'tool' ? '🔧' : '🔑'}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="font-medium text-[#16191f] text-sm truncate tracking-tight">
-                    {selectedNode.data.label || selectedNode.data.componentType}
-                  </div>
-                  <div className="text-xs text-[#5f6b7a] capitalize mt-1 font-light">
-                    {selectedNode.data.componentType.replace(/_/g, ' ')}
-                  </div>
-                </div>
-              </div>
-              <button
-                onClick={() => handleOpenConfig(selectedNode.id)}
-                className="mt-3 w-full py-2 px-3 text-sm text-[#0972d3] hover:bg-[#0972d3]/8 active:bg-[#0972d3]/12 rounded-lg transition-colors duration-200 font-medium flex items-center justify-center gap-2 border border-[#0972d3]/25 hover:border-[#0972d3]/40"
-                style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
-                aria-label={`Configure ${selectedNode.data.label || selectedNode.data.componentType}`}
-              >
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                </svg>
-                Configure
-              </button>
-            </div>
-          )}
-
-          {/* Help hint when no nodes - MotionSites empty state with glass badge */}
-          {nodes.length === 0 && (
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              {/* Twin aurora glows behind the headline for cinematic depth */}
-              <div
-                className="absolute pointer-events-none"
-                style={{
-                  width: 720, height: 440,
-                  backgroundImage:
-                    'radial-gradient(40% 50% at 38% 42%, rgba(34,211,238,0.16), transparent 70%), radial-gradient(40% 50% at 64% 55%, rgba(167,139,250,0.16), transparent 70%)',
-                  filter: 'blur(10px)',
-                }}
-              />
-              <m.div
-                className="relative text-center max-w-xl px-4"
-                variants={staggerContainer(0.09, 0.05)}
-                initial="hidden"
-                animate="visible"
-              >
-                {/* Glass badge (dark neon) */}
-                <m.div variants={fadeRise} className="inline-flex mb-6">
-                  <div
-                    className="no-darkmap flex items-center gap-2 rounded-full px-3 py-1 text-sm font-medium tracking-tight"
-                    style={{
-                      background: 'var(--glass-bg)',
-                      backdropFilter: 'blur(10px)',
-                      border: '1px solid var(--glass-border)',
-                      color: 'var(--color-text-secondary)',
-                      boxShadow: '0 0 20px -8px var(--neon-cyan)',
-                    }}
-                  >
-                    <span className="relative flex h-1.5 w-1.5">
-                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full opacity-75" style={{ background: 'var(--neon-cyan)' }} />
-                      <span className="relative inline-flex h-1.5 w-1.5 rounded-full" style={{ background: 'var(--neon-cyan)' }} />
-                    </span>
-                    Visual Workflow Builder
-                  </div>
-                </m.div>
-
-                {/* Headline - Instrument Serif italic, neon-gradient clipped */}
-                <m.h3
-                  variants={fadeRise}
-                  className="no-darkmap text-4xl sm:text-5xl md:text-6xl mb-3 leading-tight u-neon-text u-gradient-anim"
-                  style={{ fontFamily: 'var(--font-accent)', fontStyle: 'italic', fontWeight: 400 }}
-                >
-                  Build Your First Agent
-                </m.h3>
-                <m.p
-                  variants={fadeRise}
-                  className="no-darkmap text-base sm:text-lg mb-8 font-light tracking-tight leading-relaxed"
-                  style={{ color: 'var(--color-text-secondary)' }}
-                >
-                  Drag components from the sidebar, start with a template, or let AI generate an agent for you.
-                </m.p>
-
-                {/* CTAs — neon gradient primary + glass secondary */}
-                <m.div variants={fadeRise} className="flex gap-3 justify-center">
-                  <m.button
-                    {...pressable}
-                    onClick={() => setShowTemplateGallery(true)}
-                    className="no-darkmap u-gradient-anim pointer-events-auto px-5 py-2.5 text-sm font-semibold"
-                    style={{
-                      background: 'linear-gradient(90deg, var(--neon-cyan), var(--neon-violet), var(--neon-magenta))',
-                      color: '#06080f',
-                      borderRadius: '2px',
-                      boxShadow: '0 0 22px -6px var(--neon-cyan)',
-                    }}
-                  >
-                    Browse Templates
-                  </m.button>
-                  <m.button
-                    {...pressable}
-                    onClick={() => setShowAgentGenerator(true)}
-                    className="no-darkmap pointer-events-auto px-5 py-2.5 text-sm font-medium"
-                    style={{
-                      background: 'var(--glass-bg)',
-                      backdropFilter: 'blur(10px)',
-                      color: 'var(--neon-cyan)',
-                      border: '1px solid color-mix(in srgb, var(--neon-cyan) 40%, transparent)',
-                      borderRadius: '2px',
-                    }}
-                  >
-                    Generate with AI
-                  </m.button>
-                </m.div>
-              </m.div>
-            </div>
-          )}
-        </div>
+        <CanvasArea
+          nodes={nodes}
+          selectedNode={selectedNode || null}
+          lastSaveError={lastSaveError ? lastSaveError.message : null}
+          onNodeCreate={handleNodeCreate}
+          onNodeDoubleClick={handleOpenConfig}
+          onRestoreDeployment={handleRestoreDeployment}
+          onClearSaveError={clearLastSaveError}
+          onOpenTemplateGallery={() => setShowTemplateGallery(true)}
+          onOpenAgentGenerator={() => setShowAgentGenerator(true)}
+          onOpenConfig={handleOpenConfig}
+        />
       </div>
 
       {/* Deploy Panel */}
@@ -955,128 +612,8 @@ function App() {
         restoredDeployment={restoredDeployment}
       />
 
-      {/* Configuration Modals */}
-      {configModal.componentType === 'runtime' && (
-        <RuntimeConfigurationModal
-          isOpen={configModal.isOpen}
-          onClose={handleCloseConfig}
-          onSave={(config) => handleSaveConfig(config)}
-          initialConfig={configModal.initialConfig as RuntimeConfiguration}
-        />
-      )}
-
-      {configModal.componentType === 'gateway' && (
-        <GatewayConfigurationModal
-          isOpen={configModal.isOpen}
-          onClose={handleCloseConfig}
-          onSave={(config) => handleSaveConfig(config)}
-          initialConfig={configModal.initialConfig as GatewayConfiguration}
-        />
-      )}
-
-      {configModal.componentType === 'identity' && (
-        <IdentityConfigurationModal
-          isOpen={configModal.isOpen}
-          onClose={handleCloseConfig}
-          onSave={(config) => handleSaveConfig(config)}
-          initialConfig={configModal.initialConfig as IdentityConfiguration}
-        />
-      )}
-
-      {configModal.componentType === 'memory' && (
-        <MemoryConfigurationModal
-          isOpen={configModal.isOpen}
-          onClose={handleCloseConfig}
-          onSave={(config) => handleSaveConfig(config)}
-          initialConfig={configModal.initialConfig as MemoryConfiguration}
-        />
-      )}
-
-      {configModal.componentType === 'policy' && (
-        <PolicyConfigurationModal
-          isOpen={configModal.isOpen}
-          onClose={handleCloseConfig}
-          onSave={(config) => handleSaveConfig(config)}
-          initialConfig={configModal.initialConfig as PolicyConfiguration}
-        />
-      )}
-
-      {configModal.componentType === 'guardrails' && (
-        <GuardrailsConfigurationModal
-          isOpen={configModal.isOpen}
-          onClose={handleCloseConfig}
-          onSave={(config) => handleSaveConfig(config)}
-          initialConfig={configModal.initialConfig as Partial<GuardrailsConfiguration>}
-        />
-      )}
-
-      {configModal.componentType === 'observability' && (
-        <ObservabilityConfigurationModal
-          isOpen={configModal.isOpen}
-          onClose={handleCloseConfig}
-          onSave={(config) => handleSaveConfig(config)}
-          initialConfig={configModal.initialConfig as Partial<ObservabilityConfiguration>}
-          apiBaseUrl={import.meta.env.VITE_API_BASE_URL ?? ''}
-        />
-      )}
-
-      {configModal.componentType === 'evaluation' && (
-        <EvaluationConfigurationModal
-          isOpen={configModal.isOpen}
-          onClose={handleCloseConfig}
-          onSave={(config) => handleSaveConfig(config)}
-          initialConfig={configModal.initialConfig as Partial<EvaluationNodeConfig>}
-        />
-      )}
-
-      {(() => {
-        // Tool-typed nodes fan out to three modals by config shape:
-        //   connector (toolId "connector:*" / isConnector) -> ConnectorConfigModal
-        //   knowledge base (isKnowledgeBase)               -> KnowledgeBaseConfigModal
-        //   everything else (built-in / custom tools)      -> ToolConfigModal
-        if (configModal.componentType !== 'tool') return null;
-        const cfg = configModal.initialConfig as unknown as Record<string, unknown> | undefined;
-        const isConnector =
-          !!cfg?.isConnector ||
-          (typeof cfg?.toolId === 'string' && (cfg.toolId as string).startsWith(CONNECTOR_TOOL_PREFIX));
-        if (isConnector) {
-          return (
-            <ConnectorConfigModal
-              isOpen={configModal.isOpen}
-              onClose={handleCloseConfig}
-              onSave={(config) => handleSaveConfig(config)}
-              initialConfig={configModal.initialConfig as Partial<ConnectorConfiguration>}
-            />
-          );
-        }
-        if (cfg?.isKnowledgeBase) {
-          return (
-            <KnowledgeBaseConfigModal
-              isOpen={configModal.isOpen}
-              onClose={handleCloseConfig}
-              onSave={(config) => handleSaveConfig(config)}
-              initialConfig={configModal.initialConfig as Partial<KnowledgeBaseToolConfig>}
-            />
-          );
-        }
-        return (
-          <ToolConfigModal
-            isOpen={configModal.isOpen}
-            onClose={handleCloseConfig}
-            onSave={(config) => handleSaveConfig(config)}
-            initialConfig={configModal.initialConfig as Partial<ToolConfiguration>}
-          />
-        );
-      })()}
-
-      {configModal.componentType === 'a2a' && (
-        <A2AConfigurationModal
-          isOpen={configModal.isOpen}
-          onClose={handleCloseConfig}
-          onSave={(config) => handleSaveConfig(config)}
-          initialConfig={configModal.initialConfig as Partial<A2AConfiguration>}
-        />
-      )}
+      {/* Configuration Modals - registry-driven */}
+      <ModalHost modalKey={activeModal.key} modalProps={activeModal.props} />
 
       {/* Template Gallery Modal */}
       <TemplateGallery

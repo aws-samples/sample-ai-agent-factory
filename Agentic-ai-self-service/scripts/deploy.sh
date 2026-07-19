@@ -151,8 +151,8 @@ install_cdk_dependencies() {
     python3 -m pip install -r requirements.txt --quiet
   fi
 
-  # Install Node.js CDK dependencies (for npx cdk)
-  npm install --silent 2>/dev/null || true
+  # CDK is invoked via npx (no local npm project in infra/), so nothing to
+  # install here — npx resolves aws-cdk on demand.
 
   cd "${PROJECT_ROOT}"
   log_success "CDK dependencies installed."
@@ -286,13 +286,7 @@ build_frontend() {
   # Use CloudFront URL as the API base — CloudFront routes /api/* to API Gateway
   log_info "Building frontend with VITE_API_BASE_URL=${CLOUDFRONT_URL} ..."
   cd "${PROJECT_ROOT}/frontend"
-  # npm ci requires package-lock.json, which is gitignored in this repo —
-  # fall back to npm install on a fresh clone.
-  if [[ -f package-lock.json ]]; then
-    npm ci --silent
-  else
-    npm install --silent --no-audit --no-fund
-  fi
+  npm ci --silent
   VITE_API_BASE_URL="${CLOUDFRONT_URL}" VITE_AWS_REGION="${AWS_REGION}" VITE_COGNITO_USER_POOL_ID="${USER_POOL_ID}" VITE_COGNITO_CLIENT_ID="${USER_POOL_CLIENT_ID}" npm run build
   cd "${PROJECT_ROOT}"
   log_success "Frontend build complete."

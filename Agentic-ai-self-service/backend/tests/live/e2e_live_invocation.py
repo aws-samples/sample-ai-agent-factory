@@ -11,7 +11,7 @@ This script:
 
 Run:
     cd backend
-    PYTHONPATH=src python tests/test_e2e_live_invocation.py
+    PYTHONPATH=src python tests/live/e2e_live_invocation.py
 """
 
 import json
@@ -24,18 +24,17 @@ import uuid
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import boto3
-
-from app.services.deployment import generate_unified_agent_code
+from app.models import ModelConfiguration, ModelProvider, RuntimeConfiguration
 from app.services.code_generator import generate_agent_code as sfn_generate_agent_code
+from app.services.deployment import generate_unified_agent_code
 from app.services.runtime_deployer import (
-    upload_code_to_s3,
     create_agent_runtime,
     create_runtime_iam_role,
-    wait_for_runtime_ready,
     destroy_runtime,
     sanitize_runtime_name,
+    upload_code_to_s3,
+    wait_for_runtime_ready,
 )
-from app.models import RuntimeConfiguration, ModelConfiguration, ModelProvider
 
 # ---------------------------------------------------------------------------
 # Config

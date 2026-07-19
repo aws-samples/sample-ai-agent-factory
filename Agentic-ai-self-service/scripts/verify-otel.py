@@ -33,26 +33,34 @@ import urllib.parse
 import urllib.request
 import uuid
 
-
 # ---------------------------------------------------------------------------
 # Agent invocation
 # ---------------------------------------------------------------------------
 
 
+def _https_open(req, timeout):
+    """urlopen with an https-only scheme guard (Bandit B310)."""
+    if not req.full_url.startswith("https://"):
+        raise ValueError("only https URLs are allowed")
+    return urllib.request.urlopen(req, timeout=timeout)  # noqa: S310
+
+
 def invoke_agent(api_base: str, runtime_id: str, prompt: str, session_id: str) -> dict:
     """Hit the platform's /api/test-runtime endpoint."""
-    body = json.dumps({
-        "endpoint": "",
-        "input": prompt,
-        "runtimeId": runtime_id,
-        "sessionId": session_id,
-    }).encode()
+    body = json.dumps(
+        {
+            "endpoint": "",
+            "input": prompt,
+            "runtimeId": runtime_id,
+            "sessionId": session_id,
+        }
+    ).encode()
     req = urllib.request.Request(
         f"{api_base}/api/test-runtime",
         data=body,
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    with _https_open(req, timeout=120) as resp:
         return json.loads(resp.read().decode())
 
 
@@ -67,7 +75,7 @@ def fetch_langfuse_traces(host: str, pk: str, sk: str) -> list[dict]:
     Langfuse's `?name=` query filters on the OTEL span operation name (e.g.
     `invoke_agent Strands Agents`), NOT on the resource service.name. We
     fetch a broad slice and filter client-side on resourceAttributes.
-    Verified 2026-05-15 — see tasks/lessons.md Bug 19.
+    (Verified against Langfuse API behavior, 2026-05-15.)
     """
     auth = base64.b64encode(f"{pk}:{sk}".encode()).decode()
     qs = urllib.parse.urlencode({"limit": 50, "orderBy": "timestamp.desc"})
@@ -75,7 +83,7 @@ def fetch_langfuse_traces(host: str, pk: str, sk: str) -> list[dict]:
         f"{host.rstrip('/')}/api/public/traces?{qs}",
         headers={"Authorization": f"Basic {auth}"},
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with _https_open(req, timeout=30) as resp:
         body = json.loads(resp.read().decode())
         return body.get("data", body if isinstance(body, list) else [])
 
@@ -157,7 +165,7 @@ def assert_phoenix(host: str, service_name: str, expected_session: str) -> None:
     while time.time() < deadline:
         req = urllib.request.Request(f"{host.rstrip('/')}/v1/spans?{qs}")
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with _https_open(req, timeout=15) as resp:
                 spans = json.loads(resp.read().decode()).get("data", [])
         except Exception as e:
             print(f"[verify] poll error: {e}", file=sys.stderr)
@@ -207,7 +215,7 @@ def main() -> None:
     for i in range(args.invocations):
         prompt = prompts[i % len(prompts)]
         try:
-            resp = invoke_agent(args.api_base, args.runtime_id, prompt, session_id)
+            invoke_agent(args.api_base, args.runtime_id, prompt, session_id)
             print(f"[verify]  invocation {i + 1}/{args.invocations} ok")
         except Exception as e:
             print(f"[verify] invocation failed: {e}", file=sys.stderr)
@@ -217,8 +225,7 @@ def main() -> None:
     time.sleep(10)
 
     if args.provider == "langfuse":
-        assert_langfuse(args.langfuse_host, args.langfuse_pk, args.langfuse_sk,
-                        args.service_name, session_id)
+        assert_langfuse(args.langfuse_host, args.langfuse_pk, args.langfuse_sk, args.service_name, session_id)
     else:
         assert_phoenix(args.phoenix_host, args.service_name, session_id)
 

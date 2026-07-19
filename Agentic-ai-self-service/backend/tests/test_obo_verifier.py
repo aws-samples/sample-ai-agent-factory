@@ -18,7 +18,8 @@ from app.services.obo_verifier import (  # noqa: E402
 def _make_jwt(claims: dict) -> str:
     def b64(d):
         return base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")
-    return f"{b64({'alg':'RS256'})}.{b64(claims)}.signature"
+
+    return f"{b64({'alg': 'RS256'})}.{b64(claims)}.signature"
 
 
 def test_decode_jwt_claims_valid():
@@ -63,8 +64,12 @@ def test_dry_run_success_returns_before_after_claims():
     user_tok = _make_jwt({"sub": "alice", "iss": "https://corp-idp"})
     idc = _FakeIdentity(exchanged_claims={"sub": "alice", "aud": "downstream-api", "scp": "orders:read"})
     out = dry_run_obo_exchange(
-        idc, workload_name="wl", user_token=user_tok,
-        resource_provider_name="prov", scopes=["orders:read"], audience="downstream-api",
+        idc,
+        workload_name="wl",
+        user_token=user_tok,
+        resource_provider_name="prov",
+        scopes=["orders:read"],
+        audience="downstream-api",
     )
     assert out["ok"] is True
     assert any(c["claim"] == "sub" for c in out["user_claims"])
@@ -78,7 +83,10 @@ def test_dry_run_failure_is_captured_not_raised():
     user_tok = _make_jwt({"sub": "bob"})
     idc = _FakeIdentity(fail=True)
     out = dry_run_obo_exchange(
-        idc, workload_name="wl", user_token=user_tok, resource_provider_name="prov",
+        idc,
+        workload_name="wl",
+        user_token=user_tok,
+        resource_provider_name="prov",
     )
     assert out["ok"] is False
     # Sanitized error contract (CodeQL py/stack-trace-exposure): the exception
@@ -92,6 +100,7 @@ def test_dry_run_failure_is_captured_not_raised():
 
 def test_dry_run_botocore_error_surfaces_safe_code_only():
     """A botocore ClientError surfaces the AWS error CODE (safe), not str(e)."""
+
     class _ClientErr(Exception):
         def __init__(self):
             super().__init__("An error occurred (ValidationException): secret internal detail 12345")
@@ -102,8 +111,10 @@ def test_dry_run_botocore_error_surfaces_safe_code_only():
             raise _ClientErr()
 
     out = dry_run_obo_exchange(
-        _BotoIdc(fail=True), workload_name="wl",
-        user_token=_make_jwt({"sub": "bob"}), resource_provider_name="prov",
+        _BotoIdc(fail=True),
+        workload_name="wl",
+        user_token=_make_jwt({"sub": "bob"}),
+        resource_provider_name="prov",
     )
     assert out["ok"] is False
     assert out["error"] == "_ClientErr: ValidationException"

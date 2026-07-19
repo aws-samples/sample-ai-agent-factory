@@ -22,13 +22,12 @@ import pytest
 sys.path.insert(0, "src")
 
 cryptography = pytest.importorskip("cryptography")
-from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
+from app import stream_handler as sh  # noqa: E402
+from cryptography.hazmat.primitives import hashes  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import padding, rsa  # noqa: E402
 
-from app import stream_handler as sh  # noqa: E402
-
-
 # --- helpers ---------------------------------------------------------------
+
 
 def _b64url(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
@@ -52,8 +51,7 @@ def wired(monkeypatch, keypair):
     monkeypatch.setattr(sh, "COGNITO_USER_POOL_ID", "us-east-1_TESTPOOL", raising=False)
     monkeypatch.setattr(sh, "COGNITO_CLIENT_ID", "test-client-id", raising=False)
     monkeypatch.setattr(sh, "_issuer", lambda: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_TESTPOOL")
-    jwk = {"kid": "test-kid", "kty": "RSA", "alg": "RS256",
-           "n": _int_to_b64url(pub.n), "e": _int_to_b64url(pub.e)}
+    jwk = {"kid": "test-kid", "kty": "RSA", "alg": "RS256", "n": _int_to_b64url(pub.n), "e": _int_to_b64url(pub.e)}
     monkeypatch.setattr(sh, "_fetch_jwks", lambda: [jwk])
     return jwk
 
@@ -87,12 +85,14 @@ def _make_token(priv, *, kid="test-kid", alg="RS256", claims=None, tamper=False,
 
 # --- positive --------------------------------------------------------------
 
+
 def test_valid_token_accepted(wired, keypair):
     priv, _ = keypair
     assert sh._verify_cognito_token(_make_token(priv)) == "user-sub-123"
 
 
 # --- adversarial: signature / algorithm ------------------------------------
+
 
 def test_tampered_payload_rejected(wired, keypair):
     priv, _ = keypair
@@ -127,13 +127,17 @@ def test_unknown_kid_rejected(wired, keypair):
 
 # --- adversarial: claims ---------------------------------------------------
 
-@pytest.mark.parametrize("claims,_why", [
-    ({"iss": "https://evil.example.com/pool"}, "wrong issuer"),
-    ({"client_id": "someone-elses-client"}, "wrong client_id"),
-    ({"token_use": "id"}, "id token, not access"),
-    ({"exp": int(time.time()) - 10}, "expired"),
-    ({"sub": ""}, "missing sub"),
-])
+
+@pytest.mark.parametrize(
+    "claims,_why",
+    [
+        ({"iss": "https://evil.example.com/pool"}, "wrong issuer"),
+        ({"client_id": "someone-elses-client"}, "wrong client_id"),
+        ({"token_use": "id"}, "id token, not access"),
+        ({"exp": int(time.time()) - 10}, "expired"),
+        ({"sub": ""}, "missing sub"),
+    ],
+)
 def test_bad_claims_rejected(wired, keypair, claims, _why):
     priv, _ = keypair
     with pytest.raises(sh._AuthError):
@@ -141,6 +145,7 @@ def test_bad_claims_rejected(wired, keypair, claims, _why):
 
 
 # --- adversarial: structural ----------------------------------------------
+
 
 def test_missing_token_rejected(wired):
     with pytest.raises(sh._AuthError):
@@ -163,6 +168,7 @@ def test_fails_closed_when_pool_unconfigured(monkeypatch, keypair):
 
 # --- low-level primitive ---------------------------------------------------
 
+
 def test_rsa_primitive_rejects_oversized_signature(keypair):
     """sig_int >= n must be rejected (prevents a class of forgery)."""
     priv, pub = keypair
@@ -179,6 +185,7 @@ def test_rsa_primitive_accepts_valid(keypair):
 
 
 # --- Bug 147: AWS_IAM SigV4 caller resolution ------------------------------
+
 
 def _iam_event(user_id="AROAEXAMPLE:session", arn="arn:aws:sts::1:assumed-role/r/s"):
     return {"requestContext": {"authorizer": {"iam": {"userId": user_id, "userArn": arn, "accountId": "1"}}}}
@@ -221,8 +228,10 @@ def test_resolve_caller_rejects_when_neither_present(wired):
 
 # --- lambda_handler arg detection (caught live: 2nd arg was the context) -----
 
+
 class _FakeContext:
     """Mimics a LambdaContext: NO .write attribute."""
+
     function_name = "stream"
 
 
@@ -252,16 +261,27 @@ def test_iam_caller_bypasses_cognito_sub_ownership(wired, monkeypatch):
     assert it proceeds PAST the ownership gate (i.e. does NOT emit the tenant
     'Runtime not found')."""
     import app.stream_handler as shm
+
     # Deployment owned by some Cognito sub, runtime mode.
-    monkeypatch.setattr(shm, "_scan_for_runtime",
-                        lambda *a, **k: {"user_id": "someone-else-sub", "deployment_mode": "runtime",
-                                          "runtime_arn": "arn:aws:bedrock-agentcore:us-east-1:1:runtime/r-1"})
+    monkeypatch.setattr(
+        shm,
+        "_scan_for_runtime",
+        lambda *a, **k: {
+            "user_id": "someone-else-sub",
+            "deployment_mode": "runtime",
+            "runtime_arn": "arn:aws:bedrock-agentcore:us-east-1:1:runtime/r-1",
+        },
+    )
     # Make the data-plane invoke a no-op success so we get past the gate cleanly.
-    monkeypatch.setattr(shm, "_resolve_runtime_arn", lambda *a, **k: "arn:aws:bedrock-agentcore:us-east-1:1:runtime/r-1")
+    monkeypatch.setattr(
+        shm, "_resolve_runtime_arn", lambda *a, **k: "arn:aws:bedrock-agentcore:us-east-1:1:runtime/r-1"
+    )
     monkeypatch.setattr(shm, "_stream_invoke", lambda write, body, caller: write(_sse_ok()))
     out = []
-    ev = {"requestContext": {"authorizer": {"iam": {"userId": "AROAX:sess"}}},
-          "body": json.dumps({"runtimeId": "r-1", "input": "hi"})}
+    ev = {
+        "requestContext": {"authorizer": {"iam": {"userId": "AROAX:sess"}}},
+        "body": json.dumps({"runtimeId": "r-1", "input": "hi"}),
+    }
     shm._handle(ev, lambda b: out.append(b))
     joined = b"".join(out).decode()
     assert "Runtime not found" not in joined  # IAM caller passed the ownership gate
@@ -275,12 +295,16 @@ def test_cognito_caller_still_owner_scoped(wired, monkeypatch, keypair):
     """A Cognito-bearer caller is STILL rejected for a deployment owned by a
     different sub (isolation preserved for non-IAM callers)."""
     import app.stream_handler as shm
+
     priv, _ = keypair
-    monkeypatch.setattr(shm, "_scan_for_runtime",
-                        lambda *a, **k: {"user_id": "someone-else-sub", "deployment_mode": "runtime"})
+    monkeypatch.setattr(
+        shm, "_scan_for_runtime", lambda *a, **k: {"user_id": "someone-else-sub", "deployment_mode": "runtime"}
+    )
     out = []
-    ev = {"headers": {"authorization": f"Bearer {_make_token(priv)}"},  # sub=user-sub-123
-          "body": json.dumps({"runtimeId": "r-1", "input": "hi"})}
+    ev = {
+        "headers": {"authorization": f"Bearer {_make_token(priv)}"},  # sub=user-sub-123
+        "body": json.dumps({"runtimeId": "r-1", "input": "hi"}),
+    }
     shm._handle(ev, lambda b: out.append(b))
     assert "Runtime not found" in b"".join(out).decode()
 
@@ -292,6 +316,7 @@ def test_lambda_handler_uses_stream_when_writable(wired):
     class _Stream:
         def write(self, b):
             written.append(b)
+
         def end(self):
             pass
 

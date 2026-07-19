@@ -121,9 +121,7 @@ def test_rejects_orphan_support_node():
 def test_rejects_edge_referencing_unknown_suffix():
     spec = {
         "nodes": [_runtime_node("rt")],
-        "edges": [
-            {"sourceIdSuffix": "ghost", "targetIdSuffix": "rt", "connectionType": "data"}
-        ],
+        "edges": [{"sourceIdSuffix": "ghost", "targetIdSuffix": "rt", "connectionType": "data"}],
     }
     err = _validate_spec(spec)
     assert err is not None
@@ -264,3 +262,60 @@ def test_full_spec_with_memory_and_guardrails_passes():
         ],
     }
     assert _validate_spec(spec) is None
+
+
+# ---------------------------------------------------------------------------
+# _normalize_spec — gateway targetType/targetConfig defaulting
+# ---------------------------------------------------------------------------
+
+from app.services.agent_generator import _normalize_spec  # noqa: E402
+
+
+def _gateway_node(cfg):
+    return {
+        "idSuffix": "gw",
+        "type": "gateway",
+        "label": "Gateway",
+        "position": {"x": 600, "y": 150},
+        "configuration": cfg,
+    }
+
+
+def test_normalize_fills_missing_gateway_target_fields():
+    """The canvas hard-requires targetType/targetConfig on gateway nodes; a
+    model-emitted gateway with only {name, tools} must be repaired (seen live:
+    'Target Type is required / Target Config is required' after Apply)."""
+    spec = {"nodes": [_runtime_node(), _gateway_node({"name": "Tools Gateway", "tools": []})], "edges": []}
+    _normalize_spec(spec)
+    cfg = spec["nodes"][1]["configuration"]
+    assert cfg["targetType"] == "lambda"
+    assert cfg["targetConfig"] == {"type": "lambda"}
+    assert cfg["enableSemanticSearch"] is True
+
+
+def test_normalize_preserves_existing_gateway_target_fields():
+    cfg_in = {
+        "name": "gw",
+        "targetType": "openapi",
+        "targetConfig": {"type": "openapi", "specUrl": "https://x/spec.json"},
+        "enableSemanticSearch": False,
+    }
+    spec = {"nodes": [_runtime_node(), _gateway_node(dict(cfg_in))], "edges": []}
+    _normalize_spec(spec)
+    assert spec["nodes"][1]["configuration"] == cfg_in
+
+
+def test_normalize_repairs_gateway_with_no_configuration():
+    node = _gateway_node(None)
+    del node["configuration"]
+    spec = {"nodes": [_runtime_node(), node], "edges": []}
+    _normalize_spec(spec)
+    cfg = spec["nodes"][1]["configuration"]
+    assert cfg["targetType"] == "lambda"
+    assert cfg["targetConfig"]["type"] == "lambda"
+
+
+def test_normalize_ignores_non_gateway_nodes():
+    spec = {"nodes": [_runtime_node()], "edges": []}
+    _normalize_spec(spec)
+    assert "targetType" not in spec["nodes"][0]["configuration"]

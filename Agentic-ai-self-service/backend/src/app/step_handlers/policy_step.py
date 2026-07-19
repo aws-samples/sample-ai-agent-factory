@@ -9,17 +9,15 @@ References:
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import logging
 import os
 import re
 import time
 
-import boto3
-
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services import step_clients
+from app.services.aws_errors import is_error
 from app.services.deployment_state_store import DeploymentStateStore
 
 logger = logging.getLogger(__name__)
@@ -57,13 +55,10 @@ def _wait_for_policy_engine(client, engine_id: str, timeout: int = 180) -> dict:
         if "FAILED" in status:
             raise RuntimeError(f"Policy engine entered {status}")
         time.sleep(5)
-    raise RuntimeError(
-        f"Policy engine {engine_id} did not become ACTIVE in {timeout}s (last: {last})"
-    )
+    raise RuntimeError(f"Policy engine {engine_id} did not become ACTIVE in {timeout}s (last: {last})")
 
 
-def _create_policy_when_engine_ready(client, engine_id, name, description, statement,
-                                     attempts=6, backoff=10):
+def _create_policy_when_engine_ready(client, engine_id, name, description, statement, attempts=6, backoff=10):
     """create_policy with retry on the engine-still-CREATING window (Bug 177).
 
     Even after get_policy_engine reports ACTIVE, the FIRST create_policy can 409
@@ -85,17 +80,22 @@ def _create_policy_when_engine_ready(client, engine_id, name, description, state
             # warnings), NOT enforcement: AgentCore is default-deny, so a permit
             # over the allowed tools still denies everything else by omission.
             return client.create_policy(
-                policyEngineId=engine_id, name=name, description=description,
+                policyEngineId=engine_id,
+                name=name,
+                description=description,
                 definition={"cedar": {"statement": statement}},
                 validationMode="IGNORE_ALL_FINDINGS",
             )
         except Exception as e:  # noqa: BLE001
             msg = str(e)
-            if ("ConflictException" in msg and "CREATING" in msg) or "is CREATING" in msg:
+            # "is CREATING" message check kept: the engine-not-ready signal is only
+            # carried in the message text, whatever the outer exception code is.
+            if (is_error(e, "ConflictException") and "CREATING" in msg) or "is CREATING" in msg:
                 last = e
                 logger.warning(
                     "policy engine still CREATING on create (attempt %d/%d) — waiting",
-                    i + 1, attempts,
+                    i + 1,
+                    attempts,
                 )
                 time.sleep(backoff * (i + 1))
                 continue
@@ -111,9 +111,7 @@ def _read_gateway_tool_actions(agentcore_ctrl, gateway_id: str) -> list:
     """
     out = []
     try:
-        targets = agentcore_ctrl.list_gateway_targets(
-            gatewayIdentifier=gateway_id, maxResults=50
-        )
+        targets = agentcore_ctrl.list_gateway_targets(gatewayIdentifier=gateway_id, maxResults=50)
         items = targets.get("items", targets.get("gatewayTargetSummaries", []))
         for t in items:
             tname = t.get("name", "")
@@ -121,9 +119,7 @@ def _read_gateway_tool_actions(agentcore_ctrl, gateway_id: str) -> list:
             if not tname or not tid:
                 continue
             try:
-                detail = agentcore_ctrl.get_gateway_target(
-                    gatewayIdentifier=gateway_id, targetId=tid
-                )
+                detail = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway_id, targetId=tid)
             except Exception:  # noqa: BLE001
                 continue
             tc = detail.get("targetConfiguration", {}) or {}
@@ -166,9 +162,7 @@ def _cedar_action_ref(action: str, target_names: list) -> str:
     return f'action in [AgentCore::Action::"{action}"]'
 
 
-def _rules_to_cedar_policies(
-    rules: list, gateway_arn: str, principal_type: str, target_names: list
-) -> list:
+def _rules_to_cedar_policies(rules: list, gateway_arn: str, principal_type: str, target_names: list) -> list:
     """Translate the typed PolicyRule shape ({rule_id, effect, principal, action,
     resource}) into schema-correct Cedar {name, statement} policy dicts (Bug 134).
 
@@ -181,18 +175,15 @@ def _rules_to_cedar_policies(
     example policies); a body-condition rule keeps its `when { ... }`.
     """
     p_is = f"principal is {principal_type}"
-    res = (
-        f'resource == AgentCore::Gateway::"{gateway_arn}"'
-        if gateway_arn
-        else f"resource is AgentCore::Gateway"
-    )
+    res = f'resource == AgentCore::Gateway::"{gateway_arn}"' if gateway_arn else "resource is AgentCore::Gateway"
     out = []
     for r in rules:
         if not isinstance(r, dict):
             continue
         effect = "forbid" if (r.get("effect") or "permit").lower() == "forbid" else "permit"
         rule_id = re.sub(
-            r"[^A-Za-z0-9_]", "_",
+            r"[^A-Za-z0-9_]",
+            "_",
             str(r.get("rule_id") or r.get("ruleId") or f"rule_{len(out)}"),
         )
         # principal: explicit entity ref overrides the gateway-derived type
@@ -200,11 +191,13 @@ def _rules_to_cedar_policies(
         p_head = f"principal == {principal}" if principal and principal != "*" and "::" in str(principal) else p_is
         a_head = _cedar_action_ref(r.get("action"), target_names)
         stmt = f"{effect}({p_head}, {a_head}, {res});"
-        out.append({
-            "name": rule_id,
-            "description": r.get("description", f"{effect} rule {rule_id}"),
-            "statement": stmt,
-        })
+        out.append(
+            {
+                "name": rule_id,
+                "description": r.get("description", f"{effect} rule {rule_id}"),
+                "statement": stmt,
+            }
+        )
     return out
 
 
@@ -255,10 +248,11 @@ def handler(event: dict, context) -> dict:
         # Cognito/OAuth customJWTAuthorizer -> AgentCore::OAuthUser; AWS_IAM ->
         # AgentCore::IamEntity (AWS docs: policy-core-concepts "Principal types").
         # Our gateways use Cognito customJWTAuthorizer, so OAuthUser is the default.
-        auth_type = (policy_config.get("principal_type")
-                     or gateway_result.get("principal_type")
-                     or ("AgentCore::IamEntity" if gateway_result.get("auth") == "IAM"
-                         else "AgentCore::OAuthUser"))
+        auth_type = (
+            policy_config.get("principal_type")
+            or gateway_result.get("principal_type")
+            or ("AgentCore::IamEntity" if gateway_result.get("auth") == "IAM" else "AgentCore::OAuthUser")
+        )
         principal_type = auth_type if "::" in str(auth_type) else "AgentCore::OAuthUser"
 
         # Bug 134: Cedar policies validate against the gateway's auto-generated
@@ -282,7 +276,9 @@ def handler(event: dict, context) -> dict:
             qualified_tools = _read_gateway_tool_actions(agentcore_ctrl, gateway_id)
         logger.info(
             "Gateway %s exposes %d/%d tools for policy scope",
-            gateway_id, len(qualified_tools), expected_tool_count,
+            gateway_id,
+            len(qualified_tools),
+            expected_tool_count,
         )
 
         # ENFORCE with an empty OR partial manifest would deny part/all of the
@@ -354,10 +350,7 @@ def handler(event: dict, context) -> dict:
         # So we emit ONE permit over the real allowed tools (this makes discovery
         # work AND validates), then translate user forbid rules (each carved out
         # of that permit). forbid-wins gives real enforcement.
-        res = (
-            f'resource == AgentCore::Gateway::"{gateway_arn}"'
-            if gateway_arn else "resource is AgentCore::Gateway"
-        )
+        res = f'resource == AgentCore::Gateway::"{gateway_arn}"' if gateway_arn else "resource is AgentCore::Gateway"
         rules = policy_config.get("rules", []) or []
         explicit = list(policy_config.get("policies", []) or [])
 
@@ -400,11 +393,14 @@ def handler(event: dict, context) -> dict:
                 desc = "Bug 134: permit the principal to discover + call the allowed tools"
                 if forbidden:
                     desc += f" (denied by omission, default-deny: {sorted(forbidden)})"
-                policies.insert(0, {
-                    "name": "allow_permitted_tools",
-                    "description": desc + ".",
-                    "statement": f"permit(principal is {principal_type}, {action_head}, {res});",
-                })
+                policies.insert(
+                    0,
+                    {
+                        "name": "allow_permitted_tools",
+                        "description": desc + ".",
+                        "statement": f"permit(principal is {principal_type}, {action_head}, {res});",
+                    },
+                )
             elif forbidden:
                 # Everything is forbidden -> there is nothing to permit. In
                 # ENFORCE that means an empty tool plane; fail loudly rather than
@@ -436,7 +432,7 @@ def handler(event: dict, context) -> dict:
             # semantic part, e.g. allow_permitted_tools) and prefix with a bounded
             # slice of the engine name for cross-gateway uniqueness, capping the
             # whole thing at 48 chars to stay within the service limit.
-            _eng_prefix = engine_name[:max(0, 48 - len(base_name) - 1)]
+            _eng_prefix = engine_name[: max(0, 48 - len(base_name) - 1)]
             pol_name = (f"{_eng_prefix}_{base_name}" if _eng_prefix else base_name)[:48]
             # A statement-less explicit policy entry (e.g. {"effect":"permit"} with
             # no Cedar text) must NOT fall back to `permit(principal, action,
@@ -458,7 +454,9 @@ def handler(event: dict, context) -> dict:
                 continue
             try:
                 cp = _create_policy_when_engine_ready(
-                    agentcore_ctrl, engine_id, pol_name,
+                    agentcore_ctrl,
+                    engine_id,
+                    pol_name,
                     pol.get("description", ""),
                     _stmt,
                 )
@@ -471,7 +469,9 @@ def handler(event: dict, context) -> dict:
                 if pid:
                     created_policy_ids.append((pol_name, pid))
             except Exception as e:
-                if "ConflictException" in str(e) or "already exists" in str(e):
+                # "already exists" fallback kept: conflicts can surface as a
+                # ValidationException whose message says "already exists".
+                if is_error(e, "ConflictException") or "already exists" in str(e):
                     # With the engine-name prefix, a conflict means an idempotent
                     # retry reusing the SAME engine. Recover the existing policy's id
                     # FROM THIS ENGINE and validate it like a fresh one. If it is NOT
@@ -499,9 +499,7 @@ def handler(event: dict, context) -> dict:
                         ) from e
                 else:
                     logger.error("Failed to create policy '%s': %s", pol_name, e)
-                    raise RuntimeError(
-                        f"Policy creation failed for '{pol_name}': {e}. Aborting."
-                    ) from e
+                    raise RuntimeError(f"Policy creation failed for '{pol_name}': {e}. Aborting.") from e
 
         # Bug 134: create_policy is ASYNC — it returns CREATING then validates
         # against the gateway schema. A policy that references a non-existent tool,
@@ -523,10 +521,7 @@ def handler(event: dict, context) -> dict:
         # which un-bricks the tool plane under real enforcement.
         # Users who prefer availability over enforcement can opt out explicitly
         # with policyConfig.on_enforce_failure = "log_only".
-        fail_open_requested = (
-            str(policy_config.get("on_enforce_failure", "fail_closed")).lower()
-            == "log_only"
-        )
+        fail_open_requested = str(policy_config.get("on_enforce_failure", "fail_closed")).lower() == "log_only"
         enforce_validation_pending = False
         downgrade_to_log_only = False
         downgrade_reason = ""
@@ -541,8 +536,8 @@ def handler(event: dict, context) -> dict:
                         s = d.get("status", "")
                         if s in ("ACTIVE", "CREATE_FAILED", "FAILED"):
                             return s, str(d.get("statusReasons") or d.get("statusReason") or "")[:200]
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception:  # noqa: BLE001 — transient get_policy error; keep polling to timeout
+                        logger.debug("get_policy %s poll failed", pid, exc_info=True)
                     _t.sleep(3)
                 return "CREATING", "timeout"
 
@@ -561,7 +556,7 @@ def handler(event: dict, context) -> dict:
             name_to_stmt = {}
             for pol in policies:
                 _bn = re.sub(r"[^A-Za-z0-9_]", "_", pol.get("name", "default_policy"))
-                _ep = engine_name[:max(0, 48 - len(_bn) - 1)]
+                _ep = engine_name[: max(0, 48 - len(_bn) - 1)]
                 name_to_stmt[(f"{_ep}_{_bn}" if _ep else _bn)[:48]] = pol
             failed = []
             for pol_name, pid in list(created_policy_ids):
@@ -578,24 +573,27 @@ def handler(event: dict, context) -> dict:
                 # policy on later status/invoke touchpoints, once the gateway has
                 # aged into convergence — that is the real hands-off converger.
                 attempt = 0
-                while (status != "ACTIVE"
-                       and any(t in reason.lower() for t in _TRANSIENT)
-                       and attempt < 6):
+                while status != "ACTIVE" and any(t in reason.lower() for t in _TRANSIENT) and attempt < 6:
                     attempt += 1
                     logger.warning(
                         "Policy %s CREATE_FAILED (transient, attempt %d/6): %s — recreating",
-                        pol_name, attempt, reason,
+                        pol_name,
+                        attempt,
+                        reason,
                     )
                     try:
                         agentcore_ctrl.delete_policy(policyEngineId=engine_id, policyId=pid)
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception:  # noqa: BLE001 — recreate below conflicts loudly if the delete failed
+                        logger.debug("delete_policy %s before recreate failed", pid, exc_info=True)
                     _t.sleep(20)  # short waits; promoter finishes convergence post-deploy
                     pol = name_to_stmt.get(pol_name, {})
                     try:
                         cp2 = _create_policy_when_engine_ready(
-                            agentcore_ctrl, engine_id, pol_name,
-                            pol.get("description", ""), pol.get("statement", ""),
+                            agentcore_ctrl,
+                            engine_id,
+                            pol_name,
+                            pol.get("description", ""),
+                            pol.get("statement", ""),
                         )
                         pid = cp2.get("policyId") or pid
                         status, reason = _await_policy(pid)
@@ -628,13 +626,13 @@ def handler(event: dict, context) -> dict:
                 # Drop the CREATE_FAILED policies so the engine holds only ACTIVE
                 # ones; the pending payload below recreates them once the gateway
                 # converges.
-                for pol_name, pid in created_policy_ids:
+                for _pol_name, pid in created_policy_ids:
                     try:
                         d = agentcore_ctrl.get_policy(policyEngineId=engine_id, policyId=pid)
                         if d.get("status") != "ACTIVE":
                             agentcore_ctrl.delete_policy(policyEngineId=engine_id, policyId=pid)
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception:  # noqa: BLE001 — best-effort drop; promoter recreates from the pending payload
+                        logger.debug("Drop of non-ACTIVE policy %s failed", pid, exc_info=True)
 
         if is_enforce and created_count == 0 and not enforce_validation_pending:
             # Nothing valid to enforce. Same fail-closed rule as above.
@@ -691,8 +689,9 @@ def handler(event: dict, context) -> dict:
                     )
                 logger.warning(downgrade_reason)
             else:
-                logger.info("Engine %s holds %d ACTIVE policies — safe to attach in ENFORCE",
-                            engine_id, active_on_engine)
+                logger.info(
+                    "Engine %s holds %d ACTIVE policies — safe to attach in ENFORCE", engine_id, active_on_engine
+                )
 
         # Attach policy engine to gateway.
         # ENFORCE is the requested default (real enforcement). When the auto-built
@@ -754,15 +753,15 @@ def handler(event: dict, context) -> dict:
         # tool plane) and the explicit log_only opt-in (promoter flips the mode
         # to ENFORCE once policies validate).
         enforce_pending = None
-        if (downgrade_to_log_only or enforce_validation_pending) \
-                and policy_config.get("mode", "ENFORCE") == "ENFORCE":
+        if (downgrade_to_log_only or enforce_validation_pending) and policy_config.get("mode", "ENFORCE") == "ENFORCE":
             _plist = []
             for pol in policies:
                 _bn = re.sub(r"[^A-Za-z0-9_]", "_", pol.get("name", "default_policy"))
-                _ep = engine_name[:max(0, 48 - len(_bn) - 1)]
+                _ep = engine_name[: max(0, 48 - len(_bn) - 1)]
                 _pn = (f"{_ep}_{_bn}" if _ep else _bn)[:48]
-                _plist.append({"name": _pn, "statement": pol.get("statement", ""),
-                               "description": pol.get("description", "")})
+                _plist.append(
+                    {"name": _pn, "statement": pol.get("statement", ""), "description": pol.get("description", "")}
+                )
             enforce_pending = {
                 "engine_id": engine_id,
                 "gateway_id": gateway_id,

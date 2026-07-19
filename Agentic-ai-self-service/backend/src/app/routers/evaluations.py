@@ -26,7 +26,6 @@ import logging
 import os
 import re
 import time
-from typing import Optional
 
 import boto3
 from fastapi import APIRouter, Depends, HTTPException
@@ -56,9 +55,7 @@ def _region() -> str:
 router = APIRouter(prefix="/api/runtimes", tags=["evaluations"])
 
 
-def _resolve_owned_runtime_id(
-    runtime_name: str, caller_sub: str
-) -> tuple[str, str]:
+def _resolve_owned_runtime_id(runtime_name: str, caller_sub: str) -> tuple[str, str]:
     """Return (runtime_id, version_id) for the production version owned by
     *caller_sub*, or 404 if either the runtime or the slot is missing.
     """
@@ -86,7 +83,7 @@ async def get_evaluation_config(
     # but configs are named after the agent_id during create. Match by name
     # prefix as a heuristic; fall back to scanning the cloudWatchLogs serviceNames.
     configs: list[dict] = []
-    next_token: Optional[str] = None
+    next_token: str | None = None
     for _ in range(20):  # cap pagination
         kwargs: dict = {"maxResults": 50}
         if next_token:
@@ -98,6 +95,7 @@ async def get_evaluation_config(
             break
 
     matched = None
+    detail = None
     for cfg in configs:
         cfg_name = cfg.get("onlineEvaluationConfigName", "")
         # evaluation_step.py names configs `eval_<agent_id sanitized>` (re-sub
@@ -108,25 +106,49 @@ async def get_evaluation_config(
             break
 
     if matched is None:
+        # Custom-named configs (evaluationConfig.configName on deploy) never
+        # match the `eval_<agent_id>` name heuristic — live-verified: config
+        # ACTIVE in AWS, endpoint 404. Fall back to describing each config and
+        # matching on the runtime it TARGETS: evaluation_step.py always creates
+        # dataSourceConfig.cloudWatchLogs with serviceNames=[agent_id] and
+        # logGroupNames=[/aws/bedrock-agentcore/runtimes/<agent_id>-DEFAULT],
+        # so either field referencing this runtime_id identifies its config.
+        # (The name heuristic above runs first, so an `eval_`-named config is
+        # still preferred when both exist.)
+        for cfg in configs:
+            cfg_id = cfg.get("onlineEvaluationConfigId")
+            if not cfg_id:
+                continue
+            try:
+                candidate = ctrl.get_online_evaluation_config(onlineEvaluationConfigId=cfg_id)
+            except Exception:  # noqa: BLE001 — a stale/deleting config must not break the search
+                logger.debug("get_online_evaluation_config %s failed during fallback", cfg_id, exc_info=True)
+                continue
+            cw = (candidate.get("dataSourceConfig") or {}).get("cloudWatchLogs") or {}
+            service_names = cw.get("serviceNames") or []
+            log_groups = cw.get("logGroupNames") or []
+            if runtime_id in service_names or any(runtime_id in lg for lg in log_groups):
+                matched = cfg
+                detail = candidate
+                break
+
+    if matched is None:
         raise HTTPException(
             status_code=404,
             detail="No evaluation config found for this runtime",
         )
 
     cfg_id = matched.get("onlineEvaluationConfigId")
-    detail = ctrl.get_online_evaluation_config(onlineEvaluationConfigId=cfg_id)
+    if detail is None:
+        detail = ctrl.get_online_evaluation_config(onlineEvaluationConfigId=cfg_id)
     return {
         "runtime_name": runtime_name,
         "version_id": version_id,
         "runtime_id": runtime_id,
         "config_id": cfg_id,
         "config_name": detail.get("onlineEvaluationConfigName"),
-        "evaluators": [
-            ev.get("evaluatorId") for ev in detail.get("evaluators", [])
-        ],
-        "sampling_rate": (
-            detail.get("rule", {}).get("samplingConfig", {}).get("samplingPercentage")
-        ),
+        "evaluators": [ev.get("evaluatorId") for ev in detail.get("evaluators", [])],
+        "sampling_rate": (detail.get("rule", {}).get("samplingConfig", {}).get("samplingPercentage")),
         "status": detail.get("status"),
     }
 
@@ -161,7 +183,7 @@ async def list_evaluation_results(
 
     log_group = ""
     try:
-        next_token: Optional[str] = None
+        next_token: str | None = None
         for _ in range(20):
             kw: dict = {"maxResults": 50}
             if next_token:
@@ -173,9 +195,7 @@ async def list_evaluation_results(
                 if normalised_runtime[:32] in cfg_name or runtime_id[:32] in cfg_name:
                     cfg_id = cfg.get("onlineEvaluationConfigId", "")
                     if cfg_id:
-                        log_group = (
-                            f"/aws/bedrock-agentcore/evaluations/results/{cfg_id}"
-                        )
+                        log_group = f"/aws/bedrock-agentcore/evaluations/results/{cfg_id}"
                     break
             if log_group:
                 break
@@ -200,7 +220,7 @@ async def list_evaluation_results(
     query_string = (
         "fields @timestamp, @message"
         "\n| filter @message like /evaluatorId/"
-        "\n| parse @message /\"evaluatorId\":\"(?<eid>[^\"]+)\".*\"score\":(?<score>[0-9.]+)/"
+        '\n| parse @message /"evaluatorId":"(?<eid>[^"]+)".*"score":(?<score>[0-9.]+)/'
         "\n| stats count(*) as runs, avg(score) as avg_score, latest(score) as latest_score by eid"
         "\n| sort by avg_score desc"
         "\n| limit 50"
@@ -230,7 +250,7 @@ async def list_evaluation_results(
         }
     except Exception as exc:
         logger.exception("Failed to start CloudWatch Insights query")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # Poll until the query finishes (Logs Insights is async). We block up to
     # ~10s to keep the API call within API GW's 29s ceiling with margin.
@@ -251,8 +271,8 @@ async def list_evaluation_results(
         # Query still running — cancel + return partial. Caller can re-poll.
         try:
             logs_client.stop_query(queryId=query_id)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — best-effort cancel; partial results are still returned
+            logger.debug("stop_query %s failed", query_id, exc_info=True)
 
     return {
         "runtime_name": runtime_name,

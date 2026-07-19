@@ -14,16 +14,15 @@ sys.path.insert(0, "src")
 import os
 
 import boto3
-from hypothesis import given, settings, strategies as st
-from moto import mock_aws
-
 from app.services.config import (
-    SSM_PREFIX,
-    SSM_PARAM_SUFFIXES,
     ENV_VAR_NAMES,
+    SSM_PARAM_SUFFIXES,
+    SSM_PREFIX,
     load_config,
 )
-
+from hypothesis import given, settings
+from hypothesis import strategies as st
+from moto import mock_aws
 
 # ============================================================================
 # Constants

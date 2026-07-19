@@ -35,10 +35,7 @@ but that is advisory only and must never bypass this ACL.
 
 from __future__ import annotations
 
-from typing import List, Optional
-
 from pydantic import BaseModel, Field
-
 
 VALID_ROLES = ("viewer", "editor")
 
@@ -52,13 +49,13 @@ class Acl(BaseModel):
     (the owner's access is implicit, not list-driven).
     """
 
-    owner_sub: Optional[str] = None
-    editors: List[str] = Field(default_factory=list)
-    viewers: List[str] = Field(default_factory=list)
-    workspace_id: Optional[str] = None
+    owner_sub: str | None = None
+    editors: list[str] = Field(default_factory=list)
+    viewers: list[str] = Field(default_factory=list)
+    workspace_id: str | None = None
 
     @classmethod
-    def normalize(cls, acl: Optional[dict], owner_sub: Optional[str] = None) -> "Acl":
+    def normalize(cls, acl: dict | None, owner_sub: str | None = None) -> Acl:
         """Coerce a (possibly ``None`` / partial / legacy) acl dict into a valid Acl.
 
         Legacy rows store ``acl=None``; those normalise to an owner-only ACL so
@@ -105,9 +102,9 @@ class Acl(BaseModel):
         return out
 
 
-def _dedup_keep_order(items: List[str]) -> List[str]:
+def _dedup_keep_order(items: list[str]) -> list[str]:
     seen: set[str] = set()
-    out: List[str] = []
+    out: list[str] = []
     for item in items:
         if item not in seen:
             seen.add(item)
@@ -120,7 +117,7 @@ def _dedup_keep_order(items: List[str]) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-def _as_acl(acl, owner_sub: Optional[str] = None) -> Acl:
+def _as_acl(acl, owner_sub: str | None = None) -> Acl:
     if isinstance(acl, Acl):
         if owner_sub is not None and acl.owner_sub != owner_sub:
             # Re-normalise so a caller-supplied owner_sub stays authoritative.
@@ -129,19 +126,15 @@ def _as_acl(acl, owner_sub: Optional[str] = None) -> Acl:
     return Acl.normalize(acl, owner_sub=owner_sub)
 
 
-def can_view(acl, caller_sub: str, owner_sub: Optional[str] = None) -> bool:
+def can_view(acl, caller_sub: str, owner_sub: str | None = None) -> bool:
     """True when *caller_sub* may view the workflow (owner/editor/viewer)."""
     a = _as_acl(acl, owner_sub)
     if a.owner_sub is None:
         return False  # legacy/un-owned row is invisible to everyone
-    return (
-        caller_sub == a.owner_sub
-        or caller_sub in a.editors
-        or caller_sub in a.viewers
-    )
+    return caller_sub == a.owner_sub or caller_sub in a.editors or caller_sub in a.viewers
 
 
-def can_edit(acl, caller_sub: str, owner_sub: Optional[str] = None) -> bool:
+def can_edit(acl, caller_sub: str, owner_sub: str | None = None) -> bool:
     """True when *caller_sub* may edit the workflow (owner or editor only)."""
     a = _as_acl(acl, owner_sub)
     if a.owner_sub is None:
@@ -149,7 +142,7 @@ def can_edit(acl, caller_sub: str, owner_sub: Optional[str] = None) -> bool:
     return caller_sub == a.owner_sub or caller_sub in a.editors
 
 
-def can_manage(acl, caller_sub: str, owner_sub: Optional[str] = None) -> bool:
+def can_manage(acl, caller_sub: str, owner_sub: str | None = None) -> bool:
     """True only for the owner — the sole principal allowed to mutate the ACL.
 
     Editors must NOT be able to grant themselves owner or add members
@@ -165,7 +158,7 @@ def can_manage(acl, caller_sub: str, owner_sub: Optional[str] = None) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def add_member(acl, sub: str, role: str, owner_sub: Optional[str] = None) -> dict:
+def add_member(acl, sub: str, role: str, owner_sub: str | None = None) -> dict:
     """Return a new acl dict with *sub* granted *role* (``viewer``|``editor``).
 
     Role precedence: adding a sub as ``editor`` promotes it out of viewers (and
@@ -198,7 +191,7 @@ def add_member(acl, sub: str, role: str, owner_sub: Optional[str] = None) -> dic
     ).to_dict()
 
 
-def remove_member(acl, sub: str, owner_sub: Optional[str] = None) -> dict:
+def remove_member(acl, sub: str, owner_sub: str | None = None) -> dict:
     """Return a new acl dict with *sub* removed from editors and viewers.
 
     Idempotent (removing an absent sub is a no-op) and never removes the owner

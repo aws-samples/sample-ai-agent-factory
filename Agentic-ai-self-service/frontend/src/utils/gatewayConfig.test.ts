@@ -5,7 +5,8 @@
 
 import { describe, it, expect } from 'vitest';
 import * as fc from 'fast-check';
-import { isValidLambdaArn } from './gatewayConfig';
+import { isValidLambdaArn, resolveGatewayTargets, mapGatewayDeployTargets } from './gatewayConfig';
+import type { GatewayConfiguration } from '../types/components';
 
 // ============================================================================
 // Arbitraries (Test Data Generators)
@@ -157,5 +158,92 @@ describe('Property 17: Lambda ARN Format Validation', () => {
     expect(isValidLambdaArn(123 as unknown as string)).toBe(false);
     expect(isValidLambdaArn({} as unknown as string)).toBe(false);
     expect(isValidLambdaArn([] as unknown as string)).toBe(false);
+  });
+});
+
+// ============================================================================
+// Multi-target resolution + deploy mapping
+// ============================================================================
+
+describe('resolveGatewayTargets', () => {
+  it('falls back to the single legacy target when targets[] is absent', () => {
+    const config: GatewayConfiguration = {
+      name: 'gw',
+      targetType: 'lambda',
+      targetConfig: { type: 'lambda', functionArn: 'arn' },
+      enableSemanticSearch: true,
+    };
+    const resolved = resolveGatewayTargets(config);
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].type).toBe('lambda');
+  });
+
+  it('prefers targets[] when present and non-empty', () => {
+    const config: GatewayConfiguration = {
+      name: 'gw',
+      targetType: 'lambda',
+      targetConfig: { type: 'lambda', functionArn: 'arn' },
+      targets: [
+        { type: 'openapi', specUrl: 'https://x/openapi.json' },
+        { type: 'smithy', modelName: 'dynamodb' },
+      ],
+      enableSemanticSearch: true,
+    };
+    const resolved = resolveGatewayTargets(config);
+    expect(resolved.map((t) => t.type)).toEqual(['openapi', 'smithy']);
+  });
+});
+
+describe('mapGatewayDeployTargets', () => {
+  it('splits a mixed targets[] into externalMcpServers + gatewayTargets', () => {
+    const config: GatewayConfiguration = {
+      name: 'gw',
+      targetType: 'lambda',
+      targetConfig: { type: 'lambda', functionArn: 'arn' },
+      targets: [
+        { type: 'mcp_server', serverId: 'aws-knowledge' },
+        { type: 'mcp_server', serverId: '__custom__', serverUrl: 'https://mcp.example.com/mcp', authType: 'none', customName: 'mine' },
+        { type: 'lambda', functionArn: 'arn:aws:lambda:us-west-2:123456789012:function:a' },
+        { type: 'openapi', specUrl: 'https://api.example.com/openapi.json' },
+        { type: 'smithy', modelName: 'dynamodb' },
+      ],
+      enableSemanticSearch: true,
+    };
+    const { externalMcpServers, gatewayTargets } = mapGatewayDeployTargets(config);
+
+    // Both MCP entries collected (catalog + custom).
+    expect(externalMcpServers).toHaveLength(2);
+    expect(externalMcpServers[0]).toEqual({ server_id: 'aws-knowledge' });
+    expect(externalMcpServers[1]).toMatchObject({
+      endpoint: 'https://mcp.example.com/mcp',
+      auth_type: 'none',
+      name: 'mine',
+    });
+
+    // Non-MCP families threaded through as gatewayTargets.
+    expect(gatewayTargets.map((t) => t.type)).toEqual(['lambda', 'openapi', 'smithy']);
+  });
+
+  it('maps a legacy single mcp_server target with no targets[]', () => {
+    const config: GatewayConfiguration = {
+      name: 'gw',
+      targetType: 'mcp_server',
+      targetConfig: { type: 'mcp_server', serverId: 'aws-knowledge' },
+      enableSemanticSearch: true,
+    };
+    const { externalMcpServers, gatewayTargets } = mapGatewayDeployTargets(config);
+    expect(externalMcpServers).toEqual([{ server_id: 'aws-knowledge' }]);
+    expect(gatewayTargets).toHaveLength(0);
+  });
+
+  it('drops a custom mcp target with no URL and returns empty for null config', () => {
+    const config: GatewayConfiguration = {
+      name: 'gw',
+      targetType: 'mcp_server',
+      targetConfig: { type: 'mcp_server', serverId: '__custom__' },
+      enableSemanticSearch: true,
+    };
+    expect(mapGatewayDeployTargets(config).externalMcpServers).toHaveLength(0);
+    expect(mapGatewayDeployTargets(null).externalMcpServers).toHaveLength(0);
   });
 });

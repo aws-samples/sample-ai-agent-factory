@@ -39,9 +39,7 @@ def test_auto_cleanup_deletes_resources_in_order(mock_store):
     def track_cleanup(res, region, event):
         deleted.append((res.get("type"), res.get("id") or res.get("name")))
 
-    with patch(
-        "app.step_handlers.status_update_step._cleanup_resource", side_effect=track_cleanup
-    ):
+    with patch("app.step_handlers.status_update_step._cleanup_resource", side_effect=track_cleanup):
         _auto_cleanup_on_failure(mock_store, "test-deploy-123", {})
 
     # Gateway (priority 2) should be deleted before Cognito (priority 9)
@@ -61,9 +59,7 @@ def test_auto_cleanup_continues_on_individual_failure(mock_store):
         if res.get("type") == "gateway":
             raise Exception("Gateway delete failed")
 
-    with patch(
-        "app.step_handlers.status_update_step._cleanup_resource", side_effect=failing_cleanup
-    ):
+    with patch("app.step_handlers.status_update_step._cleanup_resource", side_effect=failing_cleanup):
         _auto_cleanup_on_failure(mock_store, "test-deploy-123", {})
 
     # All 4 resources should be attempted despite gateway failure
@@ -96,9 +92,7 @@ def test_auto_cleanup_treats_already_gone_as_success(mock_store):
     def already_gone_cleanup(res, region, event):
         raise Exception("ResourceNotFoundException: does not exist")
 
-    with patch(
-        "app.step_handlers.status_update_step._cleanup_resource", side_effect=already_gone_cleanup
-    ):
+    with patch("app.step_handlers.status_update_step._cleanup_resource", side_effect=already_gone_cleanup):
         # Should not raise and should log success
         _auto_cleanup_on_failure(mock_store, "test-deploy-123", {})
 
@@ -108,9 +102,7 @@ def test_cleanup_cognito_deletes_domain_first():
     from app.step_handlers.status_update_step import _cleanup_resource
 
     mock_cog = MagicMock()
-    mock_cog.describe_user_pool.return_value = {
-        "UserPool": {"Domain": "test-domain"}
-    }
+    mock_cog.describe_user_pool.return_value = {"UserPool": {"Domain": "test-domain"}}
     # After domain delete, describe returns no domain
     mock_cog.describe_user_pool.side_effect = [
         {"UserPool": {"Domain": "test-domain"}},  # First call: has domain
@@ -124,9 +116,7 @@ def test_cleanup_cognito_deletes_domain_first():
             {},
         )
 
-    mock_cog.delete_user_pool_domain.assert_called_once_with(
-        UserPoolId="us-east-1_TestPool", Domain="test-domain"
-    )
+    mock_cog.delete_user_pool_domain.assert_called_once_with(UserPoolId="us-east-1_TestPool", Domain="test-domain")
     mock_cog.delete_user_pool.assert_called_once_with(UserPoolId="us-east-1_TestPool")
 
 

@@ -20,7 +20,6 @@ from app.services.python_exporter import (
     zip_project,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers — mirror tests/test_comprehensive_preservation.py::_make_runtime_config
 # ---------------------------------------------------------------------------
@@ -144,12 +143,13 @@ def _pkg_names(reqs: str) -> set[str]:
     """Package names from a requirements body, dropping comment lines + any
     '>=' / '==' version specifier (exporter now applies version floors)."""
     import re
+
     out = set()
     for line in reqs.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        out.add(re.split(r"[><=]", line, 1)[0])
+        out.add(re.split(r"[><=]", line, maxsplit=1)[0])
     return out
 
 
@@ -206,10 +206,11 @@ def test_requirements_are_version_floored_with_header():
 
 def test_requirements_package_lines_sorted_and_deduped():
     import re
+
     config = _make_runtime_config()
-    pkg_lines = [l for l in build_requirements(config).splitlines() if l and not l.startswith("#")]
+    pkg_lines = [ln for ln in build_requirements(config).splitlines() if ln and not ln.startswith("#")]
     # Lines are ordered by PACKAGE NAME (the version specifier is appended after).
-    names = [re.split(r"[><=]", l, 1)[0] for l in pkg_lines]
+    names = [re.split(r"[><=]", ln, maxsplit=1)[0] for ln in pkg_lines]
     assert names == sorted(names)
     assert len(pkg_lines) == len(set(pkg_lines))
 
@@ -255,8 +256,6 @@ def test_env_example_observability_adds_blank_otlp_vars():
 
 
 def test_env_example_model_id_is_the_configured_id():
-    config = _make_runtime_config(
-        model={"modelId": "us.anthropic.claude-sonnet-5"}
-    )
+    config = _make_runtime_config(model={"modelId": "us.anthropic.claude-sonnet-5"})
     env = build_env_example(config)
     assert "MODEL_ID=us.anthropic.claude-sonnet-5" in env

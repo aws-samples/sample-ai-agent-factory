@@ -50,7 +50,8 @@ Oct-2025 .. May-2026).
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable, Optional
+from collections.abc import Iterable
+from typing import Any
 
 # Bedrock contextual-grounding threshold bounds. Upper bound is 0.99 (NOT 1.0):
 # Bedrock rejects exactly 1.0.
@@ -66,7 +67,7 @@ _REGEX_ACTIONS = ("BLOCK", "ANONYMIZE")
 _REGEX_DEFAULT_ACTION = "ANONYMIZE"
 
 
-def _clamp_threshold(value: Any) -> Optional[float]:
+def _clamp_threshold(value: Any) -> float | None:
     """Coerce ``value`` to a float clamped to ``[0.0, 0.99]``.
 
     Returns ``None`` when ``value`` is ``None`` or not coercible to a float, so
@@ -139,7 +140,7 @@ def _is_compilable(pattern: str) -> bool:
         return False
 
 
-def build_regex_filters(patterns: Optional[Iterable[dict]]) -> dict:
+def build_regex_filters(patterns: Iterable[dict] | None) -> dict:
     """Build a partial ``sensitiveInformationPolicyConfig`` with regex filters.
 
     Each input entry is a dict shaped like::

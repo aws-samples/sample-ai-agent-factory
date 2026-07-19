@@ -111,9 +111,7 @@ async def set_git_token(
     workflow = _load_editable_workflow(workflow_id, caller_sub)
 
     try:
-        normalized = git_sync.validate_git_source(
-            request.repo_url, request.branch, request.path
-        )
+        normalized = git_sync.validate_git_source(request.repo_url, request.branch, request.path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -125,8 +123,7 @@ async def set_git_token(
         logger.exception("Failed to store git token in Secrets Manager")
         raise HTTPException(
             status_code=502,
-            detail=f"Could not store git token: "
-            f"{e.response.get('Error', {}).get('Message', str(e))}",
+            detail="Could not store git token",
         ) from e
 
     normalized["token_ref"] = token_ref
@@ -163,9 +160,7 @@ async def git_sync_workflow(
         )
 
     try:
-        spec = git_sync.fetch_workflow_spec(
-            git_source, git_source.get("token_ref")
-        )
+        spec = git_sync.fetch_workflow_spec(git_source, git_source.get("token_ref"))
     except ValueError as e:
         # Invalid/blocked URL, bad path/branch, oversized or malformed spec.
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -173,8 +168,7 @@ async def git_sync_workflow(
         logger.exception("Failed to resolve git token from Secrets Manager")
         raise HTTPException(
             status_code=502,
-            detail=f"Could not resolve git token: "
-            f"{e.response.get('Error', {}).get('Message', str(e))}",
+            detail="Could not resolve git token",
         ) from e
 
     # Build the updated workflow by starting from the stored row's serialized
@@ -196,9 +190,9 @@ async def git_sync_workflow(
     # Force identity/ACL fields back to the stored values (last write wins).
     base["id"] = workflow.id
     base["owner_sub"] = getattr(workflow, "owner_sub", None)
-    base["created_at"] = workflow.created_at.isoformat() if hasattr(
-        workflow.created_at, "isoformat"
-    ) else workflow.created_at
+    base["created_at"] = (
+        workflow.created_at.isoformat() if hasattr(workflow.created_at, "isoformat") else workflow.created_at
+    )
 
     try:
         updated = WorkflowDefinition.model_validate(base)

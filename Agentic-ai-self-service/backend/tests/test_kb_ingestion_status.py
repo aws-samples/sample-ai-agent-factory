@@ -19,8 +19,8 @@ import pytest
 
 sys.path.insert(0, "src")
 
-from app.step_handlers.knowledge_base_step import _start_and_wait_ingestion  # noqa: E402
 from app.services.gateway_deployer import KNOWLEDGE_BASE_LAMBDA_TEMPLATE  # noqa: E402
+from app.step_handlers.knowledge_base_step import _start_and_wait_ingestion  # noqa: E402
 
 
 class _FakeBA:
@@ -42,6 +42,7 @@ class _FakeBA:
 
 def test_complete_returns_complete(monkeypatch):
     import app.step_handlers.knowledge_base_step as kb
+
     monkeypatch.setattr(kb.time, "sleep", lambda *_: None)
     job_id, status = _start_and_wait_ingestion(_FakeBA(["IN_PROGRESS", "COMPLETE"]), "kb", "ds", max_wait=60)
     assert job_id == "job-1"
@@ -50,6 +51,7 @@ def test_complete_returns_complete(monkeypatch):
 
 def test_timeout_returns_in_progress_not_success(monkeypatch):
     import app.step_handlers.knowledge_base_step as kb
+
     monkeypatch.setattr(kb.time, "sleep", lambda *_: None)
     # Never completes within the (tiny) window -> IN_PROGRESS, not a silent COMPLETE.
     job_id, status = _start_and_wait_ingestion(_FakeBA(["IN_PROGRESS"]), "kb", "ds", max_wait=10)
@@ -58,6 +60,7 @@ def test_timeout_returns_in_progress_not_success(monkeypatch):
 
 def test_failed_raises(monkeypatch):
     import app.step_handlers.knowledge_base_step as kb
+
     monkeypatch.setattr(kb.time, "sleep", lambda *_: None)
     with pytest.raises(RuntimeError, match="Ingestion job failed"):
         _start_and_wait_ingestion(_FakeBA(["FAILED"]), "kb", "ds", max_wait=10)
@@ -83,6 +86,7 @@ def test_kb_tool_lambda_emits_retryable_on_empty(monkeypatch):
     exec(KNOWLEDGE_BASE_LAMBDA_TEMPLATE, ns)  # noqa: S102 — trusted template under test
     out = ns["lambda_handler"]({"query": "where is the canary"}, None)
     import json
+
     body = json.loads(out["body"])
     assert body.get("still_ingesting") is True
     assert body.get("retryable") is True

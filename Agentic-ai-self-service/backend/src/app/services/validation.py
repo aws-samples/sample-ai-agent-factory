@@ -11,18 +11,17 @@ Requirements: 13.2
 from app.models import (
     # Enums
     AgentCoreComponentType,
-    GatewayConfiguration,
-    IdentityConfiguration,
-    RuntimeConfiguration,
     ComponentConfiguration,
     # Workflow
     ComponentNode,
     ConnectionEdge,
+    GatewayConfiguration,
+    IdentityConfiguration,
+    RuntimeConfiguration,
     ValidationError,
     ValidationResult,
     WorkflowDefinition,
 )
-
 
 # Connection compatibility matrix defining which component types can connect
 # Key: source component type, Value: list of compatible target component types

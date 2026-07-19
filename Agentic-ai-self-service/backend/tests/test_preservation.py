@@ -13,18 +13,18 @@ import json
 import os
 
 import pytest
-from hypothesis import given, settings
-from hypothesis import strategies as st
-
+from app.models.components import ModelConfiguration, RuntimeConfiguration
 from app.models.deployment_models import RuntimeConfig
 from app.models.enums import AgentFramework, StrandsModelProvider
-from app.models.components import RuntimeConfiguration, ModelConfiguration
 from app.services import code_generator
 from app.services.deployment import (
     generate_agent_code as deployment_generate_agent_code,
+)
+from app.services.deployment import (
     generate_requirements as deployment_generate_requirements,
 )
-
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -651,7 +651,7 @@ class TestFrontendRetryLogicPreservation:
             "deploy",
             "DeployPanel.tsx",
         )
-        with open(frontend_path, "r") as f:
+        with open(frontend_path) as f:
             return f.read()
 
     def _extract_handle_test(self, source: str) -> str:

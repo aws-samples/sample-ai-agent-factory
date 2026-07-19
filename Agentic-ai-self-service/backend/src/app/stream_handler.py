@@ -35,8 +35,6 @@ path returns (404-equivalent over SSE).
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import base64
 import hashlib
 import json
@@ -45,21 +43,20 @@ import os
 import re
 import time
 import urllib.request
-from typing import Optional
 
 import boto3
 
-from app.services.config import load_config
-from app.services.deployment_state_store import DeploymentStateStore
-from app.services.harness_deployer import invoke_harness
+import app.services._otel_platform  # noqa: F401
 
 # Reuse the exact resolver + parser the API-GW path uses so the two stay in
 # lockstep (same ARN construction, same response-body parsing).
 from app.deployment_handler import (
-    _create_agentcore_client,
     _parse_response_body,
     _scan_for_runtime,
 )
+from app.services.config import load_config
+from app.services.deployment_state_store import DeploymentStateStore
+from app.services.harness_deployer import invoke_harness
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +78,7 @@ COGNITO_REGION = os.environ.get("COGNITO_REGION", config.aws_region)
 # Deployment state store (lazy-initialised, mirrors deployment_handler)
 # ---------------------------------------------------------------------------
 
-_state_store: Optional[DeploymentStateStore] = None
+_state_store: DeploymentStateStore | None = None
 
 
 def _get_state_store() -> DeploymentStateStore:
@@ -195,7 +192,7 @@ def _verify_cognito_token(token: str) -> str:
         claims = json.loads(_b64url_decode(payload_b64))
         signature = _b64url_decode(sig_b64)
     except Exception as exc:  # noqa: BLE001
-        raise _AuthError(f"unparseable token: {exc}")
+        raise _AuthError(f"unparseable token: {exc}") from exc
 
     if header.get("alg") != "RS256":
         raise _AuthError("unexpected alg")
@@ -280,7 +277,7 @@ def _resolve_caller(event: dict) -> str:
 
 
 def _sse(obj: dict) -> bytes:
-    return f"data: {json.dumps(obj)}\n\n".encode("utf-8")
+    return f"data: {json.dumps(obj)}\n\n".encode()
 
 
 def _emit_tokens(write, text: str) -> None:
@@ -296,7 +293,7 @@ def _emit_tokens(write, text: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_runtime_arn(deployment_state: Optional[dict], runtime_id: str, region: str) -> str:
+def _resolve_runtime_arn(deployment_state: dict | None, runtime_id: str, region: str) -> str:
     runtime_arn = (deployment_state or {}).get("runtime_arn", "")
     if runtime_arn:
         return runtime_arn
@@ -305,7 +302,7 @@ def _resolve_runtime_arn(deployment_state: Optional[dict], runtime_id: str, regi
     return f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/{runtime_id}"
 
 
-def _stream_invoke(write, body: dict, caller_sub: Optional[str]) -> None:
+def _stream_invoke(write, body: dict, caller_sub: str | None) -> None:
     """Resolve the deployment, enforce tenant isolation, invoke, and emit SSE."""
     region = config.aws_region
 
@@ -324,8 +321,7 @@ def _stream_invoke(write, body: dict, caller_sub: Optional[str]) -> None:
     history = body.get("history") or []
     if history:
         history_text = "\n".join(
-            f"{'User' if m.get('role') == 'user' else 'Assistant'}: {m.get('content', '')}"
-            for m in history[-6:]
+            f"{'User' if m.get('role') == 'user' else 'Assistant'}: {m.get('content', '')}" for m in history[-6:]
         )
         prompt = f"Previous conversation:\n{history_text}\n\nUser: {body.get('input', '')}"
 
@@ -434,9 +430,7 @@ def _stream_invoke(write, body: dict, caller_sub: Optional[str]) -> None:
 def _handle(event: dict, write) -> None:
     """Shared request handling: auth → parse body → stream invoke."""
     # CORS/preflight: Function URLs deliver OPTIONS too; just close cleanly.
-    method = (
-        (event.get("requestContext", {}) or {}).get("http", {}) or {}
-    ).get("method", "POST")
+    method = ((event.get("requestContext", {}) or {}).get("http", {}) or {}).get("method", "POST")
     if method == "OPTIONS":
         return
 
@@ -527,8 +521,8 @@ def lambda_handler(event, response_stream=None, context=None):  # noqa: D401
         except Exception:  # noqa: BLE001
             try:
                 stream.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001 — last-ditch stream teardown; nothing left to do
+                logger.debug("stream: end() and close() both failed", exc_info=True)
 
 
 # Buffered fallback (non-streaming). Some local/test harnesses invoke a Lambda

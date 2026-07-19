@@ -17,8 +17,6 @@ per-user consent yet.
 
 from __future__ import annotations
 
-from typing import Optional
-
 # Sentinel id for a user-supplied OpenAPI/MCP connector (no curated catalog entry).
 GENERIC_CONNECTOR_ID = "generic_openapi"
 
@@ -151,7 +149,7 @@ CONNECTOR_CATALOG: dict[str, dict] = {
 }
 
 
-def get_connector(connector_id: str) -> Optional[dict]:
+def get_connector(connector_id: str) -> dict | None:
     """Return the catalog entry for *connector_id*, or None if unknown.
 
     The GENERIC sentinel intentionally has no catalog entry — a generic connector
@@ -161,7 +159,7 @@ def get_connector(connector_id: str) -> Optional[dict]:
     return CONNECTOR_CATALOG.get(connector_id)
 
 
-def is_generic(connector_id: Optional[str]) -> bool:
+def is_generic(connector_id: str | None) -> bool:
     """True when the connector is the user-supplied generic OpenAPI/MCP connector."""
     return not connector_id or connector_id == GENERIC_CONNECTOR_ID
 
@@ -184,7 +182,7 @@ def supports_auth(connector_id: str, auth_method: str) -> bool:
     return auth_method in entry.get("auth_methods", [])
 
 
-def oauth_vendor_for(connector_id: str) -> Optional[str]:
+def oauth_vendor_for(connector_id: str) -> str | None:
     """Return the AgentCore OAuth2 vendor enum for *connector_id*.
 
     Returns None for the generic connector and for curated connectors that have no

@@ -4,14 +4,11 @@ Requirements: 3.4
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import json
 import logging
 import os
 
-import boto3
-
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
@@ -52,16 +49,13 @@ def _resolve_otel_secret_arn(event: dict) -> str | None:
         return platform_defaults["auth_header_secret_arn"]
 
     obs_cfg = event.get("observability_config") or {}
-    otel_secret_arn = obs_cfg.get("auth_header_secret_arn") or obs_cfg.get(
-        "authHeaderSecretArn"
-    )
+    otel_secret_arn = obs_cfg.get("auth_header_secret_arn") or obs_cfg.get("authHeaderSecretArn")
     if otel_secret_arn:
         try:
             _validate_user_otel_secret_arn(otel_secret_arn)
         except ValueError as e:
             logger.warning(
-                "Per-canvas OTEL secret ARN rejected (%s); disabling OTEL "
-                "auth for this runtime.",
+                "Per-canvas OTEL secret ARN rejected (%s); disabling OTEL auth for this runtime.",
                 e,
             )
             return None
@@ -93,38 +87,27 @@ def handler(event: dict, context) -> dict:
         identity_config = event.get("identity_config") or {}
         identity_mode = identity_config.get("mode", "shared")
         if identity_mode == "per_agent":
-            from app.services import per_agent_identity
             import time as _time
+
+            from app.services import per_agent_identity
 
             account_id = step_clients.account_id_for_event(event)
             iam_client = step_clients.client(event, "iam")
-            agentcore_runtime_name = (
-                event.get("agentcore_runtime_name")
-                or sanitize_runtime_name(config.get("name", "agent"))
+            agentcore_runtime_name = event.get("agentcore_runtime_name") or sanitize_runtime_name(
+                config.get("name", "agent")
             )
-            pa_role_name = per_agent_identity.build_per_agent_role_name(
-                agentcore_runtime_name
-            )
+            pa_role_name = per_agent_identity.build_per_agent_role_name(agentcore_runtime_name)
 
             # Construct resource ARNs from the step results already on the
             # event (gateway/memory/kb expose IDs, not ARNs). Missing id ->
             # None -> the policy builder falls back to '*' for that one tool.
             gw_id = (event.get("gateway_result") or {}).get("gateway_id")
-            gateway_arn = (
-                f"arn:aws:bedrock-agentcore:{region}:{account_id}:gateway/{gw_id}"
-                if gw_id else None
-            )
+            gateway_arn = f"arn:aws:bedrock-agentcore:{region}:{account_id}:gateway/{gw_id}" if gw_id else None
             mem_id = (event.get("memory_result") or {}).get("memory_id")
-            memory_arn = (
-                f"arn:aws:bedrock-agentcore:{region}:{account_id}:memory/{mem_id}"
-                if mem_id else None
-            )
+            memory_arn = f"arn:aws:bedrock-agentcore:{region}:{account_id}:memory/{mem_id}" if mem_id else None
             kb_result = event.get("knowledge_base_result") or {}
             kb_id = kb_result.get("kb_id") or kb_result.get("knowledge_base_id")
-            kb_arn = (
-                f"arn:aws:bedrock:{region}:{account_id}:knowledge-base/{kb_id}"
-                if kb_id else None
-            )
+            kb_arn = f"arn:aws:bedrock:{region}:{account_id}:knowledge-base/{kb_id}" if kb_id else None
 
             otel_secret_arn = _resolve_otel_secret_arn(event)
             artifacts_bucket = _get_env("ARTIFACTS_BUCKET_NAME", "") or None
@@ -138,12 +121,8 @@ def handler(event: dict, context) -> dict:
             try:
                 iam_client.create_role(
                     RoleName=pa_role_name,
-                    AssumeRolePolicyDocument=json.dumps(
-                        per_agent_identity.build_trust_policy()
-                    ),
-                    Description=(
-                        f"Per-agent least-privilege role for {agentcore_runtime_name}"
-                    ),
+                    AssumeRolePolicyDocument=json.dumps(per_agent_identity.build_trust_policy()),
+                    Description=(f"Per-agent least-privilege role for {agentcore_runtime_name}"),
                     Tags=_managed_tag,
                 )
             except iam_client.exceptions.EntityAlreadyExistsException:

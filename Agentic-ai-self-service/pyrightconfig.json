@@ -1,0 +1,19 @@
+{
+  "include": ["backend/src", "infra/stacks"],
+  "exclude": ["**/node_modules", "**/__pycache__", "**/cdk.out", "backend/tests"],
+  "typeCheckingMode": "basic",
+  "pythonVersion": "3.12",
+  "extraPaths": ["backend/src"],
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "none",
+  "reportAttributeAccessIssue": "warning",
+  "reportPossiblyUnboundVariable": "warning",
+  "reportArgumentType": "warning",
+  "reportCallIssue": "warning",
+  "reportOptionalMemberAccess": "warning",
+  "reportOptionalSubscript": "warning",
+  "reportIndexIssue": "warning",
+  "reportOperatorIssue": "warning",
+  "reportRedeclaration": "warning",
+  "reportTypedDictNotRequiredAccess": "warning"
+}

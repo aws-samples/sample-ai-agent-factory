@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 import types
-from typing import Iterator
+from collections.abc import Iterator
 
 import boto3
 import pytest
@@ -22,8 +22,6 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, "src")
 
 moto = pytest.importorskip("moto")
-from moto import mock_aws  # noqa: E402
-
 from app.routers import prompts as prompts_router_mod  # noqa: E402
 from app.services import prompt_library_store as pl_mod  # noqa: E402
 from app.services.auth import get_caller_sub  # noqa: E402
@@ -35,6 +33,7 @@ from app.services.prompt_library_store import (  # noqa: E402
     new_prompt_version_id,
     slugify,
 )
+from moto import mock_aws  # noqa: E402
 
 
 def _create_table() -> None:
@@ -241,9 +240,7 @@ def test_delete(store: PromptLibraryStore):
 
 def test_create_slug_collision_disambiguates(store: PromptLibraryStore):
     _client("alice").post("/api/prompts", json={"display_name": "Dup", "body": "a"})
-    bob_resp = _client("bob").post(
-        "/api/prompts", json={"display_name": "Dup", "body": "b"}
-    )
+    bob_resp = _client("bob").post("/api/prompts", json={"display_name": "Dup", "body": "b"})
     assert bob_resp.status_code == 200
     assert bob_resp.json()["prompt_name"] != "dup"  # disambiguated
     # Alice's original is untouched + still owned by Alice with her body.
@@ -403,9 +400,7 @@ def test_hook_rewrites_uri_ref_with_version(store: PromptLibraryStore):
 
     alice = _client("alice")
     alice.post("/api/prompts", json={"display_name": "P", "body": "v1"})
-    v2 = alice.post("/api/prompts/p/versions", json={"body": "v2 body"}).json()[
-        "version_id"
-    ]
+    v2 = alice.post("/api/prompts/p/versions", json={"body": "v2 body"}).json()["version_id"]
     cfg = _Cfg(f"prompt://p@{v2}")
     resolve_system_prompt(cfg, "alice")
     assert cfg.system_prompt == "v2 body"

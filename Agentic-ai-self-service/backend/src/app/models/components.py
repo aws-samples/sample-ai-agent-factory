@@ -1,7 +1,7 @@
 """Pydantic models for AgentCore component configurations."""
 
 import re
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -19,7 +19,6 @@ from .enums import (
     PythonRuntime,
     StrandsModelProvider,
 )
-
 
 # ============================================================================
 # Runtime Configuration Models
@@ -60,24 +59,24 @@ class RuntimeConfiguration(BaseModel):
 
     # Model provider (Strands)
     model_provider: StrandsModelProvider = StrandsModelProvider.BEDROCK
-    provider_api_key_ref: Optional[str] = None  # Secrets Manager ARN for non-Bedrock
+    provider_api_key_ref: str | None = None  # Secrets Manager ARN for non-Bedrock
 
     # Multi-agent pattern
     multi_agent_pattern: MultiAgentPattern = MultiAgentPattern.NONE
-    multi_agent_config: Optional[dict] = None
+    multi_agent_config: dict | None = None
 
     # Timeouts
     idle_timeout: int = Field(ge=60, le=28800, default=900)
     max_lifetime: int = Field(ge=60, le=28800, default=28800)
 
     # VPC (optional)
-    vpc_config: Optional[VPCConfiguration] = None
+    vpc_config: VPCConfiguration | None = None
 
     # Observability
     enable_otel: bool = False
 
     # IAM (optional - auto-created if not provided)
-    execution_role_arn: Optional[str] = None
+    execution_role_arn: str | None = None
 
 
 # ============================================================================
@@ -89,8 +88,8 @@ class OpenAPITargetConfig(BaseModel):
     """OpenAPI target configuration."""
 
     type: Literal["openapi"] = "openapi"
-    spec_url: Optional[str] = None
-    spec_content: Optional[str] = None
+    spec_url: str | None = None
+    spec_content: str | None = None
 
     @model_validator(mode="after")
     def validate_spec_source(self) -> "OpenAPITargetConfig":
@@ -104,11 +103,11 @@ class LambdaTargetConfig(BaseModel):
     """Lambda target configuration."""
 
     type: Literal["lambda"] = "lambda"
-    function_arn: Optional[str] = None  # Optional - auto-created if not provided
+    function_arn: str | None = None  # Optional - auto-created if not provided
 
     @field_validator("function_arn")
     @classmethod
-    def validate_lambda_arn(cls, v: Optional[str]) -> Optional[str]:
+    def validate_lambda_arn(cls, v: str | None) -> str | None:
         """Validate Lambda ARN format if provided."""
         if v is None:
             return v
@@ -133,12 +132,7 @@ class MCPServerTargetConfig(BaseModel):
 
 
 GatewayTargetConfig = Annotated[
-    Union[
-        OpenAPITargetConfig,
-        LambdaTargetConfig,
-        SmithyTargetConfig,
-        MCPServerTargetConfig,
-    ],
+    OpenAPITargetConfig | LambdaTargetConfig | SmithyTargetConfig | MCPServerTargetConfig,
     Field(discriminator="type"),
 ]
 
@@ -190,11 +184,11 @@ class GatewayConfiguration(BaseModel):
         return normalized
 
     # Credentials (optional, for OpenAPI targets)
-    api_key_credentials: Optional[APIKeyCredentials] = None
-    oauth2_credentials: Optional[OAuth2Credentials] = None
+    api_key_credentials: APIKeyCredentials | None = None
+    oauth2_credentials: OAuth2Credentials | None = None
 
     # IAM (optional - auto-created if not provided)
-    role_arn: Optional[str] = None
+    role_arn: str | None = None
 
     @model_validator(mode="after")
     def validate_target_config_type(self) -> "GatewayConfiguration":
@@ -258,41 +252,37 @@ class ConnectorConfig(BaseModel):
     # Write-only raw credential — minted into a Secrets Manager secret then dropped.
     # exclude=True keeps it out of every model_dump()/serialized payload (DDB, canvas,
     # logs); repr=False keeps it out of __repr__/exception output.
-    secret_value: Optional[str] = Field(
-        alias="secretValue", default=None, exclude=True, repr=False
-    )
-    secret_arn: Optional[str] = Field(alias="secretArn", default=None)
+    secret_value: str | None = Field(alias="secretValue", default=None, exclude=True, repr=False)
+    secret_arn: str | None = Field(alias="secretArn", default=None)
 
     # OpenAPI spec source (one of; catalog default used if neither).
-    spec_url: Optional[str] = Field(alias="specUrl", default=None)
-    spec_inline: Optional[str] = Field(alias="specInline", default=None)
+    spec_url: str | None = Field(alias="specUrl", default=None)
+    spec_inline: str | None = Field(alias="specInline", default=None)
 
     # oauth2_cc only.
     scopes: list[str] = Field(default_factory=list)
-    client_id: Optional[str] = Field(alias="clientId", default=None)
-    oauth_vendor: Optional[str] = Field(alias="oauthVendor", default=None)
-    discovery_url: Optional[str] = Field(alias="discoveryUrl", default=None)
+    client_id: str | None = Field(alias="clientId", default=None)
+    oauth_vendor: str | None = Field(alias="oauthVendor", default=None)
+    discovery_url: str | None = Field(alias="discoveryUrl", default=None)
 
     # Phase 3 (Loom) OBO identity propagation. "m2m" (default) = shared
     # machine-to-machine client-credentials; "obo" = on-behalf-of token exchange
     # so the agent calls the connector AS THE END-USER (RFC 8693 / RFC 7523).
     # OBO requires the CustomOauth2 vendor + a token-exchange-capable IdP.
     delegation_mode: Literal["m2m", "obo"] = Field(alias="delegationMode", default="m2m")
-    obo_grant_type: Optional[Literal["TOKEN_EXCHANGE", "JWT_AUTHORIZATION_GRANT"]] = Field(
+    obo_grant_type: Literal["TOKEN_EXCHANGE", "JWT_AUTHORIZATION_GRANT"] | None = Field(
         alias="oboGrantType", default=None
     )
     # Phase 1 (Loom-study 1.2): explicit RFC 8693 `audience` for the OBO exchange.
     # Okta custom authorization servers REJECT a token exchange without an
     # explicit audience — a hard blocker for a common enterprise IdP. Threaded
     # into the exchange call; falls back to the subject token's aud when unset.
-    oauth_audience: Optional[str] = Field(alias="oauthAudience", default=None, max_length=512)
+    oauth_audience: str | None = Field(alias="oauthAudience", default=None, max_length=512)
 
     # api_key only (catalog provides defaults).
-    credential_location: Optional[str] = Field(alias="credentialLocation", default=None)
-    credential_parameter_name: Optional[str] = Field(
-        alias="credentialParameterName", default=None
-    )
-    credential_prefix: Optional[str] = Field(alias="credentialPrefix", default=None)
+    credential_location: str | None = Field(alias="credentialLocation", default=None)
+    credential_parameter_name: str | None = Field(alias="credentialParameterName", default=None)
+    credential_prefix: str | None = Field(alias="credentialPrefix", default=None)
 
     @field_validator("credential_location", mode="before")
     @classmethod
@@ -306,10 +296,7 @@ class ConnectorConfig(BaseModel):
             return None
         norm = str(v).strip().upper()
         if norm not in ("HEADER", "QUERY_PARAMETER"):
-            raise ValueError(
-                "credential_location must be 'HEADER' or 'QUERY_PARAMETER' "
-                f"(got '{v}')."
-            )
+            raise ValueError(f"credential_location must be 'HEADER' or 'QUERY_PARAMETER' (got '{v}').")
         return norm
 
     @model_validator(mode="after")
@@ -326,10 +313,7 @@ class ConnectorConfig(BaseModel):
                 f"Valid ids: {connectors_catalog.known_connector_ids()}."
             )
         if not connectors_catalog.supports_auth(self.connector_id, self.auth_method):
-            raise ValueError(
-                f"connector '{self.connector_id}' does not support auth_method "
-                f"'{self.auth_method}'."
-            )
+            raise ValueError(f"connector '{self.connector_id}' does not support auth_method '{self.auth_method}'.")
         return self
 
 
@@ -404,13 +388,13 @@ class GuardrailsConfiguration(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     enabled: bool = True
     mode: str = "existing"  # "existing" or "create_new"
-    guardrail_id: Optional[str] = None
-    guardrail_version: Optional[str] = None
+    guardrail_id: str | None = None
+    guardrail_version: str | None = None
     # Create-new mode fields
-    content_filters: Optional[dict] = None  # {hate: "MEDIUM", violence: "HIGH", ...}
-    pii_filters: Optional[list] = None  # [{type: "EMAIL", action: "ANONYMIZE"}, ...]
-    denied_topics: Optional[list] = None  # [{name: str, definition: str}, ...]
-    word_filters: Optional[list] = None  # ["word1", "word2"]
+    content_filters: dict | None = None  # {hate: "MEDIUM", violence: "HIGH", ...}
+    pii_filters: list | None = None  # [{type: "EMAIL", action: "ANONYMIZE"}, ...]
+    denied_topics: list | None = None  # [{name: str, definition: str}, ...]
+    word_filters: list | None = None  # ["word1", "word2"]
 
 
 # ============================================================================
@@ -434,14 +418,14 @@ class ObservabilityConfiguration(BaseModel):
         "langfuse",
         "custom",
     ] = "langfuse"
-    otlp_endpoint: Optional[str] = Field(default=None, max_length=2048)
+    otlp_endpoint: str | None = Field(default=None, max_length=2048)
     otlp_protocol: Literal["http/protobuf", "grpc"] = "http/protobuf"
-    service_name: Optional[str] = Field(default=None, max_length=200)
+    service_name: str | None = Field(default=None, max_length=200)
     sample_rate: float = Field(ge=0.0, le=1.0, default=1.0)
     resource_attributes: dict[str, str] = Field(default_factory=dict)
 
     # Auth: Secrets Manager ARN holding the OTEL_EXPORTER_OTLP_HEADERS string
-    auth_header_secret_arn: Optional[str] = Field(default=None, max_length=2048)
+    auth_header_secret_arn: str | None = Field(default=None, max_length=2048)
     extra_headers: dict[str, str] = Field(default_factory=dict)
 
 
@@ -455,7 +439,7 @@ class CustomOAuth2Config(BaseModel):
 
     authorization_url: str = Field(min_length=1)
     token_url: str = Field(min_length=1)
-    user_info_url: Optional[str] = None
+    user_info_url: str | None = None
 
 
 class OAuth2Configuration(BaseModel):
@@ -465,7 +449,7 @@ class OAuth2Configuration(BaseModel):
     client_id: str = Field(min_length=1)
     client_secret_ref: str = Field(min_length=1)  # Reference to Secrets Manager
     scopes: list[str] = Field(default_factory=list)
-    custom_config: Optional[CustomOAuth2Config] = None
+    custom_config: CustomOAuth2Config | None = None
 
     @model_validator(mode="after")
     def validate_custom_config(self) -> "OAuth2Configuration":
@@ -489,8 +473,8 @@ class IdentityConfiguration(BaseModel):
     component_type: Literal["identity"] = "identity"
     name: str = Field(min_length=1, max_length=100)
     credential_type: Literal["oauth2", "api_key"]
-    oauth2_config: Optional[OAuth2Configuration] = None
-    api_key_config: Optional[APIKeyConfiguration] = None
+    oauth2_config: OAuth2Configuration | None = None
+    api_key_config: APIKeyConfiguration | None = None
 
     @model_validator(mode="after")
     def validate_credential_config(self) -> "IdentityConfiguration":
@@ -512,7 +496,7 @@ class CustomEvaluatorConfig(BaseModel):
 
     evaluator_name: str = Field(min_length=1, max_length=100)
     evaluator_code: str = Field(min_length=1)  # Python code for custom evaluator
-    description: Optional[str] = None
+    description: str | None = None
 
 
 class EvaluatorConfig(BaseModel):
@@ -521,7 +505,7 @@ class EvaluatorConfig(BaseModel):
     evaluator_type: EvaluatorType
     enabled: bool = True
     threshold: float = Field(ge=0.0, le=1.0, default=0.7)
-    custom_config: Optional[CustomEvaluatorConfig] = None
+    custom_config: CustomEvaluatorConfig | None = None
 
     @model_validator(mode="after")
     def validate_custom_evaluator(self) -> "EvaluatorConfig":
@@ -576,11 +560,11 @@ class PolicyRule(BaseModel):
 
     rule_id: str = Field(min_length=1, max_length=100)
     effect: PolicyEffect
-    principal: Optional[str] = None  # e.g., "User::\"admin\"" or "*"
-    action: Optional[str] = None  # e.g., "Action::\"invoke_tool\""
-    resource: Optional[str] = None  # e.g., "Tool::\"database_query\""
+    principal: str | None = None  # e.g., "User::\"admin\"" or "*"
+    action: str | None = None  # e.g., "Action::\"invoke_tool\""
+    resource: str | None = None  # e.g., "Tool::\"database_query\""
     conditions: list[PolicyCondition] = Field(default_factory=list)
-    description: Optional[str] = None
+    description: str | None = None
 
 
 class PolicyConfiguration(BaseModel):
@@ -636,7 +620,7 @@ class AdvancedMemoryConfiguration(BaseModel):
 
     # Long-term memory settings
     long_term_enabled: bool = True
-    vector_store_type: Optional[str] = None  # e.g., "pinecone", "opensearch"
+    vector_store_type: str | None = None  # e.g., "pinecone", "opensearch"
 
     # Session management
     session_timeout_minutes: int = Field(ge=1, le=10080, default=60)  # max 7 days
@@ -654,7 +638,7 @@ class AgentEndpoint(BaseModel):
     agent_id: str = Field(min_length=1, max_length=100)
     endpoint_url: str = Field(min_length=1)
     protocol: Literal["HTTP", "MCP", "A2A"] = "A2A"
-    description: Optional[str] = None
+    description: str | None = None
 
 
 class A2AConfiguration(BaseModel):
@@ -697,10 +681,10 @@ class ToolConfiguration(BaseModel):
     description: str = Field(default="", max_length=2000)
     enabled: bool = True
     is_custom: bool = False
-    lambda_code: Optional[str] = None
-    input_schema: Optional[dict] = None
-    display_name: Optional[str] = None
-    is_knowledge_base: Optional[bool] = None
+    lambda_code: str | None = None
+    input_schema: dict | None = None
+    display_name: str | None = None
+    is_knowledge_base: bool | None = None
 
 
 # ============================================================================
@@ -708,20 +692,18 @@ class ToolConfiguration(BaseModel):
 # ============================================================================
 
 ComponentConfiguration = Annotated[
-    Union[
-        RuntimeConfiguration,
-        GatewayConfiguration,
-        MemoryConfiguration,
-        CodeInterpreterConfiguration,
-        BrowserConfiguration,
-        ObservabilityConfiguration,
-        IdentityConfiguration,
-        EvaluationConfiguration,
-        PolicyConfiguration,
-        AdvancedMemoryConfiguration,
-        A2AConfiguration,
-        GuardrailsConfiguration,
-        ToolConfiguration,
-    ],
+    RuntimeConfiguration
+    | GatewayConfiguration
+    | MemoryConfiguration
+    | CodeInterpreterConfiguration
+    | BrowserConfiguration
+    | ObservabilityConfiguration
+    | IdentityConfiguration
+    | EvaluationConfiguration
+    | PolicyConfiguration
+    | AdvancedMemoryConfiguration
+    | A2AConfiguration
+    | GuardrailsConfiguration
+    | ToolConfiguration,
     Field(discriminator="component_type"),
 ]

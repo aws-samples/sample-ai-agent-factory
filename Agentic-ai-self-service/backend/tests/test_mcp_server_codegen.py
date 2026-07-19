@@ -45,11 +45,16 @@ def _assert_registers(code: str, fn_name: str):
 
 def test_custom_tool_name_plus_code_full_def():
     """{name, description, code=<full def>} — the shape callers/tests send."""
-    code = generate_mcp_server_code(server_name="t", tools=[{
-        "name": "get_canary",
-        "description": "Returns the canary token",
-        "code": 'def get_canary() -> str:\n    """Return it."""\n    return "CANARY-Z"',
-    }])
+    code = generate_mcp_server_code(
+        server_name="t",
+        tools=[
+            {
+                "name": "get_canary",
+                "description": "Returns the canary token",
+                "code": 'def get_canary() -> str:\n    """Return it."""\n    return "CANARY-Z"',
+            }
+        ],
+    )
     _assert_registers(code, "get_canary")
     assert "CANARY-Z" in code
     assert "no tools" not in code  # sanity
@@ -57,21 +62,31 @@ def test_custom_tool_name_plus_code_full_def():
 
 def test_custom_tool_toolname_plus_implementation_body():
     """Legacy shape {toolName, implementation=<body>} still works."""
-    code = generate_mcp_server_code(server_name="t", tools=[{
-        "toolName": "do_thing",
-        "description": "does a thing",
-        "implementation": "return 'done'",
-    }])
+    code = generate_mcp_server_code(
+        server_name="t",
+        tools=[
+            {
+                "toolName": "do_thing",
+                "description": "does a thing",
+                "implementation": "return 'done'",
+            }
+        ],
+    )
     _assert_registers(code, "do_thing")
     assert "return 'done'" in code
 
 
 def test_custom_tool_name_plus_code_body_only():
     """{name, code=<body, no def>} — code treated as the function body."""
-    code = generate_mcp_server_code(server_name="t", tools=[{
-        "name": "calc",
-        "code": "return str(2 + 2)",
-    }])
+    code = generate_mcp_server_code(
+        server_name="t",
+        tools=[
+            {
+                "name": "calc",
+                "code": "return str(2 + 2)",
+            }
+        ],
+    )
     _assert_registers(code, "calc")
 
 

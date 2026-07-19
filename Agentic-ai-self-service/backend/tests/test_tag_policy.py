@@ -6,22 +6,21 @@ enforcement, precedence (supplied > profile > default), and platform seeding.
 
 from __future__ import annotations
 
-from typing import Iterator
+from collections.abc import Iterator
 
 import boto3
 import pytest
 
 moto = pytest.importorskip("moto")
-from moto import mock_aws  # noqa: E402
-
 from app.services import tag_policy_store as tps_mod  # noqa: E402
 from app.services.tag_policy_store import (  # noqa: E402
     DEFAULT_ORG_ID,
     TagPolicy,
-    TagProfile,
     TagPolicyStore,
+    TagProfile,
     TagResolutionError,
 )
+from moto import mock_aws  # noqa: E402
 
 TABLE = "TagPolicy"
 ORG = DEFAULT_ORG_ID

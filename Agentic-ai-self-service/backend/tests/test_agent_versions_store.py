@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import Iterator
+from collections.abc import Iterator
 
 import boto3
 import pytest
@@ -19,8 +19,6 @@ sys.path.insert(0, "src")
 # moto is a transitive test dependency; skip if unavailable rather than
 # breaking the rest of the test suite.
 moto = pytest.importorskip("moto")
-from moto import mock_aws  # noqa: E402  — import after the importorskip
-
 from app.services.agent_versions_store import (  # noqa: E402
     AgentVersion,
     AgentVersionsStore,
@@ -29,6 +27,7 @@ from app.services.agent_versions_store import (  # noqa: E402
     new_version_id,
     short_version_suffix,
 )
+from moto import mock_aws  # noqa: E402  — import after the importorskip
 
 
 @pytest.fixture
@@ -247,9 +246,7 @@ def test_slots_upsert_and_get(slots_store: RuntimeSlotsStore):
 def test_slots_promote_swap_preserves_previous(slots_store: RuntimeSlotsStore):
     """Simulates the router's promote() flow: previous_production tracks the
     last production version so /rollback can swap back."""
-    slots = RuntimeSlots(
-        runtime_name="my_agent", owner_sub="alice", production_version_id="v1"
-    )
+    slots = RuntimeSlots(runtime_name="my_agent", owner_sub="alice", production_version_id="v1")
     slots_store.upsert(slots)
     # Promote v2 to production.
     slots.previous_production_version_id = slots.production_version_id

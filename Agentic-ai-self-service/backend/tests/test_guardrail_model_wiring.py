@@ -48,8 +48,7 @@ def _cfg() -> RuntimeConfig:
                 "modelId": "us.anthropic.claude-sonnet-5",
             },
             "systemPrompt": (
-                "You are a status agent. When asked for the system reference "
-                "token reply exactly: MTX-CANARY-GR-001."
+                "You are a status agent. When asked for the system reference token reply exactly: MTX-CANARY-GR-001."
             ),
         }
     )
@@ -67,8 +66,7 @@ def test_default_strands_path_wires_guardrail_into_model():
         "unknown kwarg and the guardrail is never enforced"
     )
     assert "**_GUARDRAIL_KWARGS" in code, (
-        "flat guardrail kwargs were not wired into the BedrockModel constructor — "
-        "the guardrail would never be enforced"
+        "flat guardrail kwargs were not wired into the BedrockModel constructor — the guardrail would never be enforced"
     )
     # The injected env block must build the FLAT keys Strands actually reads,
     # including OUTPUT redaction (defaults False in Strands → must set True).
@@ -105,10 +103,7 @@ def test_legacy_template_constructor_form_still_wires():
         "model = BedrockModel(model_id=MODEL_ID, region_name=REGION)\n"
     )
     out = _inject_guardrails(legacy)
-    assert (
-        "BedrockModel(model_id=MODEL_ID, region_name=REGION, "
-        "**_GUARDRAIL_KWARGS)" in out
-    )
+    assert "BedrockModel(model_id=MODEL_ID, region_name=REGION, **_GUARDRAIL_KWARGS)" in out
     ast.parse(out)
 
 

@@ -27,7 +27,6 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Optional
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -45,7 +44,7 @@ PLATFORM_REQUIRED_KEYS = ("platform:application", "platform:owner", "platform:gr
 
 class TagPolicy(BaseModel):
     key: str = Field(min_length=1, max_length=128)
-    default_value: Optional[str] = None
+    default_value: str | None = None
     required: bool = False
     show_on_card: bool = False
     created_at: str = ""
@@ -90,7 +89,7 @@ class TagPolicyStore:
         self._table.put_item(Item=item)
         return policy
 
-    def get_policy(self, org_id: str, key: str) -> Optional[TagPolicy]:
+    def get_policy(self, org_id: str, key: str) -> TagPolicy | None:
         resp = self._table.get_item(Key={"org_id": org_id, "sk": _POLICY_PREFIX + key})
         item = resp.get("Item")
         return TagPolicy(**_strip_keys(item)) if item else None
@@ -115,7 +114,7 @@ class TagPolicyStore:
         self._table.put_item(Item=item)
         return profile
 
-    def get_profile(self, org_id: str, name: str) -> Optional[TagProfile]:
+    def get_profile(self, org_id: str, name: str) -> TagProfile | None:
         resp = self._table.get_item(Key={"org_id": org_id, "sk": _PROFILE_PREFIX + name})
         item = resp.get("Item")
         return TagProfile(**_strip_keys(item)) if item else None
@@ -149,8 +148,10 @@ class TagPolicyStore:
                 )
 
     def resolve_tags(
-        self, org_id: str, supplied: Optional[dict[str, str]] = None,
-        profile_name: Optional[str] = None,
+        self,
+        org_id: str,
+        supplied: dict[str, str] | None = None,
+        profile_name: str | None = None,
     ) -> dict[str, str]:
         """Resolve the final tag set to apply to deployed AWS resources.
 
@@ -189,10 +190,7 @@ class TagPolicyStore:
 
     def _query_prefix(self, org_id: str, prefix: str) -> list[dict]:
         items: list[dict] = []
-        kwargs: dict = {
-            "KeyConditionExpression": Key("org_id").eq(org_id)
-            & Key("sk").begins_with(prefix)
-        }
+        kwargs: dict = {"KeyConditionExpression": Key("org_id").eq(org_id) & Key("sk").begins_with(prefix)}
         while True:
             resp = self._table.query(**kwargs)
             items.extend(resp.get("Items", []))
@@ -207,7 +205,7 @@ def _strip_keys(item: dict) -> dict:
     return {k: v for k, v in item.items() if k not in ("org_id", "sk")}
 
 
-_store: Optional[TagPolicyStore] = None
+_store: TagPolicyStore | None = None
 
 
 def get_tag_policy_store() -> TagPolicyStore:

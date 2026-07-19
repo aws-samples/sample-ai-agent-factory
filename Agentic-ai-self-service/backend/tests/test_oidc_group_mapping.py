@@ -11,16 +11,14 @@ import sys
 
 sys.path.insert(0, "src")
 
-from app.services.auth import extract_cognito_groups, _parse_group_claim  # noqa: E402
+from app.services.auth import _parse_group_claim, extract_cognito_groups  # noqa: E402
 
 
 class _Req:
     """Minimal Request stand-in carrying an authorizer-claims scope."""
 
     def __init__(self, claims: dict):
-        self.scope = {
-            "aws.event": {"requestContext": {"authorizer": {"jwt": {"claims": claims}}}}
-        }
+        self.scope = {"aws.event": {"requestContext": {"authorizer": {"jwt": {"claims": claims}}}}}
 
 
 def test_parse_group_claim_shapes():

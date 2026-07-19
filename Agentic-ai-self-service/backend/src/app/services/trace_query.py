@@ -15,10 +15,8 @@ tree — no AWS in the hot path.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
-from typing import Optional
 
 import boto3
 
@@ -48,13 +46,15 @@ def build_waterfall(spans: list[dict]) -> dict:
     for s in spans:
         start = int(s.get("startTimeUnixNano") or 0)
         end = int(s.get("endTimeUnixNano") or 0)
-        norm.append({
-            "span_id": s.get("spanId") or "",
-            "parent_span_id": s.get("parentSpanId") or "",
-            "name": s.get("name") or "span",
-            "_start": start,
-            "_end": end,
-        })
+        norm.append(
+            {
+                "span_id": s.get("spanId") or "",
+                "parent_span_id": s.get("parentSpanId") or "",
+                "name": s.get("name") or "span",
+                "_start": start,
+                "_end": end,
+            }
+        )
     if not norm:
         return {"trace_id": None, "start_ms": 0, "total_ms": 0, "spans": []}
 
@@ -84,8 +84,7 @@ def build_waterfall(spans: list[dict]) -> dict:
             "duration_ms": node["duration_ms"],
             "depth": depth,
         }
-        out["children"] = [_emit(c, depth + 1) for c in
-                           sorted(node["children"], key=lambda x: x["offset_ms"])]
+        out["children"] = [_emit(c, depth + 1) for c in sorted(node["children"], key=lambda x: x["offset_ms"])]
         return out
 
     ordered = [_emit(r, 0) for r in sorted(roots, key=lambda x: x["offset_ms"])]
@@ -99,8 +98,13 @@ def build_waterfall(spans: list[dict]) -> dict:
 
 
 def fetch_trace_waterfall(
-    runtime_id: str, from_ts: int, to_ts: int, region: str,
-    *, trace_id: Optional[str] = None, poll_seconds: float = 10.0,
+    runtime_id: str,
+    from_ts: int,
+    to_ts: int,
+    region: str,
+    *,
+    trace_id: str | None = None,
+    poll_seconds: float = 10.0,
 ) -> dict:
     """Query the runtime's OTEL spans in [from_ts, to_ts] and build a waterfall.
 
@@ -110,11 +114,17 @@ def fetch_trace_waterfall(
     """
     logs_client = boto3.client("logs", region_name=region)
     log_group = log_group_for_runtime(runtime_id)
-    empty = {"trace_id": trace_id, "start_ms": 0, "total_ms": 0, "spans": [],
-             "log_group_name": log_group, "query_status": "Empty"}
+    empty = {
+        "trace_id": trace_id,
+        "start_ms": 0,
+        "total_ms": 0,
+        "spans": [],
+        "log_group_name": log_group,
+        "query_status": "Empty",
+    }
 
     # Pull span records: OTLP spans are logged with a spanId + startTimeUnixNano.
-    filt = '| filter ispresent(spanId) and ispresent(startTimeUnixNano)'
+    filt = "| filter ispresent(spanId) and ispresent(startTimeUnixNano)"
     if trace_id:
         filt += f' and traceId = "{trace_id}"'
     query_string = (
@@ -127,8 +137,10 @@ def fetch_trace_waterfall(
 
     try:
         start_resp = logs_client.start_query(
-            logGroupName=log_group, startTime=int(from_ts),
-            endTime=int(to_ts), queryString=query_string,
+            logGroupName=log_group,
+            startTime=int(from_ts),
+            endTime=int(to_ts),
+            queryString=query_string,
         )
         query_id = start_resp.get("queryId")
         if not query_id:
@@ -153,8 +165,8 @@ def fetch_trace_waterfall(
     if status == "Running":
         try:
             logs_client.stop_query(queryId=query_id)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — best-effort cancel; partial results are still returned
+            logger.debug("stop_query %s failed", query_id, exc_info=True)
 
     result = build_waterfall(rows)
     result["log_group_name"] = log_group

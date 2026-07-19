@@ -16,7 +16,6 @@ import os
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
 
 import boto3
 from botocore.exceptions import ClientError
@@ -48,6 +47,7 @@ def _safe_owner_sub(owner_sub: str) -> str:
     """
     return _OWNER_SUB_SAFE_RE.sub("-", owner_sub)[:64] or "anon"
 
+
 router = APIRouter()
 
 
@@ -55,10 +55,10 @@ class StoreCredentialsRequest(BaseModel):
     """Request body for POST /api/observability/credentials."""
 
     provider: str = Field(min_length=1, max_length=64)
-    public_key: Optional[str] = Field(default=None, max_length=512)
-    secret_key: Optional[str] = Field(default=None, max_length=512)
-    api_key: Optional[str] = Field(default=None, max_length=512)
-    header_value: Optional[str] = Field(default=None, max_length=4096)
+    public_key: str | None = Field(default=None, max_length=512)
+    secret_key: str | None = Field(default=None, max_length=512)
+    api_key: str | None = Field(default=None, max_length=512)
+    header_value: str | None = Field(default=None, max_length=4096)
 
 
 class StoreCredentialsResponse(BaseModel):
@@ -82,9 +82,7 @@ def _build_header(req: StoreCredentialsRequest) -> str:
         return f"Authorization=Basic {token}"
     if req.provider == "custom":
         if not req.header_value:
-            raise HTTPException(
-                status_code=400, detail="Custom provider requires header_value."
-            )
+            raise HTTPException(status_code=400, detail="Custom provider requires header_value.")
         return req.header_value
     raise HTTPException(status_code=400, detail=f"Unknown provider: {req.provider}")
 
@@ -98,12 +96,16 @@ class PlatformDefaultsResponse(BaseModel):
     """
 
     enabled: bool = False
-    endpoint: Optional[str] = None
-    sample_rate: Optional[float] = None
-    service_name_prefix: Optional[str] = None
+    endpoint: str | None = None
+    sample_rate: float | None = None
+    service_name_prefix: str | None = None
 
 
-@router.get("/observability/platform-defaults", response_model=PlatformDefaultsResponse, dependencies=[Depends(require_scopes("observability:read"))])
+@router.get(
+    "/observability/platform-defaults",
+    response_model=PlatformDefaultsResponse,
+    dependencies=[Depends(require_scopes("observability:read"))],
+)
 def get_platform_defaults() -> PlatformDefaultsResponse:
     """Return platform-level OTEL defaults so the UI can show them as locked.
 
@@ -127,7 +129,11 @@ def get_platform_defaults() -> PlatformDefaultsResponse:
     )
 
 
-@router.post("/observability/credentials", response_model=StoreCredentialsResponse, dependencies=[Depends(require_scopes("observability:write"))])
+@router.post(
+    "/observability/credentials",
+    response_model=StoreCredentialsResponse,
+    dependencies=[Depends(require_scopes("observability:write"))],
+)
 def store_credentials(
     request: StoreCredentialsRequest,
     raw_request: Request,
@@ -150,9 +156,7 @@ def store_credentials(
     region = os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1"))
     owner_sub = get_caller_sub(raw_request)
     safe_owner = _safe_owner_sub(owner_sub)
-    secret_name = (
-        f"agentcore-otel/{request.provider}/{safe_owner}-{uuid.uuid4().hex[:12]}"
-    )
+    secret_name = f"agentcore-otel/{request.provider}/{safe_owner}-{uuid.uuid4().hex[:12]}"
     created_at_iso = datetime.now(timezone.utc).isoformat()
 
     sm = boto3.client("secretsmanager", region_name=region)
@@ -173,7 +177,7 @@ def store_credentials(
         logger.exception("Failed to store OTEL credentials in Secrets Manager")
         raise HTTPException(
             status_code=500,
-            detail=f"Could not store credentials: {e.response.get('Error', {}).get('Message', str(e))}",
+            detail="Could not store credentials",
         ) from e
 
     return StoreCredentialsResponse(secret_arn=resp["ARN"])

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Optional
 
 import boto3
 from pydantic import BaseModel, Field
@@ -42,7 +41,7 @@ class VpcProfileStore:
         self._table.put_item(Item=item)
         return profile
 
-    def get(self, org_id: str, name: str) -> Optional[VpcProfile]:
+    def get(self, org_id: str, name: str) -> VpcProfile | None:
         item = self._table.get_item(Key={"org_id": org_id, "sk": _VPC_PREFIX + name}).get("Item")
         return _to_profile(item) if item else None
 
@@ -79,7 +78,7 @@ def validate_profile(profile: VpcProfile) -> None:
             raise ValueError(f"Invalid security group id: {g}")
 
 
-def resolve_vpc_config(org_id: str, name: str, table_name: str, region: str) -> Optional[dict]:
+def resolve_vpc_config(org_id: str, name: str, table_name: str, region: str) -> dict | None:
     """Resolve a profile name to a vpc_config dict for the deployer, or None."""
     if not name or not table_name:
         return None

@@ -34,8 +34,6 @@ No new DDB table, no new IAM: the shared runtime exec role already grants
 ``bedrock:Retrieve`` + ``bedrock:InvokeModel*`` / ``Converse*`` on ``*``.
 """
 
-from typing import Optional
-
 # Public mapping: strategy key → generated tool function name.
 STRATEGY_TOOL_NAMES: dict[str, str] = {
     "multi_hop": "retrieve_multi_hop",
@@ -264,7 +262,8 @@ def retrieve_hybrid(query: str, alpha: float = 0.5, num_results: int = 8) -> str
 # reranked
 # ---------------------------------------------------------------------------
 
-_RERANKED_SRC = '''
+_RERANKED_SRC = (
+    '''
 
 @tool
 def retrieve_reranked(query: str, top_n: int = 20, return_n: int = 5) -> str:
@@ -294,7 +293,9 @@ def retrieve_reranked(query: str, top_n: int = 20, return_n: int = 5) -> str:
     if not candidates:
         return _rag_json.dumps({"query": query, "strategy": "reranked", "results": [], "count": 0})
 
-    judge_model = _rag_os.environ.get("RERANK_JUDGE_MODEL_ID", "''' + _DEFAULT_JUDGE_MODEL_ID + '''")
+    judge_model = _rag_os.environ.get("RERANK_JUDGE_MODEL_ID", "'''
+    + _DEFAULT_JUDGE_MODEL_ID
+    + """")
 
     numbered = "\\n\\n".join(
         "[%d] %s" % (i, (c["text"] or "")[:1000]) for i, c in enumerate(candidates)
@@ -348,7 +349,8 @@ def retrieve_reranked(query: str, top_n: int = 20, return_n: int = 5) -> str:
         "results": final,
         "count": len(final),
     })
-'''
+"""
+)
 
 
 _STRATEGY_SOURCES: dict[str, str] = {
@@ -358,20 +360,20 @@ _STRATEGY_SOURCES: dict[str, str] = {
 }
 
 
-def _normalize_strategy(strategy: Optional[str]) -> str:
+def _normalize_strategy(strategy: str | None) -> str:
     """Normalize a raw strategy value to a known key (or 'simple')."""
     s = (strategy or "simple").strip().lower()
     return s if s in STRATEGY_TOOL_NAMES else "simple"
 
 
-def agentic_rag_tool_name(strategy: Optional[str]) -> Optional[str]:
+def agentic_rag_tool_name(strategy: str | None) -> str | None:
     """Return the generated tool function name for a strategy, or None for
     'simple'/absent/unknown (caller keeps the default retrieve_from_kb)."""
     s = _normalize_strategy(strategy)
     return STRATEGY_TOOL_NAMES.get(s)
 
 
-def agentic_rag_tool_source(strategy: Optional[str]) -> str:
+def agentic_rag_tool_source(strategy: str | None) -> str:
     """Return a self-contained @tool source block for the given strategy.
 
     Returns the empty string for 'simple'/absent/unknown strategies (the caller

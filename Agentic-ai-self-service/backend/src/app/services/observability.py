@@ -19,7 +19,6 @@ import logging
 import os
 import re
 from functools import lru_cache
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +44,11 @@ def _validate_user_otel_secret_arn(arn: str) -> str:
     ARNs — platform_defaults come from SSM and are operator-managed.
     """
     if not isinstance(arn, str) or not _USER_OTEL_SECRET_ARN_RE.match(arn):
-        raise ValueError(
-            "auth_header_secret_arn must be in the agentcore-otel/ namespace"
-        )
+        raise ValueError("auth_header_secret_arn must be in the agentcore-otel/ namespace")
     return arn
 
 
-def _redact_arn(arn: Optional[str]) -> str:
+def _redact_arn(arn: str | None) -> str:
     """Redact a Secrets Manager ARN for logging.
 
     The ARN is a pointer, not credential material, but it carries the AWS
@@ -65,7 +62,7 @@ def _redact_arn(arn: Optional[str]) -> str:
     return "<redacted-secrets-manager-arn>"
 
 
-def _redact_endpoint(endpoint: Optional[str]) -> str:
+def _redact_endpoint(endpoint: str | None) -> str:
     """Redact OTLP endpoint values for logging."""
     if not endpoint:
         return "<none>"
@@ -112,7 +109,7 @@ _AGENTCORE_NATIVE_OBSERVABILITY_ENV: dict[str, str] = {
 
 
 @lru_cache(maxsize=1)
-def get_platform_observability_defaults() -> Optional[dict]:
+def get_platform_observability_defaults() -> dict | None:
     """Read platform-level OTEL defaults from SSM Parameter Store.
 
     Returns:
@@ -136,6 +133,7 @@ def get_platform_observability_defaults() -> Optional[dict]:
 
     try:
         import boto3
+
         ssm = boto3.client("ssm", region_name=region)
         resp = ssm.get_parameters_by_path(Path=prefix, Recursive=False)
     except Exception as e:
@@ -173,12 +171,12 @@ def _resource_attributes_string(attrs: dict[str, str], deployment_id: str) -> st
 
 
 def build_otel_env_vars(
-    observability: Optional[dict],
+    observability: dict | None,
     *,
     runtime_name: str,
     deployment_id: str = "",
     enable_otel_legacy: bool = False,
-    platform_defaults: Optional[dict] = None,
+    platform_defaults: dict | None = None,
 ) -> dict[str, str]:
     """Translate an ObservabilityConfig dict into runtime env vars.
 
@@ -217,9 +215,11 @@ def build_otel_env_vars(
             # silently passes through this code path.
             _validate_user_otel_secret_arn(canvas_secret)
         canvas_sample = obs.get("sample_rate") if "sample_rate" in obs else obs.get("sampleRate")
-        if (canvas_endpoint and canvas_endpoint != plat.get("otlp_endpoint")) \
-                or (canvas_secret and canvas_secret != plat.get("auth_header_secret_arn")) \
-                or (canvas_sample is not None and canvas_sample != plat.get("sample_rate", 1.0)):
+        if (
+            (canvas_endpoint and canvas_endpoint != plat.get("otlp_endpoint"))
+            or (canvas_secret and canvas_secret != plat.get("auth_header_secret_arn"))
+            or (canvas_sample is not None and canvas_sample != plat.get("sample_rate", 1.0))
+        ):
             # Both endpoint and ARN are redacted before logging — the endpoint
             # is operator-controlled but can carry tenant/project hints, and
             # the ARN carries account ID + secret name. Operators only need
@@ -267,9 +267,7 @@ def build_otel_env_vars(
 
     provider = obs.get("provider", "langfuse")
     caller_endpoint = obs.get("otlp_endpoint") or obs.get("otlpEndpoint") or ""
-    caller_secret = (
-        obs.get("auth_header_secret_arn") or obs.get("authHeaderSecretArn") or ""
-    )
+    caller_secret = obs.get("auth_header_secret_arn") or obs.get("authHeaderSecretArn") or ""
     caller_headers = obs.get("extra_headers") or obs.get("extraHeaders") or {}
 
     # P-PLAT-010 cost-rollup gap (Bug 194): a 3rd-party provider default
@@ -304,8 +302,7 @@ def build_otel_env_vars(
 
     protocol = obs.get("otlp_protocol") or obs.get("otlpProtocol", "http/protobuf")
     service_name = obs.get("service_name") or obs.get("serviceName") or runtime_name
-    sample_rate = obs.get("sample_rate") if "sample_rate" in obs \
-        else obs.get("sampleRate", 1.0)
+    sample_rate = obs.get("sample_rate") if "sample_rate" in obs else obs.get("sampleRate", 1.0)
     resource_attrs = obs.get("resource_attributes") or obs.get("resourceAttributes") or {}
     secret_arn = caller_secret
     if secret_arn and not plat:
@@ -341,8 +338,6 @@ def build_otel_env_vars(
     if extra_headers:
         # Non-secret headers go in directly; the prologue merges them with the
         # resolved auth header.
-        env["OTEL_EXPORTER_OTLP_EXTRA_HEADERS"] = ",".join(
-            f"{k}={v}" for k, v in extra_headers.items() if v
-        )
+        env["OTEL_EXPORTER_OTLP_EXTRA_HEADERS"] = ",".join(f"{k}={v}" for k, v in extra_headers.items() if v)
 
     return env

@@ -4,10 +4,9 @@ Provides CRUD operations and GSI queries for ``FlowSubmission`` records.
 Follows the same patterns as ``deployment_state_store.py``.
 """
 
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional
-import logging
 
 import boto3
 
@@ -33,7 +32,7 @@ def _put_item(table, item: dict) -> dict:
     return table.put_item(Item=item)
 
 
-def _get_item(table, key: dict) -> Optional[dict]:
+def _get_item(table, key: dict) -> dict | None:
     response = table.get_item(Key=key)
     return response.get("Item")
 
@@ -43,8 +42,8 @@ def _update_item(
     key: dict,
     update_expr: str,
     expr_values: dict,
-    expr_names: Optional[dict] = None,
-    condition_expr: Optional[str] = None,
+    expr_names: dict | None = None,
+    condition_expr: str | None = None,
 ) -> dict:
     kwargs = {
         "Key": key,
@@ -130,13 +129,13 @@ class FlowSubmissionStore:
         )
         return submission
 
-    def get(self, submission_id: str) -> Optional[FlowSubmission]:
+    def get(self, submission_id: str) -> FlowSubmission | None:
         item = _get_item(self._table, {"submission_id": submission_id})
         if item is None:
             return None
         return deserialize_flow_submission(item)
 
-    def update(self, submission_id: str, updates: dict) -> Optional[FlowSubmission]:
+    def update(self, submission_id: str, updates: dict) -> FlowSubmission | None:
         existing = self.get(submission_id)
         if existing is None:
             return None
@@ -168,7 +167,7 @@ class FlowSubmissionStore:
 
     def update_with_condition(
         self, submission_id: str, updates: dict, expected_status: ToolStatus
-    ) -> Optional[FlowSubmission]:
+    ) -> FlowSubmission | None:
         """Update only if current status matches expected_status."""
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
 

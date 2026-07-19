@@ -16,7 +16,6 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from app.services import harness_deployer
 from app.services.harness_deployer import (
     build_harness_tools,
@@ -26,7 +25,7 @@ from app.services.harness_deployer import (
     pad_session_id,
     sanitize_harness_name,
 )
-
+from botocore.exceptions import ClientError
 
 # ---------------------------------------------------------------------------
 # sanitize_harness_name — regex [a-zA-Z][a-zA-Z0-9_]{0,39}
@@ -36,11 +35,11 @@ from app.services.harness_deployer import (
 @pytest.mark.parametrize(
     "raw",
     [
-        "my-agent-bot",          # hyphens -> underscores
-        "weather agent!",        # spaces + punctuation
-        "123leadingdigit",       # leading digit -> prefixed
-        "a" * 80,                # over-length
-        "Agent.With.Dots",       # dots
+        "my-agent-bot",  # hyphens -> underscores
+        "weather agent!",  # spaces + punctuation
+        "123leadingdigit",  # leading digit -> prefixed
+        "a" * 80,  # over-length
+        "Agent.With.Dots",  # dots
     ],
 )
 def test_sanitize_harness_name_enforces_regex(raw):
@@ -203,11 +202,11 @@ def test_destroy_harness_idempotent_on_notfound():
     ctrl = MagicMock()
     # _resolve_harness_identifier: get_harness succeeds so the id is used as-is.
     ctrl.get_harness.return_value = {"harness": {"harnessId": "h-gone", "status": "READY"}}
-    ctrl.delete_harness.side_effect = Exception("ResourceNotFoundException: not found")
+    ctrl.delete_harness.side_effect = ClientError(
+        {"Error": {"Code": "ResourceNotFoundException", "Message": "not found"}}, "DeleteHarness"
+    )
 
-    with patch.object(
-        harness_deployer, "_create_agentcore_control_client", return_value=ctrl
-    ):
+    with patch.object(harness_deployer, "_create_agentcore_control_client", return_value=ctrl):
         result = destroy_harness("h-gone", "us-west-2")
 
     assert result["success"] is True
@@ -219,9 +218,7 @@ def test_destroy_harness_success():
     ctrl.get_harness.return_value = {"harness": {"harnessId": "h-1", "status": "READY"}}
     ctrl.delete_harness.return_value = {}
 
-    with patch.object(
-        harness_deployer, "_create_agentcore_control_client", return_value=ctrl
-    ):
+    with patch.object(harness_deployer, "_create_agentcore_control_client", return_value=ctrl):
         result = destroy_harness("h-1", "us-west-2")
 
     assert result["success"] is True
@@ -265,9 +262,7 @@ def test_invoke_harness_collects_text_and_stop_reason():
     # session id was padded to >= 33 before invoke.
     _, kwargs = data.invoke_harness.call_args
     assert len(kwargs["runtimeSessionId"]) >= 33
-    assert kwargs["messages"] == [
-        {"role": "user", "content": [{"text": "What is the answer?"}]}
-    ]
+    assert kwargs["messages"] == [{"role": "user", "content": [{"text": "What is the answer?"}]}]
 
 
 def test_invoke_harness_surfaces_runtime_client_error():
@@ -304,6 +299,7 @@ def test_invoke_harness_collects_tool_calls():
 
 def test_harness_name_from_id_recovers_name():
     from app.services.harness_deployer import _harness_name_from_id
+
     assert _harness_name_from_id("cust_harness_conn_50919ca4-md7qbmyArB") == "cust_harness_conn_50919ca4"
     assert _harness_name_from_id("acflows_smoke2-MGG5HVlR1U") == "acflows_smoke2"
 
@@ -312,14 +308,15 @@ def test_destroy_harness_deletes_outbound_provider():
     """Teardown must delete the conventionally-named harness->gateway outbound
     OAuth provider even without a persisted harness_result (live-caught orphan)."""
     from unittest.mock import MagicMock, patch
+
     from app.services import harness_deployer as hd
+
     ctrl = MagicMock()
     ctrl.get_harness.return_value = {"harness": {"status": "READY"}}
     with patch.object(hd, "_create_agentcore_control_client", return_value=ctrl):
         res = hd.destroy_harness("cust_harness_conn_50919ca4-md7qbmyArB", "us-east-1")
     ctrl.delete_harness.assert_called_once()
-    ctrl.delete_oauth2_credential_provider.assert_called_once_with(
-        name="harness-gw-cust_harness_conn_50919ca4")
+    ctrl.delete_oauth2_credential_provider.assert_called_once_with(name="harness-gw-cust_harness_conn_50919ca4")
     assert res["success"]
 
 
@@ -329,7 +326,9 @@ def test_destroy_harness_does_not_delete_managed_backing_runtime():
     delete_agent_runtime on it (that raises 'managed by harness ... Use
     DeleteHarness')."""
     from unittest.mock import MagicMock, patch
+
     from app.services import harness_deployer as hd
+
     ctrl = MagicMock()
     ctrl.get_harness.return_value = {"harness": {"status": "READY"}}
     with patch.object(hd, "_create_agentcore_control_client", return_value=ctrl):
@@ -343,11 +342,13 @@ def test_destroy_harness_does_not_delete_managed_backing_runtime():
 # Least-privilege harness exec role (Holmes IAM findings)
 # ---------------------------------------------------------------------------
 
+
 def test_harness_role_scopes_model_and_resources(monkeypatch):
     """create_harness_iam_role scopes InvokeModel to the model family and the
     memory/gateway agentcore actions to the connected ARNs (not Resource:*)."""
     import json
     from unittest.mock import MagicMock
+
     from app.services import harness_deployer as hd
 
     captured = {}
@@ -356,10 +357,12 @@ def test_harness_role_scopes_model_and_resources(monkeypatch):
 
     def _put(**kw):
         captured["policy"] = json.loads(kw["PolicyDocument"])
+
     iam.put_role_policy.side_effect = _put
 
     hd.create_harness_iam_role(
-        iam, "AgentCoreHarness-x",
+        iam,
+        "AgentCoreHarness-x",
         model_id="us.anthropic.claude-sonnet-5",
         memory_arn="arn:aws:bedrock-agentcore:us-east-1:1:memory/m-1",
         gateway_arn="arn:aws:bedrock-agentcore:us-east-1:1:gateway/g-1",
@@ -372,14 +375,8 @@ def test_harness_role_scopes_model_and_resources(monkeypatch):
     # InvokeModelWithResponseStream is AccessDenied on the profile (Bug 146).
     model_res = stmts["BedrockModelAccess"]["Resource"]
     assert isinstance(model_res, list)
-    assert any(
-        r.startswith("arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet")
-        for r in model_res
-    )
-    assert any(
-        "inference-profile/us.anthropic.claude-sonnet-5" in r
-        for r in model_res
-    )
+    assert any(r.startswith("arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet") for r in model_res)
+    assert any("inference-profile/us.anthropic.claude-sonnet-5" in r for r in model_res)
     # Memory/gateway statement scoped to the connected ARNs, not "*"
     res = stmts["AgentCoreMemoryAndGateway"]["Resource"]
     assert "arn:aws:bedrock-agentcore:us-east-1:1:memory/m-1" in res
@@ -390,11 +387,16 @@ def test_harness_role_scopes_model_and_resources(monkeypatch):
     assert "bedrock-agentcore:GetResourceOauth2Token" in stmts["AgentCoreAccountLevel"]["Action"]
 
 
-def test_harness_role_falls_back_to_wildcard_without_arns():
-    """When no model/memory/gateway is known the role still works (Resource:*)."""
+def test_harness_role_omits_scoped_statement_without_arns():
+    """When no memory/gateway is connected the scoped statement is OMITTED
+    (no Resource:* fallback — Holmes IAM HIGH). A bare harness still works via
+    the harness-owned-memory + account-level statements. Model falls back to *
+    only because the model is unknown (user-selectable at invoke time)."""
     import json
     from unittest.mock import MagicMock
+
     from app.services import harness_deployer as hd
+
     captured = {}
     iam = MagicMock()
     iam.create_role.return_value = {"Role": {"Arn": "arn:aws:iam::1:role/AgentCoreHarness-y"}}
@@ -402,4 +404,25 @@ def test_harness_role_falls_back_to_wildcard_without_arns():
     hd.create_harness_iam_role(iam, "AgentCoreHarness-y")
     stmts = {s["Sid"]: s for s in captured["policy"]["Statement"]}
     assert stmts["BedrockModelAccess"]["Resource"] == "*"
-    assert stmts["AgentCoreMemoryAndGateway"]["Resource"] == "*"
+    assert "AgentCoreMemoryAndGateway" not in stmts
+    # The bare harness keeps working through the dedicated statements.
+    assert "AgentCoreHarnessOwnedMemory" in stmts
+    assert stmts["AgentCoreAccountLevel"]["Resource"] == "*"
+
+
+def test_harness_role_logs_scoped_to_agentcore_log_groups():
+    """CloudWatch Logs statement is scoped to /aws/bedrock-agentcore/* (not *)."""
+    import json
+    from unittest.mock import MagicMock
+
+    from app.services import harness_deployer as hd
+
+    captured = {}
+    iam = MagicMock()
+    iam.create_role.return_value = {"Role": {"Arn": "arn:aws:iam::1:role/AgentCoreHarness-z"}}
+    iam.put_role_policy.side_effect = lambda **kw: captured.update(policy=json.loads(kw["PolicyDocument"]))
+    hd.create_harness_iam_role(iam, "AgentCoreHarness-z")
+    stmts = {s["Sid"]: s for s in captured["policy"]["Statement"]}
+    logs_res = stmts["CloudWatchLogs"]["Resource"]
+    assert logs_res != "*"
+    assert any("/aws/bedrock-agentcore/" in r for r in logs_res)

@@ -7,15 +7,14 @@ settings table (reuses the tag-policy table shape).
 
 from __future__ import annotations
 
-from typing import Iterator
+from collections.abc import Iterator
 
 import boto3
 import pytest
 
 moto = pytest.importorskip("moto")
-from moto import mock_aws  # noqa: E402
-
 from app.services import deploy_target as dt  # noqa: E402
+from moto import mock_aws  # noqa: E402
 
 
 def _create_table() -> None:

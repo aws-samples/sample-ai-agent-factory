@@ -9,16 +9,13 @@ References:
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import json
 import logging
 import os
 import time
 import uuid
 
-import boto3
-
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
@@ -327,23 +324,41 @@ def handler(event: dict, context) -> dict:
                 create_params["memoryStrategies"] = memory_strategies
 
             memory_id = None
-            try:
-                resp = agentcore_ctrl.create_memory(**create_params)
-                resp_keys = [k for k in resp.keys() if k != "ResponseMetadata"]
-                logger.warning("create_memory response keys: %s", resp_keys)
-                memory_id = _extract_memory_id(resp)
-                logger.warning("Created memory, extracted id: '%s'", memory_id)
-            except Exception as e:
-                err_str = str(e).lower()
-                if "already exists" in err_str or "conflict" in err_str:
-                    logger.info("Memory '%s' already exists, looking it up again", memory_name)
-                    memory_id = _find_memory_by_name(agentcore_ctrl, memory_name)
-                    if not memory_id:
-                        raise RuntimeError(
-                            f"Memory '{memory_name}' already exists but could not be found via list_memories. "
-                            f"Delete the stuck memory from the AWS console and retry."
-                        ) from e
-                else:
+            # IAM role propagation to AgentCore's CreateMemory validator is
+            # eventually consistent: a role created seconds earlier can fail
+            # with "Please provide a role with a valid trust policy" even
+            # though the trust policy is correct. Under gateway+memory+
+            # observability deploys the 10s post-create sleep is not always
+            # enough (matrix-run finding, 2/3 repro). Retry with backoff
+            # instead of failing the whole deploy.
+            for attempt in range(5):
+                try:
+                    resp = agentcore_ctrl.create_memory(**create_params)
+                    resp_keys = [k for k in resp.keys() if k != "ResponseMetadata"]
+                    logger.warning("create_memory response keys: %s", resp_keys)
+                    memory_id = _extract_memory_id(resp)
+                    logger.warning("Created memory, extracted id: '%s'", memory_id)
+                    break
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if "already exists" in err_str or "conflict" in err_str:
+                        logger.info("Memory '%s' already exists, looking it up again", memory_name)
+                        memory_id = _find_memory_by_name(agentcore_ctrl, memory_name)
+                        if not memory_id:
+                            raise RuntimeError(
+                                f"Memory '{memory_name}' already exists but could not be found via list_memories. "
+                                f"Delete the stuck memory from the AWS console and retry."
+                            ) from e
+                        break
+                    if "trust policy" in err_str and attempt < 4:
+                        wait = 8 * (attempt + 1)
+                        logger.warning(
+                            "create_memory rejected role (IAM propagation lag), retry %d/4 in %ds",
+                            attempt + 1,
+                            wait,
+                        )
+                        time.sleep(wait)
+                        continue
                     raise
 
             if not memory_id:
@@ -385,11 +400,13 @@ def handler(event: dict, context) -> dict:
                 Key={"deployment_id": {"S": deployment_id}},
                 UpdateExpression="SET memory_result = :mr",
                 ExpressionAttributeValues={
-                    ":mr": {"M": {
-                        "success": {"BOOL": True},
-                        "memory_id": {"S": memory_id},
-                        "memory_name": {"S": memory_name},
-                    }},
+                    ":mr": {
+                        "M": {
+                            "success": {"BOOL": True},
+                            "memory_id": {"S": memory_id},
+                            "memory_name": {"S": memory_name},
+                        }
+                    },
                 },
             )
             logger.info("Persisted memory_result mid-flight for %s", deployment_id)

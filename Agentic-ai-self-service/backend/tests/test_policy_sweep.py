@@ -20,6 +20,7 @@ def _install_stub_deployment_handler(monkeypatch, pending, promote_results):
     class _Dep:
         def __init__(self, did):
             self._did = did
+
         def model_dump(self, mode="json"):  # noqa: ARG002
             return {"deployment_id": self._did, "policy_result": {"enforce_pending": {"x": 1}}}
 
@@ -41,10 +42,12 @@ def _install_stub_deployment_handler(monkeypatch, pending, promote_results):
 
 def test_sweep_promotes_each_pending(monkeypatch):
     calls = _install_stub_deployment_handler(
-        monkeypatch, pending=["d1", "d2", "d3"],
+        monkeypatch,
+        pending=["d1", "d2", "d3"],
         promote_results={"d1": True, "d2": False, "d3": True},
     )
     from app.step_handlers.policy_sweep_step import handler
+
     out = handler({"policy_sweep": True}, None)
     assert out == {"swept": 3, "promoted": 2, "failed": 0}
     assert calls["promoted"] == ["d1", "d2", "d3"]
@@ -57,6 +60,7 @@ def test_sweep_counts_failures_and_continues(monkeypatch):
         class _Dep:
             def __init__(self, did):
                 self._did = did
+
             def model_dump(self, mode="json"):  # noqa: ARG002
                 return {"deployment_id": self._did}
 
@@ -76,6 +80,7 @@ def test_sweep_counts_failures_and_continues(monkeypatch):
 
     _boom_store(monkeypatch)
     from app.step_handlers.policy_sweep_step import handler
+
     out = handler({"policy_sweep": True}, None)
     # d1 raised (failed), d2 promoted — the sweep does not abort on one failure.
     assert out["swept"] == 2
@@ -96,6 +101,7 @@ def test_sweep_handles_scan_failure(monkeypatch):
     monkeypatch.setitem(sys.modules, "app.deployment_handler", fake)
 
     from app.step_handlers.policy_sweep_step import handler
+
     out = handler({"policy_sweep": True}, None)
     assert out["error"] == "scan_failed"
     assert out["promoted"] == 0

@@ -10,7 +10,6 @@ Requirements: 5.5, 6.4
 import json
 import logging
 import os
-from typing import Optional
 
 import boto3
 import yaml
@@ -201,7 +200,7 @@ def add_tool_permissions(
         return {"success": False, "error": str(e)}
 
 
-def get_execution_role_name(deploy_dir: str) -> Optional[str]:
+def get_execution_role_name(deploy_dir: str) -> str | None:
     """Extract execution role name from agentcore YAML config.
 
     Reads ``.bedrock_agentcore.yaml`` in the deploy directory and
@@ -218,7 +217,7 @@ def get_execution_role_name(deploy_dir: str) -> Optional[str]:
         return None
 
     try:
-        with open(config_path, "r") as f:
+        with open(config_path) as f:
             config = yaml.safe_load(f)
     except Exception:
         return None

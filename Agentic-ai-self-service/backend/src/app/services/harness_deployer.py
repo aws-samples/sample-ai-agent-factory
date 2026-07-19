@@ -17,9 +17,10 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Optional
 
 import boto3
+
+from app.services.aws_errors import is_error
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +59,7 @@ def sanitize_harness_name(name: str) -> str:
     """
     from app.services.naming import sanitize_agentcore_name
 
-    return sanitize_agentcore_name(
-        name, style="underscore", max_len=40, prefix="h", fallback="agentcore_harness"
-    )
+    return sanitize_agentcore_name(name, style="underscore", max_len=40, prefix="h", fallback="agentcore_harness")
 
 
 def pad_session_id(session_id: str) -> str:
@@ -75,7 +74,7 @@ def pad_session_id(session_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _model_arn_pattern(model_id: str) -> Optional[str]:
+def _model_arn_pattern(model_id: str) -> str | None:
     """Best-effort Bedrock foundation-model ARN pattern from a model id.
 
     Scopes InvokeModel to the model FAMILY rather than ``*``. Bedrock model ids
@@ -102,7 +101,7 @@ def _model_arn_pattern(model_id: str) -> Optional[str]:
     return f"arn:aws:bedrock:*::foundation-model/{provider}.{family}*"
 
 
-def _model_resource_arns(model_id: str) -> Optional[list]:
+def _model_resource_arns(model_id: str) -> list | None:
     """Bedrock resources the exec role must allow for *model_id*.
 
     For a cross-region inference profile (id begins ``us.``/``eu.``/``apac.``/
@@ -136,9 +135,9 @@ def create_harness_iam_role(
     iam_client,
     role_name: str,
     *,
-    model_id: Optional[str] = None,
-    memory_arn: Optional[str] = None,
-    gateway_arn: Optional[str] = None,
+    model_id: str | None = None,
+    memory_arn: str | None = None,
+    gateway_arn: str | None = None,
 ) -> str:
     """Create or reuse an execution role the Harness can assume.
 
@@ -149,8 +148,10 @@ def create_harness_iam_role(
     Least-privilege (Holmes IAM findings): when *model_id* / *memory_arn* /
     *gateway_arn* are supplied the corresponding statements are scoped to those
     ARNs (model family for InvokeModel; the specific memory/gateway ARNs for the
-    agentcore actions) instead of ``Resource: "*"``. We fall back to ``*`` only
-    when an ARN is unavailable, so callers that don't pass them keep working.
+    agentcore actions). When NO memory/gateway is connected the scoped statement
+    is omitted entirely (no ``Resource: "*"`` fallback) — the harness-owned
+    default memory and account-level discovery verbs have their own dedicated,
+    tightly-scoped statements, so a bare harness still works.
     """
     import json
 
@@ -208,92 +209,107 @@ def create_harness_iam_role(
     if memory_arn:
         scoped_resources.append(f"{memory_arn}/*")
 
-    policy = {
-        "Version": "2012-10-17",
-        "Statement": [
+    statements: list[dict] = [
+        {
+            "Sid": "BedrockModelAccess",
+            "Effect": "Allow",
+            "Action": [
+                "bedrock:InvokeModel",
+                "bedrock:InvokeModelWithResponseStream",
+            ],
+            "Resource": model_resource,
+        },
+    ]
+    # Memory/gateway data-plane actions, scoped to the connected resource
+    # ARNs. Both callers (harness_step + services/deployment) thread the
+    # gateway/memory ARNs they wire, so when NONE are supplied there is no
+    # connected resource to reach and the statement is OMITTED entirely
+    # (previously it fell back to Resource "*" — Holmes IAM HIGH finding).
+    # Account-level discovery (ListGateways) + the harness's auto-provisioned
+    # default memory are covered by the dedicated statements below.
+    if scoped_resources:
+        statements.append(
             {
-                "Sid": "BedrockModelAccess",
-                "Effect": "Allow",
-                "Action": [
-                    "bedrock:InvokeModel",
-                    "bedrock:InvokeModelWithResponseStream",
-                ],
-                "Resource": model_resource,
-            },
-            {
-                # Memory/gateway data-plane actions. Scoped to the connected
-                # resource ARNs when known (Holmes IAM finding), else "*".
                 # InvokeGateway is REQUIRED for the harness to call a connected
                 # gateway's tools at runtime (mirrors the runtime exec role's
-                # GatewayAccess Sid). ListGateways/GetGateway/ListGatewayTargets
-                # cover discovery + target enumeration.
+                # GatewayAccess Sid). GetGateway/ListGatewayTargets cover
+                # discovery + target enumeration on the connected gateway.
                 "Sid": "AgentCoreMemoryAndGateway",
                 "Effect": "Allow",
                 "Action": scoped_agentcore,
-                "Resource": scoped_resources or "*",
-            },
-            {
-                # CreateHarness ALWAYS auto-provisions a DEFAULT AgentCore Memory
-                # for the harness session (memory/harness_<name>_*), whose ARN is
-                # NOT known when this role policy is built (it's minted later by the
-                # harness service). Without memory data-plane perms on that ARN, the
-                # first InvokeHarness fails with AccessDenied on ListEvents
-                # (verified live: "not authorized to perform bedrock-agentcore:
-                # ListEvents on resource memory/harness_<name>_..."). Scope the
-                # memory data-plane verbs to the harness-owned memory name prefix.
-                "Sid": "AgentCoreHarnessOwnedMemory",
-                "Effect": "Allow",
-                "Action": [
-                    "bedrock-agentcore:GetMemory",
-                    "bedrock-agentcore:CreateEvent",
-                    "bedrock-agentcore:ListEvents",
-                    "bedrock-agentcore:GetEvent",
-                    "bedrock-agentcore:ListSessions",
-                    "bedrock-agentcore:RetrieveMemoryRecords",
-                    "bedrock-agentcore:ListMemoryRecords",
-                ],
-                "Resource": [
-                    "arn:aws:bedrock-agentcore:*:*:memory/harness_*",
-                    "arn:aws:bedrock-agentcore:*:*:memory/harness_*/*",
-                ],
-            },
-            {
-                # Account-level agentcore actions with no resource-ARN form:
-                # ListGateways (collection) + the token-vault token/key fetches
-                # GetResourceOauth2Token/GetResourceApiKey (needed to load the
-                # outbound OAuth token for a CUSTOM_JWT gateway — verified live).
-                "Sid": "AgentCoreAccountLevel",
-                "Effect": "Allow",
-                "Action": [
-                    "bedrock-agentcore:ListGateways",
-                    "bedrock-agentcore:GetResourceOauth2Token",
-                    "bedrock-agentcore:GetResourceApiKey",
-                ],
-                "Resource": "*",
-            },
-            {
-                # GetResourceOauth2Token internally reads the AgentCore-managed
-                # token-vault secret (name prefix bedrock-agentcore-identity!) that
-                # holds the outbound OAuth token. Without this the token fetch fails
-                # with "Access denied when retrieving secret ...!default/oauth2/..."
-                # (verified live, the layer beneath GetResourceOauth2Token).
-                "Sid": "AgentCoreIdentityVaultSecrets",
-                "Effect": "Allow",
-                "Action": ["secretsmanager:GetSecretValue"],
-                "Resource": "arn:aws:secretsmanager:*:*:secret:bedrock-agentcore-identity!*",
-            },
-            {
-                "Sid": "CloudWatchLogs",
-                "Effect": "Allow",
-                "Action": [
-                    "logs:CreateLogGroup",
-                    "logs:CreateLogStream",
-                    "logs:PutLogEvents",
-                ],
-                "Resource": "*",
-            },
-        ],
-    }
+                "Resource": scoped_resources,
+            }
+        )
+    statements += [
+        {
+            # CreateHarness ALWAYS auto-provisions a DEFAULT AgentCore Memory
+            # for the harness session (memory/harness_<name>_*), whose ARN is
+            # NOT known when this role policy is built (it's minted later by the
+            # harness service). Without memory data-plane perms on that ARN, the
+            # first InvokeHarness fails with AccessDenied on ListEvents
+            # (verified live: "not authorized to perform bedrock-agentcore:
+            # ListEvents on resource memory/harness_<name>_..."). Scope the
+            # memory data-plane verbs to the harness-owned memory name prefix.
+            "Sid": "AgentCoreHarnessOwnedMemory",
+            "Effect": "Allow",
+            "Action": [
+                "bedrock-agentcore:GetMemory",
+                "bedrock-agentcore:CreateEvent",
+                "bedrock-agentcore:ListEvents",
+                "bedrock-agentcore:GetEvent",
+                "bedrock-agentcore:ListSessions",
+                "bedrock-agentcore:RetrieveMemoryRecords",
+                "bedrock-agentcore:ListMemoryRecords",
+            ],
+            "Resource": [
+                "arn:aws:bedrock-agentcore:*:*:memory/harness_*",
+                "arn:aws:bedrock-agentcore:*:*:memory/harness_*/*",
+            ],
+        },
+        {
+            # Account-level agentcore actions with no resource-ARN form:
+            # ListGateways (collection discovery) + the token-vault token/key
+            # fetches GetResourceOauth2Token/GetResourceApiKey (needed to load
+            # the outbound OAuth token for a CUSTOM_JWT gateway — verified
+            # live). Resource "*" is required: these verbs are not resource-
+            # scopable (token-vault/default is account-singleton).
+            "Sid": "AgentCoreAccountLevel",
+            "Effect": "Allow",
+            "Action": [
+                "bedrock-agentcore:ListGateways",
+                "bedrock-agentcore:GetResourceOauth2Token",
+                "bedrock-agentcore:GetResourceApiKey",
+            ],
+            "Resource": "*",
+        },
+        {
+            # GetResourceOauth2Token internally reads the AgentCore-managed
+            # token-vault secret (name prefix bedrock-agentcore-identity!) that
+            # holds the outbound OAuth token. Without this the token fetch fails
+            # with "Access denied when retrieving secret ...!default/oauth2/..."
+            # (verified live, the layer beneath GetResourceOauth2Token).
+            "Sid": "AgentCoreIdentityVaultSecrets",
+            "Effect": "Allow",
+            "Action": ["secretsmanager:GetSecretValue"],
+            "Resource": "arn:aws:secretsmanager:*:*:secret:bedrock-agentcore-identity!*",
+        },
+        {
+            # Scoped to the AgentCore-managed log-group namespace (harness
+            # runtimes emit under /aws/bedrock-agentcore/...) instead of "*".
+            "Sid": "CloudWatchLogs",
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+            ],
+            "Resource": [
+                "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/*",
+                "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/*:log-stream:*",
+            ],
+        },
+    ]
+    policy = {"Version": "2012-10-17", "Statement": statements}
     iam_client.put_role_policy(
         RoleName=role_name,
         PolicyName="HarnessExecutionPolicy",
@@ -308,10 +324,10 @@ def create_harness_iam_role(
 
 
 def build_harness_tools(
-    gateway_arn: Optional[str] = None,
+    gateway_arn: str | None = None,
     *,
-    gateway_outbound_provider_arn: Optional[str] = None,
-    gateway_scopes: Optional[list] = None,
+    gateway_outbound_provider_arn: str | None = None,
+    gateway_scopes: list | None = None,
 ) -> list:
     """Build the Harness ``tools`` list from connected components.
 
@@ -346,7 +362,7 @@ def build_harness_tools(
 
 def ensure_gateway_outbound_provider(
     agentcore_ctrl, harness_name: str, gateway_client_info: dict
-) -> tuple[Optional[str], list]:
+) -> tuple[str | None, list]:
     """Register an OAuth2 credential provider so a harness can call a CUSTOM_JWT
     gateway, derived from that gateway's Cognito client_info.
 
@@ -373,9 +389,7 @@ def ensure_gateway_outbound_provider(
             te = gateway_client_info.get("token_endpoint", "")
             m = re.search(r"\.auth\.([a-z0-9-]+)\.amazoncognito", te)
             reg = m.group(1) if m else "us-east-1"
-        discovery_url = (
-            f"https://cognito-idp.{reg}.amazonaws.com/{user_pool_id}/.well-known/openid-configuration"
-        )
+        discovery_url = f"https://cognito-idp.{reg}.amazonaws.com/{user_pool_id}/.well-known/openid-configuration"
 
     if not (discovery_url and client_id and client_secret):
         logger.warning(
@@ -400,11 +414,14 @@ def ensure_gateway_outbound_provider(
         provider_arn = resp["credentialProviderArn"]
         logger.info("Created harness gateway outbound OAuth provider %s", provider_name)
     except Exception as e:  # noqa: BLE001
-        if "ConflictException" in str(e) or "already exists" in str(e):
+        # "already exists" fallback kept: conflicts can surface as a
+        # ValidationException whose message says "already exists".
+        if is_error(e, "ConflictException") or "already exists" in str(e):
             try:
                 got = agentcore_ctrl.get_oauth2_credential_provider(name=provider_name)
                 provider_arn = got.get("credentialProviderArn", "")
             except Exception:  # noqa: BLE001
+                logger.warning("Outbound provider %s conflicted but lookup failed; continuing without", provider_name)
                 return None, []
         else:
             raise
@@ -417,15 +434,15 @@ def create_harness(
     harness_name: str,
     role_arn: str,
     *,
-    model_id: Optional[str] = None,
-    system_prompt: Optional[str] = None,
-    gateway_arn: Optional[str] = None,
-    gateway_outbound_provider_arn: Optional[str] = None,
-    gateway_scopes: Optional[list] = None,
-    memory_arn: Optional[str] = None,
+    model_id: str | None = None,
+    system_prompt: str | None = None,
+    gateway_arn: str | None = None,
+    gateway_outbound_provider_arn: str | None = None,
+    gateway_scopes: list | None = None,
+    memory_arn: str | None = None,
     max_tokens: int = 4096,
     temperature: float = 0.7,
-    env_vars: Optional[dict] = None,
+    env_vars: dict | None = None,
 ) -> dict:
     """Create an AgentCore Harness. Returns {harness_id, arn, status}.
 
@@ -461,9 +478,7 @@ def create_harness(
         create_params["tools"] = tools
 
     if memory_arn:
-        create_params["memory"] = {
-            "agentCoreMemoryConfiguration": {"arn": memory_arn, "messagesCount": 20}
-        }
+        create_params["memory"] = {"agentCoreMemoryConfiguration": {"arn": memory_arn, "messagesCount": 20}}
     if env_vars:
         create_params["environmentVariables"] = env_vars
 
@@ -491,11 +506,13 @@ def create_harness(
                 return agentcore_ctrl.create_harness(**create_params)
             except Exception as e:  # noqa: BLE001
                 err = str(e)
-                if "ValidationException" in err and any(m in err for m in retryable):
+                if is_error(e, "ValidationException") and any(m in err for m in retryable):
                     last_err = e
                     logger.info(
                         "create_harness transient role/cache race (attempt %d/%d): %s",
-                        attempt + 1, attempts, err[:200],
+                        attempt + 1,
+                        attempts,
+                        err[:200],
                     )
                     time.sleep(10)
                     continue
@@ -505,7 +522,9 @@ def create_harness(
     try:
         resp = _create_with_transient_retry()
     except Exception as e:  # noqa: BLE001
-        if "ConflictException" in str(e) or "already exists" in str(e):
+        # "already exists" fallback kept: conflicts can surface as a
+        # ValidationException whose message says "already exists".
+        if is_error(e, "ConflictException") or "already exists" in str(e):
             logger.info("Harness '%s' already exists, looking up", harness_name)
             existing = _find_harness_by_name(agentcore_ctrl, harness_name)
             if existing:
@@ -521,7 +540,7 @@ def create_harness(
     return {"harness_id": harness_id, "arn": arn, "status": h.get("status", "CREATING")}
 
 
-def _find_harness_by_name(agentcore_ctrl, harness_name: str) -> Optional[dict]:
+def _find_harness_by_name(agentcore_ctrl, harness_name: str) -> dict | None:
     """Paginate list_harnesses to find one by name. Returns {harness_id,arn,status}."""
     next_token = None
     for _ in range(20):
@@ -586,7 +605,7 @@ def invoke_harness(
     prompt: str,
     session_id: str,
     *,
-    timeout_seconds: Optional[int] = None,
+    timeout_seconds: int | None = None,
 ) -> dict:
     """Invoke a Harness (data plane) and collect the streamed response.
 
@@ -610,7 +629,13 @@ def invoke_harness(
         # exception text OUT of the returned dict (callers surface `error`/`output`
         # to clients). Log detail server-side; return a generic message.
         logger.warning("invoke_harness failed: %s", e)
-        return {"success": False, "error": "Harness invocation failed", "output": "", "stop_reason": "", "tool_calls": []}
+        return {
+            "success": False,
+            "error": "Harness invocation failed",
+            "output": "",
+            "stop_reason": "",
+            "tool_calls": [],
+        }
 
     text_parts: list[str] = []
     tool_calls: list[str] = []
@@ -665,8 +690,8 @@ def invoke_harness(
 def _harness_approval_check(region: str, tool_calls: list, session_id: str) -> list:
     """Match invoked harness tools against org approval policies; record PENDING
     rows for "require"-mode matches. Returns the list of matched tool names."""
-    import os
     import fnmatch
+    import os
 
     if not tool_calls:
         return []
@@ -676,6 +701,7 @@ def _harness_approval_check(region: str, tool_calls: list, session_id: str) -> l
         return []
     try:
         from app.services.approval_policy_store import ApprovalPolicyStore
+
         policies = ApprovalPolicyStore(pol_table, region).list("default")
     except Exception:  # noqa: BLE001
         return []
@@ -694,22 +720,25 @@ def _harness_approval_check(region: str, tool_calls: list, session_id: str) -> l
 
 def _record_harness_pending(region: str, hitl_table: str, tool_name: str, session_id: str) -> None:
     import os
-    import time
     import secrets
+    import time
 
     try:
         import boto3
+
         ms = int(time.time() * 1000)
-        boto3.resource("dynamodb", region_name=region).Table(hitl_table).put_item(Item={
-            "runtime_id": os.environ.get("HITL_RUNTIME_ID", "harness"),
-            "request_id": "%012x%s" % (ms, secrets.token_hex(10)),
-            "owner_sub": os.environ.get("RUNTIME_OWNER_SUB", ""),
-            "status": "PENDING",
-            "action": ("harness-tool:" + str(tool_name))[:2000],
-            "reason": ("session:" + str(session_id))[:2000],
-            "created_at": ms,
-            "ttl": int(time.time()) + 24 * 60 * 60,
-        })
+        boto3.resource("dynamodb", region_name=region).Table(hitl_table).put_item(
+            Item={
+                "runtime_id": os.environ.get("HITL_RUNTIME_ID", "harness"),
+                "request_id": f"{ms:012x}{secrets.token_hex(10)}",
+                "owner_sub": os.environ.get("RUNTIME_OWNER_SUB", ""),
+                "status": "PENDING",
+                "action": ("harness-tool:" + str(tool_name))[:2000],
+                "reason": ("session:" + str(session_id))[:2000],
+                "created_at": ms,
+                "ttl": int(time.time()) + 24 * 60 * 60,
+            }
+        )
     except Exception:  # noqa: BLE001
         logger.warning("harness HITL pending-record skipped")
 
@@ -761,11 +790,10 @@ def destroy_harness(harness_id: str, region: str) -> dict:
         logger.info("Deleted harness %s", resolved)
         result = {"success": True, "harness_id": resolved}
     except Exception as e:  # noqa: BLE001
-        err = str(e)
-        if "ResourceNotFound" in err or "NotFound" in err:
+        if is_error(e, "ResourceNotFoundException", "NotFoundException"):
             result = {"success": True, "harness_id": resolved, "note": "already gone"}
         else:
-            result = {"success": False, "harness_id": resolved, "error": err}
+            result = {"success": False, "harness_id": resolved, "error": str(e)}
 
     # Best-effort delete of the outbound OAuth provider (no orphan).
     provider_name = f"harness-gw-{harness_name}"[:60]
@@ -774,7 +802,7 @@ def destroy_harness(harness_id: str, region: str) -> dict:
         logger.info("Deleted harness gateway outbound provider %s", provider_name)
         result["outbound_provider_deleted"] = provider_name
     except Exception as e:  # noqa: BLE001
-        if "ResourceNotFound" not in str(e) and "NotFound" not in str(e):
+        if not is_error(e, "ResourceNotFoundException", "NotFoundException"):
             logger.warning("Harness outbound provider %s delete: %s", provider_name, str(e)[:120])
 
     # NOTE (Bug 188 investigation): CreateHarness auto-provisions a backing
@@ -792,9 +820,9 @@ def get_shared_or_new_harness_role(
     iam_client,
     harness_name: str,
     *,
-    model_id: Optional[str] = None,
-    memory_arn: Optional[str] = None,
-    gateway_arn: Optional[str] = None,
+    model_id: str | None = None,
+    memory_arn: str | None = None,
+    gateway_arn: str | None = None,
 ) -> str:
     """Return a harness execution role ARN.
 

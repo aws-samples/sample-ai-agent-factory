@@ -45,7 +45,7 @@ import re
 import secrets
 import uuid
 from datetime import datetime, timezone
-from typing import Literal, Optional
+from typing import Literal
 
 import boto3
 from botocore.exceptions import ClientError
@@ -57,12 +57,12 @@ from app.services.agent_versions_store import (
     get_versions_store,
 )
 from app.services.auth import assert_owner, get_caller_sub
-from app.services.rbac import require_scopes
 from app.services.gateway_deployer import (
     _DiscoveryUrlBlocked,
     _DiscoveryUrlInvalid,
     _validate_discovery_url,
 )
+from app.services.rbac import require_scopes
 from app.services.trigger_store import (
     TRIGGER_TYPES,
     TYPE_CRON,
@@ -131,9 +131,7 @@ def _validate_cron(schedule: str) -> str:
 
 def _validate_pattern(pattern: dict) -> dict:
     if not isinstance(pattern, dict) or not pattern:
-        raise HTTPException(
-            status_code=400, detail="pattern must be a non-empty JSON object"
-        )
+        raise HTTPException(status_code=400, detail="pattern must be a non-empty JSON object")
     try:
         serialized = json.dumps(pattern)
     except (TypeError, ValueError) as e:
@@ -156,9 +154,7 @@ def _validate_webhook_out_url(url: str) -> str:
     try:
         return _validate_discovery_url(url)
     except (_DiscoveryUrlInvalid, _DiscoveryUrlBlocked) as e:
-        raise HTTPException(
-            status_code=400, detail=f"Invalid webhook_out_url: {e}"
-        ) from e
+        raise HTTPException(status_code=400, detail=f"Invalid webhook_out_url: {e}") from e
 
 
 def _region() -> str:
@@ -199,10 +195,7 @@ def _store_webhook_secret(owner_sub: str) -> str:
         logger.exception("Failed to store webhook secret in Secrets Manager")
         raise HTTPException(
             status_code=500,
-            detail=(
-                "Could not store webhook secret: "
-                f"{e.response.get('Error', {}).get('Message', str(e))}"
-            ),
+            detail="Could not store webhook secret",
         ) from e
     return resp["ARN"]
 
@@ -232,9 +225,7 @@ def _resolve_owned_runtime(runtime_name: str, caller_sub: str) -> str:
     if version is None:
         raise HTTPException(status_code=404, detail="Not found")
     assert_owner(version.owner_sub, caller_sub)
-    runtime_arn = getattr(version, "runtime_arn", None) or getattr(
-        version, "agent_runtime_arn", None
-    )
+    runtime_arn = getattr(version, "runtime_arn", None) or getattr(version, "agent_runtime_arn", None)
     if not runtime_arn:
         # Fall back to the canonical runtime_id if no ARN is recorded yet; the
         # invoker resolves the ARN from this id. Never trust a body-supplied arn.
@@ -252,11 +243,11 @@ def _resolve_owned_runtime(runtime_name: str, caller_sub: str) -> str:
 class CreateTriggerRequest(BaseModel):
     type: Literal["cron", "eventbridge", "s3", "webhook"]
     # cron(...) expression, required for type=cron.
-    schedule: Optional[str] = Field(default=None, max_length=256)
+    schedule: str | None = Field(default=None, max_length=256)
     # event pattern JSON, required for type=eventbridge/s3.
-    pattern: Optional[dict] = None
+    pattern: dict | None = None
     # optional outbound POST target (SSRF-validated before persist).
-    webhook_out_url: Optional[str] = Field(default=None, max_length=2048)
+    webhook_out_url: str | None = Field(default=None, max_length=2048)
     # NOTE: any client-supplied target_runtime_arn is deliberately IGNORED — the
     # router derives it server-side from the resolved owned version.
 
@@ -267,15 +258,15 @@ class TriggerResponse(BaseModel):
     type: str
     status: str
     target_runtime_arn: str
-    schedule: Optional[str] = None
-    pattern: Optional[dict] = None
-    webhook_secret_ref: Optional[str] = None
-    webhook_out_url: Optional[str] = None
+    schedule: str | None = None
+    pattern: dict | None = None
+    webhook_secret_ref: str | None = None
+    webhook_out_url: str | None = None
     created_at: int
     updated_at: int
 
     @classmethod
-    def from_model(cls, t: Trigger) -> "TriggerResponse":
+    def from_model(cls, t: Trigger) -> TriggerResponse:
         return cls(
             runtime_name=t.runtime_name,
             trigger_id=t.trigger_id,
@@ -302,7 +293,9 @@ class DeleteTriggerResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-@router.post("/{runtime_name}/triggers", response_model=TriggerResponse, dependencies=[Depends(require_scopes("trigger:write"))])
+@router.post(
+    "/{runtime_name}/triggers", response_model=TriggerResponse, dependencies=[Depends(require_scopes("trigger:write"))]
+)
 async def create_trigger(
     runtime_name: str,
     body: CreateTriggerRequest,
@@ -321,16 +314,14 @@ async def create_trigger(
     if body.type not in TRIGGER_TYPES:
         raise HTTPException(status_code=400, detail="Invalid trigger type")
 
-    schedule: Optional[str] = None
-    pattern: Optional[dict] = None
-    webhook_secret_ref: Optional[str] = None
-    webhook_out_url: Optional[str] = None
+    schedule: str | None = None
+    pattern: dict | None = None
+    webhook_secret_ref: str | None = None
+    webhook_out_url: str | None = None
 
     if body.type == TYPE_CRON:
         if not body.schedule:
-            raise HTTPException(
-                status_code=400, detail="schedule is required for cron triggers"
-            )
+            raise HTTPException(status_code=400, detail="schedule is required for cron triggers")
         schedule = _validate_cron(body.schedule)
     elif body.type in (TYPE_EVENTBRIDGE, TYPE_S3):
         if body.pattern is None:
@@ -368,7 +359,11 @@ async def create_trigger(
     return TriggerResponse.from_model(trig)
 
 
-@router.get("/{runtime_name}/triggers", response_model=list[TriggerResponse], dependencies=[Depends(require_scopes("trigger:read"))])
+@router.get(
+    "/{runtime_name}/triggers",
+    response_model=list[TriggerResponse],
+    dependencies=[Depends(require_scopes("trigger:read"))],
+)
 async def list_triggers(
     runtime_name: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -383,11 +378,7 @@ async def list_triggers(
     _resolve_owned_runtime(runtime_name, caller_sub)  # 404 cross-tenant / Bug 122
 
     triggers = get_trigger_store().list_for_runtime(runtime_name)
-    return [
-        TriggerResponse.from_model(t)
-        for t in triggers
-        if t.owner_sub == caller_sub
-    ]
+    return [TriggerResponse.from_model(t) for t in triggers if t.owner_sub == caller_sub]
 
 
 @router.delete(

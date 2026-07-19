@@ -26,9 +26,24 @@ from pathlib import Path
 
 import pytest
 
-# backend/tests/ -> backend/ -> repo root -> infra/stacks/platform_stack.py
+# backend/tests/ -> backend/ -> repo root -> infra/stacks/. The platform stack
+# was split from a single platform_stack.py into the platform/ package
+# (commit "refactor(infra): split 4,430-line platform_stack.py"), so the IAM
+# text assertions scan platform_stack.py PLUS every module in platform/.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_PLATFORM_STACK = _REPO_ROOT / "infra" / "stacks" / "platform_stack.py"
+_STACKS_DIR = _REPO_ROOT / "infra" / "stacks"
+_PLATFORM_STACK = _STACKS_DIR / "platform_stack.py"
+
+
+def _platform_source_files() -> list[Path]:
+    files = [_PLATFORM_STACK] if _PLATFORM_STACK.is_file() else []
+    files += sorted((_STACKS_DIR / "platform").glob("*.py"))
+    assert files, f"no platform stack sources found under {_STACKS_DIR}"
+    return files
+
+
+def _platform_source() -> str:
+    return "\n".join(p.read_text() for p in _platform_source_files())
 
 
 def _agentcore_steps_source() -> str:
@@ -38,18 +53,17 @@ def _agentcore_steps_source() -> str:
     moving), then slices the literal out of the raw source so substring checks
     work regardless of formatting/comments inside each block.
     """
-    assert _PLATFORM_STACK.is_file(), f"platform_stack.py not found at {_PLATFORM_STACK}"
-    source = _PLATFORM_STACK.read_text()
-    tree = ast.parse(source)
-    lines = source.splitlines()
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
-            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
-            if "agentcore_steps" in targets:
-                # ast end_lineno is inclusive and 1-based.
-                return "\n".join(lines[node.lineno - 1 : node.end_lineno])
-    raise AssertionError("could not locate `agentcore_steps = {...}` dict in platform_stack.py")
+    for path in _platform_source_files():
+        source = path.read_text()
+        tree = ast.parse(source)
+        lines = source.splitlines()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
+                targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+                if "agentcore_steps" in targets:
+                    # ast end_lineno is inclusive and 1-based.
+                    return "\n".join(lines[node.lineno - 1 : node.end_lineno])
+    raise AssertionError("could not locate `agentcore_steps = {...}` dict in the platform stack sources")
 
 
 def _block_source(steps_source: str, key: str) -> str:
@@ -123,7 +137,7 @@ def test_agentcore_step_grants_fanout_action(step, action):
     assert action in block, (
         f'IAM completeness gap: step "{step}" is missing the required action '
         f'"{action}". CreateHarness/CreateGateway/CreateMemory fan out to this '
-        f'verb under the hood; omitting it causes a live AccessDenied deploy '
+        f"verb under the hood; omitting it causes a live AccessDenied deploy "
         f'failure (Bug 151/152/153 class). Add it to agentcore_steps["{step}"] '
         f"in infra/stacks/platform_stack.py."
     )
@@ -139,20 +153,16 @@ def test_harness_block_holds_full_runtime_and_memory_lifecycle():
     block = _block_source(_agentcore_steps_source(), "harness")
     runtime_verbs = ["CreateAgentRuntime", "GetAgentRuntime", "DeleteAgentRuntime"]
     memory_verbs = ["CreateMemory", "GetMemory", "DeleteMemory"]
-    missing = [
-        v
-        for v in runtime_verbs + memory_verbs + ["CreateTokenVault"]
-        if f"bedrock-agentcore:{v}" not in block
-    ]
+    missing = [v for v in runtime_verbs + memory_verbs + ["CreateTokenVault"] if f"bedrock-agentcore:{v}" not in block]
     assert not missing, (
-        "harness step IAM block is missing transparently-required verbs: "
-        f"{missing}. See Bug 151/152/153."
+        f"harness step IAM block is missing transparently-required verbs: {missing}. See Bug 151/152/153."
     )
 
 
 # --------------------------------------------------------------------------- #
 # gateway_deployer embedded tool lambda: structured failure shape             #
 # --------------------------------------------------------------------------- #
+
 
 def _dynamic_tools_code() -> str:
     from app.services.gateway_deployer import DYNAMIC_TOOLS_LAMBDA_CODE
@@ -169,8 +179,7 @@ def test_dynamic_tools_lambda_has_retry_logic():
     """
     code = _dynamic_tools_code()
     assert "retries" in code and "time.sleep" in code, (
-        "DYNAMIC_TOOLS_LAMBDA_CODE lost its HTTP retry logic "
-        "(_http_get retries + backoff)."
+        "DYNAMIC_TOOLS_LAMBDA_CODE lost its HTTP retry logic (_http_get retries + backoff)."
     )
 
 
@@ -203,19 +212,19 @@ def test_dynamic_tools_lambda_returns_structured_unavailable_error():
 
 # Each manifest dispatcher type -> the IAM delete action the delete handler calls.
 _MANIFEST_DELETE_ACTIONS = [
-    "bedrock-agentcore:DeleteAgentRuntime",      # agent_runtime
-    "bedrock-agentcore:DeleteHarness",           # harness
-    "bedrock-agentcore:DeleteMemory",            # memory
-    "bedrock-agentcore:DeleteGateway",           # gateway
+    "bedrock-agentcore:DeleteAgentRuntime",  # agent_runtime
+    "bedrock-agentcore:DeleteHarness",  # harness
+    "bedrock-agentcore:DeleteMemory",  # memory
+    "bedrock-agentcore:DeleteGateway",  # gateway
     "bedrock-agentcore:DeleteOauth2CredentialProvider",  # oauth2_credential_provider
     "bedrock-agentcore:DeleteApiKeyCredentialProvider",  # api_key_credential_provider
-    "bedrock-agentcore:DeletePolicyEngine",      # policy_engine
-    "bedrock:DeleteGuardrail",                   # guardrail (Bug 165)
-    "secretsmanager:DeleteSecret",               # secret
-    "s3vectors:DeleteVectorBucket",              # s3_vectors_bucket (Bug 167)
-    "s3vectors:DeleteIndex",                     # s3_vectors_bucket indexes (Bug 167)
-    "bedrock:DeleteKnowledgeBase",               # knowledge_base manifest type (Bug 167)
-    "bedrock:DeleteDataSource",                  # knowledge_base data sources (Bug 167)
+    "bedrock-agentcore:DeletePolicyEngine",  # policy_engine
+    "bedrock:DeleteGuardrail",  # guardrail (Bug 165)
+    "secretsmanager:DeleteSecret",  # secret
+    "s3vectors:DeleteVectorBucket",  # s3_vectors_bucket (Bug 167)
+    "s3vectors:DeleteIndex",  # s3_vectors_bucket indexes (Bug 167)
+    "bedrock:DeleteKnowledgeBase",  # knowledge_base manifest type (Bug 167)
+    "bedrock:DeleteDataSource",  # knowledge_base data sources (Bug 167)
 ]
 
 
@@ -230,10 +239,10 @@ def test_manifest_delete_action_is_granted_somewhere(action):
     cognito service actions covered by the role's existing broad grants and the
     runtime-role delete path, so they are not re-asserted here.
     """
-    source = _PLATFORM_STACK.read_text()
+    source = _platform_source()
     assert action in source, (
         f"Manifest teardown calls {action} but it is not granted anywhere in "
-        f"platform_stack.py — the resource will orphan with AccessDenied on delete."
+        f"the platform stack sources — the resource will orphan with AccessDenied on delete."
     )
 
 
@@ -242,7 +251,7 @@ def test_deployment_role_can_delete_mcp_server_lambda():
     (no AgentCore prefix). The deployment role's lambda:DeleteFunction resource
     scope MUST cover MCPServer* or deleting an MCP-server flow orphans the
     function with AccessDenied."""
-    source = _PLATFORM_STACK.read_text()
+    source = _platform_source()
     assert "function:MCPServer" in source, (
         "deployment role lambda:DeleteFunction scope does not cover the "
         "MCPServerRuntime lambda — MCP-server flow deletes will orphan it."

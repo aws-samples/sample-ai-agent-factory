@@ -21,10 +21,12 @@ def test_none_is_public():
 
 
 def test_snake_case_vpc_config():
-    out = _build_network_configuration({
-        "subnet_ids": ["subnet-a", "subnet-b"],
-        "security_group_ids": ["sg-1"],
-    })
+    out = _build_network_configuration(
+        {
+            "subnet_ids": ["subnet-a", "subnet-b"],
+            "security_group_ids": ["sg-1"],
+        }
+    )
     assert out["networkMode"] == "VPC"
     assert out["networkModeConfig"]["subnets"] == ["subnet-a", "subnet-b"]
     assert out["networkModeConfig"]["securityGroups"] == ["sg-1"]

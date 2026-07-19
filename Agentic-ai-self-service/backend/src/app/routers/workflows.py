@@ -13,7 +13,6 @@ Requirements: 9.1, 9.5, 11.1, 11.5, 11.6, 11.7
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -38,18 +37,17 @@ def _validate_workflow_id(workflow_id: str) -> str:
 
 
 from app.models import (
-    WorkflowDefinition,
-    ValidationResult,
-    Viewport,
-    WorkflowMetadata,
-    DeploymentStatus,
     DeploymentConfig,
     DeploymentResult,
+    DeploymentStatus,
+    ValidationResult,
+    Viewport,
+    WorkflowDefinition,
+    WorkflowMetadata,
 )
+from app.services.deployment import WorkflowExecutor
 from app.services.storage import get_workflow_storage
 from app.services.validation import ValidationEngine
-from app.services.deployment import WorkflowExecutor
-
 
 router = APIRouter(prefix="/api/workflows", tags=["workflows"])
 
@@ -65,20 +63,20 @@ class WorkflowCreateRequest(BaseModel):
     version: str = Field(pattern=r"^\d+\.\d+\.\d+$", default="1.0.0")
     nodes: list = Field(default_factory=list)
     edges: list = Field(default_factory=list)
-    viewport: Optional[Viewport] = None
+    viewport: Viewport | None = None
     metadata: WorkflowMetadata
 
 
 class WorkflowUpdateRequest(BaseModel):
     """Request body for updating a workflow."""
 
-    name: Optional[str] = Field(None, min_length=1, max_length=200)
-    description: Optional[str] = Field(None, max_length=2000)
-    version: Optional[str] = Field(None, pattern=r"^\d+\.\d+\.\d+$")
-    nodes: Optional[list] = None
-    edges: Optional[list] = None
-    viewport: Optional[Viewport] = None
-    metadata: Optional[WorkflowMetadata] = None
+    name: str | None = Field(None, min_length=1, max_length=200)
+    description: str | None = Field(None, max_length=2000)
+    version: str | None = Field(None, pattern=r"^\d+\.\d+\.\d+$")
+    nodes: list | None = None
+    edges: list | None = None
+    viewport: Viewport | None = None
+    metadata: WorkflowMetadata | None = None
 
 
 class WorkflowResponse(BaseModel):
@@ -95,7 +93,12 @@ class DeleteResponse(BaseModel):
     message: str
 
 
-@router.post("", response_model=WorkflowResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_scopes("agent:write"))])
+@router.post(
+    "",
+    response_model=WorkflowResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_scopes("agent:write"))],
+)
 async def create_workflow(
     request: WorkflowCreateRequest,
     caller_sub: str = Depends(get_caller_sub),
@@ -128,11 +131,11 @@ async def create_workflow(
             workflow=created,
             message="Workflow created successfully",
         )
-    except ValueError:
+    except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Workflow already exists",
-        )
+        ) from e
 
 
 @router.get("", response_model=list[WorkflowDefinition], dependencies=[Depends(require_scopes("agent:read"))])
@@ -311,7 +314,9 @@ async def delete_workflow(
     )
 
 
-@router.post("/{workflow_id}/validate", response_model=ValidationResult, dependencies=[Depends(require_scopes("agent:write"))])
+@router.post(
+    "/{workflow_id}/validate", response_model=ValidationResult, dependencies=[Depends(require_scopes("agent:write"))]
+)
 async def validate_workflow(workflow_id: str) -> ValidationResult:
     """Validate a workflow configuration.
 
@@ -371,6 +376,7 @@ async def import_workflow(request: ImportRequest) -> ImportResponse:
     Requirements: 14.1, 14.2, 14.3
     """
     import uuid
+
     from pydantic import ValidationError as PydanticValidationError
 
     validation_errors: list[str] = []
@@ -423,7 +429,7 @@ async def import_workflow(request: ImportRequest) -> ImportResponse:
                 "errors": errors,
                 "message": "Invalid workflow JSON schema",
             },
-        )
+        ) from e
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -432,10 +438,12 @@ async def import_workflow(request: ImportRequest) -> ImportResponse:
                 "errors": [str(e)],
                 "message": "Failed to import workflow",
             },
-        )
+        ) from e
 
 
-@router.get("/{workflow_id}/export", response_model=ExportResponse, dependencies=[Depends(require_scopes("agent:read"))])
+@router.get(
+    "/{workflow_id}/export", response_model=ExportResponse, dependencies=[Depends(require_scopes("agent:read"))]
+)
 async def export_workflow(workflow_id: str) -> ExportResponse:
     """Export a workflow as JSON.
 
@@ -467,12 +475,14 @@ class DeployRequest(BaseModel):
     """Request body for deploying a workflow."""
 
     aws_region: str = Field(pattern=r"^[a-z]{2}(-[a-z]+-\d+)?$", max_length=30)
-    vpc_config: Optional[dict] = None
+    vpc_config: dict | None = None
     enable_cloudwatch: bool = True
     enable_cloudtrail: bool = True
 
 
-@router.post("/{workflow_id}/deploy", response_model=DeploymentResult, dependencies=[Depends(require_scopes("agent:write"))])
+@router.post(
+    "/{workflow_id}/deploy", response_model=DeploymentResult, dependencies=[Depends(require_scopes("agent:write"))]
+)
 async def deploy_workflow(workflow_id: str, request: DeployRequest) -> DeploymentResult:
     """Deploy a workflow to AWS.
 
@@ -515,7 +525,7 @@ async def deploy_workflow(workflow_id: str, request: DeployRequest) -> Deploymen
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid deployment configuration",
-        )
+        ) from e
 
     # Create executor and deploy
     try:
@@ -552,10 +562,10 @@ async def deploy_workflow(workflow_id: str, request: DeployRequest) -> Deploymen
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
-        )
+        ) from e
     except Exception as e:
         logger.exception("Deployment failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Deployment failed",
-        )
+        ) from e

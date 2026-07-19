@@ -14,9 +14,10 @@ import os
 import re
 import time
 import zipfile
-from typing import Optional
 
 import boto3
+
+from app.services.aws_errors import is_error
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +44,7 @@ def sanitize_runtime_name(name: str) -> str:
     """
     from app.services.naming import sanitize_agentcore_name
 
-    return sanitize_agentcore_name(
-        name, style="underscore", prefix="agent", fallback="agent_default"
-    )
+    return sanitize_agentcore_name(name, style="underscore", prefix="agent", fallback="agent_default")
 
 
 def _merge_deps_into_zip(target_zf: zipfile.ZipFile, bundle_bytes: bytes) -> None:
@@ -70,7 +69,7 @@ def _create_code_zip(
     agent_code: str,
     requirements_txt: str,
     entrypoint: str,
-    deps_bundle: Optional[bytes] = None,
+    deps_bundle: bytes | None = None,
 ) -> bytes:
     """Create in-memory zip with agent code and optionally bundled deps.
 
@@ -101,7 +100,7 @@ def upload_code_to_s3(
     agent_code: str,
     requirements_txt: str,
     entrypoint: str = "agent.py",
-    deps_bundle: Optional[bytes] = None,
+    deps_bundle: bytes | None = None,
 ) -> str:
     """Upload agent code zip to S3, optionally with bundled dependencies.
 
@@ -118,9 +117,9 @@ def create_runtime_iam_role(
     role_name: str,
     account_id: str,
     region: str,
-    connected_tools: Optional[list] = None,
-    otel_secret_arn: Optional[str] = None,
-    resource_tags: Optional[dict] = None,
+    connected_tools: list | None = None,
+    otel_secret_arn: str | None = None,
+    resource_tags: dict | None = None,
 ) -> str:
     """Create or reuse an IAM execution role for an AgentCore runtime.
 
@@ -146,9 +145,7 @@ def create_runtime_iam_role(
     # IAM keys/values must be strings; the ManagedBy tag is always last so it
     # can't be overridden by a caller-supplied governance tag of the same key.
     _managed_tag = [
-        {"Key": str(k), "Value": str(v)}
-        for k, v in (resource_tags or {}).items()
-        if k and k != "ManagedBy"
+        {"Key": str(k), "Value": str(v)} for k, v in (resource_tags or {}).items() if k and k != "ManagedBy"
     ]
     _managed_tag.append({"Key": "ManagedBy", "Value": "agentcore-flows"})
     try:
@@ -341,7 +338,7 @@ def create_runtime_iam_role(
     return role_arn
 
 
-def _build_network_configuration(vpc_config: Optional[dict]) -> dict:
+def _build_network_configuration(vpc_config: dict | None) -> dict:
     """Build the AgentCore networkConfiguration block.
 
     VPC mode (Loom-study 0.1) when vpc_config carries subnets + security groups;
@@ -371,9 +368,9 @@ def create_agent_runtime(
     entrypoint: str = "agent.py",
     python_runtime: str = "PYTHON_3_13",
     protocol: str = "HTTP",
-    env_vars: Optional[dict] = None,
-    authorizer_config: Optional[dict] = None,
-    vpc_config: Optional[dict] = None,
+    env_vars: dict | None = None,
+    authorizer_config: dict | None = None,
+    vpc_config: dict | None = None,
 ) -> dict:
     """Create an AgentCore runtime using the boto3 control API.
 
@@ -435,8 +432,8 @@ def create_agent_runtime(
         """
         retryable_markers = (
             "Access denied when trying to retrieve",  # IAM-propagation race
-            "Moved Permanently",                       # S3 region cache miss
-            "Status Code: 301",                        # S3 region cache miss
+            "Moved Permanently",  # S3 region cache miss
+            "Status Code: 301",  # S3 region cache miss
         )
         last_err = None
         attempts = 8
@@ -445,13 +442,13 @@ def create_agent_runtime(
                 return agentcore_ctrl.create_agent_runtime(**create_params)
             except Exception as e:
                 err_str = str(e)
-                if "ValidationException" in err_str and any(
-                    m in err_str for m in retryable_markers
-                ):
+                if is_error(e, "ValidationException") and any(m in err_str for m in retryable_markers):
                     last_err = e
                     logger.info(
                         "create_agent_runtime transient (attempt %d/%d): %s",
-                        attempt + 1, attempts, err_str[:200],
+                        attempt + 1,
+                        attempts,
+                        err_str[:200],
                     )
                     time.sleep(5)
                     continue
@@ -461,7 +458,9 @@ def create_agent_runtime(
     try:
         resp = _create_with_transient_retry()
     except Exception as e:
-        if "ConflictException" in str(e) or "already exists" in str(e):
+        # "already exists" fallback kept: conflicts can surface as a
+        # ValidationException whose message says "already exists".
+        if is_error(e, "ConflictException") or "already exists" in str(e):
             # Find existing runtime by paginating through all runtimes
             logger.info("Runtime '%s' already exists, searching to update...", runtime_name)
             found_id = None
@@ -572,9 +571,7 @@ def wait_for_runtime_ready(agentcore_ctrl, runtime_id: str, timeout: int = 600) 
     }
 
 
-def wait_for_default_endpoint_ready(
-    agentcore_ctrl, runtime_id: str, timeout: int = 180
-) -> dict:
+def wait_for_default_endpoint_ready(agentcore_ctrl, runtime_id: str, timeout: int = 180) -> dict:
     """Poll until the runtime's DEFAULT endpoint is READY (Bug 166).
 
     ``get_agent_runtime`` returning READY is NOT sufficient to invoke: the
@@ -595,9 +592,7 @@ def wait_for_default_endpoint_ready(
     last_seen = ""
     while time.time() - start < timeout:
         try:
-            eps = agentcore_ctrl.list_agent_runtime_endpoints(
-                agentRuntimeId=runtime_id
-            ).get("runtimeEndpoints", [])
+            eps = agentcore_ctrl.list_agent_runtime_endpoints(agentRuntimeId=runtime_id).get("runtimeEndpoints", [])
             for ep in eps:
                 if ep.get("name") == "DEFAULT":
                     last_seen = ep.get("status", "")
@@ -613,10 +608,8 @@ def wait_for_default_endpoint_ready(
                             "status": last_seen,
                             "error": f"DEFAULT endpoint entered {last_seen}",
                         }
-        except Exception as e:  # noqa: BLE001 — transient list errors are retried
-            logger.warning(
-                "Error listing endpoints for runtime %s (will retry)", runtime_id
-            )
+        except Exception:  # noqa: BLE001 — transient list errors are retried
+            logger.warning("Error listing endpoints for runtime %s (will retry)", runtime_id)
         time.sleep(5)
 
     return {
@@ -672,9 +665,7 @@ def _resolve_runtime_identifier(agentcore_ctrl, identifier: str) -> str:
     return identifier  # fall through; caller will see ResourceNotFound and treat as no-op
 
 
-def _resolve_runtime_name_for_cleanup(
-    canonical_id: str, region: str
-) -> Optional[str]:
+def _resolve_runtime_name_for_cleanup(canonical_id: str, region: str) -> str | None:
     """Map an AgentCore canonical runtime id back to the friendly runtime_name.
 
     The TriggersTable is keyed by the human-friendly ``runtime_name`` (e.g.
@@ -699,17 +690,12 @@ def _resolve_runtime_name_for_cleanup(
         table_name = os.environ.get("AGENT_VERSIONS_TABLE_NAME", "AgentVersions")
         table = boto3.resource("dynamodb", region_name=region).Table(table_name)
         scan_kwargs: dict = {
-            "ProjectionExpression": (
-                "runtime_name, runtime_id, agentcore_runtime_name"
-            ),
+            "ProjectionExpression": ("runtime_name, runtime_id, agentcore_runtime_name"),
         }
         for _ in range(20):  # cap at 20 pages of scan
             resp = table.scan(**scan_kwargs)
             for item in resp.get("Items", []):
-                if (
-                    item.get("runtime_id") == canonical_id
-                    or item.get("agentcore_runtime_name") == canonical_id
-                ):
+                if item.get("runtime_id") == canonical_id or item.get("agentcore_runtime_name") == canonical_id:
                     name = item.get("runtime_name")
                     if name:
                         return name
@@ -750,8 +736,7 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
     # runtime ID doesn't exist. Treat both as "runtime is gone" so DELETE on a
     # never-created runtime still proceeds to IAM-role cleanup. See lessons Bug 55.
     def _is_runtime_gone(err: Exception) -> bool:
-        s = str(err)
-        return "ResourceNotFound" in s or "AccessDeniedException" in s
+        return is_error(err, "ResourceNotFoundException", "AccessDeniedException")
 
     # Capture roleArn first so we can also delete the IAM role.
     role_arn = ""
@@ -799,9 +784,7 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
     # other runtime in the stack (and DemoTriage). Compare role NAME (not
     # ARN) so this still works when the cleanup is via the name fallback.
     shared_role_arn = os.environ.get("SHARED_RUNTIME_ROLE_ARN", "")
-    shared_role_name = (
-        shared_role_arn.rsplit("/", 1)[-1] if shared_role_arn else ""
-    )
+    shared_role_name = shared_role_arn.rsplit("/", 1)[-1] if shared_role_arn else ""
 
     iam = boto3.client("iam")
     deleted_any_role = False
@@ -816,17 +799,13 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
             continue
         try:
             # Detach managed policies
-            for p in iam.list_attached_role_policies(RoleName=role_name).get(
-                "AttachedPolicies", []
-            ):
+            for p in iam.list_attached_role_policies(RoleName=role_name).get("AttachedPolicies", []):
                 try:
                     iam.detach_role_policy(RoleName=role_name, PolicyArn=p["PolicyArn"])
                 except Exception as e:
                     logger.warning("detach_role_policy %s: %s", p.get("PolicyArn"), e)
             # Delete inline policies
-            for pn in iam.list_role_policies(RoleName=role_name).get(
-                "PolicyNames", []
-            ):
+            for pn in iam.list_role_policies(RoleName=role_name).get("PolicyNames", []):
                 try:
                     iam.delete_role_policy(RoleName=role_name, PolicyName=pn)
                 except Exception as e:
@@ -844,16 +823,14 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
             # (untagged / belongs to someone else / never existed) — that's the
             # guard working as intended, not a failure. Log it quietly so it
             # doesn't read as an orphan-leak alarm; only surface other errors loud.
-            if "AccessDenied" in str(e):
+            if is_error(e, "AccessDenied", "AccessDeniedException"):
                 logger.debug(
                     "Skipping role %s during cleanup: not an agentcore-managed role "
                     "(tag-scoped grant denied). Candidate name, not an orphan.",
                     role_name,
                 )
             else:
-                logger.warning(
-                    "Runtime %s role cleanup (%s) failed: %s", runtime_id, role_name, e
-                )
+                logger.warning("Runtime %s role cleanup (%s) failed: %s", runtime_id, role_name, e)
 
     # Phase 1 Gap 1D — best-effort dashboard cleanup. The dashboard was
     # created in runtime_launch_step.py with name `agentcore-{runtime_id}`.
@@ -861,6 +838,7 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
     # destroy. Same Bug 25/27 cascade-cleanup pattern.
     try:
         from app.services.observability_dashboard import delete_dashboard_for_runtime
+
         delete_dashboard_for_runtime(canonical_id, region)
     except Exception as e:
         logger.warning("Dashboard cleanup for %s failed: %s", canonical_id, e)
@@ -875,7 +853,7 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
         ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
         logs_client = boto3.client("logs", region_name=region)
         normalised_runtime = re.sub(r"[^a-zA-Z0-9_]", "_", canonical_id)[:32]
-        next_token: Optional[str] = None
+        next_token: str | None = None
         for _ in range(20):  # cap pagination at 20 pages × 50 = 1000 configs
             kw: dict = {"maxResults": 50}
             if next_token:
@@ -898,20 +876,11 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
                     logger.warning("Failed to delete eval config %s: %s", cfg_id, e)
                 # Eval results log group is per-config — see Bug 120.
                 try:
-                    logs_client.delete_log_group(
-                        logGroupName=f"/aws/bedrock-agentcore/evaluations/results/{cfg_id}"
-                    )
-                    logger.info(
-                        "Deleted eval-results log group for config %s", cfg_id
-                    )
+                    logs_client.delete_log_group(logGroupName=f"/aws/bedrock-agentcore/evaluations/results/{cfg_id}")
+                    logger.info("Deleted eval-results log group for config %s", cfg_id)
                 except Exception as e:
-                    msg = str(e)
-                    if "ResourceNotFound" in msg:
-                        pass
-                    else:
-                        logger.warning(
-                            "Failed to delete eval log group for %s: %s", cfg_id, e
-                        )
+                    if not is_error(e, "ResourceNotFoundException"):
+                        logger.warning("Failed to delete eval log group for %s: %s", cfg_id, e)
             next_token = resp.get("nextToken")
             if not next_token:
                 break
@@ -921,21 +890,17 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
         # already-gone roles.
         eval_role_name = f"AgentCoreEval-{normalised_runtime}"
         try:
-            for pn in iam.list_role_policies(RoleName=eval_role_name).get(
-                "PolicyNames", []
-            ):
+            for pn in iam.list_role_policies(RoleName=eval_role_name).get("PolicyNames", []):
                 try:
                     iam.delete_role_policy(RoleName=eval_role_name, PolicyName=pn)
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001 — best-effort; delete_role below reports the real failure
+                    logger.debug("Could not delete inline policy %s on %s", pn, eval_role_name, exc_info=True)
             iam.delete_role(RoleName=eval_role_name)
             logger.info("Deleted eval execution role %s", eval_role_name)
         except iam.exceptions.NoSuchEntityException:
             pass
         except Exception as e:
-            logger.warning(
-                "Failed to delete eval role %s: %s", eval_role_name, e
-            )
+            logger.warning("Failed to delete eval role %s: %s", eval_role_name, e)
     except Exception as e:
         logger.warning("Eval-config cleanup for %s failed: %s", canonical_id, e)
 
@@ -968,18 +933,14 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
                 if trig.eventbridge_rule_arn:
                     try:
                         rule_name = trig.eventbridge_rule_arn.rsplit("/", 1)[-1]
-                        for t in events.list_targets_by_rule(Rule=rule_name).get(
-                            "Targets", []
-                        ):
+                        for t in events.list_targets_by_rule(Rule=rule_name).get("Targets", []):
                             events.remove_targets(Rule=rule_name, Ids=[t["Id"]])
                         events.delete_rule(Name=rule_name)
                     except Exception as e:
                         logger.warning("Trigger rule cleanup failed: %s", e)
                 if trig.function_url:
                     try:
-                        lam.delete_function_url_config(
-                            FunctionName=trig.function_url
-                        )
+                        lam.delete_function_url_config(FunctionName=trig.function_url)
                     except Exception as e:
                         logger.warning("Trigger function-url cleanup failed: %s", e)
                 if trig.webhook_secret_ref:

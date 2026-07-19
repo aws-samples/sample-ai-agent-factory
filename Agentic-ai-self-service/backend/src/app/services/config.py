@@ -17,7 +17,6 @@ Requirements: 3.3, 5.1, 5.2
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Optional
 
 import boto3
 from botocore.exceptions import ClientError
@@ -72,7 +71,7 @@ def _create_ssm_client(region: str):
     return boto3.client("ssm", region_name=region)
 
 
-def _get_ssm_parameter(ssm_client, parameter_name: str) -> Optional[str]:
+def _get_ssm_parameter(ssm_client, parameter_name: str) -> str | None:
     """Read a single parameter value from SSM Parameter Store.
 
     Wrapper around ssm.get_parameter() that handles the
@@ -104,7 +103,7 @@ def _get_ssm_parameter(ssm_client, parameter_name: str) -> Optional[str]:
 # ============================================================================
 
 
-def _read_environment_variable(var_name: str) -> Optional[str]:
+def _read_environment_variable(var_name: str) -> str | None:
     """Read a value from environment variables.
 
     Args:
@@ -165,7 +164,7 @@ def _resolve_config_value(
     key: str,
     environment: str,
     ssm_client,
-) -> Optional[str]:
+) -> str | None:
     """Resolve a single config value from SSM or environment variables.
 
     Strategy:
@@ -200,7 +199,7 @@ def _resolve_config_value(
     return None
 
 
-def _parse_cors_origins(raw: Optional[str]) -> list[str]:
+def _parse_cors_origins(raw: str | None) -> list[str]:
     """Parse a comma-separated CORS origins string into a list.
 
     Args:
@@ -235,8 +234,8 @@ class AppConfig:
 
     aws_region: str
     cors_origins: list[str] = field(default_factory=list)
-    dynamodb_table_name: Optional[str] = None
-    dynamodb_flows_table_name: Optional[str] = None
+    dynamodb_table_name: str | None = None
+    dynamodb_flows_table_name: str | None = None
     environment: str = "local"
 
 

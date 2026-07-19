@@ -35,7 +35,6 @@ No boto3, no I/O — fully unit-testable.
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Trust policy — bedrock-agentcore assumes the per-agent execution role.
@@ -113,12 +112,12 @@ def build_per_agent_role_name(agentcore_runtime_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _scoped_resource(arn: Optional[str]) -> object:
+def _scoped_resource(arn: str | None) -> object:
     """Return ``arn`` (as a single-element list) if supplied, else ``"*"``."""
     return [arn] if arn else "*"
 
 
-def _gateway_statement(gateway_arn: Optional[str]) -> dict:
+def _gateway_statement(gateway_arn: str | None) -> dict:
     return {
         "Sid": "GatewayAccess",
         "Effect": "Allow",
@@ -131,7 +130,7 @@ def _gateway_statement(gateway_arn: Optional[str]) -> dict:
     }
 
 
-def _memory_statement(memory_arn: Optional[str]) -> dict:
+def _memory_statement(memory_arn: str | None) -> dict:
     return {
         "Sid": "MemoryAccess",
         "Effect": "Allow",
@@ -149,7 +148,7 @@ def _memory_statement(memory_arn: Optional[str]) -> dict:
     }
 
 
-def _knowledge_base_statement(kb_arn: Optional[str]) -> dict:
+def _knowledge_base_statement(kb_arn: str | None) -> dict:
     return {
         "Sid": "KnowledgeBaseAccess",
         "Effect": "Allow",
@@ -243,12 +242,12 @@ _TOOL_BUILDERS = {
 
 
 def build_scoped_runtime_policy(
-    connected_tools: Optional[list],
-    kb_arn: Optional[str] = None,
-    gateway_arn: Optional[str] = None,
-    memory_arn: Optional[str] = None,
-    otel_secret_arn: Optional[str] = None,
-    artifacts_bucket: Optional[str] = None,
+    connected_tools: list | None,
+    kb_arn: str | None = None,
+    gateway_arn: str | None = None,
+    memory_arn: str | None = None,
+    otel_secret_arn: str | None = None,
+    artifacts_bucket: str | None = None,
 ) -> dict:
     """Build a least-privilege IAM policy document for a per-agent runtime role.
 

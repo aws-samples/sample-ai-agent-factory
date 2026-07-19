@@ -12,15 +12,12 @@ Requirements: MCP Server as Gateway Target pattern
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import logging
 import os
 import re
 import time
 
-import boto3
-
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services import step_clients
 from app.services.deployment import generate_mcp_server_code
@@ -86,7 +83,9 @@ def _prewarm_mcp_runtime(region: str, runtime_arn: str, event: dict, attempts: i
         except Exception as e:  # noqa: BLE001
             logger.info(
                 "MCP runtime pre-warm attempt %d/%d still warming: %s",
-                i + 1, attempts, str(e)[:160],
+                i + 1,
+                attempts,
+                str(e)[:160],
             )
             time.sleep(5)
     return False
