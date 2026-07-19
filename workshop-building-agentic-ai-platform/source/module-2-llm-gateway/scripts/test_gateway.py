@@ -223,7 +223,9 @@ def main() -> None:
     print("  LLM Gateway (LiteLLM Proxy) — Test Suite")
     print("=" * 55)
     print(f"  URL: {args.url}")
-    print(f"  Key: {'*' * 8 + args.api_key[-4:] if args.api_key else '(none)'}")
+    # Don't echo any portion of the key (even a masked suffix is flagged as
+    # sensitive-data logging); presence/absence is all the tester needs.
+    print(f"  Key: {'(set)' if args.api_key else '(none)'}")
 
     test_health(client)
     test_model_health(client)
