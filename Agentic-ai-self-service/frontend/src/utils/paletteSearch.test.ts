@@ -20,7 +20,11 @@ import { PALETTE_ITEMS, type PaletteItem } from '../components/palette/Component
 export function filterPaletteItems(items: PaletteItem[], query: string): PaletteItem[] {
   if (!query.trim()) return items;
 
-  const normalizedQuery = query.toLowerCase();
+  // Trim BEFORE matching (mirrors ComponentPalette): a query like "a " must
+  // match the same items as "a" — trailing whitespace never changes results.
+  // Without the trim, the exclusion property fails on counterexamples like
+  // "A " (item contains "a" but not "a ").
+  const normalizedQuery = query.trim().toLowerCase();
   return items.filter(
     (item) =>
       item.label.toLowerCase().includes(normalizedQuery) ||

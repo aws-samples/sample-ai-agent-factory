@@ -349,11 +349,14 @@ export function ComponentPalette({
     new Set(['compute', 'integration', 'security', 'tools', 'connectors'])
   );
 
-  // Filter items based on search query
+  // Filter items based on search query. Trim BEFORE matching — an untrimmed
+  // query like "a " excludes items that contain "a" but not "a " (trailing
+  // whitespace should never change search results); Property 41 checks the
+  // trimmed semantics.
   const filteredItems = useMemo(() => {
     if (!searchQuery.trim()) return PALETTE_ITEMS;
 
-    const query = searchQuery.toLowerCase();
+    const query = searchQuery.trim().toLowerCase();
     return PALETTE_ITEMS.filter(
       (item) =>
         item.label.toLowerCase().includes(query) ||
