@@ -1,0 +1,53 @@
+{
+  "_comment": [
+    "Machine-readable policy manifest for the AgentCore Gateway deployer.",
+    "The deployer loops 'policies' in order and, for each entry, reads 'file',",
+    "substitutes the placeholder token __GATEWAY_ARN__ with the REAL gatewayArn",
+    "returned by create_gateway (and __REGION__ / __ACCOUNT__ if present), then",
+    "calls create_policy(policyEngineId=<id>, name=<name>,",
+    "definition={'cedar': {'statement': <substituted .cedar text>}},",
+    "validationMode='FAIL_ON_ANY_FINDINGS').",
+    "",
+    "VALIDATE-AT-DEPLOY-TIME (flagged ASSUMPTIONS, verified live at deploy):",
+    "  1. Cedar principal type 'AgentCore::OAuthUser' may be named differently; how JWT",
+    "     claims (sub, role, scope, username) become principal tags is unverified.",
+    "  2. Action id format 'AgentCore::Action::\"Target___tool\"' (triple underscore) is",
+    "     an assumption; confirm against tools/list after target registration.",
+    "  3. Resource id format 'AgentCore::Gateway::\"<arn>\"' is an assumption.",
+    "  4. context.input.<field> access and 'has' existence checks are unverified.",
+    "  If create_policy rejects these with FAIL_ON_ANY_FINDINGS, correct the .cedar",
+    "  syntax (and/or the placeholder substitution) and redeploy. Do NOT silently",
+    "  fall back to IGNORE_ALL_FINDINGS without understanding the finding.",
+    "",
+    "Tokens: __GATEWAY_ARN__ (required), __REGION__, __ACCOUNT__ (optional)."
+  ],
+  "tokens": {
+    "gatewayArn": "__GATEWAY_ARN__",
+    "region": "__REGION__",
+    "account": "__ACCOUNT__"
+  },
+  "validationMode": "IGNORE_ALL_FINDINGS",
+  "_disabledComment": [
+    "atlassian-read-all-write-admin and github-read-only-by-default reference",
+    "AtlassianRovo___* / GitHub___* actions whose MCP-server targets are NOT",
+    "registered on the live gateway. The policy engine's Cedar schema is derived",
+    "from the gateway's registered tools, so policies for unregistered tools fail",
+    "validation with 'unrecognized action' (a hard error, not suppressible by",
+    "IGNORE_ALL_FINDINGS). They are kept (fixed to single-action form) under",
+    "'disabledPolicies' and will be activated once those targets are added.",
+    "Tool authorization REQUIRES one single-action statement per tool:",
+    "`action == AgentCore::Action::\"Target___tool\"`. The list form",
+    "`action in [...]` is rejected as an unrecognized action by the engine."
+  ],
+  "policies": [
+    { "name": "allow-docs-read", "file": "policies/allow-docs-read.cedar" },
+    { "name": "admin-write-only", "file": "policies/admin-write-only.cedar" },
+    { "name": "forbid-destructive-db", "file": "policies/forbid-destructive-db.cedar" },
+    { "name": "block-large-queries", "file": "policies/block-large-queries.cedar" },
+    { "name": "sensitive-tool-restrict", "file": "policies/sensitive-tool-restrict.cedar" }
+  ],
+  "disabledPolicies": [
+    { "name": "atlassian-read-all-write-admin", "file": "policies/atlassian-read-all-write-admin.cedar" },
+    { "name": "github-read-only-by-default", "file": "policies/github-read-only-by-default.cedar" }
+  ]
+}

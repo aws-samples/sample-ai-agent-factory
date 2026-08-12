@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Connector Authorize</title>
+  <style>
+    body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 640px;
+           margin: 3rem auto; padding: 0 1rem; color: #1a1a2e; }
+    h1 { font-size: 1.4rem; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 1.25rem; margin-top: 1rem; }
+    .status { padding: .5rem .75rem; border-radius: 6px; font-size: .95rem; margin: .5rem 0; }
+    .ok { background: #e7f7ec; color: #146c2e; }
+    .info { background: #eef2ff; color: #26408b; }
+    .err { background: #fdecec; color: #b3261e; white-space: pre-wrap; }
+    button { background: #26408b; color: #fff; border: 0; border-radius: 6px;
+             padding: .6rem 1rem; font-size: .95rem; cursor: pointer; }
+    code { background: #f2f2f7; padding: .1rem .3rem; border-radius: 4px; }
+    #log { margin-top: 1rem; font-size: .8rem; color: #585b70; white-space: pre-wrap;
+           background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: .6rem;
+           max-height: 220px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>Connector Authorize</h1>
+  <div class="card">
+    <div id="provider-line" class="status info">Loading…</div>
+    <div id="action"></div>
+  </div>
+  <div id="log"></div>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const log = (m) => { $("log").textContent += m + "\n"; };
+const setStatus = (cls, msg) => { $("provider-line").className = "status " + cls; $("provider-line").textContent = msg; };
+
+// PKCE helpers
+function b64url(bytes) {
+  return btoa(String.fromCharCode(...new Uint8Array(bytes)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+async function pkce() {
+  const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
+  const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+  return { verifier, challenge };
+}
+const decodeJwt = (t) => JSON.parse(atob(t.split(".")[1]));
+
+async function main() {
+  const cfg = await (await fetch("./config.json", { cache: "no-store" })).json();
+  const url = new URL(window.location.href);
+  const provider = url.searchParams.get("provider")
+    || localStorage.getItem("auth_provider")
+    || Object.keys(cfg.providers)[0];
+  localStorage.setItem("auth_provider", provider);
+  const pcfg = cfg.providers[provider];
+  if (!pcfg) { setStatus("err", `Unknown provider "${provider}". Known: ${Object.keys(cfg.providers).join(", ")}`); return; }
+  setStatus("info", `Authorizing ${pcfg.label || provider}…`);
+
+  // --- Step A: Cognito Hosted UI login (auth code + PKCE) ---
+  const code = url.searchParams.get("code");
+  if (code) {
+    // Returning from Hosted UI — exchange the code for tokens.
+    log("Exchanging authorization code for tokens…");
+    const verifier = sessionStorage.getItem("pkce_verifier");
+    const body = new URLSearchParams({
+      grant_type: "authorization_code", client_id: cfg.userPoolClientId,
+      code, redirect_uri: cfg.redirectUri, code_verifier: verifier || "",
+    });
+    const resp = await fetch(`${cfg.cognitoLoginDomain}/oauth2/token`, {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body,
+    });
+    if (!resp.ok) { setStatus("err", "Token exchange failed: " + (await resp.text())); return; }
+    const tok = await resp.json();
+    localStorage.setItem("id_token", tok.id_token);
+    localStorage.setItem("access_token", tok.access_token);
+    // Clean the code out of the URL, keep provider.
+    window.history.replaceState({}, "", `${cfg.redirectUri}/?provider=${encodeURIComponent(provider)}`);
+  }
+
+  let accessToken = localStorage.getItem("access_token");
+  let idToken = localStorage.getItem("id_token");
+  const expired = (t) => { try { return decodeJwt(t).exp * 1000 < Date.now() + 30000; } catch { return true; } };
+  if (!accessToken || !idToken || expired(accessToken)) {
+    // Not signed in (or token stale) — start Hosted UI login.
+    log("Redirecting to sign-in…");
+    const { verifier, challenge } = await pkce();
+    sessionStorage.setItem("pkce_verifier", verifier);
+    const a = new URL(`${cfg.cognitoLoginDomain}/oauth2/authorize`);
+    a.searchParams.set("response_type", "code");
+    a.searchParams.set("client_id", cfg.userPoolClientId);
+    a.searchParams.set("redirect_uri", cfg.redirectUri);
+    a.searchParams.set("scope", "openid email profile mcp-gateway/read");
+    a.searchParams.set("code_challenge", challenge);
+    a.searchParams.set("code_challenge_method", "S256");
+    a.searchParams.set("state", provider);
+    window.location.href = a.toString();
+    return;
+  }
+  log(`Signed in as ${decodeJwt(idToken).email || decodeJwt(idToken)["cognito:username"] || "user"}.`);
+
+  // --- Step B: probe the gateway to see if consent is needed ---
+  // The gateway (which owns its service-linked workload) runs the OAuth exchange
+  // and returns the -32042 consent URL if no token is vaulted. We pass returnUrl in
+  // _meta so consent redirects back to THIS SPA's callback.html.
+  const returnUrl = `${cfg.redirectUri}/callback.html`;
+  log(`Probing ${pcfg.probeTool}…`);
+  const probe = await fetch(cfg.gatewayUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream",
+      "Mcp-Protocol-Version": "2025-11-25",
+      "Authorization": "Bearer " + accessToken,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: {
+        name: pcfg.probeTool,
+        arguments: {},
+        // _meta MUST be inside params (per AWS 3LO docs). This overrides the
+        // target's defaultReturnUrl so consent redirects to THIS SPA's callback.
+        _meta: {
+          "aws.bedrock-agentcore.gateway/credentialProviderConfiguration": {
+            oauthCredentialProvider: { returnUrl },
+          },
+        },
+      },
+    }),
+  });
+  const data = await probe.json();
+
+  if (data.error && data.error.code === -32042) {
+    const elic = (data.error.data && data.error.data.elicitations) || [];
+    const authUrl = elic[0] && elic[0].url;
+    if (!authUrl) { setStatus("err", "Consent required but no authorization URL returned."); return; }
+    // Persist the SAME access token used for this probe (it must match the token
+    // used later in CompleteResourceTokenAuth) + id token, across the cross-origin
+    // redirect. localStorage (NOT sessionStorage) survives that round-trip.
+    localStorage.setItem("auth_flow_access_token", accessToken);
+    localStorage.setItem("auth_flow_id_token", idToken);
+    localStorage.setItem("auth_flow_provider", provider);
+    setStatus("info", `Sign in to ${pcfg.label || provider} and click Allow…`);
+    log("Redirecting to provider consent…");
+    window.location.href = authUrl;
+    return;
+  }
+
+  if (data.result && !data.result.isError) {
+    setStatus("ok", `✓ Already authorized for ${pcfg.label || provider}. Return to Kiro — the tools now return your data.`);
+    return;
+  }
+  setStatus("err", "Unexpected response:\n" + JSON.stringify(data.error || data, null, 2));
+}
+
+main().catch((e) => setStatus("err", String(e && e.stack || e)));
+</script>
+</body>
+</html>

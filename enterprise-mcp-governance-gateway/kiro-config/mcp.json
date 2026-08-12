@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "enterprise-gateway": {
+      "url": "__GATEWAY_URL__",
+      "headers": {
+        "Authorization": "Bearer ${AGENTCORE_JWT}"
+      }
+    }
+  }
+}
