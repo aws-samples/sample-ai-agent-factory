@@ -1,0 +1,69 @@
+{
+  "tools": [
+    {
+      "name": "get_page",
+      "description": "Get a documentation page by ID",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pageId": { "type": "string", "description": "The page identifier" }
+        },
+        "required": ["pageId"]
+      }
+    },
+    {
+      "name": "search_pages",
+      "description": "Search documentation pages by keyword",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "description": "Search query" }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "list_spaces",
+      "description": "List all documentation spaces",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "create_page",
+      "description": "Create a new documentation page",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string", "description": "Page title" },
+          "content": { "type": "string", "description": "Page content in markdown" }
+        },
+        "required": ["title", "content"]
+      }
+    },
+    {
+      "name": "update_page",
+      "description": "Update an existing documentation page",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pageId": { "type": "string", "description": "The page identifier" },
+          "content": { "type": "string", "description": "New page content" }
+        },
+        "required": ["pageId", "content"]
+      }
+    },
+    {
+      "name": "delete_page",
+      "description": "Delete a documentation page",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pageId": { "type": "string", "description": "The page identifier" }
+        },
+        "required": ["pageId"]
+      }
+    }
+  ]
+}

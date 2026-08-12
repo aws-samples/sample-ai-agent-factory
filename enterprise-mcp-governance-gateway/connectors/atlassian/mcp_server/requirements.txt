@@ -1,0 +1,3 @@
+# MCP server runtime deps. FastMCP (in the `mcp` package) brings Starlette/uvicorn.
+# Pinned exactly for reproducible, scanner-friendly container builds.
+mcp==1.28.1

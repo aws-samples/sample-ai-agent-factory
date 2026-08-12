@@ -1,0 +1,16 @@
+{
+  "_comment": "TEMPLATE ONLY — documents the shape of the SPA's runtime config. Do not edit or deploy this file. scripts/deploy-connector-auth.sh reads the ConnectorAuthStack outputs and writes the real connectors/authorize-spa/config.json (git-ignored, since it holds live account-specific ids) before uploading the site.",
+  "region": "REPLACE_ME_REGION",
+  "gatewayUrl": "REPLACE_ME_GATEWAY_MCP_URL",
+  "cognitoLoginDomain": "REPLACE_ME_COGNITO_HOSTED_UI_DOMAIN",
+  "userPoolId": "REPLACE_ME_USER_POOL_ID",
+  "userPoolClientId": "REPLACE_ME_SPA_APP_CLIENT_ID",
+  "identityPoolId": "REPLACE_ME_IDENTITY_POOL_ID",
+  "redirectUri": "REPLACE_ME_CLOUDFRONT_SITE_URL",
+  "providers": {
+    "atlassian": {
+      "label": "Atlassian (Jira & Confluence)",
+      "probeTool": "Atlassian___getVisibleJiraProjects"
+    }
+  }
+}

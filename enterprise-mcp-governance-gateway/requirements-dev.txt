@@ -1,0 +1,11 @@
+# Test / local-tooling dependencies (NOT needed to deploy — that's cdk/requirements.txt).
+# Install into your venv before running the tests:
+#   pip install -r requirements-dev.txt
+#
+# Pinned for reproducible, vetted installs. Versions are chosen to avoid known CVEs
+# (e.g. requests <2.32.4 CVE-2024-47081; pytest <9.0.3 CVE-2025-71176) — when bumping,
+# re-run `python3 -m pytest tests/unit` to confirm nothing breaks.
+pytest==9.1.1        # unit + integration test runner
+requests==2.34.2     # live integration tests (HTTP calls to the gateway)
+boto3==1.43.24       # mcp_client.py SSM lookup + Cognito/SSM calls in the helper scripts
+certifi==2026.7.22   # scripts/mcp_client.py TLS CA bundle (keep current)

@@ -1,0 +1,4 @@
+# Verified present: aws_cdk.aws_bedrockagentcore exposes CfnGateway,
+# CfnGatewayTarget, CfnPolicyEngine, CfnPolicy in this version.
+aws-cdk-lib==2.261.0
+constructs==10.6.0
