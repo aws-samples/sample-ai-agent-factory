@@ -21,7 +21,18 @@ This workshop follows two complementary personas — the **platform engineer** w
 - **Module 3b: AgentCore Registry & Gateway** — AWS-native tool governance using Amazon Bedrock AgentCore with Cedar-based authorization and EventBridge-driven approval workflows
 - **Module 4: Build Your Agent** — deploy a full-stack travel agent using FAST (Fullstack AgentCore Solution Template) on Amazon Bedrock AgentCore, wired to the platform via either the MCP path or the AgentCore path
 
-## Choose Your Track
+## Learning outcomes
+
+After completing this workshop you will be able to:
+
+1. **Deploy a governed LLM gateway** — run LiteLLM Proxy on ECS Fargate in front of Amazon Bedrock, issue per-team virtual keys with budgets, and attribute every model call to the team that made it.
+2. **Enforce content controls at the platform edge** — attach Amazon Bedrock Guardrails to both model input and tool output so PII and harmful content are blocked before an agent ever sees them.
+3. **Catalogue and govern tools** — register MCP servers, agents, and skills in a registry, run them through a publish/approve workflow, and control who can see and invoke each one.
+4. **Front those tools with an AgentCore Gateway** — expose curated tools over MCP with JWT machine-to-machine auth, request/response interceptors, and an audit trail of every tool call.
+5. **Build and deploy a production-shaped agent** — ship a full-stack Strands agent on Amazon Bedrock AgentCore Runtime with memory, a code interpreter, and a React frontend, wired to the platform rather than calling Bedrock directly.
+6. **Prove the governance path, not assume it** — verify from the CLI that model calls flow through the gateway, that spend is recorded, and that traces land in CloudWatch.
+
+## Choose your track
 
 | Track | Best For | You Do | Duration |
 |-------|----------|--------|----------|
@@ -47,8 +58,8 @@ This workshop is not an introduction to AWS or AI/ML concepts. Participants shou
 
 Each module's opening page includes a short verification block to confirm the tools it expects are installed and working before you begin. For Module 4 specifically, see the [Module 4 prerequisites check](/module-4#prerequisites).
 
-### AWS Account Requirements and Costs
+### AWS account requirements and costs
 
 **At an AWS Event:** An AWS account will be provided for you at no cost. You will not incur any charges.
 
-**Self-Hosted:** If you are running this workshop in your own AWS account, you will incur charges for the AWS services used. Key cost-bearing resources include [Amazon ECS Fargate](https://aws.amazon.com/fargate/pricing/), [Amazon DocumentDB](https://aws.amazon.com/documentdb/pricing/), [Amazon Aurora PostgreSQL](https://aws.amazon.com/rds/aurora/pricing/), [NAT Gateways](https://aws.amazon.com/vpc/pricing/), [Application Load Balancers](https://aws.amazon.com/elasticloadbalancing/pricing/), [Amazon CloudFront](https://aws.amazon.com/cloudfront/pricing/), [AWS Lambda invocations](https://aws.amazon.com/lambda/pricing/), and [Amazon Bedrock model invocations](https://aws.amazon.com/bedrock/pricing/). Be sure to follow the [cleanup instructions](/cleanup) at the end of the workshop to minimize costs.
+**Self-Hosted:** If you are running this workshop in your own AWS account, you will incur charges for the AWS services used. Key cost-bearing resources include [Amazon ECS Fargate](https://aws.amazon.com/fargate/pricing/), [Amazon DocumentDB](https://aws.amazon.com/documentdb/pricing/) (the Module 3 registry's document store), [Amazon EFS](https://aws.amazon.com/efs/pricing/) (which persists the Module 2 LLM gateway's PostgreSQL sidecar container, running inside the Fargate task rather than as a managed Aurora or RDS instance), [NAT Gateways](https://aws.amazon.com/vpc/pricing/), [Application Load Balancers](https://aws.amazon.com/elasticloadbalancing/pricing/), [Amazon CloudFront](https://aws.amazon.com/cloudfront/pricing/), [AWS Lambda invocations](https://aws.amazon.com/lambda/pricing/), and [Amazon Bedrock model invocations](https://aws.amazon.com/bedrock/pricing/). Be sure to follow the [cleanup instructions](/cleanup) at the end of the workshop to minimize costs.

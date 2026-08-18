@@ -3,7 +3,7 @@ title: "Tools Gateway: Register + Cleanup"
 weight: 54
 ---
 
-## Register the Gateway as a Discoverable Service (Optional)
+## Register the gateway as a discoverable service (optional)
 
 The AgentCore Gateway can be registered in the MCP Registry so agents can discover the governed path dynamically:
 
@@ -20,7 +20,7 @@ echo "Gateway ID:  $GATEWAY_ID"
 echo "Gateway URL: $GATEWAY_URL"
 :::
 
-### Step 2: Authenticate with the Registry
+### Step 2: Authenticate with the registry
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 REGISTRY_URL=$(aws cloudformation list-exports \
@@ -53,7 +53,7 @@ This is composability: the gateway is both infrastructure AND a discoverable ser
 
 ::alert[If you plan to continue to Module 4, **do not clean up** — Module 4 depends on the gateway and tools registered here. Follow the [Workshop Cleanup](../../cleanup/) instructions when you are completely finished.]{type="warning"}
 
-## What You Built
+## What you built
 
 | Component | Purpose |
 |-----------|---------|

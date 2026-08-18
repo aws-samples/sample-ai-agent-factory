@@ -7,14 +7,14 @@ If you are participating in an AWS Immersion Day, public workshop, or a similar 
 
 Follow the instructions in this section to sign in to the pre-provisioned AWS account.
 
-## Before You Start
+## Before you start
 
 - Log out from all existing AWS console sessions in all browser windows.
 - Review the terms and conditions of the event. Do not upload any personal or confidential information in the account.
 - The AWS account is only available for the duration of this workshop and you will not be able to retain access after the workshop is complete. Back up any materials you wish to keep access to after the workshop.
 - All workshop resources are deployed to **US West (Oregon) / us-west-2**. Make sure your AWS console region switcher matches this.
 
-## Access AWS Console
+## Access AWS console
 
 Use the button below to access your workshop AWS account, it will open in a new window/tab:
 
@@ -24,7 +24,7 @@ Alternatively you can find the **Open AWS console** link at the bottom of the me
 
 ::alert[The AWS console will open in **US West (Oregon) / us-west-2** — the region Workshop Studio has deployed your workshop resources to. If you ever navigate away and lose the region, switch back to us-west-2 using the region selector in the top-right of the console.]{type="info"}
 
-## Open the Workshop IDE
+## Open the workshop IDE
 
 Your workshop environment includes a browser-based VS Code IDE with all required tools pre-installed (AWS CLI, Python, Git, Docker). All workshop commands should be run in this IDE's terminal.
 
@@ -59,7 +59,7 @@ Open the CloudFormation console in us-west-2, select the **`code-editor`** stack
 
 ::alert[The IDE runs on an EC2 instance in your workshop account with pre-configured AWS credentials. You do not need to paste CLI credentials into the IDE terminal — they are available automatically via the instance role. The default AWS region is also pre-set to `us-west-2`.]{type="info"}
 
-## Kiro CLI in the Workshop IDE (Optional)
+## Kiro CLI in the workshop IDE (optional)
 
 **Kiro CLI** (the successor to the `q` CLI — same lineage, renamed) is pre-installed in the Workshop IDE. It gives you a terminal-based AI assistant with access to MCP tools. It is **optional** — everything in the workshop works without it, so skip this section at a time-boxed event if you prefer and come back later.
 
@@ -98,7 +98,7 @@ Useful in-chat commands: `/clear` (reset context), `/model` (switch models), `/t
 
 ::alert[Use Kiro for exploration and code explanation; do not paste real credentials, customer data, or anything confidential into the chat. Workshop accounts are short-lived and shared for testing.]{type="warning"}
 
-## Where to Run CLI Commands
+## Where to run CLI commands
 
 ::alert[**Every `aws` / `bash` / `python` command in every module is intended for the Workshop IDE's terminal.** The IDE has pre-configured AWS credentials, the correct default region (`us-west-2`), and the `/workshop/` folder pre-staged. Do not run module commands from your laptop terminal — credentials, region defaults, and file paths will not match.]{type="warning"}
 
@@ -110,17 +110,17 @@ If you have not used VS Code in the browser before, three quick orientation tips
 2. **Copy the IDE URL again if you lose it.** If you accidentally close the IDE tab, the URL is always available on the Workshop Studio **Event outputs** panel (the same row as `IdePassword`) — see screenshot above. Re-open that URL and paste your password again.
 3. **Open a file from the explorer.** The left-hand panel shows the `/workshop/` folder tree. Click a `.py`, `.md`, or `.ipynb` file to open it. Notebooks open in VS Code's notebook view — when a kernel is needed, pick **`Python 3 (workshop)`** from the kernel-picker at the top-right of the notebook.
 
-### Using a Local Terminal (not recommended)
+### Using a local terminal (not recommended)
 
 If the Workshop IDE is unavailable and you must fall back to a local terminal, you can pull short-lived CLI credentials from the workshop menu. Select the **Get AWS CLI credentials** menu item on the left:
 
-![AWS credentials menu item](/static/img/getting-started/credentials-menu.png)
+![Workshop Studio left-hand AWS account access panel, with an "Open AWS console (us-west-2)" link above the "Get AWS CLI credentials" link, which is outlined in red](/static/img/getting-started/credentials-menu.png)
 
-![AWS credentials popup](/static/img/getting-started/credentials-account-access.png)
+![AWS account access dialog showing the AWS CLI credentials block for Linux or macOS (bash), with export lines for AWS_DEFAULT_REGION set to us-west-2 plus AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN, a copy button, and a note that only the event Region should be used](/static/img/getting-started/credentials-account-access.png)
 
 Copy the credentials and paste them into your local terminal. They are valid for the duration of the workshop session. Note that paths like `/workshop/source/...` referenced throughout the modules will not exist on your laptop — you will need to clone the workshop repository and adjust paths manually. For these reasons we strongly recommend using the IDE terminal.
 
-## Pre-Provisioned Infrastructure
+## Pre-provisioned infrastructure
 
 Your workshop environment comes with infrastructure already deployed:
 
@@ -134,7 +134,7 @@ Your workshop environment comes with infrastructure already deployed:
 
 ::alert[You do not need to deploy any of these resources. They are all provisioned automatically when the workshop environment starts. Each module walks you through exploring and configuring the pre-deployed infrastructure.]{type="info"}
 
-## Jupyter Notebooks (Optional)
+## Jupyter notebooks (optional)
 
 Several modules offer a Jupyter notebook walkthrough as an alternative to the CLI steps. The workshop source code — including all notebooks — is pre-staged at `/workshop/source/`, and Jupyter, `ipykernel`, and all Python dependencies (`boto3`, `httpx`, `strands-agents`, etc.) are already installed in the IDE. Each module's notebook walkthrough will point you to the relevant `.ipynb` file.
 

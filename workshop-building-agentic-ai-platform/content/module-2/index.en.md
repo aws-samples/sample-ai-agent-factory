@@ -7,7 +7,7 @@ weight: 30
 
 Deploy an enterprise LLM Gateway using **LiteLLM Proxy** that provides governed, unified access to Amazon Bedrock foundation models — with virtual keys, cost tracking, guardrails, and native integration with Strands Agents.
 
-## The Problem
+## The problem
 
 - Teams across the enterprise call foundation models directly, each managing their own credentials
 - No centralized visibility into model usage, costs, or which teams are consuming what
@@ -15,19 +15,19 @@ Deploy an enterprise LLM Gateway using **LiteLLM Proxy** that provides governed,
 - Switching between models or providers requires code changes in every application
 - Agents need a single, portable endpoint they can call regardless of the underlying model
 
-## The Solution: LiteLLM Proxy
+## The solution: LiteLLM proxy
 
 | Capability | Description |
 |-----------|-------------|
 | **Unified API** | OpenAI-compatible endpoint — existing code and Strands Agents work by changing the base URL |
 | **Virtual Keys** | Per-team/per-key budgets, rate limiting, and spend tracking — no provider keys exposed |
-| **65 Bedrock Models** | Route to Claude, Nova, Llama, Mistral, Cohere, Titan, DeepSeek, Qwen, and more through one gateway |
+| **17 Bedrock model aliases** | Route to Claude, Nova, Llama, Mistral, and DeepSeek through one gateway — and add more from a 55-alias reference catalog |
 | **Bedrock Guardrails** | Native integration with Amazon Bedrock Guardrails for content safety and PII detection |
 | **Cost Tracking** | Per-key, per-team, per-model spend attribution with `/spend/logs` API |
 | **Caching** | Identical requests return cached responses — reduces cost and latency |
 | **Strands Agents** | Native `LiteLLMModel` provider — tool calling works through the Bedrock Converse API |
 
-## What You'll Deploy
+## What you'll deploy
 
 [LiteLLM Proxy](https://docs.litellm.ai/) is an open-source LLM gateway deployed on **ECS Fargate** with a **PostgreSQL sidecar** (for virtual keys and spend tracking), persisted on **EFS**. An **API Gateway HTTP API** provides an HTTPS front door via a VPC Link to an internal ALB. The task role authenticates to **Amazon Bedrock** via IAM — no API keys needed.
 
@@ -64,9 +64,8 @@ Strands Agents / Applications
 │   + Bedrock Guardrails      │
 │                             │
 │   Claude · Nova · Llama     │
-│   Mistral · Cohere · Titan  │
-│   DeepSeek · Qwen · Gemma   │
-│   Nemotron · Writer · more  │
+│   Mistral · DeepSeek        │
+│   + 55 more via config      │
 └─────────────────────────────┘
 ```
 
@@ -91,12 +90,12 @@ LiteLLM was chosen over other gateways because:
 6. [Spend Tracking & Admin](step-6/) — Review costs, explore the LiteLLM Admin UI
 7. [Cleanup](step-7/) — Tear down all AWS resources
 
-## Source Code
+## Source code
 
 :::code{showCopyAction=false showLineNumbers=false language=text}
 source/module-2-llm-gateway/
-├── cfn/
-│   └── litellm-config.yaml     # LiteLLM config: models, guardrails, settings
+├── reference/
+│   └── litellm-config.yaml     # LiteLLM model catalog (reference only)
 ├── scripts/                     # Deploy, setup keys, test scripts
 ├── llm_gateway_client/          # Python client library
 ├── tests/                       # Unit tests

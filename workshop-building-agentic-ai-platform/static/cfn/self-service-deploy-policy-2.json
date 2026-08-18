@@ -2,55 +2,14 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "ElbForServicesStack",
+      "Sid": "DocumentDbForDataStackNoResourceLevel",
       "Effect": "Allow",
       "Action": [
-        "elasticloadbalancing:CreateLoadBalancer",
-        "elasticloadbalancing:DeleteLoadBalancer",
-        "elasticloadbalancing:DescribeLoadBalancers",
-        "elasticloadbalancing:CreateTargetGroup",
-        "elasticloadbalancing:DeleteTargetGroup",
-        "elasticloadbalancing:DescribeTargetGroups",
-        "elasticloadbalancing:DescribeTargetHealth",
-        "elasticloadbalancing:RegisterTargets",
-        "elasticloadbalancing:DeregisterTargets",
-        "elasticloadbalancing:CreateListener",
-        "elasticloadbalancing:DeleteListener",
-        "elasticloadbalancing:DescribeListeners",
-        "elasticloadbalancing:CreateRule",
-        "elasticloadbalancing:DeleteRule",
-        "elasticloadbalancing:DescribeRules",
-        "elasticloadbalancing:ModifyLoadBalancerAttributes",
-        "elasticloadbalancing:ModifyTargetGroupAttributes",
-        "elasticloadbalancing:AddTags",
-        "elasticloadbalancing:RemoveTags",
-        "elasticloadbalancing:DescribeTags"
-      ],
-      "Resource": "*",
-      "Condition": {
-        "StringEquals": {
-          "aws:RequestedRegion": [
-            "us-west-2",
-            "us-east-1",
-            "eu-west-1"
-          ]
-        }
-      }
-    },
-    {
-      "Sid": "EfsForServicesStack",
-      "Effect": "Allow",
-      "Action": [
-        "elasticfilesystem:CreateFileSystem",
-        "elasticfilesystem:DeleteFileSystem",
-        "elasticfilesystem:DescribeFileSystems",
-        "elasticfilesystem:CreateMountTarget",
-        "elasticfilesystem:DeleteMountTarget",
-        "elasticfilesystem:DescribeMountTargets",
-        "elasticfilesystem:CreateAccessPoint",
-        "elasticfilesystem:DeleteAccessPoint",
-        "elasticfilesystem:DescribeAccessPoints",
-        "elasticfilesystem:TagResource"
+        "rds:DescribeDBClusters",
+        "rds:DescribeDBInstances",
+        "rds:DescribeDBSubnetGroups",
+        "rds:DescribeDBClusterParameterGroups",
+        "rds:DescribeDBClusterParameters"
       ],
       "Resource": "*",
       "Condition": {
@@ -69,25 +28,25 @@
       "Action": [
         "rds:CreateDBCluster",
         "rds:DeleteDBCluster",
-        "rds:DescribeDBClusters",
         "rds:ModifyDBCluster",
         "rds:CreateDBInstance",
         "rds:DeleteDBInstance",
-        "rds:DescribeDBInstances",
         "rds:ModifyDBInstance",
         "rds:CreateDBSubnetGroup",
         "rds:DeleteDBSubnetGroup",
-        "rds:DescribeDBSubnetGroups",
         "rds:CreateDBClusterParameterGroup",
         "rds:DeleteDBClusterParameterGroup",
-        "rds:DescribeDBClusterParameterGroups",
         "rds:ModifyDBClusterParameterGroup",
-        "rds:DescribeDBClusterParameters",
         "rds:AddTagsToResource",
         "rds:RemoveTagsFromResource",
         "rds:ListTagsForResource"
       ],
-      "Resource": "*",
+      "Resource": [
+        "arn:aws:rds:*:*:cluster:workshop-*",
+        "arn:aws:rds:*:*:db:workshop-*",
+        "arn:aws:rds:*:*:subgrp:workshop-*",
+        "arn:aws:rds:*:*:cluster-pg:*"
+      ],
       "Condition": {
         "StringEquals": {
           "aws:RequestedRegion": [
@@ -99,26 +58,12 @@
       }
     },
     {
-      "Sid": "DynamoDbForWorkshopTables",
+      "Sid": "KmsCreateAndListNoResourceLevel",
       "Effect": "Allow",
       "Action": [
-        "dynamodb:CreateTable",
-        "dynamodb:DeleteTable",
-        "dynamodb:DescribeTable",
-        "dynamodb:DescribeTimeToLive",
-        "dynamodb:UpdateTimeToLive",
-        "dynamodb:UpdateContinuousBackups",
-        "dynamodb:DescribeContinuousBackups",
-        "dynamodb:PutItem",
-        "dynamodb:GetItem",
-        "dynamodb:UpdateItem",
-        "dynamodb:DeleteItem",
-        "dynamodb:Query",
-        "dynamodb:Scan",
-        "dynamodb:BatchWriteItem",
-        "dynamodb:BatchGetItem",
-        "dynamodb:TagResource",
-        "dynamodb:ListTables"
+        "kms:CreateKey",
+        "kms:ListAliases",
+        "kms:ListKeys"
       ],
       "Resource": "*",
       "Condition": {
@@ -132,10 +77,46 @@
       }
     },
     {
-      "Sid": "KmsForEncryptedResources",
+      "Sid": "KmsWorkshopAlias",
       "Effect": "Allow",
       "Action": [
-        "kms:CreateKey",
+        "kms:CreateAlias",
+        "kms:DeleteAlias"
+      ],
+      "Resource": "arn:aws:kms:*:*:alias/workshop-*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "KmsAliasTargetKeyMustBeWorkshopTagged",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateAlias",
+        "kms:DeleteAlias"
+      ],
+      "Resource": "arn:aws:kms:*:*:key/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ],
+          "aws:ResourceTag/Workshop": "AgentCore-Platform"
+        }
+      }
+    },
+    {
+      "Sid": "KmsManageTaggedWorkshopKeys",
+      "Effect": "Allow",
+      "Action": [
         "kms:ScheduleKeyDeletion",
         "kms:DescribeKey",
         "kms:EnableKeyRotation",
@@ -143,18 +124,35 @@
         "kms:GetKeyRotationStatus",
         "kms:GetKeyPolicy",
         "kms:PutKeyPolicy",
-        "kms:CreateAlias",
-        "kms:DeleteAlias",
-        "kms:ListAliases",
-        "kms:ListKeys",
         "kms:TagResource",
         "kms:UntagResource",
         "kms:CreateGrant",
         "kms:RevokeGrant",
+        "kms:RetireGrant",
         "kms:ListGrants",
         "kms:Encrypt",
         "kms:Decrypt",
-        "kms:GenerateDataKey"
+        "kms:GenerateDataKey",
+        "kms:GenerateDataKeyWithoutPlaintext",
+        "kms:ListResourceTags"
+      ],
+      "Resource": "arn:aws:kms:*:*:key/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ],
+          "aws:ResourceTag/Workshop": "AgentCore-Platform"
+        }
+      }
+    },
+    {
+      "Sid": "SecretsManagerForWorkshopSecretsNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetRandomPassword"
       ],
       "Resource": "*",
       "Condition": {
@@ -176,9 +174,29 @@
         "secretsmanager:DescribeSecret",
         "secretsmanager:GetSecretValue",
         "secretsmanager:PutSecretValue",
-        "secretsmanager:GetRandomPassword",
         "secretsmanager:TagResource",
         "secretsmanager:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:secretsmanager:*:*:secret:workshop*",
+        "arn:aws:secretsmanager:*:*:secret:ac-admin-password*",
+        "arn:aws:secretsmanager:*:*:secret:CodeEditor-*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "SsmParametersForWorkshopNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameters"
       ],
       "Resource": "*",
       "Condition": {
@@ -196,11 +214,78 @@
       "Effect": "Allow",
       "Action": [
         "ssm:GetParameter",
-        "ssm:GetParameters",
         "ssm:GetParametersByPath",
         "ssm:PutParameter",
         "ssm:DeleteParameter",
-        "ssm:AddTagsToResource"
+        "ssm:AddTagsToResource",
+        "ssm:RemoveTagsFromResource"
+      ],
+      "Resource": [
+        "arn:aws:ssm:*:*:parameter/workshop*",
+        "arn:aws:ssm:*:*:parameter/FAST-stack/*",
+        "arn:aws:ssm:*:*:parameter/agentcore-gateway/*",
+        "arn:aws:ssm:*:*:parameter/keycloak/*",
+        "arn:aws:ssm:*:*:parameter/cdk-bootstrap/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "SsmDocumentsForCodeEditorBootstrapNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:DescribeDocument",
+        "ssm:ListAssociations",
+        "ssm:DescribeAssociation"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "SsmDocumentsForCodeEditorBootstrap",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:CreateDocument",
+        "ssm:UpdateDocument",
+        "ssm:DeleteDocument",
+        "ssm:GetDocument",
+        "ssm:ListTagsForResource",
+        "ssm:AddTagsToResource",
+        "ssm:RemoveTagsFromResource"
+      ],
+      "Resource": [
+        "arn:aws:ssm:*:*:document/code-editor-*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "EventBridgeForSyncRuleNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "events:ListRules"
       ],
       "Resource": "*",
       "Condition": {
@@ -224,10 +309,32 @@
         "events:DisableRule",
         "events:PutTargets",
         "events:RemoveTargets",
-        "events:ListRules",
         "events:ListTargetsByRule",
         "events:ListTagsForResource",
-        "events:TagResource"
+        "events:TagResource",
+        "events:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:events:*:*:rule/workshop-*",
+        "arn:aws:events:*:*:rule/ac-*",
+        "arn:aws:events:*:*:rule/agentcore-*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "SnsForObservabilityNotificationsNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "sns:ListTopics",
+        "sns:ListSubscriptions"
       ],
       "Resource": "*",
       "Condition": {
@@ -248,45 +355,16 @@
         "sns:DeleteTopic",
         "sns:GetTopicAttributes",
         "sns:SetTopicAttributes",
-        "sns:ListTopics",
         "sns:Subscribe",
         "sns:Unsubscribe",
-        "sns:ListSubscriptions",
         "sns:ListSubscriptionsByTopic",
         "sns:TagResource",
-        "sns:UntagResource"
+        "sns:UntagResource",
+        "sns:ListTagsForResource"
       ],
-      "Resource": "*",
-      "Condition": {
-        "StringEquals": {
-          "aws:RequestedRegion": [
-            "us-west-2",
-            "us-east-1",
-            "eu-west-1"
-          ]
-        }
-      }
-    },
-    {
-      "Sid": "PrometheusForObservabilityStack",
-      "Effect": "Allow",
-      "Action": [
-        "aps:CreateWorkspace",
-        "aps:DeleteWorkspace",
-        "aps:DescribeWorkspace",
-        "aps:ListWorkspaces",
-        "aps:CreateRuleGroupsNamespace",
-        "aps:DeleteRuleGroupsNamespace",
-        "aps:DescribeRuleGroupsNamespace",
-        "aps:PutRuleGroupsNamespace",
-        "aps:CreateAlertManagerDefinition",
-        "aps:DeleteAlertManagerDefinition",
-        "aps:DescribeAlertManagerDefinition",
-        "aps:PutAlertManagerDefinition",
-        "aps:TagResource",
-        "aps:UntagResource"
+      "Resource": [
+        "arn:aws:sns:*:*:workshop-*"
       ],
-      "Resource": "*",
       "Condition": {
         "StringEquals": {
           "aws:RequestedRegion": [

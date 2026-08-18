@@ -2,34 +2,50 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "BedrockReadAndInvoke",
+      "Sid": "BedrockInvokeModelsScoped",
       "Effect": "Allow",
       "Action": [
         "bedrock:InvokeModel",
         "bedrock:InvokeModelWithResponseStream",
-        "bedrock:ListFoundationModels",
         "bedrock:GetFoundationModel",
+        "bedrock:GetInferenceProfile",
+        "bedrock:PutFoundationModelEntitlement"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:*::foundation-model/*",
+        "arn:aws:bedrock:*:*:inference-profile/*",
+        "arn:aws:bedrock:*:*:application-inference-profile/*"
+      ]
+    },
+    {
+      "Sid": "BedrockCatalogNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:ListFoundationModels",
         "bedrock:GetFoundationModelAvailability",
         "bedrock:ListInferenceProfiles",
-        "bedrock:GetInferenceProfile",
         "bedrock:PutUseCaseForModelAccess",
         "bedrock:GetUseCaseForModelAccess",
-        "bedrock:PutFoundationModelEntitlement",
         "bedrock:ListGuardrails",
-        "bedrock:ListTagsForResource",
-        "bedrock:GetModelInvocationLoggingConfiguration",
-        "bedrock:PutModelInvocationLoggingConfiguration",
-        "aws-marketplace:Subscribe",
-        "aws-marketplace:ViewSubscriptions"
+        "bedrock:ListTagsForResource"
       ],
-      "Resource": "*"
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
     },
     {
       "Sid": "BedrockGuardrailWrite",
       "Effect": "Allow",
       "Action": [
-        "bedrock:ApplyGuardrail",
         "bedrock:CreateGuardrail",
+        "bedrock:ApplyGuardrail",
         "bedrock:UpdateGuardrail",
         "bedrock:DeleteGuardrail",
         "bedrock:GetGuardrail",
@@ -40,45 +56,40 @@
       "Resource": "arn:aws:bedrock:*:*:guardrail/*"
     },
     {
-      "Sid": "ACRegistryWrite",
+      "Sid": "ACRegistryServiceLinkedRole",
       "Effect": "Allow",
-      "Action": [
-        "bedrock-agentcore:CreateRegistry",
-        "bedrock-agentcore:DeleteRegistry",
-        "bedrock-agentcore:CreateRegistryRecord",
-        "bedrock-agentcore:UpdateRegistryRecord",
-        "bedrock-agentcore:DeleteRegistryRecord",
-        "bedrock-agentcore:SubmitRegistryRecordForApproval",
-        "bedrock-agentcore:UpdateRegistryRecordStatus"
-      ],
-      "Resource": "*"
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::*:role/aws-service-role/agent-registry.amazonaws.com/AWSServiceRoleForAgentRegistry",
+      "Condition": {
+        "StringLike": {
+          "iam:AWSServiceName": "agent-registry.amazonaws.com"
+        }
+      }
     },
     {
-      "Sid": "ACRegistryRead",
+      "Sid": "ACGatewayCreate",
       "Effect": "Allow",
       "Action": [
-        "bedrock-agentcore:GetRegistry",
-        "bedrock-agentcore:ListRegistries",
-        "bedrock-agentcore:GetRegistryRecord",
-        "bedrock-agentcore:ListRegistryRecords",
-        "bedrock-agentcore:SearchRegistryRecords",
-        "bedrock-agentcore:ListActors"
+        "bedrock-agentcore:CreateGateway"
       ],
-      "Resource": "*"
+      "Resource": "arn:aws:bedrock-agentcore:*:*:gateway/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
     },
     {
-      "Sid": "ACGatewayWrite",
+      "Sid": "ACGatewaySyncOnCreate",
       "Effect": "Allow",
       "Action": [
-        "bedrock-agentcore:CreateGateway",
-        "bedrock-agentcore:UpdateGateway",
-        "bedrock-agentcore:DeleteGateway",
-        "bedrock-agentcore:CreateGatewayTarget",
-        "bedrock-agentcore:DeleteGatewayTarget",
-        "bedrock-agentcore:SynchronizeGatewayTargets",
-        "bedrock-agentcore:PutResourcePolicy"
+        "bedrock-agentcore:SynchronizeGatewayTargets"
       ],
-      "Resource": "*"
+      "Resource": "arn:aws:bedrock-agentcore:*:*:gateway/*"
     },
     {
       "Sid": "ACGatewayRead",
@@ -87,24 +98,34 @@
         "bedrock-agentcore:GetGateway",
         "bedrock-agentcore:ListGateways",
         "bedrock-agentcore:GetGatewayTarget",
-        "bedrock-agentcore:ListGatewayTargets"
+        "bedrock-agentcore:ListGatewayTargets",
+        "bedrock-agentcore:GetAgentRuntime",
+        "bedrock-agentcore:ListAgentRuntimes"
       ],
       "Resource": "*"
     },
     {
-      "Sid": "ACIdentityWrite",
+      "Sid": "ACIdentityScoped",
       "Effect": "Allow",
       "Action": [
         "bedrock-agentcore:CreateWorkloadIdentity",
-        "bedrock-agentcore:DeleteWorkloadIdentity",
-        "bedrock-agentcore:UpdateWorkloadIdentity",
         "bedrock-agentcore:CreateOauth2CredentialProvider",
-        "bedrock-agentcore:DeleteOauth2CredentialProvider",
-        "bedrock-agentcore:AuthorizeAction",
-        "bedrock-agentcore:CreateTokenVault",
-        "bedrock-agentcore:SetTokenVaultCMK"
+        "bedrock-agentcore:GetWorkloadAccessToken",
+        "bedrock-agentcore:GetResourceOauth2Token"
       ],
-      "Resource": "*"
+      "Resource": [
+        "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default*",
+        "arn:aws:bedrock-agentcore:*:*:token-vault/default*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
     },
     {
       "Sid": "ACIdentityRead",
@@ -112,26 +133,37 @@
       "Action": [
         "bedrock-agentcore:GetWorkloadIdentity",
         "bedrock-agentcore:ListWorkloadIdentities",
-        "bedrock-agentcore:GetWorkloadAccessToken",
-        "bedrock-agentcore:GetResourceOauth2Token",
         "bedrock-agentcore:GetOauth2CredentialProvider",
         "bedrock-agentcore:ListOauth2CredentialProviders",
         "bedrock-agentcore:GetTokenVault"
       ],
-      "Resource": "*"
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
     },
     {
-      "Sid": "ACPolicyWrite",
+      "Sid": "ACPolicyEngineCreate",
       "Effect": "Allow",
       "Action": [
-        "bedrock-agentcore:CreatePolicyEngine",
-        "bedrock-agentcore:DeletePolicyEngine",
-        "bedrock-agentcore:CreatePolicy",
-        "bedrock-agentcore:UpdatePolicy",
-        "bedrock-agentcore:DeletePolicy",
-        "bedrock-agentcore:ManageResourceScopedPolicy"
+        "bedrock-agentcore:CreatePolicyEngine"
       ],
-      "Resource": "*"
+      "Resource": "arn:aws:bedrock-agentcore:*:*:policy-engine/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
     },
     {
       "Sid": "ACPolicyRead",
@@ -148,9 +180,18 @@
       "Sid": "ACEvents",
       "Effect": "Allow",
       "Action": [
-        "bedrock-agentcore:ListEvents"
+        "bedrock-agentcore:ListEvents",
+        "bedrock-agentcore:ListActors"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "ACMemoryRead",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:ListSessions"
+      ],
+      "Resource": "arn:aws:bedrock-agentcore:*:*:memory/*"
     },
     {
       "Sid": "Lambda",
@@ -161,14 +202,9 @@
         "lambda:GetFunction",
         "lambda:GetFunctionConfiguration",
         "lambda:InvokeFunction",
-        "lambda:UpdateFunctionCode",
         "lambda:UpdateFunctionConfiguration",
-        "lambda:AddPermission",
         "lambda:RemovePermission",
-        "lambda:GetPolicy",
-        "lambda:CreateEventSourceMapping",
-        "lambda:DeleteEventSourceMapping",
-        "lambda:GetEventSourceMapping"
+        "lambda:GetPolicy"
       ],
       "Resource": [
         "arn:aws:lambda:*:*:function:workshop-*",
@@ -180,8 +216,7 @@
       "Sid": "LambdaList",
       "Effect": "Allow",
       "Action": [
-        "lambda:ListFunctions",
-        "lambda:ListEventSourceMappings"
+        "lambda:ListFunctions"
       ],
       "Resource": "*"
     },
@@ -191,25 +226,20 @@
       "Action": [
         "s3:CreateBucket",
         "s3:DeleteBucket",
-        "s3:DeleteBucketPolicy",
         "s3:GetObject",
         "s3:PutObject",
         "s3:DeleteObject",
         "s3:ListBucket",
         "s3:GetBucketLocation",
         "s3:GetBucketPolicy",
-        "s3:PutBucketPolicy",
         "s3:GetObjectAcl",
         "s3:PutObjectAcl",
         "s3:GetBucketAcl"
       ],
       "Resource": [
         "arn:aws:s3:::workshop-*",
-        "arn:aws:s3:::workshop-*/*",
         "arn:aws:s3:::fast-*",
-        "arn:aws:s3:::fast-*/*",
-        "arn:aws:s3:::cdk-*",
-        "arn:aws:s3:::cdk-*/*"
+        "arn:aws:s3:::cdk-*"
       ]
     },
     {
@@ -226,7 +256,12 @@
       "Action": [
         "sts:AssumeRole"
       ],
-      "Resource": "arn:aws:iam::*:role/workshop-*"
+      "Resource": [
+        "arn:aws:iam::*:role/workshop-*",
+        "arn:aws:iam::*:role/cdk-hnb659fds-deploy-role-*",
+        "arn:aws:iam::*:role/cdk-hnb659fds-*-publishing-role-*",
+        "arn:aws:iam::*:role/cdk-hnb659fds-lookup-role-*"
+      ]
     },
     {
       "Sid": "STSReadOnly",
@@ -245,7 +280,12 @@
         "ssm:DeleteParameter",
         "ssm:GetParametersByPath"
       ],
-      "Resource": "arn:aws:ssm:*:*:parameter/workshop*"
+      "Resource": [
+        "arn:aws:ssm:*:*:parameter/workshop*",
+        "arn:aws:ssm:*:*:parameter/FAST-stack/*",
+        "arn:aws:ssm:*:*:parameter/agentcore-gateway/*",
+        "arn:aws:ssm:*:*:parameter/cdk-bootstrap/*"
+      ]
     },
     {
       "Sid": "EB",

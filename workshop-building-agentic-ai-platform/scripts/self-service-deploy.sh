@@ -95,7 +95,7 @@ if ! CALLER_ARN="$(aws sts get-caller-identity --query Arn --output text 2>/dev/
   echo "       disposable AWS account you own. The deploy creates IAM roles and"
   echo "       infrastructure, so the principal needs broad permissions:"
   echo "       use AdministratorAccess, or attach the scoped"
-  echo "       policies in static/cfn/self-service-deploy-policy-{1..4}.json."
+  echo "       policies in static/cfn/self-service-deploy-policy-{1..7}.json."
   echo "       Try:  aws configure   (or set AWS_PROFILE / AWS_ACCESS_KEY_ID etc.)"
   exit 1
 fi
@@ -160,6 +160,42 @@ if ! aws bedrock-agentcore-control list-gateways --region "$REGION" \
   exit 1
 fi
 echo "  [OK] AgentCore control plane reachable"
+
+# VPCs per Region: the workshop needs two (Module 2 LLM gateway, Module 3
+# registry network stack). The default quota is 5 and it counts the default VPC
+# plus anything else already in the account, so on a shared account this is the
+# quota that actually bites. Without this check the failure surfaces ~10 minutes
+# in, as "The maximum number of VPCs has been reached" on the registry's nested
+# NetworkStack, leaving four stacks half-deployed.
+VPC_TOTAL="$(aws ec2 describe-vpcs --region "$REGION" \
+  --query 'length(Vpcs)' --output text 2>/dev/null || echo "")"
+# VPCs this workshop already owns don't count against what we still need.
+VPC_OURS="$(aws ec2 describe-vpcs --region "$REGION" \
+  --filters "Name=tag:aws:cloudformation:stack-name,Values=workshop-*" \
+  --query 'length(Vpcs)' --output text 2>/dev/null || echo 0)"
+VPC_QUOTA="$(aws service-quotas get-service-quota --region "$REGION" \
+  --service-code vpc --quota-code L-F678F1CE \
+  --query 'Quota.Value' --output text 2>/dev/null || echo "")"
+if [[ -z "$VPC_TOTAL" || -z "$VPC_QUOTA" ]]; then
+  echo "  [WARN] could not read the VPCs-per-Region quota; skipping the check."
+  echo "         The workshop needs 2 VPCs. If the registry stack later fails"
+  echo "         with \"The maximum number of VPCs has been reached\", raise"
+  echo "         Service Quotas > Amazon VPC > VPCs per Region."
+else
+  VPC_QUOTA_INT="${VPC_QUOTA%%.*}"
+  VPC_NEEDED=$(( 2 - VPC_OURS )); (( VPC_NEEDED < 0 )) && VPC_NEEDED=0
+  if (( VPC_TOTAL + VPC_NEEDED > VPC_QUOTA_INT )); then
+    echo
+    echo "ERROR: not enough VPC headroom in $REGION."
+    echo "       VPCs in use: $VPC_TOTAL   quota: $VPC_QUOTA_INT   this workshop still needs: $VPC_NEEDED"
+    echo "       The Module 3 registry stack would fail partway through with"
+    echo "       \"The maximum number of VPCs has been reached\"."
+    echo "       Raise the quota, or delete unused VPCs:"
+    echo "       https://console.aws.amazon.com/servicequotas/home/services/vpc/quotas/L-F678F1CE?region=$REGION"
+    exit 1
+  fi
+  echo "  [OK] VPC headroom ($VPC_TOTAL in use of $VPC_QUOTA_INT; need $VPC_NEEDED more)"
+fi
 echo
 
 echo "This will deploy ALL workshop stacks (LLM Gateway, MCP Registry,"

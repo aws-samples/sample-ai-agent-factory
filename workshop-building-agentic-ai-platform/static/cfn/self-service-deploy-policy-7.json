@@ -1,0 +1,274 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BedrockInvokeModelsScoped",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:*::foundation-model/*",
+        "arn:aws:bedrock:*:*:inference-profile/*",
+        "arn:aws:bedrock:*:*:application-inference-profile/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "BedrockModelDiscoveryNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:ListFoundationModels",
+        "bedrock:GetFoundationModel",
+        "bedrock:GetFoundationModelAvailability",
+        "bedrock:ListInferenceProfiles",
+        "bedrock:GetInferenceProfile",
+        "bedrock:PutUseCaseForModelAccess",
+        "bedrock:GetUseCaseForModelAccess",
+        "bedrock:PutFoundationModelEntitlement",
+        "bedrock:ListGuardrails"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "BedrockGuardrails",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:CreateGuardrail",
+        "bedrock:ApplyGuardrail",
+        "bedrock:UpdateGuardrail",
+        "bedrock:DeleteGuardrail",
+        "bedrock:GetGuardrail",
+        "bedrock:CreateGuardrailVersion",
+        "bedrock:ListTagsForResource",
+        "bedrock:TagResource",
+        "bedrock:UntagResource"
+      ],
+      "Resource": "arn:aws:bedrock:*:*:guardrail/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ACCreateAndListNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:ListGateways",
+        "bedrock-agentcore:ListWorkloadIdentities",
+        "bedrock-agentcore:ListOauth2CredentialProviders",
+        "bedrock-agentcore:GetTokenVault",
+        "bedrock-agentcore:AuthorizeAction",
+        "bedrock-agentcore:ListPolicyEngines",
+        "bedrock-agentcore:ListPolicies",
+        "bedrock-agentcore:ListEvents",
+        "bedrock-agentcore:ListActors",
+        "bedrock-agentcore:GetAgentRuntime"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ACGatewayCreate",
+      "Effect": "Allow",
+      "Action": "bedrock-agentcore:CreateGateway",
+      "Resource": "arn:aws:bedrock-agentcore:*:*:gateway/*"
+    },
+    {
+      "Sid": "ACPolicyEngineCreate",
+      "Effect": "Allow",
+      "Action": "bedrock-agentcore:CreatePolicyEngine",
+      "Resource": "arn:aws:bedrock-agentcore:*:*:policy-engine/*"
+    },
+    {
+      "Sid": "ACGatewayManage",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:UpdateGateway",
+        "bedrock-agentcore:DeleteGateway",
+        "bedrock-agentcore:GetGateway",
+        "bedrock-agentcore:CreateGatewayTarget",
+        "bedrock-agentcore:GetGatewayTarget",
+        "bedrock-agentcore:ListGatewayTargets",
+        "bedrock-agentcore:DeleteGatewayTarget",
+        "bedrock-agentcore:SynchronizeGatewayTargets",
+        "bedrock-agentcore:PutResourcePolicy",
+        "bedrock-agentcore:ManageResourceScopedPolicy"
+      ],
+      "Resource": "arn:aws:bedrock-agentcore:*:*:gateway/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ACIdentityManage",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:CreateWorkloadIdentity",
+        "bedrock-agentcore:GetWorkloadIdentity",
+        "bedrock-agentcore:UpdateWorkloadIdentity",
+        "bedrock-agentcore:DeleteWorkloadIdentity",
+        "bedrock-agentcore:GetWorkloadAccessToken"
+      ],
+      "Resource": [
+        "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ACTokenVaultManage",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:Create*",
+        "bedrock-agentcore:GetOauth2CredentialProvider",
+        "bedrock-agentcore:DeleteOauth2CredentialProvider",
+        "bedrock-agentcore:GetResourceOauth2Token"
+      ],
+      "Resource": [
+        "arn:aws:bedrock-agentcore:*:*:token-vault/default*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ACPolicyEngineManage",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:GetPolicyEngine",
+        "bedrock-agentcore:DeletePolicyEngine",
+        "bedrock-agentcore:CreatePolicy",
+        "bedrock-agentcore:GetPolicy",
+        "bedrock-agentcore:UpdatePolicy",
+        "bedrock-agentcore:DeletePolicy"
+      ],
+      "Resource": "arn:aws:bedrock-agentcore:*:*:policy-engine/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ACTagging",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:TagResource",
+        "bedrock-agentcore:ListTagsForResource",
+        "bedrock-agentcore:UntagResource"
+      ],
+      "Resource": "arn:aws:bedrock-agentcore:*:*:*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "Ec2DescribeOnlyNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeAccountAttributes",
+        "ec2:DescribeAddresses",
+        "ec2:DescribeAvailabilityZones",
+        "ec2:DescribeIamInstanceProfileAssociations",
+        "ec2:DescribeImages",
+        "ec2:DescribeInstanceAttribute",
+        "ec2:DescribeInstanceCreditSpecifications",
+        "ec2:DescribeInstanceStatus",
+        "ec2:DescribeInstanceTypes",
+        "ec2:DescribeInstances",
+        "ec2:DescribeInternetGateways",
+        "ec2:DescribeKeyPairs",
+        "ec2:DescribeLaunchTemplateVersions",
+        "ec2:DescribeLaunchTemplates",
+        "ec2:DescribeManagedPrefixLists",
+        "ec2:DescribeNatGateways",
+        "ec2:DescribeNetworkAcls",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DescribePrefixLists",
+        "ec2:DescribeRegions",
+        "ec2:DescribeRouteTables",
+        "ec2:DescribeSecurityGroupRules",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeTags",
+        "ec2:DescribeVolumes",
+        "ec2:DescribeVpcAttribute",
+        "ec2:DescribeVpcEndpoints",
+        "ec2:DescribeVpcs",
+        "ec2:GetManagedPrefixListEntries",
+        "ec2:GetSecurityGroupsForVpc"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -7,9 +7,9 @@ The `workshop-agentcore-stack` was pre-deployed by the workshop platform. In thi
 
 ::alert[This step provides both a CLI walkthrough and a Jupyter notebook walkthrough. You can follow either approach — both achieve the same result.]{type="info"}
 
-## CLI Walkthrough
+## CLI walkthrough
 
-### Verify the Stack
+### Verify the stack
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 REGION=$(aws configure get region)
@@ -22,7 +22,7 @@ aws cloudformation describe-stacks \
 
 You should see `CREATE_COMPLETE`.
 
-### Capture Outputs
+### Capture outputs
 
 Save the key outputs as environment variables for use in subsequent steps:
 
@@ -76,7 +76,7 @@ else
 fi
 :::
 
-### Verify the Gateway Has Targets
+### Verify the gateway has targets
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 REGION=$(aws configure get region)
@@ -98,7 +98,7 @@ You should see 3 targets (flights, hotels, search-kb) all in `READY` status.
 
 ---
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > This notebook (02-deploy.ipynb) is an alternative path covering the same material as the CLI section above — follow *either* path, you do not need to do both. The notebook verifies the stack, captures outputs, and saves state to `.state.json` for subsequent notebooks.
 >

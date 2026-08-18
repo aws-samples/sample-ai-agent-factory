@@ -5,11 +5,25 @@ weight: 46
 
 Before moving to the Tools Gateway, run a quick verification to confirm everything is in place.
 
-## Verification Checklist
+## Verification checklist
 
-### 1. MCP Servers are Registered
+### 1. MCP servers are registered
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
+# Re-derive the registry variables if this is a fresh terminal (a no-op otherwise).
+# Without REGISTRY_TOKEN the Registry answers 401 with an HTML body and the
+# `python3 -m json.tool` pipes below fail on "Expecting value: line 1 column 1".
+export AWS_REGION=${AWS_REGION:-$(aws configure get region)}
+if [ -z "$REGISTRY_URL" ]; then
+  export REGISTRY_URL=$(aws cloudformation list-exports \
+    --query "Exports[?Name=='workshop-MainCloudFrontUrl'].Value" --output text)
+fi
+if [ -z "$REGISTRY_TOKEN" ]; then
+  export REGISTRY_TOKEN=$(aws secretsmanager get-secret-value \
+    --secret-id workshop-registry-api-token --query SecretString --output text \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['api_token'])")
+fi
+
 curl -s "$REGISTRY_URL/api/servers" \
   -H "Authorization: Bearer $REGISTRY_TOKEN" \
   | python3 -c "
@@ -24,7 +38,7 @@ for name in ['flights-mcp', 'hotels-mcp']:
 
 Expected: both `PASS`.
 
-### 2. Static Token Authenticates to Registry
+### 2. Static token authenticates to registry
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 curl -s "$REGISTRY_URL/api/auth/me" \
@@ -38,7 +52,7 @@ print(f'  PASS' if data.get('is_admin') else '  FAIL')
 "
 :::
 
-### 3. Cognito M2M Token Works
+### 3. Cognito M2M token works
 
 Verify that the M2M credentials can obtain a Cognito token (used by the Tools Gateway):
 
@@ -48,6 +62,20 @@ COGNITO_DOMAIN=$(aws cloudformation list-exports \
   --output text)
 
 REGION=$(aws configure get region)
+
+# Re-read the M2M credentials from Secrets Manager rather than relying on the
+# shell variables set on the previous page: this check has to be able to fail
+# for the right reason, and empty credentials look identical to bad ones.
+M2M_SECRET_ARN=$(aws cloudformation list-exports \
+  --query "Exports[?Name=='workshop-CognitoM2MClientSecretArn'].Value" \
+  --output text)
+
+M2M_JSON=$(aws secretsmanager get-secret-value \
+  --secret-id "$M2M_SECRET_ARN" \
+  --query SecretString --output text)
+
+M2M_CLIENT_ID=$(echo "$M2M_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['client_id'])")
+M2M_CLIENT_SECRET=$(echo "$M2M_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['client_secret'])")
 
 M2M_TOKEN=$(curl -s -X POST \
   "https://${COGNITO_DOMAIN}.auth.${REGION}.amazoncognito.com/oauth2/token" \
@@ -64,7 +92,7 @@ fi
 
 ::alert[The static token authenticates to the **Registry API**. The Cognito M2M token authenticates to the **AgentCore Gateway**. Both are stored in the agent credentials secret for use in later modules.]{type="info"}
 
-### 4. Credentials Are in Secrets Manager
+### 4. Credentials are in Secrets Manager
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 aws secretsmanager describe-secret \
@@ -74,7 +102,7 @@ aws secretsmanager describe-secret \
 
 Expected: `workshop-registry-api-token`
 
-## What You Have Built
+## What you have built
 
 | What | Where |
 |------|-------|
@@ -85,7 +113,7 @@ Expected: `workshop-registry-api-token`
 | Agent identity | `workshop-travel-agent-sa` service account |
 | Credentials | Registry API token in Secrets Manager at `workshop-registry-api-token`; Cognito M2M creds in `workshop-cognito-m2m-secret` |
 
-## Hand-Off
+## Hand-off
 
 Share the following with the developer team:
 
@@ -100,6 +128,6 @@ echo "M2M Secret Export:   workshop-CognitoM2MClientSecretArn"
 echo "========================="
 :::
 
-## What's Next
+## What's next
 
 The Tools Gateway section adds runtime governance on top of the Registry — Bedrock Guardrails, request interceptors, and audit logging for every tool call. Proceed to **Tools Gateway: Introduction**.

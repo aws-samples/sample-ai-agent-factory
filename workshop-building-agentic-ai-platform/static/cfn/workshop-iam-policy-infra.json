@@ -26,22 +26,6 @@
       "Resource": "*"
     },
     {
-      "Sid": "CloudShellAccess",
-      "Effect": "Allow",
-      "Action": [
-        "cloudshell:CreateEnvironment",
-        "cloudshell:DeleteEnvironment",
-        "cloudshell:GetEnvironmentStatus",
-        "cloudshell:StartEnvironment",
-        "cloudshell:StopEnvironment",
-        "cloudshell:PutCredentials",
-        "cloudshell:CreateSession",
-        "cloudshell:GetFileDownloadUrls",
-        "cloudshell:GetFileUploadUrls"
-      ],
-      "Resource": "*"
-    },
-    {
       "Sid": "CognitoRead",
       "Effect": "Allow",
       "Action": [
@@ -71,7 +55,6 @@
         "cognito-idp:CreateUserPoolClient",
         "cognito-idp:DeleteUserPoolClient",
         "cognito-idp:AdminSetUserPassword",
-        "cognito-idp:InitiateAuth",
         "cognito-idp:AdminInitiateAuth"
       ],
       "Resource": "arn:aws:cognito-idp:*:*:userpool/*"
@@ -98,8 +81,7 @@
         "dynamodb:TagResource"
       ],
       "Resource": [
-        "arn:aws:dynamodb:*:*:table/workshop-*",
-        "arn:aws:dynamodb:*:*:table/workshop-*/index/*"
+        "arn:aws:dynamodb:*:*:table/workshop-*"
       ]
     },
     {
@@ -125,7 +107,16 @@
         "arn:aws:apigateway:*::/restapis*",
         "arn:aws:apigateway:*::/apis*",
         "arn:aws:execute-api:*:*:*"
-      ]
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
     },
     {
       "Sid": "XRayAccess",
@@ -147,7 +138,16 @@
       "Action": [
         "ecr:GetAuthorizationToken"
       ],
-      "Resource": "*"
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
     },
     {
       "Sid": "ECRAccess",
@@ -170,7 +170,10 @@
         "ecr:PutImage",
         "ecr:TagResource"
       ],
-      "Resource": "arn:aws:ecr:*:*:repository/workshop-*"
+      "Resource": [
+        "arn:aws:ecr:*:*:repository/workshop-*",
+        "arn:aws:ecr:*:*:repository/cdk-hnb659fds-*"
+      ]
     },
     {
       "Sid": "ECSResourceScoped",
@@ -198,41 +201,40 @@
       "Sid": "ECSAccountLevel",
       "Effect": "Allow",
       "Action": [
-        "ecs:CreateCluster",
         "ecs:DescribeClusters",
         "ecs:ListClusters",
         "ecs:ListServices",
-        "ecs:RegisterTaskDefinition",
-        "ecs:DeregisterTaskDefinition",
         "ecs:DescribeTaskDefinition",
         "ecs:ListTaskDefinitions",
         "ecs:ListTasks"
       ],
-      "Resource": "*"
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
     },
     {
-      "Sid": "AmplifyAccess",
+      "Sid": "ECSTaskDefinitionWorkshopFamiliesOnly",
       "Effect": "Allow",
       "Action": [
-        "amplify:CreateApp",
-        "amplify:DeleteApp",
-        "amplify:GetApp",
-        "amplify:ListApps",
-        "amplify:UpdateApp",
-        "amplify:CreateBranch",
-        "amplify:DeleteBranch",
-        "amplify:GetBranch",
-        "amplify:ListBranches",
-        "amplify:CreateDeployment",
-        "amplify:StartDeployment",
-        "amplify:GetJob",
-        "amplify:ListJobs",
-        "amplify:StartJob",
-        "amplify:StopJob",
-        "amplify:TagResource",
-        "amplify:UntagResource"
+        "ecs:RegisterTaskDefinition"
       ],
-      "Resource": "arn:aws:amplify:*:*:apps/*"
+      "Resource": "arn:aws:ecs:*:*:task-definition/workshop-*:*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
     },
     {
       "Sid": "CloudFrontRead",
@@ -249,19 +251,45 @@
       "Resource": "*"
     },
     {
-      "Sid": "CloudFrontWriteUnpredictableIds",
+      "Sid": "CloudFrontDeleteAndUpdateTaggedOnly",
       "Effect": "Allow",
       "Action": [
-        "cloudfront:CreateDistribution",
         "cloudfront:DeleteDistribution",
-        "cloudfront:UpdateDistribution",
+        "cloudfront:UpdateDistribution"
+      ],
+      "Resource": "arn:aws:cloudfront::*:distribution/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Workshop": "AgentCore-Platform"
+        }
+      }
+    },
+    {
+      "Sid": "CloudFrontTagAndInvalidate",
+      "Effect": "Allow",
+      "Action": [
         "cloudfront:TagResource",
         "cloudfront:UntagResource",
-        "cloudfront:CreateOriginAccessControl",
-        "cloudfront:DeleteOriginAccessControl",
+        "cloudfront:ListTagsForResource",
         "cloudfront:CreateInvalidation"
       ],
-      "Resource": "*"
+      "Resource": "arn:aws:cloudfront::*:distribution/*"
+    },
+    {
+      "Sid": "CloudFrontManageOac",
+      "Effect": "Allow",
+      "Action": [
+        "cloudfront:DeleteOriginAccessControl"
+      ],
+      "Resource": "arn:aws:cloudfront::*:origin-access-control/*"
+    },
+    {
+      "Sid": "ECSCreateWorkshopClusterOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:CreateCluster"
+      ],
+      "Resource": "arn:aws:ecs:*:*:cluster/workshop-*"
     }
   ]
 }

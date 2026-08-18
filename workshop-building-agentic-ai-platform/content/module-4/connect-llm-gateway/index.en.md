@@ -5,18 +5,24 @@ weight: 73
 
 The agent is deployed but currently calls Amazon Bedrock directly. In this step you will point it at the LLM Gateway from Module 2 so all model invocations flow through the governed proxy with budget controls and cost tracking.
 
-::alert[**Track 1 participants** — if you skipped Module 2, the LLM Gateway has no models registered and no virtual keys yet. Run the setup script (`setup_keys.py`) below first to register models and create keys. If you completed Module 2, skip to [Retrieve the LLM Gateway Credentials](#retrieve-the-llm-gateway-credentials).]{type="warning"}
+::alert[**Track 1 participants** — if you skipped Module 2, the LLM Gateway has no models registered and no virtual keys yet. Run the setup script (`setup_keys.py`) below first to register models and create keys. If you completed Module 2, skip to [Retrieve the LLM Gateway credentials](#retrieve-the-llm-gateway-credentials).]{type="warning"}
 
-### Register Models and Create Keys (Track 1 only)
+## Register models and create keys (Track 1 only)
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 cd /workshop
-# Use Python 3.13 explicitly. The workshop tools (strands-agents) require
-# Python >= 3.10, and Amazon Linux 2023 ships 3.9 as the default `python3`,
-# so name the interpreter directly rather than relying on a shell alias.
-PYBIN=$(command -v python3.13 || command -v python3)
-"$PYBIN" -m venv .venv
+# strands-agents requires Python >= 3.10; the IDE's default `python3` is 3.9 and
+# building the venv with it makes the installs below resolve to "No matching
+# distribution found", after which setup_keys.py fails on `import boto3`.
+PY=""
+for CAND in python3.13 python3.12 python3.11 python3.10; do
+  command -v "$CAND" >/dev/null 2>&1 && { PY="$CAND"; break; }
+done
+[ -z "$PY" ] && PY=python3
+echo "Building .venv with $PY ($($PY -V 2>&1))"
+$PY -m venv --clear .venv
 source .venv/bin/activate
+python -V
 
 cd /workshop/source/module-2-llm-gateway
 pip install --upgrade pip==24.0 --quiet
@@ -24,9 +30,9 @@ pip install -r requirements.txt --quiet
 python scripts/setup_keys.py --stack-name workshop-llm-gateway-stack
 :::
 
-This registers 23 Bedrock models (Claude, Nova, Llama, Mistral, Cohere, DeepSeek) in the LLM Gateway, creates two teams with budgets, and issues virtual keys. Copy the `export` commands printed at the end and run them in your terminal.
+This registers 17 Bedrock models (Claude, Nova, Llama, Mistral, DeepSeek) in the LLM Gateway, creates two teams with budgets, and issues virtual keys. Copy the `export` commands printed at the end and run them in your terminal.
 
-## Retrieve the LLM Gateway Credentials
+## Retrieve the LLM Gateway credentials
 
 The platform team stores the LLM Gateway URL and virtual key in SSM Parameter Store (Module 2). Check if they exist:
 
@@ -41,11 +47,25 @@ LLM_GATEWAY_KEY=$(aws ssm get-parameter \
   --name "/workshop/llm-gateway-key" \
   --query "Parameter.Value" --output text --region $REGION 2>/dev/null)
 
+# Presence is not enough. A virtual key left in SSM by an earlier deployment is no
+# longer in this gateway's database, and the agent then fails at runtime with
+# HTTP 401 "Unable to find token". Probe the key before trusting it.
+KEY_OK=""
 if [ -n "$LLM_GATEWAY_URL" ] && [ -n "$LLM_GATEWAY_KEY" ]; then
+  HTTP=$(curl -s -o /dev/null -w '%{http_code}' "${LLM_GATEWAY_URL}/key/info" \
+    -H "Authorization: Bearer ${LLM_GATEWAY_KEY}")
+  if [ "$HTTP" = "200" ]; then
+    KEY_OK=1
+  else
+    echo "Stored virtual key is no longer valid (HTTP $HTTP) — issuing a new one..."
+  fi
+fi
+
+if [ -n "$KEY_OK" ]; then
   echo "LLM Gateway URL: $LLM_GATEWAY_URL"
-  echo "Virtual Key: ${LLM_GATEWAY_KEY:0:15}..."
+  echo "Virtual Key: sk-****${LLM_GATEWAY_KEY: -4}"
 else
-  echo "SSM parameters not found — creating them now..."
+  echo "Creating LLM Gateway parameters..."
 
   LLM_GATEWAY_URL=$(aws cloudformation describe-stacks \
     --stack-name workshop-llm-gateway-stack \
@@ -71,13 +91,13 @@ else
 
   echo "Created and stored:"
   echo "  LLM Gateway URL: $LLM_GATEWAY_URL"
-  echo "  Virtual Key: ${LLM_GATEWAY_KEY:0:15}..."
+  echo "  Virtual Key: sk-****${LLM_GATEWAY_KEY: -4}"
 fi
 :::
 
 ::alert[If you completed Module 2, the parameters already exist. If you're on Track 1 (fast path), the script creates them automatically.]{type="info"}
 
-## Store in FAST SSM Parameters
+## Store in FAST SSM parameters
 
 The travel agent reads the LLM Gateway URL and key from SSM at startup (under the FAST stack name). Store them:
 
@@ -95,7 +115,7 @@ aws ssm put-parameter \
 echo "SSM parameters stored for FAST agent"
 :::
 
-## Redeploy to Pick Up the New Configuration
+## Redeploy to pick up the new configuration
 
 The agent reads SSM parameters when the container starts. Touch the agent file to force CDK to rebuild the container:
 
@@ -139,7 +159,7 @@ print(f'Spend: \${info.get(\"spend\", 0):.4f} / \${info.get(\"max_budget\", 0):.
 
 If spend is greater than $0, the agent is routing through the LLM Gateway.
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > Prefer an interactive notebook experience? The notebook below covers the same material as the CLI commands above, with additional inline explanations and visualizations.
 >

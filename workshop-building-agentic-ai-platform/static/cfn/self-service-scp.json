@@ -43,8 +43,16 @@
       "Sid": "DenyBillingAndAccountMutation",
       "Effect": "Deny",
       "Action": [
-        "aws-portal:Modify*",
         "billing:Update*",
+        "billing:Put*",
+        "billing:Redeem*",
+        "payments:Create*",
+        "payments:Delete*",
+        "payments:Update*",
+        "tax:Put*",
+        "tax:Delete*",
+        "tax:Update*",
+        "tax:Batch*",
         "account:PutAlternateContact",
         "account:DeleteAlternateContact"
       ],

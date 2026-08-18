@@ -5,11 +5,13 @@ weight: 63
 
 ::alert[This step provides both a CLI walkthrough and a Jupyter notebook walkthrough. You can follow either approach — both achieve the same result.]{type="info"}
 
-## CLI Walkthrough
+::alert[**Agent Registry uses its own API namespace.** The Registry is served by the `agent-registry-control` (control plane) and `agent-registry` (data plane) APIs, and its IAM actions use the `agent-registry:` prefix — *not* `bedrock-agentcore:`. Gateway, Runtime, Identity, and Memory are unchanged and still use `bedrock-agentcore`. The CLI commands below therefore require **AWS CLI v2 ≥ 2.36.19**, and the notebooks require **boto3/botocore ≥ 1.43.66**. Check with `aws --version`; the Workshop IDE ships a new enough version.]{type="warning"}
+
+## CLI walkthrough
 
 Create an AgentCore Registry with Cognito JWT authentication and manual approval workflow.
 
-### Gather Stack Outputs
+### Gather stack outputs
 
 Retrieve the values you need **before** assuming the admin role (the persona roles don't have CloudFormation permissions):
 
@@ -52,7 +54,7 @@ else
 fi
 :::
 
-### Assume the Admin Persona
+### Assume the admin persona
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 if [ -z "$ADMIN_ROLE_ARN" ] || [ "$ADMIN_ROLE_ARN" = "None" ]; then
@@ -76,12 +78,12 @@ fi
 
 You should see an ARN containing `workshop-ac-registry-admin-<region>`.
 
-### Create the Registry
+### Create the registry
 
 The command below is **idempotent**: it first checks whether `workshop-registry` already exists and only creates a new one if it does not. This keeps the step safe to re-run and avoids hitting the per-account registry quota.
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
-EXISTING_ID=$(aws bedrock-agentcore-control list-registries \
+EXISTING_ID=$(aws agent-registry-control list-registries --no-paginate \
   --query "registries[?name=='workshop-registry'] | [0].registryId" \
   --output text --region $REGION)
 
@@ -89,17 +91,19 @@ if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "None" ]; then
   echo "Registry already exists: $EXISTING_ID"
   REGISTRY_ID=$EXISTING_ID
 else
-  CREATE_OUT=$(aws bedrock-agentcore-control create-registry \
+  CREATE_OUT=$(aws agent-registry-control create-registry \
     --name workshop-registry \
     --description "Enterprise tool and agent catalog for the workshop platform" \
-    --authorizer-type CUSTOM_JWT \
-    --authorizer-configuration "{
-      \"customJWTAuthorizer\": {
-        \"discoveryUrl\": \"${DISCOVERY_URL}\",
-        \"allowedClients\": [\"${M2M_CLIENT_ID}\"]
+    --discovery-configuration "{
+      \"authorizerType\": \"CUSTOM_JWT\",
+      \"authorizerConfiguration\": {
+        \"customJWTAuthorizer\": {
+          \"discoveryUrl\": \"${DISCOVERY_URL}\",
+          \"allowedClients\": [\"${M2M_CLIENT_ID}\"]
+        }
       }
     }" \
-    --approval-configuration '{"autoApproval": false}' \
+    --approval-configuration '{"autoApprovalRules": []}' \
     --region $REGION \
     --output json)
   if [ -n "$CREATE_OUT" ]; then
@@ -119,9 +123,11 @@ fi
 
 Two key design decisions:
 - **CUSTOM_JWT** — the registry validates Cognito JWTs. The same pool is used by the Gateway, so agents authenticate once for both.
-- **Manual approval** — every tool registration must be approved by an admin before consumers can discover it.
+- **Manual approval** — an empty `autoApprovalRules` list means every tool registration must be approved by an admin before consumers can discover it. (The only other value is `APPROVE_ALL`, which auto-approves everything — the opposite of what an enterprise wants.)
 
-## Step 4: Wait for the Registry to Become READY
+`create-registry` returns only `registryArn`, so the ID is derived from the last ARN segment (`registryArn.split('/')[-1]`) rather than read from a `registryId` field.
+
+## Step 4: Wait for the registry to become READY
 
 The registry takes a few seconds to provision. Poll until the status is `READY`:
 
@@ -133,7 +139,7 @@ if [ -z "$REGISTRY_ID" ] || [ "$REGISTRY_ID" = "None" ]; then
 else
   echo "Waiting for registry to become READY..."
   for i in $(seq 1 30); do
-    STATUS=$(aws bedrock-agentcore-control get-registry \
+    STATUS=$(aws agent-registry-control get-registry \
       --registry-id "$REGISTRY_ID" \
       --query 'status' --output text --region "$REGION" 2>/dev/null)
     echo "  Attempt $i: ${STATUS:-<unreadable>}"
@@ -150,7 +156,7 @@ fi
 
 ---
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > This notebook (03-create-registry.ipynb) is an alternative path covering the same material as the CLI section above — follow *either* path, you do not need to do both. The notebook covers the same steps with boto3 and saves state for subsequent notebooks.
 >

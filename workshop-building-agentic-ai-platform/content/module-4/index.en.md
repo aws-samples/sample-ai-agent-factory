@@ -13,7 +13,7 @@ You will use [FAST](https://github.com/awslabs/fullstack-solution-template-for-a
 
 ::alert[**Track 1 (fast path):** Foundational services are pre-deployed — start here directly. **Track 3 (full journey):** You arrive here after completing Modules 2 and 3.]{type="info"}
 
-## The Scenario
+## The scenario
 
 Your team needs to build a **Travel Planning Agent** that can search flights, search hotels, and recommend itineraries — all through the governed services. You will deploy it as a full-stack application with a React frontend, AgentCore Runtime backend, and conversation memory.
 
@@ -25,7 +25,7 @@ The infrastructure team has deployed:
 
 ![FAST Architecture — AgentCore Runtime with Amplify frontend, Cognito auth, Gateway tools, and Memory](/static/img/module-4/fast-architecture.png)
 
-## What You Will Do
+## What you will do
 
 | Step | What | Why |
 |------|------|-----|

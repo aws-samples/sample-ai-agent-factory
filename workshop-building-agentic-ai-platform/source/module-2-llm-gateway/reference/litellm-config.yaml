@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 # LiteLLM Proxy Configuration
 # This file defines the models, guardrails, and settings for the LLM Gateway.
 # It is loaded by the LiteLLM proxy at startup.
@@ -14,72 +17,52 @@ model_list:
   # Claude 4.6 (latest generation)
   - model_name: claude-opus-4.6
     litellm_params:
-      model: bedrock/us.anthropic.claude-opus-4-6-v1
+      model: bedrock/global.anthropic.claude-opus-4-6-v1
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: claude-sonnet-4.6
     litellm_params:
-      model: bedrock/us.anthropic.claude-sonnet-4-6
+      model: bedrock/global.anthropic.claude-sonnet-4-6
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   # Claude 4.5
   - model_name: claude-opus-4.5
     litellm_params:
-      model: bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0
+      model: bedrock/global.anthropic.claude-opus-4-5-20251101-v1:0
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: claude-sonnet-4.5
     litellm_params:
-      model: bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0
+      model: bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: claude-haiku-4.5
     litellm_params:
-      model: bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0
+      model: bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
-  # Claude 4.1
-  - model_name: claude-opus-4.1
-    litellm_params:
-      model: bedrock/us.anthropic.claude-opus-4-1-20250805-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # Claude 4
-  - model_name: claude-sonnet-4
-    litellm_params:
-      model: bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # Claude 3.5
-  - model_name: claude-3.5-haiku
-    litellm_params:
-      model: bedrock/us.anthropic.claude-3-5-haiku-20241022-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # Convenience aliases (point to latest)
+  # Stable convenience aliases. These deliberately point at the latest
+  # generation so agent code can pin `claude-sonnet` and follow model upgrades
+  # without a code change. Superseded generations (Claude 4, 4.1) are not
+  # listed: 4.5 and 4.6 above cover every capability they had.
   - model_name: claude-opus
     litellm_params:
-      model: bedrock/us.anthropic.claude-opus-4-6-v1
+      model: bedrock/global.anthropic.claude-opus-4-6-v1
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: claude-sonnet
     litellm_params:
-      model: bedrock/us.anthropic.claude-sonnet-4-6
+      model: bedrock/global.anthropic.claude-sonnet-4-6
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: claude-haiku
     litellm_params:
-      model: bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0
+      model: bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   # ─────────────────────────────────────────────────────────
   # Amazon Nova
   # ─────────────────────────────────────────────────────────
-  - model_name: nova-premier
-    litellm_params:
-      model: bedrock/us.amazon.nova-premier-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
   - model_name: nova-pro
     litellm_params:
       model: bedrock/us.amazon.nova-pro-v1:0
@@ -90,37 +73,19 @@ model_list:
       model: bedrock/us.amazon.nova-lite-v1:0
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
-  - model_name: nova-sonic
-    litellm_params:
-      model: bedrock/us.amazon.nova-sonic-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # Nova 2 generation
   - model_name: nova-2-lite
     litellm_params:
-      model: bedrock/us.amazon.nova-2-lite-v1:0
+      model: bedrock/global.amazon.nova-2-lite-v1:0
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: nova-2-sonic
     litellm_params:
-      model: bedrock/us.amazon.nova-2-sonic-v1:0
+      model: bedrock/amazon.nova-2-sonic-v1:0
       aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # ─────────────────────────────────────────────────────────
-  # Amazon Titan
-  # ─────────────────────────────────────────────────────────
-  - model_name: titan-text-premier
-    litellm_params:
-      model: bedrock/amazon.titan-text-premier-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # titan-text-express-v1 and titan-text-lite-v1 are end-of-life — removed
 
   # ─────────────────────────────────────────────────────────
   # Meta Llama
   # ─────────────────────────────────────────────────────────
-
-  # Llama 4
   - model_name: llama4-scout
     litellm_params:
       model: bedrock/us.meta.llama4-scout-17b-instruct-v1:0
@@ -159,11 +124,6 @@ model_list:
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   # Llama 3.1
-  - model_name: llama3.1-405b
-    litellm_params:
-      model: bedrock/us.meta.llama3-1-405b-instruct-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
   - model_name: llama3.1-70b
     litellm_params:
       model: bedrock/us.meta.llama3-1-70b-instruct-v1:0
@@ -177,12 +137,12 @@ model_list:
   # Llama 3
   - model_name: llama3-70b
     litellm_params:
-      model: bedrock/us.meta.llama3-70b-instruct-v1:0
+      model: bedrock/meta.llama3-70b-instruct-v1:0
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: llama3-8b
     litellm_params:
-      model: bedrock/us.meta.llama3-8b-instruct-v1:0
+      model: bedrock/meta.llama3-8b-instruct-v1:0
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   # ─────────────────────────────────────────────────────────
@@ -190,79 +150,52 @@ model_list:
   # ─────────────────────────────────────────────────────────
   - model_name: mistral-large-3
     litellm_params:
-      model: bedrock/us.mistral.mistral-large-3-675b-instruct
+      model: bedrock/mistral.mistral-large-3-675b-instruct
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: devstral-2
     litellm_params:
-      model: bedrock/us.mistral.devstral-2-123b
+      model: bedrock/mistral.devstral-2-123b
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: magistral-small
     litellm_params:
-      model: bedrock/us.mistral.magistral-small-2509
+      model: bedrock/mistral.magistral-small-2509
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: ministral-14b
     litellm_params:
-      model: bedrock/us.mistral.ministral-3-14b-instruct
+      model: bedrock/mistral.ministral-3-14b-instruct
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: ministral-8b
     litellm_params:
-      model: bedrock/us.mistral.ministral-3-8b-instruct
+      model: bedrock/mistral.ministral-3-8b-instruct
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: ministral-3b
     litellm_params:
-      model: bedrock/us.mistral.ministral-3-3b-instruct
+      model: bedrock/mistral.ministral-3-3b-instruct
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: mistral-large
     litellm_params:
-      model: bedrock/us.mistral.mistral-large-2407-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: mistral-small
-    litellm_params:
-      model: bedrock/us.mistral.mistral-small-2402-v1:0
+      model: bedrock/mistral.mistral-large-2407-v1:0
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: mixtral-8x7b
     litellm_params:
-      model: bedrock/us.mistral.mixtral-8x7b-instruct-v0:1
+      model: bedrock/mistral.mixtral-8x7b-instruct-v0:1
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: mistral-7b
     litellm_params:
-      model: bedrock/us.mistral.mistral-7b-instruct-v0:2
+      model: bedrock/mistral.mistral-7b-instruct-v0:2
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
-  # ─────────────────────────────────────────────────────────
-  # Cohere
-  # ─────────────────────────────────────────────────────────
-  - model_name: cohere-command-r-plus
-    litellm_params:
-      model: bedrock/cohere.command-r-plus-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: cohere-command-r
-    litellm_params:
-      model: bedrock/cohere.command-r-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  # ─────────────────────────────────────────────────────────
-  # AI21 Labs
-  # ─────────────────────────────────────────────────────────
-  - model_name: jamba-1.5-large
-    litellm_params:
-      model: bedrock/ai21.jamba-1-5-large-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
-
-  - model_name: jamba-1.5-mini
-    litellm_params:
-      model: bedrock/ai21.jamba-1-5-mini-v1:0
-      aws_region_name: os.environ/AWS_DEFAULT_REGION
+  # Cohere Command R and Command R+ are intentionally absent: both reach
+  # end of life on Bedrock on 2026-08-19, so an alias for either would stop
+  # resolving during the lifetime of this workshop.
 
   # ─────────────────────────────────────────────────────────
   # DeepSeek
@@ -274,12 +207,12 @@ model_list:
 
   - model_name: deepseek-v3
     litellm_params:
-      model: bedrock/us.deepseek.v3-v1:0
+      model: bedrock/deepseek.v3-v1:0
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: deepseek-v3.2
     litellm_params:
-      model: bedrock/us.deepseek.v3.2
+      model: bedrock/deepseek.v3.2
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   # ─────────────────────────────────────────────────────────
@@ -287,12 +220,12 @@ model_list:
   # ─────────────────────────────────────────────────────────
   - model_name: palmyra-x5
     litellm_params:
-      model: bedrock/writer.palmyra-x5-v1:0
+      model: bedrock/us.writer.palmyra-x5-v1:0
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   - model_name: palmyra-x4
     litellm_params:
-      model: bedrock/writer.palmyra-x4-v1:0
+      model: bedrock/us.writer.palmyra-x4-v1:0
       aws_region_name: os.environ/AWS_DEFAULT_REGION
 
   # ─────────────────────────────────────────────────────────

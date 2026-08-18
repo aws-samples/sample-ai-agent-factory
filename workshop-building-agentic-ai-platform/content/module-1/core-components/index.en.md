@@ -17,7 +17,7 @@ Now let's look at the key components you will build in this workshop.
 | **AgentCore Identity** | Authentication and authorization for agent-to-tool and agent-to-agent interactions |
 | **AgentCore Observability** | Monitoring, tracing, latency tracking, and cost attribution |
 
-## The Gateway Pattern
+## The gateway pattern
 
 Rather than letting every agent directly access models, tools, and other agents, all interactions flow through governed gateways:
 
@@ -28,7 +28,7 @@ Rather than letting every agent directly access models, tools, and other agents,
 | **Tool Gateway (AWS-Native)** | Tool access via AgentCore Registry & Gateway — AgentCore Policy Engine (Cedar-based), Lambda targets | Module 3b |
 | **Agent Gateway** | Agent-to-agent — A2A discovery, secure routing, entitlements | Modules 3a/3b (registry) |
 
-## Registry vs. Gateway: Discovery and Invocation
+## Registry vs. gateway: discovery and invocation
 
 The Registry and the Gateway answer two different questions, and it helps to keep them straight:
 
@@ -42,7 +42,7 @@ The recommended workflow combines both:
 
 ::alert[The Registry and the Gateway are independent services. Discovery (Registry) and invocation (Gateway) are decoupled, so you can evolve your tool catalog and your runtime enforcement separately.]{header="Two independent services" type="info"}
 
-## How a Request Flows
+## How a request flows
 
 1. A **client** (app, IDE, playground) sends a request
 2. The **Gateway** authenticates the caller and applies governance policies

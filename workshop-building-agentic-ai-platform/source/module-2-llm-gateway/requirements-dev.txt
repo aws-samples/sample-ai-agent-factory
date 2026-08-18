@@ -2,4 +2,7 @@
 # pytest 9.0.3 fixes the world-readable tmpdir handling (dev/test-only dep).
 pytest==9.0.3
 responses==0.25.3
-cfn-lint==1.21.2
+# cfn-lint 1.55.1 is the first release whose IAM service-namespace data knows
+# the `agent-registry` namespace (launched 2026-08-06). Older pins report every
+# agent-registry action as W3037 "not a valid service".
+cfn-lint==1.55.1

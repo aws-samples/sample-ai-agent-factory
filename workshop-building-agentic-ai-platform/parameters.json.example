@@ -1,16 +1,13 @@
 {
-  "_comment": "Replace IngressCidrBlocks with your corporate CIDR. Use 0.0.0.0/0 only in Workshop Studio with SCP protections.",
+  "_comment": "Optional overrides for static/cfn/registry/workshop-registry-stack.yaml. Every parameter below has a working default in the template, so this file is only needed if you want to diverge from it. Leave DocumentDBPassword empty to have the data stack auto-generate one in Secrets Manager (recommended) — never commit a real password. Note there is no ingress-CIDR parameter: MainAlbSG derives its port-80 source from the AWS-managed CloudFront origin-facing prefix list at deploy time.",
   "Parameters": {
     "EnvironmentName": "workshop",
     "VpcCidr": "10.0.0.0/16",
-    "IngressCidrBlocks": "10.0.0.0/8",
+    "DocumentDBUsername": "docdbadmin",
+    "DocumentDBPassword": "",
+    "DocumentDBInstanceClass": "db.t3.medium",
     "BaseDomain": "",
     "HostedZoneId": "",
-    "UseRegionalDomains": "false",
-    "KeycloakDatabaseUsername": "keycloak",
-    "KeycloakDatabasePassword": "CHANGE_ME_DB_PASSWORD",
-    "KeycloakAdminPassword": "CHANGE_ME_ADMIN_PASSWORD",
-    "DocumentDBUsername": "admin",
-    "DocumentDBPassword": "CHANGE_ME_DOCDB_PASSWORD"
+    "UseRegionalDomains": "false"
   }
 }

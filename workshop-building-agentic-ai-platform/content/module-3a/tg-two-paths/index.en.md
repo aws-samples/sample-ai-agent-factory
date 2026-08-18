@@ -22,6 +22,20 @@ The MCP Registry provides direct access to Docker-based MCP servers via NGINX/Cl
 Verify the Registry API is accessible (you should already have `$REGISTRY_TOKEN` and `$REGISTRY_URL` from the previous steps):
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
+# Re-derive the registry variables if this is a fresh terminal (a no-op otherwise).
+# Without REGISTRY_TOKEN the Registry answers 401 with an HTML body and the
+# `python3 -m json.tool` pipes below fail on "Expecting value: line 1 column 1".
+export AWS_REGION=${AWS_REGION:-$(aws configure get region)}
+if [ -z "$REGISTRY_URL" ]; then
+  export REGISTRY_URL=$(aws cloudformation list-exports \
+    --query "Exports[?Name=='workshop-MainCloudFrontUrl'].Value" --output text)
+fi
+if [ -z "$REGISTRY_TOKEN" ]; then
+  export REGISTRY_TOKEN=$(aws secretsmanager get-secret-value \
+    --secret-id workshop-registry-api-token --query SecretString --output text \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['api_token'])")
+fi
+
 curl -s -H "Authorization: Bearer $REGISTRY_TOKEN" \
   "$REGISTRY_URL/api/servers" \
   | python3 -c "
@@ -35,7 +49,7 @@ for s in servers:
 
 You should see the Flights MCP, Hotels MCP, and demo servers listed. This is Path A — direct, ungoverned access.
 
-#### Store key values in shell variables
+### Store key values in shell variables
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 REGION=$(aws configure get region)
@@ -62,7 +76,7 @@ echo "Cognito Pool:   $COGNITO_POOL_ID"
 echo "M2M Client:     $M2M_CLIENT_ID"
 :::
 
-#### Retrieve the M2M static API token from Secrets Manager
+### Retrieve the M2M static API token from Secrets Manager
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 ACCESS_TOKEN=$(aws secretsmanager get-secret-value \
@@ -70,10 +84,10 @@ ACCESS_TOKEN=$(aws secretsmanager get-secret-value \
   --query SecretString --output text --region $REGION \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['api_token'])")
 
-echo "Token retrieved (first 10 chars): ${ACCESS_TOKEN:0:10}..."
+echo "Token retrieved: ${#ACCESS_TOKEN} chars (value not printed)"
 :::
 
-#### Test Path A -- list tools via the Registry API through NGINX
+### Test Path A -- list tools via the registry API through NGINX
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -84,7 +98,7 @@ This call goes through CloudFront to NGINX to the Registry API. You should see t
 
 ---
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > This notebook covers the same material as the CLI section above — follow *either* path, you do not need to do both.
 >

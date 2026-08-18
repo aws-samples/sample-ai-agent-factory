@@ -14,9 +14,9 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 echo "Current role: $(aws sts get-caller-identity --query Arn --output text)"
 :::
 
-## CLI Walkthrough
+## CLI walkthrough
 
-### Step 1: Get a Cognito M2M Token
+### Step 1: Get a Cognito M2M token
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 REGION=$(aws configure get region)
@@ -43,14 +43,14 @@ else
     | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 
   if [ -n "$ACCESS_TOKEN" ]; then
-    echo "Token acquired: ${ACCESS_TOKEN:0:20}..."
+    echo "Token acquired: ${#ACCESS_TOKEN} chars (value not printed)"
   else
     echo "ERROR: Failed to acquire Cognito access token" >&2
   fi
 fi
 :::
 
-### Step 2: Get the Gateway URL
+### Step 2: Get the gateway URL
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 GATEWAY_ID=$(aws cloudformation describe-stacks \
@@ -66,7 +66,7 @@ else
 fi
 :::
 
-### Step 3: List Tools
+### Step 3: List tools
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 curl -s -X POST "$GATEWAY_URL" \
@@ -85,7 +85,7 @@ for t in tools:
 
 You should see the flights, hotels, and knowledge base tools from the pre-deployed gateway targets.
 
-### Step 4: Call a Tool — search_flights
+### Step 4: Call a tool — search_flights
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 curl -s -X POST "$GATEWAY_URL" \
@@ -104,7 +104,7 @@ curl -s -X POST "$GATEWAY_URL" \
 
 You should see flight results — SFO to Tokyo with prices and schedules.
 
-### Step 5: Call Another Tool — search_hotels
+### Step 5: Call another tool — search_hotels
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 curl -s -X POST "$GATEWAY_URL" \
@@ -121,7 +121,7 @@ curl -s -X POST "$GATEWAY_URL" \
   }' | python3 -m json.tool
 :::
 
-### Step 6: Verify Audit Logging
+### Step 6: Verify audit logging
 
 The request interceptor runs on every `tools/call`. Verify it was invoked:
 
@@ -138,7 +138,7 @@ You should see `START` and `END` entries confirming the interceptor executed. In
 
 ---
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > This notebook (06-test-gateway.ipynb) is an alternative path covering the same material as the CLI section above — follow *either* path, you do not need to do both. The notebook covers additional topics including WorkloadIdentity token flow and OAuth2CredentialProvider setup for production M2M auth.
 >

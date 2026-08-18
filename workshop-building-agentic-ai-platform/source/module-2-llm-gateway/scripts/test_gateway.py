@@ -166,13 +166,15 @@ def test_strands_agent(proxy_url: str, api_key: str) -> None:
         from strands.models.litellm import LiteLLMModel
 
         # Use "openai/" prefix so litellm routes through the proxy
-        # (OpenAI-compatible endpoint), and pass connection details via params
+        # (OpenAI-compatible endpoint). Connection details go in client_args,
+        # which LiteLLMModel splats into litellm.acompletion(); params is for
+        # inference parameters (max_tokens, temperature, ...).
         model = LiteLLMModel(
-            model_id="openai/claude-sonnet",
-            params={
+            client_args={
                 "api_base": proxy_url,
                 "api_key": api_key,
             },
+            model_id="openai/claude-sonnet",
         )
 
         agent = Agent(model=model)
@@ -181,8 +183,8 @@ def test_strands_agent(proxy_url: str, api_key: str) -> None:
         print()
         print("  Strands Agent → LiteLLM Proxy → Bedrock is working!")
     except ImportError:
-        print("  strands-agents not installed. Install the pinned workshop version with:")
-        print("    pip install 'strands-agents[litellm]==0.1.5'")
+        print("  strands-agents not installed. Install with:")
+        print("    pip install 'strands-agents[litellm,openai]==1.52.0'")
     except Exception as e:
         print(f"  Strands Agent test failed: {e}")
         print("  This is expected if strands-agents[litellm] is not installed.")
@@ -223,9 +225,7 @@ def main() -> None:
     print("  LLM Gateway (LiteLLM Proxy) — Test Suite")
     print("=" * 55)
     print(f"  URL: {args.url}")
-    # Don't echo any portion of the key (even a masked suffix is flagged as
-    # sensitive-data logging); presence/absence is all the tester needs.
-    print(f"  Key: {'(set)' if args.api_key else '(none)'}")
+    print(f"  Key: {'*' * 8 + args.api_key[-4:] if args.api_key else '(none)'}")
 
     test_health(client)
     test_model_health(client)

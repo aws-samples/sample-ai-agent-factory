@@ -5,14 +5,14 @@ weight: 47
 
 Add a governed tool access layer on top of the MCP Registry using Amazon Bedrock AgentCore Gateway. As the platform engineer, you will now add runtime governance — audit logging, guardrails, and access control — to every tool call.
 
-## The Problem
+## The problem
 
 - The MCP Registry provides an NGINX reverse proxy (Path A) -- fast but ungoverned
 - Agents need Lambda-backed tools and external APIs that NGINX can't serve
 - There is no audit trail, content screening, or group-based access control on tool calls
 - Platform teams need to control which teams can access which tools
 
-## The Solution: Dual-Path Architecture
+## The solution: dual-path architecture
 
 | Path | Entry Point | Authentication | Audit | Guardrails | Tool Types |
 |------|-------------|---------------|-------|------------|------------|
@@ -59,7 +59,7 @@ graph TB
     COG["Cognito<br/>(MCP Registry)"] -->|JWT validation| GW
 ```
 
-### What the Tools Gateway Does NOT Duplicate
+### What the Tools Gateway does NOT duplicate
 
 The Tools Gateway is intentionally thin:
 
@@ -68,7 +68,7 @@ The Tools Gateway is intentionally thin:
 - No Streamlit UI (the MCP Registry UI handles registration and browsing)
 - No approval workflows (tools are available once registered in the Registry)
 
-## AWS Resources Created
+## AWS resources created
 
 | Resource | Service | Purpose |
 |----------|---------|---------|
@@ -94,7 +94,7 @@ Follow the notebooks in the sidebar:
 1. [Bedrock Guardrails](../tg-guardrails/) -- Add content screening to Path B
 1. [Register Gateway + Cleanup](../tg-register-cleanup/) -- Make the gateway discoverable, then tear down
 
-## Source Code
+## Source code
 
 ::alert[The Tools Gateway source lives under `source/module-4a-tools-gateway/` because the `4a` prefix sorts it alphabetically before `module-4b-fast/` in the IDE file tree — matching the order in which you touch these components during the workshop. Despite the directory name, this code is taught here in **Module 3a** (the governance layer) and is consumed by Module 4's FAST agent.]{type="info"}
 

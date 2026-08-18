@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Centralized Observability Dashboard for the Agentic AI Platform.
   Aggregates metrics from the LLM Gateway (Module 2) and Tools Gateway
-  (Module 4) into a single CloudWatch Dashboard.
+  (Module 3a) into a single CloudWatch Dashboard.
 
 Parameters:
   LLMGatewayStackName:
@@ -67,7 +67,7 @@ Resources:
               "type": "text",
               "x": 0, "y": 0, "width": 24, "height": 2,
               "properties": {
-                "markdown": "# Agentic AI Platform — Observability Dashboard\n**LLM Gateway** (Module 2) + **Tools Gateway** (Module 4) — unified metrics across the platform.\n\n[LiteLLM Admin UI](http://${LLMGatewayALBName}/ui) *(internal ALB — HTTP is acceptable ONLY because this load balancer is internal-only with no public route; **production deployments must use HTTPS with an ACM certificate and never expose an HTTP ALB publicly**)* | [CloudWatch Logs: LLM Gateway](/cloudwatch/home#logsV2:log-groups/log-group/$252Fecs$252F${LLMGatewayStackName})"
+                "markdown": "# Agentic AI Platform — Observability Dashboard\n**LLM Gateway** (Module 2) + **Tools Gateway** (Module 3a) — unified metrics across the platform.\n\n[LiteLLM Admin UI](http://${LLMGatewayALBName}/ui) *(internal ALB — HTTP is acceptable ONLY because this load balancer is internal-only with no public route; **production deployments must use HTTPS with an ACM certificate and never expose an HTTP ALB publicly**)* | [CloudWatch Logs: LLM Gateway](/cloudwatch/home#logsV2:log-groups/log-group/$252Fecs$252F${LLMGatewayStackName})"
               }
             },
             {

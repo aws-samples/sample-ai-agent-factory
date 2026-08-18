@@ -18,9 +18,52 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import tempfile
 
 import boto3
 import requests
+
+
+def _mask(secret: str) -> str:
+    """Confirm a key exists without revealing any of its bytes.
+
+    The caller prints the key name alongside, so no leading/trailing characters
+    are needed to recognise it — the length alone separates a real key from a
+    short or empty lookup failure.
+    """
+    if not secret:
+        return "(not created)"
+    if len(secret) <= 12:
+        return "(unexpectedly short — check the proxy response)"
+    return f"(value not printed — {len(secret)} chars)"
+
+
+def _write_env_file(key_name: str, proxy_url: str, virtual_key: str) -> str:
+    """Persist the new key to a 0600 file instead of printing it.
+
+    A virtual key printed to stdout lands in terminal scrollback, shell history
+    and any captured session log. Writing it to a mode-0600 file the participant
+    sources keeps it out of all three and survives opening a second terminal.
+    Mirrors setup_keys.py, which writes /workshop/.llm-gateway-env the same way.
+    Returns the path written, or "" if nowhere was writable.
+    """
+    lines = [
+        f"# Written by create_api_key.py for virtual key '{key_name}'.",
+        f"export LLM_GATEWAY_URL={proxy_url}",
+        f"export LLM_GATEWAY_API_KEY={virtual_key}",
+        "",
+    ]
+    filename = f".llm-gateway-{key_name}-env"
+    for base in ("/workshop", os.path.expanduser("~"), tempfile.gettempdir()):
+        path = os.path.join(base, filename)
+        try:
+            with open(path, "w") as f:
+                f.write("\n".join(lines))
+            os.chmod(path, 0o600)  # contains a live virtual key
+            return path
+        except OSError:
+            continue
+    return ""
 
 
 def get_from_stack(stack_name: str, region: str) -> tuple[str, str]:
@@ -95,14 +138,23 @@ def main() -> None:
     key_data = resp.json()
 
     virtual_key = key_data.get("key", "")
-    # NOTE: printing credentials is acceptable only in this ephemeral workshop
-    # sandbox (the participant needs to copy their own freshly-created,
-    # budget-scoped key); never do this in production.
-    print(f"Virtual Key: {virtual_key}")
+    env_path = _write_env_file(args.key_name, proxy_url, virtual_key)
+
+    print(f"Virtual Key: {_mask(virtual_key)}  (name={args.key_name}, "
+          f"budget=${args.max_budget})")
     print()
-    print("Export for use:")
-    print(f"  export LLM_GATEWAY_API_KEY={virtual_key}")
-    print(f"  export LLM_GATEWAY_URL={proxy_url}")
+    if env_path:
+        print("Load it into any terminal with:")
+        print(f"  source {env_path}")
+        print()
+        print(f"{env_path} is mode 0600 and holds the full value.")
+    else:
+        # Nowhere was writable, so the key exists but was not saved. Re-running
+        # mints another key, which is cheaper than putting this one in the
+        # scrollback for good.
+        print("Could not write the env file to /workshop, $HOME or the temp")
+        print("directory, so this key was created but not saved. Fix the")
+        print("writable path and re-run to mint a replacement key.")
 
 
 if __name__ == "__main__":

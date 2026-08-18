@@ -5,7 +5,7 @@ weight: 43
 
 In this step you register two MCP servers — **Flights** and **Hotels** — so that agents can discover and call them through the governed gateway.
 
-## What You Are Registering
+## What you are registering
 
 The Tools Gateway stack (`workshop-tools-gateway-stack`) pre-deployed two Lambda-backed MCP servers:
 
@@ -18,11 +18,25 @@ Both Lambdas are already deployed and running. You are registering them in the R
 
 ::alert[The Tools Gateway stack is pre-provisioned by Workshop Studio — you do not need to deploy it yourself.]{type="info"}
 
-## Retrieve the Lambda Function URLs
+## Retrieve the Lambda function URLs
 
 Get the function URLs from your CloudFormation outputs:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
+# Re-derive the registry variables if this is a fresh terminal (a no-op otherwise).
+# Without REGISTRY_TOKEN the Registry answers 401 with an HTML body and the
+# `python3 -m json.tool` pipes below fail on "Expecting value: line 1 column 1".
+export AWS_REGION=${AWS_REGION:-$(aws configure get region)}
+if [ -z "$REGISTRY_URL" ]; then
+  export REGISTRY_URL=$(aws cloudformation list-exports \
+    --query "Exports[?Name=='workshop-MainCloudFrontUrl'].Value" --output text)
+fi
+if [ -z "$REGISTRY_TOKEN" ]; then
+  export REGISTRY_TOKEN=$(aws secretsmanager get-secret-value \
+    --secret-id workshop-registry-api-token --query SecretString --output text \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['api_token'])")
+fi
+
 export FLIGHTS_MCP_URL=$(aws cloudformation describe-stacks \
   --stack-name workshop-tools-gateway-stack \
   --query "Stacks[0].Outputs[?OutputKey=='FlightsMcpFunctionUrl'].OutputValue" \
@@ -37,7 +51,7 @@ echo "Flights MCP: $FLIGHTS_MCP_URL"
 echo "Hotels MCP:  $HOTELS_MCP_URL"
 :::
 
-## Register the Flights MCP Server
+## Register the flights MCP server
 
 In the Registry UI, select **Register Server** from the navigation menu.
 
@@ -108,7 +122,7 @@ else:
 
 You should see the server listed with `Enabled: True`.
 
-## Register the Hotels MCP Server
+## Register the hotels MCP server
 
 Repeat the process for the Hotels MCP server:
 

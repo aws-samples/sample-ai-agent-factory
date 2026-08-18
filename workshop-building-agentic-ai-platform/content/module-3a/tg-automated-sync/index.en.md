@@ -7,7 +7,7 @@ weight: 51
 
 In the previous step you manually curated tools into the gateway — browsing the catalog, selecting tools, resolving ARNs, and creating targets one by one. That is the right approach for understanding the flow. In production, you automate it with the **Sync Lambda**.
 
-## How the Sync Lambda Works
+## How the sync Lambda works
 
 The Sync Lambda is a scheduled bridge between the Registry and the AgentCore Gateway:
 
@@ -24,7 +24,7 @@ Registry API ──(list servers)──→ Sync Lambda ──(create targets)─
    - `http://` or `https://` -> Skipped (these use Path A via NGINX/CloudFront or require manual curation as in step 3; the `http://` scheme here refers to **in-cluster** service-to-service URLs inside the Registry's VPC — intentional, not internet-facing traffic)
 6. **Create** new targets, skip existing ones
 
-## Tag-Based Selection
+## Tag-based selection
 
 The `SYNC_FILTER_TAGS` environment variable controls which Registry tools the Sync Lambda processes:
 
@@ -34,7 +34,7 @@ The `SYNC_FILTER_TAGS` environment variable controls which Registry tools the Sy
 | `agentcore-target` | Only tools tagged `agentcore-target` are synced |
 | `agentcore-target,priority` | Tools with either tag are synced |
 
-## What Happens When You Run It Now
+## What happens when you run it now
 
 Since you already created gateway targets manually in step 3, the Sync Lambda will detect them as existing and skip them:
 
@@ -46,9 +46,9 @@ Since you already created gateway targets manually in step 3, the Sync Lambda wi
 | `currenttime-server` | No | Docker server (in-cluster `http://` — intentional for internal service-to-service traffic), skipped by Sync Lambda |
 | `realserverfaketools` | No | Docker server, skipped |
 
-## CLI Walkthrough
+## CLI walkthrough
 
-### Step 1: Invoke the Sync Lambda
+### Step 1: Invoke the sync Lambda
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 REGION=$(aws configure get region)
@@ -190,7 +190,7 @@ echo "Tag filter reset (all tools sync)"
 
 ---
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > This notebook covers the same material as the CLI section above — follow *either* path, you do not need to do both.
 >

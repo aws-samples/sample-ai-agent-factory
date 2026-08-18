@@ -7,11 +7,11 @@ weight: 52
 
 Run real requests through both paths to compare performance, audit, and governance capabilities.
 
-## What You'll Compare
+## What you'll compare
 
 | Capability | Path A (NGINX) | Path B (Gateway) |
 |-----------|----------------|-------------------|
-| Latency | ~50ms | ~200-400ms |
+| Latency | Lower — one reverse-proxy hop | Higher — adds JWT validation, interceptor Lambdas and Guardrails |
 | Authentication | Static token | Cognito JWT |
 | Audit trail | NGINX logs | CloudWatch structured audit log |
 | Content screening | None | Bedrock Guardrails |
@@ -19,7 +19,9 @@ Run real requests through both paths to compare performance, audit, and governan
 | Lambda tools | Not supported | Native invocation |
 | MCP protocol | Standard | Standard |
 
-## Group-Based Access Control
+::alert[The latency row is deliberately qualitative. The gap depends on your region, Lambda cold-start state, and whether Guardrails is enabled, so a single number would not transfer to your environment. You will time both paths against your own deployment further down this page — treat that measurement as the real answer.]{type="info"}
+
+## Group-based access control
 
 When `TOOL_ACCESS_POLICY` is configured on the interceptor Lambdas, access is filtered by Cognito groups:
 
@@ -38,11 +40,11 @@ When `TOOL_ACCESS_POLICY` is configured on the interceptor Lambdas, access is fi
 
 The request interceptor blocks unauthorized `tools/call` with an MCP error (`-32600`). The response interceptor filters `tools/list` results.
 
-## Key Insight
+## Key insight
 
 Path A is faster. Path B is governed. Both coexist -- the agent (or platform policy) chooses which path to use based on the use case. Production agents in workstream accounts should use Path B; internal tooling can use Path A.
 
-## CLI Walkthrough
+## CLI walkthrough
 
 ### Step 1: Set up URLs and authentication
 
@@ -86,11 +88,14 @@ COGNITO_DOMAIN=$(aws cloudformation list-exports \
   --query "Exports[?Name=='workshop-CognitoDomain'].Value" \
   --output text --region $REGION)
 
-GATEWAY_TOKEN=$(curl -s -X POST \
-  "https://${COGNITO_DOMAIN}.auth.${REGION}.amazoncognito.com/oauth2/token" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -u "${M2M_CLIENT_ID}:${M2M_CLIENT_SECRET}" \
-  -d "grant_type=client_credentials&scope=mcp-servers-unrestricted/read mcp-servers-unrestricted/execute" \
+# The client secret goes to curl on stdin (-K -) rather than in a -u argument,
+# so it never appears in the process table where any local user could read it.
+# printf is a shell builtin, so this forks nothing that could leak it either.
+GATEWAY_TOKEN=$(printf 'user = "%s:%s"\n' "$M2M_CLIENT_ID" "$M2M_CLIENT_SECRET" \
+  | curl -s -K - -X POST \
+    "https://${COGNITO_DOMAIN}.auth.${REGION}.amazoncognito.com/oauth2/token" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "grant_type=client_credentials&scope=mcp-servers-unrestricted/read mcp-servers-unrestricted/execute" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 
 # Fail loudly if any required value is empty — without exiting the shell.
@@ -103,10 +108,10 @@ done
 echo "Registry URL (Path A):   $REGISTRY_URL"
 echo "Gateway URL (Path B):    $GATEWAY_URL"
 echo "Gateway ID:              $GATEWAY_ID"
-echo "Cognito JWT:             ${GATEWAY_TOKEN:0:20}..."
+echo "Cognito JWT:             ${#GATEWAY_TOKEN} chars (value not printed)"
 :::
 
-### Step 2: Path A -- List tools via the Registry API through NGINX
+### Step 2: Path A -- list tools via the registry API through NGINX
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 echo "=== PATH A: Registry API via NGINX ==="
@@ -118,7 +123,7 @@ python3 -c "import json,sys; print('\n'.join(json.dumps(json.load(open('/tmp/pat
 
 ::alert[This command shows the first 40 lines of registered tools for illustration. The full listing of all tools available through this Registry endpoint is visible in the next step via the AgentCore Gateway.]{type="info"}
 
-### Step 3: Path B -- List tools via the AgentCore Gateway
+### Step 3: Path B -- list tools via the AgentCore Gateway
 
 First, list available gateway targets:
 
@@ -149,7 +154,7 @@ python3 -m json.tool < /tmp/pathB-list.json
 
 ::alert[The `tools/list` response returns namespaced tool names (e.g., `tg-workshop-flights-mcp___search_flights`). Use the full namespaced name when calling `tools/call`.]{type="info"}
 
-### Step 4: Path B -- Call a specific tool
+### Step 4: Path B -- call a specific tool
 
 Invoke `search_flights` through the full interceptor chain (request interceptor logs the call, Lambda target executes, response interceptor applies guardrails). Note the namespaced tool name:
 
@@ -226,7 +231,7 @@ fi
 
 ---
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > This notebook covers the same material as the CLI section above — follow *either* path, you do not need to do both.
 >

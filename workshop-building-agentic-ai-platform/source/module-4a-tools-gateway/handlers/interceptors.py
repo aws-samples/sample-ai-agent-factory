@@ -153,28 +153,49 @@ def request_interceptor_handler(event: dict, context) -> dict:
     method = body.get("method", "")
     policy = _load_access_policy()
 
-    # Audit tools/call and tools/list requests
-    if method in ("tools/call", "tools/list") and AUDIT_TABLE_NAME:
+    # Audit tools/call and tools/list requests.
+    #
+    # CloudWatch Logs is the primary audit sink and is written unconditionally —
+    # DynamoDB is the optional second sink. This used to be gated on
+    # AUDIT_TABLE_NAME, which the CDK stack sets to "", so no audit record was
+    # produced at all on a default deployment; the observability notebook's
+    # "inspect the gateway audit log" step always found zero events. The
+    # CloudFormation copies of this handler already log unconditionally, so this
+    # also brings the CDK source back into parity with what actually deploys.
+    if method in ("tools/call", "tools/list"):
         actor = _extract_actor(headers)
         tool_name = ""
         if method == "tools/call":
             params = body.get("params", {})
             tool_name = params.get("name", "")
 
-        try:
-            dynamo = boto3.resource("dynamodb", region_name=AWS_REGION)
-            table = dynamo.Table(AUDIT_TABLE_NAME)
-            table.put_item(Item={
-                "toolId": f"gateway:{tool_name}" if tool_name else "gateway:list",
-                "eventId": str(uuid.uuid4()),
-                "action": "GATEWAY_TOOLS_CALL" if method == "tools/call" else "GATEWAY_TOOLS_LIST",
-                "actor": actor,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "method": method,
-                "toolName": tool_name,
-            })
-        except Exception as e:
-            logger.warning("Audit log write failed (non-fatal): %s", e)
+        audit_entry = {
+            "audit": True,
+            "request_id": getattr(context, "aws_request_id", str(uuid.uuid4())),
+            "method": method,
+            "tool_name": tool_name,
+            "client_id": actor,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        # Metadata only: no tool arguments, which can carry caller-supplied data.
+        logger.info(json.dumps(audit_entry))
+
+        if AUDIT_TABLE_NAME:
+            try:
+                dynamo = boto3.resource("dynamodb", region_name=AWS_REGION)
+                table = dynamo.Table(AUDIT_TABLE_NAME)
+                table.put_item(Item={
+                    "toolId": f"gateway:{tool_name}" if tool_name else "gateway:list",
+                    "eventId": str(uuid.uuid4()),
+                    "action": "GATEWAY_TOOLS_CALL" if method == "tools/call" else "GATEWAY_TOOLS_LIST",
+                    "actor": actor,
+                    "timestamp": audit_entry["timestamp"],
+                    "method": method,
+                    "toolName": tool_name,
+                })
+            except Exception as e:
+                # Type only: the message can echo the item, which holds the actor.
+                logger.warning("Audit log write failed (non-fatal): %s", type(e).__name__)
 
     # Enforce access control on tools/call
     if method == "tools/call" and policy:

@@ -5,7 +5,7 @@ weight: 77
 
 The agent is running end to end. In this step you will inspect the observability surfaces that the platform provides.
 
-## View Agent Runtime Logs
+## View agent runtime logs
 
 AgentCore Runtime streams logs to CloudWatch via OpenTelemetry. Open the log group for your agent:
 
@@ -20,14 +20,14 @@ Key log entries to look for:
 | Log Entry | What It Confirms |
 |-----------|-----------------|
 | `[MODEL] Using LiteLLM Gateway: https://...` | Model calls routed through Module 2 |
-| `[GATEWAY] URL: https://tools-gateway-...` | Tools served by Module 3a's Tools Gateway |
-| `Getting OAuth2 token...` | M2M auth via Token Vault → Module 3a Cognito |
+| `[GATEWAY] URL: https://<gateway-id>.gateway.bedrock-agentcore...` | Tools served by whichever gateway you wired on the `connect-gateway-*` page |
+| `Getting OAuth2 token...` | M2M auth via Token Vault → Cognito |
 | `Negotiated protocol version: 2025-03-26` | MCP handshake with gateway succeeded |
 | `LiteLLM completion() model=...` | Each model invocation |
 | `Created session: ...` | AgentCore Memory session created |
 | `Started code interpreter in ...` | Code Interpreter sandbox activated |
 
-## GenAI Observability
+## GenAI observability
 
 Amazon Bedrock provides a GenAI Observability dashboard in CloudWatch. Open it to see traces for your agent:
 
@@ -35,19 +35,31 @@ Amazon Bedrock provides a GenAI Observability dashboard in CloudWatch. Open it t
 
 Select a trace to see the full request flow — from the user's prompt through model calls, tool invocations, and the final response. Each span shows latency, status, and metadata.
 
-## Inspect Gateway Audit Logs
+## Inspect gateway audit logs
 
-Module 3a's AgentCore Gateway request interceptor logs every tool invocation. Check the interceptor log group:
+Whichever gateway you wired, its request interceptor Lambda logs every tool invocation. The two gateways use different interceptor names, so the block below checks both and reports the one your agent is actually using:
+
+- **Module 3a's Tools Gateway** (`connect-gateway-mcp`) → `/aws/lambda/agentcore-gateway-request-interceptor`
+- **Module 3b's AgentCore Gateway** (`connect-gateway-agentcore`) → `/aws/lambda/ac-gateway-request-interceptor`
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 REGION=$(aws configure get region)
 
-aws logs filter-log-events \
-  --log-group-name "/aws/lambda/agentcore-gateway-request-interceptor" \
-  --filter-pattern '"tools"' \
-  --limit 5 --region $REGION \
-  --query "events[].message" --output text
+for LG in /aws/lambda/agentcore-gateway-request-interceptor \
+          /aws/lambda/ac-gateway-request-interceptor; do
+  aws logs describe-log-groups --log-group-name-prefix "$LG" --region $REGION \
+    --query "logGroups[?logGroupName=='$LG'].logGroupName" --output text \
+    | grep -q . || continue
+  echo "=== $LG ==="
+  aws logs filter-log-events \
+    --log-group-name "$LG" \
+    --filter-pattern '"tools"' \
+    --limit 5 --region $REGION \
+    --query "events[].message" --output text
+done
 :::
+
+::alert[Only the gateway you wired last will have fresh audit entries — `connect-gateway-agentcore` and `connect-gateway-mcp` both overwrite `/FAST-stack/gateway_url`, so the most recent one wins. An empty result for the other interceptor is expected.]{type="info"}
 
 Each audit entry includes the caller identity (from the JWT), the tool name, and a timestamp. This is the audit trail that platform teams use to track which agents are calling which tools.
 
@@ -100,7 +112,7 @@ PYEOF
 
 Each event represents a conversation turn stored by the `AgentCoreMemorySessionManager`. The agent loads recent turns at the start of each session to maintain context.
 
-## What You Observed
+## What you observed
 
 | Surface | What It Shows | Who Uses It |
 |---------|---------------|-------------|
@@ -111,7 +123,7 @@ Each event represents a conversation turn stored by the `AgentCoreMemorySessionM
 
 This observability stack demonstrates the patterns needed for an enterprise solution — every layer is instrumented and auditable.
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > This notebook covers the same material as the CLI section above — follow *either* path, you do not need to do both.
 >

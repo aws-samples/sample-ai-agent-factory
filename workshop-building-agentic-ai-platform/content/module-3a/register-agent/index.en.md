@@ -5,7 +5,7 @@ weight: 44
 
 The AI/ML team is building a **Travel Agent** — an assistant that searches flights and hotels to plan trips. Before the agent is built (Module 4), you register its **agent card** in the registry so other agents can discover it by capability.
 
-## What Is an Agent Card?
+## What is an agent card?
 
 An agent card is a structured metadata document from the [A2A protocol](https://github.com/a2aproject/A2A) that describes an agent's capabilities, endpoint, and skills. It is the agent equivalent of an API specification — it tells other agents what this agent can do and how to talk to it.
 
@@ -44,11 +44,25 @@ For the Travel Agent, the card looks like this:
 
 ::alert[The endpoint URL is a placeholder. In Module 4, after deploying the agent on AgentCore, you will update the card with the real endpoint. For now, the card establishes the agent's identity and discoverability in the registry.]{type="info"}
 
-## Register the Agent via the API
+## Register the agent via the API
 
 Save the agent card JSON and register it via the API:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
+# Re-derive the registry variables if this is a fresh terminal (a no-op otherwise).
+# Without REGISTRY_TOKEN the Registry answers 401 with an HTML body and the
+# `python3 -m json.tool` pipes below fail on "Expecting value: line 1 column 1".
+export AWS_REGION=${AWS_REGION:-$(aws configure get region)}
+if [ -z "$REGISTRY_URL" ]; then
+  export REGISTRY_URL=$(aws cloudformation list-exports \
+    --query "Exports[?Name=='workshop-MainCloudFrontUrl'].Value" --output text)
+fi
+if [ -z "$REGISTRY_TOKEN" ]; then
+  export REGISTRY_TOKEN=$(aws secretsmanager get-secret-value \
+    --secret-id workshop-registry-api-token --query SecretString --output text \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['api_token'])")
+fi
+
 curl -s -X POST "$REGISTRY_URL/api/agents/register?skip_validation=true" \
   -H "Authorization: Bearer $REGISTRY_TOKEN" \
   -H "Content-Type: application/json" \
@@ -76,7 +90,7 @@ Confirm the agent appears in the Registry UI under the **A2A Agents** tab:
 
 ![Travel Agent registered and visible in the A2A Agents tab](/static/img/module-3/register-agent-success.png)
 
-## Verify the Agent Card
+## Verify the agent card
 
 Confirm the agent is registered and its card is accessible:
 
@@ -88,7 +102,7 @@ curl -s "$REGISTRY_URL/api/agents/workshop-travel-agent" \
 
 The response should show the full agent card including skills, endpoint, and metadata.
 
-## Test Semantic Discovery
+## Test semantic discovery
 
 Agents discover other agents by describing what they need in natural language — not by knowing the agent's name in advance.
 

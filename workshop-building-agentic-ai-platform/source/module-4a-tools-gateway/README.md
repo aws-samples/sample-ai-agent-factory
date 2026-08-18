@@ -1,17 +1,17 @@
-# Module 4: AgentCore Gateway Integration Layer
+# Module 4: AgentCore Gateway integration layer
 
 ## Overview
 
 Module 4 adds a **governed tool access layer** (Path B) on top of Module 3's MCP Registry. It uses Amazon Bedrock AgentCore Gateway to provide JWT authentication, group-based access control, audit logging, and Bedrock Guardrails -- capabilities that the NGINX reverse proxy (Path A) cannot offer.
 
-### The Problem
+### The problem
 
 - Module 3's NGINX proxy (Path A) is fast but has no governance: no audit trail, no content screening, no per-team access control
 - Lambda-backed tools can't be served through NGINX
 - Platform teams need to control which workstream teams can access which tools
 - Tool output may contain PII or harmful content that should be screened before reaching agents
 
-### The Solution: Dual-Path Architecture
+### The solution: dual-path architecture
 
 ```
                             ┌─── Path A (Direct) ──────────────────────────┐
@@ -38,7 +38,7 @@ Agent ──┤                   │   Fast, no governance, Docker servers only
 | **Tag-Based Sync** | Only Registry tools tagged for the gateway are synced (platform controls selection) |
 | **Registry Bridge** | Sync Lambda reads Module 3's Registry API and creates/removes gateway targets |
 
-### What Module 4 Does NOT Have
+### What Module 4 does NOT have
 
 This is intentionally a **thin integration layer**:
 
@@ -59,12 +59,13 @@ This is intentionally a **thin integration layer**:
 | **Request Interceptor** | `handlers/interceptors.py` | Audit logging + group-based access control |
 | **Response Interceptor** | `handlers/interceptors.py` | Field sanitization + Bedrock Guardrails + group-based tool filtering |
 | **Demo Tool Lambda** | `handlers/demo_tool.py` | MCP-compatible `search-knowledge-base` tool |
+| **Product Info Tool Lambda** | `handlers/product_info_tool.py` | MCP-compatible `product-info` tool — the Lambda-native target Module 3b registers |
 | **Gateway Sync Service** | `services/gateway_sync.py` | AgentCore Gateway target CRUD via boto3 |
 | **Registry Client** | `services/registry_client.py` | M2M-authenticated Registry API client (urllib) |
 | **Gateway Creator** | `create_gateway.py` | Creates/updates the AgentCore Gateway itself |
-| **CDK Stack** | `cdk/agentcore_gateway_stack.py` | All infrastructure (4 Lambdas, EventBridge, IAM, Cognito groups) |
+| **CDK Stack** | `cdk/agentcore_gateway_stack.py` | All infrastructure (5 Lambdas, EventBridge, IAM, Cognito groups) |
 
-### Data Flow
+### Data flow
 
 ```
 Module 3 Registry API
@@ -101,7 +102,7 @@ Response Interceptor
 Agent receives response
 ```
 
-### Access Control Model
+### Access control model
 
 The `TOOL_ACCESS_POLICY` environment variable (JSON) maps Cognito groups to tool name patterns:
 
@@ -116,7 +117,7 @@ The `TOOL_ACCESS_POLICY` environment variable (JSON) maps Cognito groups to tool
 - **Response interceptor**: Filters `tools/list` to only show accessible tools
 - **No policy set**: All authenticated users see all tools (fail-open, backward compatible)
 
-### Cross-Account Pattern (Platform vs Workstream)
+### Cross-account pattern (platform vs workstream)
 
 In production, Module 4 sits in the **platform account** alongside Modules 2 and 3. Workstream accounts access tools via HTTPS + JWT:
 
@@ -134,7 +135,7 @@ Workshop reality: single AWS account, but architecture STRUCTURED as if multi-ac
 
 ---
 
-## AWS Resources Created
+## AWS resources created
 
 | Resource | Service | Purpose |
 |----------|---------|---------|
@@ -142,6 +143,7 @@ Workshop reality: single AWS account, but architecture STRUCTURED as if multi-ac
 | `agentcore-gateway-request-interceptor` | Lambda | Audit + access control (Python 3.12, 256 MB, 10s) |
 | `agentcore-gateway-response-interceptor` | Lambda | Guardrails + filtering (Python 3.12, 256 MB, 10s) |
 | `workshop-search-knowledge-base` | Lambda | Demo MCP tool (Python 3.12, 128 MB, 10s) |
+| `workshop-product-info-tool` | Lambda | Second demo MCP tool, the Lambda-native target Module 3b registers (Python 3.12, 128 MB, 10s) |
 | EventBridge Rule | EventBridge | Triggers sync every 5 minutes |
 | `workshop-agentcore-gateway-role-<region>` | IAM Role | Assumed by AgentCore Gateway |
 | `gateway-admins` | Cognito Group | Full access to all gateway tools |
@@ -154,12 +156,12 @@ Workshop reality: single AWS account, but architecture STRUCTURED as if multi-ac
 - **Module 3 deployed** -- CDK imports 5 CloudFormation exports from Module 3
 - **AWS CLI** configured with credentials
 - **Python 3.12+**
-- **Node.js 18+** and **AWS CDK CLI** (`npm install -g aws-cdk@2.147.0` — version matched to the workshop IDE bootstrap)
+- **Node.js 22** and **AWS CDK CLI** (`npm install -g aws-cdk@2.147.0` — version matched to the workshop IDE bootstrap). Node.js 22 specifically, not "18 or newer": Node 18 and 20 are both end-of-life, and the CDK CLI prints a ten-line unsupported-version banner on every command in response, which reads like a crash.
 - **CDK Bootstrap** run once per account/region
 
 ---
 
-## Repository Structure
+## Repository structure
 
 ```
 source/module-4a-tools-gateway/
@@ -178,15 +180,14 @@ source/module-4a-tools-gateway/
 ├── create_gateway.py         # Creates/updates the AgentCore Gateway
 ├── notebooks/                # Per-step Jupyter notebooks
 │   ├── 01-two-paths.ipynb
-│   ├── 02-deploy-stack.ipynb
-│   ├── 03-register-tools.ipynb
+│   ├── 02-explore-stack.ipynb
+│   ├── 03-curate-tools.ipynb
 │   ├── 04-sync-catalog.ipynb
 │   ├── 05-test-both-paths.ipynb
-│   ├── 06-bedrock-guardrails.ipynb
-│   └── 07-register-gateway.ipynb
+│   └── 06-bedrock-guardrails.ipynb
 ├── tests/
 │   ├── conftest.py           # sys.path setup + aws_credentials fixture
-│   ├── unit/                 # 42 unit tests
+│   ├── unit/                 # 48 unit tests
 │   └── integration/          # E2E tests (require deployed stack)
 ├── requirements.txt
 └── README.md                 # This file
@@ -194,9 +195,9 @@ source/module-4a-tools-gateway/
 
 ---
 
-## Quick Start
+## Quick start
 
-### 1. Run Unit Tests
+### 1. Run unit tests
 
 ```bash
 cd source/module-4a-tools-gateway
@@ -206,7 +207,7 @@ pytest tests/unit/ -v
 
 Expected: **48 passed**.
 
-### 2. Deploy the Infrastructure
+### 2. Deploy the infrastructure
 
 The workshop uses a CloudFormation stack (`workshop-tools-gateway-stack`) instead of CDK.
 The CDK stack in `cdk/` is a developer reference only — participants do not run it.
@@ -228,13 +229,13 @@ cd ..
 python create_gateway.py
 ```
 
-### 4. Follow the Notebooks
+### 4. Follow the notebooks
 
-Open `notebooks/01-two-paths.ipynb` and work through all 7 notebooks in order.
+Open `notebooks/01-two-paths.ipynb` and work through all 6 notebooks in order.
 
 ---
 
-## Environment Variables
+## Environment variables
 
 ### Sync Lambda
 
@@ -246,14 +247,14 @@ Open `notebooks/01-two-paths.ipynb` and work through all 7 notebooks in order.
 | `CLOUDFRONT_URL` | _(empty)_ | Module 3 CloudFront URL |
 | `SYNC_FILTER_TAGS` | _(empty)_ | Comma-separated tags to filter; empty = sync all |
 
-### Request Interceptor
+### Request interceptor
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AUDIT_TABLE_NAME` | _(empty)_ | DynamoDB table for audit logs |
 | `TOOL_ACCESS_POLICY` | _(empty)_ | JSON: `{"group": ["pattern", ...]}` |
 
-### Response Interceptor
+### Response interceptor
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -276,13 +277,13 @@ Open `notebooks/01-two-paths.ipynb` and work through all 7 notebooks in order.
 - Request interceptor blocks unauthorized `tools/call` with MCP error (-32600)
 - Response interceptor filters `tools/list` results by caller's Cognito groups
 
-### Gateway Target Security
+### Gateway target security
 
 - Lambda ARN validation (must start with `arn:aws:lambda:`)
 - Private/internal URL blocking (localhost, 169.254.x.x, 10.x.x.x, etc.)
 - `credentialProviderConfigurations` set to `GATEWAY_IAM_ROLE` on all targets
 
-### Response Sanitization
+### Response sanitization
 
 - Internal fields stripped: `gatewayTargetId`, `embedding`, `securityScanResult`, `createdBy`, `healthCheckMessage`, `lastHealthCheck`
 - Bedrock Guardrails screen tool output for PII and harmful content (fail-open if unavailable)

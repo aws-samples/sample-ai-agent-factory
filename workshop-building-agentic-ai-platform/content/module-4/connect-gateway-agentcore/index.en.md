@@ -7,11 +7,11 @@ Connect the travel agent to the pre-deployed AgentCore Gateway (`ac-tools-gatewa
 
 ::alert[Follow this page if you're on **Track 1 (fast path)** using the AgentCore registry, or you completed **Module 3b** (AgentCore Registry). If you completed Module 3a (OSS MCP Registry), use the [MCP Path](../connect-gateway-mcp/) instead.]{type="info"}
 
-## The Auth Challenge
+## The auth challenge
 
 Same concept as the MCP path — FAST's agent needs to authenticate to Module 3b's `ac-tools-gateway`. The gateway validates JWTs from the shared Cognito pool (created by the Registry stack).
 
-## Retrieve Credentials
+## Retrieve credentials
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 REGION=$(aws configure get region)
@@ -33,26 +33,35 @@ echo "M2M Client ID: $M2M_CLIENT_ID"
 echo "Discovery URL: $DISCOVERY_URL"
 :::
 
-## Create the OAuth2 Credential Provider
+## Create the OAuth2 credential provider
 
 ::alert[If you already created this in Module 3, you'll see "already exists" — that's fine, skip to the next step.]{type="info"}
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
-aws bedrock-agentcore-control create-oauth2-credential-provider \
-  --name "workshop-tools-gateway-auth" \
-  --credential-provider-vendor "CustomOauth2" \
-  --oauth2-provider-config-input "{
-    \"customOauth2ProviderConfig\": {
-      \"oauthDiscovery\": {
-        \"discoveryUrl\": \"${DISCOVERY_URL}\"
-      },
-      \"clientId\": \"${M2M_CLIENT_ID}\",
-      \"clientSecret\": \"${M2M_CLIENT_SECRET}\"
-    }
-  }" --region $REGION
+# The provider name is fixed, so creating it twice fails with
+# "Credential provider with name: workshop-tools-gateway-auth already exists".
+# Both gateway paths in this module create the same provider — treat an existing
+# one as success so either path (or a re-run) works.
+if aws bedrock-agentcore-control get-oauth2-credential-provider \
+     --name "workshop-tools-gateway-auth" --region $REGION >/dev/null 2>&1; then
+  echo "Credential provider 'workshop-tools-gateway-auth' already exists - reusing it"
+else
+  aws bedrock-agentcore-control create-oauth2-credential-provider \
+    --name "workshop-tools-gateway-auth" \
+    --credential-provider-vendor "CustomOauth2" \
+    --oauth2-provider-config-input "{
+      \"customOauth2ProviderConfig\": {
+        \"oauthDiscovery\": {
+          \"discoveryUrl\": \"${DISCOVERY_URL}\"
+        },
+        \"clientId\": \"${M2M_CLIENT_ID}\",
+        \"clientSecret\": \"${M2M_CLIENT_SECRET}\"
+      }
+    }" --region $REGION
+fi
 :::
 
-## Store Gateway Configuration in SSM
+## Store gateway configuration in SSM
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 GATEWAY_ID=$(aws cloudformation describe-stacks \
@@ -75,7 +84,7 @@ aws ssm put-parameter \
 echo "Gateway URL: $GATEWAY_URL"
 :::
 
-## Update the Gateway Client
+## Update the gateway client
 
 Replace the agent's `gateway.py` so it reads the credential provider from SSM:
 
@@ -136,7 +145,7 @@ cd /workshop/fast-agent
 python3 -c "import ast; ast.parse(open('patterns/strands-travel-agent/tools/gateway.py').read()); print('✓ gateway.py syntax OK')"
 :::
 
-## Update IAM and Redeploy
+## Update IAM and redeploy
 
 Widen the Secrets Manager IAM permission so the agent can read the new OAuth2 credential provider's secret:
 
@@ -208,7 +217,7 @@ After redeployment, open the Amplify URL and ask:
 
 The agent should call `search_flights` and `search_hotels` through the gateway and return real results.
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > Prefer an interactive notebook experience? The notebook below is the notebook-track equivalent of the **AgentCore path** on this page — if you are instead taking the MCP path, see `04a-connect-gateway-mcp.ipynb` (covered on the [Connect to Tools Gateway — MCP path](../connect-gateway-mcp/) page).
 >

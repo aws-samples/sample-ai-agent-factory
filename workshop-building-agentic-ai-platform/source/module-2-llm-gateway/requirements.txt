@@ -1,12 +1,18 @@
 # Pinned to exact tested versions for supply-chain reproducibility.
-boto3==1.42.87
+# boto3 1.43.72: the Agent Registry clients (agent-registry-control) that
+# modules 3b and 4b use only exist from 1.43.66 onward.
+boto3==1.43.72
 # requests 2.33.0 fixes the insecure temp-file reuse in extract_zipped_paths.
 requests==2.33.0
-# pydantic 2.10.6: 2.9.x lacked a prebuilt cp313 pydantic-core wheel pre-2.9.2,
-# and litellm 1.84.0 requires pydantic >= 2.10.0. 2.10.6 ships cp313 wheels.
-pydantic==2.10.6
+# pydantic 2.13.4: 2.10.6 is too old for strands-agents 1.52.0 (pip reports
+# ResolutionImpossible), and 2.9.x lacked a prebuilt cp313 pydantic-core wheel.
+pydantic==2.13.4
 # litellm 1.84.0 patches the auth-bypass (host-header injection), SQL injection
 # in proxy key verification, SSTI, MCP stdio command execution, and the
 # custom-code guardrail sandbox escape (GHSA advisories, < 1.84.0).
 litellm==1.84.0
-strands-agents[litellm]==0.1.5
+# strands-agents 1.52.0 with BOTH extras. 0.1.5 caps openai<2.0.0 via its
+# `openai` extra, but litellm 1.84.0 requires openai>=2.8.0 — pinning both made
+# pip resolution impossible, so `pip install -r` installed NOTHING and every
+# script here died on `import boto3`.
+strands-agents[litellm,openai]==1.52.0

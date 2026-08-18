@@ -1,19 +1,19 @@
-# Module 2: LLM Gateway (LiteLLM Proxy)
+# Module 2: LLM Gateway (LiteLLM proxy)
 
-Enterprise LLM Gateway deployed on AWS ECS Fargate using [LiteLLM Proxy](https://docs.litellm.ai/), providing governed, unified access to 70+ Amazon Bedrock foundation models with virtual keys, spend tracking, Bedrock Guardrails, and native Strands Agents integration.
+Enterprise LLM Gateway deployed on AWS ECS Fargate using [LiteLLM Proxy](https://docs.litellm.ai/), providing governed, unified access to Amazon Bedrock foundation models with virtual keys, spend tracking, Bedrock Guardrails, and native Strands Agents integration.
 
 ## Architecture
 
 - **API Gateway HTTP API** — HTTPS front door (public endpoint)
 - **Internal ALB** — routes to LiteLLM via VPC Link (private, not publicly accessible)
-- **LiteLLM Proxy** (`litellm-database:v1.83.3-stable`, pinned for supply-chain reproducibility) on ECS Fargate — port 4000
-- **PostgreSQL 16.6 sidecar** (Debian, pinned tag) for virtual keys, teams, and spend tracking
+- **LiteLLM Proxy** (`litellm-database:v1.84.0`, pinned for supply-chain reproducibility) on ECS Fargate — port 4000
+- **PostgreSQL 16.7 sidecar** (Debian, pinned tag) for virtual keys, teams, and spend tracking
 - **EFS** for PostgreSQL data persistence
 - **IAM Task Role** for Amazon Bedrock + Guardrails access (no API keys needed)
 - **Secrets Manager** for auto-generated admin key and database password
 - **CloudFormation** for infrastructure provisioning
 
-## Quick Start
+## Quick start
 
 ### Deploy
 
@@ -40,16 +40,20 @@ export LLM_GATEWAY_API_KEY=<virtual-key-from-setup-script>
 python scripts/test_gateway.py
 ```
 
-### Strands Agent Integration
+### Strands agent integration
 
 ```python
 from strands import Agent
 from strands.models.litellm import LiteLLMModel
 
 model = LiteLLMModel(
-    model_id="claude-sonnet",
-    api_base=os.environ["LLM_GATEWAY_URL"],  # HTTPS API Gateway endpoint
-    api_key="<virtual-key>",
+    # Connection settings belong in client_args (splatted into
+    # litellm.acompletion); params is for inference parameters only.
+    client_args={
+        "api_base": os.environ["LLM_GATEWAY_URL"],  # HTTPS API Gateway endpoint
+        "api_key": "<virtual-key>",
+    },
+    model_id="openai/claude-sonnet",  # "openai/" = OpenAI-compatible proxy path
 )
 
 agent = Agent(model=model)
@@ -62,11 +66,12 @@ result = agent("Analyse this and create a report.")
 bash scripts/destroy.sh workshop-llm-gateway-stack
 ```
 
-## Directory Structure
+## Directory structure
 
 ```
-├── cfn/
-│   └── litellm-config.yaml        # LiteLLM proxy config (70+ models)
+├── reference/
+│   └── litellm-config.yaml        # LiteLLM model catalog, for reference only —
+│                                  # the live catalog is registered by scripts/setup_keys.py
 │   # Note: the CloudFormation template lives at
 │   # static/cfn/llm-gateway/workshop-llm-gateway-stack.yaml (single source of truth)
 ├── scripts/
@@ -83,8 +88,9 @@ bash scripts/destroy.sh workshop-llm-gateway-stack
 ├── tests/
 │   ├── conftest.py
 │   └── unit/
-│       ├── test_gateway_client.py  # 17 client tests
-│       └── test_cfn_template.py    # 40 template tests
+│       ├── test_gateway_client.py  # 19 client tests
+│       ├── test_cfn_template.py    # 40 template tests
+│       └── test_bedrock_region.py  # 18 region/model-resolution tests
 ├── notebooks/                      # Step-by-step notebooks (one per module step)
 │   ├── step-1-architecture.ipynb
 │   ├── step-2-deploy.ipynb
@@ -98,7 +104,7 @@ bash scripts/destroy.sh workshop-llm-gateway-stack
 └── requirements-dev.txt
 ```
 
-## Python Client
+## Python client
 
 ```python
 from llm_gateway_client import LLMGatewayClient
@@ -121,26 +127,44 @@ key = client.create_key(models=["claude-sonnet"], max_budget=5.0)
 logs = client.get_spend_logs()
 ```
 
-## Running Tests
+## Running tests
 
 ```bash
 pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
 
-59 tests covering the Python client and CloudFormation template structure.
+77 tests (19 client + 40 template + 18 region resolution) covering the Python
+client, the CloudFormation template structure, and per-region model resolution.
+The counts are what `pytest --collect-only -q` reports, so they include
+parametrized cases and are higher than a `def test_` grep.
 
-## Available Models (70+)
+## Available models
+
+Two catalogs, and they are deliberately different sizes.
+
+**What the deployed gateway serves (17 aliases).** `scripts/setup_keys.py` registers these through
+`/model/new`; the proxy runs with `STORE_MODEL_IN_DB=True` and no mounted config file, so this table
+*is* the live catalog. Each entry is resolved against the deploy region at registration time and
+skipped if the region has no invocable flavor.
+
+| Provider | Aliases |
+|----------|---------|
+| Anthropic Claude | `claude-opus`, `claude-sonnet`, `claude-haiku`, `claude-opus-4.6`, `claude-sonnet-4.6`, `claude-opus-4.5`, `claude-sonnet-4.5`, `claude-haiku-4.5` |
+| Amazon Nova | `nova-pro`, `nova-lite`, `nova-2-lite` |
+| Meta Llama | `llama3.3-70b`, `llama3.1-70b` |
+| Mistral AI | `mistral-large-3`, `mistral-large` |
+| DeepSeek | `deepseek-r1`, `deepseek-v3` |
+
+**The wider reference catalog (55 aliases).** `reference/litellm-config.yaml` is documentation only —
+it is not mounted into the container. Use it as a menu when you want to add models to the table above.
 
 | Provider | Models |
 |----------|--------|
-| Anthropic Claude | Opus 4.6, Sonnet 4.6, Opus 4.5, Sonnet 4.5, Haiku 4.5, Opus 4.1, Sonnet 4, 3.5 Haiku |
-| Amazon Nova | Premier, Pro, Lite, Micro, Sonic, 2 Lite, 2 Sonic |
-| Amazon Titan | Text Premier, Express, Lite |
-| Meta Llama | 4 Scout, 4 Maverick, 3.3 70B, 3.2 (90B/11B/3B/1B), 3.1 (405B/70B/8B), 3 (70B/8B) |
-| Mistral AI | Large 3, Devstral 2, Magistral Small, Ministral (14B/8B/3B), Large, Small, Mixtral 8x7B, 7B |
-| Cohere | Command R+, Command R |
-| AI21 Labs | Jamba 1.5 Large, Jamba 1.5 Mini |
+| Anthropic Claude | Opus 4.6, Sonnet 4.6, Opus 4.5, Sonnet 4.5, Haiku 4.5 (plus the `claude-opus`/`claude-sonnet`/`claude-haiku` rolling aliases) |
+| Amazon Nova | Pro, Lite, 2 Lite, 2 Sonic |
+| Meta Llama | 4 Scout, 4 Maverick, 3.3 70B, 3.2 (90B/11B/3B/1B), 3.1 (70B/8B), 3 (70B/8B) |
+| Mistral AI | Large 3, Devstral 2, Magistral Small, Ministral (14B/8B/3B), Large, Mixtral 8x7B, 7B |
 | DeepSeek | R1, v3, v3.2 |
 | Writer | Palmyra X5, X4 |
 | Google | Gemma 3 (27B/12B/4B) |
@@ -150,3 +174,9 @@ pytest tests/ -v
 | Moonshot | Kimi K2 Thinking, K2.5 |
 | Zhipu AI | GLM 4.7, GLM 4.7 Flash |
 | OpenAI (OSS) | GPT OSS 120B, 20B |
+
+Cohere Command R and Command R+ are absent from both catalogs on purpose: they reach end of life on
+Bedrock on 2026-08-19, so registering either would hand participants an endpoint that stops working
+during the workshop's lifetime. Amazon Titan Text and AI21 Jamba are absent for the same reason —
+check the [Bedrock model lifecycle page](https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle.html)
+before adding any model to either table.

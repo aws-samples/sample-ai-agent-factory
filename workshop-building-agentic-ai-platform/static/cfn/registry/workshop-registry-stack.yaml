@@ -36,13 +36,6 @@ Parameters:
     Default: 10.0.0.0/16
     Description: CIDR block for VPC
 
-  IngressCidrBlocks:
-    Type: String
-    Default: 10.0.0.0/8
-    Description: >
-      CIDR blocks for ALB access. Replace with your corporate CIDR.
-      Workshop Studio deployments may use 0.0.0.0/0 with SCP protections.
-
   # Domain Configuration
   BaseDomain:
     Type: String
@@ -86,7 +79,7 @@ Parameters:
       - db.r5.xlarge
       - db.r5.2xlarge
 
-  # Aurora Serverless Scaling
+  # Container image configuration (ECR repositories and tags)
   RegistryImageRepo:
     Type: String
     Default: 'mcp-gateway-registry'
@@ -173,7 +166,7 @@ Parameters:
     Default: 80
     Description: Target memory utilization percentage
 
-  # Keycloak Configuration
+  # Embeddings Configuration
   EmbeddingsProvider:
     Type: String
     Default: 'sentence-transformers'
@@ -350,7 +343,6 @@ Resources:
       Parameters:
         EnvironmentName: !Ref EnvironmentName
         VpcCidr: !Ref VpcCidr
-        IngressCidrBlocks: !Ref IngressCidrBlocks
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-network
@@ -500,11 +492,15 @@ Outputs:
 
   CognitoLoginUrl:
     Description: Cognito hosted UI login URL
+    # DataStack's CognitoDomain output is the domain PREFIX only, and
+    # MainCloudFrontUrl already carries its own https:// scheme (see GrafanaUrl
+    # below). Treating either as if it were otherwise produced a link that could
+    # not work: no such host, and redirect_uri=https://https://...
     Value: !Sub
-      - 'https://${Domain}/login?client_id=${ClientId}&response_type=code&scope=email+openid+profile&redirect_uri=${RedirectUri}'
+      - 'https://${Domain}.auth.${AWS::Region}.amazoncognito.com/login?client_id=${ClientId}&response_type=code&scope=email+openid+profile&redirect_uri=${RedirectUri}'
       - Domain: !GetAtt DataStack.Outputs.CognitoDomain
         ClientId: !GetAtt DataStack.Outputs.CognitoWebAppClientId
-        RedirectUri: !Sub 'https://${ComputeStack.Outputs.MainCloudFrontUrl}/oauth2/callback/cognito'
+        RedirectUri: !Sub '${ComputeStack.Outputs.MainCloudFrontUrl}/oauth2/callback/cognito'
 
 
   GrafanaUrl:

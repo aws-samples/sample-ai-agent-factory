@@ -16,13 +16,6 @@ Parameters:
     Default: 10.0.0.0/16
     Description: CIDR block for VPC (matches Terraform default)
 
-  IngressCidrBlocks:
-    Type: String
-    Default: 10.0.0.0/8
-    Description: >
-      CIDR blocks for ALB access. Replace with your corporate CIDR.
-      Workshop Studio deployments may use 0.0.0.0/0 with SCP protections.
-
 Resources:
   #============================================================================
   # VPC
@@ -245,70 +238,148 @@ Resources:
   # Security Groups
   #============================================================================
   
-  # VPC Endpoints Security Group
+  # CloudFront's origin-facing edge ranges, resolved at deploy time.
+  #
+  # The registry ALB is an internet-facing CloudFront origin, so its port-80
+  # ingress cannot be a VPC-internal CIDR — but it does not have to be
+  # 0.0.0.0/0 either. AWS publishes the edge ranges as the managed prefix list
+  # `com.amazonaws.global.cloudfront.origin-facing`, which a security group can
+  # reference directly. CloudFormation has no intrinsic for looking up an
+  # AWS-managed prefix list, hence this custom resource.
+  #
+  # An earlier revision of this template claimed the prefix list was
+  # unavailable in sandbox accounts, citing a `MainAlbSG CREATE_FAILED`. That
+  # diagnosis was wrong. The list exists in every commercial region; the failure
+  # was `RulesPerSecurityGroupLimitExceeded`, because a managed prefix-list
+  # reference counts as *max-entries* rules against the 60-rule-per-group quota
+  # (L-0EA8095F) and the CloudFront list is currently weighted 55. One reference
+  # fits (55 + the 443 rule = 56); two do not. That is why only port 80 uses it.
+  CloudFrontPrefixListLookupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-cf-prefix-list-lookup
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DescribeManagedPrefixLists
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeManagedPrefixLists
+                # DescribeManagedPrefixLists does not support resource-level
+                # permissions — the prefix list being looked up is AWS-managed
+                # and has no account-scoped ARN. Read-only, no mutating actions.
+                Resource: '*'
+
+  CloudFrontPrefixListLookupLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-cf-prefix-list-lookup
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      ReservedConcurrentExecutions: 1
+      Role: !GetAtt CloudFrontPrefixListLookupRole.Arn
+      Code:
+        ZipFile: |
+          # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+          # SPDX-License-Identifier: Apache-2.0
+          import boto3
+          import cfnresponse
+
+          PREFIX_LIST_NAME = 'com.amazonaws.global.cloudfront.origin-facing'
+
+          def handler(event, context):
+              if event['RequestType'] == 'Delete':
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  return
+              try:
+                  ec2 = boto3.client('ec2')
+                  lists = ec2.describe_managed_prefix_lists(
+                      Filters=[{'Name': 'prefix-list-name',
+                                'Values': [PREFIX_LIST_NAME]}],
+                  ).get('PrefixLists', [])
+                  if not lists:
+                      # Fail loudly rather than silently widening the security
+                      # group to 0.0.0.0/0 — a silent fallback would look like a
+                      # successful deploy while removing the control entirely.
+                      raise RuntimeError(
+                          f'Managed prefix list {PREFIX_LIST_NAME} not found in '
+                          f'this region. The registry ALB security group cannot '
+                          f'be scoped to CloudFront edges without it.'
+                      )
+                  pl = lists[0]
+                  print(f"Resolved {PREFIX_LIST_NAME} -> {pl['PrefixListId']} "
+                        f"(max entries {pl.get('MaxEntries')})")
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                      'PrefixListId': pl['PrefixListId'],
+                      'MaxEntries': pl.get('MaxEntries'),
+                  })
+              except Exception as e:
+                  print(f'Error: {e}')
+                  cfnresponse.send(event, context, cfnresponse.FAILED,
+                                   {'Error': str(e)})
+
+  CloudFrontPrefixList:
+    Type: Custom::CloudFrontPrefixList
+    Properties:
+      ServiceToken: !GetAtt CloudFrontPrefixListLookupLambda.Arn
+
+  # Main ALB Security Group
   MainAlbSG:
     Type: AWS::EC2::SecurityGroup
     Metadata:
-      checkov:
-        skip:
-          - id: CKV_AWS_260
-            comment: "ALB SG ports 80/443 accept 0.0.0.0/0 as the public CloudFront origin (CloudFront edge IPs are outside the VPC CIDR)."
       cfn_nag:
         rules_to_suppress:
-          - id: W9
-            reason: >
-              Ports 80/443 accept 0.0.0.0/0 because Workshop Studio accounts
-              cannot reliably use the AWS-managed CloudFront origin-facing
-              prefix list (`com.amazonaws.global.cloudfront.origin-facing`)
-              in security-group ingress rules — the prefix-list ID varies
-              per partition/region and is not always available in sandbox
-              accounts (observed as a `MainAlbSG CREATE_FAILED` in a
-              us-west-2 sandbox account). The ALB
-              is fronted by CloudFront (MainCloudFrontDistribution) which
-              terminates TLS; the ALB itself is a best-effort public origin.
-              Compensating control is the Workshop Studio SCP on the
-              sandbox account (self-hosted: dedicated disposable account +
-              optional static/cfn/self-service-scp.json).
           - id: W2
-            reason: Same rationale as W9 above.
+            reason: >
+              Port 443 accepts 0.0.0.0/0 by design: MainAlbHttpsListener only
+              exists when a BaseDomain and ACM certificate are supplied
+              (compute-stack `HasDnsConfig`), and that listener is meant to
+              serve the public internet directly over TLS. The port-80 origin
+              path is restricted to CloudFront's managed prefix list.
     Properties:
       GroupName: !Sub ${EnvironmentName}-main-alb
       GroupDescription: Security group for main ALB
       VpcId: !Ref VPC
       SecurityGroupIngress:
-        # Ports 80/443 must accept 0.0.0.0/0: the public CloudFront distribution
-        # (MainCloudFrontDistribution) reaches this internet-facing ALB from edge
-        # IPs that are NOT inside the VPC CIDR. Narrowing these to IngressCidrBlocks
-        # (10.0.0.0/8) blackholes CloudFront -> 504s. CloudFront terminates TLS; the
-        # ALB is a best-effort public origin guarded by the Workshop Studio SCP.
-        # See the cfn_nag W9/W2 suppression above.
+        # Port 80 is the CloudFront origin path (MainCloudFrontDistribution uses
+        # OriginProtocolPolicy: http-only against HTTPPort 80). Scoping it to the
+        # CloudFront edge prefix list means the ALB's plaintext listener is not
+        # reachable from the internet at large, and compute-stack's
+        # MainAlbHttpListener only forwards requests that also carry the
+        # X-Cloudfront-Forwarded-Proto header CloudFront stamps on origin
+        # requests. Everything else gets a 301 to HTTPS.
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
-          CidrIp: 0.0.0.0/0
-          Description: HTTP from CloudFront origin-facing edges (fronted by CloudFront)
+          SourcePrefixListId: !GetAtt CloudFrontPrefixList.PrefixListId
+          Description: HTTP from CloudFront origin-facing edges only
+        # Port 443 serves MainAlbHttpsListener, which compute-stack creates only
+        # under HasDnsConfig (a real domain + ACM certificate). Public by intent.
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
           CidrIp: 0.0.0.0/0
-          Description: HTTPS from CloudFront origin-facing edges (fronted by CloudFront)
-        # Ports 8888/7860 are accessed directly (not via CloudFront) and stay
-        # scoped to the allowed CIDRs.
-        - IpProtocol: tcp
-          FromPort: 8888
-          ToPort: 8888
-          CidrIp: !Ref IngressCidrBlocks
-          Description: Auth server port (direct access, not CloudFront-fronted)
-        - IpProtocol: tcp
-          FromPort: 7860
-          ToPort: 7860
-          CidrIp: !Ref IngressCidrBlocks
-          Description: Gradio port (direct access, not CloudFront-fronted)
+          Description: HTTPS direct to the ALB when a custom domain and ACM certificate are configured
+        # No ingress for 8888 (auth-server) or 7860 (Gradio). Those listeners
+        # exist only to keep their ECS target groups associated with a load
+        # balancer; see the comment above MainAlbAuthListener in compute-stack.
+        # East-west traffic uses ECS Service Connect, not the ALB.
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-main-alb
 
-  # Keycloak ALB Security Group
+  # ECS Tasks Security Group
   EcsTasksSG:
     Type: AWS::EC2::SecurityGroup
     Metadata:
@@ -378,7 +449,7 @@ Resources:
       SourceSecurityGroupId: !Ref EcsTasksSG
       Description: Allow all traffic between ECS tasks in same security group
 
-  # Keycloak ECS Security Group
+  # Main ALB egress to the ECS tasks
   MainAlbEgressToEcs:
     Type: AWS::EC2::SecurityGroupEgress
     Properties:

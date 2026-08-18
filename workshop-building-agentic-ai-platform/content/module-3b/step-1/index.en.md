@@ -5,7 +5,7 @@ weight: 61
 
 Understand the three pillars and three personas before starting the hands-on steps.
 
-## Three Pillars
+## Three pillars
 
 | Pillar | Service | Role |
 |--------|---------|------|
@@ -15,7 +15,7 @@ Understand the three pillars and three personas before starting the hands-on ste
 
 The Registry and Gateway are **independent services**. The Registry is a catalog (discovery). The Gateway routes traffic (governance). Agent developers search the Registry to find tools, then invoke them through the Gateway.
 
-## Three Personas
+## Three personas
 
 | Persona | IAM Role | Can Register | Can Approve | Can Search | Can Invoke |
 |---------|----------|-------------|-------------|------------|------------|
@@ -25,7 +25,7 @@ The Registry and Gateway are **independent services**. The Registry is a catalog
 
 The person who builds a tool is not the person who approves it for production — this is a deliberate governance control.
 
-## Tool Lifecycle
+## Tool lifecycle
 
 ```mermaid
 graph LR
@@ -37,7 +37,7 @@ graph LR
 
 Steps 1 is handled by CloudFormation (pre-deployed). Steps 2-5 are interactive — you will do them in the following pages.
 
-## What Was Pre-Deployed
+## What was pre-deployed
 
 The `workshop-agentcore-stack` created:
 

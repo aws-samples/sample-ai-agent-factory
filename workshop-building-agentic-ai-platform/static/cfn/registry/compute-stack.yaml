@@ -118,12 +118,12 @@ Resources:
               - Effect: Allow
                 Action:
                   - iam:CreateServiceLinkedRole
-                # AWS API requires '*' as the resource for CreateServiceLinkedRole.
-                # The Condition below restricts the action to ECS's service-linked
-                # role only — this is the sole SLR this Lambda is expected to
-                # create. Satisfies Checkov CKV_AWS_109 (IAM permissions management
-                # must have constraints).
-                Resource: '*'
+                # Scoped to the one service-linked role this Lambda exists to
+                # create, belt-and-braces with the iam:AWSServiceName condition.
+                # An earlier revision used Resource '*' on the grounds that the
+                # API requires it; it does not — CreateServiceLinkedRole supports
+                # resource-level permissions on the role ARN it would create.
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS
                 Condition:
                   StringEquals:
                     iam:AWSServiceName: ecs.amazonaws.com
@@ -340,7 +340,6 @@ Resources:
                   - ssm:GetParameters
                   - ssm:GetParameter
                 Resource:
-                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/keycloak/*
                   - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/*
         - PolicyName: EcsExecLogging
           PolicyDocument:
@@ -515,36 +514,83 @@ Resources:
         - Key: Name
           Value: !Sub ${EnvironmentName}-gradio-tg
 
-  # ALB HTTP listeners: CloudFront enforces HTTPS for all viewer traffic
-  # (redirect-to-https). ALB uses HTTP because no ACM certificate is available
-  # without Route53/custom domains.
+  # Port 80 listener. There is no ACM certificate available without a custom
+  # domain, so TLS still terminates at CloudFront — but the listener no longer
+  # serves plaintext to anyone who asks. Its default action is a redirect to
+  # HTTPS; only requests carrying the `X-Cloudfront-Forwarded-Proto: https`
+  # header that MainCloudFrontDistribution stamps on every origin request are
+  # forwarded to the registry (see MainAlbCloudFrontForwardRule below).
+  # Reaching the listener at all requires coming from a CloudFront edge: the
+  # port-80 ingress on MainAlbSG is scoped to the AWS-managed
+  # `com.amazonaws.global.cloudfront.origin-facing` prefix list — see
+  # network-stack.yaml. That combination is what makes Checkov CKV_AWS_2 and
+  # CKV_AWS_103 pass here rather than being suppressed.
   MainAlbHttpListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Metadata:
-      checkov:
-        skip:
-          - id: CKV_AWS_103
-            comment: "ALB is a CloudFront origin; TLS terminates at CloudFront. An HTTPS listener requires a custom domain + ACM certificate not available in the workshop — never use http-only in production; use ACM + HTTPS origins."
-          - id: CKV_AWS_2
-            comment: "ALB is a CloudFront origin; TLS terminates at CloudFront. HTTPS listener requires a domain + ACM cert not available in the workshop — never use http-only in production; use ACM + HTTPS origins."
       cfn_nag:
         rules_to_suppress:
           - id: W55
             reason: >
-              CloudFront (MainCloudFrontDistribution) terminates TLS for viewer
-              traffic and forwards to this ALB over HTTP on the internal VPC
-              network. Adding HTTPS on the ALB itself would require an ACM
-              certificate, which Workshop Studio accounts do not provide
-              without a custom domain.
+              Protocol is HTTP because no ACM certificate is available without
+              a custom domain, but the default action is a 301 redirect to
+              HTTPS — nothing is proxied in the clear unless it arrives from a
+              CloudFront edge with CloudFront's own origin header. TLS
+              terminates at MainCloudFrontDistribution.
           - id: W56
             reason: >
-              No SslPolicy configured because this is an HTTP listener — see
-              W55.
+              No SslPolicy configured because this is an HTTP redirect
+              listener — see W55.
     Properties:
       LoadBalancerArn: !Ref MainAlb
       Port: 80
       Protocol: HTTP
       DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: '443'
+            Host: '#{host}'
+            Path: /#{path}
+            Query: '#{query}'
+            StatusCode: HTTP_301
+
+  # The real traffic path: CloudFront-originated requests forward to the
+  # registry. Priority is deliberately *above* the /grafana/* rule (priority 15)
+  # that services-stack and observability-stack attach to this same listener, so
+  # path-based routing keeps winning.
+  #
+  # The X-Cloudfront-Forwarded-Proto condition below is NOT authentication and is
+  # NOT the primary access control. Its value is a fixed, guessable string; on its
+  # own it would be trivially forgeable. The control that actually restricts who
+  # can reach this listener is the MainAlbSG port-80 ingress, scoped to the
+  # AWS-managed `com.amazonaws.global.cloudfront.origin-facing` prefix list in
+  # network-stack.yaml. The header check is a second-layer filter behind it, so
+  # that a request arriving from a CloudFront edge for some *other* distribution
+  # still does not get proxied. Authentication happens inside the registry
+  # application (Cognito), not at the ALB.
+  #
+  # PRODUCTION NOTE: the prefix list admits every CloudFront distribution in
+  # every account, so it bounds the source network but does not identify the
+  # caller. For a production deployment, do both of these instead of relying on
+  # the header: (1) attach an ALB listener rule with an `authenticate-oidc` or
+  # `authenticate-cognito` action so unauthenticated requests never reach a
+  # target group, and (2) replace the static header with a secret custom origin
+  # header held in Secrets Manager and rotated, or front the origin with
+  # CloudFront VPC origins / AWS WAF so the ALB is not internet-routable at all.
+  # See https://docs.aws.amazon.com/elasticloadbalancing/latest/application/listener-authenticate-users.html
+  MainAlbCloudFrontForwardRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref MainAlbHttpListener
+      Priority: 100
+      Conditions:
+        - Field: http-header
+          HttpHeaderConfig:
+            HttpHeaderName: X-Cloudfront-Forwarded-Proto
+            Values:
+              - https
+      Actions:
         - Type: forward
           TargetGroupArn: !Ref RegistryTargetGroup
 
@@ -562,56 +608,98 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref RegistryTargetGroup
 
+  # Ports 8888 (auth-server) and 7860 (registry Gradio UI) carry no
+  # traffic. Nothing can reach them: MainAlbSG has no ingress rule for either
+  # port (it used to admit 10.0.0.0/8, which never matched — the ALB is
+  # internet-facing, so an in-VPC client resolving its public DNS name egresses
+  # through the NAT gateway and arrives with a public source address). East-west
+  # traffic uses ECS Service Connect instead (`http://auth-server:8888`), and no
+  # template, notebook, or content page references the ALB on either port.
+  #
+  # They cannot simply be deleted: ECS rejects a service whose target group has
+  # no associated load balancer ("does not have an associated load balancer"),
+  # and services-stack attaches auth-server to AuthTargetGroup and the registry
+  # task's second port to GradioTargetGroup. So each listener keeps a forward
+  # rule to hold that association, while its *default* action redirects to
+  # HTTPS rather than proxying plaintext — which is also what makes CKV_AWS_2
+  # and CKV_AWS_103 pass instead of being suppressed.
   MainAlbAuthListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Metadata:
-      checkov:
-        skip:
-          - id: CKV_AWS_103
-            comment: "ALB is a CloudFront origin; TLS terminates at CloudFront. An HTTPS listener requires a custom domain + ACM certificate not available in the workshop — never use http-only in production; use ACM + HTTPS origins."
-          - id: CKV_AWS_2
-            comment: "ALB is a CloudFront origin; TLS terminates at CloudFront. HTTPS listener requires a domain + ACM cert not available in the workshop — never use http-only in production; use ACM + HTTPS origins."
       cfn_nag:
         rules_to_suppress:
           - id: W55
             reason: >
-              Keycloak auth-server listener — accessed via CloudFront for the
-              OAuth2 callback and direct VPC-internal access during
-              ServiceConnect probes. HTTPS requires an ACM certificate not
-              available in Workshop Studio accounts without a custom domain.
+              Auth-server listener. Protocol is HTTP because no ACM
+              certificate exists without a custom domain; the default action is
+              a 301 redirect to HTTPS. The listener is unreachable — see the
+              comment above the resource.
           - id: W56
-            reason: No SslPolicy on HTTP listener — see W55.
+            reason: No SslPolicy on an HTTP redirect listener — see W55.
     Properties:
       LoadBalancerArn: !Ref MainAlb
       Port: 8888
       Protocol: HTTP
       DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: '443'
+            Host: '#{host}'
+            Path: /#{path}
+            Query: '#{query}'
+            StatusCode: HTTP_301
+
+  MainAlbAuthForwardRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref MainAlbAuthListener
+      Priority: 100
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /*
+      Actions:
         - Type: forward
           TargetGroupArn: !Ref AuthTargetGroup
 
   MainAlbGradioListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Metadata:
-      checkov:
-        skip:
-          - id: CKV_AWS_103
-            comment: "ALB is a CloudFront origin; TLS terminates at CloudFront. An HTTPS listener requires a custom domain + ACM certificate not available in the workshop — never use http-only in production; use ACM + HTTPS origins."
-          - id: CKV_AWS_2
-            comment: "ALB is a CloudFront origin; TLS terminates at CloudFront. HTTPS listener requires a domain + ACM cert not available in the workshop — never use http-only in production; use ACM + HTTPS origins."
       cfn_nag:
         rules_to_suppress:
           - id: W55
             reason: >
-              Gradio admin UI listener — participant-facing over CloudFront
-              (which terminates TLS). ALB-leg HTTPS requires an ACM certificate
-              not available in Workshop Studio without a custom domain.
+              Registry Gradio UI listener. Protocol is HTTP because no ACM
+              certificate exists without a custom domain; the default action is
+              a 301 redirect to HTTPS. Participants reach the UI through
+              MainCloudFrontDistribution on port 80, not this listener.
           - id: W56
-            reason: No SslPolicy on HTTP listener — see W55.
+            reason: No SslPolicy on an HTTP redirect listener — see W55.
     Properties:
       LoadBalancerArn: !Ref MainAlb
       Port: 7860
       Protocol: HTTP
       DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: '443'
+            Host: '#{host}'
+            Path: /#{path}
+            Query: '#{query}'
+            StatusCode: HTTP_301
+
+  MainAlbGradioForwardRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref MainAlbGradioListener
+      Priority: 100
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /*
+      Actions:
         - Type: forward
           TargetGroupArn: !Ref GradioTargetGroup
 
@@ -714,12 +802,21 @@ Resources:
           # Studio accounts without a custom domain). Modern browsers still
           # negotiate TLSv1.2+ with CloudFront by default.
           MinimumProtocolVersion: TLSv1.2_2021
+      # The Workshop tag is set explicitly rather than left to CloudFormation
+      # stack-tag propagation, because the ParticipantRole's
+      # CloudFrontDeleteAndUpdateTaggedOnly statement conditions
+      # DeleteDistribution on aws:ResourceTag/Workshop -- if the tag were
+      # missing, cleanup would fail with AccessDenied and leave a billable
+      # distribution behind. Tag-based authorization on distributions is
+      # live-proven: the same call is denied untagged and allowed tagged.
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-main-cloudfront
+        - Key: Workshop
+          Value: AgentCore-Platform
 
   #============================================================================
-  # CloudFront Distribution for Keycloak HTTPS (no custom domain required)
+  # CloudFront Distribution for auth-server HTTPS (no custom domain required)
   # Provides HTTPS via *.cloudfront.net certificate when Route53 is not available
   #============================================================================
 Outputs:

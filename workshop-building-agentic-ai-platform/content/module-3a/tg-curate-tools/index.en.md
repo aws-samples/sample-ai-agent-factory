@@ -5,7 +5,7 @@ weight: 50
 
 The Registry has several tools registered — but not all need runtime governance. In this step you selectively promote the tools the Travel Agent needs to the AgentCore Gateway.
 
-## Why Selective Curation?
+## Why selective curation?
 
 | Tool | Governance Need | Gateway? |
 |------|----------------|----------|
@@ -15,7 +15,7 @@ The Registry has several tools registered — but not all need runtime governanc
 | currenttime | None (low-risk utility) | No — Path A only |
 | realserverfaketools | None (test fixture) | No — Path A only |
 
-## Set Up Variables
+## Set up variables
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 REGION=$(aws configure get region)
@@ -33,7 +33,7 @@ echo "Gateway ID: $GATEWAY_ID"
 echo "Account:    $ACCOUNT_ID"
 :::
 
-## Create Gateway Targets
+## Create gateway targets
 
 Each gateway target connects a Lambda function to the AgentCore Gateway. The process for each tool is:
 
@@ -121,7 +121,7 @@ export REGION ACCOUNT_ID GATEWAY_ID
 python3 /tmp/add_target.py
 :::
 
-## Verify Gateway Targets
+## Verify gateway targets
 
 List all targets to confirm only the selected tools were added:
 

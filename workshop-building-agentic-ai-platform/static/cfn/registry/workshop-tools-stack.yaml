@@ -331,18 +331,31 @@ Resources:
               }
           ]
 
-          # Agent Skills to register (SKILL.md-based capabilities)
+          # Agent Skills to register (SKILL.md-based capabilities).
+          #
+          # These URLs must stay inside an Amazon-owned organisation, and they must
+          # stay live: the Registry requires skill_md_url and *fetches* it during
+          # registration, rejecting anything that is not HTTP 200 with
+          # "400 Invalid SKILL.md URL". The field cannot be omitted and inline
+          # content is not accepted -- see static/skills/README.md for the measured
+          # matrix. Both files are versioned in this repository under
+          # static/skills/ and served from the workshop's own published tree, so
+          # publish static/skills/ together with any change to these URLs.
+          SKILLS_BASE_URL = (
+              'https://raw.githubusercontent.com/aws-samples/sample-ai-agent-factory'
+              '/main/workshop-building-agentic-ai-platform/static/skills'
+          )
           AGENT_SKILLS = [
               {
                   'name': 'frontend-design',
                   'description': 'Create distinctive frontend interfaces with high design quality suitable for workshop demonstrations.',
-                  'skill_md_url': 'https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/frontend-design/SKILL.md',
+                  'skill_md_url': f'{SKILLS_BASE_URL}/frontend-design/SKILL.md',
                   'tags': ['design', 'frontend', 'ui'],
               },
               {
                   'name': 'canvas-design',
                   'description': 'Create beautiful visual art in .png and .pdf documents using design philosophy.',
-                  'skill_md_url': 'https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/canvas-design/SKILL.md',
+                  'skill_md_url': f'{SKILLS_BASE_URL}/canvas-design/SKILL.md',
                   'tags': ['design', 'canvas', 'art'],
               }
           ]

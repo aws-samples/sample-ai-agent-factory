@@ -5,12 +5,12 @@ weight: 24
 
 Now that you understand the platform vision, it's time to choose your path.
 
-## Choose Your Track
+## Choose your track
 
 ::::tabs
 :::tab{label="Track 1: Build an Agent"}
 
-### Best for: AI/ML Engineers, Developers
+### Best for: AI/ML engineers, developers
 
 You want to build and deploy an agent — not set up infrastructure. The platform foundations are pre-deployed for you.
 
@@ -27,7 +27,7 @@ You want to build and deploy an agent — not set up infrastructure. The platfor
 :::
 :::tab{label="Track 2: Build the Platform"}
 
-### Best for: Platform Engineers, Infrastructure Teams
+### Best for: platform engineers, infrastructure teams
 
 You want to understand and deploy the foundational platform components that AI/ML teams depend on.
 
@@ -45,7 +45,7 @@ You want to understand and deploy the foundational platform components that AI/M
 :::
 :::tab{label="Track 3: Full Journey"}
 
-### Best for: Solutions Architects, Tech Leads
+### Best for: solutions architects, tech leads
 
 Build the platform foundations and then build agents on top. End-to-end understanding of both sides.
 
@@ -64,7 +64,7 @@ Build the platform foundations and then build agents on top. End-to-end understa
 
 ::alert[**Track 1 (Fast Path):** The platform infrastructure is pre-deployed for you. Skip Modules 2 and 3 and [jump directly to Module 4](/module-4) to build and deploy your agent.]{header="Quick Start" type="info"}
 
-## Module Roadmap
+## Module roadmap
 
 | Module | What It Covers | Required For |
 |--------|---------------|-------------|

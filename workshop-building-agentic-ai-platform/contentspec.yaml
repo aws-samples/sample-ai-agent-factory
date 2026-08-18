@@ -17,7 +17,7 @@ params:
 # List of links to display in the workshop guide. Will be rendered on the left hand side navigation menu.
 additionalLinks:
   - title: Amazon Bedrock AgentCore Documentation
-    link: https://docs.aws.amazon.com/bedrock/latest/userguide/agentcore.html
+    link: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html
   - title: Amazon Bedrock Agents Documentation
     link: https://docs.aws.amazon.com/bedrock/latest/userguide/agents.html
   - title: Model Context Protocol Specification
@@ -36,6 +36,13 @@ awsAccountConfig:
   serviceLinkedRoles:
     - ecs.amazonaws.com
     - ecs.application-autoscaling.amazonaws.com
+    # agent-registry.amazonaws.com is deliberately NOT declared here. Workshop
+    # Studio does not recognise it yet and warns "abnormal Service Linked Role
+    # requested" on every build. It does not need declaring: the service creates
+    # AWSServiceRoleForAgentRegistry itself on the account's first Agent Registry
+    # call (Module 3b notebook 03) using the caller's permission, and the
+    # ParticipantRole grants iam:CreateServiceLinkedRole for exactly that role
+    # (Sid ACRegistryServiceLinkedRole in workshop-iam-policy-core.json).
 
   # The following configuration is specific to the ParticipantRole's scoped permissions.
   participantRole:
@@ -59,6 +66,7 @@ awsAccountConfig:
     iamPolicies:
       - static/cfn/workshop-iam-policy-core.json
       - static/cfn/workshop-iam-policy-core-2.json
+      - static/cfn/workshop-iam-policy-core-3.json
       - static/cfn/workshop-iam-policy-infra.json
       - static/cfn/workshop-iam-policy-network.json
 
@@ -72,6 +80,7 @@ awsAccountConfig:
         - lambda.amazonaws.com
         - bedrock.amazonaws.com
         - bedrock-agentcore.amazonaws.com
+        - agent-registry.amazonaws.com
         - cloudformation.amazonaws.com
 
   # Enable EC2 KeyPair for CloudShell access

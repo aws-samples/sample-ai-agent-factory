@@ -30,11 +30,11 @@ The LLM Gateway CloudFormation stack was automatically deployed when your worksh
 8. You can now close the playground — the account is primed for both models (LiteLLM and the baseline FAST agent).
 ::::
 
-## What Was Deployed
+## What was deployed
 
 The `workshop-llm-gateway-stack` deployed the architecture described in the previous step — LiteLLM Proxy + PostgreSQL on ECS Fargate, fronted by API Gateway, running in an isolated VPC. All resources are listed in the CloudFormation **Resources** tab if you want to explore them.
 
-## CLI Walkthrough
+## CLI walkthrough
 
 As the **infrastructure engineer**, your first task is to verify the pre-deployed LLM Gateway is healthy and capture the credentials you'll need to configure teams, virtual keys, and guardrails in the following steps.
 
@@ -101,14 +101,14 @@ The ECS task needs time to pull images, start PostgreSQL, run migrations, and be
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 for i in $(seq 1 30); do
-  if curl -fsS "${LLM_GATEWAY_URL}/health/liveliness" 2>/dev/null | grep -q "alive"; then
+  if curl -fsS --max-time 10 "${LLM_GATEWAY_URL}/health/liveliness" 2>/dev/null | grep -q "alive"; then
     echo "Gateway is healthy after ${i} attempts."
     break
   fi
   echo "Attempt ${i}/30 - gateway not ready yet, waiting 10s..."
   sleep 10
 done
-curl "${LLM_GATEWAY_URL}/health/liveliness"
+curl --max-time 10 "${LLM_GATEWAY_URL}/health/liveliness"; echo
 :::
 
 You should see, on the last line:
@@ -117,9 +117,9 @@ You should see, on the last line:
 "I'm alive!"
 ```
 
-If the poll exits after 30 attempts (5 minutes) without `Gateway is healthy`, the ECS task likely failed to start. Check the ECS service events: `aws ecs describe-services --cluster <cluster> --services <service> --query "services[0].events[0:5]"`.
+If the poll exits after 30 attempts (5–10 minutes, depending on whether the endpoint refuses at once or accepts and then times out) without `Gateway is healthy`, the ECS task likely failed to start. Check the ECS service events: `aws ecs describe-services --cluster <cluster> --services <service> --query "services[0].events[0:5]"`.
 
-### 2.5 Open the LiteLLM Admin UI
+### 2.5 Open the LiteLLM admin UI
 
 The LLM Gateway includes a web-based admin dashboard for managing teams, virtual keys, models, and spend tracking. Open it in your browser:
 
@@ -140,7 +140,7 @@ Explore the dashboard — you will see the available models, and in later steps 
 
 ---
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > This notebook covers the same material as the CLI section above — follow *either* path, you do not need to do both.
 >

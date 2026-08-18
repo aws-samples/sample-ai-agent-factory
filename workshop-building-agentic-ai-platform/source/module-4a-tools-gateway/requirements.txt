@@ -1,2 +1,9 @@
-boto3==1.42.87
-httpx==0.27.0
+# Pinned to exact tested versions for supply-chain reproducibility, and kept in
+# step with source/module-2-llm-gateway/requirements.txt so a single kernel can
+# run both modules' notebooks.
+# boto3 1.43.72: the Agent Registry clients (agent-registry-control) that
+# modules 3b and 4b use only exist from 1.43.66 onward.
+boto3==1.43.72
+# httpx 0.28.1 is what the module-2 kernel already resolves to via litellm/openai;
+# pinning 0.27.0 here downgraded it and broke those imports in a shared kernel.
+httpx==0.28.1

@@ -213,21 +213,19 @@ do_status() {
     --query "Exports[?Name=='workshop-RegistryUrl'].Value" \
     --output text 2>/dev/null)
 
-  ADMIN_PASSWORD=$(aws cloudformation list-exports \
-    --query "Exports[?Name=='workshop-AdminPassword'].Value" \
-    --output text 2>/dev/null)
-
   if [[ -n "${REGISTRY_URL}" && "${REGISTRY_URL}" != "None" ]]; then
     echo "    export REGISTRY_URL=${REGISTRY_URL}"
   else
     echo "    export REGISTRY_URL=<check stack outputs>"
   fi
+  echo ""
 
-  if [[ -n "${ADMIN_PASSWORD}" && "${ADMIN_PASSWORD}" != "None" ]]; then
-    echo "    export REGISTRY_ADMIN_PASSWORD=${ADMIN_PASSWORD}"
-  else
-    echo "    export REGISTRY_ADMIN_PASSWORD=<check stack outputs>"
-  fi
+  # The admin password is never printed here. It is a browser-login credential
+  # with no CLI consumer, so it stays in Secrets Manager and is copied from the
+  # console; echoing it would put it in terminal scrollback and shell history.
+  REGION=${AWS_REGION:-$(aws configure get region 2>/dev/null)}
+  echo "  Admin password — copy it from Secrets Manager:"
+  echo "    https://${REGION}.console.aws.amazon.com/secretsmanager/secret?name=workshop-admin-password&region=${REGION}"
   echo ""
 }
 

@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   MCP Gateway Registry - Services Stack (Consolidated)
-  Creates all 8 ECS task definitions, services, auto scaling, and CloudWatch log groups.
+  Creates all 7 ECS task definitions, services, auto scaling, and CloudWatch log groups.
   Uses !ImportValue to reference outputs from network, data, and compute stacks.
   Deploys to the region specified by AWS::Region. Allowed deploy regions are
   controlled by contentspec.yaml regionConfiguration.deployableRegions
@@ -518,7 +518,7 @@ Resources:
 
 
   #============================================================================
-  # Task Definition: Keycloak (Matching Terraform keycloak-ecs.tf exactly)
+  # Task Definition: currenttime demo MCP server
   #============================================================================
   CurrentTimeTaskDefinition:
     Type: AWS::ECS::TaskDefinition
@@ -668,7 +668,7 @@ Resources:
           Value: !Sub ${EnvironmentName}-realserverfaketools
 
   #============================================================================
-  # Task Definition: Flight Booking Agent
+  # ECS Service: Auth Server
   #============================================================================
   AuthServerService:
     Type: AWS::ECS::Service
@@ -890,7 +890,7 @@ Resources:
 
 
   #============================================================================
-  # Task Definition: Keycloak (Matching Terraform keycloak-ecs.tf exactly)
+  # ECS Services
   #============================================================================
 
   # Registry Service
@@ -948,7 +948,7 @@ Resources:
         - Key: Name
           Value: !Sub ${EnvironmentName}-registry
 
-  # Keycloak Service
+  # currenttime demo MCP server service
   CurrentTimeService:
     Type: AWS::ECS::Service
     DependsOn: AuthServerService
@@ -1074,7 +1074,7 @@ Resources:
         - Key: Name
           Value: !Sub ${EnvironmentName}-realserverfaketools
 
-  # Flight Booking Agent Service
+  # Auth Server Auto Scaling
   AuthServerScalableTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
     Condition: EnableAutoScalingCondition
@@ -1148,7 +1148,7 @@ Resources:
           PredefinedMetricType: ECSServiceAverageMemoryUtilization
         TargetValue: !Ref TargetMemoryUtilization
 
-  # Keycloak Auto Scaling (matching Terraform keycloak-ecs.tf)
+  # currenttime service auto scaling
   CurrentTimeScalableTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
     Condition: EnableAutoScalingCondition
@@ -1223,7 +1223,7 @@ Resources:
           PredefinedMetricType: ECSServiceAverageCPUUtilization
         TargetValue: !Ref TargetCpuUtilization
 
-  # Flight Booking Agent Auto Scaling
+  # CloudWatch Alarm SNS Topic
   AlarmSnsTopic:
     Type: AWS::SNS::Topic
     Condition: CreateSnsTopicCondition
@@ -1424,10 +1424,10 @@ Resources:
         - []
 
   #============================================================================
-  # Keycloak Realm Initialization (Lambda Custom Resource)
+  # DocumentDB Initialization (Lambda Custom Resource)
   #============================================================================
 
-  # IAM Role for Keycloak Init Lambda
+  # Runs the registry's init task once the registry service is up
   DocumentDBInitTrigger:
     Type: Custom::DocumentDBInit
     DependsOn:
@@ -1544,7 +1544,9 @@ Resources:
       Memory: '1024'
       ExecutionRoleArn: !ImportValue
         Fn::Sub: '${EnvironmentName}-EcsTaskExecutionRoleArn'
-      TaskRoleArn: !Ref GrafanaTaskRole
+      # !Ref on an AWS::IAM::Role yields the role *name*, not its ARN (cfn-lint
+      # E1041). ECS tolerates a bare name here, but the property is an ARN.
+      TaskRoleArn: !GetAtt GrafanaTaskRole.Arn
       ContainerDefinitions:
         - Name: grafana
           # Custom ECR image with dashboards and datasources pre-loaded

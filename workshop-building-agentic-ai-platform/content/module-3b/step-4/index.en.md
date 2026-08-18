@@ -7,9 +7,11 @@ weight: 64
 
 Register three MCP tools, exercise the Publisher/Admin approval workflow, and verify the governance boundary.
 
-## CLI Walkthrough
+::alert[Registry calls use the `agent-registry-control` API and the `agent-registry:` IAM prefix (see the callout in the previous step). Requires **AWS CLI v2 ≥ 2.36.19** / **boto3 ≥ 1.43.66**.]{type="info"}
 
-### Step 1: Assume the Publisher Persona
+## CLI walkthrough
+
+### Step 1: Assume the publisher persona
 
 The Publisher can register tools but **cannot** approve them. First, unset any assumed role and gather the role ARN:
 
@@ -22,7 +24,7 @@ PUBLISHER_ROLE_ARN=$(aws cloudformation list-exports \
   --query "Exports[?Name=='ac-RegistryPublisherRoleArn'].Value" \
   --output text --region $REGION)
 
-REGISTRY_ID=$(aws bedrock-agentcore-control list-registries \
+REGISTRY_ID=$(aws agent-registry-control list-registries --no-paginate \
   --query "registries[?name=='workshop-registry'].registryId | [0]" \
   --output text --region $REGION)
 
@@ -73,7 +75,7 @@ else
 fi
 :::
 
-### Step 2: Register Three Tools
+### Step 2: Register three tools
 
 The script below registers the three travel tools (Flights, Hotels, Knowledge Base) in the Registry, waits for them to reach DRAFT status, then submits them for admin approval:
 
@@ -94,7 +96,7 @@ if missing:
     )
     sys.exit(0)  # Exit the Python subprocess cleanly - does NOT kill the shell.
 
-client = boto3.client("bedrock-agentcore-control", region_name=region)
+client = boto3.client("agent-registry-control", region_name=region)
 
 tools = [
     {
@@ -124,6 +126,9 @@ tools = [
     },
 ]
 
+MCP_SERVER_SCHEMA_VERSION = "2025-12-11"
+MCP_TOOLS_SCHEMA_VERSION = "2025-11-25"
+
 record_ids = {}
 for t in tools:
     server_def = {"name": f"workshop/{t['name']}", "description": t["description"], "version": "1.0.0"}
@@ -132,11 +137,17 @@ for t in tools:
             registryId=registry_id,
             name=t["name"],
             description=t["description"],
-            descriptorType="MCP",
+            recordType="MCP",
             descriptors={
-                "mcp": {
-                    "server": {"schemaVersion": "2025-12-11", "inlineContent": json.dumps(server_def)},
-                    "tools": {"protocolVersion": "2024-11-05", "inlineContent": json.dumps({"tools": t["tools"]})},
+                "mcpServer": {
+                    "data": json.dumps(server_def),
+                    "dataSchemaVersion": MCP_SERVER_SCHEMA_VERSION,
+                    "additionalData": {
+                        "tools": {
+                            "data": json.dumps({"tools": t["tools"]}),
+                            "dataSchemaVersion": MCP_TOOLS_SCHEMA_VERSION,
+                        }
+                    },
                 }
             },
             recordVersion="1.0.0",
@@ -197,12 +208,32 @@ for name, rid in record_ids.items():
 print(f"\nAll {len(record_ids)} records processed.")
 PYEOF
 
-python3 /tmp/register_tools.py
+# The Agent Registry clients (`agent-registry-control`) only exist in
+# boto3 >= 1.43.66. The IDE's default `python3` is 3.9 with an older boto3, so
+# pick an interpreter that actually has them — otherwise this fails with
+# "UnknownServiceError: Unknown service: 'agent-registry-control'".
+PY=""
+for CAND in python3.13 python3.12 python3.11 python3; do
+  command -v "$CAND" >/dev/null 2>&1 || continue
+  if "$CAND" -c "import boto3,sys; sys.exit(0 if 'agent-registry-control' in boto3.session.Session().get_available_services() else 1)" 2>/dev/null; then
+    PY="$CAND"; break
+  fi
+done
+
+if [ -z "$PY" ]; then
+  echo "No interpreter has an Agent Registry-capable boto3 — creating /tmp/registry-venv"
+  python3 -m venv /tmp/registry-venv
+  /tmp/registry-venv/bin/pip install --quiet 'boto3==1.43.72' 'botocore==1.43.72'
+  PY=/tmp/registry-venv/bin/python
+fi
+
+echo "Using $PY ($($PY -V 2>&1))"
+$PY /tmp/register_tools.py
 :::
 
 You should see all 3 tools registered and submitted as `PENDING`.
 
-### Step 3: Verify Publisher Cannot Approve
+### Step 3: Verify publisher cannot approve
 
 Try to approve a record as the Publisher — this should fail:
 
@@ -210,7 +241,7 @@ Try to approve a record as the Publisher — this should fail:
 if [ -z "$REGISTRY_ID" ] || [ "$REGISTRY_ID" = "None" ]; then
   echo "ERROR: REGISTRY_ID is empty - re-run Step 1 block first" >&2
 else
-  FIRST_RECORD=$(aws bedrock-agentcore-control list-registry-records \
+  FIRST_RECORD=$(aws agent-registry-control list-registry-records \
     --registry-id "$REGISTRY_ID" \
     --query "registryRecords[0].recordId" \
     --output text --region "$REGION" 2>/dev/null)
@@ -218,7 +249,7 @@ else
   if [ -z "$FIRST_RECORD" ] || [ "$FIRST_RECORD" = "None" ]; then
     echo "No records in the registry yet - run Step 2 (Register Three Tools) first" >&2
   else
-    aws bedrock-agentcore-control update-registry-record-status \
+    aws agent-registry-control update-registry-record-status \
       --registry-id "$REGISTRY_ID" \
       --record-id "$FIRST_RECORD" \
       --status APPROVED \
@@ -231,7 +262,7 @@ fi
 
 You should see an `AccessDeniedException` — the Publisher role cannot approve records. This is the governance boundary in action.
 
-### Step 4: Switch to Admin and Approve
+### Step 4: Switch to admin and approve
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
@@ -268,12 +299,12 @@ Review what's waiting for approval:
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 if [ -z "$REGISTRY_ID" ] || [ "$REGISTRY_ID" = "None" ]; then
   REGION="${REGION:-$(aws configure get region)}"
-  REGISTRY_ID=$(aws bedrock-agentcore-control list-registries \
+  REGISTRY_ID=$(aws agent-registry-control list-registries --no-paginate \
     --query "registries[?name=='workshop-registry'].registryId | [0]" \
     --output text --region "$REGION" 2>/dev/null)
   export REGISTRY_ID
 fi
-aws bedrock-agentcore-control list-registry-records \
+aws agent-registry-control list-registry-records \
   --registry-id "$REGISTRY_ID" \
   --query "registryRecords[?status=='PENDING_APPROVAL'].{Name:name, Status:status, RecordId:recordId}" \
   --output table --region "$REGION"
@@ -286,7 +317,7 @@ REGION=$(aws configure get region)
 
 if [ -z "$REGISTRY_ID" ] || [ "$REGISTRY_ID" = "None" ]; then
   # Re-resolve REGISTRY_ID if it was lost between blocks.
-  REGISTRY_ID=$(aws bedrock-agentcore-control list-registries \
+  REGISTRY_ID=$(aws agent-registry-control list-registries --no-paginate \
     --query "registries[?name=='workshop-registry'].registryId | [0]" \
     --output text --region "$REGION" 2>/dev/null)
   export REGISTRY_ID
@@ -295,7 +326,7 @@ fi
 if [ -z "$REGISTRY_ID" ] || [ "$REGISTRY_ID" = "None" ]; then
   echo "ERROR: REGISTRY_ID is empty - re-run Step 3 (Create the Registry) first" >&2
 else
-  RECORDS=$(aws bedrock-agentcore-control list-registry-records \
+  RECORDS=$(aws agent-registry-control list-registry-records \
     --registry-id "$REGISTRY_ID" \
     --query "registryRecords[?status=='PENDING_APPROVAL'].recordId" \
     --output text --region "$REGION" 2>/dev/null)
@@ -304,7 +335,7 @@ else
     echo "No records in PENDING_APPROVAL status. Check the list-registry-records block above."
   else
     for rid in $RECORDS; do
-      aws bedrock-agentcore-control update-registry-record-status \
+      aws agent-registry-control update-registry-record-status \
         --registry-id "$REGISTRY_ID" \
         --record-id "$rid" \
         --status APPROVED \
@@ -319,7 +350,7 @@ fi
 
 All records should show `APPROVED`.
 
-## What You Built
+## What you built
 
 | Record | Type | Status | Tools |
 |--------|------|--------|-------|
@@ -331,7 +362,7 @@ The governance workflow: **Publisher registers → Admin approves → Consumer d
 
 ---
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > This notebook (04-register-tools.ipynb) is an alternative path covering the same material as the CLI section above — follow *either* path, you do not need to do both. The notebook covers registration, approval workflow, and additional advanced topics (EventBridge automation, URL-based sync, Registry→Gateway sync).
 >

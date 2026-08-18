@@ -20,7 +20,7 @@ The LLM Gateway solves these by providing a **single, governed endpoint** that a
 
 ::alert[This module implements the [Guidance for Multi-Provider Generative AI Gateway on AWS](https://aws.amazon.com/solutions/guidance/multi-provider-generative-ai-gateway-on-aws/) — an AWS Solutions pattern for unified LLM access with cost tracking and governance.]{type="info"}
 
-## LiteLLM Proxy + Strands Agents
+## LiteLLM proxy + Strands agents
 
 A key reason we chose LiteLLM is its native integration with [Strands Agents](https://strandsagents.com/) — an open-source SDK for building AI agents on AWS — via `LiteLLMModel`:
 
@@ -28,11 +28,16 @@ A key reason we chose LiteLLM is its native integration with [Strands Agents](ht
 from strands import Agent
 from strands.models.litellm import LiteLLMModel
 
-# Agent routes all LLM calls through the platform gateway
+# Agent routes all LLM calls through the platform gateway.
+# Connection settings go in client_args, which LiteLLMModel splats straight into
+# litellm.acompletion(); params is for inference parameters (max_tokens,
+# temperature, ...) and will not route your calls.
 model = LiteLLMModel(
-    model_id="claude-sonnet",
-    api_base="https://<api-gateway-id>.execute-api.<region>.amazonaws.com",
-    api_key="<virtual-key>",
+    client_args={
+        "api_base": "https://<api-gateway-id>.execute-api.<region>.amazonaws.com",
+        "api_key": "<virtual-key>",
+    },
+    model_id="openai/claude-sonnet",  # "openai/" = OpenAI-compatible proxy path
 )
 
 agent = Agent(model=model, tools=[...])
@@ -43,9 +48,9 @@ This means:
 - **Tool calling works** — LiteLLM speaks the Bedrock Converse API natively, so Strands tool calls flow through without translation
 - **Cost is tracked** — Every LLM call from every agent is attributed to its virtual key
 - **Guardrails are enforced** — Bedrock Guardrails apply centrally, invisible to agent code
-- **Models are swappable** — Change `model_id` to route to any of 65+ Bedrock models
+- **Models are swappable** — Change `model_id` to route to any model alias the gateway has registered
 
-## AWS Resources
+## AWS resources
 
 The CloudFormation template creates:
 
@@ -64,28 +69,28 @@ The CloudFormation template creates:
 | PostgreSQL Password | Secrets Manager | Auto-generated database password |
 | Log Group | CloudWatch | Container logs (7-day retention) |
 
-## Two-Container Architecture
+## Two-container architecture
 
 The ECS Fargate task runs **two containers** in the same task definition:
 
 | Container | Image | Port | Purpose |
 |-----------|-------|------|---------|
-| `litellm` | `litellm-database:v1.83.3-stable` | 4000 | LLM proxy, virtual keys, spend tracking, Admin UI |
-| `postgres` | `postgres:16.6` (Debian) | 5432 | Stores virtual keys, teams, spend logs |
+| `litellm` | `litellm-database:v1.84.0` | 4000 | LLM proxy, virtual keys, spend tracking, Admin UI |
+| `postgres` | `postgres:16.7` (Debian) | 5432 | Stores virtual keys, teams, spend logs |
 
 PostgreSQL data is persisted on EFS, so it survives task restarts. The LiteLLM container waits for PostgreSQL to be healthy before starting.
 
-## Network Flow
+## Network flow
 
 Requests flow through: **Client → API Gateway (HTTPS) → VPC Link → Internal ALB → ECS Fargate (LiteLLM + PostgreSQL) → Amazon Bedrock**. All internal traffic stays within the VPC. The API Gateway provides the public HTTPS endpoint.
 
-## Available Models
+## Available models
 
-The gateway is pre-configured with Bedrock models from multiple providers including Anthropic Claude, Amazon Nova, Meta Llama, Mistral AI, Cohere, and others. You will explore the full model list in the next step.
+The gateway is pre-configured with Bedrock models from multiple providers including Anthropic Claude, Amazon Nova, Meta Llama, Mistral AI, and DeepSeek. You will explore the full model list in the next step.
 
 ---
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > This notebook covers the same material as the section above — follow *either* path, you do not need to do both.
 >

@@ -10,6 +10,8 @@ Uses environment variables (set these first):
 """
 
 import os
+import time
+
 import boto3
 
 REGION = os.environ["REGION"]
@@ -71,6 +73,38 @@ INTERCEPTOR_CONFIGS = [
     },
 ]
 
+# A gateway sits in FAILED when a CREATE or a DELETE only half-finished — for
+# example a delete that was refused partway through because the caller lacked
+# bedrock-agentcore:DeleteWorkloadIdentity. FAILED is terminal: update_gateway
+# rejects it outright ("can't be performed on gateway when it is in Failed
+# state"), so create-or-update can never recover on its own. Replace it.
+if match and match[0].get("status") == "FAILED":
+    stale_id = match[0]["gatewayId"]
+    print(f"Gateway '{GATEWAY_NAME}' (id={stale_id}) is in FAILED state, which is")
+    print("terminal — deleting it so a working gateway can be created.")
+    for tgt in client.list_gateway_targets(
+        gatewayIdentifier=stale_id
+    ).get("items", []):
+        client.delete_gateway_target(
+            gatewayIdentifier=stale_id, targetId=tgt["targetId"]
+        )
+    client.delete_gateway(gatewayIdentifier=stale_id)
+    for _ in range(24):  # up to 2 minutes
+        if not [
+            g for g in client.list_gateways().get("items", [])
+            if g["name"] == GATEWAY_NAME
+        ]:
+            break
+        time.sleep(5)
+    else:
+        print(f"ERROR: gateway {stale_id} did not finish deleting in 2 minutes.")
+        print("       If the delete is itself being denied, the calling role is")
+        print("       missing bedrock-agentcore:DeleteWorkloadIdentity on")
+        print("       arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default*")
+        raise SystemExit(1)
+    print("  Stale gateway deleted.")
+    match = []
+
 if match:
     gateway_id = match[0]["gatewayId"]
     print(f"Gateway '{GATEWAY_NAME}' already exists — updating configuration.")
@@ -106,8 +140,13 @@ if match:
         )
         print("  Configuration updated successfully.")
     except Exception as exc:
-        print(f"  Warning: Could not update gateway config: {exc}")
-        print("  The gateway may need to be deleted and recreated.")
+        # Do not downgrade this to a warning. Falling through would publish this
+        # gateway's ID to SSM and the Sync Lambda and exit 0, pointing every
+        # later step at a gateway whose configuration is not what they assume.
+        print(f"ERROR: could not update gateway {gateway_id}: {exc}")
+        print("       Refusing to publish this gateway ID. Delete the gateway and")
+        print("       re-run this script to recreate it from scratch.")
+        raise SystemExit(1)
 else:
     response = client.create_gateway(
         name=GATEWAY_NAME,
@@ -139,6 +178,30 @@ else:
     print(f"  Gateway ID:  {gateway_id}")
     if gateway_url:
         print(f"  Gateway URL: {gateway_url}")
+
+# Create and update are asynchronous, so confirm the gateway can actually serve
+# before publishing its ID. Without this, a gateway that settles into FAILED gets
+# written into SSM and the Sync Lambda as though it were healthy, and the failure
+# only surfaces several steps later as an opaque "requested gateway is not
+# available" from the MCP endpoint.
+status = "UNKNOWN"
+for _ in range(24):  # up to 2 minutes
+    gw = client.get_gateway(gatewayIdentifier=gateway_id)
+    status = gw.get("status", "UNKNOWN")
+    if status == "READY":
+        break
+    if status.endswith("FAILED"):
+        print(f"ERROR: gateway {gateway_id} entered {status}.")
+        for reason in gw.get("statusReasons", []):
+            print(f"       {reason}")
+        raise SystemExit(1)
+    print(f"  Gateway status: {status}; waiting...")
+    time.sleep(5)
+else:
+    print(f"ERROR: gateway {gateway_id} did not reach READY in 2 minutes "
+          f"(last status: {status}).")
+    raise SystemExit(1)
+print(f"  Gateway status: {status}")
 
 # Store gateway ID in SSM Parameter Store for cross-stack discovery
 ssm = boto3.client("ssm", region_name=REGION)

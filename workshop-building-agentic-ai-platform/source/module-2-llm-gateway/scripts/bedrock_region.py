@@ -29,13 +29,32 @@ one yields a ``ValidationException`` at invoke time:
 
 3. bare (non-profile) foundation models
    -------------------------------------
-   Models invoked directly without any inference profile (titan, cohere, ai21,
-   etc.) take NO prefix ever. Pass ``needs_profile=False``. Example:
-   ``bedrock/amazon.titan-text-premier-v1:0``.
+   Models invoked directly without any inference profile (DeepSeek, Mistral,
+   Qwen, etc.) take NO prefix ever. Pass ``needs_profile=False``.
+   Example: ``bedrock/deepseek.v3.2``.
+
+   The example used to be a Cohere Command R+ id, which reached end-of-life on
+   2026-08-19 and now reports LEGACY. It was only ever an illustration --
+   nothing here invokes it -- but an example that 404s teaches the wrong thing,
+   so it is now an id verified ACTIVE and ON_DEMAND by
+   ``list-foundation-models``.
 
 The ``suffix`` argument to :func:`model_id` is always the BARE model id WITHOUT
 any geo/global prefix and WITHOUT the ``bedrock/`` provider segment, e.g.
 ``anthropic.claude-sonnet-4-6``.
+
+Which flavor a given model needs is NOT stable: models are retired, and a model
+that needs an inference profile in one region is often invocable bare (or not
+present at all) in another. Verified live on 2026-08-15, of the 23 models the
+workshop table then carried, 4 resolved to a non-existent id in us-west-2 and 11
+in eu-west-1 (one, ``claude-3.5-haiku``, was retired in all three). So a
+hardcoded table cannot be correct everywhere.
+
+:func:`resolve` therefore treats the ``needs_profile`` / ``prefer_global`` flags
+as *preference hints* and validates the result against the model inventory the
+deploy region actually reports (:func:`available_ids`), returning ``None`` when
+a model has no invocable form there. Callers skip those instead of registering
+endpoints that fail at invoke time.
 
 Pure stdlib + boto3 only.
 """
@@ -123,6 +142,88 @@ def model_id(suffix, region, needs_profile=True, prefer_global=False):
     return "bedrock/" + suffix
 
 
+# Cache of region -> frozenset of invocable ids, so a caller resolving 17 models
+# makes two Bedrock calls total rather than 34.
+_AVAILABLE_CACHE = {}
+
+
+def available_ids(region, client=None):
+    """Return the set of Bedrock ids invocable on demand in ``region``.
+
+    The set is the union of every cross-region inference profile id and every
+    foundation model that advertises ``ON_DEMAND``. PROVISIONED-only and
+    INFERENCE_PROFILE-only foundation models are deliberately excluded: their
+    bare id cannot be invoked, only the matching profile id can.
+
+    Returns ``None`` (meaning "unknown, do not filter") if boto3 is missing or
+    Bedrock cannot be queried — callers must treat that as "skip validation"
+    rather than "nothing is available".
+    """
+    if region in _AVAILABLE_CACHE:
+        return _AVAILABLE_CACHE[region]
+    if boto3 is None and client is None:
+        return None
+    try:
+        bedrock = client or boto3.client("bedrock", region_name=region)
+        ids = set()
+        paginator_kwargs = {"maxResults": 100}
+        token = None
+        while True:
+            if token:
+                paginator_kwargs["nextToken"] = token
+            resp = bedrock.list_inference_profiles(**paginator_kwargs)
+            ids.update(
+                p["inferenceProfileId"] for p in resp.get("inferenceProfileSummaries", [])
+            )
+            token = resp.get("nextToken")
+            if not token:
+                break
+        for summary in bedrock.list_foundation_models().get("modelSummaries", []):
+            if "ON_DEMAND" in (summary.get("inferenceTypesSupported") or []):
+                ids.add(summary["modelId"])
+    except Exception:
+        return None
+    available = frozenset(ids)
+    _AVAILABLE_CACHE[region] = available
+    return available
+
+
+def resolve(suffix, region, needs_profile=True, prefer_global=False, available=None):
+    """Return an invocable ``bedrock/<id>`` for ``suffix`` in ``region``, or None.
+
+    ``needs_profile`` / ``prefer_global`` order the candidates by preference;
+    every candidate flavor is then tried against ``available`` (defaults to
+    :func:`available_ids` for the region) and the first invocable one wins. This
+    is what makes a single model table work across regions with different
+    inventories, and makes a retired model skip itself instead of registering an
+    endpoint that fails at invoke time.
+
+    Returns ``None`` when no flavor of the model exists in the region. When the
+    inventory is unknown, falls back to the unvalidated :func:`model_id` result
+    so an IAM-restricted caller still gets the documented behaviour.
+    """
+    if available is None:
+        available = available_ids(region)
+    preferred = model_id(
+        suffix, region, needs_profile=needs_profile, prefer_global=prefer_global
+    )
+    if available is None:
+        return preferred
+    # Preference order: caller's choice first, then the remaining two flavors.
+    candidates = [preferred]
+    for flavor in (
+        "bedrock/global." + suffix,
+        "bedrock/" + geo_prefix(region) + suffix,
+        "bedrock/" + suffix,
+    ):
+        if flavor not in candidates:
+            candidates.append(flavor)
+    for candidate in candidates:
+        if candidate[len("bedrock/"):] in available:
+            return candidate
+    return None
+
+
 if __name__ == "__main__":
     # Runnable self-test: prints derived ids for a few representative cases.
     print("geo_prefix self-test:")
@@ -147,8 +248,8 @@ if __name__ == "__main__":
         # (suffix, region, kwargs, expected)
         ("anthropic.claude-sonnet-4-6", "ap-southeast-1",
          {"prefer_global": True}, "bedrock/global.anthropic.claude-sonnet-4-6"),
-        ("amazon.titan-text-premier-v1:0", "us-east-1",
-         {"needs_profile": False}, "bedrock/amazon.titan-text-premier-v1:0"),
+        ("deepseek.v3.2", "us-east-1",
+         {"needs_profile": False}, "bedrock/deepseek.v3.2"),
         ("meta.llama3-3-70b-instruct-v1:0", "eu-west-1",
          {}, "bedrock/eu.meta.llama3-3-70b-instruct-v1:0"),
         ("anthropic.claude-sonnet-4-6", "us-west-2",

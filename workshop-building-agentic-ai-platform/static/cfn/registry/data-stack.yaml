@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   MCP Gateway Registry - Data Stack (Consolidated)
   Creates DocumentDB, Cognito User Pool, Secrets Manager, SSM Parameters, and KMS.
-  Matches terraform/aws-ecs/documentdb.tf, secrets.tf and keycloak-database.tf
+  Matches terraform/aws-ecs/documentdb.tf and secrets.tf.
   Deploys to the region specified by AWS::Region (this workshop locks this to us-west-2 via contentspec.yaml).
 
 Parameters:
@@ -42,7 +42,7 @@ Parameters:
     Default: ''
     Description: Database Security Group ID (leave empty to use ImportValue)
 
-  # Keycloak Database credentials (NoEcho for security)
+  # DocumentDB credentials (NoEcho for security)
   DocumentDBUsername:
     Type: String
     Default: docdbadmin
@@ -68,7 +68,6 @@ Parameters:
       - db.r5.xlarge
       - db.r5.2xlarge
 
-  # Aurora Serverless scaling
 Conditions:
   UseVpcIdParam: !Not [!Equals [!Ref VpcId, '']]
   UsePrivateSubnet1Param: !Not [!Equals [!Ref PrivateSubnet1, '']]
@@ -83,7 +82,7 @@ Resources:
   # KMS Keys for Encryption
   #============================================================================
 
-  # KMS Key for RDS (Aurora/Keycloak) Encryption
+  # KMS key for DocumentDB encryption
   DocumentDBKmsKey:
     Type: AWS::KMS::Key
     Metadata:
@@ -108,6 +107,17 @@ Resources:
       KeyPolicy:
         Version: '2012-10-17'
         Statement:
+          # PRODUCTION NOTE: this account-root grant is the AWS-documented default
+          # for account-managed keys — without it, no IAM policy in the account can
+          # grant access to this key and the key becomes unmanageable. It is not a
+          # blanket grant to every principal: it delegates authorization to IAM, so
+          # a principal still needs an IAM policy allowing the KMS action.
+          # For production keys, replace the root principal with the specific
+          # administrator and consumer role ARNs that actually need the key, so key
+          # access cannot be granted by editing an IAM policy alone. Keep at least
+          # one principal able to run kms:PutKeyPolicy or you will lock yourself out.
+          # See https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-default.html
+          # and https://docs.aws.amazon.com/kms/latest/developerguide/key-policy-overview.html
           - Sid: Enable IAM User Permissions
             Effect: Allow
             Principal:
@@ -396,7 +406,7 @@ Resources:
         - Key: Component
           Value: documentdb
 
-  # Keycloak Database credentials secret
+  # Application secret key (Flask/session signing)
   SecretKeySecret:
     Type: AWS::SecretsManager::Secret
     Metadata:
@@ -504,7 +514,7 @@ Resources:
         - Key: Name
           Value: !Sub ${EnvironmentName}-grafana-admin-password
 
-  # Keycloak client secret (placeholder, updated by init script)
+  # Embeddings provider API key (placeholder; only used with the litellm provider)
   EmbeddingsApiKeySecret:
     Type: AWS::SecretsManager::Secret
     Metadata:
@@ -523,10 +533,9 @@ Resources:
           Value: !Sub ${EnvironmentName}-embeddings-api-key
 
   #============================================================================
-  # Aurora Serverless v2 Database (for Keycloak)
+  # SecureString SSM parameters (Lambda-backed custom resource)
   #============================================================================
 
-  # DB Subnet Group
   SsmSecureStringLambdaRole:
     Type: AWS::IAM::Role
     Properties:
@@ -559,7 +568,6 @@ Resources:
                   - ssm:RemoveTagsFromResource
                   - ssm:ListTagsForResource
                 Resource:
-                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/keycloak/*
                   - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/*
       Tags:
         - Key: Name
@@ -645,7 +653,7 @@ Resources:
         - Key: Name
           Value: !Sub ${EnvironmentName}-ssm-securestring
 
-  # Keycloak SSM Parameters
+  # SSM Parameters
 
   SsmDocumentDBEndpoint:
     Type: Custom::SsmSecureString
@@ -950,12 +958,17 @@ Resources:
                   })
 
               except Exception as e:
-                  print(f"Error: {str(e)}")
+                  # Log the exception type only. This function passes the DocumentDB
+                  # master password to the init task as a container override, so an
+                  # exception message can echo the credential into CloudWatch Logs
+                  # and into the CloudFormation response (which is world-readable
+                  # via DescribeStackEvents). The type is enough to diagnose.
+                  print(f"Error: {type(e).__name__}")
                   # Don't fail the stack on init errors - the init can be run manually
                   cfnresponse.send(event, context, cfnresponse.SUCCESS, {
                       'Status': 'WARNING',
-                      'Error': str(e),
-                      'Message': 'DocumentDB init failed but stack creation continues. Run init manually.'
+                      'Error': type(e).__name__,
+                      'Message': 'DocumentDB init failed but stack creation continues. Run init manually. See the Lambda log group for details.'
                   })
       Tags:
         - Key: Name
@@ -1027,7 +1040,7 @@ Resources:
       Timeout: 60
       Code:
         ZipFile: |
-          import boto3, json, urllib.request, urllib.parse
+          import boto3, json, os, urllib.request, urllib.parse
 
           def send_response(event, context, status, reason=''):
               body = json.dumps({'Status': status, 'Reason': reason,
@@ -1093,7 +1106,16 @@ Resources:
                               UserPoolId=pool_id, ClientId=m2m_client_id
                           )
                           client_secret = resp['UserPoolClient'].get('ClientSecret', '')
-                          token_url = f"https://{props.get('CognitoDomain')}/oauth2/token"
+                          # CognitoDomain is only the domain PREFIX, so building the
+                          # token URL from it alone yields a host that does not
+                          # resolve. CognitoTokenUrl is the full endpoint, built in
+                          # CFN where the region is known; keep a fallback that
+                          # appends the suffix so an older stack still gets a URL
+                          # that works.
+                          token_url = props.get('CognitoTokenUrl') or (
+                              f"https://{props.get('CognitoDomain')}"
+                              f".auth.{os.environ['AWS_REGION']}.amazoncognito.com/oauth2/token"
+                          )
                           sm.update_secret(
                               SecretId=m2m_secret_arn,
                               SecretString=json.dumps({
@@ -1133,7 +1155,9 @@ Resources:
                   # Log the exception type only — the exception message may echo
                   # event fragments (e.g. secret ARNs / resource properties)
                   print(f'Error: {type(e).__name__}')
-                  send_response(event, context, 'FAILED', str(e))
+                  # The reason string surfaces in DescribeStackEvents; keep it to
+                  # the type so it cannot carry secret ARNs or property values.
+                  send_response(event, context, 'FAILED', type(e).__name__)
 
   CognitoAdminInit:
     Type: Custom::CognitoInit
@@ -1154,7 +1178,10 @@ Resources:
       WebAppClientId: !Ref CognitoWebAppClient
       WebAppClientSecretArn: !Ref CognitoWebAppClientSecret
       CognitoDomain: !Sub ${EnvironmentName}-mcp-registry-${AWS::AccountId}
-      Version: '1.2'
+      CognitoTokenUrl: !Sub 'https://${EnvironmentName}-mcp-registry-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com/oauth2/token'
+      # Bump on every change to the inline code above: a Custom:: resource is only
+      # re-invoked when one of its properties changes.
+      Version: '1.3'
 
 
 
@@ -1419,7 +1446,7 @@ Outputs:
     Export:
       Name: !Sub ${EnvironmentName}-DocumentDBInitLambdaArn
 
-  # Aurora (Keycloak) Database Outputs
+  # Secrets Manager Outputs
   SecretKeySecretArn:
     Description: Application secret key ARN
     Value: !Ref SecretKeySecret
@@ -1450,7 +1477,7 @@ Outputs:
     Export:
       Name: !Sub ${EnvironmentName}-EmbeddingsApiKeySecretArn
 
-  # SSM Parameter Outputs (for Keycloak - matching Terraform)
+  # KMS Outputs
   DocumentDBKmsKeyArn:
     Description: DocumentDB KMS key ARN
     Value: !GetAtt DocumentDBKmsKey.Arn

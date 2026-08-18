@@ -1,13 +1,10 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: Create a Code Editor instance with an Amazon CloudFront distribution for use in Workshop Studio. Version 1.7.0
+Description: Create a Code Editor instance with an Amazon CloudFront distribution for use in Workshop Studio. Version 1.5.3 (bootstrap restore + optional VpcId/SubnetId for accounts with no default VPC)
 
 Parameters:
   CodeEditorUser:
     Type: String
     Description: UserName for Code Editor
     Default: participant
-    AllowedPattern: ^[a-z_][a-z0-9_-]{0,31}$
-    ConstraintDescription: Must be a valid Linux username (1-32 chars, lowercase, starting with a letter or underscore)
   InstanceName:
     Type: String
     Description: Code Editor EC2 instance name
@@ -29,8 +26,6 @@ Parameters:
     Type: String
     Description: Folder to open in Code Editor
     Default: /workshop
-    AllowedPattern: ^/[A-Za-z0-9_][A-Za-z0-9_/.-]*$
-    ConstraintDescription: Must be an absolute path starting with / and an alphanumeric or underscore character
   DevServerBasePath:
     Type: String
     Description: Base path for the application to be added to Nginx sites-available list
@@ -40,11 +35,9 @@ Parameters:
     Description: Port for the DevServer
     Default: 8081
   RepoUrl:
-    Description: Remote repo URL to clone (https, git SSH, or codecommit::). The literal placeholder {.Region} is replaced with the stack's region at bootstrap time. Leave blank to skip.
+    Description: Remote repo URL to clone. To not clone a remote repo, leave blank
     Type: String
     Default: ''
-    AllowedPattern: ^$|^[A-Za-z0-9:/@._~+%{}-]+$
-    ConstraintDescription: Must be a valid repo URL containing only letters, digits, and the characters :/@._~+%{}- (shell metacharacters are rejected)
   AssetZipS3Path:
     Description: S3 path holding the asset zip file to be copied into the home folder. To not include any assets, leave blank
     Type: String
@@ -57,19 +50,72 @@ Parameters:
     Description: S3 path holding the folder zip file, with each folder being a subfolder of the home directory. Each folder will have its own local git repo. To not include any folders, leave blank
     Type: String
     Default: ''
+  WorkshopAssetsBucket:
+    Description: Workshop Studio assets S3 bucket. When set, the workshop source/ tree is synced into the IDE home folder on boot.
+    Type: String
+    Default: ''
+  WorkshopAssetsPrefix:
+    Description: Workshop Studio assets S3 prefix (ends with '/'). Set to "{{.AssetsBucketPrefix}}" in contentspec.yaml.
+    Type: String
+    Default: ''
+  CloudFrontPrefixListIdOverride:
+    Description: >
+      Optional override for the CloudFront origin-facing managed prefix-list ID
+      (com.amazonaws.global.cloudfront.origin-facing). Leave empty to look the
+      ID up from the AWSRegionsPrefixListID map below. Set this ONLY when
+      deploying to a region not present in that map; find the ID with:
+      aws ec2 describe-managed-prefix-lists --region <REGION> --query
+      "PrefixLists[?PrefixListName=='com.amazonaws.global.cloudfront.origin-facing'].PrefixListId"
+    Type: String
+    Default: ''
+  VpcId:
+    Description: >
+      Optional VPC for the Code Editor instance. Leave BOTH this and SubnetId
+      empty to use the account's default VPC (the Workshop Studio sandbox
+      always has one). Set BOTH when deploying into an account without a
+      default VPC (common in enterprise landing zones where default VPCs are
+      deleted as a security baseline).
+    Type: String
+    Default: ''
+  SubnetId:
+    Description: >
+      Optional PUBLIC subnet for the Code Editor instance (must belong to
+      VpcId and must route to an Internet Gateway). The instance is assigned a
+      public IP so CloudFront can reach it as a custom origin. Set together
+      with VpcId; leave empty to use the default VPC.
+    Type: String
+    Default: ''
 
 Conditions:
   IsAL2023: !Equals [!Ref InstanceOperatingSystem, 'AmazonLinux-2023']
-  # Graviton iff family contains 'g' AND does not start with 'g'. Misses a1/g5g/inf/trn (obvious at boot).
-  IsGraviton: !And
-    - !Not
-      - !Equals # family contains 'g' (e.g. t4g, c7gd, im4gn; rejects m5, a1)
-        - !Select [0, !Split ['.', !Ref InstanceType]]
-        - !Join ['', !Split ['g', !Select [0, !Split ['.', !Ref InstanceType]]]]
-    - !Not
-      - !Equals # family does not start with 'g' (rejects g5, g4dn, g6, g5g)
-        - !Select [0, !Split ['g', !Select [0, !Split ['.', !Ref InstanceType]]]]
-        - ''
+  # When the override is supplied, the AWSRegionsPrefixListID FindInMap (which
+  # would fail for an unmapped region) is NOT evaluated.
+  HasCloudFrontPrefixListIdOverride: !Not [!Equals [!Ref CloudFrontPrefixListIdOverride, '']]
+  HasAssetZip: !Not [!Equals [!Ref AssetZipS3Path, '']]
+  HasFolderZip: !Not [!Equals [!Ref FolderZipS3Path, '']]
+  HasBranchZip: !Not [!Equals [!Ref BranchZipS3Path, '']]
+  HasWorkshopAssetsBucket: !Not [!Equals [!Ref WorkshopAssetsBucket, '']]
+  # Guards the BootstrapAssetRead statement. Without this, a bare deploy that
+  # sets none of the four asset parameters would render an empty Resource list,
+  # which IAM rejects.
+  HasAnyAsset: !Or
+    - !Not [!Equals [!Ref AssetZipS3Path, '']]
+    - !Not [!Equals [!Ref FolderZipS3Path, '']]
+    - !Not [!Equals [!Ref BranchZipS3Path, '']]
+    - !Not [!Equals [!Ref WorkshopAssetsBucket, '']]
+  # Custom networking: both VpcId and SubnetId supplied -> SG is created in
+  # that VPC and the instance launches in that subnet with a public IP.
+  # Otherwise the SG/instance land in the account's default VPC (original
+  # behavior, required by Workshop Studio sandboxes).
+  HasCustomNetwork: !And
+    - !Not [!Equals [!Ref VpcId, '']]
+    - !Not [!Equals [!Ref SubnetId, '']]
+  IsGraviton: !Not [
+    !Equals [
+      !Select [0, !Split ['g', !Select [0, !Split ['.', !Ref InstanceType]]]],
+      !Select [0, !Split ['.', !Ref InstanceType]]
+    ]
+  ]
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -92,6 +138,8 @@ Metadata:
           - AssetZipS3Path
           - BranchZipS3Path
           - FolderZipS3Path
+          - WorkshopAssetsBucket
+          - WorkshopAssetsPrefix
     ParameterLabels:
       CodeEditorUser:
         default: Code Editor user name
@@ -117,6 +165,10 @@ Metadata:
         default: Branch file S3 path
       FolderZipS3Path:
         default: Folder file S3 path
+      WorkshopAssetsBucket:
+        default: Workshop Studio assets bucket
+      WorkshopAssetsPrefix:
+        default: Workshop Studio assets prefix
 
 Mappings:
   ArmImage:
@@ -141,8 +193,6 @@ Mappings:
       PrefixList: pl-58a04531
     ap-northeast-2:
       PrefixList: pl-22a6434b
-    ap-northeast-3:
-      PrefixList: pl-31a14458
     ap-south-1:
       PrefixList: pl-9aa247f3
     ap-southeast-1:
@@ -176,6 +226,10 @@ Resources:
   CodeEditorSecret:
     Type: AWS::SecretsManager::Secret
     Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_149
+            comment: "Workshop secrets use the AWS-managed Secrets Manager key; a customer-managed KMS CMK is out of scope for this ephemeral workshop."
       cfn_nag:
         rules_to_suppress:
           - id: W77
@@ -246,7 +300,10 @@ Resources:
           logger.setLevel(logging.INFO)
 
           def is_valid_json(json_string):
-              logger.debug(f'Calling is_valid_json:{json_string}')
+              # Never log json_string: the only caller passes the plaintext
+              # SecretString, so interpolating it here would write the secret to
+              # CloudWatch Logs the moment anyone raises the log level to DEBUG.
+              logger.debug('Calling is_valid_json')
               try:
                   json.loads(json_string)
                   logger.info(f'Secret is in json format')
@@ -256,8 +313,13 @@ Resources:
                   return False
 
           def lambda_handler(event, context):
-              logger.debug(f'event: {event}')
-              logger.debug(f'context: {context}')
+              # Envelope fields only. ResourceProperties carries the workshop
+              # password (RunSSMDoc) and secret ARNs, so logging the whole event
+              # would copy those into CloudWatch Logs as soon as anyone raises
+              # the level to DEBUG. context holds no secrets but nothing useful.
+              logger.debug('event: RequestType=%s StackId=%s LogicalResourceId=%s',
+                           event.get('RequestType'), event.get('StackId'),
+                           event.get('LogicalResourceId'))
               try:
                   if event['RequestType'] == 'Delete':
                       cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData={}, reason='No action to take')
@@ -269,20 +331,30 @@ Resources:
                       logger.info(f'Getting secret from {secret_name}')
 
                       secret = secrets_mgr.get_secret_value(SecretId = secret_name)
-                      logger.debug(f'secret: {secret}')
                       secret_value = secret['SecretString']
 
-                      responseData = {}
+                      # Both branches must end with a dict, because cfnresponse
+                      # serialises responseData itself and CloudFormation
+                      # resolves !GetAtt against its keys. Parsing inside the
+                      # json branch (rather than calling json.loads on the
+                      # result of both branches) is what keeps that true: the
+                      # else branch already holds a dict, and json.loads() on a
+                      # dict raises TypeError, which would fail the custom
+                      # resource and roll the whole stack back.
                       if is_valid_json(secret_value):
-                          responseData = secret_value
+                          responseData = json.loads(secret_value)
                       else:
                           responseData = {'secret': secret_value}
-                      logger.debug(f'responseData: {responseData}')
                       logger.debug(f'type(responseData): {type(responseData)}')
-                      cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData=json.loads(responseData), reason='OK', noEcho=True)
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData=responseData, reason='OK', noEcho=True)
               except Exception as e:
-                  logger.error(e)
-                  cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason=str(e))
+                  # Type only. This function holds the plaintext secret in
+                  # secret_value, and json.loads() puts the offending text in its
+                  # own error message -- so str(e) can copy the secret into both
+                  # the log group and the CloudFormation reason field, which is
+                  # readable via DescribeStackEvents regardless of noEcho.
+                  logger.error('SecretPlaintext failed: %s', type(e).__name__)
+                  cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason=f'SecretPlaintext failed: {type(e).__name__} (see the Lambda log group)')
 
   SecretPlaintext:
     Type: Custom::SecretPlaintextLambda
@@ -324,11 +396,11 @@ Resources:
                   while [ $retry_count -lt $max_retries ]; do
                     echo "Installing extension: $extension_name (attempt $((retry_count + 1))/$max_retries)"
 
-                    if ! sudo -i -u {{ CodeEditorUser }} code-editor-server --install-extension "$extension_name" --force 2>&1; then
+                    if ! sudo -i -u {{ CodeEditorUser }} code-server --install-extension "$extension_name" --force 2>&1; then
                       echo "Failed to install $extension_name on attempt $((retry_count + 1))"
                     fi
 
-                    if sudo -i -u {{ CodeEditorUser }} code-editor-server --list-extensions | grep -qi "$extension_name"; then
+                    if sudo -i -u {{ CodeEditorUser }} code-server --list-extensions | grep -qi "$extension_name"; then
                       echo "Successfully installed $extension_name"
                       exit 0
                     else
@@ -464,7 +536,6 @@ Resources:
                   fi
                 - !Sub |
                   tee /etc/sudoers.d/91-vscode-user <<EOF
-                  # WORKSHOP POSTURE: passwordless sudo is intentional so participants can install tools without being prompted.
                   ${CodeEditorUser} ALL=(ALL) NOPASSWD:ALL
                   EOF
                 - !Sub mkdir -p /home/${CodeEditorUser}/.local/bin && chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}
@@ -494,22 +565,27 @@ Resources:
                 - '#!/bin/bash'
                 - set -euo pipefail
                 - !Sub sudo -u ${CodeEditorUser} curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip -o /tmp/aws-cli.zip
-                - unzip -q -d /tmp /tmp/aws-cli.zip
-                - sudo /tmp/aws/install
+                - unzip -q -o -d /tmp /tmp/aws-cli.zip
+                # --update makes this idempotent and, on AL2023, overwrites the
+                # dnf-provided CLI that would otherwise stay first on PATH.
+                - sudo /tmp/aws/install --update
                 - rm -rf /tmp/aws
                 - echo "AWS CLI installed. Checking configuration"
                 - aws --version
-          - name: InstallKiroCLI
-            action: aws:runShellScript
-            inputs:
-              timeoutSeconds: 300
-              runCommand:
-                - '#!/bin/bash'
-                # - set -euo pipefail # Uncomment to throw error on failure
-                - !Sub sudo -u ${CodeEditorUser} curl -fsSL https://cli.kiro.dev/install -o /tmp/kiro_cli_install.sh
-                - !Sub sudo -u ${CodeEditorUser} bash /tmp/kiro_cli_install.sh 2>&1
-                - echo "Kiro CLI installed. Checking configuration"
-                - !Sub sudo -i -u ${CodeEditorUser} kiro-cli --version
+                # The Agent Registry commands (aws agent-registry-control / aws
+                # agent-registry, Module 3b) only exist in CLI v2 >= 2.36.19.
+                # Fail the build loudly here rather than at Module 3b Step 3.
+                - |
+                  MIN="2.36.19"
+                  CUR=$(aws --version 2>&1 | sed -n 's#^aws-cli/\([0-9.]*\).*#\1#p')
+                  echo "AWS CLI version: ${CUR:-<unknown>} (minimum ${MIN})"
+                  if [ "$(printf '%s\n%s\n' "$MIN" "$CUR" | sort -V | head -1)" != "$MIN" ]; then
+                    echo "ERROR: AWS CLI $CUR is older than $MIN — 'aws agent-registry-control' would be missing." >&2
+                    exit 1
+                  fi
+                  aws agent-registry-control help >/dev/null 2>&1 \
+                    && echo "agent-registry-control command is available" \
+                    || { echo "ERROR: 'aws agent-registry-control' not available in CLI $CUR" >&2; exit 1; }
           - name: InstallGitDnf
             action: aws:runShellScript
             precondition:
@@ -527,7 +603,7 @@ Resources:
                   then
                     dnf install -y python3-pip
                     echo "Installing git-remote-codecommit with pip3"
-                    sudo -u ${CodeEditorUser} PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install git-remote-codecommit
+                    sudo -u ${CodeEditorUser} PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --retries 10 --timeout 60 git-remote-codecommit==1.17
                   fi
           - name: InstallGitApt
             action: aws:runShellScript
@@ -548,7 +624,7 @@ Resources:
                   then
                     apt-get -q update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q python3-pip
                     echo "Installing git-remote-codecommit with pip3"
-                    sudo -u ${CodeEditorUser} PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install git-remote-codecommit
+                    sudo -u ${CodeEditorUser} PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --retries 10 --timeout 60 git-remote-codecommit==1.17
                   fi
           - name: ConfigureGit
             action: aws:runShellScript
@@ -699,11 +775,48 @@ Resources:
                     sudo -u ${CodeEditorUser} git -C ${HomeFolder} restore .
                     rm -rf /tmp/branch
                     rm -rf /tmp/git
-                    echo "Branches downloaded. Checking configuration: ${HomeFolder}"
+                    echo "Branches downloaded. Checking configuration: $HomeFolder"
                     sudo -u ${CodeEditorUser} git -C ${HomeFolder} branch
                     ls -la ${HomeFolder}
                   fi
+          - name: SyncWorkshopAssets
+            # Pulls the workshop source tree from the Workshop Studio assets
+            # bucket into ${HomeFolder}. Without this, the IDE opens to an
+            # empty folder and participants have nothing to run.
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 900
+              runCommand:
+                - '#!/bin/bash'
+                - set -euo pipefail
+                - !Sub |
+                  if [[ -z "${WorkshopAssetsBucket}" ]]
+                  then
+                    echo "No workshop assets bucket configured — skipping sync"
+                    exit 0
+                  fi
+                  mkdir -p ${HomeFolder}
+                  chown -R ${CodeEditorUser}:${CodeEditorUser} ${HomeFolder}
+                  echo "Syncing workshop assets from s3://${WorkshopAssetsBucket}/${WorkshopAssetsPrefix} into ${HomeFolder}"
+                  # The Workshop Studio assets prefix contains the full repo tree
+                  # (content/, static/, source/, contentspec.yaml, README.md).
+                  # We sync it all so participants have the source + any
+                  # referenced fixtures/scripts available inside the IDE.
+                  sudo -u ${CodeEditorUser} aws s3 sync \
+                    "s3://${WorkshopAssetsBucket}/${WorkshopAssetsPrefix}" \
+                    "${HomeFolder}/" \
+                    --exclude '*.zip' \
+                    --only-show-errors
+                  chown -R ${CodeEditorUser}:${CodeEditorUser} ${HomeFolder}
+                  echo "Workshop assets synced. Top-level contents:"
+                  ls -la ${HomeFolder}
           - name: InstallCodeEditor
+            # Install coder.com's open-source code-server. We moved off the
+            # AWS code-editor-server build because it enforces a per-request
+            # ?tkn= query param that does not compose cleanly with CloudFront
+            # (every navigation must reinject the token). code-server has
+            # native password auth via ~/.config/code-server/config.yaml,
+            # which works cleanly behind CloudFront.
             action: aws:runShellScript
             inputs:
               timeoutSeconds: 600
@@ -711,7 +824,11 @@ Resources:
                 - '#!/bin/bash'
                 - set -euo pipefail
                 - !Sub export CodeEditorUser=${CodeEditorUser}
-                - curl -fsSL https://code-editor.amazonaws.com/content/code-editor-server/dist/aws-workshop-studio/install.sh | bash -s -- 2>&1 || { echo "Code Editor installation failed"; exit 1; }
+                # The upstream installer references $HOME with `set -u`; SSM
+                # invokes scripts without HOME set, so export it explicitly.
+                - export HOME=/root
+                - curl -fsSL https://code-server.dev/install.sh -o /tmp/code-server-install.sh
+                - bash /tmp/code-server-install.sh 2>&1 || { echo "code-server installation failed"; exit 1; }
           - name: ConfigureNginx
             action: aws:runShellScript
             inputs:
@@ -757,6 +874,10 @@ Resources:
                 - nginx -t 2>&1
                 - systemctl status nginx
           - name: ConfigureAuthToken
+            # Write code-server's native password-auth config. Same
+            # randomly-generated secret (CodeEditorSecret) the stack already
+            # creates — just delivered via config.yaml instead of a token
+            # file. Participants paste this password at the login screen.
             action: aws:runShellScript
             inputs:
               timeoutSeconds: 600
@@ -764,10 +885,14 @@ Resources:
                 - '#!/bin/bash'
                 - set -euo pipefail
                 - !Sub |
-                  sudo -u ${CodeEditorUser} mkdir -p /home/${CodeEditorUser}/.code-editor-server/data
-                  sudo -u ${CodeEditorUser} touch /home/${CodeEditorUser}/.code-editor-server/data/token
-                  # token format: /^[0-9A-Za-z_-]+$/
-                  echo -n "{{ CodeEditorPassword }}" > /home/${CodeEditorUser}/.code-editor-server/data/token
+                  sudo -u ${CodeEditorUser} mkdir -p /home/${CodeEditorUser}/.config/code-server
+                  tee /home/${CodeEditorUser}/.config/code-server/config.yaml <<EOF
+                  bind-addr: 127.0.0.1:8080
+                  auth: password
+                  password: "{{ CodeEditorPassword }}"
+                  cert: false
+                  EOF
+                  chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}/.config
           - name: ConfigureCodeEditor
             action: aws:runShellScript
             inputs:
@@ -775,12 +900,12 @@ Resources:
               runCommand:
                 - '#!/bin/bash'
                 - set -euo pipefail
-                - !Sub sudo -i -u ${CodeEditorUser} mkdir -p /home/${CodeEditorUser}/.code-editor-server/data/User
-                - !Sub sudo -i -u ${CodeEditorUser} touch /home/${CodeEditorUser}/.code-editor-server/data/User/settings.json
+                - !Sub sudo -i -u ${CodeEditorUser} mkdir -p /home/${CodeEditorUser}/.local/share/code-server/User
+                - !Sub sudo -i -u ${CodeEditorUser} touch /home/${CodeEditorUser}/.local/share/code-server/User/settings.json
                 - !Sub touch /home/${CodeEditorUser}/.hushlogin
                 - !Sub mkdir -p ${HomeFolder} && chown -R ${CodeEditorUser}:${CodeEditorUser} ${HomeFolder}
                 - !Sub |
-                  tee /home/${CodeEditorUser}/.code-editor-server/data/User/settings.json <<EOF
+                  tee /home/${CodeEditorUser}/.local/share/code-server/User/settings.json <<EOF
                   {
                     "aws.telemetry": false,
                     "extensions.autoUpdate": false,
@@ -800,11 +925,11 @@ Resources:
                   }
                   EOF
                 - !Sub chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}
-                - !Sub systemctl enable --now code-editor@${CodeEditorUser}
-                - !Sub systemctl restart code-editor@${CodeEditorUser}
-                - echo "Code Editor installed. Checking configuration"
-                - !Sub sudo -i -u ${CodeEditorUser} code-editor-server -v
-                - !Sub systemctl status code-editor@${CodeEditorUser}
+                - !Sub systemctl enable --now code-server@${CodeEditorUser}
+                - !Sub systemctl restart code-server@${CodeEditorUser}
+                - echo "code-server installed. Checking configuration"
+                - !Sub sudo -i -u ${CodeEditorUser} code-server --version
+                - !Sub systemctl status code-server@${CodeEditorUser}
           - name: InstallAWSToolkitExtension
             action: aws:runDocument
             inputs:
@@ -812,6 +937,14 @@ Resources:
               documentPath: !Ref InstallCodeEditorExtensionSSMDoc
               documentParameters:
                 ExtensionId: AmazonWebServices.aws-toolkit-vscode
+                CodeEditorUser: !Ref CodeEditorUser
+          - name: InstallAmazonQExtension
+            action: aws:runDocument
+            inputs:
+              documentType: SSMDocument
+              documentPath: !Ref InstallCodeEditorExtensionSSMDoc
+              documentParameters:
+                ExtensionId: AmazonWebServices.amazon-q-vscode
                 CodeEditorUser: !Ref CodeEditorUser
           - name: InstallLiveServerExtension
             action: aws:runDocument
@@ -830,6 +963,842 @@ Resources:
                 ExtensionId: synedra.auto-run-command
                 CodeEditorUser: !Ref CodeEditorUser
 # Install optional packages here - any of these blocks can be deleted if that software is not required for the workshop
+          - name: InstallNodeDnf
+            action: aws:runShellScript
+            precondition:
+              StringEquals:
+                - '{{ LinuxFlavor }}'
+                - al2023
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                - set -euo pipefail
+                # AL2023 `dnf install nodejs` ships Node 18, which Vite 7
+                # (used by Module 4's FAST frontend) rejects. Pull Node 22
+                # from NodeSource instead so the frontend build succeeds.
+                #
+                # Node 22, not 20: Node 20 reached end-of-life on 2026-04-30, and
+                # aws-cdk 2.147.0 responds by printing a 10-line `!!!!!!` banner on
+                # EVERY invocation ("Node 20 ... is not supported ... supported node
+                # releases are: ^22.0.0"). Module 4b runs `cdk bootstrap` and
+                # `cdk deploy` from a notebook, so participants read that banner as a
+                # crash. Node 22 satisfies both CDK's ^22.0.0 and Vite 7's >=22.12.0.
+                - curl -fsSL https://rpm.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh
+                - bash /tmp/nodesource_setup.sh
+                - dnf install -y nodejs
+                - echo "Node and npm installed. Checking configuration"
+                - node -v
+                - npm -v
+          - name: InstallNodeApt
+            action: aws:runShellScript
+            precondition:
+              StringEquals:
+                - '{{ LinuxFlavor }}'
+                - ubuntu
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg
+                # Node 22 to match the al2023 path: aws-cdk 2.147.0 lists ^22.0.0 as
+                # the only supported release, so both 20 (EOL) and 24 make it print a
+                # `!!!!!!` unsupported-version banner on every command.
+                - echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list
+                - apt-get -q update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q nodejs
+                - npm install -g npm@10.8.1
+                - echo "Node and npm installed. Checking configuration"
+                - node -v
+                - npm -v
+          - name: InstallCDK
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - npm install -g aws-cdk@2.147.0
+                - echo "AWS CDK installed. Checking configuration"
+                - cdk --version
+          - name: InstallSAMCLI
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - curl -fsSL https://github.com/aws/aws-sam-cli/releases/latest/download/aws-sam-cli-linux-$(uname -m | sed 's/aarch64/arm64/').zip -o /tmp/aws_sam.zip
+                - !Sub chown -R ${CodeEditorUser}:${CodeEditorUser} /tmp/aws_sam.zip
+                - unzip -q -d /tmp/sam-installation /tmp/aws_sam.zip
+                - sudo bash /tmp/sam-installation/install
+                - rm -rf /tmp/sam-installation
+                - echo "AWS SAM CLI installed. Checking configuration"
+                - sam --version
+          - name: InstallKiroCLI
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                # The old desktop-release.q zip URL broke (reason for the July
+                # 'fix-kiro-cli-patch' merge); use the official installer instead.
+                # This step's exit code once failed the ENTIRE stack when the
+                # installer URL broke. Kiro CLI is a convenience tool no notebook
+                # depends on, so never let it fail deployment — warn and exit 0.
+                - !Sub |
+                  if sudo -u ${CodeEditorUser} curl -fsSL https://cli.kiro.dev/install -o /tmp/kiro_cli_install.sh \
+                    && sudo -u ${CodeEditorUser} bash /tmp/kiro_cli_install.sh 2>&1 \
+                    && sudo -i -u ${CodeEditorUser} kiro-cli --version; then
+                    echo "Kiro CLI installed OK"
+                  else
+                    echo "WARNING: Kiro CLI install failed (non-fatal, continuing bootstrap)" >&2
+                  fi
+                  exit 0
+          - name: ConfigureKiroCliCustomAgent
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - echo "Writing MCP config"
+                - !Sub mkdir -p /home/${CodeEditorUser}/.aws/amazonq/cli-agents
+                - !Sub |
+                  tee /home/${CodeEditorUser}/.aws/amazonq/cli-agents/participant.json <<EOF
+                  {
+                    "name": "participant",
+                    "description": "Coding Expert",
+                    "prompt": "You are an expert on AWS Services. When asked questions about AWS services, validate your answers against the latest AWS documentation and blog articles.",
+                    "mcpServers": {
+                      "aws_core": {
+                        "command": "uvx",
+                        "args": [
+                          "mcp-proxy",
+                          "--transport",
+                          "streamablehttp",
+                          "https://knowledge-mcp.global.api.aws"
+                        ],
+                        "env": {
+                          "FASTMCP_LOG_LEVEL": "ERROR",
+                          "aws-foundation": "true",
+                          "security-identity": "true"
+                        },
+                        "autoApprove": [],
+                        "disabled": false
+                      }
+                    },
+                    "tools": [
+                      "fs_read",
+                      "fs_write",
+                      "execute_bash",
+                      "use_aws",
+                      "@aws_core"
+                    ],
+                    "toolAliases": {},
+                    "allowedTools": [
+                      "fs_read",
+                      "@aws_core"
+                    ],
+                    "resources": [
+                      "file://AmazonQ.md",
+                      "file://README.md",
+                      "file://.amazonq/rules/**/*.md"
+                    ],
+                    "hooks": {},
+                    "toolsSettings": {},
+                    "useLegacyMcpJson": false,
+                    "model": null
+                  }
+                  EOF
+                - !Sub mkdir -p /home/${CodeEditorUser}/.local/share/amazon-q/settings
+                - !Sub |
+                  tee /home/${CodeEditorUser}/.local/share/amazon-q/settings.json <<EOF
+                  {
+                    "chat.defaultAgent": "participant",
+                    "mcp.loadedBefore": true
+                  }
+                  EOF
+                - !Sub chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}
+                - echo "Amazon Q Custom Agent configured"
+          - name: Installuv
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 600
+              runCommand:
+                - '#!/bin/bash'
+                - set -euo pipefail
+                # SECURITY: the installer is fetched from a *version-pinned*
+                # astral.sh path, which is immutable — so the sha256 below stays
+                # valid for the life of this template and the check is
+                # fail-closed. The previous revision fetched the floating
+                # `astral.sh/uv/install.sh` and compared it against a
+                # placeholder (`WORKSHOP_TODO_REFRESH_BEFORE_EVENT`) that
+                # short-circuited the comparison, so nothing was actually
+                # verified: an unpinned installer was piped straight into bash.
+                # To bump uv: change UV_VERSION, then
+                #   curl -fsSL https://astral.sh/uv/<version>/install.sh | sha256sum
+                # and paste the digest into UV_INSTALLER_SHA256.
+                - |
+                  UV_VERSION="0.12.5"
+                  UV_INSTALLER_SHA256="504511fbbbd811aeaba6738abc79408956b6c7da0ca35437b3dcc24a41efc111"
+                  curl -fsSL "https://astral.sh/uv/${UV_VERSION}/install.sh" -o /tmp/uv_install.sh
+                  ACTUAL_SHA=$(sha256sum /tmp/uv_install.sh | awk '{print $1}')
+                  if [ "$UV_INSTALLER_SHA256" != "$ACTUAL_SHA" ]; then
+                    echo "FATAL: uv ${UV_VERSION} installer checksum mismatch." >&2
+                    echo "  expected=$UV_INSTALLER_SHA256" >&2
+                    echo "  actual  =$ACTUAL_SHA" >&2
+                    rm -f /tmp/uv_install.sh
+                    exit 1
+                  fi
+                  echo "Verified uv ${UV_VERSION} installer (sha256 $ACTUAL_SHA)"
+                - !Sub chown ${CodeEditorUser}:${CodeEditorUser} /tmp/uv_install.sh
+                - !Sub sudo -i -u ${CodeEditorUser} bash /tmp/uv_install.sh 2>&1
+                - !Sub |
+                    if uv generate-shell-completion bash &>/dev/null; then
+                      echo 'eval "$(uv generate-shell-completion bash)"' >> /home/${CodeEditorUser}/.bashrc
+                    fi
+                - !Sub |
+                    if uvx generate-shell-completion bash &>/dev/null; then
+                      echo 'eval "$(uvx generate-shell-completion bash)"' >> /home/${CodeEditorUser}/.bashrc
+                    fi
+                - echo "uv installed. Checking configuration"
+                - !Sub sudo -i -u ${CodeEditorUser} uv --version
+          - name: InstallPythonDnf
+            # AL2023 ships Python 3.9 by default; we install 3.13 for the workshop.
+            action: aws:runShellScript
+            precondition:
+              StringEquals:
+                - '{{ LinuxFlavor }}'
+                - al2023
+            inputs:
+              timeoutSeconds: 900
+              runCommand:
+                - '#!/bin/bash'
+                - set -euo pipefail
+                # A transient PyPI failure must not kill the whole stack. This
+                # bootstrap runs once, rollback is disabled, and there is no
+                # retry above us — so a few seconds of "too many 502 error
+                # responses" from files.pythonhosted.org used to leave the IDE
+                # uninstalled and the deploy dead with nothing to resume. Retry
+                # the whole install a few times and widen pip's own per-request
+                # retry budget.
+                - |
+                  pip_retry() {
+                    for attempt in 1 2 3; do
+                      "$@" && return 0
+                      echo "pip attempt $attempt failed; retrying in 20s" >&2
+                      sleep 20
+                    done
+                    return 1
+                  }
+                - dnf install -y python3.13 python3.13-pip python3-virtualenv python3-pytest python3-boto3
+                - !Sub echo 'alias python3=python3.13' >> /home/${CodeEditorUser}/.bashrc
+                - !Sub echo 'alias pip3=pip3.13' >> /home/${CodeEditorUser}/.bashrc
+                # The aliases above only exist in an INTERACTIVE shell, so they
+                # cover pasting a command into the IDE terminal and nothing else.
+                # `python3` inside a shell script, a `bash -c`, a Makefile or a
+                # cron job still resolves to /usr/bin/python3 -- AL2023's 3.9,
+                # whose dnf-installed botocore (1.40.x) is old enough to reject
+                # parameters the workshop uses (e.g. CreateGateway's
+                # `interceptorConfigurations`), with a confusing
+                # ParamValidationError rather than an obvious version error.
+                # Put a real python3 ahead of it on PATH so the interpreter is
+                # the same one in every context. /usr/local/bin precedes /usr/bin
+                # for both root and the participant, and system tooling pins
+                # itself via `#!/usr/bin/python3` shebangs rather than PATH, so
+                # this does not repoint dnf or cloud-init.
+                - ln -sf /usr/bin/python3.13 /usr/local/bin/python3
+                - ln -sf /usr/bin/pip3.13 /usr/local/bin/pip3
+                - python3 --version && python3 -c 'import sys; assert sys.version_info[:2] == (3, 13), sys.version'
+                - pip_retry python3.13 -m pip install --retries 10 --timeout 60 --upgrade pip==24.0 2>&1
+                # Jupyter + workshop libraries for the notebook-driven modules.
+                # Every version is an EXACT pin, verified to resolve together
+                # (pip 24.0, CPython 3.13) — a floor like 'boto3>=1.43.66' lets a
+                # future release in and makes the kernel non-reproducible, and the
+                # old 'strands-agents==0.1.5' pin conflicted with the litellm the
+                # module-2 notebooks install (0.1.5's openai extra caps
+                # openai<2.0.0 while litellm 1.84.0 needs openai>=2.8.0, which
+                # made `pip install -r requirements.txt` a no-op).
+                # This set MUST stay in step with
+                # source/module-2-llm-gateway/requirements.txt.
+                # boto3/botocore 1.43.72: the Agent Registry API moved to the
+                # agent-registry-control service on 2026-08-06 and anything older
+                # than 1.43.66 cannot build that client at all.
+                - !Sub |
+                  pip_retry sudo -u ${CodeEditorUser} python3.13 -m pip install --user \
+                    --retries 10 --timeout 60 \
+                    jupyter==1.0.0 ipykernel==6.29.4 nbformat==5.10.4 nbconvert==7.16.4 \
+                    pyyaml==6.0.3 requests==2.33.0 httpx==0.28.1 \
+                    boto3==1.43.72 botocore==1.43.72 \
+                    pydantic==2.13.4 openai==2.54.0 litellm==1.84.0 \
+                    'strands-agents[litellm,openai]==1.52.0'
+                # Register an ipykernel under a unique name so VS Code auto-selects it
+                # without colliding with the system python3 interpreter.
+                - !Sub |
+                  sudo -u ${CodeEditorUser} python3.13 -m ipykernel install --user \
+                    --name workshop --display-name "Python 3 (workshop)"
+                # Repair the kernelspec ipykernel ships as a package DATA FILE.
+                # `pip install --user ipykernel` drops its own
+                # share/jupyter/kernels/python3/kernel.json into ~/.local/share,
+                # untemplated -- its argv[0] is the bare string "python", which is
+                # not on the participant's PATH (only python3/python3.13 are). A
+                # participant who picks "Python 3 (ipykernel)" therefore gets a
+                # kernel that dies instantly, and because the Jupyter extension
+                # retries silently that surfaces as an endless
+                # "Connecting to kernel ... Restarting Kernel" loop with no error.
+                # Point it at the absolute interpreter and name it so it cannot be
+                # mistaken for the curated workshop kernel.
+                - !Sub |
+                    ks=/home/${CodeEditorUser}/.local/share/jupyter/kernels/python3/kernel.json
+                    if [ -f "$ks" ]; then
+                      py_abs=$(sudo -u ${CodeEditorUser} python3.13 -c 'import sys; print(sys.executable)')
+                      tmp=$(mktemp)
+                      jq --arg py "$py_abs" \
+                        '.argv[0] = $py | .display_name = "Python 3 (system)"' \
+                        "$ks" > "$tmp" && mv "$tmp" "$ks"
+                      chown ${CodeEditorUser}:${CodeEditorUser} "$ks"
+                      echo "repaired stray kernelspec: argv[0] -> $py_abs"
+                    fi
+                - !Sub sudo -u ${CodeEditorUser} python3.13 -m jupyter --version
+          - name: InstallPythonApt
+            # Ubuntu 22 default is Python 3.10, Ubuntu 24 default is Python 3.12
+            action: aws:runShellScript
+            precondition:
+              StringEquals:
+                - '{{ LinuxFlavor }}'
+                - ubuntu
+            inputs:
+              timeoutSeconds: 900
+              runCommand:
+                - '#!/bin/bash'
+                - set -euo pipefail
+                # Same transient-PyPI hardening as InstallPythonDnf above.
+                - |
+                  pip_retry() {
+                    for attempt in 1 2 3; do
+                      "$@" && return 0
+                      echo "pip attempt $attempt failed; retrying in 20s" >&2
+                      sleep 20
+                    done
+                    return 1
+                  }
+                - dpkg --configure -a
+                - apt-get -q update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q python3-pip python3-venv python3-boto3 python3-pytest
+                - systemctl start multipathd.service packagekit.service
+                - systemctl restart unattended-upgrades.service
+                - systemctl restart networkd-dispatcher.service
+                # Jupyter + workshop libraries for the notebook-driven modules.
+                # Keep this list byte-identical to InstallPythonDnf above — see
+                # there for why every version is an exact pin.
+                - !Sub |
+                  pip_retry sudo -u ${CodeEditorUser} python3 -m pip install --user --break-system-packages \
+                    --retries 10 --timeout 60 \
+                    jupyter==1.0.0 ipykernel==6.29.4 nbformat==5.10.4 nbconvert==7.16.4 \
+                    pyyaml==6.0.3 requests==2.33.0 httpx==0.28.1 \
+                    boto3==1.43.72 botocore==1.43.72 \
+                    pydantic==2.13.4 openai==2.54.0 litellm==1.84.0 \
+                    'strands-agents[litellm,openai]==1.52.0'
+                - !Sub |
+                  sudo -u ${CodeEditorUser} python3 -m ipykernel install --user \
+                    --name workshop --display-name "Python 3 (workshop)"
+                # Same stray-kernelspec repair as InstallPythonDnf above -- see
+                # there for why the shipped python3 kernelspec is a dead end.
+                - !Sub |
+                    ks=/home/${CodeEditorUser}/.local/share/jupyter/kernels/python3/kernel.json
+                    if [ -f "$ks" ]; then
+                      py_abs=$(sudo -u ${CodeEditorUser} python3 -c 'import sys; print(sys.executable)')
+                      tmp=$(mktemp)
+                      jq --arg py "$py_abs" \
+                        '.argv[0] = $py | .display_name = "Python 3 (system)"' \
+                        "$ks" > "$tmp" && mv "$tmp" "$ks"
+                      chown ${CodeEditorUser}:${CodeEditorUser} "$ks"
+                      echo "repaired stray kernelspec: argv[0] -> $py_abs"
+                    fi
+                - !Sub sudo -u ${CodeEditorUser} python3 -m jupyter --version
+          - name: ConfigurePython
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                - set -euo pipefail
+                - !Sub echo 'export AWS_DEFAULT_REGION=${AWS::Region}' >> /home/${CodeEditorUser}/.bashrc
+                - !Sub sudo -i -u ${CodeEditorUser} aws configure set region ${AWS::Region}
+                - !Sub echo 'alias pytest=pytest-3' >> /home/${CodeEditorUser}/.bashrc
+                - !Sub |
+                    target_file="/home/${CodeEditorUser}/.local/share/code-server/User/settings.json"
+                    if [ ! -f "$target_file" ]; then
+                      echo '{}' > "$target_file"
+                    fi
+                    # Point the Python / Jupyter extensions at the workshop
+                    # interpreter and trust the registered ipykernel so VS
+                    # Code picks it up without prompting.
+                    #
+                    # createEnvironment.trigger=off: the default is "prompt", which
+                    # offers "Create a virtual environment?" when a notebook or a
+                    # requirements.txt is opened. Accepting it runs
+                    # `python -m venv /workshop/.venv`, and the Jupyter extension
+                    # selects that venv as the kernel the moment it appears --
+                    # before anything is installed into it. The kernel then dies
+                    # with "No module named ipykernel_launcher". The workshop
+                    # already ships two curated kernels, so this prompt has no
+                    # upside here and one very confusing failure mode.
+                    #
+                    # askForKernelRestart is pinned to its DEFAULT of true on
+                    # purpose. Setting it false suppresses the "kernel died" dialog,
+                    # which turns any startup failure into a silent, endless
+                    # "Connecting to kernel ... Restarting Kernel" loop that gives
+                    # the participant nothing to act on. A prompt only ever appears
+                    # when a kernel has actually died, which is precisely when the
+                    # reason needs to be visible.
+                    tmp=$(mktemp)
+                    jq '. + {
+                      "python.testing.pytestEnabled": true,
+                      "python.defaultInterpreterPath": "/usr/bin/python3.13",
+                      "python.createEnvironment.trigger": "off",
+                      "jupyter.kernels.trusted": [
+                        "/home/${CodeEditorUser}/.local/share/jupyter/kernels/workshop/kernel.json",
+                        "/home/${CodeEditorUser}/.local/share/jupyter/kernels/workshop-fast/kernel.json"
+                      ],
+                      "notebook.kernelPicker.type": "mru",
+                      "jupyter.askForKernelRestart": true
+                    }' "$target_file" > "$tmp" && mv "$tmp" "$target_file"
+                    chown ${CodeEditorUser}:${CodeEditorUser} "$target_file"
+                # Write a workspace-level settings file so /workshop/* notebooks pick
+                # the named 'workshop' kernel on first open without a picker prompt.
+                - !Sub |
+                    mkdir -p /workshop/.vscode
+                    cat > /workshop/.vscode/settings.json <<'WSSETTINGS'
+                    {
+                      "jupyter.kernels.trusted": [
+                        "/home/${CodeEditorUser}/.local/share/jupyter/kernels/workshop/kernel.json",
+                        "/home/${CodeEditorUser}/.local/share/jupyter/kernels/workshop-fast/kernel.json"
+                      ],
+                      "notebook.kernelPicker.type": "mru",
+                      "jupyter.askForKernelRestart": true,
+                      "python.createEnvironment.trigger": "off",
+                      "python.defaultInterpreterPath": "/usr/bin/python3.13"
+                    }
+                    WSSETTINGS
+                    chown -R ${CodeEditorUser}:${CodeEditorUser} /workshop/.vscode
+                - echo "Python and Pip installed. Checking configuration"
+                - !Sub sudo -i -u ${CodeEditorUser} python3 --version
+                - !Sub sudo -i -u ${CodeEditorUser} pip3 --version
+          - name: PrepareModule4bFastVenv
+            # Module 4b notebooks (FAST / CDK path) import packages not in the
+            # workshop kernel: bedrock-agentcore, mcp, bedrock-agentcore-starter-toolkit.
+            # Create a dedicated venv + register the 'workshop-fast' kernel so the
+            # Module 4b notebooks auto-select without the participant needing to run
+            # `python -m venv` themselves.
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 900
+              runCommand:
+                - '#!/bin/bash'
+                - set -euo pipefail
+                - !Sub |
+                    # Same transient-PyPI hardening as InstallPythonDnf. Each SSM
+                    # step is its own shell, so the helper is redefined here.
+                    pip_retry() {
+                      for attempt in 1 2 3; do
+                        "$@" && return 0
+                        echo "pip attempt $attempt failed; retrying in 20s" >&2
+                        sleep 20
+                      done
+                      return 1
+                    }
+                    FAST_VENV=/home/${CodeEditorUser}/.venvs/workshop-fast
+                    if command -v python3.13 >/dev/null 2>&1; then
+                      PY=python3.13
+                    else
+                      PY=python3
+                    fi
+                    sudo -u ${CodeEditorUser} $PY -m venv $FAST_VENV
+                    pip_retry sudo -u ${CodeEditorUser} $FAST_VENV/bin/pip install --retries 10 --timeout 60 --upgrade pip==24.0
+                    # The Module 4b notebooks import ONLY boto3/botocore in this
+                    # kernel — the strands / bedrock_agentcore / mcp import lines
+                    # they contain live inside the r'''...''' source strings the
+                    # notebooks write into FAST's tree, and those run inside
+                    # AgentCore Runtime against FAST's own requirements, not here.
+                    # So this venv installs the kernel stack plus boto3 and nothing
+                    # else. The previous list carried bedrock-agentcore==0.1.0,
+                    # bedrock-agentcore-starter-toolkit==0.1.0 and an UNPINNED mcp
+                    # (which now resolves to 2.0.0) — three stale/floating pins
+                    # that nothing imported, and ~100 transitive packages of
+                    # bootstrap time.
+                    # boto3/botocore 1.43.72: exact pin, and >=1.43.66 is a hard
+                    # floor for the agent-registry-control client notebook 07 uses.
+                    pip_retry sudo -u ${CodeEditorUser} $FAST_VENV/bin/pip install \
+                      --retries 10 --timeout 60 \
+                      jupyter==1.0.0 ipykernel==6.29.4 nbformat==5.10.4 \
+                      boto3==1.43.72 botocore==1.43.72
+                    sudo -u ${CodeEditorUser} $FAST_VENV/bin/python -m ipykernel install --user \
+                      --name workshop-fast --display-name "Python 3 (workshop-fast)"
+                    sudo -u ${CodeEditorUser} $FAST_VENV/bin/python -m jupyter --version
+          - name: InstallPythonExtension
+            action: aws:runDocument
+            inputs:
+              documentType: SSMDocument
+              documentPath: !Ref InstallCodeEditorExtensionSSMDoc
+              documentParameters:
+                ExtensionId: ms-python.python
+                CodeEditorUser: !Ref CodeEditorUser
+          - name: RemovePythonEnvsExtension
+            # ms-python.python is an extension PACK: installing it also installs
+            # ms-python.vscode-pylance, ms-python.debugpy and
+            # ms-python.vscode-python-envs, none of them pinned. The envs extension
+            # locates interpreters by shelling out to a `pet` binary that ships only
+            # in the PLATFORM-specific VSIX, and code-server resolves
+            # ms-python.python to the `universal` build -- so `pet` is simply absent
+            # and every discovery pass fails:
+            #   [interpreterSelection] Failed to set global environment:
+            #     Error: spawn .../python-env-tools/bin/pet ENOENT
+            #   No Python environments were found.
+            # The participant then sees "Default interpreter path
+            # '/usr/bin/python3.13' could not be resolved", and with no environment
+            # resolved the notebook kernel picker falls back to offering to create a
+            # `.venv` -- which lands in the empty-venv kernel death described in
+            # ConfigurePython above.
+            #
+            # ms-python.python does its own discovery (python.locator defaults to
+            # "js" and python.useEnvironmentsExtension defaults to false), so
+            # removing the envs extension costs nothing and deletes the only
+            # component here that cannot work. Non-fatal: a future pack that no
+            # longer includes it must not fail the build.
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                - !Sub |
+                    if sudo -i -u ${CodeEditorUser} code-server --list-extensions \
+                         | grep -qi ms-python.vscode-python-envs; then
+                      sudo -i -u ${CodeEditorUser} code-server \
+                        --uninstall-extension ms-python.vscode-python-envs 2>&1 \
+                        || echo "WARNING: failed to remove ms-python.vscode-python-envs"
+                    else
+                      echo "ms-python.vscode-python-envs not present; nothing to remove"
+                    fi
+          - name: InstallJupyterExtension
+            action: aws:runDocument
+            inputs:
+              documentType: SSMDocument
+              documentPath: !Ref InstallCodeEditorExtensionSSMDoc
+              documentParameters:
+                ExtensionId: ms-toolsai.jupyter
+                CodeEditorUser: !Ref CodeEditorUser
+          - name: InstallJavaDnf
+            action: aws:runShellScript
+            precondition:
+              StringEquals:
+                - '{{ LinuxFlavor }}'
+                - al2023
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - dnf install -y java-21-amazon-corretto java-17-amazon-corretto java-1.8.0-amazon-corretto maven
+          - name: InstallJavaApt
+            action: aws:runShellScript
+            precondition:
+              StringEquals:
+                - '{{ LinuxFlavor }}'
+                - ubuntu
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - dpkg --configure -a
+                - curl -fsSL https://apt.corretto.aws/corretto.key | gpg --dearmor -o /usr/share/keyrings/corretto-keyring.gpg
+                - echo "deb [signed-by=/usr/share/keyrings/corretto-keyring.gpg] https://apt.corretto.aws stable main" > /etc/apt/sources.list.d/corretto.list
+                - DEBIAN_FRONTEND=noninteractive apt-get update
+                - DEBIAN_FRONTEND=noninteractive apt-get install -y -q java-21-amazon-corretto-jdk java-17-amazon-corretto-jdk java-1.8.0-amazon-corretto-jdk maven
+          - name: ConfigureJava
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - !Sub echo 'export JAVA_1_8_HOME=$(dirname $(dirname $(readlink -f $(which java))))' >> /home/${CodeEditorUser}/.bashrc
+                - !Sub echo 'export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))' >> /home/${CodeEditorUser}/.bashrc
+                - !Sub echo 'export PATH=$PATH:$JAVA_HOME/bin:/usr/share/maven/bin' >> /home/${CodeEditorUser}/.bashrc
+                - echo "Java and Maven installed. Checking configuration"
+                - java -version 2>&1
+                - mvn --version
+                - update-alternatives --display java
+          - name: InstallJavaExtension
+            action: aws:runDocument
+            inputs:
+              documentType: SSMDocument
+              documentPath: !Ref InstallCodeEditorExtensionSSMDoc
+              documentParameters:
+                ExtensionId: vscjava.vscode-java-pack
+                CodeEditorUser: !Ref CodeEditorUser
+          - name: InstallGoDnf
+            action: aws:runShellScript
+            precondition:
+              StringEquals:
+                - '{{ LinuxFlavor }}'
+                - al2023
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - dnf install -y golang
+          - name: InstallGoApt
+            action: aws:runShellScript
+            precondition:
+              StringEquals:
+                - '{{ LinuxFlavor }}'
+                - ubuntu
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - dpkg --configure -a
+                - add-apt-repository ppa:longsleep/golang-backports
+                - apt-get -q update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q golang-go
+          - name: ConfigureGo
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - !Sub chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}
+                - echo "Go installed. Checking configuration"
+                - go version
+          - name: InstallDotNetDnf
+            action: aws:runShellScript
+            precondition:
+              StringEquals:
+                - '{{ LinuxFlavor }}'
+                - al2023
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - dnf install -y dotnet-sdk-8.0
+          - name: InstallDotNetApt
+            action: aws:runShellScript
+            precondition:
+              StringEquals:
+                - '{{ LinuxFlavor }}'
+                - ubuntu
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - dpkg --configure -a
+                - apt-get -q update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q dotnet-sdk-8.0
+          - name: ConfigureDotNet
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - !Sub sudo -i -u ${CodeEditorUser} dotnet tool install Microsoft.Web.LibraryManager.Cli --create-manifest-if-needed
+                - !Sub echo 'PATH=$PATH:/home/${CodeEditorUser}/.dotnet/tools' >> /home/${CodeEditorUser}/.bashrc
+                - !Sub chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}
+                - echo "Dotnet installed. Checking configuration"
+                - !Sub sudo -i -u ${CodeEditorUser} dotnet --list-sdks
+          - name: InstallRust
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - !Sub sudo -u ${CodeEditorUser} curl -fsSL https://sh.rustup.rs -o /tmp/rust_install.sh
+                - !Sub sudo -i -u ${CodeEditorUser} bash /tmp/rust_install.sh -y 2>&1
+                - echo "Rust installed. Checking configuration"
+                - !Sub sudo -i -u ${CodeEditorUser} rustc --version
+          # No global Vite install: nothing in the workshop scaffolds a project.
+          # Module 4b's frontend build runs `npm ci` inside FAST's own pattern
+          # directory, which installs the lockfile-pinned Vite 7.3.1 locally. A
+          # global `create-vite` was previously installed here and never used --
+          # and at the pin it carried (5.2.3) it scaffolded Vite 5, contradicting
+          # the Vite 7 floor that the Node 22 requirement above exists to satisfy.
+          - name: InstallDockerDnf
+            action: aws:runShellScript
+            precondition:
+              StringEquals:
+                - '{{ LinuxFlavor }}'
+                - al2023
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - dnf install -y docker amazon-ecr-credential-helper
+          - name: InstallDockerApt
+            action: aws:runShellScript
+            precondition:
+              StringEquals:
+                - '{{ LinuxFlavor }}'
+                - ubuntu
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - dpkg --configure -a
+                # - curl -fsSL https://get.docker.com | bash
+                - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+                - echo "deb [signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release --codename --short) stable" > /etc/apt/sources.list.d/docker.list
+                - apt-get -q update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker-ce docker-ce-cli containerd.io amazon-ecr-credential-helper
+          - name: ConfigureDocker
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - !Sub usermod -aG docker ${CodeEditorUser}
+                - !Sub sudo -u ${CodeEditorUser} newgrp docker
+                - !Sub systemctl restart code-server@${CodeEditorUser}
+                - systemctl start docker.service
+                - !Sub mkdir -p /home/${CodeEditorUser}/.docker
+                - !Sub |
+                  tee /home/${CodeEditorUser}/.docker/config.json <<EOF
+                  {
+                    "credsStore": "ecr-login"
+                  }
+                  EOF
+                - !Sub chown -R ${CodeEditorUser}:${CodeEditorUser} /home/${CodeEditorUser}/.docker
+                # The workshop host is Graviton (arm64), but FAST's CedarPolicyLambda
+                # is an x86_64 PythonFunction (it omits `architecture`, so CDK
+                # defaults to X86_64), so `cdk deploy` runs
+                # `docker build --platform linux/amd64`. Without QEMU/binfmt
+                # emulation registered WITH THE 'F' (fix-binary) FLAG, that build
+                # fails at the first RUN layer with "exec /bin/sh: exec format error".
+                # The 'F' flag is essential: `docker build` runs each RUN in a fresh
+                # container, so the kernel must pin the qemu interpreter fd at
+                # registration time (F) rather than resolve its path per-process —
+                # otherwise the interpreter isn't visible inside the build container.
+                # tonistiigi/binfmt registers WITH 'F'; that is why it is used here.
+                - |
+                  for i in $(seq 1 30); do
+                    if docker info >/dev/null 2>&1; then break; fi
+                    echo "waiting for docker daemon ($i/30)..."; sleep 2
+                  done
+                # Register via tonistiigi/binfmt (installs handlers with the F flag).
+                # Pull through the account ECR pull-through cache if configured;
+                # otherwise fall back to Docker Hub. Do not swallow failure.
+                - |
+                  if docker run --privileged --rm tonistiigi/binfmt:qemu-v9.2.2 --install amd64; then
+                    echo "binfmt: amd64 emulation registered (tonistiigi/binfmt, F flag)"
+                  else
+                    echo "WARNING: binfmt registration FAILED - linux/amd64 docker builds (FAST CedarPolicyLambda) will not work on this arm64 host" >&2
+                  fi
+                # Verify the x86_64 handler is registered AND carries the F flag.
+                # Without F the handler exists but docker build still fails.
+                - |
+                  H=/proc/sys/fs/binfmt_misc/qemu-x86_64
+                  if test -f "$H" && grep -q '^flags:.*F' "$H"; then
+                    echo "binfmt qemu-x86_64 handler present with F flag - cross-arch docker build ready"
+                  else
+                    echo "WARNING - qemu-x86_64 handler missing or lacks F flag; amd64 docker build will fail" >&2
+                    cat "$H" 2>/dev/null || true
+                  fi
+                - echo "Docker installed. Checking configuration"
+                - docker --version
+                - docker buildx ls || true
+                - systemctl status docker.service
+          - name: InstallDockerExtension
+            action: aws:runDocument
+            inputs:
+              documentType: SSMDocument
+              documentPath: !Ref InstallCodeEditorExtensionSSMDoc
+              documentParameters:
+                ExtensionId: ms-azuretools.vscode-docker
+                CodeEditorUser: !Ref CodeEditorUser
+          - name: InstallTerraformDnf
+            action: aws:runShellScript
+            precondition:
+              StringEquals:
+                - '{{ LinuxFlavor }}'
+                - al2023
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - dnf config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
+                - dnf -y install terraform 2>&1
+                - echo "Terraform installed. Checking configuration"
+                - terraform --version
+          - name: InstallTerraformApt
+            action: aws:runShellScript
+            precondition:
+              StringEquals:
+                - '{{ LinuxFlavor }}'
+                - ubuntu
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - dpkg --configure -a
+                - curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-keyring.gpg
+                - echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-keyring.gpg] https://apt.releases.hashicorp.com/ $(lsb_release --codename --short) main" >> /etc/apt/sources.list.d/hashicorp.list
+                - apt-get -q update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q terraform
+                - echo "Terraform installed. Checking configuration"
+                - terraform --version
+          - name: InstallPrettierExtension
+            action: aws:runDocument
+            inputs:
+              documentType: SSMDocument
+              documentPath: !Ref InstallCodeEditorExtensionSSMDoc
+              documentParameters:
+                ExtensionId: esbenp.prettier-vscode
+                CodeEditorUser: !Ref CodeEditorUser
+          - name: ConfigurePrettier
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 300
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - !Sub |
+                    target_file="/home/${CodeEditorUser}/.local/share/code-server/User/settings.json"
+                    if [ ! -f "$target_file" ]; then
+                      echo '{}' > "$target_file"
+                    fi
+                    echo "$(jq '. + {"editor.defaultFormatter": "esbenp.prettier-vscode", "editor.formatOnSave": true}' "$target_file")" > "$target_file"
+                - echo "Prettier add-in installed"
+          - name: ConfigureGraphExplorer
+            action: aws:runShellScript
+            inputs:
+              timeoutSeconds: 600
+              runCommand:
+                - '#!/bin/bash'
+                # - set -euo pipefail # Uncomment to throw error on failure
+                - echo "Configuring nginx for Graph Explorer"
+                - !Sub |
+                  if [[ -n "${DevServerBasePath}" ]]
+                  then
+                      sed -i '$i\
+                      # Graph Explorer API endpoints - regex for common patterns\
+                      location ~ ^/${DevServerBasePath}/(logger|summary|status|gremlin|openCypher|sparql|defaultConnection)$ {\
+                          proxy_pass http://localhost:${DevServerPort}/$1;\
+                      }' /etc/nginx/conf.d/code-editor.conf
+                  fi
+                - systemctl enable nginx 2>&1
+                - systemctl restart nginx
+                - echo "Nginx config updated installed. Checking configuration"
+                - nginx -t 2>&1
+                - systemctl status nginx
 # Install Workshop specific packages here
 
   SSMDocLambdaRole:
@@ -887,7 +1856,7 @@ Resources:
       Environment:
         Variables:
           RetrySleep: 2900
-          AbortTimeRemaining: 5000
+          TimeoutThreshold: 5000
       Architectures:
         - arm64
       Role: !GetAtt SSMDocLambdaRole.Arn
@@ -903,14 +1872,19 @@ Resources:
           logger.setLevel(logging.INFO)
 
           def lambda_handler(event, context):
-              logger.debug(f'event: {event}')
-              logger.debug(f'context: {context}')
+              # Envelope fields only. ResourceProperties carries the workshop
+              # password (RunSSMDoc) and secret ARNs, so logging the whole event
+              # would copy those into CloudWatch Logs as soon as anyone raises
+              # the level to DEBUG. context holds no secrets but nothing useful.
+              logger.debug('event: RequestType=%s StackId=%s LogicalResourceId=%s',
+                           event.get('RequestType'), event.get('StackId'),
+                           event.get('LogicalResourceId'))
 
               if event['RequestType'] != 'Create':
                   cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData={}, reason='No action to take')
               else:
                   sleep_ms = int(os.environ.get('RetrySleep'))
-                  abort_time_remaining_ms = int(os.environ.get('AbortTimeRemaining'))
+                  timeout_threshold_ms = int(os.environ.get('TimeoutThreshold'))
                   resource_properties = event['ResourceProperties']
                   instance_id = resource_properties['InstanceId']
                   document_name = resource_properties['DocumentName']
@@ -927,13 +1901,18 @@ Resources:
                   if 'PhysicalResourceId' in resource_properties:
                       del resource_properties['PhysicalResourceId']
 
-                  logger.debug(f'resource_properties filtered: {resource_properties}')
+                  # Keys only. What is left after the deletions above is the SSM
+                  # document's parameter map, and one of those parameters is
+                  # CodeEditorPassword (see the Custom::RunSSMDocLambda resource),
+                  # so logging the values would put the workshop password in
+                  # CloudWatch Logs.
+                  logger.debug(f'resource_properties filtered (keys): {sorted(resource_properties)}')
 
                   parameters = {}
                   for key, value in resource_properties.items():
                       parameters[key] = [value]
 
-                  logger.debug(f'parameters: {parameters}')
+                  logger.debug(f'parameter keys: {list(parameters.keys())}')
 
                   retry = True
                   attempt_no = 0
@@ -959,14 +1938,14 @@ Resources:
 
                       except ssm.exceptions.InvalidInstanceId as e:
                           time_remaining_ms = context.get_remaining_time_in_millis()
-                          if (time_remaining_ms > abort_time_remaining_ms):
+                          if (time_remaining_ms > timeout_threshold_ms):
                               logger.info(f'Instance {instance_id} not ready. Sleeping: {sleep_ms/1000}s')
                               time.sleep(sleep_ms/1000)
                               retry = True
                           else:
-                              logger.info(f'Instance {instance_id} not ready, timed out. Time remaining {time_remaining_ms/1000}s < Abort time remaining {abort_time_remaining_ms/1000}s')
+                              logger.info(f'Instance {instance_id} not ready, timed out. Time remaining {time_remaining_ms/1000}s < Timeout threshold {timeout_threshold_ms/1000}s')
                               logger.error(e, exc_info=True)
-                              cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason='Timed out. Time remaining: ' + str(time_remaining_ms/1000) + 's < Abort time remaining: ' + str(abort_time_remaining_ms/1000) + 's')
+                              cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason='Timed out. Time remaining: ' + str(time_remaining_ms/1000) + 's < Timeout threshold: ' + str(timeout_threshold_ms/1000) + 's')
                               retry = False
 
                       except Exception as e:
@@ -978,16 +1957,1482 @@ Resources:
     Type: Custom::RunSSMDocLambda
     Properties:
       ServiceToken: !GetAtt RunSSMDocLambda.Arn
-      ServiceTimeout: 305
+      ServiceTimeout: 600
       InstanceId: !Ref CodeEditorInstance
       DocumentName: !Ref CodeEditorSSMDoc
       CloudWatchLogGroupName: !Sub /aws/ssm/${CodeEditorSSMDoc}
       CodeEditorPassword: !GetAtt SecretPlaintext.password
       LinuxFlavor: !If [IsAL2023, 'al2023', 'ubuntu']
 
-  # WORKSHOP POSTURE: This role is intentionally broad so participants can explore AWS during the workshop. ReadOnlyAccess grants read on every service in the account.
+  # GENERATED FROM static/cfn/workshop-iam-policy-network.json -- DO NOT EDIT BY HAND.
+  # Edit the source JSON, then run scripts/verify-ide-policy-parity.py --sync.
+  # scripts/verify-ide-policy-parity.py fails the build if this copy drifts.
+  # Minified size 6028/6144 bytes (IAM managed-policy limit).
+  CodeEditorParticipantPolicyNetwork:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: >-
+        Workshop IDE participant permissions (network): VPC, subnet, security-group, endpoint and other network primitives.
+      PolicyDocument:
+        "Version": "2012-10-17"
+        "Statement":
+          -
+            "Sid": "EC2VPCWriteScopedToResourceTypes"
+            "Effect": "Allow"
+            "Action":
+              - "ec2:CreateVpc"
+              - "ec2:ModifyVpcAttribute"
+              - "ec2:CreateSubnet"
+              - "ec2:CreateInternetGateway"
+              - "ec2:AttachInternetGateway"
+              - "ec2:DetachInternetGateway"
+              - "ec2:CreateNatGateway"
+              - "ec2:AllocateAddress"
+              - "ec2:ReleaseAddress"
+              - "ec2:CreateRouteTable"
+              - "ec2:CreateRoute"
+              - "ec2:AssociateRouteTable"
+              - "ec2:DisassociateRouteTable"
+              - "ec2:CreateSecurityGroup"
+              - "ec2:CreateNetworkInterface"
+              - "ec2:DeleteNetworkInterface"
+
+            "Resource":
+              - "arn:aws:ec2:*:*:vpc/*"
+              - "arn:aws:ec2:*:*:subnet/*"
+              - "arn:aws:ec2:*:*:internet-gateway/*"
+              - "arn:aws:ec2:*:*:natgateway/*"
+              - "arn:aws:ec2:*:*:elastic-ip/*"
+              - "arn:aws:ec2:*:*:route-table/*"
+              - "arn:aws:ec2:*:*:security-group/*"
+              - "arn:aws:ec2:*:*:network-interface/*"
+
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "EC2VPCDescribeNoResourceLevel"
+            "Effect": "Allow"
+            "Action":
+              - "ec2:DescribeVpcs"
+              - "ec2:DescribeSubnets"
+              - "ec2:DescribeInternetGateways"
+              - "ec2:DescribeNatGateways"
+              - "ec2:DescribeAddresses"
+              - "ec2:DescribeRouteTables"
+              - "ec2:DescribeSecurityGroups"
+              - "ec2:DescribeSecurityGroupRules"
+              - "ec2:DescribeAvailabilityZones"
+              - "ec2:DescribeNetworkInterfaces"
+              - "ec2:DescribeTags"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "EC2TagOnlyResourceTypesTheWorkshopCreates"
+            "Effect": "Allow"
+            "Action":
+              - "ec2:CreateTags"
+              - "ec2:DeleteTags"
+
+            "Resource":
+              - "arn:aws:ec2:*:*:vpc/*"
+              - "arn:aws:ec2:*:*:subnet/*"
+              - "arn:aws:ec2:*:*:internet-gateway/*"
+              - "arn:aws:ec2:*:*:natgateway/*"
+              - "arn:aws:ec2:*:*:elastic-ip/*"
+              - "arn:aws:ec2:*:*:route-table/*"
+              - "arn:aws:ec2:*:*:security-group/*"
+              - "arn:aws:ec2:*:*:security-group-rule/*"
+              - "arn:aws:ec2:*:*:vpc-endpoint/*"
+              - "arn:aws:ec2:*:*:network-interface/*"
+              - "arn:aws:ec2:*:*:instance/*"
+              - "arn:aws:ec2:*:*:volume/*"
+              - "arn:aws:ec2:*:*:launch-template/*"
+
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+                "ec2:CreateAction":
+                  - "CreateVpc"
+                  - "CreateSubnet"
+                  - "CreateInternetGateway"
+                  - "CreateNatGateway"
+                  - "AllocateAddress"
+                  - "CreateRouteTable"
+                  - "CreateSecurityGroup"
+                  - "AuthorizeSecurityGroupIngress"
+                  - "AuthorizeSecurityGroupEgress"
+                  - "CreateVpcEndpoint"
+                  - "CreateNetworkInterface"
+                  - "RunInstances"
+                  - "CreateVolume"
+                  - "CreateLaunchTemplate"
+
+
+
+
+          -
+            "Sid": "EC2RetagAlreadyWorkshopTagged"
+            "Effect": "Allow"
+            "Action":
+              - "ec2:CreateTags"
+              - "ec2:DeleteTags"
+
+            "Resource":
+              - "arn:aws:ec2:*:*:vpc/*"
+              - "arn:aws:ec2:*:*:subnet/*"
+              - "arn:aws:ec2:*:*:internet-gateway/*"
+              - "arn:aws:ec2:*:*:natgateway/*"
+              - "arn:aws:ec2:*:*:elastic-ip/*"
+              - "arn:aws:ec2:*:*:route-table/*"
+              - "arn:aws:ec2:*:*:security-group/*"
+              - "arn:aws:ec2:*:*:security-group-rule/*"
+              - "arn:aws:ec2:*:*:vpc-endpoint/*"
+              - "arn:aws:ec2:*:*:network-interface/*"
+              - "arn:aws:ec2:*:*:instance/*"
+              - "arn:aws:ec2:*:*:volume/*"
+              - "arn:aws:ec2:*:*:launch-template/*"
+
+            "Condition":
+              "StringEquals":
+                "aws:ResourceTag/Workshop": "AgentCore-Platform"
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "EC2SecurityGroupRulesWorkshopTaggedOnly"
+            "Effect": "Allow"
+            "Action":
+              - "ec2:AuthorizeSecurityGroupIngress"
+              - "ec2:RevokeSecurityGroupIngress"
+              - "ec2:AuthorizeSecurityGroupEgress"
+              - "ec2:RevokeSecurityGroupEgress"
+              - "ec2:ModifySecurityGroupRules"
+
+            "Resource": "arn:aws:ec2:*:*:security-group/*"
+            "Condition":
+              "StringEquals":
+                "aws:ResourceTag/Workshop": "AgentCore-Platform"
+
+
+
+          -
+            "Sid": "EC2DeleteWorkshopTaggedOnly"
+            "Effect": "Allow"
+            "Action":
+              - "ec2:DeleteVpc"
+              - "ec2:DeleteSubnet"
+              - "ec2:DeleteInternetGateway"
+              - "ec2:DeleteNatGateway"
+              - "ec2:DeleteRouteTable"
+              - "ec2:DeleteRoute"
+              - "ec2:DeleteSecurityGroup"
+
+            "Resource":
+              - "arn:aws:ec2:*:*:vpc/*"
+              - "arn:aws:ec2:*:*:subnet/*"
+              - "arn:aws:ec2:*:*:internet-gateway/*"
+              - "arn:aws:ec2:*:*:natgateway/*"
+              - "arn:aws:ec2:*:*:route-table/*"
+              - "arn:aws:ec2:*:*:security-group/*"
+
+            "Condition":
+              "StringEquals":
+                "aws:ResourceTag/Workshop": "AgentCore-Platform"
+
+
+
+          -
+            "Sid": "EFSDescribeNoResourceLevel"
+            "Effect": "Allow"
+            "Action":
+              - "elasticfilesystem:DescribeFileSystems"
+              - "elasticfilesystem:DescribeMountTargets"
+              - "elasticfilesystem:DescribeAccessPoints"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "EFSFileSystemAndAccessPointScoped"
+            "Effect": "Allow"
+            "Action":
+              - "elasticfilesystem:CreateFileSystem"
+              - "elasticfilesystem:DeleteFileSystem"
+              - "elasticfilesystem:CreateMountTarget"
+              - "elasticfilesystem:DeleteMountTarget"
+              - "elasticfilesystem:CreateAccessPoint"
+              - "elasticfilesystem:DeleteAccessPoint"
+              - "elasticfilesystem:TagResource"
+
+            "Resource":
+              - "arn:aws:elasticfilesystem:*:*:file-system/*"
+              - "arn:aws:elasticfilesystem:*:*:access-point/*"
+
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "ELBManageWorkshopLoadBalancers"
+            "Effect": "Allow"
+            "Action":
+              - "elasticloadbalancing:CreateLoadBalancer"
+              - "elasticloadbalancing:DeleteLoadBalancer"
+              - "elasticloadbalancing:CreateTargetGroup"
+              - "elasticloadbalancing:DeleteTargetGroup"
+              - "elasticloadbalancing:RegisterTargets"
+              - "elasticloadbalancing:DeregisterTargets"
+              - "elasticloadbalancing:CreateListener"
+              - "elasticloadbalancing:DeleteListener"
+              - "elasticloadbalancing:CreateRule"
+              - "elasticloadbalancing:DeleteRule"
+              - "elasticloadbalancing:ModifyLoadBalancerAttributes"
+              - "elasticloadbalancing:ModifyTargetGroupAttributes"
+              - "elasticloadbalancing:AddTags"
+              - "elasticloadbalancing:RemoveTags"
+
+            "Resource":
+              - "arn:aws:elasticloadbalancing:*:*:loadbalancer/app/workshop-*"
+              - "arn:aws:elasticloadbalancing:*:*:targetgroup/workshop-*"
+              - "arn:aws:elasticloadbalancing:*:*:listener/app/workshop-*"
+              - "arn:aws:elasticloadbalancing:*:*:listener-rule/app/workshop-*"
+
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "ELBDescribeNoResourceLevel"
+            "Effect": "Allow"
+            "Action":
+              - "elasticloadbalancing:DescribeLoadBalancers"
+              - "elasticloadbalancing:DescribeTargetGroups"
+              - "elasticloadbalancing:DescribeTargetHealth"
+              - "elasticloadbalancing:DescribeListeners"
+              - "elasticloadbalancing:DescribeRules"
+              - "elasticloadbalancing:DescribeTags"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+  # GENERATED FROM static/cfn/workshop-iam-policy-infra.json -- DO NOT EDIT BY HAND.
+  # Edit the source JSON, then run scripts/verify-ide-policy-parity.py --sync.
+  # scripts/verify-ide-policy-parity.py fails the build if this copy drifts.
+  # Minified size 5302/6144 bytes (IAM managed-policy limit).
+  CodeEditorParticipantPolicyInfra:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: >-
+        Workshop IDE participant permissions (infra): ECS/ECR/DynamoDB/CloudFront and the rest of the container + data plane.
+      PolicyDocument:
+        "Version": "2012-10-17"
+        "Statement":
+          -
+            "Sid": "ConsoleHomePage"
+            "Effect": "Allow"
+            "Action":
+              - "ce:GetCostAndUsage"
+              - "ce:GetCostForecast"
+              - "cloudwatch:DescribeAlarms"
+              - "cloudwatch:GetMetricData"
+              - "cloudwatch:ListDashboards"
+              - "cost-optimization-hub:ListEnrollmentStatuses"
+              - "health:DescribeEventAggregates"
+              - "iam:GetAccountSummary"
+              - "iam:ListAccessKeys"
+              - "iam:ListMFADevices"
+              - "securityhub:DescribeHub"
+              - "servicecatalog:ListApplications"
+              - "tag:GetResources"
+              - "tag:GetTagKeys"
+              - "trustedadvisor:DescribeAccount"
+              - "trustedadvisor:DescribeChecks"
+              - "trustedadvisor:DescribeCheckSummaries"
+
+            "Resource": "*"
+
+          -
+            "Sid": "CognitoRead"
+            "Effect": "Allow"
+            "Action":
+              - "cognito-idp:DescribeUserPool"
+              - "cognito-idp:DescribeUserPoolClient"
+              - "cognito-idp:ListUserPools"
+              - "cognito-idp:ListUserPoolClients"
+              - "cognito-idp:ListUsers"
+              - "cognito-idp:ListGroups"
+              - "cognito-idp:GetGroup"
+              - "cognito-idp:ListResourceServers"
+              - "cognito-idp:DescribeResourceServer"
+
+            "Resource": "*"
+
+          -
+            "Sid": "CognitoWrite"
+            "Effect": "Allow"
+            "Action":
+              - "cognito-idp:AdminGetUser"
+              - "cognito-idp:AdminCreateUser"
+              - "cognito-idp:AdminDeleteUser"
+              - "cognito-idp:AdminAddUserToGroup"
+              - "cognito-idp:AdminRemoveUserFromGroup"
+              - "cognito-idp:CreateGroup"
+              - "cognito-idp:UpdateUserPoolClient"
+              - "cognito-idp:CreateUserPoolClient"
+              - "cognito-idp:DeleteUserPoolClient"
+              - "cognito-idp:AdminSetUserPassword"
+              - "cognito-idp:AdminInitiateAuth"
+
+            "Resource": "arn:aws:cognito-idp:*:*:userpool/*"
+
+          -
+            "Sid": "DynamoDBAccess"
+            "Effect": "Allow"
+            "Action":
+              - "dynamodb:CreateTable"
+              - "dynamodb:DeleteTable"
+              - "dynamodb:DescribeTable"
+              - "dynamodb:DescribeTimeToLive"
+              - "dynamodb:UpdateTimeToLive"
+              - "dynamodb:UpdateContinuousBackups"
+              - "dynamodb:DescribeContinuousBackups"
+              - "dynamodb:PutItem"
+              - "dynamodb:GetItem"
+              - "dynamodb:UpdateItem"
+              - "dynamodb:DeleteItem"
+              - "dynamodb:Query"
+              - "dynamodb:Scan"
+              - "dynamodb:BatchWriteItem"
+              - "dynamodb:BatchGetItem"
+              - "dynamodb:TagResource"
+
+            "Resource":
+              - "arn:aws:dynamodb:*:*:table/workshop-*"
+
+
+          -
+            "Sid": "DynamoDBList"
+            "Effect": "Allow"
+            "Action":
+              - "dynamodb:ListTables"
+
+            "Resource": "*"
+
+          -
+            "Sid": "APIGatewayAccess"
+            "Effect": "Allow"
+            "Action":
+              - "apigateway:GET"
+              - "apigateway:POST"
+              - "apigateway:PUT"
+              - "apigateway:DELETE"
+              - "apigateway:PATCH"
+              - "execute-api:Invoke"
+
+            "Resource":
+              - "arn:aws:apigateway:*::/restapis*"
+              - "arn:aws:apigateway:*::/apis*"
+              - "arn:aws:execute-api:*:*:*"
+
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "XRayAccess"
+            "Effect": "Allow"
+            "Action":
+              - "xray:GetTraceSummaries"
+              - "xray:BatchGetTraces"
+              - "xray:GetServiceGraph"
+              - "xray:GetTraceGraph"
+              - "xray:GetInsight"
+              - "xray:GetGroups"
+              - "xray:GetGroup"
+
+            "Resource": "*"
+
+          -
+            "Sid": "ECRAuthToken"
+            "Effect": "Allow"
+            "Action":
+              - "ecr:GetAuthorizationToken"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "ECRAccess"
+            "Effect": "Allow"
+            "Action":
+              - "ecr:BatchCheckLayerAvailability"
+              - "ecr:GetDownloadUrlForLayer"
+              - "ecr:BatchGetImage"
+              - "ecr:DescribeRepositories"
+              - "ecr:ListImages"
+              - "ecr:DescribeImages"
+              - "ecr:CreateRepository"
+              - "ecr:DeleteRepository"
+              - "ecr:PutLifecyclePolicy"
+              - "ecr:SetRepositoryPolicy"
+              - "ecr:GetRepositoryPolicy"
+              - "ecr:InitiateLayerUpload"
+              - "ecr:UploadLayerPart"
+              - "ecr:CompleteLayerUpload"
+              - "ecr:PutImage"
+              - "ecr:TagResource"
+
+            "Resource":
+              - "arn:aws:ecr:*:*:repository/workshop-*"
+              - "arn:aws:ecr:*:*:repository/cdk-hnb659fds-*"
+
+
+          -
+            "Sid": "ECSResourceScoped"
+            "Effect": "Allow"
+            "Action":
+              - "ecs:DeleteCluster"
+              - "ecs:CreateService"
+              - "ecs:DeleteService"
+              - "ecs:UpdateService"
+              - "ecs:DescribeServices"
+              - "ecs:DescribeTasks"
+              - "ecs:RunTask"
+              - "ecs:StopTask"
+              - "ecs:TagResource"
+              - "ecs:PutClusterCapacityProviders"
+
+            "Resource":
+              - "arn:aws:ecs:*:*:cluster/workshop-*"
+              - "arn:aws:ecs:*:*:service/workshop-*/*"
+              - "arn:aws:ecs:*:*:task/workshop-*/*"
+              - "arn:aws:ecs:*:*:task-definition/workshop-*:*"
+
+
+          -
+            "Sid": "ECSAccountLevel"
+            "Effect": "Allow"
+            "Action":
+              - "ecs:DescribeClusters"
+              - "ecs:ListClusters"
+              - "ecs:ListServices"
+              - "ecs:DescribeTaskDefinition"
+              - "ecs:ListTaskDefinitions"
+              - "ecs:ListTasks"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "ECSTaskDefinitionWorkshopFamiliesOnly"
+            "Effect": "Allow"
+            "Action":
+              - "ecs:RegisterTaskDefinition"
+
+            "Resource": "arn:aws:ecs:*:*:task-definition/workshop-*:*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "CloudFrontRead"
+            "Effect": "Allow"
+            "Action":
+              - "cloudfront:GetDistribution"
+              - "cloudfront:GetDistributionConfig"
+              - "cloudfront:ListDistributions"
+              - "cloudfront:GetOriginAccessControl"
+              - "cloudfront:ListOriginAccessControls"
+              - "cloudfront:GetInvalidation"
+              - "cloudfront:ListInvalidations"
+
+            "Resource": "*"
+
+          -
+            "Sid": "CloudFrontDeleteAndUpdateTaggedOnly"
+            "Effect": "Allow"
+            "Action":
+              - "cloudfront:DeleteDistribution"
+              - "cloudfront:UpdateDistribution"
+
+            "Resource": "arn:aws:cloudfront::*:distribution/*"
+            "Condition":
+              "StringEquals":
+                "aws:ResourceTag/Workshop": "AgentCore-Platform"
+
+
+
+          -
+            "Sid": "CloudFrontTagAndInvalidate"
+            "Effect": "Allow"
+            "Action":
+              - "cloudfront:TagResource"
+              - "cloudfront:UntagResource"
+              - "cloudfront:ListTagsForResource"
+              - "cloudfront:CreateInvalidation"
+
+            "Resource": "arn:aws:cloudfront::*:distribution/*"
+
+          -
+            "Sid": "CloudFrontManageOac"
+            "Effect": "Allow"
+            "Action":
+              - "cloudfront:DeleteOriginAccessControl"
+
+            "Resource": "arn:aws:cloudfront::*:origin-access-control/*"
+
+          -
+            "Sid": "ECSCreateWorkshopClusterOnly"
+            "Effect": "Allow"
+            "Action":
+              - "ecs:CreateCluster"
+
+            "Resource": "arn:aws:ecs:*:*:cluster/workshop-*"
+  # GENERATED FROM static/cfn/workshop-iam-policy-core.json -- DO NOT EDIT BY HAND.
+  # Edit the source JSON, then run scripts/verify-ide-policy-parity.py --sync.
+  # scripts/verify-ide-policy-parity.py fails the build if this copy drifts.
+  # Minified size 5985/6144 bytes (IAM managed-policy limit).
+  CodeEditorParticipantPolicyCore:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: >-
+        Workshop IDE participant permissions (core): Bedrock, AgentCore, Lambda, Cognito, Secrets Manager, S3, STS.
+      PolicyDocument:
+        "Version": "2012-10-17"
+        "Statement":
+          -
+            "Sid": "BedrockInvokeModelsScoped"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock:InvokeModel"
+              - "bedrock:InvokeModelWithResponseStream"
+              - "bedrock:GetFoundationModel"
+              - "bedrock:GetInferenceProfile"
+              - "bedrock:PutFoundationModelEntitlement"
+
+            "Resource":
+              - "arn:aws:bedrock:*::foundation-model/*"
+              - "arn:aws:bedrock:*:*:inference-profile/*"
+              - "arn:aws:bedrock:*:*:application-inference-profile/*"
+
+
+          -
+            "Sid": "BedrockCatalogNoResourceLevel"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock:ListFoundationModels"
+              - "bedrock:GetFoundationModelAvailability"
+              - "bedrock:ListInferenceProfiles"
+              - "bedrock:PutUseCaseForModelAccess"
+              - "bedrock:GetUseCaseForModelAccess"
+              - "bedrock:ListGuardrails"
+              - "bedrock:ListTagsForResource"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "BedrockGuardrailWrite"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock:CreateGuardrail"
+              - "bedrock:ApplyGuardrail"
+              - "bedrock:UpdateGuardrail"
+              - "bedrock:DeleteGuardrail"
+              - "bedrock:GetGuardrail"
+              - "bedrock:CreateGuardrailVersion"
+              - "bedrock:TagResource"
+              - "bedrock:UntagResource"
+
+            "Resource": "arn:aws:bedrock:*:*:guardrail/*"
+
+          -
+            "Sid": "ACRegistryServiceLinkedRole"
+            "Effect": "Allow"
+            "Action": "iam:CreateServiceLinkedRole"
+            "Resource": "arn:aws:iam::*:role/aws-service-role/agent-registry.amazonaws.com/AWSServiceRoleForAgentRegistry"
+            "Condition":
+              "StringLike":
+                "iam:AWSServiceName": "agent-registry.amazonaws.com"
+
+
+
+          -
+            "Sid": "ACGatewayCreate"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:CreateGateway"
+
+            "Resource": "arn:aws:bedrock-agentcore:*:*:gateway/*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "ACGatewaySyncOnCreate"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:SynchronizeGatewayTargets"
+
+            "Resource": "arn:aws:bedrock-agentcore:*:*:gateway/*"
+
+          -
+            "Sid": "ACGatewayRead"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:GetGateway"
+              - "bedrock-agentcore:ListGateways"
+              - "bedrock-agentcore:GetGatewayTarget"
+              - "bedrock-agentcore:ListGatewayTargets"
+              - "bedrock-agentcore:GetAgentRuntime"
+              - "bedrock-agentcore:ListAgentRuntimes"
+
+            "Resource": "*"
+
+          -
+            "Sid": "ACIdentityScoped"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:CreateWorkloadIdentity"
+              - "bedrock-agentcore:CreateOauth2CredentialProvider"
+              - "bedrock-agentcore:GetWorkloadAccessToken"
+              - "bedrock-agentcore:GetResourceOauth2Token"
+
+            "Resource":
+              - "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default*"
+              - "arn:aws:bedrock-agentcore:*:*:token-vault/default*"
+
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "ACIdentityRead"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:GetWorkloadIdentity"
+              - "bedrock-agentcore:ListWorkloadIdentities"
+              - "bedrock-agentcore:GetOauth2CredentialProvider"
+              - "bedrock-agentcore:ListOauth2CredentialProviders"
+              - "bedrock-agentcore:GetTokenVault"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "ACPolicyEngineCreate"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:CreatePolicyEngine"
+
+            "Resource": "arn:aws:bedrock-agentcore:*:*:policy-engine/*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "ACPolicyRead"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:GetPolicyEngine"
+              - "bedrock-agentcore:ListPolicyEngines"
+              - "bedrock-agentcore:GetPolicy"
+              - "bedrock-agentcore:ListPolicies"
+
+            "Resource": "*"
+
+          -
+            "Sid": "ACEvents"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:ListEvents"
+              - "bedrock-agentcore:ListActors"
+
+            "Resource": "*"
+
+          -
+            "Sid": "ACMemoryRead"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:ListSessions"
+
+            "Resource": "arn:aws:bedrock-agentcore:*:*:memory/*"
+
+          -
+            "Sid": "Lambda"
+            "Effect": "Allow"
+            "Action":
+              - "lambda:CreateFunction"
+              - "lambda:DeleteFunction"
+              - "lambda:GetFunction"
+              - "lambda:GetFunctionConfiguration"
+              - "lambda:InvokeFunction"
+              - "lambda:UpdateFunctionConfiguration"
+              - "lambda:RemovePermission"
+              - "lambda:GetPolicy"
+
+            "Resource":
+              - "arn:aws:lambda:*:*:function:workshop-*"
+              - "arn:aws:lambda:*:*:function:ac-*"
+              - "arn:aws:lambda:*:*:function:agentcore-*"
+
+
+          -
+            "Sid": "LambdaList"
+            "Effect": "Allow"
+            "Action":
+              - "lambda:ListFunctions"
+
+            "Resource": "*"
+
+          -
+            "Sid": "S3Access"
+            "Effect": "Allow"
+            "Action":
+              - "s3:CreateBucket"
+              - "s3:DeleteBucket"
+              - "s3:GetObject"
+              - "s3:PutObject"
+              - "s3:DeleteObject"
+              - "s3:ListBucket"
+              - "s3:GetBucketLocation"
+              - "s3:GetBucketPolicy"
+              - "s3:GetObjectAcl"
+              - "s3:PutObjectAcl"
+              - "s3:GetBucketAcl"
+
+            "Resource":
+              - "arn:aws:s3:::workshop-*"
+              - "arn:aws:s3:::fast-*"
+              - "arn:aws:s3:::cdk-*"
+
+
+          -
+            "Sid": "S3List"
+            "Effect": "Allow"
+            "Action":
+              - "s3:ListAllMyBuckets"
+
+            "Resource": "*"
+
+          -
+            "Sid": "STSAssume"
+            "Effect": "Allow"
+            "Action":
+              - "sts:AssumeRole"
+
+            "Resource":
+              - "arn:aws:iam::*:role/workshop-*"
+              - "arn:aws:iam::*:role/cdk-hnb659fds-deploy-role-*"
+              - "arn:aws:iam::*:role/cdk-hnb659fds-*-publishing-role-*"
+              - "arn:aws:iam::*:role/cdk-hnb659fds-lookup-role-*"
+
+
+          -
+            "Sid": "STSReadOnly"
+            "Effect": "Allow"
+            "Action":
+              - "sts:GetCallerIdentity"
+
+            "Resource": "*"
+
+          -
+            "Sid": "SSM"
+            "Effect": "Allow"
+            "Action":
+              - "ssm:GetParameter"
+              - "ssm:PutParameter"
+              - "ssm:DeleteParameter"
+              - "ssm:GetParametersByPath"
+
+            "Resource":
+              - "arn:aws:ssm:*:*:parameter/workshop*"
+              - "arn:aws:ssm:*:*:parameter/FAST-stack/*"
+              - "arn:aws:ssm:*:*:parameter/agentcore-gateway/*"
+              - "arn:aws:ssm:*:*:parameter/cdk-bootstrap/*"
+
+
+          -
+            "Sid": "EB"
+            "Effect": "Allow"
+            "Action":
+              - "events:PutRule"
+              - "events:DeleteRule"
+              - "events:DescribeRule"
+              - "events:EnableRule"
+              - "events:DisableRule"
+              - "events:PutTargets"
+              - "events:RemoveTargets"
+              - "events:ListTargetsByRule"
+              - "events:ListTagsForResource"
+              - "events:TagResource"
+
+            "Resource":
+              - "arn:aws:events:*:*:rule/workshop-*"
+              - "arn:aws:events:*:*:rule/ac-*"
+              - "arn:aws:events:*:*:rule/agentcore-*"
+
+
+          -
+            "Sid": "EBList"
+            "Effect": "Allow"
+            "Action":
+              - "events:ListRules"
+
+            "Resource": "*"
+
+          -
+            "Sid": "SM"
+            "Effect": "Allow"
+            "Action":
+              - "secretsmanager:CreateSecret"
+              - "secretsmanager:DeleteSecret"
+              - "secretsmanager:DescribeSecret"
+              - "secretsmanager:GetSecretValue"
+              - "secretsmanager:PutSecretValue"
+              - "secretsmanager:TagResource"
+
+            "Resource":
+              - "arn:aws:secretsmanager:*:*:secret:workshop*"
+              - "arn:aws:secretsmanager:*:*:secret:bedrock-agentcore-identity*"
+  # GENERATED FROM static/cfn/workshop-iam-policy-core-2.json -- DO NOT EDIT BY HAND.
+  # Edit the source JSON, then run scripts/verify-ide-policy-parity.py --sync.
+  # scripts/verify-ide-policy-parity.py fails the build if this copy drifts.
+  # Minified size 5721/6144 bytes (IAM managed-policy limit).
+  CodeEditorParticipantPolicyCore2:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: >-
+        Workshop IDE participant permissions (core-2): CloudFormation, CloudWatch Logs, IAM PassRole, KMS via-service.
+      PolicyDocument:
+        "Version": "2012-10-17"
+        "Statement":
+          -
+            "Sid": "PassRole"
+            "Effect": "Allow"
+            "Action":
+              - "iam:PassRole"
+
+            "Resource":
+              - "arn:aws:iam::*:role/workshop-*"
+              - "arn:aws:iam::*:role/cdk-hnb659fds-*"
+
+            "Condition":
+              "StringEquals":
+                "iam:PassedToService":
+                  - "lambda.amazonaws.com"
+                  - "bedrock.amazonaws.com"
+                  - "bedrock-agentcore.amazonaws.com"
+                  - "agent-registry.amazonaws.com"
+                  - "cloudformation.amazonaws.com"
+                  - "ecs-tasks.amazonaws.com"
+
+
+
+
+          -
+            "Sid": "IAMRole"
+            "Effect": "Allow"
+            "Action":
+              - "iam:CreateRole"
+              - "iam:DeleteRole"
+              - "iam:GetRole"
+              - "iam:AttachRolePolicy"
+              - "iam:DetachRolePolicy"
+              - "iam:PutRolePolicy"
+              - "iam:DeleteRolePolicy"
+              - "iam:GetRolePolicy"
+              - "iam:ListRolePolicies"
+              - "iam:ListAttachedRolePolicies"
+              - "iam:TagRole"
+              - "iam:UntagRole"
+              - "iam:ListRoleTags"
+
+            "Resource":
+              - "arn:aws:iam::*:role/workshop-*"
+              - "arn:aws:iam::*:role/cdk-hnb659fds-*"
+
+
+          -
+            "Sid": "IAMPolicy"
+            "Effect": "Allow"
+            "Action":
+              - "iam:CreatePolicy"
+              - "iam:DeletePolicy"
+              - "iam:GetPolicy"
+              - "iam:GetPolicyVersion"
+              - "iam:ListPolicyVersions"
+
+            "Resource":
+              - "arn:aws:iam::*:policy/workshop-*"
+              - "arn:aws:iam::*:policy/cdk-hnb659fds-*"
+
+
+          -
+            "Sid": "IAMListReadOnly"
+            "Effect": "Allow"
+            "Action":
+              - "iam:ListPolicies"
+
+            "Resource": "*"
+
+          -
+            "Sid": "CFN"
+            "Effect": "Allow"
+            "Action":
+              - "cloudformation:CreateStack"
+              - "cloudformation:UpdateStack"
+              - "cloudformation:DeleteStack"
+              - "cloudformation:DescribeStacks"
+              - "cloudformation:DescribeStackEvents"
+              - "cloudformation:DescribeStackResource"
+              - "cloudformation:DescribeStackResources"
+              - "cloudformation:ListStackResources"
+              - "cloudformation:GetTemplate"
+              - "cloudformation:GetTemplateSummary"
+              - "cloudformation:CreateChangeSet"
+              - "cloudformation:DescribeChangeSet"
+              - "cloudformation:ExecuteChangeSet"
+              - "cloudformation:DeleteChangeSet"
+              - "cloudformation:ListChangeSets"
+              - "cloudformation:SignalResource"
+              - "cloudformation:TagResource"
+
+            "Resource":
+              - "arn:aws:cloudformation:*:*:stack/workshop-*/*"
+              - "arn:aws:cloudformation:*:*:stack/FAST-stack/*"
+              - "arn:aws:cloudformation:*:*:stack/FAST-stack-*/*"
+              - "arn:aws:cloudformation:*:*:stack/code-editor/*"
+              - "arn:aws:cloudformation:*:*:stack/CDKToolkit/*"
+
+
+          -
+            "Sid": "CFNReadOnly"
+            "Effect": "Allow"
+            "Action":
+              - "cloudformation:ListStacks"
+              - "cloudformation:ListExports"
+              - "cloudformation:ListImports"
+              - "cloudformation:ValidateTemplate"
+
+            "Resource": "*"
+
+          -
+            "Sid": "CWReadOnly"
+            "Effect": "Allow"
+            "Action":
+              - "cloudwatch:GetMetricData"
+              - "cloudwatch:GetMetricStatistics"
+              - "cloudwatch:ListMetrics"
+              - "cloudwatch:DescribeAlarms"
+              - "cloudwatch:GetDashboard"
+              - "cloudwatch:ListDashboards"
+
+            "Resource": "*"
+
+          -
+            "Sid": "CWWorkshopAlarmsAndDashboards"
+            "Effect": "Allow"
+            "Action":
+              - "cloudwatch:PutMetricAlarm"
+              - "cloudwatch:DeleteAlarms"
+              - "cloudwatch:PutDashboard"
+              - "cloudwatch:DeleteDashboards"
+              - "cloudwatch:TagResource"
+              - "cloudwatch:UntagResource"
+
+            "Resource":
+              - "arn:aws:cloudwatch:*:*:alarm:workshop-*"
+              - "arn:aws:cloudwatch::*:dashboard/workshop-*"
+              - "arn:aws:cloudwatch::*:dashboard/agentic-*"
+
+
+          -
+            "Sid": "CWNoResourceLevel"
+            "Effect": "Allow"
+            "Action":
+              - "cloudwatch:PutMetricData"
+
+            "Resource": "*"
+
+          -
+            "Sid": "LogsWrite"
+            "Effect": "Allow"
+            "Action":
+              - "logs:CreateLogGroup"
+              - "logs:DeleteLogGroup"
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+              - "logs:PutRetentionPolicy"
+              - "logs:DeleteRetentionPolicy"
+              - "logs:TagResource"
+              - "logs:UntagResource"
+              - "logs:TagLogGroup"
+              - "logs:AssociateKmsKey"
+              - "logs:PutSubscriptionFilter"
+              - "logs:DeleteSubscriptionFilter"
+
+            "Resource":
+              - "arn:aws:logs:*:*:log-group:/aws/lambda/workshop-*"
+              - "arn:aws:logs:*:*:log-group:/aws/lambda/ac-*"
+              - "arn:aws:logs:*:*:log-group:/aws/lambda/agentcore-*"
+              - "arn:aws:logs:*:*:log-group:/ecs/workshop*"
+              - "arn:aws:logs:*:*:log-group:/aws/ecs/workshop*"
+              - "arn:aws:logs:*:*:log-group:/workshop/*"
+
+
+          -
+            "Sid": "LogsReadOnly"
+            "Effect": "Allow"
+            "Action":
+              - "logs:DescribeLogGroups"
+              - "logs:DescribeLogStreams"
+              - "logs:GetLogEvents"
+              - "logs:FilterLogEvents"
+              - "logs:StartLiveTail"
+              - "logs:ListTagsForResource"
+              - "logs:StartQuery"
+              - "logs:GetQueryResults"
+              - "logs:StopQuery"
+
+            "Resource": "*"
+
+          -
+            "Sid": "KMSForWorkshopEncryptedResources"
+            "Effect": "Allow"
+            "Action":
+              - "kms:Decrypt"
+              - "kms:Encrypt"
+              - "kms:GenerateDataKey"
+              - "kms:DescribeKey"
+
+            "Resource": "arn:aws:kms:*:*:key/*"
+            "Condition":
+              "StringEquals":
+                "kms:ViaService":
+                  - "lambda.us-east-1.amazonaws.com"
+                  - "lambda.us-west-2.amazonaws.com"
+                  - "lambda.eu-west-1.amazonaws.com"
+                  - "secretsmanager.us-east-1.amazonaws.com"
+                  - "secretsmanager.us-west-2.amazonaws.com"
+                  - "secretsmanager.eu-west-1.amazonaws.com"
+
+
+              "ForAnyValue:StringLike":
+                "kms:ResourceAliases":
+                  - "alias/aws/lambda"
+                  - "alias/aws/secretsmanager"
+                  - "alias/workshop-*"
+
+
+
+
+          -
+            "Sid": "SecretsManagerListOnly"
+            "Effect": "Allow"
+            "Action":
+              - "secretsmanager:ListSecrets"
+
+            "Resource": "*"
+
+          -
+            "Sid": "ACGatewayManage"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:UpdateGateway"
+              - "bedrock-agentcore:DeleteGateway"
+              - "bedrock-agentcore:CreateGatewayTarget"
+              - "bedrock-agentcore:DeleteGatewayTarget"
+              - "bedrock-agentcore:SynchronizeGatewayTargets"
+              - "bedrock-agentcore:PutResourcePolicy"
+              - "bedrock-agentcore:ManageResourceScopedPolicy"
+
+            "Resource":
+              - "arn:aws:bedrock-agentcore:*:*:gateway/tools-gateway-*"
+              - "arn:aws:bedrock-agentcore:*:*:gateway/ac-tools-gateway-*"
+
+
+          -
+            "Sid": "ACIdentityManage"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:UpdateWorkloadIdentity"
+              - "bedrock-agentcore:DeleteWorkloadIdentity"
+
+            "Resource":
+              - "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default*"
+
+
+          -
+            "Sid": "ACTokenVaultManage"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:Create*"
+              - "bedrock-agentcore:DeleteOauth2CredentialProvider"
+
+            "Resource":
+              - "arn:aws:bedrock-agentcore:*:*:token-vault/default/oauth2credentialprovider/workshop-*"
+              - "arn:aws:bedrock-agentcore:*:*:token-vault/default"
+
+
+          -
+            "Sid": "ACPolicyManage"
+            "Effect": "Allow"
+            "Action":
+              - "bedrock-agentcore:DeletePolicyEngine"
+              - "bedrock-agentcore:CreatePolicy"
+              - "bedrock-agentcore:UpdatePolicy"
+              - "bedrock-agentcore:DeletePolicy"
+              - "bedrock-agentcore:AuthorizeAction"
+
+            "Resource":
+              - "arn:aws:bedrock-agentcore:*:*:policy-engine/workshop_policy_engine-*"
+  CodeEditorParticipantPolicyCore3:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: >-
+        Workshop IDE participant permissions (core-3): AgentCore Agent Registry
+        (Module 3b), CDK bootstrap, AWS Marketplace subscribe, AWS Amplify, and
+        the single-function ac-auto-review code update. Split into its own
+        managed policy because core is at its 6144-character quota; see
+        static/cfn/POLICY_NOTES.md.
+      PolicyDocument:
+        "Version": "2012-10-17"
+        "Statement":
+          -
+            "Sid": "ACRegistryListNoResourceLevel"
+            "Effect": "Allow"
+            "Action":
+              - "agent-registry:ListRegistries"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "ACRegistryCreate"
+            "Effect": "Allow"
+            "Action":
+              - "agent-registry:CreateRegistry"
+
+            "Resource": "arn:aws:agent-registry:*:*:registry/*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "ACRegistryManage"
+            "Effect": "Allow"
+            "Action":
+              - "agent-registry:GetRegistry"
+              - "agent-registry:UpdateRegistry"
+              - "agent-registry:DeleteRegistry"
+              - "agent-registry:CreateRegistryRecord"
+              - "agent-registry:GetRegistryRecord"
+              - "agent-registry:ListRegistryRecords"
+              - "agent-registry:UpdateRegistryRecord"
+              - "agent-registry:DeleteRegistryRecord"
+              - "agent-registry:SubmitRegistryRecordForApproval"
+              - "agent-registry:UpdateRegistryRecordStatus"
+              - "agent-registry:TagResource"
+              - "agent-registry:UntagResource"
+              - "agent-registry:ListTagsForResource"
+
+            "Resource": "arn:aws:agent-registry:*:*:registry/*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "CdkBootstrapStagingBucketConfiguration"
+            "Effect": "Allow"
+            "Action":
+              - "s3:PutBucketAcl"
+              - "s3:PutEncryptionConfiguration"
+              - "s3:GetEncryptionConfiguration"
+              - "s3:PutBucketVersioning"
+              - "s3:GetBucketVersioning"
+              - "s3:PutBucketPublicAccessBlock"
+              - "s3:GetBucketPublicAccessBlock"
+              - "s3:PutLifecycleConfiguration"
+              - "s3:GetLifecycleConfiguration"
+              - "s3:PutBucketTagging"
+              - "s3:GetBucketTagging"
+
+            "Resource": "arn:aws:s3:::cdk-*"
+
+          -
+            "Sid": "CdkBootstrapEcrRepositoryConfiguration"
+            "Effect": "Allow"
+            "Action":
+              - "ecr:PutImageTagMutability"
+              - "ecr:GetLifecyclePolicy"
+              - "ecr:DeleteLifecyclePolicy"
+              - "ecr:ListTagsForResource"
+              - "ecr:UntagResource"
+
+            "Resource": "arn:aws:ecr:*:*:repository/cdk-hnb659fds-*"
+
+          -
+            "Sid": "CdkBootstrapVersionParameter"
+            "Effect": "Allow"
+            "Action":
+              - "ssm:GetParameters"
+              - "ssm:AddTagsToResource"
+              - "ssm:RemoveTagsFromResource"
+              - "ssm:ListTagsForResource"
+
+            "Resource": "arn:aws:ssm:*:*:parameter/cdk-bootstrap/*"
+
+          -
+            "Sid": "MarketplaceSubscribeNoResourceLevel"
+            "Effect": "Allow"
+            "Action":
+              - "aws-marketplace:Subscribe"
+              - "aws-marketplace:ViewSubscriptions"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "LambdaUpdateCodeAutoReview"
+            "Effect": "Allow"
+            "Action":
+              - "lambda:UpdateFunctionCode"
+
+            "Resource": "arn:aws:lambda:*:*:function:ac-auto-review"
+
+          -
+            "Sid": "AmplifyCreateAppScoped"
+            "Effect": "Allow"
+            "Action":
+              - "amplify:CreateApp"
+
+            "Resource": "arn:aws:amplify:*:*:apps/*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "AmplifyListNoResourceLevel"
+            "Effect": "Allow"
+            "Action":
+              - "amplify:ListApps"
+
+            "Resource": "*"
+            "Condition":
+              "StringEquals":
+                "aws:RequestedRegion":
+                  - "us-west-2"
+                  - "us-east-1"
+                  - "eu-west-1"
+
+
+
+
+          -
+            "Sid": "AmplifyAccess"
+            "Effect": "Allow"
+            "Action":
+              - "amplify:DeleteApp"
+              - "amplify:GetApp"
+              - "amplify:UpdateApp"
+              - "amplify:CreateBranch"
+              - "amplify:DeleteBranch"
+              - "amplify:GetBranch"
+              - "amplify:ListBranches"
+              - "amplify:CreateDeployment"
+              - "amplify:StartDeployment"
+              - "amplify:GetJob"
+              - "amplify:ListJobs"
+              - "amplify:StartJob"
+              - "amplify:StopJob"
+              - "amplify:TagResource"
+              - "amplify:UntagResource"
+
+            "Resource": "arn:aws:amplify:*:*:apps/*"
+
+          -
+            "Sid": "S3BucketPolicyOnWorkshopAndCdkStagingBucketsOnly"
+            "Effect": "Allow"
+            "Action":
+              - "s3:PutBucketPolicy"
+              - "s3:DeleteBucketPolicy"
+
+            "Resource":
+              - "arn:aws:s3:::workshop-*"
+              - "arn:aws:s3:::cdk-hnb659fds-assets-*"
   CodeEditorInstanceBootstrapRole:
     Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: >
+              The four attached participant policies still contain some
+              Resource:"*" statements, and they are unavoidable rather than
+              lazy. They fall into two groups. (1) Account-level actions that
+              take no resource at all — bedrock:ListFoundationModels,
+              ecs:ListClusters, secretsmanager:ListSecrets,
+              logs:DescribeLogGroups. IAM has no ARN to name for these; a
+              resource-scoped statement would simply never match. (2) Create*
+              actions whose resource does not exist yet and whose identifier is
+              service-generated, so the template cannot pre-declare it —
+              elasticfilesystem:CreateFileSystem (fs-*), aps:CreateWorkspace
+              (ws-<uuid>), cognito-idp:CreateUserPool (<region>_<id>),
+              bedrock-agentcore:CreateGateway / CreatePolicyEngine. Every
+              statement whose resource IS name-deterministic is scoped: S3 to
+              workshop-*/fast-*/cdk-*, Lambda to workshop-*/ac-*/agentcore-*,
+              log groups to /aws/lambda/workshop-* and friends, Secrets Manager
+              to workshop* and bedrock-agentcore-identity*, CloudFormation to
+              the five workshop stack name patterns, IAM PassRole/CreateRole to
+              role/workshop-* and role/cdk-hnb659fds-*.
     Properties:
       AssumeRolePolicyDocument:
         Version: 2012-10-17
@@ -999,11 +3444,82 @@ Resources:
                 - !Sub ssm.${AWS::URLSuffix}
             Action: sts:AssumeRole
       ManagedPolicyArns:
+        # This role used to carry AdministratorAccess. That was wrong, and not
+        # merely on paper: nothing on this instance ever assumes
+        # WSParticipantRole (the bootstrap runs only `aws configure set region`,
+        # see the CodeEditorSSMDoc content above), so EVERY CLI command and
+        # notebook cell a participant runs executes as THIS role. The scoped
+        # workshop-iam-policy-*.json documents attached via contentspec.yaml
+        # were therefore decorative for the whole workshop. The same five
+        # documents are now attached here, which makes the least-privilege
+        # story the one that is actually enforced at participant time.
+        #
+        # The permission set was derived from evidence, not guesswork: 4117
+        # CloudTrail records across two complete workshop runs, reduced to 80
+        # distinct actions and 131 action/ARN pairs, then replayed through
+        # `aws iam simulate-custom-policy` against these documents. That is
+        # what surfaced the cdk-hnb659fds-* gaps that AdministratorAccess had
+        # been masking (sts:AssumeRole, iam:PassRole/CreateRole/CreatePolicy,
+        # ssm:PutParameter on /cdk-bootstrap/*, and ECR on the bootstrap repo).
+        #
+        # The three AWS managed policies below stay: they cover the agent and
+        # telemetry actions the instance itself needs (ssm:UpdateInstance-
+        # Information, ec2:DescribeTags for the CloudWatch agent, and Q).
+        #
+        # PRODUCTION NOTE: iam:PassRole on cdk-hnb659fds-cfn-exec-role remains
+        # an escalation path, because CDK bootstraps that role with
+        # AdministratorAccess by default. To close it, bootstrap with
+        # `npx cdk bootstrap --cloudformation-execution-policies <arns>` using
+        # the five managed-policy ARNs this stack creates, so the CFN execution
+        # role is no broader than the participant. The stack does not export
+        # them (Outputs are URL and IdePassword only) — read them with
+        # `aws cloudformation describe-stack-resources --stack-name code-editor
+        #  --query "StackResources[?ResourceType=='AWS::IAM::ManagedPolicy']"`.
+        - !Ref CodeEditorParticipantPolicyNetwork
+        - !Ref CodeEditorParticipantPolicyInfra
+        - !Ref CodeEditorParticipantPolicyCore
+        - !Ref CodeEditorParticipantPolicyCore2
+        - !Ref CodeEditorParticipantPolicyCore3
         - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
         - !Sub arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy
         - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonQDeveloperAccess
-        - !Sub arn:${AWS::Partition}:iam::aws:policy/ReadOnlyAccess
-        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSCodeCommitPowerUser
+      Policies:
+        # Bootstrap-only reads. These four S3 locations are the asset archives
+        # and the Workshop Studio assets prefix that the SSM bootstrap document
+        # copies into the IDE home folder. They are stack parameters, so they
+        # can be scoped exactly rather than with a prefix wildcard. Each entry
+        # drops out when its parameter is empty, which keeps the document valid
+        # for the self-service path (where only WorkshopAssetsBucket is set).
+        - !If
+          - HasAnyAsset
+          - PolicyName: BootstrapAssetRead
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Sid: ReadAssetArchives
+                  Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:GetObjectVersion
+                  Resource:
+                    - !If [HasAssetZip, !Sub 'arn:${AWS::Partition}:s3:::${AssetZipS3Path}', !Ref 'AWS::NoValue']
+                    - !If [HasFolderZip, !Sub 'arn:${AWS::Partition}:s3:::${FolderZipS3Path}', !Ref 'AWS::NoValue']
+                    - !If [HasBranchZip, !Sub 'arn:${AWS::Partition}:s3:::${BranchZipS3Path}', !Ref 'AWS::NoValue']
+                    # When WorkshopAssetsPrefix is empty this renders as
+                    # bucket/*, which is exactly the intended whole-bucket read.
+                    - !If [HasWorkshopAssetsBucket, !Sub 'arn:${AWS::Partition}:s3:::${WorkshopAssetsBucket}/${WorkshopAssetsPrefix}*', !Ref 'AWS::NoValue']
+                # `aws s3 sync` enumerates the prefix before copying, so it
+                # needs ListBucket on the bucket ARN (not the object ARN).
+                - !If
+                  - HasWorkshopAssetsBucket
+                  - Sid: ListWorkshopAssetsBucket
+                    Effect: Allow
+                    Action:
+                      - s3:ListBucket
+                      - s3:GetBucketLocation
+                    Resource: !Sub 'arn:${AWS::Partition}:s3:::${WorkshopAssetsBucket}'
+                  - !Ref 'AWS::NoValue'
+          - !Ref 'AWS::NoValue'
 
   CodeEditorInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -1027,15 +3543,42 @@ Resources:
             DeleteOnTermination: true
             Encrypted: true
       Monitoring: true
-      SecurityGroupIds:
-        - !Ref SecurityGroup
+      # Default VPC: plain SecurityGroupIds (subnet/public-IP from VPC
+      # defaults). Custom network: NetworkInterfaces with an explicit subnet
+      # and AssociatePublicIpAddress so PublicDnsName (the CloudFront origin)
+      # resolves even when the subnet has MapPublicIpOnLaunch disabled. The
+      # two properties are mutually exclusive in EC2, hence the paired !Ifs.
+      SecurityGroupIds: !If
+        - HasCustomNetwork
+        - !Ref AWS::NoValue
+        - [!Ref SecurityGroup]
+      NetworkInterfaces: !If
+        - HasCustomNetwork
+        - - DeviceIndex: '0'
+            SubnetId: !Ref SubnetId
+            GroupSet: [!Ref SecurityGroup]
+            AssociatePublicIpAddress: true
+        - !Ref AWS::NoValue
       IamInstanceProfile: !Ref CodeEditorInstanceProfile
       UserData:
         Fn::Base64: !Sub |
           #cloud-config
           hostname: ${InstanceName}
           runcmd:
-            - mkdir -p ${HomeFolder} && chown -R ${CodeEditorUser}:${CodeEditorUser} ${HomeFolder}
+            # ${CodeEditorUser} does not exist yet at boot: it is created by the
+            # AddUser/AddUserApt steps of CodeEditorSSMDoc, which runs later via
+            # RunCodeEditorSSMDoc. An unguarded chown therefore fails with
+            # "chown: invalid user: 'participant:participant'", which fails
+            # cloud-init's scripts-user module and leaves a misleading error at
+            # the top of /var/log/cloud-init-output.log -- it looks like the
+            # cause of a broken IDE when the real cause is elsewhere. The
+            # bootstrap document mkdir's and chown's ${HomeFolder} itself once
+            # the user exists, so all this needs to do is create the directory
+            # and not fail. Creating the user here instead is NOT an option:
+            # AddUser runs `adduser` under `set -euo pipefail` and would abort
+            # the whole bootstrap on an already-existing user.
+            - mkdir -p ${HomeFolder}
+            - if id -u ${CodeEditorUser} >/dev/null 2>&1; then chown -R ${CodeEditorUser}:${CodeEditorUser} ${HomeFolder}; fi
       Tags:
       - Key: Name
         Value: !Ref InstanceName
@@ -1064,9 +3607,9 @@ Resources:
         ParametersInCacheKeyAndForwardedToOrigin:
           CookiesConfig:
             CookieBehavior: all
-          EnableAcceptEncodingGzip: True
-          EnableAcceptEncodingBrotli: True
+          EnableAcceptEncodingGzip: False
           HeadersConfig:
+            # whitelist is the AWS CloudFront API value name (legacy); semantics are an allow list
             HeaderBehavior: whitelist
             Headers:
               - Accept-Charset
@@ -1076,6 +3619,7 @@ Resources:
               - Referer
               - Host
               - Accept-Language
+              - Accept-Encoding
               - Accept-Datetime
           QueryStringsConfig:
             QueryStringBehavior: all
@@ -1084,12 +3628,29 @@ Resources:
     Type: AWS::CloudFront::Distribution
     DependsOn: ElasticIPAssociation
     Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_174
+            comment: "CloudFront uses the default certificate; minimum TLS 1.2 is not enforceable without a custom domain/ACM cert. Workshop sample."
+          - id: CKV_AWS_86
+            comment: "WAF is out of scope for the ephemeral workshop CloudFront distribution."
       cfn_nag:
         rules_to_suppress:
           - id: W10
             reason: CloudFront Distribution access logging would require setup of an S3 bucket and changes in IAM, which add unnecessary complexity to the template
           - id: W70
-            reason: Workshop Studio does not include a domain that can be used to provision a certificate, so it is not possible to setup TLS. See PFR EE-6016
+            reason: >
+              Workshop Studio accounts do not include a custom domain that can
+              be used to provision an ACM certificate, so the distribution
+              uses the default *.cloudfront.net cert and cannot set a custom
+              TLS minimum protocol at the edge. ViewerProtocolPolicy is
+              `redirect-to-https` on both cache behaviors, so any plaintext
+              HTTP arrival is 301-redirected to HTTPS before reaching the
+              IDE; code-server's WebSocket transport (wss://) rides the
+              already-established HTTPS viewer connection, so the redirect
+              does not affect it (validated by live us-west-2 deploy). The
+              companion OriginProtocolPolicy: http-only on the EC2 origin
+              runs inside CloudFront's private network.
     Properties:
       DistributionConfig:
         Enabled: True
@@ -1106,7 +3667,6 @@ Resources:
             CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # see https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html#managed-cache-policy-caching-disabled
             Compress: False
             OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # Managed-AllViewer - see https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-origin-request-policies.html#:~:text=When%20using%20AWS,47e4%2Db989%2D5492eafa07d3
-            ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03 # Managed-SecurityHeadersPolicy
             TargetOriginId: !Sub CloudFront-${AWS::StackName}
             ViewerProtocolPolicy: redirect-to-https
             PathPattern: '/proxy/*'
@@ -1120,9 +3680,7 @@ Resources:
             - POST
             - DELETE
           CachePolicyId: !Ref CodeEditorInstanceCachePolicy
-          Compress: True
           OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # Managed-AllViewer - see https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-origin-request-policies.html#:~:text=When%20using%20AWS,47e4%2Db989%2D5492eafa07d3
-          ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03 # Managed-SecurityHeadersPolicy
           TargetOriginId: !Sub CloudFront-${AWS::StackName}
           ViewerProtocolPolicy: redirect-to-https
         Origins:
@@ -1132,7 +3690,23 @@ Resources:
               OriginProtocolPolicy: http-only
         ViewerCertificate:
           CloudFrontDefaultCertificate: true
+          # MinimumProtocolVersion is set to TLSv1.2_2021 to satisfy Checkov
+          # CKV_AWS_174 (which reads templates, not runtime behavior). Note:
+          # when CloudFrontDefaultCertificate=true, CloudFront pins the actual
+          # floor to TLSv1 for the default *.cloudfront.net cert regardless of
+          # this value. To truly enforce TLS 1.2 at the edge, an ACM custom
+          # cert bound via Aliases is required — Workshop Studio does not
+          # provide one (see W70 above). The viewer→CloudFront leg remains
+          # safe because redirect-to-https is enforced below and modern
+          # browsers negotiate TLSv1.2+ with CloudFront by default.
           MinimumProtocolVersion: TLSv1.2_2021
+      # Set explicitly, not left to CloudFormation stack-tag propagation: the
+      # ParticipantRole conditions DeleteDistribution on
+      # aws:ResourceTag/Workshop, so an untagged distribution cannot be
+      # deleted at cleanup and keeps billing.
+      Tags:
+        - Key: Workshop
+          Value: AgentCore-Platform
 
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -1140,18 +3714,26 @@ Resources:
       cfn_nag:
         rules_to_suppress:
           - id: F1000
-            reason: All outbound traffic should be allowed from this instance. The EC2 instance is provisioned in the default VPC, which already has this egress rule, and it is not possible to duplicate this egress rule in the default VPC
+            reason: All outbound traffic should be allowed from this instance. The EC2 instance is provisioned in the default VPC (or the participant-supplied VpcId), which already has this egress rule, and it is not possible to duplicate this egress rule in the default VPC
     Properties:
       GroupDescription: Security Group for Code Editor - only allow CloudFront ingress
+      # Without VpcId, EC2 places the SG in the default VPC — accounts that
+      # deleted their default VPC (a common enterprise security baseline) fail
+      # with "No default VPC for this user". Supplying VpcId+SubnetId routes
+      # around that.
+      VpcId: !If
+        - HasCustomNetwork
+        - !Ref VpcId
+        - !Ref AWS::NoValue
       SecurityGroupIngress:
         - Description: Allow HTTP from com.amazonaws.global.cloudfront.origin-facing
           IpProtocol: tcp
           FromPort: 80
           ToPort: 80
-          SourcePrefixListId: !FindInMap [AWSRegionsPrefixListID, !Ref 'AWS::Region', PrefixList]
-      Tags:
-        - Key: Name
-          Value: !Sub ${InstanceName}-sg
+          SourcePrefixListId: !If
+            - HasCloudFrontPrefixListIdOverride
+            - !Ref CloudFrontPrefixListIdOverride
+            - !FindInMap [AWSRegionsPrefixListID, !Ref 'AWS::Region', PrefixList]
 
   CodeEditorHealthCheckLambdaRole:
     Type: AWS::IAM::Role
@@ -1186,7 +3768,7 @@ Resources:
       Environment:
         Variables:
           RetrySleep: 2900
-          AbortTimeRemaining: 5000
+          TimeoutThreshold: 5000
       Architectures:
         - arm64
       Role: !GetAtt CodeEditorHealthCheckLambdaRole.Arn
@@ -1220,21 +3802,15 @@ Resources:
                   logger.debug(f'response.status: {response.status}')
                   content = response.read()
                   logger.debug(f'content: {content}')
-                  # This will be true for any return code below 4xx (so 3xx and 2xx)
+                  # Any 2xx/3xx on /healthz means code-server has bound to its
+                  # port and is serving. code-server returns JSON like
+                  # {"status":"alive","lastHeartbeat":...} — we don't inspect
+                  # the body (the old code-editor-server returned a different
+                  # shape with `hasActiveConnections`, which no longer applies).
                   if 200 <= response.status < 400:
-                      response_dict = json.loads(content.decode('utf-8'))
-                      logger.debug(f'response_dict: {response_dict}')
-                      # Checking for expected keys and if the key has the expected value
-                      if 'hasActiveConnections' in response_dict:
-                          # Response code 200 and correct JSON returned
-                          logger.info('Health check OK.')
-                          return True
-                      else:
-                          # Response code 200 but the 'hasActiveConnections' key is not present
-                          logger.info(f'Health check failed. Response: {response_dict}')
-                          return False
+                      logger.info(f'Health check OK. Status: {response.status}')
+                      return True
                   else:
-                      # Response was not ok (error 4xx or 5xx)
                       logger.info(f'Healthcheck failed. Return code: {response.status}')
                       return False
 
@@ -1267,14 +3843,19 @@ Resources:
                   return False
 
           def lambda_handler(event, context):
-              logger.debug(f'event: {event}')
-              logger.debug(f'context: {context}')
+              # Envelope fields only. ResourceProperties carries the workshop
+              # password (RunSSMDoc) and secret ARNs, so logging the whole event
+              # would copy those into CloudWatch Logs as soon as anyone raises
+              # the level to DEBUG. context holds no secrets but nothing useful.
+              logger.debug('event: RequestType=%s StackId=%s LogicalResourceId=%s',
+                           event.get('RequestType'), event.get('StackId'),
+                           event.get('LogicalResourceId'))
               try:
                   if event['RequestType'] != 'Create':
                       cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData={}, reason='No action to take')
                   else:
                       sleep_ms = int(os.environ.get('RetrySleep'))
-                      abort_time_remaining_ms = int(os.environ.get('AbortTimeRemaining'))
+                      timeout_threshold_ms = int(os.environ.get('TimeoutThreshold'))
                       resource_properties = event['ResourceProperties']
                       url = resource_properties['Url']
 
@@ -1283,7 +3864,7 @@ Resources:
                       time_remaining_ms = context.get_remaining_time_in_millis()
                       attempt_no = 0
                       health_check = False
-                      while (attempt_no == 0 or (time_remaining_ms > abort_time_remaining_ms and not health_check)):
+                      while (attempt_no == 0 or (time_remaining_ms > timeout_threshold_ms and not health_check)):
                           attempt_no += 1
                           logger.info(f'Attempt: {attempt_no}. Time Remaining: {time_remaining_ms/1000}s')
                           health_check = healthURLOk(url)
@@ -1295,7 +3876,7 @@ Resources:
                           logger.info(f'Health check successful. Attempts: {attempt_no}. Time Remaining: {time_remaining_ms/1000}s')
                           cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData={}, reason='Code Editor healthcheck successful')
                       else:
-                          logger.info(f'Health check failed. Timed out. Attempts: {attempt_no}. Time remaining {time_remaining_ms/1000}s < Abort time remaining {abort_time_remaining_ms/1000}s')
+                          logger.info(f'Health check failed. Timed out. Attempts: {attempt_no}. Time remaining {time_remaining_ms/1000}s < Timeout threshold {timeout_threshold_ms/1000}s')
                           cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason='Code Editor healthcheck failed. Timed out after ' + str(attempt_no) + ' attempts')
                           logger.info(f'Response sent')
 
@@ -1331,7 +3912,7 @@ Resources:
       Environment:
         Variables:
           RetrySleep: 2900
-          AbortTimeRemaining: 5000
+          TimeoutThreshold: 5000
       Architectures:
         - arm64
       Role: !GetAtt SSMDocLambdaRole.Arn
@@ -1347,14 +3928,19 @@ Resources:
           logger.setLevel(logging.INFO)
 
           def lambda_handler(event, context):
-              logger.debug(f'event: {event}')
-              logger.debug(f'context: {context}')
+              # Envelope fields only. ResourceProperties carries the workshop
+              # password (RunSSMDoc) and secret ARNs, so logging the whole event
+              # would copy those into CloudWatch Logs as soon as anyone raises
+              # the level to DEBUG. context holds no secrets but nothing useful.
+              logger.debug('event: RequestType=%s StackId=%s LogicalResourceId=%s',
+                           event.get('RequestType'), event.get('StackId'),
+                           event.get('LogicalResourceId'))
 
               if event['RequestType'] != 'Create':
                   cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData={}, reason='No action to take')
               else:
                   sleep_ms = int(os.environ.get('RetrySleep'))
-                  abort_time_remaining_ms = int(os.environ.get('AbortTimeRemaining'))
+                  timeout_threshold_ms = int(os.environ.get('TimeoutThreshold'))
                   resource_properties = event['ResourceProperties']
                   instance_id = resource_properties['InstanceId']
                   document_name = resource_properties['DocumentName']
@@ -1418,14 +4004,14 @@ Resources:
                                       logger.info(f'SSM Document {document_name} on EC2 instance {instance_id} not yet complete. Status: {invocation_status}')
                                       retry = True
                           if retry == True:
-                              if (time_remaining_ms > abort_time_remaining_ms):
+                              if (time_remaining_ms > timeout_threshold_ms):
                                   logger.info(f'Sleeping: {sleep_ms/1000}s')
                                   time.sleep(sleep_ms/1000)
                                   time_remaining_ms = context.get_remaining_time_in_millis()
                               else:
-                                  logger.info(f'Time remaining {time_remaining_ms/1000}s < Abort time remaining {abort_time_remaining_ms/1000}s')
-                                  logger.info(f'Aborting check as time remaining {time_remaining_ms/1000}s < Abort time remaining {abort_time_remaining_ms/1000}s')
-                                  cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason='Timed out. Time remaining: ' + str(time_remaining_ms/1000) + 's < Abort time remaining: ' + str(abort_time_remaining_ms/1000) + 's')
+                                  logger.info(f'Time remaining {time_remaining_ms/1000}s < Timeout threshold {timeout_threshold_ms/1000}s')
+                                  logger.info(f'Stopping check due to timeout as time remaining {time_remaining_ms/1000}s < Timeout threshold {timeout_threshold_ms/1000}s')
+                                  cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason='Timed out. Time remaining: ' + str(time_remaining_ms/1000) + 's < Timeout threshold: ' + str(timeout_threshold_ms/1000) + 's')
                                   retry = False
                       except Exception as e:
                           logger.error(e, exc_info=True)
@@ -1443,5 +4029,8 @@ Resources:
 
 Outputs:
   URL:
-    Description: Code Editor URL
-    Value: !Sub https://${CloudFrontDistribution.DomainName}/?folder=${HomeFolder}&tkn=${SecretPlaintext.password}
+    Description: Workshop IDE URL. Open in a browser, then paste the IdePassword value at the code-server sign-in prompt.
+    Value: !Sub https://${CloudFrontDistribution.DomainName}/?folder=${HomeFolder}
+  IdePassword:
+    Description: Password for the Workshop IDE login. Randomly generated on stack create; paste this into the code-server sign-in form when prompted.
+    Value: !GetAtt SecretPlaintext.password

@@ -1,4 +1,4 @@
-# Building an Enterprise Agentic AI Platform on Amazon Bedrock AgentCore
+# Building an enterprise agentic AI platform on Amazon Bedrock AgentCore
 
 A hands-on AWS workshop for building an enterprise-style landing-zone pattern for agentic AI
 workloads on Amazon Bedrock and Amazon Bedrock AgentCore. You assemble governed model access,

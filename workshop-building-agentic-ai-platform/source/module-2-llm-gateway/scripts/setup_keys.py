@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 import time
 
 import boto3
@@ -48,23 +50,30 @@ def get_admin_key(secret_arn: str, region: str) -> str:
 
 
 # Core workshop models to register via /model/new API.
-# The full 70-model catalog is in cfn/litellm-config.yaml for reference.
+# The full 55-alias catalog is in reference/litellm-config.yaml for reference.
+# That file is reference documentation only — it is NOT mounted into the
+# container; this table is what the deployed proxy actually serves.
 #
 # This catalog is REGION-INDEPENDENT. Each entry is:
 #   (alias, bare_suffix, needs_profile, prefer_global)
 # where ``bare_suffix`` carries NO geo/global prefix and NO ``bedrock/`` segment.
 # The concrete LiteLLM model string is built at registration time via
-# ``bedrock_region.model_id(suffix, region, needs_profile, prefer_global)`` so a
-# deploy in any region resolves the correct identifier.
+# ``bedrock_region.resolve(...)``, which orders the candidate flavors by these
+# flags and then returns the first one the deploy region actually reports as
+# invocable — so one table works in every region.
 #
-# Selection rules (see bedrock_region.py + region_decisions.md):
+# The flags are PREFERENCE HINTS, not assertions:
 #   - Claude 4.x, Nova-2, and any model with a ``global.`` profile -> prefer_global=True
 #     (region-agnostic, zero geo derivation).
 #   - Older Nova v1 / Llama / Mistral-large / DeepSeek -> needs_profile=True,
 #     prefer_global=False (geo prefix derived from the deploy region).
-#   - Bare foundation models (titan, cohere, ai21) -> needs_profile=False (no prefix).
+#   - Bare foundation models (cohere, mistral-large-3, deepseek-v3) -> needs_profile=False.
+# A model with no invocable flavor in the deploy region is SKIPPED, so
+# participants never see an endpoint that 400s at invoke time. Regional gaps are
+# real: verified live on 2026-08-15, eu-west-1 carries neither the Llama nor the
+# DeepSeek entries below.
 WORKSHOP_MODELS = [
-    # Anthropic Claude 4.x — global. inference profile (region-agnostic)
+    # Anthropic Claude 4.x — global. inference profile (region-agnostic).
     ("claude-opus", "anthropic.claude-opus-4-6-v1", True, True),
     ("claude-sonnet", "anthropic.claude-sonnet-4-6", True, True),
     ("claude-haiku", "anthropic.claude-haiku-4-5-20251001-v1:0", True, True),
@@ -73,26 +82,25 @@ WORKSHOP_MODELS = [
     ("claude-opus-4.5", "anthropic.claude-opus-4-5-20251101-v1:0", True, True),
     ("claude-sonnet-4.5", "anthropic.claude-sonnet-4-5-20250929-v1:0", True, True),
     ("claude-haiku-4.5", "anthropic.claude-haiku-4-5-20251001-v1:0", True, True),
-    ("claude-opus-4.1", "anthropic.claude-opus-4-1-20250805-v1:0", True, True),
-    ("claude-sonnet-4", "anthropic.claude-sonnet-4-20250514-v1:0", True, True),
-    ("claude-3.5-haiku", "anthropic.claude-3-5-haiku-20241022-v1:0", True, True),
-    # Amazon Nova — Nova-2 uses global.; older Nova v1 uses geo-scoped profiles
-    ("nova-premier", "amazon.nova-premier-v1:0", True, False),
+    # Claude 4 and 4.1 are deliberately absent: superseded by the 4.5/4.6
+    # entries above, which cover every capability they had.
+    # Amazon Nova — Nova-2 uses global.; older Nova v1 uses geo-scoped profiles.
+    # Nova Premier v1 is omitted as superseded by the Nova 2 family.
     ("nova-pro", "amazon.nova-pro-v1:0", True, False),
     ("nova-lite", "amazon.nova-lite-v1:0", True, False),
     ("nova-2-lite", "amazon.nova-2-lite-v1:0", True, True),
     # Meta Llama — geo-scoped inference profiles (no global. profile)
     ("llama3.3-70b", "meta.llama3-3-70b-instruct-v1:0", True, False),
     ("llama3.1-70b", "meta.llama3-1-70b-instruct-v1:0", True, False),
-    # Mistral — large needs a geo-scoped profile; large-2407 is a bare model
-    ("mistral-large-3", "mistral.mistral-large-3-675b-instruct", True, False),
+    # Mistral — both are bare ON_DEMAND models; Mistral has no geo profiles
+    ("mistral-large-3", "mistral.mistral-large-3-675b-instruct", False, False),
     ("mistral-large", "mistral.mistral-large-2407-v1:0", False, False),
-    # Cohere — bare foundation models (no prefix)
-    ("cohere-command-r-plus", "cohere.command-r-plus-v1:0", False, False),
-    ("cohere-command-r", "cohere.command-r-v1:0", False, False),
-    # DeepSeek — geo-scoped inference profiles
+    # Cohere Command R and Command R+ are deliberately absent: both reach end of
+    # life on Bedrock on 2026-08-19, so registering either would hand
+    # participants an endpoint that stops working during the workshop's lifetime.
+    # DeepSeek — r1 is a geo-scoped profile, v3 is a bare ON_DEMAND model
     ("deepseek-r1", "deepseek.r1-v1:0", True, False),
-    ("deepseek-v3", "deepseek.v3-v1:0", True, False),
+    ("deepseek-v3", "deepseek.v3-v1:0", False, False),
 ]
 
 
@@ -128,17 +136,37 @@ def register_models(proxy_url: str, headers: dict, region: str) -> int:
 
     Deletes all existing model entries first, so that model ID updates
     (e.g. switching to inference profile IDs) are applied cleanly.
+
+    Models with no invocable form in ``region`` are skipped and listed, rather
+    than registered as endpoints that would fail at invoke time.
     """
     deleted = _delete_existing_models(proxy_url, headers)
     if deleted:
         print(f"    Cleaned up {deleted} existing model entries.")
 
-    registered = 0
-    for model_name, suffix, needs_profile, prefer_global in WORKSHOP_MODELS:
-        # Build the region-correct LiteLLM model id at registration time.
-        litellm_model = bedrock_region.model_id(
-            suffix, region, needs_profile=needs_profile, prefer_global=prefer_global
+    # One inventory lookup for the whole catalog (cached inside the helper).
+    available = bedrock_region.available_ids(region)
+    if available is None:
+        print(
+            "    Note: could not read the Bedrock model inventory "
+            f"(needs bedrock:ListFoundationModels / ListInferenceProfiles in {region}); "
+            "registering the full catalog unvalidated."
         )
+
+    registered = 0
+    skipped = []
+    for model_name, suffix, needs_profile, prefer_global in WORKSHOP_MODELS:
+        # Resolve to a model id this region actually reports as invocable.
+        litellm_model = bedrock_region.resolve(
+            suffix,
+            region,
+            needs_profile=needs_profile,
+            prefer_global=prefer_global,
+            available=available,
+        )
+        if litellm_model is None:
+            skipped.append(model_name)
+            continue
         try:
             resp = requests.post(
                 f"{proxy_url}/model/new",
@@ -160,6 +188,11 @@ def register_models(proxy_url: str, headers: dict, region: str) -> int:
                 print(f"    Warning: Failed to register {model_name}: {resp.status_code}")
         except Exception as e:
             print(f"    Warning: Failed to register {model_name}: {e}")
+    if skipped:
+        print(
+            f"    Skipped {len(skipped)} model(s) not offered in {region}: "
+            + ", ".join(skipped)
+        )
     return registered
 
 
@@ -176,6 +209,50 @@ def wait_for_proxy(proxy_url: str, retries: int = 20, interval: int = 5) -> bool
         print(f"  Waiting for proxy... ({i}/{retries})")
         time.sleep(interval)
     return False
+
+
+def _mask(secret: str) -> str:
+    """Confirm a key exists without revealing any of its bytes.
+
+    Every caller prints the key's name or env-var name alongside this value, so
+    no leading/trailing characters are needed to tell the keys apart — the length
+    is enough to distinguish a real key from a short or empty lookup failure,
+    and a failed lookup cannot masquerade as a real key.
+    """
+    if not secret:
+        return "(not created)"
+    if len(secret) <= 12:
+        return "(unexpectedly short — check the proxy response)"
+    return f"(value not printed — {len(secret)} chars)"
+
+
+def _write_env_file(proxy_url: str, api_key: str, admin_key: str) -> str:
+    """Persist the three exports so a new terminal can `source` them.
+
+    Tries /workshop first (where the workshop tree lives), then $HOME, then the
+    system temp directory. The third location exists so that "nowhere was
+    writable" is not a realistic outcome: the alternative used to be printing
+    both live keys to stdout, and a credential in terminal scrollback is worse
+    than a credential in a 0600 file under /tmp. Returns the path written, or ""
+    if even the temp directory is unwritable.
+    """
+    lines = [
+        "# Written by setup_keys.py — source this file in a new terminal.",
+        f"export LLM_GATEWAY_URL={proxy_url}",
+        f"export LLM_GATEWAY_API_KEY={api_key}",
+        f"export LLM_GATEWAY_ADMIN_KEY={admin_key}",
+        "",
+    ]
+    for base in ("/workshop", os.path.expanduser("~"), tempfile.gettempdir()):
+        path = os.path.join(base, ".llm-gateway-env")
+        try:
+            with open(path, "w") as f:
+                f.write("\n".join(lines))
+            os.chmod(path, 0o600)  # contains live virtual keys
+            return path
+        except OSError:
+            continue
+    return ""
 
 
 def main() -> None:
@@ -351,7 +428,7 @@ def main() -> None:
         virtual_key = key_data.get("key", "")
         keys[key_name] = virtual_key
         group_label = f" → Cognito '{cognito_group}'" if cognito_pool_id else ""
-        print(f"  Created key '{key_name}' = {virtual_key[:16]}... (budget=${budget}){group_label}")
+        print(f"  Created key '{key_name}' {_mask(virtual_key)} (budget=${budget}){group_label}")
     print()
 
     # Step 6: Test completion with the dev key
@@ -389,24 +466,57 @@ def main() -> None:
     print("  Setup complete!")
     print("=" * 55)
     print()
-    print("  Export these for use in other scripts and the notebook.")
+    print("  Two credentials are now set up for the rest of this module.")
     print("  LLM_GATEWAY_API_KEY is the 'workshop-dev-key' virtual key —")
     print("  the scoped, developer-facing key the workshop uses for all")
     print("  chat calls. LLM_GATEWAY_ADMIN_KEY is the administrative key")
     print("  used for spend + key management endpoints only.")
     print()
-    print(f"    export LLM_GATEWAY_URL={proxy_url}")
-    # These are the participant's own freshly-created, budget-scoped ephemeral keys
-    # printed to their own terminal. The Module 2 CLI walkthrough (content/module-2/
-    # step-3) instructs participants to copy these export lines verbatim, so the full
-    # values MUST be emitted here — masking them breaks the workshop. Not a secret leak.
-    # NOTE: printing credentials is acceptable only in this ephemeral workshop
-    # sandbox; never do this in production.
-    print(f"    export LLM_GATEWAY_API_KEY={keys.get('workshop-dev-key', '')}       # = workshop-dev-key")
-    # NOTE: printing credentials is acceptable only in this ephemeral workshop
-    # sandbox; never do this in production.
-    print(f"    export LLM_GATEWAY_ADMIN_KEY={admin_key}  # administrative key")
-    print()
+
+    # Load the credentials by sourcing a 0600 file rather than by printing them.
+    #
+    # This used to print all three export lines with full values and tell
+    # participants to copy them. That put two live keys into terminal scrollback,
+    # shell history and any captured session log, and it was also the more
+    # fragile flow: the values existed only in the one shell they were pasted
+    # into, so opening a second terminal failed later steps with
+    # KeyError: 'LLM_GATEWAY_API_KEY'. Sourcing fixes both at once.
+    #
+    # No branch of this function prints a full key. _write_env_file falls back
+    # through /workshop, $HOME and the temp directory, so the "nowhere to write"
+    # case means the filesystem is broken; recovery instructions are more useful
+    # there than a credential in the scrollback.
+    dev_key = keys.get("workshop-dev-key", "")
+    env_path = _write_env_file(proxy_url, dev_key, admin_key)
+    if env_path:
+        print(f"  Load them into any terminal with:")
+        print(f"    source {env_path}")
+        print()
+        print(f"    LLM_GATEWAY_URL        {proxy_url}")
+        print(f"    LLM_GATEWAY_API_KEY    {_mask(dev_key)}   # = workshop-dev-key")
+        print(f"    LLM_GATEWAY_ADMIN_KEY  {_mask(admin_key)}   # administrative key")
+        print()
+        print(f"  {env_path} is mode 0600 and holds the full values.")
+        print()
+    else:
+        # Every writable location failed, which should not happen. Print the
+        # masked values so the run is still verifiable, and say how to recover
+        # the real ones -- the admin key is in Secrets Manager and a replacement
+        # dev key is one API call away. Printing the live values here instead
+        # would put two credentials in the terminal scrollback for good.
+        print("  Could not write the env file to /workshop, $HOME or the temp")
+        print("  directory, so the keys below were created but not saved:")
+        print()
+        print(f"    LLM_GATEWAY_URL        {proxy_url}")
+        print(f"    LLM_GATEWAY_API_KEY    {_mask(dev_key)}   # = workshop-dev-key")
+        print(f"    LLM_GATEWAY_ADMIN_KEY  {_mask(admin_key)}   # administrative key")
+        print()
+        print("  To recover them, fix the writable path and re-run this script, or:")
+        print("    admin key -> aws secretsmanager get-secret-value \\")
+        print(f"                   --secret-id {secret_arn}")
+        print("    dev key   -> python scripts/create_api_key.py \\")
+        print("                   --key-name workshop-dev-key-2")
+        print()
 
     if cognito_pool_id:
         print("  Identity mapping (virtual key → Cognito group):")

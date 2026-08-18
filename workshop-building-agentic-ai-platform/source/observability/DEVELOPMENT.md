@@ -8,7 +8,7 @@ never encounter it.
 The scripts and templates here are a local-development prototype for a
 CloudWatch dashboard on top of the LLM Gateway. Their defaults were last
 updated before the Workshop Studio stack-naming rename and will not work
-out of the box; you must pass the current stack name explicitly, for
+without changes; you must pass the current stack name explicitly, for
 example:
 
 ```bash

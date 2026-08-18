@@ -15,13 +15,18 @@ Parameters:
   # floating tags like main-stable / 16) for supply-chain reproducibility.
   LiteLLMImageTag:
     Type: String
-    # v1.84.0-stable is the first release that patches the full set of LiteLLM
+    # v1.84.0 is the first release that patches the full set of LiteLLM
     # advisories affecting < 1.84.0: auth bypass via host-header injection, SQL
     # injection in proxy API-key verification, SSTI in /prompts/test, command
     # execution via MCP stdio test endpoints, and the custom-code guardrail
     # sandbox escape (plus the earlier CVE-2026-47101/47102/40217 priv-esc/RCE).
     # Pinned to a specific release for supply-chain reproducibility.
-    Default: v1.84.0-stable
+    #
+    # No `-stable` suffix: LiteLLM stopped publishing `vX.Y.Z-stable` tags after
+    # the v1.83.x line, so `v1.84.0-stable` does not exist in the registry and
+    # ECS fails with CannotPullContainerError ~20 minutes into the deploy.
+    # scripts/verify-images.py checks every pin against its registry.
+    Default: v1.84.0
     Description: >
       Tag for the LiteLLM Docker image
       (docker.litellm.ai/berriai/litellm-database). Pinned to a specific
@@ -207,6 +212,7 @@ Resources:
           FromPort: 80
           ToPort: 80
           CidrIp: 10.2.0.0/16
+          Description: HTTP from the API Gateway VPC Link inside this VPC only
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-alb-sg'
@@ -221,6 +227,7 @@ Resources:
           FromPort: 4000
           ToPort: 4000
           SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: LiteLLM proxy port from the internal ALB
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-ecs-sg'
@@ -235,6 +242,7 @@ Resources:
           FromPort: 2049
           ToPort: 2049
           SourceSecurityGroupId: !Ref ECSSecurityGroup
+          Description: NFS from the LiteLLM ECS tasks
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-efs-sg'
@@ -594,6 +602,11 @@ Resources:
         - !Ref PrivateSubnet2
       SecurityGroups:
         - !Ref ALBSecurityGroup
+      LoadBalancerAttributes:
+        # Matters here specifically: ALBListenerApiGatewayRule routes on the
+        # X-Apigw-Proto header, so malformed header fields must not reach it.
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: 'true'
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-alb'
@@ -612,34 +625,59 @@ Resources:
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
 
+  # The only supported way in is API Gateway. This listener's *default* action
+  # is a 301 to HTTPS; a request is forwarded to LiteLLM only when it carries
+  # the `X-Apigw-Proto: https` header that HttpApiIntegration overwrites on
+  # every request it proxies (see its RequestParameters below). An HTTPS
+  # listener here is not an option — that needs an ACM certificate, which in
+  # turn needs a custom domain the workshop does not have — but a plaintext
+  # catch-all forward is not the only alternative. This shape is also what makes
+  # Checkov CKV_AWS_2 and CKV_AWS_103 pass rather than be suppressed.
+  #
+  # `overwrite:` (not `append:`) matters: a caller inside the VPC cannot smuggle
+  # its own value through API Gateway, because API Gateway replaces the header.
   ALBListenerHTTP:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Metadata:
-      checkov:
-        skip:
-          - id: CKV_AWS_103
-            comment: "TLS-version finding does not apply: this is an internal HTTP listener. The ALB is internal-only and fronted by API Gateway (HTTPS, TLS 1.2+), which terminates TLS upstream; the API Gateway -> ALB leg is VPC-internal east-west traffic. An HTTPS listener would require a custom domain + ACM certificate not available in the workshop."
-          - id: CKV_AWS_2
-            comment: "ALB is internal-only behind API Gateway (HTTPS); TLS terminates upstream at API Gateway. An HTTPS listener requires a custom domain + ACM certificate not available in the workshop."
       cfn_nag:
         rules_to_suppress:
           - id: W55
             reason: >
-              HTTP listener on the ALB is intentional. The ALB is internal to
-              the VPC; the public entry point is API Gateway (HTTPS) in front
-              of it. TLS is terminated at API Gateway; the API Gateway → ALB
-              leg is VPC-internal east-west traffic. Adding HTTPS on the ALB
-              itself would require an ACM certificate, which Workshop Studio
-              accounts do not provide (no custom domain).
+              Protocol is HTTP because an HTTPS listener requires an ACM
+              certificate and Workshop Studio accounts have no custom domain.
+              The default action is a 301 redirect to HTTPS; only requests
+              arriving through API Gateway (which terminates TLS) are
+              forwarded. The ALB itself is internal to the VPC.
           - id: W56
             reason: >
-              No SslPolicy configured because this is an HTTP listener — see
-              W55. No TLS policy applies.
+              No SslPolicy configured because this is an HTTP redirect
+              listener — see W55. No TLS policy applies.
     Properties:
       LoadBalancerArn: !Ref ALB
       Port: 80
       Protocol: HTTP
       DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: '443'
+            Host: '#{host}'
+            Path: /#{path}
+            Query: '#{query}'
+            StatusCode: HTTP_301
+
+  ALBListenerApiGatewayRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListenerHTTP
+      Priority: 1
+      Conditions:
+        - Field: http-header
+          HttpHeaderConfig:
+            HttpHeaderName: X-Apigw-Proto
+            Values:
+              - https
+      Actions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup
 
@@ -672,6 +710,11 @@ Resources:
       ConnectionType: VPC_LINK
       ConnectionId: !Ref VpcLink
       PayloadFormatVersion: '1.0'
+      # Stamps the header ALBListenerApiGatewayRule matches on. Without this
+      # every request hits the listener's default action and gets a 301 instead
+      # of reaching LiteLLM. `overwrite:` replaces any client-supplied value.
+      RequestParameters:
+        'overwrite:header.X-Apigw-Proto': https
 
   HttpApiRoute:
     Type: AWS::ApiGatewayV2::Route

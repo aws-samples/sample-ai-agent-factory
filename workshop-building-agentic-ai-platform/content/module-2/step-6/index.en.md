@@ -7,9 +7,24 @@ LiteLLM Proxy includes built-in spend tracking, an Admin UI, and API endpoints f
 
 ::alert[This step provides both a CLI walkthrough and a Jupyter notebook walkthrough. You can follow either approach — both achieve the same result.]{type="info"}
 
-## CLI Walkthrough
+## CLI walkthrough
 
-## 6.1 View spend in the Admin UI
+Every command on this page authenticates with the `LLM_GATEWAY_ADMIN_KEY` that Step 3
+wrote to `/workshop/.llm-gateway-env`, alongside `LLM_GATEWAY_URL` and
+`LLM_GATEWAY_API_KEY`. Run this first — it is a no-op if they are already set:
+
+:::code{showCopyAction=true showLineNumbers=false language=bash}
+if [ -f /workshop/.llm-gateway-env ]; then
+  source /workshop/.llm-gateway-env
+  echo "Gateway: $LLM_GATEWAY_URL"
+else
+  echo "ERROR: /workshop/.llm-gateway-env is missing - go back and run Step 3.2 (setup_keys.py)" >&2
+fi
+:::
+
+::alert[Without these variables the `curl` commands below request an empty host, return nothing, and the `python3` pipe fails with `Expecting value: line 1 column 1 (char 0)` — a symptom of the missing variables, not of a gateway problem.]{type="info"}
+
+## 6.1 View spend in the admin UI
 
 Open the LiteLLM Admin UI and navigate to the **Usage** tab to see spend per key and per model:
 
@@ -44,14 +59,18 @@ View the current budget usage for a specific virtual key:
 curl -s "${LLM_GATEWAY_URL}/key/info" \
   -H "Authorization: Bearer ${LLM_GATEWAY_ADMIN_KEY}" \
   -G --data-urlencode "key=${LLM_GATEWAY_API_KEY}" \
-  | python -m json.tool
+  | python3 -m json.tool
 :::
 
-Look at the `spend` field vs `max_budget` — this shows how much of the key's budget has been consumed.
+The response wraps everything in an `info` object; look at `info.spend` against
+`info.max_budget` to see how much of the key's budget has been consumed.
 
-## 6.5 Proxy health + model catalog
+## 6.4 Proxy health + model catalog
 
-LiteLLM exposes the deep `/health` endpoint which probes every registered backend — but that endpoint routinely takes 30-90 seconds and returns `503 Service Unavailable` through API Gateway's 30-second integration timeout. For the workshop we use two lightweight endpoints instead: `/health/readiness` (checks the proxy process + database) and `/v1/models` (lists every configured model). Together they answer the same question in under a second:
+LiteLLM exposes the deep `/health` endpoint which probes every registered backend — but that endpoint routinely takes 30-90 seconds and returns `503 Service Unavailable` through API Gateway's 30-second integration timeout. For the workshop we use two lightweight endpoints instead: `/health/readiness` (checks the proxy process + database) and `/v1/models` (lists every configured model). Together they answer the same question in under a second.
+
+`/health/readiness` is deliberately minimal — it returns `status` and `db` and nothing
+else, so do not expect a version string from it:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 echo "=== Proxy readiness ==="
@@ -61,7 +80,6 @@ import sys, json
 d = json.load(sys.stdin)
 print(f'Proxy status: {d.get(\"status\")}')
 print(f'DB:           {d.get(\"db\")}')
-print(f'Version:      {d.get(\"litellm_version\")}')
 "
 
 echo ""
@@ -82,7 +100,7 @@ if len(models) > 10:
 
 ::alert[If you need a full backend-connectivity probe (which Bedrock models are actually reachable from the proxy, not just configured), open the **Admin UI → Health** tab — the browser can tolerate the long response time even when `curl ... /health` through API Gateway cannot. If a model shows unhealthy there, return to Module 2 Step 2 and prime it in the Bedrock console.]{type="info"}
 
-## 6.6 Observability: What to Monitor
+## 6.5 Observability: what to monitor
 
 In production, you would create a CloudWatch Dashboard covering:
 
@@ -97,7 +115,7 @@ Use the ECS cluster name from the stack outputs (the pre-provisioned stack names
 
 ---
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > This notebook covers the same material as the CLI section above — follow *either* path, you do not need to do both.
 >

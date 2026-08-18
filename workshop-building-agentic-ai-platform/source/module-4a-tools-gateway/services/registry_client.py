@@ -18,7 +18,7 @@ import os
 import re
 import ssl
 import time
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 import boto3
@@ -41,18 +41,6 @@ def _http(method: str, url: str, headers: dict, data: bytes | None = None) -> tu
         return resp.status, body
 
 
-def _is_cognito_host(url: str) -> bool:
-    """True when the URL's HOSTNAME belongs to amazoncognito.com.
-
-    A plain substring check (".amazoncognito.com" in url) is bypassable —
-    e.g. https://evil.example/x.amazoncognito.com or a hostname like
-    amazoncognito.com.evil.example — so parse the URL and match the parsed
-    hostname suffix (py/incomplete-url-substring-sanitization).
-    """
-    host = urlparse(url if "://" in url else f"https://{url}").hostname or ""
-    return host == "amazoncognito.com" or host.endswith(".amazoncognito.com")
-
-
 def _build_cognito_token_url(creds: dict, region: str) -> str:
     """Build the Cognito token endpoint URL from credentials.
 
@@ -63,7 +51,7 @@ def _build_cognito_token_url(creds: dict, region: str) -> str:
     """
     # Prefer explicit token_url if present and valid
     token_url = creds.get("token_url", "")
-    if token_url and _is_cognito_host(token_url):
+    if token_url and ".amazoncognito.com" in token_url:
         return token_url
 
     cognito_domain = creds.get("cognito_domain", "")
@@ -71,7 +59,7 @@ def _build_cognito_token_url(creds: dict, region: str) -> str:
         raise ValueError("No token_url or cognito_domain in credentials")
 
     # Already a full URL
-    if _is_cognito_host(cognito_domain):
+    if ".amazoncognito.com" in cognito_domain:
         if not cognito_domain.startswith("https://"):
             cognito_domain = f"https://{cognito_domain}"
         return f"{cognito_domain}/oauth2/token"
@@ -124,12 +112,13 @@ class RegistryClient:
         basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
         body = f"grant_type=client_credentials&scope={quote(scopes)}".encode()
 
+        if not token_url.startswith("https://"):
+            raise ValueError(f"Refusing non-HTTPS token URL: {token_url!r}")
+
         req = Request(token_url, data=body, method="POST")
         req.add_header("Content-Type", "application/x-www-form-urlencoded")
         req.add_header("Authorization", f"Basic {basic}")
 
-        if not token_url.startswith("https://"):
-            raise ValueError(f"Refusing non-HTTPS token URL: {token_url!r}")
         ctx = ssl.create_default_context()
         # nosec B310 — scheme validated to https above; token_url is the Cognito endpoint.
         with urlopen(req, timeout=10, context=ctx) as resp:  # nosec B310

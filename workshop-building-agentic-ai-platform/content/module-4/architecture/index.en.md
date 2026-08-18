@@ -5,7 +5,7 @@ weight: 71
 
 Before deploying, understand what FAST builds and verify your environment is ready.
 
-## FAST Architecture
+## FAST architecture
 
 FAST (Fullstack AgentCore Solution Template) deploys a complete agent application stack using AWS CDK:
 
@@ -19,7 +19,7 @@ FAST (Fullstack AgentCore Solution Template) deploys a complete agent applicatio
 | Conversation Memory | AgentCore Memory | Short-term conversation history across turns |
 | Code Interpreter | AgentCore Code Interpreter | Secure Python sandbox for calculations |
 
-## Authentication Flows
+## Authentication flows
 
 1. **User → Frontend** — Cognito Authorization Code grant (browser login)
 2. **Frontend → Runtime** — User's JWT passed in the Authorization header
@@ -29,7 +29,7 @@ FAST (Fullstack AgentCore Solution Template) deploys a complete agent applicatio
 
 FAST ships with multiple agent patterns (Strands, LangGraph, Claude Agent SDK). You will create a `strands-travel-agent` pattern — a travel planning agent that uses the platform's LLM Gateway and Tools Gateway.
 
-## Prime Anthropic Model Access
+## Prime Anthropic model access
 
 ::alert[**Track 1 participants — this step is required.** If you skipped Modules 2 and 3, the Anthropic Marketplace subscription has not been activated yet. The FAST agent uses Claude Sonnet and will fail with `AccessDeniedException` until you complete this one-time step. If you completed Module 2, you have already done this and can skip ahead.]{type="warning"}
 
@@ -50,7 +50,7 @@ Before the agent can invoke any Claude model, Anthropic requires a one-time use 
 8. You can now close the playground — the account is primed for both models.
 ::::
 
-## Verify Prerequisites
+## Verify prerequisites
 
 Confirm your region is set (the Workshop IDE pre-sets it to your deploy region) and that the tools are available:
 
@@ -59,9 +59,9 @@ aws configure get region   # should print your deploy region
 node --version && cdk --version && python3 --version && docker --version
 :::
 
-::alert[If deploying from your local machine instead of the Workshop IDE, verify you have Node.js 18+, Python 3.12+, CDK v2, and Docker (or Finch with `export CDK_DOCKER=finch`).]{type="info"}
+::alert[If deploying from your local machine instead of the Workshop IDE, verify you have Node.js 22, Python 3.12+, CDK v2, and Docker (or Finch with `export CDK_DOCKER=finch`). Node.js 22 is what the Workshop IDE installs and what we recommend, but the hard floor is lower: FAST's frontend pins Vite 7.3.1, whose declared engines range is `^20.19.0 || >=22.12.0`, so Node 20.19+ does build successfully. What you get on Node 18/20 is noise, not failure — both are end-of-life, so the CDK CLI prints a ten-line `!!!!!!` unsupported-version banner on every command, which reads like a crash but is harmless. Below 20.19, the frontend build genuinely fails.]{type="info"}
 
-## Verify Platform Foundations
+## Verify platform foundations
 
 ::alert[If using the Workshop IDE, credentials are pre-configured via the instance role.]{type="warning"}
 
@@ -130,7 +130,7 @@ aws bedrock-agentcore-control list-gateway-targets \
 
 You should see targets including flights, hotels, and knowledge base tools.
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > This notebook covers the same material as the section above — follow *either* path, you do not need to do both.
 >

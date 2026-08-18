@@ -7,13 +7,13 @@ Connect the travel agent to the Tools Gateway from Module 3a. This step wires th
 
 ::alert[Follow this page if you completed **Module 3a** (OSS MCP Registry + Tools Gateway), or you're on **Track 1 (fast path)** using the MCP registry. If you're on the AgentCore path (completed Module 3b), use the [AgentCore Path](../connect-gateway-agentcore/) instead.]{type="info"}
 
-## The Auth Challenge
+## The auth challenge
 
 FAST's agent authenticates to FAST's own gateway using FAST's Cognito pool. Module 3a's gateway expects JWTs from Module 3a's Cognito pool — a different identity provider.
 
 The solution: register a new **OAuth2 Credential Provider** in AgentCore Identity's Token Vault that points at Module 3a's Cognito.
 
-## Retrieve Module 3a Credentials
+## Retrieve Module 3a credentials
 
 Look up the M2M client credentials from Module 3a (MCP Registry)'s Cognito:
 
@@ -43,25 +43,34 @@ echo "M2M Client ID:  $M2M_CLIENT_ID"
 echo "Discovery URL:  $DISCOVERY_URL"
 :::
 
-## Create the OAuth2 Credential Provider
+## Create the OAuth2 credential provider
 
 ::alert[If you see "already exists", the provider was created in a previous step — skip to **Update the Gateway Client** below.]{type="info"}
 
 Register a credential provider in AgentCore Identity's Token Vault. This tells the Token Vault how to get tokens from Module 3a (MCP Registry)'s Cognito:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
-aws bedrock-agentcore-control create-oauth2-credential-provider \
-  --name "workshop-tools-gateway-auth" \
-  --credential-provider-vendor "CustomOauth2" \
-  --oauth2-provider-config-input "{
-    \"customOauth2ProviderConfig\": {
-      \"oauthDiscovery\": {
-        \"discoveryUrl\": \"${DISCOVERY_URL}\"
-      },
-      \"clientId\": \"${M2M_CLIENT_ID}\",
-      \"clientSecret\": \"${M2M_CLIENT_SECRET}\"
-    }
-  }" --region $REGION
+# The provider name is fixed, so creating it twice fails with
+# "Credential provider with name: workshop-tools-gateway-auth already exists".
+# Both gateway paths in this module create the same provider — treat an existing
+# one as success so either path (or a re-run) works.
+if aws bedrock-agentcore-control get-oauth2-credential-provider \
+     --name "workshop-tools-gateway-auth" --region $REGION >/dev/null 2>&1; then
+  echo "Credential provider 'workshop-tools-gateway-auth' already exists - reusing it"
+else
+  aws bedrock-agentcore-control create-oauth2-credential-provider \
+    --name "workshop-tools-gateway-auth" \
+    --credential-provider-vendor "CustomOauth2" \
+    --oauth2-provider-config-input "{
+      \"customOauth2ProviderConfig\": {
+        \"oauthDiscovery\": {
+          \"discoveryUrl\": \"${DISCOVERY_URL}\"
+        },
+        \"clientId\": \"${M2M_CLIENT_ID}\",
+        \"clientSecret\": \"${M2M_CLIENT_SECRET}\"
+      }
+    }" --region $REGION
+fi
 :::
 
 You should see a response with the provider ARN and a `callbackUrl`.
@@ -71,7 +80,7 @@ This provider stores:
 - **Which client** — Module 3a (MCP Registry)'s M2M client ID
 - **The secret** — stored securely in Secrets Manager by AgentCore Identity
 
-## Update the Gateway Client
+## Update the gateway client
 
 The agent's `tools/gateway.py` needs to use the new credential provider. Replace it with a version that reads the provider name from SSM (so you can switch providers without redeploying):
 
@@ -134,7 +143,7 @@ python3 -c "import ast; ast.parse(open('patterns/strands-travel-agent/tools/gate
 
 The key change: the credential provider name is read from SSM (`/FAST-stack/gateway_credential_provider`) instead of being hardcoded to FAST's provider. This lets the agent authenticate to Module 3a (Tools Gateway)'s gateway using Module 3a (MCP Registry)'s Cognito.
 
-## Store the Gateway Configuration in SSM
+## Store the gateway configuration in SSM
 
 Point the agent at Module 3a (Tools Gateway)'s gateway and the new credential provider:
 
@@ -159,7 +168,7 @@ echo "Gateway URL (Module 3a): $GATEWAY_URL"
 echo "Credential provider: workshop-tools-gateway-auth"
 :::
 
-## Widen IAM Permissions
+## Widen IAM permissions
 
 The agent's IAM role needs permission to read the new credential provider's secret. Update the CDK stack to allow access to all AgentCore Identity OAuth2 secrets:
 
@@ -215,7 +224,7 @@ aws ssm put-parameter \
 echo "Re-applied /FAST-stack/gateway_url and /FAST-stack/gateway_credential_provider"
 :::
 
-## Verify Tool Discovery
+## Verify tool discovery
 
 After the deployment completes, open the Amplify URL and ask:
 
@@ -225,7 +234,7 @@ The agent should call `search_flights` and `search_hotels` through the Module 3a
 
 ::alert[If the agent still falls back to Code Interpreter or says it can't access tools, check the runtime logs for authentication errors. The most common issue is the IAM permission for the new OAuth2 secret.]{type="warning"}
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > Prefer an interactive notebook experience? The notebook below is the notebook-track equivalent of the **MCP path** on this page — if you are instead taking the AgentCore path, see `04b-connect-gateway-agentcore.ipynb` (covered on the [Connect to Tools Gateway — AgentCore path](../connect-gateway-agentcore/) page).
 >

@@ -7,9 +7,22 @@ Now that you have virtual keys, let's test model access through the gateway usin
 
 ::alert[This step provides both a CLI walkthrough and a Jupyter notebook walkthrough. You can follow either approach — both achieve the same result.]{type="info"}
 
-## CLI Walkthrough
+## CLI walkthrough
 
-::alert[This walkthrough uses `LLM_GATEWAY_URL` and `LLM_GATEWAY_API_KEY` environment variables set in Step 3. If they are not set (e.g. you opened a new terminal), re-run the `export` commands from Step 3.]{type="info"}
+This walkthrough continues in the terminal you used for Step 3, and needs two
+things from it: the **virtualenv** (which is where `pip` and the `openai` /
+`strands-agents` packages live) and the `LLM_GATEWAY_*` **environment variables**
+that `setup_keys.py` wrote to `/workshop/.llm-gateway-env`. If you opened a new
+terminal since Step 3, run this first — it is a no-op if you did not:
+
+:::code{showCopyAction=true showLineNumbers=false language=bash}
+source /workshop/.venv/bin/activate
+source /workshop/.llm-gateway-env
+python -V
+echo "Gateway: $LLM_GATEWAY_URL"
+:::
+
+::alert[Without the virtualenv, `pip install` writes to a different interpreter than the one running the code blocks and the Python snippets fail with `ModuleNotFoundError: No module named 'openai'`. Without the environment variables they fail with `KeyError: 'LLM_GATEWAY_API_KEY'`. If `/workshop/.venv` does not exist at all, go back and run Step 3.1.]{type="info"}
 
 With teams and virtual keys in place, verify that model access works through the gateway. You will test with curl, try multiple models, and preview the Strands Agent integration that Module 4 uses.
 
@@ -27,10 +40,10 @@ curl -s "${LLM_GATEWAY_URL}/chat/completions" \
       {"role": "user", "content": "What are three benefits of using an LLM Gateway?"}
     ],
     "max_tokens": 200
-  }' | python -m json.tool
+  }' | python3 -m json.tool
 :::
 
-Notice the model name is `claude-sonnet` (the friendly alias), not the full Bedrock model ID. LiteLLM maps it to `bedrock/us.anthropic.claude-sonnet-4-6` automatically via the model registry.
+Notice the model name is `claude-sonnet` (the friendly alias), not the full Bedrock model ID. LiteLLM maps it to `bedrock/global.anthropic.claude-sonnet-4-6` automatically via the model registry.
 
 ::alert[**Prompt Caching via the LLM Gateway.** When you send identical requests through the gateway (same model, messages, and parameters), LiteLLM caches the response. For Claude Sonnet and Opus models on Bedrock, prompt caching goes deeper — the Bedrock Converse API natively caches the prompt tokens themselves, reducing latency and cost for subsequent requests with the same context. In this workshop, the gateway's cache is per-container, so you may not always see a hit; in production, add a Redis backend (`cache_params:` in litellm-config.yaml) to share cache hits across all gateway tasks. To use it, just make identical API calls — no code changes needed.]{type="info"}
 
@@ -39,8 +52,8 @@ Notice the model name is `claude-sonnet` (the friendly alias), not the full Bedr
 Because the gateway is OpenAI-compatible, the standard `openai` package works:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
-# Pinned for supply-chain reproducibility; matches the floor required by litellm==1.83.0 in the venv
-pip install openai==2.8.0 --quiet
+# Pinned for supply-chain reproducibility; matches the openai floor litellm 1.84.0 requires
+pip install "openai==2.54.0" --quiet
 
 python3 << 'PYEOF'
 import os
@@ -75,26 +88,26 @@ curl -s "${LLM_GATEWAY_URL}/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${LLM_GATEWAY_API_KEY}" \
   -d '{"model": "claude-sonnet", "messages": [{"role": "user", "content": "What makes you unique? One sentence."}], "max_tokens": 50}' \
-  | python -m json.tool
+  | python3 -m json.tool
 
 # Amazon Nova Lite
 curl -s "${LLM_GATEWAY_URL}/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${LLM_GATEWAY_API_KEY}" \
   -d '{"model": "nova-2-lite", "messages": [{"role": "user", "content": "What makes you unique? One sentence."}], "max_tokens": 50}' \
-  | python -m json.tool
+  | python3 -m json.tool
 
 # Claude Haiku
 curl -s "${LLM_GATEWAY_URL}/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${LLM_GATEWAY_API_KEY}" \
   -d '{"model": "claude-haiku", "messages": [{"role": "user", "content": "What makes you unique? One sentence."}], "max_tokens": 50}' \
-  | python -m json.tool
+  | python3 -m json.tool
 :::
 
-## 4.4 Strands Agent with LiteLLMModel
+## 4.4 Strands agent with LiteLLMModel
 
-This is the **critical integration point** — the single place where an agent's model client meets the platform's governance layer. Everything you built in Module 2 only matters if agents actually route their LLM calls through it. The `LiteLLMModel` class is how that happens: when you pass `api_base=<gateway URL>` and `api_key=<virtual key>` into a Strands `Agent`, every model call (chat completions, tool calls, streaming) goes through the gateway instead of directly to Bedrock. From the participant's point of view the change is **three lines of Python** — but the implications are:
+This is the **critical integration point** — the single place where an agent's model client meets the platform's governance layer. Everything you built in Module 2 only matters if agents actually route their LLM calls through it. The `LiteLLMModel` class is how that happens: when you pass `client_args={"api_base": <gateway URL>, "api_key": <virtual key>}` into a Strands `Agent`, every model call (chat completions, tool calls, streaming) goes through the gateway instead of directly to Bedrock. From the participant's point of view the change is **three lines of Python** — but the implications are:
 
 - **Cost attribution** — Every call is attributed to the virtual key, which ties back to a team and a Cognito identity. Finance can query spend per team per day from the gateway's spend logs.
 - **Budget enforcement** — If the key's `max_budget` is exhausted, the gateway rejects the call with `BudgetExceededError`. The agent sees an LLM error, not a Bedrock throttling event, and can degrade gracefully.
@@ -104,7 +117,7 @@ This is the **critical integration point** — the single place where an agent's
 In Module 4, the FAST travel agent uses exactly this pattern — see `patterns/strands-travel-agent/travel_agent.py`. Here's the shape of the integration you will use there:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
-pip install strands-agents[litellm]==0.1.5 --quiet
+pip install "strands-agents[litellm,openai]==1.52.0" --quiet
 
 python3 << 'PYEOF'
 import os
@@ -112,11 +125,14 @@ from strands import Agent
 from strands.models.litellm import LiteLLMModel
 
 model = LiteLLMModel(
-    model_id="openai/claude-sonnet",
-    params={
+    # Connection settings belong in client_args, which LiteLLMModel splats
+    # straight into litellm.acompletion(). `params` is for inference parameters
+    # (max_tokens, temperature, ...), not for routing.
+    client_args={
         "api_base": os.environ["LLM_GATEWAY_URL"],
         "api_key": os.environ["LLM_GATEWAY_API_KEY"],
     },
+    model_id="openai/claude-sonnet",
 )
 
 agent = Agent(model=model)
@@ -133,14 +149,14 @@ For a comprehensive test covering health checks, model listing, completions, cac
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 cd /workshop/source/module-2-llm-gateway
-python scripts/test_gateway.py
+python3 scripts/test_gateway.py
 :::
 
 The test script runs 8 tests and prints results for each. If `strands-agents[litellm]` is not installed, the Strands test is skipped gracefully.
 
 ---
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > This notebook covers the same material as the CLI section above — follow *either* path, you do not need to do both.
 >
@@ -156,7 +172,7 @@ Open **`step-4-test-models.ipynb`**. This notebook demonstrates four different w
 2. **List available models** — Queries the OpenAI-compatible `/models` endpoint and prints every configured model alias.
 3. **Chat completion via `requests`** — A plain HTTP POST showing the raw request/response cycle.
 4. **OpenAI SDK compatibility** — Demonstrates that the standard `openai` Python package works unchanged against the gateway. Pay attention to how only `base_url` and `api_key` differ from a standard OpenAI setup.
-5. **Multi-model routing** — Sends the same prompt to Claude Sonnet, Claude Haiku, Nova Lite, and Titan Text. Compare the responses to see how different models handle identical prompts.
+5. **Multi-model routing** — Sends the same prompt to the three aliases the `workshop-dev-key` is allowed to call: Claude Sonnet, Claude Haiku, and Nova 2 Lite. Compare the responses to see how different models handle identical prompts.
 6. **Caching demonstration** — Sends two identical requests with `temperature=0` and measures latency. The proxy runs with `cache: true` but no shared backend, so cache hits are per-ECS-task — if both requests land on different tasks, expect similar latency. The exercise is here to show the API contract, not to produce a reliable speedup in this workshop environment.
 7. **Strands Agent integration** — Creates a Strands `Agent` using `LiteLLMModel` pointed at the gateway. This is the pattern Module 4 agents will use in production.
 8. **Workshop client library** — Shows the `LLMGatewayClient` convenience wrapper for quick interactions.

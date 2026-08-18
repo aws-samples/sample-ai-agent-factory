@@ -5,7 +5,7 @@ weight: 49
 
 The `workshop-tools-gateway-stack` was pre-deployed alongside the Registry stack. It contains the Lambda functions, interceptors, and IAM roles needed for the AgentCore Gateway. In this step you will verify the stack and create the gateway.
 
-## Verify the Stack
+## Verify the stack
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 REGION=$(aws configure get region)
@@ -18,7 +18,7 @@ aws cloudformation describe-stacks \
 
 You should see `CREATE_COMPLETE`.
 
-## Capture Stack Outputs
+## Capture stack outputs
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 REGION=$(aws configure get region)
@@ -77,9 +77,9 @@ python3 create_gateway.py
 
 ::alert[The `create_gateway.py` script creates the gateway, configures the JWT authorizer, attaches interceptors, stores the gateway ID in SSM, and updates the Sync Lambda — all in one step.]{type="info"}
 
-## Update the Sync Lambda (Optional — for reference)
+## Update the sync Lambda (optional — for reference)
 
-### What is the Sync Lambda?
+### What is the sync Lambda?
 
 The **Sync Lambda** is one of the three Lambda functions deployed by `workshop-tools-gateway-stack` (alongside the request and response interceptors). You can see it in the AWS Console as `agentcore-gateway-sync` under **Lambda → Functions**, or in the CloudFormation **Resources** tab of the tools-gateway stack. Its job is to read the MCP Registry's catalog on a schedule (EventBridge every 5 minutes, see [Automated Sync](../tg-automated-sync/)), compare it to the AgentCore Gateway's current targets, and create / update targets for any tool it finds. That's why you only had to register a tool in the Registry UI in the previous step — the Sync Lambda picked it up and wired it into the gateway automatically.
 

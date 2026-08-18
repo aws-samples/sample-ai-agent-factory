@@ -7,13 +7,17 @@
       "Action": [
         "iam:PassRole"
       ],
-      "Resource": "arn:aws:iam::*:role/workshop-*",
+      "Resource": [
+        "arn:aws:iam::*:role/workshop-*",
+        "arn:aws:iam::*:role/cdk-hnb659fds-*"
+      ],
       "Condition": {
         "StringEquals": {
           "iam:PassedToService": [
             "lambda.amazonaws.com",
             "bedrock.amazonaws.com",
             "bedrock-agentcore.amazonaws.com",
+            "agent-registry.amazonaws.com",
             "cloudformation.amazonaws.com",
             "ecs-tasks.amazonaws.com"
           ]
@@ -33,9 +37,15 @@
         "iam:DeleteRolePolicy",
         "iam:GetRolePolicy",
         "iam:ListRolePolicies",
-        "iam:ListAttachedRolePolicies"
+        "iam:ListAttachedRolePolicies",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:ListRoleTags"
       ],
-      "Resource": "arn:aws:iam::*:role/workshop-*"
+      "Resource": [
+        "arn:aws:iam::*:role/workshop-*",
+        "arn:aws:iam::*:role/cdk-hnb659fds-*"
+      ]
     },
     {
       "Sid": "IAMPolicy",
@@ -47,7 +57,10 @@
         "iam:GetPolicyVersion",
         "iam:ListPolicyVersions"
       ],
-      "Resource": "arn:aws:iam::*:policy/workshop-*"
+      "Resource": [
+        "arn:aws:iam::*:policy/workshop-*",
+        "arn:aws:iam::*:policy/cdk-hnb659fds-*"
+      ]
     },
     {
       "Sid": "IAMListReadOnly",
@@ -79,7 +92,13 @@
         "cloudformation:SignalResource",
         "cloudformation:TagResource"
       ],
-      "Resource": "arn:aws:cloudformation:*:*:stack/workshop-*/*"
+      "Resource": [
+        "arn:aws:cloudformation:*:*:stack/workshop-*/*",
+        "arn:aws:cloudformation:*:*:stack/FAST-stack/*",
+        "arn:aws:cloudformation:*:*:stack/FAST-stack-*/*",
+        "arn:aws:cloudformation:*:*:stack/code-editor/*",
+        "arn:aws:cloudformation:*:*:stack/CDKToolkit/*"
+      ]
     },
     {
       "Sid": "CFNReadOnly",
@@ -106,32 +125,27 @@
       "Resource": "*"
     },
     {
-      "Sid": "CWDashboards",
+      "Sid": "CWWorkshopAlarmsAndDashboards",
       "Effect": "Allow",
       "Action": [
+        "cloudwatch:PutMetricAlarm",
+        "cloudwatch:DeleteAlarms",
         "cloudwatch:PutDashboard",
-        "cloudwatch:DeleteDashboards"
+        "cloudwatch:DeleteDashboards",
+        "cloudwatch:TagResource",
+        "cloudwatch:UntagResource"
       ],
       "Resource": [
+        "arn:aws:cloudwatch:*:*:alarm:workshop-*",
         "arn:aws:cloudwatch::*:dashboard/workshop-*",
         "arn:aws:cloudwatch::*:dashboard/agentic-*"
       ]
     },
     {
-      "Sid": "CWAlarms",
-      "Effect": "Allow",
-      "Action": [
-        "cloudwatch:PutMetricAlarm",
-        "cloudwatch:DeleteAlarms"
-      ],
-      "Resource": "arn:aws:cloudwatch:*:*:alarm:workshop-*"
-    },
-    {
       "Sid": "CWNoResourceLevel",
       "Effect": "Allow",
       "Action": [
-        "cloudwatch:PutMetricData",
-        "cloudwatch:TagResource"
+        "cloudwatch:PutMetricData"
       ],
       "Resource": "*"
     },
@@ -146,6 +160,7 @@
         "logs:PutRetentionPolicy",
         "logs:DeleteRetentionPolicy",
         "logs:TagResource",
+        "logs:UntagResource",
         "logs:TagLogGroup",
         "logs:AssociateKmsKey",
         "logs:PutSubscriptionFilter",
@@ -153,9 +168,11 @@
       ],
       "Resource": [
         "arn:aws:logs:*:*:log-group:/aws/lambda/workshop-*",
-        "arn:aws:logs:*:*:log-group:/aws/lambda/workshop-*:*",
-        "arn:aws:logs:*:*:log-group:/workshop/*",
-        "arn:aws:logs:*:*:log-group:/workshop/*:*"
+        "arn:aws:logs:*:*:log-group:/aws/lambda/ac-*",
+        "arn:aws:logs:*:*:log-group:/aws/lambda/agentcore-*",
+        "arn:aws:logs:*:*:log-group:/ecs/workshop*",
+        "arn:aws:logs:*:*:log-group:/aws/ecs/workshop*",
+        "arn:aws:logs:*:*:log-group:/workshop/*"
       ]
     },
     {
@@ -166,12 +183,105 @@
         "logs:DescribeLogStreams",
         "logs:GetLogEvents",
         "logs:FilterLogEvents",
+        "logs:StartLiveTail",
         "logs:ListTagsForResource",
         "logs:StartQuery",
         "logs:GetQueryResults",
         "logs:StopQuery"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "KMSForWorkshopEncryptedResources",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt",
+        "kms:Encrypt",
+        "kms:GenerateDataKey",
+        "kms:DescribeKey"
+      ],
+      "Resource": "arn:aws:kms:*:*:key/*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": [
+            "lambda.us-east-1.amazonaws.com",
+            "lambda.us-west-2.amazonaws.com",
+            "lambda.eu-west-1.amazonaws.com",
+            "secretsmanager.us-east-1.amazonaws.com",
+            "secretsmanager.us-west-2.amazonaws.com",
+            "secretsmanager.eu-west-1.amazonaws.com"
+          ]
+        },
+        "ForAnyValue:StringLike": {
+          "kms:ResourceAliases": [
+            "alias/aws/lambda",
+            "alias/aws/secretsmanager",
+            "alias/workshop-*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "SecretsManagerListOnly",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:ListSecrets"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ACGatewayManage",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:UpdateGateway",
+        "bedrock-agentcore:DeleteGateway",
+        "bedrock-agentcore:CreateGatewayTarget",
+        "bedrock-agentcore:DeleteGatewayTarget",
+        "bedrock-agentcore:SynchronizeGatewayTargets",
+        "bedrock-agentcore:PutResourcePolicy",
+        "bedrock-agentcore:ManageResourceScopedPolicy"
+      ],
+      "Resource": [
+        "arn:aws:bedrock-agentcore:*:*:gateway/tools-gateway-*",
+        "arn:aws:bedrock-agentcore:*:*:gateway/ac-tools-gateway-*"
+      ]
+    },
+    {
+      "Sid": "ACIdentityManage",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:UpdateWorkloadIdentity",
+        "bedrock-agentcore:DeleteWorkloadIdentity"
+      ],
+      "Resource": [
+        "arn:aws:bedrock-agentcore:*:*:workload-identity-directory/default*"
+      ]
+    },
+    {
+      "Sid": "ACTokenVaultManage",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:Create*",
+        "bedrock-agentcore:DeleteOauth2CredentialProvider"
+      ],
+      "Resource": [
+        "arn:aws:bedrock-agentcore:*:*:token-vault/default/oauth2credentialprovider/workshop-*",
+        "arn:aws:bedrock-agentcore:*:*:token-vault/default"
+      ]
+    },
+    {
+      "Sid": "ACPolicyManage",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:DeletePolicyEngine",
+        "bedrock-agentcore:CreatePolicy",
+        "bedrock-agentcore:UpdatePolicy",
+        "bedrock-agentcore:DeletePolicy",
+        "bedrock-agentcore:AuthorizeAction"
+      ],
+      "Resource": [
+        "arn:aws:bedrock-agentcore:*:*:policy-engine/workshop_policy_engine-*"
+      ]
     }
   ]
 }

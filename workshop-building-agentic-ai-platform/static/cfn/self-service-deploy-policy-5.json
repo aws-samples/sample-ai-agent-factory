@@ -1,0 +1,332 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LambdaForWorkshopFunctions",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction",
+        "lambda:DeleteFunction",
+        "lambda:GetFunction",
+        "lambda:GetFunctionConfiguration",
+        "lambda:InvokeFunction",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration",
+        "lambda:ListVersionsByFunction",
+        "lambda:PublishVersion",
+        "lambda:AddPermission",
+        "lambda:RemovePermission",
+        "lambda:GetPolicy",
+        "lambda:TagResource",
+        "lambda:UntagResource",
+        "lambda:CreateFunctionUrlConfig",
+        "lambda:GetFunctionUrlConfig",
+        "lambda:DeleteFunctionUrlConfig",
+        "lambda:GetFunctionCodeSigningConfig",
+        "lambda:GetFunctionRecursionConfig",
+        "lambda:GetRuntimeManagementConfig",
+        "lambda:PutFunctionConcurrency",
+        "lambda:DeleteFunctionConcurrency"
+      ],
+      "Resource": [
+        "arn:aws:lambda:*:*:function:workshop-*",
+        "arn:aws:lambda:*:*:function:ac-*",
+        "arn:aws:lambda:*:*:function:agentcore-*",
+        "arn:aws:lambda:*:*:function:code-editor-*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "LambdaAccountReadNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:ListFunctions",
+        "lambda:GetAccountSettings"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "EfsDescribeNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "elasticfilesystem:DescribeFileSystems",
+        "elasticfilesystem:DescribeMountTargets",
+        "elasticfilesystem:DescribeAccessPoints",
+        "elasticfilesystem:DescribeMountTargetSecurityGroups"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "EfsCreateFileSystemScoped",
+      "Effect": "Allow",
+      "Action": [
+        "elasticfilesystem:CreateFileSystem"
+      ],
+      "Resource": "arn:aws:elasticfilesystem:*:*:file-system/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "EfsManageTaggedWorkshopFileSystems",
+      "Effect": "Allow",
+      "Action": [
+        "elasticfilesystem:DeleteFileSystem",
+        "elasticfilesystem:CreateMountTarget",
+        "elasticfilesystem:DeleteMountTarget",
+        "elasticfilesystem:CreateAccessPoint",
+        "elasticfilesystem:TagResource",
+        "elasticfilesystem:UntagResource",
+        "elasticfilesystem:ListTagsForResource",
+        "elasticfilesystem:DescribeBackupPolicy",
+        "elasticfilesystem:DescribeFileSystemPolicy",
+        "elasticfilesystem:DescribeLifecycleConfiguration",
+        "elasticfilesystem:DescribeReplicationConfigurations"
+      ],
+      "Resource": [
+        "arn:aws:elasticfilesystem:*:*:file-system/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Workshop": "AgentCore-Platform",
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "EfsDeleteTaggedAccessPoints",
+      "Effect": "Allow",
+      "Action": [
+        "elasticfilesystem:DeleteAccessPoint"
+      ],
+      "Resource": [
+        "arn:aws:elasticfilesystem:*:*:access-point/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Workshop": "AgentCore-Platform",
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ApsCreateWorkshopTaggedWorkspace",
+      "Effect": "Allow",
+      "Action": [
+        "aps:CreateWorkspace"
+      ],
+      "Resource": [
+        "arn:aws:aps:*:*:/workspaces",
+        "arn:aws:aps:*:*:workspace/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Workshop": "AgentCore-Platform",
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ApsListNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "aps:ListWorkspaces"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ApsReadNotTagConditionedSoDeleteCanStabilize",
+      "Effect": "Allow",
+      "Action": [
+        "aps:DescribeWorkspace",
+        "aps:DescribeRuleGroupsNamespace",
+        "aps:DescribeLoggingConfiguration",
+        "aps:DescribeWorkspaceConfiguration",
+        "aps:DescribeQueryLoggingConfiguration",
+        "aps:DescribeAlertManagerDefinition",
+        "aps:ListRuleGroupsNamespaces",
+        "aps:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:aps:*:*:workspace/*",
+        "arn:aws:aps:*:*:rulegroupsnamespace/*/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ApsTagOnCreate",
+      "Effect": "Allow",
+      "Action": [
+        "aps:TagResource"
+      ],
+      "Resource": [
+        "arn:aws:aps:*:*:/workspaces",
+        "arn:aws:aps:*:*:workspace/*",
+        "arn:aws:aps:*:*:rulegroupsnamespace/*/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Workshop": "AgentCore-Platform",
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ApsManageTaggedWorkshopWorkspaces",
+      "Effect": "Allow",
+      "Action": [
+        "aps:DeleteWorkspace",
+        "aps:TagResource",
+        "aps:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:aps:*:*:workspace/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Workshop": "AgentCore-Platform",
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ApsCreateWorkshopTaggedRuleGroupsNamespace",
+      "Effect": "Allow",
+      "Action": [
+        "aps:CreateRuleGroupsNamespace"
+      ],
+      "Resource": "arn:aws:aps:*:*:rulegroupsnamespace/*/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Workshop": "AgentCore-Platform",
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ApsManageTaggedRuleGroupsNamespaces",
+      "Effect": "Allow",
+      "Action": [
+        "aps:PutRuleGroupsNamespace"
+      ],
+      "Resource": "arn:aws:aps:*:*:rulegroupsnamespace/*/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Workshop": "AgentCore-Platform",
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ApsDeleteOnlyTheWorkshopRuleGroupsNamespaceByName",
+      "Effect": "Allow",
+      "Action": [
+        "aps:DeleteRuleGroupsNamespace"
+      ],
+      "Resource": "arn:aws:aps:*:*:rulegroupsnamespace/*/mcp-gateway-alerts",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ServiceQuotasReadForStackPreflight",
+      "Effect": "Allow",
+      "Action": [
+        "servicequotas:GetServiceQuota"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    }
+  ]
+}

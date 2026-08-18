@@ -482,11 +482,11 @@ Resources:
               "width": 8,
               "height": 6,
               "properties": {
-                "title": "Aurora Serverless ACU",
+                "title": "DocumentDB CPU",
                 "view": "timeSeries",
                 "stacked": false,
                 "metrics": [
-                  ["AWS/RDS", "ServerlessDatabaseCapacity", "DBClusterIdentifier", "${EnvironmentName}-keycloak-db", {"stat": "Average", "label": "ACU"}]
+                  ["AWS/DocDB", "CPUUtilization", "DBClusterIdentifier", "${EnvironmentName}-registry", {"stat": "Average", "label": "CPU %"}]
                 ],
                 "region": "${AWS::Region}",
                 "period": 60

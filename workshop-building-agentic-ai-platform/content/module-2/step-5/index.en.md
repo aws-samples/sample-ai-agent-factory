@@ -7,9 +7,25 @@ An LLM Gateway isn't just a proxy — it's where enterprise governance happens. 
 
 ::alert[This step provides both a CLI walkthrough and a Jupyter notebook walkthrough. You can follow either approach — both achieve the same result.]{type="info"}
 
-## CLI Walkthrough
+## CLI walkthrough
 
-## Why Guardrails at the Gateway?
+This section uses the `LLM_GATEWAY_URL`, `LLM_GATEWAY_API_KEY` and
+`LLM_GATEWAY_ADMIN_KEY` environment variables that Step 3 wrote to
+`/workshop/.llm-gateway-env`. Run this first — it is a no-op if they are already set,
+and it is what makes the rest of the page work in a terminal you opened since Step 3:
+
+:::code{showCopyAction=true showLineNumbers=false language=bash}
+if [ -f /workshop/.llm-gateway-env ]; then
+  source /workshop/.llm-gateway-env
+  echo "Gateway: $LLM_GATEWAY_URL"
+else
+  echo "ERROR: /workshop/.llm-gateway-env is missing - go back and run Step 3.2 (setup_keys.py)" >&2
+fi
+:::
+
+::alert[Without these variables the `curl` commands below post to `/chat/completions` with an empty host, so `curl` writes nothing and the `| python3 -m json.tool` pipe fails with `Expecting value: line 1 column 1 (char 0)`. That message is about the empty response, not about the guardrail.]{type="info"}
+
+## Why guardrails at the gateway?
 
 Without gateway-level guardrails, every agent and application must implement its own content safety — and they won't. By enforcing guardrails at the gateway:
 
@@ -18,7 +34,7 @@ Without gateway-level guardrails, every agent and application must implement its
 - **Audit trail** — Every guardrail intervention is logged centrally
 - **PII protection** — Sensitive data is masked before reaching the model
 
-## 5.1 Create a Bedrock Guardrail
+## 5.1 Create a Bedrock guardrail
 
 ::alert[**This guardrail is shared across modules.** The `workshop-content-filter` guardrail created here is referenced by Modules 3a, 3b, and 4. Do **not** delete it at the end of Module 2 — the global [Workshop Cleanup](../../cleanup/) page removes it at the end of the workshop.]{type="warning"}
 
@@ -69,7 +85,7 @@ aws bedrock get-guardrail \
   --region $(aws configure get region) | python3 -m json.tool
 :::
 
-You should see the guardrail configuration with all six content filters at `HIGH` strength.
+You should see all six content filters. Five are `HIGH` in both directions; `PROMPT_ATTACK` is `HIGH` on input and `NONE` on output, because Bedrock only accepts `NONE` there — a prompt attack is something a caller sends, not something a model emits.
 
 ## 5.3 Test the guardrail through the LLM Gateway
 
@@ -118,7 +134,7 @@ curl -s "${LLM_GATEWAY_URL}/chat/completions" \
 
 The response should come through normally — the guardrail only blocks harmful content.
 
-::alert[In production, you would configure the guardrail as a **default** in the LiteLLM config file so it applies to all requests automatically, rather than requiring each caller to include `guardrailConfig`. See the `guardrails:` section in `cfn/litellm-config.yaml` for the configuration reference.]{type="info"}
+::alert[In production, you would configure the guardrail as a **default** in the LiteLLM config file so it applies to all requests automatically, rather than requiring each caller to include `guardrailConfig`. See the `guardrails:` section in `reference/litellm-config.yaml` for the configuration reference.]{type="info"}
 
 ## 5.5 Caching demonstration
 
@@ -142,8 +158,6 @@ time curl -s "${LLM_GATEWAY_URL}/chat/completions" \
 
 ## 5.6 Platform governance summary
 
-
-
 The LLM Gateway now provides three layers of enterprise governance:
 
 | Layer | Mechanism | Scope |
@@ -156,7 +170,7 @@ These are enforced centrally at the gateway — agents and applications are unaw
 
 ---
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > This notebook covers the same material as the CLI section above — follow *either* path, you do not need to do both.
 >
@@ -174,4 +188,4 @@ Open **`step-5-guardrails.ipynb`**. This notebook creates and tests a Bedrock Gu
 4. **Test with a harmful request** — Sends a request that should trigger the content filter. Observe the blocked response message and the HTTP status code returned by the gateway.
 5. **Save state** — Persists the guardrail ID for potential reuse in later steps.
 
-::alert[If you already created a guardrail named `workshop-content-filter` in the CLI walkthrough, the notebook will create a second one. You can delete either via the Bedrock console after the workshop.]{type="info"}
+::alert[Running both paths is safe. The notebook paginates through the existing guardrails first, and if it finds one named `workshop-content-filter` — the one the CLI walkthrough creates — it reuses that ID and prints `Guardrail already exists — reusing ID: ...` instead of creating a duplicate.]{type="info"}

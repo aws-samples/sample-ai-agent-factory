@@ -2,47 +2,15 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "GrafanaForObservabilityStack",
-      "Effect": "Allow",
-      "Action": [
-        "grafana:CreateWorkspace",
-        "grafana:DeleteWorkspace",
-        "grafana:DescribeWorkspace",
-        "grafana:ListWorkspaces",
-        "grafana:UpdateWorkspace",
-        "grafana:UpdateWorkspaceConfiguration",
-        "grafana:DescribeWorkspaceConfiguration",
-        "grafana:TagResource",
-        "grafana:UntagResource"
-      ],
-      "Resource": "*",
-      "Condition": {
-        "StringEquals": {
-          "aws:RequestedRegion": [
-            "us-west-2",
-            "us-east-1",
-            "eu-west-1"
-          ]
-        }
-      }
-    },
-    {
-      "Sid": "ServiceDiscoveryForServicesStack",
+      "Sid": "ServiceDiscoveryCreateAndListNoResourceLevel",
       "Effect": "Allow",
       "Action": [
         "servicediscovery:CreatePrivateDnsNamespace",
-        "servicediscovery:DeleteNamespace",
-        "servicediscovery:GetNamespace",
         "servicediscovery:ListNamespaces",
-        "servicediscovery:CreateService",
-        "servicediscovery:DeleteService",
-        "servicediscovery:GetService",
-        "servicediscovery:ListServices",
-        "servicediscovery:RegisterInstance",
-        "servicediscovery:DeregisterInstance",
         "servicediscovery:GetOperation",
         "servicediscovery:TagResource",
-        "servicediscovery:UntagResource"
+        "servicediscovery:UntagResource",
+        "servicediscovery:ListTagsForResource"
       ],
       "Resource": "*",
       "Condition": {
@@ -56,18 +24,30 @@
       }
     },
     {
-      "Sid": "AcmForTlsCertificates",
+      "Sid": "ServiceDiscoveryDeleteTagged",
       "Effect": "Allow",
       "Action": [
-        "acm:RequestCertificate",
-        "acm:DeleteCertificate",
-        "acm:DescribeCertificate",
-        "acm:ListCertificates",
-        "acm:AddTagsToCertificate",
-        "acm:RemoveTagsFromCertificate",
-        "acm:ListTagsForCertificate"
+        "servicediscovery:DeleteNamespace"
       ],
-      "Resource": "*",
+      "Resource": "arn:aws:servicediscovery:*:*:namespace/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ],
+          "aws:ResourceTag/Workshop": "AgentCore-Platform"
+        }
+      }
+    },
+    {
+      "Sid": "ServiceDiscoveryManage",
+      "Effect": "Allow",
+      "Action": [
+        "servicediscovery:GetNamespace"
+      ],
+      "Resource": "arn:aws:servicediscovery:*:*:namespace/*",
       "Condition": {
         "StringEquals": {
           "aws:RequestedRegion": [
@@ -79,14 +59,48 @@
       }
     },
     {
-      "Sid": "CognitoForIdentityStack",
+      "Sid": "CognitoCreateAndListNoResourceLevel",
       "Effect": "Allow",
       "Action": [
         "cognito-idp:CreateUserPool",
-        "cognito-idp:DeleteUserPool",
+        "cognito-idp:ListUserPools",
+        "cognito-idp:DescribeUserPoolDomain"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "CognitoDeleteTaggedUserPool",
+      "Effect": "Allow",
+      "Action": [
+        "cognito-idp:DeleteUserPool"
+      ],
+      "Resource": "arn:aws:cognito-idp:*:*:userpool/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ],
+          "aws:ResourceTag/Workshop": "AgentCore-Platform"
+        }
+      }
+    },
+    {
+      "Sid": "CognitoManageWorkshopUserPool",
+      "Effect": "Allow",
+      "Action": [
         "cognito-idp:DescribeUserPool",
         "cognito-idp:UpdateUserPool",
-        "cognito-idp:ListUserPools",
         "cognito-idp:CreateUserPoolClient",
         "cognito-idp:DeleteUserPoolClient",
         "cognito-idp:DescribeUserPoolClient",
@@ -94,7 +108,6 @@
         "cognito-idp:ListUserPoolClients",
         "cognito-idp:CreateUserPoolDomain",
         "cognito-idp:DeleteUserPoolDomain",
-        "cognito-idp:DescribeUserPoolDomain",
         "cognito-idp:CreateResourceServer",
         "cognito-idp:DeleteResourceServer",
         "cognito-idp:DescribeResourceServer",
@@ -111,10 +124,12 @@
         "cognito-idp:AdminAddUserToGroup",
         "cognito-idp:AdminRemoveUserFromGroup",
         "cognito-idp:AdminInitiateAuth",
-        "cognito-idp:InitiateAuth",
-        "cognito-idp:TagResource"
+        "cognito-idp:TagResource",
+        "cognito-idp:GetUserPoolMfaConfig",
+        "cognito-idp:UntagResource",
+        "cognito-idp:ListTagsForResource"
       ],
-      "Resource": "*",
+      "Resource": "arn:aws:cognito-idp:*:*:userpool/*",
       "Condition": {
         "StringEquals": {
           "aws:RequestedRegion": [
@@ -126,7 +141,7 @@
       }
     },
     {
-      "Sid": "ApiGatewayForServicesStack",
+      "Sid": "ApiGatewayV2ForLlmGateway",
       "Effect": "Allow",
       "Action": [
         "apigateway:GET",
@@ -134,7 +149,75 @@
         "apigateway:PUT",
         "apigateway:DELETE",
         "apigateway:PATCH",
-        "execute-api:Invoke"
+        "apigateway:TagResource",
+        "apigateway:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:apigateway:*::/apis",
+        "arn:aws:apigateway:*::/apis/*",
+        "arn:aws:apigateway:*::/vpclinks",
+        "arn:aws:apigateway:*::/vpclinks/*",
+        "arn:aws:apigateway:*::/tags/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ElbManageWorkshopLoadBalancers",
+      "Effect": "Allow",
+      "Action": [
+        "elasticloadbalancing:CreateLoadBalancer",
+        "elasticloadbalancing:DeleteLoadBalancer",
+        "elasticloadbalancing:CreateTargetGroup",
+        "elasticloadbalancing:DeleteTargetGroup",
+        "elasticloadbalancing:RegisterTargets",
+        "elasticloadbalancing:DeregisterTargets",
+        "elasticloadbalancing:CreateListener",
+        "elasticloadbalancing:DeleteListener",
+        "elasticloadbalancing:CreateRule",
+        "elasticloadbalancing:DeleteRule",
+        "elasticloadbalancing:ModifyLoadBalancerAttributes",
+        "elasticloadbalancing:ModifyTargetGroupAttributes",
+        "elasticloadbalancing:AddTags",
+        "elasticloadbalancing:RemoveTags"
+      ],
+      "Resource": [
+        "arn:aws:elasticloadbalancing:*:*:loadbalancer/app/workshop-*",
+        "arn:aws:elasticloadbalancing:*:*:targetgroup/workshop-*",
+        "arn:aws:elasticloadbalancing:*:*:listener/app/workshop-*",
+        "arn:aws:elasticloadbalancing:*:*:listener-rule/app/workshop-*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ElbDescribeNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "elasticloadbalancing:DescribeLoadBalancers",
+        "elasticloadbalancing:DescribeTargetGroups",
+        "elasticloadbalancing:DescribeTargetHealth",
+        "elasticloadbalancing:DescribeListeners",
+        "elasticloadbalancing:DescribeRules",
+        "elasticloadbalancing:DescribeTags",
+        "elasticloadbalancing:DescribeCapacityReservation",
+        "elasticloadbalancing:DescribeListenerAttributes",
+        "elasticloadbalancing:DescribeLoadBalancerAttributes",
+        "elasticloadbalancing:DescribeTargetGroupAttributes"
       ],
       "Resource": "*",
       "Condition": {
@@ -148,31 +231,10 @@
       }
     },
     {
-      "Sid": "BedrockForGatewayAndGuardrails",
+      "Sid": "AgentRegistryListNoResourceLevel",
       "Effect": "Allow",
       "Action": [
-        "bedrock:InvokeModel",
-        "bedrock:InvokeModelWithResponseStream",
-        "bedrock:ListFoundationModels",
-        "bedrock:GetFoundationModel",
-        "bedrock:GetFoundationModelAvailability",
-        "bedrock:ListInferenceProfiles",
-        "bedrock:GetInferenceProfile",
-        "bedrock:PutUseCaseForModelAccess",
-        "bedrock:GetUseCaseForModelAccess",
-        "bedrock:PutFoundationModelEntitlement",
-        "bedrock:ApplyGuardrail",
-        "bedrock:CreateGuardrail",
-        "bedrock:UpdateGuardrail",
-        "bedrock:DeleteGuardrail",
-        "bedrock:GetGuardrail",
-        "bedrock:ListGuardrails",
-        "bedrock:CreateGuardrailVersion",
-        "bedrock:ListTagsForResource",
-        "bedrock:TagResource",
-        "bedrock:UntagResource",
-        "bedrock:GetModelInvocationLoggingConfiguration",
-        "bedrock:PutModelInvocationLoggingConfiguration"
+        "agent-registry:ListRegistries"
       ],
       "Resource": "*",
       "Condition": {
@@ -186,50 +248,30 @@
       }
     },
     {
-      "Sid": "BedrockAgentCoreForGatewayRegistryIdentityPolicy",
+      "Sid": "AgentRegistryCreate",
       "Effect": "Allow",
       "Action": [
-        "bedrock-agentcore:CreateGateway",
-        "bedrock-agentcore:UpdateGateway",
-        "bedrock-agentcore:DeleteGateway",
-        "bedrock-agentcore:GetGateway",
-        "bedrock-agentcore:ListGateways",
-        "bedrock-agentcore:CreateGatewayTarget",
-        "bedrock-agentcore:GetGatewayTarget",
-        "bedrock-agentcore:ListGatewayTargets",
-        "bedrock-agentcore:DeleteGatewayTarget",
-        "bedrock-agentcore:SynchronizeGatewayTargets",
-        "bedrock-agentcore:PutResourcePolicy",
-        "bedrock-agentcore:CreateRegistry",
-        "bedrock-agentcore:GetRegistry",
-        "bedrock-agentcore:ListRegistries",
-        "bedrock-agentcore:DeleteRegistry",
-        "bedrock-agentcore:CreateWorkloadIdentity",
-        "bedrock-agentcore:GetWorkloadIdentity",
-        "bedrock-agentcore:ListWorkloadIdentities",
-        "bedrock-agentcore:DeleteWorkloadIdentity",
-        "bedrock-agentcore:UpdateWorkloadIdentity",
-        "bedrock-agentcore:GetWorkloadAccessToken",
-        "bedrock-agentcore:GetResourceOauth2Token",
-        "bedrock-agentcore:CreateOauth2CredentialProvider",
-        "bedrock-agentcore:GetOauth2CredentialProvider",
-        "bedrock-agentcore:ListOauth2CredentialProviders",
-        "bedrock-agentcore:DeleteOauth2CredentialProvider",
-        "bedrock-agentcore:GetTokenVault",
-        "bedrock-agentcore:AuthorizeAction",
-        "bedrock-agentcore:CreatePolicyEngine",
-        "bedrock-agentcore:GetPolicyEngine",
-        "bedrock-agentcore:ListPolicyEngines",
-        "bedrock-agentcore:DeletePolicyEngine",
-        "bedrock-agentcore:CreatePolicy",
-        "bedrock-agentcore:GetPolicy",
-        "bedrock-agentcore:ListPolicies",
-        "bedrock-agentcore:UpdatePolicy",
-        "bedrock-agentcore:DeletePolicy",
-        "bedrock-agentcore:ManageResourceScopedPolicy",
-        "bedrock-agentcore:ListEvents"
+        "agent-registry:CreateRegistry"
       ],
-      "Resource": "*",
+      "Resource": "arn:aws:agent-registry:*:*:registry/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "AgentRegistryManage",
+      "Effect": "Allow",
+      "Action": [
+        "agent-registry:GetRegistry",
+        "agent-registry:DeleteRegistry"
+      ],
+      "Resource": "arn:aws:agent-registry:*:*:registry/*",
       "Condition": {
         "StringEquals": {
           "aws:RequestedRegion": [

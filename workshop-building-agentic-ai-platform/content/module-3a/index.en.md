@@ -7,13 +7,13 @@ weight: 40
 
 ::alert[**Where to run commands.** All `aws` / `bash` / `python` commands in this module should be run in the **Workshop IDE's terminal** — not your laptop terminal. **When you open a notebook**, select the **`Python 3 (workshop)`** kernel when VS Code prompts in the top-right; `ModuleNotFoundError` usually means the wrong kernel is selected.]{type="info"}
 
-Use the pre-deployed [MCP Gateway & Registry](https://github.com/agentic-community/mcp-gateway-registry) to register tools and agents, configure identity-aware access control, and verify discoverability — building the governance layer that agents in Module 4 will consume.
+Use the pre-deployed **MCP Gateway & Registry** — an open-source project (Apache-2.0) already running in your workshop account — to register tools and agents, configure identity-aware access control, and verify discoverability, building the governance layer that agents in Module 4 will consume. Upstream attribution for this and every other third-party component is recorded in `THIRD_PARTY_LICENSES.md` at the root of the workshop repository.
 
-## The Problem
+## The problem
 
 Module 2 solved model access — every agent talks to one LLM Gateway instead of managing its own Bedrock credentials. But models are only half the story. Agents also need **tools** (MCP servers) and **other agents** (A2A peers). Without governance, the same sprawl pattern emerges:
 
-![MCP Sprawl vs Governed Access](/static/img/module-3/mcp-gateway-registry-infographic.png)
+![Infographic contrasting two topologies. Top half, "Enterprise AI tool sprawl": two developers and two agents each drawing their own tangled dashed lines to six separate MCP servers (A-F), with a pain-point list — per-developer configs, no visibility, scattered credentials, no standard agent auth. Bottom half, "Single control plane": the same developers, autonomous agents and AI coding assistants all arriving at one MCP Gateway & Registry box holding six components (gateway, unified registry, runtime discovery, auth and identity, security scanning, observability and audit logs), which then fans out to MCP servers on EKS and AgentCore and to A2A agents on Lambda, each reaching its own databases and external APIs.](/static/img/module-3/mcp-gateway-registry-infographic.png)
 
 - Teams deploy MCP servers independently — no inventory of what exists, no way to discover new tools
 - Agents are hardcoded to specific tool endpoints — add a new tool and every agent needs a code change
@@ -23,7 +23,7 @@ Module 2 solved model access — every agent talks to one LLM Gateway instead of
 
 This is the tool and agent sprawl problem. The MCP Gateway & Registry solves it.
 
-## Two Layers of Governance
+## Two layers of governance
 
 Both layers are taught in this module. You cover the discovery and access-control layer first (steps 1–6), then layer the Tools Gateway on top (the Tools Gateway section later in this module).
 
@@ -36,7 +36,7 @@ The Registry answers *"what tools exist and who is allowed to use them?"* The To
 
 ::alert[You can think of the Registry as the control plane (policy and discovery) and the Tools Gateway as the data plane (runtime enforcement). This mirrors how AWS services like API Gateway separate configuration from request handling.]{type="info"}
 
-## What's Already Deployed
+## What's already deployed
 
 The workshop bootstrap deployed the MCP Gateway & Registry on Amazon ECS Fargate with:
 
@@ -49,7 +49,7 @@ The workshop bootstrap deployed the MCP Gateway & Registry on Amazon ECS Fargate
 - **Amazon DocumentDB** — stores registrations, agent cards, and access control scopes
 - **Observability** — Grafana dashboards backed by Amazon Managed Service for Prometheus
 
-## The Scenario
+## The scenario
 
 ![Travel Agent Architecture — Flights MCP, Hotels MCP, and Travel Agent connected through the Registry and AgentCore Gateway](/static/img/module-3/travel-agent-architecture.png)
 
@@ -61,7 +61,7 @@ You are a **platform engineer** who has received a request from an AI/ML team bu
 
 Your job is to register the MCP servers and the agent card in the platform registry, configure access control, create a machine-to-machine service account, and verify everything is discoverable. The output of this module feeds directly into the Tools Gateway section later in this module (where these tools are synced to the AgentCore Gateway) and Module 4 (where the developer team builds the actual Travel Agent).
 
-## What You Will Do
+## What you will do
 
 | Step | What | Why |
 |------|------|-----|

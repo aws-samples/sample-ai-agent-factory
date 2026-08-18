@@ -7,7 +7,7 @@ weight: 53
 
 Add Bedrock Guardrails to screen all tool responses for sensitive information before they reach agents.
 
-## Why Guardrails on Tool Output?
+## Why guardrails on tool output?
 
 Tools return raw data -- database records, API responses, knowledge base passages. This data may contain:
 
@@ -17,7 +17,7 @@ Tools return raw data -- database records, API responses, knowledge base passage
 
 Path A (NGINX) passes everything through unfiltered. Path B's response interceptor can screen tool output using Bedrock Guardrails before it reaches the agent.
 
-## How It Works in the Response Interceptor
+## How it works in the response interceptor
 
 :::code{showCopyAction=true showLineNumbers=false language=python}
 # In handlers/interceptors.py (response_interceptor_handler)
@@ -33,15 +33,15 @@ if BEDROCK_GUARDRAIL_ID and "content" in result:
         item["text"] = guardrail_resp["outputs"][0]["text"]
 :::
 
-## Fail-Open Design
+## Fail-open design
 
 The guardrail check is fail-open: if Bedrock is unavailable or the guardrail call fails, the original tool output passes through unchanged. This prevents guardrail outages from blocking all tool calls.
 
 ::alert[This is the **enterprise guardrail** applied to all tool output. Module 4 adds a separate **per-agent guardrail** for domain-specific rules (e.g., "no financial advice"). Both layers apply.]{type="info"}
 
-## CLI Walkthrough
+## CLI walkthrough
 
-### Step 1: Create a Bedrock Guardrail
+### Step 1: Create a Bedrock guardrail
 
 First check if the guardrail already exists:
 
@@ -108,9 +108,9 @@ echo "Guardrail Version: $GUARDRAIL_VERSION"
 
 This guardrail will block SSNs, credit card numbers, and bank account numbers, anonymize emails and phone numbers, and block harmful content (hate, violence, sexual, misconduct, insults).
 
-:::alert[**Compliance note.** This step demonstrates PII/PCI screening patterns on tool output. Bedrock Guardrails is one control, not a compliance certification. If your application processes payment card data (PCI-DSS), protected health information (HIPAA/PHI), or EU personal data (GDPR), additional controls and attestations are required. See [AWS Compliance Programs](https://aws.amazon.com/compliance/programs/).]{type="info"}
+::alert[**Compliance note.** This step demonstrates PII/PCI screening patterns on tool output. Bedrock Guardrails is one control, not a compliance certification. If your application processes payment card data (PCI-DSS), protected health information (HIPAA/PHI), or EU personal data (GDPR), additional controls and attestations are required. See [AWS Compliance Programs](https://aws.amazon.com/compliance/programs/).]{type="info"}
 
-### Step 2: Update the Response Interceptor Lambda
+### Step 2: Update the response interceptor Lambda
 
 Write the guardrail ID and version into the Response Interceptor Lambda's environment variables using a read-merge-update pattern:
 
@@ -166,7 +166,10 @@ aws lambda wait function-updated-v2 \
 
 Use the Bedrock Runtime `apply_guardrail` API directly to verify the guardrail behavior:
 
+The record below is synthetic and uses reserved placeholders only: the reserved `000-00-0000` SSN, an `example.com` address, a `555` phone number, and `4000-0000-0000-0000` as the card number. That card number fails the Luhn checksum, so it can never be a real card. It still has to keep the shape of a card — four groups of four digits next to a card label — because the `CREDIT_DEBIT_CARD_NUMBER` detector matches on format and surrounding context, not on the checksum. Replacing the digits with `XXXX-XXXX-XXXX-XXXX` is not reliable: the detector only picks a fully masked value up when other PII sits beside it.
+
 :::code{showCopyAction=true showLineNumbers=false language=bash}
+# Synthetic test data only -- reserved/documented placeholders, no real PII.
 cat > /tmp/apply-guardrail.json << EOF
 {
   "guardrailIdentifier": "$GUARDRAIL_ID",
@@ -175,7 +178,7 @@ cat > /tmp/apply-guardrail.json << EOF
   "content": [
     {
       "text": {
-        "text": "Customer record found. Name: John Smith, SSN: 000-00-0000, Credit Card: 4111-1111-1111-1111, Email: john.smith@example.com, Phone: (555) 123-4567. Account balance: \$12,450.00."
+        "text": "Customer record found. Name: John Smith, SSN: 000-00-0000, Credit Card: 4000-0000-0000-0000, Email: john.smith@example.com, Phone: (555) 123-4567. Account balance: \$12,450.00."
       }
     }
   ]
@@ -212,11 +215,13 @@ M2M_CLIENT_ID=$(echo "$M2M_JSON" | python3 -c "import sys,json; print(json.load(
 M2M_CLIENT_SECRET=$(echo "$M2M_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['client_secret'])")
 COGNITO_DOMAIN=$(aws cloudformation list-exports \
   --query "Exports[?Name=='workshop-CognitoDomain'].Value" --output text --region $REGION)
-GATEWAY_TOKEN=$(curl -s -X POST \
-  "https://${COGNITO_DOMAIN}.auth.${REGION}.amazoncognito.com/oauth2/token" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -u "${M2M_CLIENT_ID}:${M2M_CLIENT_SECRET}" \
-  -d "grant_type=client_credentials&scope=mcp-servers-unrestricted/read mcp-servers-unrestricted/execute" \
+# Client secret via stdin (-K -), never as a -u argument that would be visible
+# in the process table. printf is a shell builtin, so nothing is forked.
+GATEWAY_TOKEN=$(printf 'user = "%s:%s"\n' "$M2M_CLIENT_ID" "$M2M_CLIENT_SECRET" \
+  | curl -s -K - -X POST \
+    "https://${COGNITO_DOMAIN}.auth.${REGION}.amazoncognito.com/oauth2/token" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "grant_type=client_credentials&scope=mcp-servers-unrestricted/read mcp-servers-unrestricted/execute" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 
 echo "=== PATH B with Bedrock Guardrails active ==="
@@ -239,7 +244,7 @@ If the tool response contains any PII, the guardrail will block or anonymize it 
 
 ---
 
-## Notebook Walkthrough (Optional alternative)
+## Notebook walkthrough (optional alternative)
 
 > This notebook covers the same material as the CLI section above — follow *either* path, you do not need to do both.
 >

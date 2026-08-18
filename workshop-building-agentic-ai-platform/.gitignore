@@ -9,12 +9,16 @@ cdk.out/
 .toolkit-mdrc
 *.egg-info/
 
+# Security-scanner artifacts — regenerable, large, and they quote full finding
+# text (including the very strings some rules match on, which makes a committed
+# report self-flagging on the next scan).
+HOLMES-CONSOLIDATED-REPORT.json
+scan-report*.json
+holmes-report-*.json
+.holmes/
+
 # State files may contain API keys, secrets, and account IDs
 **/.state.json
 .DS_Store
 kiro-workshop-content-session-*.md
 .ipynb_checkpoints/
-
-# Holmes security-review reports (internal artifacts — never ship to the public repo)
-HOLMES-CONSOLIDATED-REPORT.json
-holmes-report-*.json

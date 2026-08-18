@@ -5,7 +5,7 @@ weight: 13
 
 ::alert[**Scripted self-service is available now.** Clone this repository and run one deploy script (below) to provision the full platform — including the browser IDE — into your own AWS account. The one-click CloudFormation console buttons and the published Workshop Studio asset bundle are still being prepared and will be added once the workshop is public; until then, use the scripted flow on this page.]{header="Self-paced setup" type="info"}
 
-::alert[Provisioning this workshop environment in your own AWS account will create resources and there will be costs associated with them. For per-service pricing, see [Amazon Bedrock pricing](https://aws.amazon.com/bedrock/pricing/), [Amazon ECS pricing](https://aws.amazon.com/ecs/pricing/), [Amazon DocumentDB pricing](https://aws.amazon.com/documentdb/pricing/), [Amazon Aurora pricing](https://aws.amazon.com/rds/aurora/pricing/), [Amazon CloudFront pricing](https://aws.amazon.com/cloudfront/pricing/), [AWS Lambda pricing](https://aws.amazon.com/lambda/pricing/), and [NAT Gateway pricing](https://aws.amazon.com/vpc/pricing/). The cleanup section provides a guide to remove all provisioned resources to prevent further charges.]{header="Warning" type="error"}
+::alert[Provisioning this workshop environment in your own AWS account will create resources and there will be costs associated with them. For per-service pricing, see [Amazon Bedrock pricing](https://aws.amazon.com/bedrock/pricing/), [Amazon ECS pricing](https://aws.amazon.com/ecs/pricing/), [Amazon DocumentDB pricing](https://aws.amazon.com/documentdb/pricing/), [Amazon EFS pricing](https://aws.amazon.com/efs/pricing/), [Amazon CloudFront pricing](https://aws.amazon.com/cloudfront/pricing/), [AWS Lambda pricing](https://aws.amazon.com/lambda/pricing/), and [NAT Gateway pricing](https://aws.amazon.com/vpc/pricing/). The cleanup section provides a guide to remove all provisioned resources to prevent further charges.]{header="Warning" type="error"}
 
 Follow these instructions if you are running this workshop independently in your own AWS account. The deploy script provisions the **same environment** that AWS-run events provision automatically — including the browser-based IDE — so every module works exactly as written, with no path changes.
 
@@ -48,34 +48,88 @@ aws configure set region <region>   # one of: us-west-2, us-east-1, eu-west-1
 
 We recommend running this in a **dedicated AWS account** you can tear down afterwards, rather than a shared or production account — the deploy creates IAM roles, networking, and compute across many services.
 
-The deploying principal needs permission to create that infrastructure (CloudFormation, EC2/VPC, ECS, Lambda, IAM roles, Secrets Manager, DocumentDB/RDS, Cognito, Bedrock, AgentCore, CloudFront, and more). Attach the **scoped deploy policies** included in this repository:
+#### Service quota headroom
 
-- [`static/cfn/self-service-deploy-policy-1.json`](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/workshop-building-agentic-ai-platform/static/cfn/self-service-deploy-policy-1.json)
-- [`static/cfn/self-service-deploy-policy-2.json`](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/workshop-building-agentic-ai-platform/static/cfn/self-service-deploy-policy-2.json)
-- [`static/cfn/self-service-deploy-policy-3.json`](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/workshop-building-agentic-ai-platform/static/cfn/self-service-deploy-policy-3.json)
-- [`static/cfn/self-service-deploy-policy-4.json`](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/workshop-building-agentic-ai-platform/static/cfn/self-service-deploy-policy-4.json)
-
-They grant only the **explicit actions the workshop stacks actually use** (no `service:*` wildcards), with every regional statement restricted to the validated regions via an `aws:RequestedRegion` condition. The action list is split across four files because it exceeds a single IAM managed policy's 6,144-character limit. Create each as a customer-managed policy and attach all four to the user or role that runs the deploy:
+The workshop builds **two VPCs** — one for the Module 2 LLM gateway, one for the Module 3 registry — each with its own NAT gateway. The default **VPCs per Region** quota is **5**, and it is the quota most likely to stop you, because it counts your default VPC and every VPC any other workload in the account already created. Check your headroom in the region you are deploying into:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
-for n in 1 2 3 4; do
-  aws iam create-policy \
-    --policy-name "AgenticPlatformWorkshopDeploy${n}" \
-    --policy-document "file://static/cfn/self-service-deploy-policy-${n}.json"
+aws ec2 describe-vpcs --query 'length(Vpcs)'
+aws service-quotas get-service-quota \
+  --service-code vpc --quota-code L-F678F1CE \
+  --query 'Quota.Value' --output text
+:::
+
+If the first number is within 1 of the second, the registry stack fails partway through with:
+
+:::code{showLineNumbers=false}
+VPC  CREATE_FAILED  The maximum number of VPCs has been reached.
+:::
+
+Request an increase from **Service Quotas → Amazon VPC → VPCs per Region** before you start, or deploy into a region with more room. The other quotas the deploy touches (2 Elastic IPs, 2 NAT gateways, 1 Application Load Balancer, 1 CloudFront distribution) sit well inside their defaults.
+
+The deploying principal needs permission to create that infrastructure (CloudFormation, EC2/VPC, ECS, Lambda, IAM roles, Secrets Manager, DocumentDB/RDS, Cognito, Bedrock, AgentCore, CloudFront, and more). Attach the **scoped deploy policies** included in this repository:
+
+- `static/cfn/self-service-deploy-policy-1.json`
+- `static/cfn/self-service-deploy-policy-2.json`
+- `static/cfn/self-service-deploy-policy-3.json`
+- `static/cfn/self-service-deploy-policy-4.json`
+- `static/cfn/self-service-deploy-policy-5.json`
+- `static/cfn/self-service-deploy-policy-6.json`
+- `static/cfn/self-service-deploy-policy-7.json`
+
+They grant only the **explicit actions the workshop stacks actually use** (no `service:*` wildcards), with every regional statement restricted to the validated regions via an `aws:RequestedRegion` condition. Where an action supports resource-level permissions the statement names concrete ARN patterns; the statements that must use `Resource: "*"` are the ones for actions AWS authorizes only at the account level (for example `bedrock:CreateGuardrail` and `lambda:ListFunctions`), and those are grouped into clearly-labelled `…NoResourceLevel` statements. The action list is split across seven files because it exceeds a single IAM managed policy's 6,144-character limit.
+
+The paths above are relative to the repository root, so clone the repository first (the [Clone the Workshop Repository](#clone-the-workshop-repository) step below), then run this from that root to create each file as a customer-managed policy and attach all seven to the user or role that runs the deploy:
+
+:::code{showCopyAction=true showLineNumbers=false language=bash}
+for n in 1 2 3 4 5 6 7; do
+  # Safe to re-run: if the policy already exists, update it in place rather
+  # than failing with EntityAlreadyExists.
+  arn=$(aws iam list-policies --scope Local \
+    --query "Policies[?PolicyName=='AgenticPlatformWorkshopDeploy${n}'].Arn" --output text)
+  if [ -n "$arn" ]; then
+    # IAM keeps at most 5 versions per policy, so drop the oldest non-default
+    # one before adding a new one.
+    old=$(aws iam list-policy-versions --policy-arn "$arn" \
+      --query 'Versions[?IsDefaultVersion==`false`]|[-1].VersionId' --output text)
+    if [ -n "$old" ] && [ "$old" != "None" ]; then
+      aws iam delete-policy-version --policy-arn "$arn" --version-id "$old"
+    fi
+    # Report the outcome, not the attempt: an unconditional "updated" line here
+    # would print even when IAM rejected the document, and the participant would
+    # start the deploy believing all seven policies were current.
+    if aws iam create-policy-version --policy-arn "$arn" --set-as-default \
+         --policy-document "file://static/cfn/self-service-deploy-policy-${n}.json" >/dev/null; then
+      echo "updated $arn"
+    else
+      echo "FAILED to update AgenticPlatformWorkshopDeploy${n} - see the error above" >&2
+    fi
+  else
+    if ! aws iam create-policy \
+         --policy-name "AgenticPlatformWorkshopDeploy${n}" \
+         --policy-document "file://static/cfn/self-service-deploy-policy-${n}.json" \
+         --query 'Policy.Arn' --output text; then
+      echo "FAILED to create AgenticPlatformWorkshopDeploy${n} - see the error above" >&2
+    fi
+  fi
 done
-# then attach each returned policy ARN to your deploy user/role, e.g.:
+# then attach each policy ARN printed above to your deploy user/role, e.g.:
 # aws iam attach-user-policy --user-name <you> --policy-arn <arn-from-above>
 :::
 
-::alert[Prefer not to manage four policies? `AdministratorAccess` on the deploying principal also works for a dedicated workshop account — the scoped policies are the least-privilege option for accounts where that matters.]{type="info"}
+::alert[An IAM user or role can have at most **10** managed policies attached by default, so all seven fit alongside anything already attached. If you hit `LimitExceeded`, attach them to a dedicated deploy role instead.]{type="info"}
+
+::alert[Prefer not to manage seven policies? `AdministratorAccess` on the deploying principal also works for a dedicated workshop account — the scoped policies are the least-privilege option for accounts where that matters.]{type="info"}
+
+::alert[**What the scoped policies do and do not contain.** They stop the deploy from touching resources outside the workshop's own naming prefixes, tags and regions. They are *not* a containment boundary against a hostile principal: the deploy must be able to create the workshop's IAM roles and attach policies to them, and any principal that can do that can grant itself more permission (via `iam:PutRolePolicy` plus `iam:PassRole` to Lambda). Closing that would require an IAM permissions boundary on every role the stacks create. This is why the recommendation above is a dedicated, disposable account rather than a shared one. See `static/cfn/POLICY_NOTES.md` for the full analysis.]{type="warning"}
 
 ::alert[If your account is part of an AWS Organization and you want an extra guardrail, you can apply [`static/cfn/self-service-scp.json`](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/workshop-building-agentic-ai-platform/static/cfn/self-service-scp.json) as a Service Control Policy — it restricts the account to the validated regions and blocks account/billing changes. This is optional hardening, not required to run the workshop.]{type="info"}
 
 ::alert[The deploy provisions a Code Editor IDE on an EC2 instance with a scoped instance role (it mirrors the workshop's permission set plus the CDK actions Module 4 needs). This is the environment you run module commands from — another reason to use a dedicated, disposable account and tear it down when finished.]{type="warning"}
 
-::alert[**Do not run this in an account with automated resource-governance or "janitor" tooling.** The MCP Gateway & Registry stack stands up an Amazon DocumentDB cluster (plus Aurora PostgreSQL) that the registry service connects to during stack creation. Some corporate or sandbox accounts run schedulers that automatically delete or stop RDS/DocumentDB instances shortly after they are created — if one deletes the registry's DocumentDB instance, the registry ECS service can never connect and the `workshop-registry-stack` deploy fails (you will see repeated DNS resolution errors for the `*.docdb.amazonaws.com` endpoint in the registry container logs). Use an account where you can keep the databases running for the duration of the workshop.]{type="warning"}
+::alert[**Do not run this in an account with automated resource-governance or "janitor" tooling.** The MCP Gateway & Registry stack stands up an Amazon DocumentDB cluster that the registry service connects to during stack creation. Some corporate or sandbox accounts run schedulers that automatically delete or stop RDS/DocumentDB instances shortly after they are created — if one deletes the registry's DocumentDB instance, the registry ECS service can never connect and the `workshop-registry-stack` deploy fails (you will see repeated DNS resolution errors for the `*.docdb.amazonaws.com` endpoint in the registry container logs). Use an account where you can keep the database running for the duration of the workshop.]{type="warning"}
 
-## Clone the Workshop Repository
+## Clone the workshop repository
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
 git clone https://github.com/aws-samples/sample-ai-agent-factory.git
@@ -84,7 +138,7 @@ cd sample-ai-agent-factory/workshop-building-agentic-ai-platform
 
 ::alert[The workshop lives in the public `aws-samples` repository above (`https://github.com/aws-samples/sample-ai-agent-factory`, directory `workshop-building-agentic-ai-platform`). If you received this content as a different repository copy or an archive, use that copy: `cd` into its root (the directory containing `deploy-cfn.sh` and `contentspec.yaml`) and continue.]{type="info"}
 
-## Deploy the Platform
+## Deploy the platform
 
 From the repository root, run the self-paced deployer:
 
@@ -114,7 +168,7 @@ When the script finishes it prints a table like this — keep these values handy
 ::alert[If you ever lose these values, retrieve them again with:
 `aws cloudformation describe-stacks --stack-name code-editor --region "$(aws configure get region)" --query "Stacks[0].Outputs[?OutputKey=='URL' || OutputKey=='IdePassword']" --output table`]{type="info"}
 
-## Open the Workshop IDE
+## Open the workshop IDE
 
 Your workshop environment includes a browser-based VS Code IDE with all required tools pre-installed (AWS CLI, Python, Git, Docker, Node.js, the AWS CDK, and Strands Agents). **All workshop commands should be run in this IDE's terminal.**
 
@@ -141,7 +195,7 @@ You should see the VS Code IDE with the `/workshop/` folder pre-populated with t
 
 ::alert[The IDE runs on an EC2 instance in your account with pre-configured AWS credentials. You do not need to paste CLI credentials into the IDE terminal — they are available automatically via the instance role. The default AWS region is also pre-set to the region you deployed into.]{type="info"}
 
-## Verify the Environment
+## Verify the environment
 
 Before starting the modules, confirm everything is healthy. From the repository root (in your local terminal, where you ran the deploy), run the self-test:
 
@@ -153,7 +207,7 @@ This checks that all five stacks are `*_COMPLETE` and that the LLM Gateway, MCP 
 
 ::alert[A transient failure immediately after a stack reaches `CREATE_COMPLETE` is possible — public endpoints (CloudFront, load balancers) can take a few minutes to start serving traffic. If a health check fails, wait 2–3 minutes and re-run the self-test.]{type="info"}
 
-## Where to Run CLI Commands
+## Where to run CLI commands
 
 ::alert[**Every `aws` / `bash` / `python` command in every module is intended for the Workshop IDE's terminal.** Open a terminal in the IDE with **Terminal → New Terminal** (`` Ctrl+` ``). The terminal already runs in the `/workshop/` folder with pre-configured AWS credentials and the correct default region (the region you deployed into). The only commands you run from your **local** terminal are the deploy (`./scripts/self-service-deploy.sh`), the self-test (`./scripts/self-test.sh`), and cleanup (`./deploy-cfn.sh destroy`).]{type="warning"}
 
@@ -167,6 +221,6 @@ When you are finished, tear everything down to stop charges. From the repository
 
 This removes all five stacks in reverse dependency order (including the GuardDuty VPC-endpoint pre-cleanup that otherwise blocks VPC deletion). If you completed **Module 4**, tear down its FAST CDK resources **first** — see the [Cleanup](../../cleanup/) page for the complete teardown order and a verification checklist.
 
-## What's Next
+## What's next
 
 Proceed to **Module 1: The Vision** to understand the platform architecture and choose your track.

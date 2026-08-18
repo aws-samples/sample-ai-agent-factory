@@ -19,7 +19,7 @@ In this module you take on the role of a **platform engineer** onboarding a set 
 
 ::alert[This module is part of Track 2 (Build the Platform) and Track 3 (The Full Journey). If you are on Track 1 (fast path), these steps are completed automatically by the workshop bootstrap — skip to Module 4.]{type="info"}
 
-## The Scenario
+## The scenario
 
 Your AI/ML team is building an intelligent travel and commerce assistant. The assistant needs to:
 
@@ -29,13 +29,13 @@ Your AI/ML team is building an intelligent travel and commerce assistant. The as
 
 As the platform engineer, your job is to deploy the tool infrastructure, register each tool in a governed catalog, set up identity and access control, and verify that agent developers can discover and invoke tools safely.
 
-## Three Pillars, Three Personas
+## Three pillars, three personas
 
 The AgentCore Services architecture is built on three pillars — **Discovery** (Registry), **Governance** (Gateway), and **Identity** (Cognito + WorkloadIdentity) — and you will work through them as three personas with distinct IAM boundaries: **Admin** (builds the catalog and approves tools), **Publisher** (registers tools but cannot approve their own), and **Consumer** (agent developer, searches and invokes). This separation of duties mirrors real enterprise governance: the person who builds a tool is not the person who approves it for production use.
 
 The full tables — which service backs each pillar, which IAM role backs each persona, and what each role can and cannot do — live on the [Architecture Overview](step-1/) page. Skim this page, then open step-1 to see the detail.
 
-## What You Will Learn
+## What you will learn
 
 - How the AgentCore Registry provides a searchable, governed tool catalog
 - How the AgentCore Gateway routes and governs tool invocations via Lambda targets
@@ -60,7 +60,7 @@ The full tables — which service backs each pillar, which IAM role backs each p
 7. [Add Guardrails](step-7/) — Wire Bedrock Guardrails and group-based access control
 8. [Cleanup](step-8/) — Tear down all AWS resources
 
-## Source Code
+## Source code
 
 The CloudFormation stack (`static/cfn/agentcore/workshop-agentcore-stack.yaml`) is pre-deployed by Workshop Studio — you do not run it by hand. Your work in this module happens inside the notebooks below.
 

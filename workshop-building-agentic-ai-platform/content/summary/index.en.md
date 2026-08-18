@@ -5,7 +5,7 @@ weight: 90
 
 Congratulations on completing the workshop!
 
-## What You Built
+## What you built
 
 Depending on the track you chose, you deployed and explored different layers of the Agentic AI Platform:
 
@@ -15,7 +15,7 @@ Depending on the track you chose, you deployed and explored different layers of 
 | **Track 2 (Platform)** | Deployed and configured the foundational infrastructure — LLM Gateway with virtual keys and guardrails, OSS MCP Registry with access control, Tools Gateway with travel tools, and/or the AgentCore Registry & Gateway |
 | **Track 3 (Full Journey)** | Built the complete platform end-to-end — foundation components plus a Travel Agent (workshop sample) consuming them via FAST, across either the MCP path, the AgentCore path, or both |
 
-## Architecture Recap
+## Architecture recap
 
 The platform you built follows the architecture from Module 1:
 
@@ -26,7 +26,7 @@ The platform you built follows the architecture from Module 1:
 | **Runtime** | AgentCore Runtime running Strands Agents in managed containers via FAST |
 | **Observability** | CloudWatch logs, GenAI Observability traces, gateway audit trail, spend tracking via LiteLLM, AgentCore Memory |
 
-## Key Takeaways
+## Key takeaways
 
 - Enterprise agentic AI requires a **platform approach** — not just individual agents
 - The **gateway pattern** (LLM Gateway, Tool Gateway, Agent Gateway) is the control plane for all AI interactions — it enforces governance without requiring changes to agent code
@@ -35,7 +35,7 @@ The platform you built follows the architecture from Module 1:
 - **Two paths to the same outcome** — whether you use the open-source MCP Registry or the AWS-native AgentCore Registry, the platform architecture and agent code remain similar
 - **Separation of concerns** between platform teams (who govern) and AI/ML teams (who build) is what makes the platform scalable across an organization
 
-## Taking This to Production
+## Taking this to production
 
 The workshop deployed a functional platform in a single account. Moving to production involves hardening across several dimensions:
 
@@ -48,9 +48,9 @@ The workshop deployed a functional platform in a single account. Moving to produ
 | **Deployment** | Manual CDK/CLI | CI/CD pipelines, blue/green deployments, canary releases |
 | **Multi-account** | Single account | Landing zone with separate accounts for platform, workloads, and shared services |
 
-## Next Steps
+## Next steps
 
-- Explore the [Amazon Bedrock AgentCore documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/agentcore.html)
+- Explore the [Amazon Bedrock AgentCore documentation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html)
 - Review the [Strands Agents documentation](https://strandsagents.com/)
 - Learn more about [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
 - Explore the [FAST repository](https://github.com/awslabs/fullstack-solution-template-for-agentcore) for additional agent patterns

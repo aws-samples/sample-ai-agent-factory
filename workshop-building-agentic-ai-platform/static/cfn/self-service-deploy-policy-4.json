@@ -2,50 +2,6 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "CloudWatchLogsAndMetricsForStacks",
-      "Effect": "Allow",
-      "Action": [
-        "logs:CreateLogGroup",
-        "logs:DeleteLogGroup",
-        "logs:DescribeLogGroups",
-        "logs:PutRetentionPolicy",
-        "logs:DeleteRetentionPolicy",
-        "logs:CreateLogStream",
-        "logs:DeleteLogStream",
-        "logs:DescribeLogStreams",
-        "logs:PutLogEvents",
-        "logs:GetLogEvents",
-        "logs:FilterLogEvents",
-        "logs:TagResource",
-        "logs:UntagResource",
-        "logs:TagLogGroup",
-        "logs:ListTagsForResource",
-        "cloudwatch:PutMetricData",
-        "cloudwatch:GetMetricData",
-        "cloudwatch:GetMetricStatistics",
-        "cloudwatch:ListMetrics",
-        "cloudwatch:DescribeAlarms",
-        "cloudwatch:PutMetricAlarm",
-        "cloudwatch:DeleteAlarms",
-        "cloudwatch:PutDashboard",
-        "cloudwatch:DeleteDashboards",
-        "cloudwatch:GetDashboard",
-        "cloudwatch:ListDashboards",
-        "cloudwatch:TagResource",
-        "cloudwatch:UntagResource"
-      ],
-      "Resource": "*",
-      "Condition": {
-        "StringEquals": {
-          "aws:RequestedRegion": [
-            "us-west-2",
-            "us-east-1",
-            "eu-west-1"
-          ]
-        }
-      }
-    },
-    {
       "Sid": "IamRolesAndPoliciesScopedToWorkshopPrefix",
       "Effect": "Allow",
       "Action": [
@@ -63,7 +19,6 @@
         "iam:ListAttachedRolePolicies",
         "iam:TagRole",
         "iam:UntagRole",
-        "iam:CreateServiceLinkedRole",
         "iam:CreatePolicy",
         "iam:DeletePolicy",
         "iam:GetPolicy",
@@ -75,17 +30,66 @@
       "Resource": [
         "arn:aws:iam::*:role/workshop-*",
         "arn:aws:iam::*:policy/workshop-*",
-        "arn:aws:iam::*:role/aws-service-role/*"
+        "arn:aws:iam::*:role/code-editor-*",
+        "arn:aws:iam::*:policy/code-editor-*"
       ]
     },
     {
-      "Sid": "IamReadOnlyForStackInspection",
+      "Sid": "IamCreateServiceLinkedRoleOnly",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateServiceLinkedRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:role/aws-service-role/ecs.amazonaws.com/*",
+        "arn:aws:iam::*:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/*",
+        "arn:aws:iam::*:role/aws-service-role/ops.apigateway.amazonaws.com/*",
+        "arn:aws:iam::*:role/aws-service-role/elasticloadbalancing.amazonaws.com/*",
+        "arn:aws:iam::*:role/aws-service-role/elasticfilesystem.amazonaws.com/*",
+        "arn:aws:iam::*:role/aws-service-role/ec2-nat-gateway.amazonaws.com/*",
+        "arn:aws:iam::*:role/aws-service-role/rds.amazonaws.com/*",
+        "arn:aws:iam::*:role/aws-service-role/agent-registry.amazonaws.com/*",
+        "arn:aws:iam::*:role/aws-service-role/bedrock-agentcore.amazonaws.com/*",
+        "arn:aws:iam::*:role/aws-service-role/network.bedrock-agentcore.amazonaws.com/*",
+        "arn:aws:iam::*:role/aws-service-role/runtime-identity.bedrock-agentcore.amazonaws.com/*"
+      ]
+    },
+    {
+      "Sid": "IamInstanceProfileForCodeEditorIde",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateInstanceProfile",
+        "iam:DeleteInstanceProfile",
+        "iam:AddRoleToInstanceProfile",
+        "iam:RemoveRoleFromInstanceProfile",
+        "iam:TagInstanceProfile",
+        "iam:UntagInstanceProfile"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:instance-profile/code-editor-*",
+        "arn:aws:iam::*:instance-profile/workshop-*"
+      ]
+    },
+    {
+      "Sid": "AccountLevelReadOnlyNoArnSupport",
       "Effect": "Allow",
       "Action": [
         "iam:ListPolicies",
         "iam:ListRoles",
         "iam:GetInstanceProfile",
-        "iam:ListInstanceProfilesForRole"
+        "iam:ListInstanceProfilesForRole",
+        "iam:GetAccountSummary",
+        "iam:ListEntitiesForPolicy",
+        "iam:GetServiceLinkedRoleDeletionStatus",
+        "cloudfront:ListDistributions",
+        "cloudfront:ListOriginAccessControls",
+        "cloudfront:GetConnectionGroup",
+        "cloudfront:GetVpcOrigin",
+        "route53:ListHostedZonesByName",
+        "route53:ListHostedZonesByVPC",
+        "sts:GetCallerIdentity",
+        "s3:ListAllMyBuckets",
+        "aws-marketplace:ViewSubscriptions"
       ],
       "Resource": "*"
     },
@@ -96,7 +100,8 @@
         "iam:PassRole"
       ],
       "Resource": [
-        "arn:aws:iam::*:role/workshop-*"
+        "arn:aws:iam::*:role/workshop-*",
+        "arn:aws:iam::*:role/code-editor-*"
       ],
       "Condition": {
         "StringEquals": {
@@ -104,49 +109,103 @@
             "lambda.amazonaws.com",
             "bedrock.amazonaws.com",
             "bedrock-agentcore.amazonaws.com",
+            "agent-registry.amazonaws.com",
             "cloudformation.amazonaws.com",
             "ecs-tasks.amazonaws.com",
             "ec2.amazonaws.com",
             "apigateway.amazonaws.com",
             "events.amazonaws.com",
-            "grafana.amazonaws.com",
             "aps.amazonaws.com"
           ]
         }
       }
     },
     {
-      "Sid": "CloudFrontGlobalForCodeEditorDistribution",
+      "Sid": "CloudFrontCreateScoped",
       "Effect": "Allow",
       "Action": [
         "cloudfront:CreateDistribution",
+        "cloudfront:CreateOriginAccessControl",
+        "cloudfront:CreateCachePolicy"
+      ],
+      "Resource": [
+        "arn:aws:cloudfront::*:distribution/*",
+        "arn:aws:cloudfront::*:origin-access-control/*",
+        "arn:aws:cloudfront::*:cache-policy/*"
+      ]
+    },
+    {
+      "Sid": "Route53CreateHostedZoneNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "route53:CreateHostedZone"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudFrontDeleteAndUpdateTaggedOnly",
+      "Effect": "Allow",
+      "Action": [
         "cloudfront:DeleteDistribution",
+        "cloudfront:UpdateDistribution"
+      ],
+      "Resource": "arn:aws:cloudfront::*:distribution/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Workshop": "AgentCore-Platform"
+        }
+      }
+    },
+    {
+      "Sid": "CloudFrontReadTagAndInvalidateDistribution",
+      "Effect": "Allow",
+      "Action": [
         "cloudfront:GetDistribution",
         "cloudfront:GetDistributionConfig",
-        "cloudfront:UpdateDistribution",
-        "cloudfront:ListDistributions",
         "cloudfront:TagResource",
         "cloudfront:UntagResource",
-        "cloudfront:CreateOriginAccessControl",
-        "cloudfront:DeleteOriginAccessControl",
-        "cloudfront:GetOriginAccessControl",
-        "cloudfront:ListOriginAccessControls",
+        "cloudfront:ListTagsForResource",
         "cloudfront:CreateInvalidation",
         "cloudfront:GetInvalidation",
         "cloudfront:ListInvalidations"
       ],
-      "Resource": "*"
+      "Resource": "arn:aws:cloudfront::*:distribution/*"
     },
     {
-      "Sid": "StsCallerIdentityGlobal",
+      "Sid": "CloudFrontManageOacAndCachePolicy",
       "Effect": "Allow",
       "Action": [
-        "sts:GetCallerIdentity"
+        "cloudfront:DeleteOriginAccessControl",
+        "cloudfront:GetOriginAccessControl",
+        "cloudfront:UpdateCachePolicy",
+        "cloudfront:DeleteCachePolicy",
+        "cloudfront:GetCachePolicy",
+        "cloudfront:GetCachePolicyConfig"
       ],
-      "Resource": "*"
+      "Resource": [
+        "arn:aws:cloudfront::*:origin-access-control/*",
+        "arn:aws:cloudfront::*:cache-policy/*"
+      ]
     },
     {
-      "Sid": "StsAssumeWorkshopRolesGlobal",
+      "Sid": "Route53ManageCloudMapPrivateDnsHostedZone",
+      "Effect": "Allow",
+      "Action": [
+        "route53:AssociateVPCWithHostedZone",
+        "route53:DisassociateVPCFromHostedZone",
+        "route53:DeleteHostedZone",
+        "route53:GetHostedZone",
+        "route53:ChangeResourceRecordSets",
+        "route53:ListResourceRecordSets",
+        "route53:GetChange"
+      ],
+      "Resource": [
+        "arn:aws:route53:::hostedzone/*",
+        "arn:aws:route53:::change/*"
+      ]
+    },
+    {
+      "Sid": "StsAssumeWorkshopPersonaRoles",
       "Effect": "Allow",
       "Action": [
         "sts:AssumeRole"
@@ -159,8 +218,7 @@
       "Sid": "MarketplaceSubscribeForBedrockModelAccess",
       "Effect": "Allow",
       "Action": [
-        "aws-marketplace:Subscribe",
-        "aws-marketplace:ViewSubscriptions"
+        "aws-marketplace:Subscribe"
       ],
       "Resource": "*"
     },
@@ -185,18 +243,8 @@
       ],
       "Resource": [
         "arn:aws:s3:::cfn-deploy-*",
-        "arn:aws:s3:::cfn-deploy-*/*",
-        "arn:aws:s3:::workshop-*",
-        "arn:aws:s3:::workshop-*/*"
+        "arn:aws:s3:::workshop-*"
       ]
-    },
-    {
-      "Sid": "S3ListAllMyBucketsGlobal",
-      "Effect": "Allow",
-      "Action": [
-        "s3:ListAllMyBuckets"
-      ],
-      "Resource": "*"
     }
   ]
 }

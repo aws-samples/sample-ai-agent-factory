@@ -1,0 +1,203 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ACRegistryListNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "agent-registry:ListRegistries"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ACRegistryCreate",
+      "Effect": "Allow",
+      "Action": [
+        "agent-registry:CreateRegistry"
+      ],
+      "Resource": "arn:aws:agent-registry:*:*:registry/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ACRegistryManage",
+      "Effect": "Allow",
+      "Action": [
+        "agent-registry:GetRegistry",
+        "agent-registry:UpdateRegistry",
+        "agent-registry:DeleteRegistry",
+        "agent-registry:CreateRegistryRecord",
+        "agent-registry:GetRegistryRecord",
+        "agent-registry:ListRegistryRecords",
+        "agent-registry:UpdateRegistryRecord",
+        "agent-registry:DeleteRegistryRecord",
+        "agent-registry:SubmitRegistryRecordForApproval",
+        "agent-registry:UpdateRegistryRecordStatus",
+        "agent-registry:TagResource",
+        "agent-registry:UntagResource",
+        "agent-registry:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:agent-registry:*:*:registry/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "CdkBootstrapStagingBucketConfiguration",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutBucketAcl",
+        "s3:PutEncryptionConfiguration",
+        "s3:GetEncryptionConfiguration",
+        "s3:PutBucketVersioning",
+        "s3:GetBucketVersioning",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:PutLifecycleConfiguration",
+        "s3:GetLifecycleConfiguration",
+        "s3:PutBucketTagging",
+        "s3:GetBucketTagging"
+      ],
+      "Resource": "arn:aws:s3:::cdk-*"
+    },
+    {
+      "Sid": "CdkBootstrapEcrRepositoryConfiguration",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:PutImageTagMutability",
+        "ecr:GetLifecyclePolicy",
+        "ecr:DeleteLifecyclePolicy",
+        "ecr:ListTagsForResource",
+        "ecr:UntagResource"
+      ],
+      "Resource": "arn:aws:ecr:*:*:repository/cdk-hnb659fds-*"
+    },
+    {
+      "Sid": "CdkBootstrapVersionParameter",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameters",
+        "ssm:AddTagsToResource",
+        "ssm:RemoveTagsFromResource",
+        "ssm:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:ssm:*:*:parameter/cdk-bootstrap/*"
+    },
+    {
+      "Sid": "MarketplaceSubscribeNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "aws-marketplace:Subscribe",
+        "aws-marketplace:ViewSubscriptions"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "LambdaUpdateCodeAutoReview",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:UpdateFunctionCode"
+      ],
+      "Resource": "arn:aws:lambda:*:*:function:ac-auto-review"
+    },
+    {
+      "Sid": "AmplifyCreateAppScoped",
+      "Effect": "Allow",
+      "Action": [
+        "amplify:CreateApp"
+      ],
+      "Resource": "arn:aws:amplify:*:*:apps/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "AmplifyListNoResourceLevel",
+      "Effect": "Allow",
+      "Action": [
+        "amplify:ListApps"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": [
+            "us-west-2",
+            "us-east-1",
+            "eu-west-1"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "AmplifyAccess",
+      "Effect": "Allow",
+      "Action": [
+        "amplify:DeleteApp",
+        "amplify:GetApp",
+        "amplify:UpdateApp",
+        "amplify:CreateBranch",
+        "amplify:DeleteBranch",
+        "amplify:GetBranch",
+        "amplify:ListBranches",
+        "amplify:CreateDeployment",
+        "amplify:StartDeployment",
+        "amplify:GetJob",
+        "amplify:ListJobs",
+        "amplify:StartJob",
+        "amplify:StopJob",
+        "amplify:TagResource",
+        "amplify:UntagResource"
+      ],
+      "Resource": "arn:aws:amplify:*:*:apps/*"
+    },
+    {
+      "Sid": "S3BucketPolicyOnWorkshopAndCdkStagingBucketsOnly",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy"
+      ],
+      "Resource": [
+        "arn:aws:s3:::workshop-*",
+        "arn:aws:s3:::cdk-hnb659fds-assets-*"
+      ]
+    }
+  ]
+}
