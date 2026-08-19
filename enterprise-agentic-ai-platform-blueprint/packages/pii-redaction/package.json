@@ -1,0 +1,9 @@
+{
+  "name": "@agenticai/pii-redaction",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "description": "PII redaction helpers for memory writes + log emission. Defence-in-depth on top of Bedrock Guardrails PII filters.",
+  "license": "MIT-0"
+}

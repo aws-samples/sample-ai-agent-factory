@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/bedrock-quotas",
+  "version": "0.1.0",
+  "description": "Bedrock per-account quota-increase requests via Service Quotas API. Spec §2.4.6 / R-BED-034.",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

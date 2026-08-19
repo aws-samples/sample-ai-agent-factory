@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/observability",
+  "version": "0.1.0",
+  "description": "CloudWatch OAM source links (workload → audit sink) + dashboards + alarms. Spec §5.1 derived.",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

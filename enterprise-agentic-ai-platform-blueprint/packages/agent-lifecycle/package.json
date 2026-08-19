@@ -1,0 +1,9 @@
+{
+  "name": "@agenticai/agent-lifecycle",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "description": "Agent lifecycle — versioning + canary + rollback Step Function. Closes BLUEPRINT_GAP_ANALYSIS Missing-3.",
+  "license": "MIT-0"
+}

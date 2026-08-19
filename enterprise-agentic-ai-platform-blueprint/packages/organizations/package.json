@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/organizations",
+  "version": "0.1.0",
+  "description": "L1 constructs for AWS Organizations + OUs + SCPs 01-08. CDK has no L2 for Organizations (confirmed _research/R10 §1), so we use CfnOrganization / CfnOrganizationalUnit / CfnPolicy.",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

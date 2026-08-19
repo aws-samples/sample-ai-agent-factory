@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/bedrock-guardrails",
+  "version": "0.1.0",
+  "description": "Bedrock Guardrail profiles (Baseline / Internal Tool / Customer-Facing) + Guardrail Admin role. Spec §2.4.3-§2.4.4.",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

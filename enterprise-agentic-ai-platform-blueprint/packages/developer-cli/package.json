@@ -1,0 +1,12 @@
+{
+  "name": "@agenticai/developer-cli",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "bin": {
+    "agenticai": "src/cli.ts"
+  },
+  "description": "agenticai CLI — workstream developer surface. init, registry search/subscribe, dev run/eval, submit. Phase N of v0.5.0.",
+  "license": "MIT-0"
+}

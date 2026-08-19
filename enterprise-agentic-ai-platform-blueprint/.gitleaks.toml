@@ -1,0 +1,88 @@
+# .gitleaks.toml — secret-scan configuration for this blueprint.
+#
+# Extends the gitleaks default rule set with rules for the leakage classes that
+# matter to this repository: AWS account IDs, internal Amazon references,
+# developer-specific absolute paths, and licensing markers incompatible with
+# MIT-0.
+#
+# Paired with scripts/scrub-security-leakage.sh for defence in depth: gitleaks
+# catches regex-based secrets (AWS access keys, generic API keys, tokens); the
+# script adds the repository-specific rules and runs without a gitleaks binary.
+#
+# NEVER encode a real account ID, developer alias, or event ID in a rule here.
+# The rule file is allow-listed against itself, so such a value would be
+# published and never flagged. Match the shape, not the value.
+
+title = "enterprise-agentic-ai-platform-blueprint gitleaks config"
+
+[extend]
+# Pull in every rule gitleaks ships by default; we only add on top.
+useDefault = true
+
+# -- Blueprint-specific custom rules ----------------------------------------
+
+[[rules]]
+id = "workshop-metrics-api-key"
+description = "Workshop-metrics literal API key from Workshop Studio prototypes"
+regex = '''workshop-metrics-key-[0-9]{4}'''
+tags = ["key", "generic"]
+
+[[rules]]
+id = "aws-account-id"
+description = "Bare 12-digit AWS account ID outside the documented placeholder set"
+regex = '''\b[0-9]{12}\b'''
+tags = ["aws", "account-id"]
+
+  [rules.allowlist]
+  description = "Documented placeholders: AWS canonical example, low-number examples, repeated-digit test fixtures."
+  regexes = [
+    '''\b123456789012\b''',
+    '''\b0{10}[0-9]{2}\b''',
+    '''\b(0{12}|1{12}|2{12}|3{12}|4{12}|5{12}|6{12}|7{12}|8{12}|9{12})\b''',
+  ]
+
+[[rules]]
+id = "internal-gitlab-url"
+description = "Internal Amazon GitLab references"
+regex = '''gitlab\.aws\.dev'''
+tags = ["internal"]
+
+[[rules]]
+id = "workshop-studio-event-id"
+description = "Workshop Studio event identifiers"
+regex = '''eventId-[0-9]{8,}'''
+tags = ["workshop"]
+
+[[rules]]
+id = "workshop-placeholder"
+description = "Pre-event TODO placeholder that must be resolved before publishing"
+regex = '''WORKSHOP_TODO_REFRESH'''
+tags = ["placeholder"]
+
+[[rules]]
+id = "developer-absolute-path"
+description = "Hardcoded absolute developer home path — leaks a local username"
+regex = '''/(Users|home)/[A-Za-z0-9._-]+'''
+tags = ["internal", "pii"]
+
+[[rules]]
+id = "isengard-reference"
+description = "Isengard internal-tool references"
+regex = '''(?i)isengard'''
+tags = ["internal"]
+
+[[rules]]
+id = "amazon-confidential-marking"
+description = "Legacy Amazon Confidential and Trademark marking — incompatible with MIT-0"
+regex = '''Amazon Confidential'''
+tags = ["licensing"]
+
+# -- Allow-listed paths ----------------------------------------------------
+
+[allowlist]
+description = "Paths where documentation-level references to the above patterns are permitted."
+paths = [
+  '''scripts/scrub-security-leakage\.sh''',
+  '''\.gitleaks\.toml''',
+  '''SECURITY-EXCEPTIONS\.md''',
+]

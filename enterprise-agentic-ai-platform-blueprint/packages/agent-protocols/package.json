@@ -1,0 +1,9 @@
+{
+  "name": "@agenticai/agent-protocols",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "description": "A2A Agent Cards (first-class registry records) + MCP-native gateway probe Lambda. Closes BLUEPRINT_GAP_ANALYSIS Partial-2 + Partial-3.",
+  "license": "MIT-0"
+}

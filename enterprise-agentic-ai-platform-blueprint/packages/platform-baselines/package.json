@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/platform-baselines",
+  "version": "0.1.0",
+  "description": "Single source of truth for model allow-list, approved regions, and platform-level constants. Referenced by SCP-01, Bedrock VPCE policy, LiteLLM router config, and IAM resource scopes.",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

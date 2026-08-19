@@ -1,0 +1,14 @@
+virtualModels:
+  - name: chatbot-primary
+    source: application-inference-profile
+
+guardrails:
+  required: true
+  default_profile: customer-facing
+
+streaming:
+  default: true
+
+hitl:
+  enabled: true
+  queue: sqs://agenticai-${env}-${tenant}-${agent}-escalations

@@ -1,0 +1,15 @@
+virtualModels:
+  - name: supervisor-primary
+    source: application-inference-profile
+  - name: worker-primary
+    source: application-inference-profile
+
+guardrails:
+  required: true
+  default_profile: baseline
+
+streaming:
+  default: false        # multi-agent dispatches are batched, not streamed
+
+hitl:
+  enabled: false

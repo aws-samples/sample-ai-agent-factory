@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/landing-zone",
+  "version": "0.1.0",
+  "description": "Log Archive, Audit, and Shared Services account stacks: Org CloudTrail, CloudWatch Logs destination, CUR bucket, OAM sink. Spec §2.1.3 + §5 observability (derived).",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

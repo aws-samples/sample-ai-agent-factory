@@ -1,0 +1,14 @@
+virtualModels:
+  - name: crewai-primary
+    source: application-inference-profile
+
+guardrails:
+  required: true
+  default_profile: customer-facing
+
+framework: crewai
+mcp_protocol_version: "2025-06-18"
+
+tools:
+  - tool-echo
+  - tool-ping
