@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/bedrock-invocation-logging",
+  "version": "0.1.0",
+  "description": "Bedrock Model Invocation Logging per workload account. CMK-encrypted CloudWatch log group + service role per spec §2.4.7.",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

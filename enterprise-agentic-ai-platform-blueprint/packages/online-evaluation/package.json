@@ -1,0 +1,9 @@
+{
+  "name": "@agenticai/online-evaluation",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "description": "Online evaluation watchdog — sample CloudWatch logs, score with judge models, alarm on regression. Closes BLUEPRINT_GAP_ANALYSIS Missing-1.",
+  "license": "MIT-0"
+}

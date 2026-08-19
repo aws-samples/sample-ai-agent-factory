@@ -1,0 +1,22 @@
+# Bedrock configuration for the Strands task-agent blueprint.
+# Model selection is constrained to the platform allow-list.
+
+# The blueprint resolves the model ARN via the application inference profile
+# that the AgenticApp L3 construct creates. This file declares the mapping
+# from virtual model name to profile so the Strands SDK knows which profile
+# to call.
+virtualModels:
+  - name: task-primary
+    source: application-inference-profile
+    # Profile name built by AgenticApp: agenticai-{env}-{tenant}-{agent}
+    # and resolved at deploy time from stack outputs.
+
+guardrails:
+  required: true        # R-BED-028 — every invocation carries an identifier
+  default_profile: baseline
+
+streaming:
+  default: true
+
+hitl:
+  enabled: false        # task-agent is non-interactive by default

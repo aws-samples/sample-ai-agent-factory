@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/agentic-vpc",
+  "version": "0.1.0",
+  "description": "Agentic VPC construct — 3 AZs, private subnets, 9 required VPCEs with endpoint policies, SG pair, no IGW/NAT. Spec §2.3.",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

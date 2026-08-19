@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/agentcore-gateway",
+  "version": "0.1.0",
+  "description": "AgentCore Gateway fronted by API Gateway HTTP v2 + JWT authorizer + WAF (§08 Option A). Cedar policies + Lambda interceptors.",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

@@ -1,0 +1,9 @@
+{
+  "name": "@agenticai/tool-cedar-wrapper",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "description": "Phase Q — per-tool Lambda Cedar enforcement wrapper. Evaluates the tool's Cedar policy against the AgentCore-injected JWT claims before the user's tool body runs. Acts as the second-layer entitlement check until AgentCore PolicyEngine API is GA.",
+  "license": "MIT-0"
+}

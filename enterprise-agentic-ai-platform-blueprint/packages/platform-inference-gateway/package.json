@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/platform-inference-gateway",
+  "version": "0.1.0",
+  "description": "D-03 centralised-platform PrivateLink primitive. Internal NLB + VPC Endpoint Service (principal-restricted to workload account roots) that fronts a platform-account LiteLLM ALB. Enables workload-account Strands agents to reach LiteLLM cross-account over PrivateLink (no public internet, no cross-account AssumeRole-only path).",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

@@ -1,0 +1,9 @@
+{
+  "name": "@agenticai/developer-access",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "description": "Identity Center permission sets that put developers into their workstream account with three personas (Developer / ReadOnly / Approver). Scopes consumer access to the platform AgentCore Registry, deny-by-default mutation of platform-owned resources via SCP-12. Phase M of v0.5.0.",
+  "license": "MIT-0"
+}

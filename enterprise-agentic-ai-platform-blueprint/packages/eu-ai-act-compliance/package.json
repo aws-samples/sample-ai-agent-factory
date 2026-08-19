@@ -1,0 +1,9 @@
+{
+  "name": "@agenticai/eu-ai-act-compliance",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "description": "EU AI Act compliance module — risk classification SSOT, conformity assessment record-keeping (Object Lock COMPLIANCE 7y), automated technical documentation. Closes BLUEPRINT_GAP_ANALYSIS Missing-2.",
+  "license": "MIT-0"
+}

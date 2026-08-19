@@ -1,0 +1,9 @@
+{
+  "name": "@agenticai/agent-registry",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "description": "AWS Bedrock AgentCore Registry constructs — platform-account-owned registry, record publishing with descriptor schemas (MCP/A2A/AGENT_SKILLS/CUSTOM), and consumer-grant helpers. Replaces the v0.4.0 in-process platform-tool-catalogue as the SSOT for D-03 v3 tool subscription.",
+  "license": "MIT-0"
+}

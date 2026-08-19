@@ -1,0 +1,9 @@
+{
+  "name": "@agenticai/evaluation-gates",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "description": "Evaluation gates for agentic AI CI/CD — golden-prompt corpus runner, 7-category scoring, multi-artefact versioning. Closes BLUEPRINT_GAP_ANALYSIS Partial-1 + research §4.3.",
+  "license": "MIT-0"
+}

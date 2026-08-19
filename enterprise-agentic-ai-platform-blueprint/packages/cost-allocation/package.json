@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/cost-allocation",
+  "version": "0.1.0",
+  "description": "Per-application AWS Budgets + CUR query helpers. Spec §5.2 / R-COST-001 derived.",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

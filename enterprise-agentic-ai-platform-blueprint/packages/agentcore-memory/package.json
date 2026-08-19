@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/agentcore-memory",
+  "version": "0.1.0",
+  "description": "AgentCore Memory namespace per-tenant with CMK + TTL + actor-scoping per spec §3.4. Static namespace generation honors spec §3.4.4 L4657-4660 constraint.",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

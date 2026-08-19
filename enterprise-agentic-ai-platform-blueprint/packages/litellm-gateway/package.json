@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/litellm-gateway",
+  "version": "0.1.0",
+  "description": "LiteLLM per-account broker between agents and Bedrock (D-01). ECS Fargate + internal ALB + API Gateway HTTP v2 via VpcLink + triple-gate guardrail enforcement.",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

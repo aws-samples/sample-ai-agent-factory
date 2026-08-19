@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/agentic-app",
+  "version": "0.1.0",
+  "description": "AgenticApp L3 — per-application composition of Memory + Runtime + inference profile + IAM with RBP isolation. Spec §2.5 tenancy.",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

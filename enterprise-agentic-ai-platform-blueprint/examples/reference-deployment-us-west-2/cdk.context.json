@@ -1,0 +1,34 @@
+{
+  "agenticai/defaultRegion": "us-west-2",
+  "agenticai/approvedRegions": ["us-west-2", "us-east-1"],
+  "agenticai/bootstrapQualifier": "hnb659fds",
+  "agenticai/regulated": true,
+
+  "_comment": "Replace every value below with real account IDs before running `cdk deploy`.",
+
+  "agenticai/organizationId": "o-REPLACE-ME",
+  "agenticai/managementAccountId": "000000000001",
+  "agenticai/logArchiveAccountId": "000000000002",
+  "agenticai/auditAccountId": "000000000003",
+  "agenticai/sandboxAccountId": "000000000004",
+  "agenticai/platformNonprodAccountId": "000000000005",
+  "agenticai/platformProdAccountId": "000000000006",
+  "agenticai/workloadNonprodAccountId": "000000000007",
+  "agenticai/workloadProdAccountId": "000000000008",
+
+  "agenticai/workloadAccountIds": ["000000000007", "000000000008"],
+
+  "agenticai/pipelineRoleArn": "arn:aws:iam::000000000005:role/AgenticAI-PlatformPipelineRole",
+  "agenticai/guardrailAdminRoleArn": "arn:aws:iam::000000000005:role/AgenticAI-GuardrailAdmin",
+  "agenticai/auditOamSinkArn": "arn:aws:oam:us-west-2:000000000003:sink/REPLACE-ME",
+
+  "agenticai/githubRepo": "aws-samples/sample-ai-agent-factory",
+  "agenticai/githubBranch": "main",
+  "agenticai/githubConnectionArn": "arn:aws:codestar-connections:us-west-2:000000000005:connection/REPLACE-ME",
+
+  "agenticai/tenantId": "app1",
+  "agenticai/agentId": "primary",
+  "agenticai/costCentre": "engineering",
+  "agenticai/notificationEmail": "finops@example.com",
+  "agenticai/monthlyBudgetUsd": 500
+}

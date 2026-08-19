@@ -1,0 +1,9 @@
+{
+  "name": "@agenticai/federation",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "description": "Federated mesh: domain-scoped registry + shared memory + multi-framework adapters. Closes BLUEPRINT_GAP_ANALYSIS Missing-6, 7, 9.",
+  "license": "MIT-0"
+}

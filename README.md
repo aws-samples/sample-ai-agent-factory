@@ -31,6 +31,7 @@ and observable in production" as short and as safe as possible.
 | [`workshop-building-agentic-ai-platform/`](workshop-building-agentic-ai-platform/) | A hands-on AWS **workshop** for building an enterprise landing-zone pattern for agentic AI on Amazon Bedrock AgentCore — governed model access (LLM Gateway), a tool/agent registry (MCP Gateway & Registry), security controls, and observability. | Platform & ML engineers and solutions architects who want to **understand and build the foundation**. |
 | [`Agentic-ai-self-service/`](Agentic-ai-self-service/) | The **AgentCore Visual Workflow Platform** — an n8n-style drag-and-drop builder to design, configure, and deploy AgentCore agents from a canvas, with templates, CloudFormation/Python export, and an enterprise feature set (versioning, Cedar policy, evaluation, observability, registry). | Engineers who want to **build and ship agents fast** on top of AgentCore. |
 | [`enterprise-mcp-governance-gateway/`](enterprise-mcp-governance-gateway/) | A deployable **MCP governance layer** built on Amazon Bedrock AgentCore Gateway — one governed MCP endpoint where every tool call is authenticated with a Cognito JWT, authorized by **Cedar** policies in a policy engine (`ENFORCE` mode), inspected by request/response Lambda interceptors, and screened by a managed **Amazon Bedrock Guardrail**. Includes an optional per-user OAuth 3LO connector for Atlassian. | Platform & security engineers who need **per-tool-call authorization and audit** in front of internal tools and SaaS. |
+| [`enterprise-agentic-ai-platform-blueprint/`](enterprise-agentic-ai-platform-blueprint/) | A **multi-account AWS CDK blueprint** for the governed landing zone itself — AWS Organizations OUs with twelve service control policies, guardrailed-only Bedrock access, per-tenant Application Inference Profiles, PrivateLink-only egress, an AgentCore Runtime/Gateway/Memory stack, a tool registry as single source of truth, CDK Pipelines with an evaluation gate, and per-application cost attribution. | Platform & security engineers who need to **stand up the production foundation** other teams deploy agents onto. |
 
 Each folder is self-contained and keeps **its own `README.md`** with the full architecture,
 prerequisites, and deploy instructions for that project. Start there once you've picked a track.
@@ -69,13 +70,33 @@ governs **agent configuration**, whereas this evaluates Cedar per **tool call** 
 path. See
 [`enterprise-mcp-governance-gateway/README.md`](enterprise-mcp-governance-gateway/README.md).
 
+### `enterprise-agentic-ai-platform-blueprint/` — run the foundation in production
+
+An AWS CDK (TypeScript) blueprint for the multi-account platform an enterprise stands up once.
+It provisions the AWS Organizations structure and twelve service control policies that make the
+guarantees non-bypassable at the org level — Bedrock is reachable only with a guardrail attached
+and only for allow-listed models, in approved regions, over PrivateLink. On top of that sit
+per-tenant Application Inference Profiles for cost attribution, an AgentCore Runtime / Gateway /
+Memory stack with customer-managed keys, a platform tool catalogue that is validated at synth
+time, Cedar per-tool entitlement, RAG and observability constructs, and CDK Pipelines with a
+mandatory *Deploy(nonprod) → Evaluation Gate → Manual Approval → canary → Prod* sequence. Two
+deployment patterns are supported: a distributed one where each workload account owns its agent
+stack, and a centralised one where the platform account governs a per-workstream AgentCore
+Gateway at synth, deploy, and runtime. It ships 500 tests, a NIST 800-53 Rev 5 derivation, a
+register of every cdk-nag suppression, and an honest account of what has and has not been
+verified against live AWS.
+
+Where `workshop-building-agentic-ai-platform/` teaches the foundation in a single account, this
+is the multi-account, SCP-governed, CI/CD-gated form of it. See
+[`enterprise-agentic-ai-platform-blueprint/README.md`](enterprise-agentic-ai-platform-blueprint/README.md).
+
 
 ## Getting started
 
 1. Pick a folder above based on whether you want to **build the platform**, **build agents**, or
    **govern how agents reach tools**.
 2. Open that folder's `README.md` and follow its prerequisites and deploy steps.
-3. All three deploy real, billable AWS resources — read each project's cost notice and tear
+3. All four deploy real, billable AWS resources — read each project's cost notice and tear
    resources down when finished.
 
 ## Security

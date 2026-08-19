@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/agentcore-identity",
+  "version": "0.1.0",
+  "description": "AgentCore Identity — Cognito user pool + client + Token Vault CMK per spec §3.3. Phase 3 Entra Agent Identity deferred to v2.",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}

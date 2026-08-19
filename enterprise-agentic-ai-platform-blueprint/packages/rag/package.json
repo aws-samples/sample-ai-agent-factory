@@ -1,0 +1,8 @@
+{
+  "name": "@agenticai/rag",
+  "version": "0.1.0",
+  "description": "Retrieval-Augmented Generation on Amazon S3 (+ S3 Vectors when available). CMK, VPCE-only access, scoped prefix per spec §4.2.",
+  "license": "MIT-0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}
