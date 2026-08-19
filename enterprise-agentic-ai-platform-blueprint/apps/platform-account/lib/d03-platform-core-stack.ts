@@ -383,7 +383,7 @@ export class D03PlatformCoreStack extends Stack {
     //     can actually assume — a random IAM user in the workload account
     //     cannot.
     //   - StringLike sts:RoleSessionName = `workload-*` (stable convention
-    //     `workload-<acct>-<tenant>-<agent>` documented in OPERATIONS.md).
+    //     `workload-<acct>-<tenant>-<agent>` documented in README section 9).
     //     Audit attribution survives role chaining via RoleSessionName.
     // AssumeRole only — we do NOT grant `sts:TagSession` because session
     // tags do not survive the `account-root → runtime-role →

@@ -6,7 +6,7 @@
 # Run from the management / admin workstation with credentials that can
 # assume AdministratorAccess in each target account (e.g. via SSO).
 #
-# Bootstrap matrix (per 07-multi-account-topology-plan.md §4.3):
+# Bootstrap matrix (see README section 13, Multi-account topology):
 #   platform-nonprod  — self-bootstrap
 #   platform-prod     — trust platform-nonprod
 #   workload-nonprod  — trust platform-nonprod
@@ -23,13 +23,13 @@ set -euo pipefail
 REGION="${AWS_REGION:-us-west-2}"
 QUALIFIER="hnb659fds"
 
-# SEC (Holmes CSR) — LEAST PRIVILEGE: the CloudFormation execution policy sets
+# SEC (security review) — LEAST PRIVILEGE: the CloudFormation execution policy sets
 # the permissions CloudFormation uses to create EVERY resource in every
 # CDK-deployed stack. Do NOT use AdministratorAccess in production — it makes
 # every deployed stack admin-equivalent. Supply a customer-managed policy ARN
 # scoped to exactly the services these stacks provision (IAM, Lambda, DynamoDB,
 # S3, KMS, ECS, Bedrock/AgentCore, CloudWatch, EventBridge, Step Functions,
-# SNS/SQS, EC2/VPC) via CFN_EXECUTION_POLICY_ARN. See SECURITY-EXCEPTIONS.md.
+# SNS/SQS, EC2/VPC) via CFN_EXECUTION_POLICY_ARN.
 # The default below is intentionally NOT AdministratorAccess so a copy-paste
 # run fails safe and forces an explicit choice.
 CFN_EXECUTION_POLICY_ARN="${CFN_EXECUTION_POLICY_ARN:-}"
@@ -37,7 +37,7 @@ if [[ -z "$CFN_EXECUTION_POLICY_ARN" ]]; then
   echo "ERROR: set CFN_EXECUTION_POLICY_ARN to a scoped customer-managed policy ARN" >&2
   echo "       for the CDK CloudFormation execution role. Do NOT use" >&2
   echo "       arn:aws:iam::aws:policy/AdministratorAccess in production." >&2
-  echo "       See SECURITY-EXCEPTIONS.md and README §9 for the scoping guidance." >&2
+  echo "       See README §9 for the scoping guidance." >&2
   exit 1
 fi
 

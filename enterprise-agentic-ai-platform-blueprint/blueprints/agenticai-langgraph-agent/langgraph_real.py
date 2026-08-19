@@ -85,7 +85,7 @@ def build_state_graph(
                 "iteration": (state.get("iteration") or 0) + 1,
             }
         except Exception as exc:  # noqa: BLE001
-            # SEC (Holmes CSR): do not surface the raw exception into the
+            # SEC (security review): do not surface the raw exception into the
             # message state — it can carry connection strings, PII, or
             # internal detail. Log ONLY the exception type (not .exception(),
             # which would emit the full message/traceback that may echo the

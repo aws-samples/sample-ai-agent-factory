@@ -21,7 +21,7 @@ describe('EU AI Act risk classification SSOT', () => {
     ]);
   });
 
-  it('chatbot + task default to limited per .claude/GAP_CLOSURE_PLAN.md §16-LOCKED', () => {
+  it('chatbot + task default to limited per the locked platform decision', () => {
     expect(BLUEPRINT_RISK_CLASS.chatbot).toBe('limited');
     expect(BLUEPRINT_RISK_CLASS.task).toBe('limited');
   });

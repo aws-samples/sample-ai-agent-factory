@@ -132,7 +132,7 @@ export function renderInlinePolicy(
      * The workstream slug. When supplied, the developer's CI/CD write grant
      * (StartPipelineExecution / GitPush / StartBuild) is scoped to ARNs
      * prefixed with this workstream id so a developer cannot trigger another
-     * workstream's pipeline. SEC (Holmes CSR).
+     * workstream's pipeline. SEC (security review).
      */
     readonly workstreamId?: string;
   } = {},
@@ -141,7 +141,7 @@ export function renderInlinePolicy(
     ? `arn:aws:bedrock-agentcore:*:${opts.platformAccountId}:registry/*`
     : 'arn:aws:bedrock-agentcore:*:*:registry/*';
   const recordArnScope = `${registryArnScope}/record/*`;
-  // SEC (Holmes CSR): per-workstream CI/CD resource scoping. The blueprint
+  // SEC (security review): per-workstream CI/CD resource scoping. The blueprint
   // convention names a workstream's pipeline/repo/build project with the
   // workstream id as prefix (see pipelines/*). When no workstreamId is
   // supplied (legacy callers), fall back to the platform naming prefix

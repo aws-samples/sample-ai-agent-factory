@@ -215,7 +215,7 @@ export class EvaluationGatesConstruct extends Construct {
         {
           id: 'NIST.800.53.R5-DynamoDBInBackupPlan',
           reason:
-            'SEC-023: PITR is enabled; AWS Backup plan is a customer opt-in covered in OPERATIONS.md.',
+            'SEC-023: PITR is enabled; AWS Backup plan is a customer opt-in covered in README section 9 (Operations).',
         },
       ],
       true,

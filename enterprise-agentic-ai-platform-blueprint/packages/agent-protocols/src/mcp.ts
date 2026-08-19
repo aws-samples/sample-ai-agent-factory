@@ -5,8 +5,7 @@
  * conventions matter for callers, both validated here:
  *   1. The MCP-Protocol-Version header MUST be `2025-06-18` after the
  *      initialize handshake — otherwise AgentCore defaults to 2025-03-26
- *      and rejects calls (live-verified 2026-05-05; see CLAUDE.md
- *      landmines).
+ *      and rejects calls (live-verified 2026-05-05).
  *   2. Tool names appear in tools/list as `target-<target-name>___<tool-id>`.
  *      Callers must use the qualified name verbatim in tools/call.
  *

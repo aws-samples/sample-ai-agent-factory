@@ -39,7 +39,7 @@ export const DEFAULT_EVAL_THRESHOLDS: EvalThresholds = {
   costPerPromptMaxUsd: 0.05,
 };
 
-/** Phase-A judge-model split per .claude/GAP_CLOSURE_PLAN.md §16-LOCKED. */
+/** Phase-A judge-model split — locked platform decision. */
 export const JUDGE_MODELS = {
   /** Sonnet 4.5 — accurate but ~5x cost; used for correctness scoring. */
   correctness: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',

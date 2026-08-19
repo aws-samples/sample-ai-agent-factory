@@ -212,7 +212,7 @@ export class ChargebackConstruct extends Construct {
     this.kmsKey.grantEncryptDecrypt(this.runner);
     this.runsTable.grantWriteData(this.runner);
 
-    // SEC-025 (Holmes CSR): scope Athena/Glue/SES to exact resource ARNs.
+    // SEC-025 (security review): scope Athena/Glue/SES to exact resource ARNs.
     // The runner submits queries against the default "primary" workgroup
     // (no WorkGroup param on StartQueryExecution), reads only the CUR
     // database/table, and sends mail only from the first distro address
@@ -347,7 +347,7 @@ async function recordRunRow(month, costCentre, status, reason) {
 exports.handler = async () => {
   const today = new Date();
   const month = today.toISOString().slice(0, 7); // YYYY-MM
-  // SEC (Holmes CSR): prevent SQL injection.
+  // SEC (security review): prevent SQL injection.
   //  - The month VALUE is bound via Athena ExecutionParameters ('?'), never
   //    interpolated into the query string.
   //  - The table IDENTIFIER cannot be a bind parameter in Athena, so it is

@@ -101,7 +101,7 @@ export class AgentCoreRuntimeConstruct extends Construct {
     );
     // Belt-and-braces: even if something ever grants InvokeModel to this role,
     // the guardrail deny still applies. Preserves spec §2.2.3 R-BED-028.
-    // SEC (Holmes CSR — reviewed, INTENTIONAL): resources:['*'] is correct on
+    // SEC (security review — INTENTIONAL): resources:['*'] is correct on
     // a DENY — it must cover every Bedrock resource so no model/profile can
     // escape guardrail enforcement. Narrowing it would be a security
     // regression; a broad Deny only ever removes access.

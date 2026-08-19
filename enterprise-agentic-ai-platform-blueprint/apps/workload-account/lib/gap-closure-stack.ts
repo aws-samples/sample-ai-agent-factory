@@ -1,6 +1,6 @@
 /**
  * GapClosureStack — deploys every new v0.4.0 construct in one CFN stack so
- * Phase J's live-AWS verification matrix can exercise every change made in
+ * the live-AWS verification matrix can exercise every change made in
  * Phases A–I.
  *
  * Closes BLUEPRINT_GAP_ANALYSIS (2).md (live-AWS half).

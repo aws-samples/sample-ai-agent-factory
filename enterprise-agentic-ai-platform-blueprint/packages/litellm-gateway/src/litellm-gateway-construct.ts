@@ -151,7 +151,7 @@ export class LiteLLMGatewayConstruct extends Construct {
     );
 
     // Deny when GuardrailIdentifier is Null — the critical D-01 compensation.
-    // SEC (Holmes CSR — reviewed, INTENTIONAL): resources:['*'] is correct on
+    // SEC (security review — INTENTIONAL): resources:['*'] is correct on
     // a DENY. The whole point of this statement is to block un-guardrailed
     // inference on EVERY Bedrock resource, including any model/profile a
     // future Allow (or an inherited policy) might grant. Narrowing this Deny
@@ -203,7 +203,7 @@ export class LiteLLMGatewayConstruct extends Construct {
       [
         {
           id: 'AwsSolutions-SMG4',
-          reason: 'SEC-016: LiteLLM master key has no target service rotation contract; rotation is a manual-release operation gated by the platform. Documented in OPERATIONS.md runbook.',
+          reason: 'SEC-016: LiteLLM master key has no target service rotation contract; rotation is a manual-release operation gated by the platform. Documented in README section 9 (Operations).',
         },
         {
           id: 'NIST.800.53.R5-SecretsManagerRotationEnabled',
@@ -225,7 +225,7 @@ export class LiteLLMGatewayConstruct extends Construct {
 
     this.taskDefinition.addContainer('litellm', {
       containerName: 'litellm',
-      // SEC (Holmes CSR): the default base image below pins only the minor
+      // SEC (security review): the default base image below pins only the minor
       // tag `:3.12`, which can drift across patch releases. This is a demo
       // placeholder ONLY — production deployments MUST supply `props.image`
       // built from a base image pinned to an immutable SHA256 digest

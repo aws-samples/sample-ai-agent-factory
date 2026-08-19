@@ -58,7 +58,7 @@ export interface AgentCoreGatewayConstructProps {
    * back to plaintext HTTP:80 — permitted ONLY because the intra-VPC hop sits
    * behind API Gateway (which terminates the public TLS) and is gated by
    * security-group trust boundaries. A synth-time `console.warn` is emitted in
-   * the plaintext fallback path; see SEC-013 in SECURITY-EXCEPTIONS.md.
+   * the plaintext fallback path; see the SEC-013 suppression on the listener below.
    */
   readonly certificate?: ICertificate;
   /**
@@ -206,7 +206,7 @@ export class AgentCoreGatewayConstruct extends Construct {
           'falling back to plaintext HTTP:80 on the internal ALB. This is permitted ONLY ' +
           'because API Gateway terminates public TLS upstream and the intra-VPC hop is ' +
           'gated by SG + VPC isolation (SEC-013). For production, pass `certificate` so ' +
-          'the ALB listener runs HTTPS:443. See SECURITY-EXCEPTIONS.md SEC-013.',
+          'the ALB listener runs HTTPS:443. SEC-013.',
       );
       this.albListener = this.alb.addListener('Listener', {
         port: 80,

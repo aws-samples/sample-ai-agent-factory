@@ -2,7 +2,7 @@
  * @agenticai/eu-ai-act-compliance — risk classification SSOT.
  *
  * Maps each blueprint pattern to its EU AI Act Article 6 risk class. Defaults
- * captured per .claude/GAP_CLOSURE_PLAN.md §16-LOCKED:
+ * are a locked platform decision:
  *   - chatbot:     limited
  *   - task:        limited
  *   - multi-agent: high   (multi-agent systems can chain effects;

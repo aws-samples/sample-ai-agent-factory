@@ -1,5 +1,5 @@
 """
-gap_closure_live_verify.py — Phase J end-to-end verification.
+gap_closure_live_verify.py — end-to-end live-AWS verification harness.
 
 Reads the GapClosureStack outputs from CloudFormation in the deployed
 account/region, then exercises every Phase A–I change against real AWS:

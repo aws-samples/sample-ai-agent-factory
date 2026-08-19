@@ -100,7 +100,7 @@ describe('Phase 17 — ChargebackConstruct CFN shape', () => {
     });
   });
 
-  // Holmes CSR SEC-025: Athena/Glue/SES must be scoped to exact ARNs, never '*'.
+  // Security review SEC-025: Athena/Glue/SES must be scoped to exact ARNs, never '*'.
   it('runner IAM policy has NO wildcard resource on athena/glue/ses actions', () => {
     const t = synth();
     const policies = t.findResources('AWS::IAM::Policy');
@@ -178,7 +178,7 @@ describe('Phase 17 — ChargebackConstruct CFN shape', () => {
     });
   });
 
-  // Holmes CSR: SQL-injection defence on the Athena FROM identifier.
+  // Security review: SQL-injection defence on the Athena FROM identifier.
   it('bakes the exact CUR table name into the runner as an immutable allow-list', () => {
     const t = synth();
     const fns = t.findResources('AWS::Lambda::Function');

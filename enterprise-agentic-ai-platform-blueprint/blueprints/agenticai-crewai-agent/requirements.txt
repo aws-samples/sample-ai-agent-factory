@@ -1,4 +1,4 @@
-# Pinned to exact tested versions (Holmes CSR: supply-chain hygiene).
+# Pinned to exact tested versions (security review: supply-chain hygiene).
 # Bump deliberately after re-running test_real_integration.py against the new set.
 # crewai 0.41.x carried CVE-2026-2286 (SSRF in RAG search tools) and
 # CVE-2026-2285 (path traversal in the JSON loader); this pin is well past

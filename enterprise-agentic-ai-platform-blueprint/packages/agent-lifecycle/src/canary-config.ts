@@ -1,7 +1,7 @@
 /**
  * @agenticai/agent-lifecycle — canary configuration SSOT.
  *
- * Per .claude/GAP_CLOSURE_PLAN.md §16-LOCKED: default canary 5%,
+ * Locked platform default: canary 5%,
  * configurable per-tenant via context `agenticai/canaryPercent`.
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.

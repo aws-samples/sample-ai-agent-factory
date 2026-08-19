@@ -310,7 +310,7 @@ export class D03WorkloadAgentStack extends Stack {
     // live 2026-04-30). Cost attribution is carried by the platform's
     // per-tenant application inference profile; audit attribution is carried
     // by a stable `RoleSessionName` convention
-    // (`workload-<acctId>-<tenantId>-<agentId>`, documented in OPERATIONS.md)
+    // (`workload-<acctId>-<tenantId>-<agentId>`, documented in README section 9)
     // which DOES survive role chaining.
     const platformCallerRoleArn = `arn:aws:iam::${props.platformAccountId}:role/AgenticAI-D03-BedrockCaller`;
     this.agentRuntimeRole.addToPolicy(
@@ -527,7 +527,7 @@ export class D03WorkloadAgentStack extends Stack {
         policy: AwsCustomResourcePolicy.fromStatements([
           new PolicyStatement({
             effect: Effect.ALLOW,
-            // SEC-011 (Holmes CSR): ec2:DescribeSubnets and
+            // SEC-011 (security review): ec2:DescribeSubnets and
             // ec2:DescribeAvailabilityZones require Resource:'*' — they are
             // account-wide list/describe operations that do NOT support
             // resource-level permissions. Read-only, non-mutating.

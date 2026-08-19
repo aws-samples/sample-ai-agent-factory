@@ -51,7 +51,7 @@ export class CatalogueDriftDetectorConstruct extends Construct {
     const stack = Stack.of(this);
     const dim = { TenantId: props.tenantId, AgentId: props.agentId, Env: props.envName };
 
-    // SEC (Holmes CSR): CMK-encrypt the Lambda log group — matches the CMK
+    // SEC (security review): CMK-encrypt the Lambda log group — matches the CMK
     // log-group idiom used across the blueprint (e.g. online-evaluation).
     this.kmsKey = new Key(this, 'LogKey', {
       alias: `alias/agenticai/catalogue-drift-${props.envName}-${props.tenantId}-${props.agentId}`,

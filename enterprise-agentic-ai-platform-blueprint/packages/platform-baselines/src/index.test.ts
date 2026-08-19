@@ -49,7 +49,7 @@ describe('allowedModelArns', () => {
 });
 
 describe('PLATFORM_APPROVED_REGIONS', () => {
-  it('includes us-west-2 as the baseline per DECISIONS.md Q-REF-DEPLOY', () => {
+  it('includes us-west-2 as the reference-deployment baseline', () => {
     expect(PLATFORM_APPROVED_REGIONS).toContain('us-west-2');
   });
 

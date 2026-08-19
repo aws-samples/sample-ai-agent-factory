@@ -141,7 +141,7 @@ Agents call Bedrock through a per-workload-account LiteLLM deployment rather tha
 
 Infrastructure is authored in AWS CDK (TypeScript + Python), synthesising CloudFormation. The spec's Terraform examples are re-implemented as CDK constructs with equivalent control semantics — same SCP bodies, VPCE policies, resource-based policies, Cedar policies, CMK wiring, guardrail attachment.
 
-- **Compensating controls.** Every deviating construct cites the spec § it implements; cdk-nag `AwsSolutionsChecks` + `NIST80053R5Checks` Aspects mandatory; build-time SCP-size check; every suppression documented in [`SECURITY-EXCEPTIONS.md`](SECURITY-EXCEPTIONS.md).
+- **Compensating controls.** Every deviating construct cites the spec § it implements; cdk-nag `AwsSolutionsChecks` + `NIST80053R5Checks` Aspects mandatory; build-time SCP-size check; every suppression carries an inline `SEC-0NN` marker with owner, rationale and compensating control.
 
 ### 3.3 D-03 — Centralised-platform pattern
 
@@ -189,7 +189,7 @@ export CDK_DEFAULT_REGION=us-west-2
 npx cdk bootstrap "aws://$CDK_DEFAULT_ACCOUNT/$CDK_DEFAULT_REGION" --qualifier hnb659fds
 ```
 
-> **Least privilege.** Set the CDK CloudFormation execution policy to a customer-managed policy scoped to the services these stacks provision — do **not** use `AdministratorAccess`. See `pipelines/bootstrap/bootstrap-cross-account.sh` (requires `CFN_EXECUTION_POLICY_ARN`) and [`SECURITY-EXCEPTIONS.md`](SECURITY-EXCEPTIONS.md).
+> **Least privilege.** Set the CDK CloudFormation execution policy to a customer-managed policy scoped to the services these stacks provision — do **not** use `AdministratorAccess`. See `pipelines/bootstrap/bootstrap-cross-account.sh` (requires `CFN_EXECUTION_POLICY_ARN`); the required scope is documented inline there.
 
 > **Worked example.** [`examples/reference-deployment-us-west-2/`](examples/reference-deployment-us-west-2/) is a complete 7-account `us-west-2` walkthrough with a fully populated `cdk.context.json` template (placeholder account ids), the Phase 1 → 8 deploy sequence, and the matching teardown. Use it as the concrete reference for the abstract steps below.
 
@@ -237,7 +237,7 @@ python3 tests/smoke/smoke.py            # read-only sanity checks
 pytest tests/integration/ -v            # full D-03 harness (needs live creds)
 ```
 
-Fast checks: `npm test` green (500/50); `npx cdk synth` cdk-nag-clean with only the documented `SECURITY-EXCEPTIONS.md` suppressions; SCPs attached; VPCEs present; `bedrock:InvokeModel` without a `GuardrailIdentifier` returns `AccessDenied`; a non-allow-listed model returns `AccessDenied`.
+Fast checks: `npm test` green (500/50); `npx cdk synth` cdk-nag-clean with only the documented `SEC-0NN` suppressions; SCPs attached; VPCEs present; `bedrock:InvokeModel` without a `GuardrailIdentifier` returns `AccessDenied`; a non-allow-listed model returns `AccessDenied`.
 
 Repository hygiene gates, runnable locally and suitable for wiring into CI: `npm run scrub` (fails on any AWS account ID, internal reference, or hardcoded developer path in the tree) and `gitleaks detect --config .gitleaks.toml`.
 
@@ -300,7 +300,7 @@ LiteLLM's virtual-key spend view is the budget-alert source of truth; CUR is the
 - **MCP target outage** — identify the failing target in the Gateway logs, circuit-break its Cedar route, activate fallbacks.
 - **Cross-account KMS / SelfMutate failures** — usually a bootstrap `aws-cdk-lib` gap or a direct `cdk deploy` against the pipeline stack; re-bootstrap ≥ 2.150 or always flow changes through the pipeline.
 
-**Change management.** All prod changes flow through the pipeline (evaluation gate + manual approval); no out-of-band `cdk deploy` to prod. Reviews: Well-Architected quarterly, cost monthly, `SECURITY-EXCEPTIONS` expiry monthly, SCP drift quarterly, dependency/SBOM monthly, red-team quarterly. Quarterly chaos experiments (Bedrock throttling, VPCE failure, ECS task kill, KMS pending-delete) each carry a hypothesis + stop criteria.
+**Change management.** All prod changes flow through the pipeline (evaluation gate + manual approval); no out-of-band `cdk deploy` to prod. Reviews: Well-Architected quarterly, cost monthly, security-exception expiry monthly, SCP drift quarterly, dependency/SBOM monthly, red-team quarterly. Quarterly chaos experiments (Bedrock throttling, VPCE failure, ECS task kill, KMS pending-delete) each carry a hypothesis + stop criteria.
 
 ---
 
@@ -320,7 +320,7 @@ STRIDE + OWASP LLM Top 10 + MITRE ATLAS applied to blueprint-authored controls (
 
 ### 10.2 Security exceptions
 
-Every cdk-nag / cfn-nag suppression is catalogued in [`SECURITY-EXCEPTIONS.md`](SECURITY-EXCEPTIONS.md) with owner, requirement, justification, and compensating control — 24 entries (`SEC-001`..`SEC-016`, `SEC-022`..`SEC-029`). Suppressions without a register entry fail CI; expired ones block `main`. The register distinguishes **service-limitation** exceptions (e.g. AgentCore's action-family evaluator rejecting narrow per-action lists; Bedrock guardrail admin APIs lacking resource-level ARNs — reviewed when the upstream service adds support) from **framework** exceptions (CDK custom-resource / Provider internals — reviewed on each `aws-cdk-lib` major bump).
+Every cdk-nag / cfn-nag suppression carries an inline `SEC-0NN` marker recording the requirement, the justification, and the compensating control — 24 in total (`SEC-001`..`SEC-016`, `SEC-022`..`SEC-029`), each visible on the suppression itself in the CDK source. Suppressions without a marker fail CI. The markers distinguish **service-limitation** exceptions (e.g. AgentCore's action-family evaluator rejecting narrow per-action lists; Bedrock guardrail admin APIs lacking resource-level ARNs — reviewed when the upstream service adds support) from **framework** exceptions (CDK custom-resource / Provider internals — reviewed on each `aws-cdk-lib` major bump).
 
 ### 10.3 Shared responsibility
 

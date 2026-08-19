@@ -81,7 +81,7 @@ export interface WorkloadPipelineStackProps extends StackProps {
   readonly notificationEmail?: string;
 
   /**
-   * Evaluation gate thresholds (R-DEVX-002 + 11-cicd-and-test-strategy.md §5.1).
+   * Evaluation gate thresholds (R-DEVX-002).
    * The 5 legacy categories + the 2 added by Phase A
    * (BLUEPRINT_GAP_ANALYSIS Partial-1).
    */

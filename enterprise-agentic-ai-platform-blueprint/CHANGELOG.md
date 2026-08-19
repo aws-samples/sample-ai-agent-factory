@@ -166,7 +166,7 @@ Closes the gap analysis dated 2026-05-06. Builds 8 new construct packages, 2 new
 - 17/17 verification matrix PASS. Three Step Functions executed end-to-end live (KillSwitch SUCCEEDED + audit DDB row; HITL high-confidence SUCCEEDED bypass; HITL low-confidence RUNNING with pause-token recorded).
 - Stack destroyed; all non-COMPLIANCE-locked residuals cleaned up; the 7-year COMPLIANCE-locked AI Act buckets remain by design.
 
-**Decisions locked (per `.claude/GAP_CLOSURE_PLAN.md` §16-LOCKED):**
+**Decisions locked for this release:**
 
 - Phase A judge models: Sonnet 4.5 for correctness, Haiku 4.5 for refusal + toxicity (both already on the platform allow-list — no SCP exception).
 - Phase D canary default: 5% / 30 min / auto-promote / 10pp regression tolerance.
@@ -373,7 +373,7 @@ This was the v1.0.0 release candidate, subject to AppSec, legal, and solution-qu
 
 ### Changed
 
-- Migrated README from the GitLab project-starter template to the AWS `aws-solutions-library-samples` 11-section canonical template.
+- Migrated README from a project-starter template to the AWS `aws-solutions-library-samples` 11-section canonical template.
 - Swapped `LICENSE` from MIT-with-copyright-preamble to canonical MIT-0.
 
 ### Security

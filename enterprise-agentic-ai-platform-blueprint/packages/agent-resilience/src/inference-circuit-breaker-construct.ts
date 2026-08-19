@@ -258,7 +258,7 @@ exports.handler = async (event) => {
     }
   }
   if (attempt >= retry.maxAttempts - 1) await emit('RetryStorm', 1);
-  // SEC (Holmes CSR): do not surface the raw upstream error message to the
+  // SEC (security review): do not surface the raw upstream error message to the
   // caller — a Bedrock error body can echo the user prompt. Return only the
   // error's name/type + HTTP status; the full error is logged server-side.
   const lastCode = (lastErr && lastErr.$metadata && lastErr.$metadata.httpStatusCode) || 0;

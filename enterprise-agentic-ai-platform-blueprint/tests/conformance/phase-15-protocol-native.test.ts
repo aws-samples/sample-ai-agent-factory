@@ -111,7 +111,7 @@ describe('Phase 15 — McpProbeConstruct CFN shape', () => {
     expect(JSON.stringify(put!.Condition)).toContain('AgenticAI/MCP');
   });
 
-  // Holmes CSR: InvokeGateway must NOT be account-wide '*'.
+  // Security review: InvokeGateway must NOT be account-wide '*'.
   it('bedrock-agentcore:InvokeGateway scoped to a gateway ARN, not "*"', () => {
     const t = synth();
     const policies = t.findResources('AWS::IAM::Policy');

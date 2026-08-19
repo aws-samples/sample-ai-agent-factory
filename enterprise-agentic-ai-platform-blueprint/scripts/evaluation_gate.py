@@ -199,7 +199,7 @@ def _bedrock_invoke_factory(model_id: str, region: str, guardrail_id: str, guard
                 },
             )
         except Exception as exc:  # noqa: BLE001
-            # SEC (Holmes CSR): a Bedrock error body can echo the user prompt.
+            # SEC (security review): a Bedrock error body can echo the user prompt.
             # Log ONLY the exception type — never the message/traceback, which
             # can contain the prompt. (Do not use _LOGGER.exception(): it emits
             # the full traceback + message.)

@@ -1,4 +1,4 @@
-# Pinned to exact tested versions (Holmes CSR: supply-chain hygiene).
+# Pinned to exact tested versions (security review: supply-chain hygiene).
 # Bump deliberately after re-running test_real_integration.py against the new set.
 langgraph==0.2.60
 langchain-aws==0.2.10

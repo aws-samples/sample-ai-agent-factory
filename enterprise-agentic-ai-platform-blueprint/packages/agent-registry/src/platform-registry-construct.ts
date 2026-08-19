@@ -208,11 +208,10 @@ export class PlatformRegistryConstruct extends Construct {
       policy: AwsCustomResourcePolicy.fromStatements([
         new PolicyStatement({
           effect: Effect.ALLOW,
-          // SEC-028 (known limitation, Holmes CSR-reviewed): the AgentCore
+          // SEC-028 (known limitation, security-reviewed): the AgentCore
           // control-plane action-family evaluator rejects narrow per-action
-          // lists for registry create/update/delete (live-verified 2026-05
-          // — see CLAUDE.md landmine §1), so a service-scoped wildcard is
-          // required. CreateRegistry also provisions a Workload Identity
+          // lists for registry create/update/delete (live-verified 2026-05), so a
+          // service-scoped wildcard is required. CreateRegistry also provisions a Workload Identity
           // internally, so the grant must cover that action family too.
           // Compensating controls that bound this grant:
           //   1. Lifetime — this is a CDK-managed AwsCustomResource singleton

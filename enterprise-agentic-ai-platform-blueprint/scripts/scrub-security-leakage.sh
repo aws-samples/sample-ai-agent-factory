@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # scrub-security-leakage.sh — source-tree leakage verifier.
 #
-# Fails if the working tree contains an AWS account ID, an internal Amazon
-# reference, a developer-specific absolute path, or a licensing marker that is
-# incompatible with MIT-0. Idempotent — a second run on a clean tree does
-# nothing and exits zero.
+# Fails if anything that would be committed contains an AWS account ID outside
+# the documented placeholder set, a developer-specific absolute path, or a
+# value listed in the site-specific deny-list. Idempotent — a second run on a
+# clean tree does nothing and exits zero.
 #
 # Run this:
 #   * Before every commit (git pre-commit hook)
@@ -18,89 +18,91 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Literal strings to detect. Only patterns that are themselves safe to publish
-# belong here — internal hostnames, internal tool names, licensing markers.
+# --- What gets scanned ------------------------------------------------------
 #
-# NEVER add a real AWS account ID, a developer alias, or a real event ID to
-# this list. Writing one here leaks exactly the value the pattern exists to
-# catch, and this file is excluded from its own scan, so nothing would flag it.
-# Account IDs are already covered generically below; anything else
-# value-specific belongs in the untracked deny-list (EXTRA_PATTERNS_FILE).
-PATTERNS=(
-  "gitlab.aws.dev"
-  "WORKSHOP_TODO_REFRESH"
-  "wstudio"
-  "isengard"
-  "Amazon Confidential"
-)
+# Everything git would commit: tracked files plus untracked files that are not
+# ignored. Deriving the list from git rather than hardcoding directory names is
+# deliberate — build outputs, virtualenvs, dependency trees and local tool
+# state are already ignored, so they need no mention here. That matters because
+# naming them would put site-specific strings into a published file, which is
+# the very thing this script exists to prevent.
+#
+# Outside a git work tree (an extracted tarball, say) fall back to a plain walk
+# with the usual build directories pruned.
+list_files() {
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git ls-files -z --cached --others --exclude-standard
+  else
+    find . -type f \
+      \( -path './.git' -o -name node_modules -o -name '.venv' \
+         -o -name '__pycache__' -o -name '.pytest_cache' -o -name dist \
+         -o -name 'cdk.out*' \) -prune -o -type f -print0
+  fi
+}
 
-# Regex patterns covering classes whose individual values are identifying: the
-# shape is published here, the values are not.
+# Files that legitimately carry the patterns and so cannot be scanned for them:
+# this script, the paired gitleaks config, and the deny-list itself.
+SELF_EXEMPT_RE='(^|/)(scrub-security-leakage\.sh|\.gitleaks\.toml|\.scrub-denylist\.local)$'
+
+FILES=()
+while IFS= read -r -d '' f; do
+  f="${f#./}"
+  [[ "$f" =~ $SELF_EXEMPT_RE ]] && continue
+  FILES+=("$f")
+done < <(list_files)
+
+if [[ ${#FILES[@]} -eq 0 ]]; then
+  echo "[FAIL] scrub-security-leakage.sh: no files to scan — is this a repository?"
+  exit 1
+fi
+
+# --- Generic patterns -------------------------------------------------------
+#
+# Only classes whose *shape* is safe to publish belong in this file. A pattern
+# whose value is itself identifying — an internal hostname, an internal tool or
+# system name, an account ID, a developer alias, an event id — must live in the
+# untracked deny-list instead. Writing such a value here would publish exactly
+# what the rule exists to catch, and this file is exempt from its own scan, so
+# nothing would flag it.
 REGEX_PATTERNS=(
-  "workshop-metrics-key-[0-9]{4}"   # literal workshop-metrics API keys
-  "eventId-[0-9]{8,}"               # Workshop Studio event identifiers
-  "/Users/[A-Za-z0-9._-]+"          # hardcoded absolute developer home paths
-  "/home/[A-Za-z0-9._-]+"           # ditto, Linux
+  "/Users/[A-Za-z0-9._-]+"   # hardcoded absolute developer home paths
+  "/home/[A-Za-z0-9._-]+"    # ditto, Linux
 )
 
-# Optional untracked deny-list for historical literals that must never be
-# committed but are still worth scanning for locally (account IDs and developer
-# aliases inherited from an archived source tree). One pattern per line; blank
-# lines and '#' comments ignored. This file must stay untracked.
+# --- Site-specific deny-list ------------------------------------------------
+#
+# Optional, untracked, one pattern per line; blank lines and '#' comments
+# ignored. This is where an adopting organisation puts the literals it must
+# never publish: internal hostnames and tool names, confidentiality markings,
+# historical identifiers inherited from an archived source tree. Keeping them
+# out of the tree means the deny-list can be specific without leaking.
 EXTRA_PATTERNS_FILE="${SCRUB_EXTRA_PATTERNS_FILE:-$REPO_ROOT/.scrub-denylist.local}"
-
-# Directories and files we deliberately skip:
-#   - .git: version-control metadata.
-#   - node_modules, .venv, __pycache__, cdk.out*, .pytest_cache, dist: build
-#     and cache outputs. cdk.out* contains live account IDs by design.
-#   - .claude, .holmes: local tool state, gitignored.
-#   - this file and .gitleaks.toml: they carry the patterns literally.
-#   - cdk.context.json: auto-generated by CDK's AZ lookup, gitignored, and
-#     contains the developer's locally-loaded account ID by design.
-EXCLUDES=(
-  --exclude-dir=.git
-  --exclude-dir=node_modules
-  --exclude-dir=.venv
-  --exclude-dir=__pycache__
-  --exclude-dir=cdk.out
-  --exclude-dir=cdk.out.*
-  --exclude-dir=.pytest_cache
-  --exclude-dir=.claude
-  --exclude-dir=.holmes
-  --exclude-dir=dist
-  --exclude=scrub-security-leakage.sh
-  --exclude=.gitleaks.toml
-  --exclude=cdk.context.json
-  --exclude=.scrub-denylist.local
-)
 
 fail=0
 
+report() {
+  echo "[LEAKAGE] $1 matched in:"
+  echo "$2" | sed 's/^/    /'
+  fail=1
+}
+
+# Both checkers must return 0 even when they find nothing: the script runs
+# under `set -e`, so a bare test as the last statement would abort the run.
 check_literal() {
-  local pattern="$1"
   local matches
-  matches=$(grep -rln "${EXCLUDES[@]}" -- "$pattern" . 2>/dev/null || true)
-  if [[ -n "$matches" ]]; then
-    echo "[LEAKAGE] Pattern '$pattern' matched in:"
-    echo "$matches" | sed 's/^/    /'
-    fail=1
-  fi
+  matches=$(printf '%s\0' "${FILES[@]}" \
+    | xargs -0 grep -lI --binary-files=without-match -- "$1" 2>/dev/null || true)
+  if [[ -n "$matches" ]]; then report "Pattern '$1'" "$matches"; fi
+  return 0
 }
 
 check_regex() {
-  local pattern="$1"
   local matches
-  matches=$(grep -rlnE "${EXCLUDES[@]}" -- "$pattern" . 2>/dev/null || true)
-  if [[ -n "$matches" ]]; then
-    echo "[LEAKAGE] Pattern /$pattern/ matched in:"
-    echo "$matches" | sed 's/^/    /'
-    fail=1
-  fi
+  matches=$(printf '%s\0' "${FILES[@]}" \
+    | xargs -0 grep -lIE --binary-files=without-match -- "$1" 2>/dev/null || true)
+  if [[ -n "$matches" ]]; then report "Pattern /$1/" "$matches"; fi
+  return 0
 }
-
-for pattern in "${PATTERNS[@]}"; do
-  check_literal "$pattern"
-done
 
 for pattern in "${REGEX_PATTERNS[@]}"; do
   check_regex "$pattern"
@@ -113,11 +115,12 @@ if [[ -f "$EXTRA_PATTERNS_FILE" ]]; then
   done < "$EXTRA_PATTERNS_FILE"
 fi
 
-# Twelve-digit AWS account IDs — any occurrence in a source file is a leakage
-# unless it is one of the recognised placeholders. This rule is what protects
-# against real account IDs generically, so it must stay broader than any
-# literal list: it covers every text format the repo carries, including the
-# architecture-diagram sources, which embed account chips.
+# --- AWS account IDs --------------------------------------------------------
+#
+# Any 12-digit run in a text file is a leak unless it is a recognised
+# placeholder. This is the rule that generically protects against real account
+# IDs, so it deliberately scans every text file rather than an extension list:
+# a leak in an extensionless file or a diagram source counts the same.
 #
 # Allowed placeholders:
 #   123456789012                — AWS-canonical documentation example.
@@ -125,26 +128,20 @@ fi
 #                                 (cdk.context.json, README samples).
 #   Repeated-digit sequences    — Test fixtures only (111...1, 222...2, etc.).
 #                                 Production code must never contain these.
-account_matches=$(
-  grep -rEoh --binary-files=without-match \
-             --include='*.py' --include='*.yaml' --include='*.yml' \
-             --include='*.json' --include='*.md' --include='*.sh' \
-             --include='*.ts' --include='*.js' --include='*.ipynb' \
-             --include='*.toml' --include='*.txt' --include='*.cfg' \
-             --include='*.ini' --include='*.csv' --include='*.tf' \
-             --include='*.svg' --include='*.html' --include='*.drawio' \
-             --include='Dockerfile' \
-             "${EXCLUDES[@]}" \
-             "[0-9]{12}" . 2>/dev/null \
+account_hits=$(
+  printf '%s\0' "${FILES[@]}" \
+    | xargs -0 grep -hIEo --binary-files=without-match "[0-9]{12}" 2>/dev/null \
     | sort -u \
     | grep -v '^123456789012$' \
     | grep -vE '^0{10}[0-9]{2}$' \
     | grep -vE '^([0-9])\1{11}$' \
     || true
 )
-if [[ -n "$account_matches" ]]; then
+if [[ -n "$account_hits" ]]; then
   echo "[LEAKAGE] Unexpected 12-digit AWS account IDs detected (allow-list: 123456789012, 000000000000..99, repeated digits):"
-  echo "$account_matches" | sed 's/^/    /'
+  echo "$account_hits" | sed 's/^/    /'
+  echo "          Locate them with:"
+  echo "$account_hits" | sed 's/^/            git grep -n /'
   fail=1
 fi
 

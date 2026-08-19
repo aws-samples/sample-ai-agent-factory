@@ -37,7 +37,7 @@ describe('DEFAULT_EVAL_THRESHOLDS', () => {
   });
 });
 
-describe('JUDGE_MODELS — locked decision per .claude/GAP_CLOSURE_PLAN.md §16-LOCKED', () => {
+describe('JUDGE_MODELS — locked platform decision', () => {
   it('uses Sonnet 4.5 for correctness', () => {
     expect(JUDGE_MODELS.correctness).toMatch(/claude-sonnet-4-5/);
   });

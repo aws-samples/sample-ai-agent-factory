@@ -19,7 +19,7 @@
  * cdk-nag Aspects:
  *   - `AwsSolutionsChecks` is always applied.
  *   - `NIST80053R5Checks` is applied when the `agenticai/regulated` context
- *     flag is true (default true per DECISIONS.md Q-REGULATED-FLAG).
+ *     flag is true (default true).
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0

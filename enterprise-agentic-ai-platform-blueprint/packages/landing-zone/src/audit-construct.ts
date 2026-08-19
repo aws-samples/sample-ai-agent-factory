@@ -6,7 +6,8 @@
  * metrics + logs + traces into a single observability plane (R-OBS-002).
  *
  * Spec §5 observability is body-missing from the source PDF, so the details
- * are derived per `_research/R11-wa-genai-nist-nag.md` + AWS OAM docs.
+ * are derived from the AWS Well-Architected GenAI Lens, NIST 800-53 Rev 5,
+ * and the AWS OAM documentation.
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
@@ -42,7 +43,7 @@ export class AuditConstruct extends Construct {
     }
 
     // Build sink-policy principal set.
-    // SEC (Holmes CSR): the `{ AWS: '*' }` branch is used ONLY together with
+    // SEC (security review): the `{ AWS: '*' }` branch is used ONLY together with
     // the `aws:PrincipalOrgID` Condition below — it is the standard,
     // AWS-recommended pattern for organization-wide OAM sink sharing. The
     // wildcard principal is NOT open: only accounts belonging to the specified
