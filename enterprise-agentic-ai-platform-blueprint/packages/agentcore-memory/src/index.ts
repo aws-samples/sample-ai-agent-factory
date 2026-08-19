@@ -8,7 +8,7 @@
  *   - Namespace template accepts only {actorId} / {memoryStrategyId} / {sessionId}
  *     — tenant/agent segments must be STATIC (spec §3.4.4 L4657-4660). This
  *     forces tenant onboarding to be deploy-time; documented in
- *     CHOICE_ARCHITECTURE.md (Phase 9).
+ *     README section 11 (Choice architecture).
  *
  * The CfnMemory L1 for AgentCore lands in a Phase 5 follow-on when the CFN
  * resource type ships. For now the construct emits the CMK + retention

@@ -95,5 +95,6 @@ NOTES/
 TODO/
 tests/live/
 
-# Holmes scan cache
-.holmes/
+# Site-specific scrubber deny-list. Holds the literal values a given
+# organisation must never publish, so it must never itself be committed.
+.scrub-denylist.local

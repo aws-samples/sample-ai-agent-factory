@@ -12,7 +12,7 @@
  * Note: Control Tower often supplies an aggregation bucket already. Pass
  * `adoptControlTowerBucket: true` + the existing bucket ARN/name to skip
  * bucket creation and adopt the pre-existing resources. This matches
- * DECISIONS.md Q-WORKLOAD-CONTROL-TOWER.
+ * the blueprint's Control Tower adoption decision.
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
@@ -133,7 +133,7 @@ export class LogArchiveConstruct extends Construct {
         {
           id: 'NIST.800.53.R5-S3BucketReplicationEnabled',
           reason:
-            'SEC-002: CRR deferred to the v2 DR roadmap (W-REL-02 in 05-well-architected-overlay.md). Archive is versioned + retained; single-region for v1.',
+            'SEC-002: CRR deferred to the v2 DR roadmap (W-REL-02). Archive is versioned + retained; single-region for v1.',
         },
         {
           id: 'AwsSolutions-S2',
@@ -175,7 +175,7 @@ export class LogArchiveConstruct extends Construct {
         {
           id: 'NIST.800.53.R5-S3BucketReplicationEnabled',
           reason:
-            'SEC-002: CRR deferred to the v2 DR roadmap (W-REL-02 in 05-well-architected-overlay.md). CloudTrail archive is versioned + CMK-encrypted + access-logged; single-region for v1.',
+            'SEC-002: CRR deferred to the v2 DR roadmap (W-REL-02). CloudTrail archive is versioned + CMK-encrypted + access-logged; single-region for v1.',
         },
       ],
       true,
@@ -225,7 +225,7 @@ export class LogArchiveConstruct extends Construct {
         {
           id: 'NIST.800.53.R5-S3BucketReplicationEnabled',
           reason:
-            'SEC-002: CRR deferred to the v2 DR roadmap (W-REL-02 in 05-well-architected-overlay.md). CUR is reproducible from billing; single-region for v1.',
+            'SEC-002: CRR deferred to the v2 DR roadmap (W-REL-02). CUR is reproducible from billing; single-region for v1.',
         },
       ],
       true,

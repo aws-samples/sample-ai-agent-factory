@@ -1,17 +1,20 @@
 # .gitleaks.toml — secret-scan configuration for this blueprint.
 #
-# Extends the gitleaks default rule set with rules for the leakage classes that
-# matter to this repository: AWS account IDs, internal Amazon references,
-# developer-specific absolute paths, and licensing markers incompatible with
-# MIT-0.
+# Extends the gitleaks default rule set with the leakage classes that matter to
+# this repository and are safe to describe in public: AWS account IDs outside
+# the documented placeholder set, and developer-specific absolute paths.
 #
 # Paired with scripts/scrub-security-leakage.sh for defence in depth: gitleaks
 # catches regex-based secrets (AWS access keys, generic API keys, tokens); the
-# script adds the repository-specific rules and runs without a gitleaks binary.
+# script adds the account-ID and developer-path rules and runs without a
+# gitleaks binary.
 #
-# NEVER encode a real account ID, developer alias, or event ID in a rule here.
-# The rule file is allow-listed against itself, so such a value would be
-# published and never flagged. Match the shape, not the value.
+# Match the shape, not the value. NEVER encode a real account ID, a developer
+# alias, an internal hostname, an internal tool or system name, or an event id
+# in a rule here: this file is allow-listed against itself, so such a value
+# would be published and never flagged. Site-specific literals belong in the
+# untracked deny-list that scrub-security-leakage.sh reads instead
+# (.scrub-denylist.local).
 
 title = "enterprise-agentic-ai-platform-blueprint gitleaks config"
 
@@ -20,12 +23,6 @@ title = "enterprise-agentic-ai-platform-blueprint gitleaks config"
 useDefault = true
 
 # -- Blueprint-specific custom rules ----------------------------------------
-
-[[rules]]
-id = "workshop-metrics-api-key"
-description = "Workshop-metrics literal API key from Workshop Studio prototypes"
-regex = '''workshop-metrics-key-[0-9]{4}'''
-tags = ["key", "generic"]
 
 [[rules]]
 id = "aws-account-id"
@@ -42,47 +39,16 @@ tags = ["aws", "account-id"]
   ]
 
 [[rules]]
-id = "internal-gitlab-url"
-description = "Internal Amazon GitLab references"
-regex = '''gitlab\.aws\.dev'''
-tags = ["internal"]
-
-[[rules]]
-id = "workshop-studio-event-id"
-description = "Workshop Studio event identifiers"
-regex = '''eventId-[0-9]{8,}'''
-tags = ["workshop"]
-
-[[rules]]
-id = "workshop-placeholder"
-description = "Pre-event TODO placeholder that must be resolved before publishing"
-regex = '''WORKSHOP_TODO_REFRESH'''
-tags = ["placeholder"]
-
-[[rules]]
 id = "developer-absolute-path"
 description = "Hardcoded absolute developer home path — leaks a local username"
 regex = '''/(Users|home)/[A-Za-z0-9._-]+'''
 tags = ["internal", "pii"]
 
-[[rules]]
-id = "isengard-reference"
-description = "Isengard internal-tool references"
-regex = '''(?i)isengard'''
-tags = ["internal"]
-
-[[rules]]
-id = "amazon-confidential-marking"
-description = "Legacy Amazon Confidential and Trademark marking — incompatible with MIT-0"
-regex = '''Amazon Confidential'''
-tags = ["licensing"]
-
 # -- Allow-listed paths ----------------------------------------------------
 
 [allowlist]
-description = "Paths where documentation-level references to the above patterns are permitted."
+description = "Files that carry the patterns above literally, by design."
 paths = [
   '''scripts/scrub-security-leakage\.sh''',
   '''\.gitleaks\.toml''',
-  '''SECURITY-EXCEPTIONS\.md''',
 ]

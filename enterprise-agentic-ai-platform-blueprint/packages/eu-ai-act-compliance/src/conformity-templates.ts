@@ -97,7 +97,7 @@ export function riskAssessment(inputs: ConformityInputs): string {
 
 ## 2. Residual risks
 
-Documented in \`SECURITY-EXCEPTIONS.md\` per platform deployment.
+Documented as a registered security exception per platform deployment.
 
 ## 3. Trigger to re-assess
 

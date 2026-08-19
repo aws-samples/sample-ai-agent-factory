@@ -50,7 +50,7 @@ export interface McpProbeConstructProps {
    * probe's `bedrock-agentcore:InvokeGateway` grant is scoped to this single
    * ARN. When omitted, the grant is scoped to the gateway id parsed from
    * `gatewayUrl` if derivable, otherwise to `gateway/*` in THIS account and
-   * region (never account-wide `*`). SEC (Holmes CSR).
+   * region (never account-wide `*`). SEC (security review).
    */
   readonly gatewayArn?: string;
   /**
@@ -162,7 +162,7 @@ export class McpProbeConstruct extends Construct {
     // Allow SigV4 calling the gateway. AgentCore Gateway accepts SigV4 by
     // role-arn; the probe role is the identity we'll allow on the gateway
     // resource policy in the live deploy.
-    // SEC (Holmes CSR): scope InvokeGateway to the exact gateway ARN when
+    // SEC (security review): scope InvokeGateway to the exact gateway ARN when
     // known, else the gateway id parsed from the URL, else `gateway/*` bounded
     // to THIS account + region — never an account-wide `*`.
     const gatewayId = parseGatewayId(props.gatewayUrl);

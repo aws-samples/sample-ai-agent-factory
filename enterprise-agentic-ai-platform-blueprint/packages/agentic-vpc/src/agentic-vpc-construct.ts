@@ -132,7 +132,7 @@ export interface AgenticVpcConstructProps {
  * Builds VPC endpoint policy statements that limit principals to the local
  * account root ARN, matching spec §2.3.5 L1101-1116.
  *
- * SEC (Holmes CSR): the Allow statement is scoped to the action namespace(s)
+ * SEC (security review): the Allow statement is scoped to the action namespace(s)
  * of the single service each endpoint fronts (e.g. `logs:*` for the
  * CloudWatch Logs endpoint) rather than `*`. An interface endpoint only ever
  * carries traffic for its own service, so the service-prefix wildcard is the
@@ -463,7 +463,7 @@ export class AgenticVpcConstruct extends Construct {
         policy: AwsCustomResourcePolicy.fromStatements([
           new PolicyStatement({
             effect: Effect.ALLOW,
-            // SEC-011 (Holmes CSR): ec2:DescribeSubnets and
+            // SEC-011 (security review): ec2:DescribeSubnets and
             // ec2:DescribeAvailabilityZones require Resource:'*' — they are
             // account-wide list/describe operations that do NOT support
             // resource-level permissions. Read-only, non-mutating.

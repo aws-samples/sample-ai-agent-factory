@@ -7,7 +7,7 @@
 import { DEFAULT_CANARY_CONFIG, validateCanaryConfig } from './canary-config';
 
 describe('canary config SSOT', () => {
-  it('locks the default canary to 5% per GAP_CLOSURE_PLAN §16-LOCKED', () => {
+  it('locks the default canary to 5% as a platform default', () => {
     expect(DEFAULT_CANARY_CONFIG.canaryPercent).toBe(5);
   });
 

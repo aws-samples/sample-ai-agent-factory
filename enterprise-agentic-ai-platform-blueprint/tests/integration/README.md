@@ -8,7 +8,7 @@ against the tenant-specific Application Inference Profile.
 
 Run order against a live deployment:
 
-1. Deploy both stacks (platform + workload) — see `DEPLOYMENT.md`.
+1. Deploy both stacks (platform + workload) — see README section 6 (Deployment).
 2. Run `pytest tests/integration -v`.
 3. Run `cdk destroy` for both stacks.
 4. Run `pytest tests/teardown -v` to confirm no residual resources.

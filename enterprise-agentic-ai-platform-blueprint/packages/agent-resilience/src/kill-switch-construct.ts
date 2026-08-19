@@ -118,7 +118,7 @@ export class KillSwitchConstruct extends Construct {
       new PolicyStatement({
         sid: 'AgentCoreIdentityRevoke',
         effect: Effect.ALLOW,
-        // SEC (Holmes CSR): bedrock-agentcore Delete/GetWorkloadIdentity do
+        // SEC (security review): bedrock-agentcore Delete/GetWorkloadIdentity do
         // NOT support resource-level ARNs today (live-verified) — the API
         // rejects a non-'*' Resource. This is a break-glass kill-switch role
         // assumed only by the kill-switch Step Functions state machine, whose
@@ -245,7 +245,7 @@ exports.handler = async () => {
       new PolicyStatement({
         effect: Effect.ALLOW,
         actions: ['bedrock-agentcore:GetGatewayTarget', 'bedrock-agentcore:UpdateGatewayTarget'],
-        // SEC (Holmes CSR): scope to THIS workstream's gateway target ARN
+        // SEC (security review): scope to THIS workstream's gateway target ARN
         // (same pattern as the identity-policy statement above), not '*'.
         resources: [`arn:aws:bedrock-agentcore:*:*:gateway-target/*${props.gatewayTargetId}`],
       }),

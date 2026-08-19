@@ -104,7 +104,7 @@ export class AgentCoreRegistryConstruct extends Construct {
           {
             id: 'NIST.800.53.R5-DynamoDBInBackupPlan',
             reason:
-              'SEC-023: PITR enabled (35-day continuous recovery) + RETAIN removal policy. AWS Backup plan is a customer-specific opt-in; referenced in OPERATIONS.md quarterly review.',
+              'SEC-023: PITR enabled (35-day continuous recovery) + RETAIN removal policy. AWS Backup plan is a customer-specific opt-in; reviewed quarterly per README section 9 (Operations).',
           },
         ],
         true,

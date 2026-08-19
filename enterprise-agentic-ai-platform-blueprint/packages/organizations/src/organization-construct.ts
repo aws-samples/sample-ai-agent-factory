@@ -42,7 +42,7 @@ import { buildScpSet, type ScpDefinition, SCP_BODY_SOFT_LIMIT, SCP_BODY_HARD_LIM
 export interface OrganizationConstructProps {
   /**
    * Region used to render foundation-model ARNs in SCP-01 (the platform
-   * allow-list). Defaults to 'us-west-2' per DECISIONS.md Q-REF-DEPLOY.
+   * allow-list). Defaults to 'us-west-2', the reference-deployment region.
    */
   readonly primaryRegion?: string;
 

@@ -3,7 +3,8 @@
  * shares CloudWatch metrics, logs, and traces with the audit-account OAM sink
  * created by packages/landing-zone/AuditConstruct.
  *
- * Spec reference: R-OBS-002 (derived from §5.1 + `_research/R11…`).
+ * Spec reference: R-OBS-002 (derived from spec §5.1 plus the AWS OAM
+ * documentation, since the spec's observability body is missing).
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0

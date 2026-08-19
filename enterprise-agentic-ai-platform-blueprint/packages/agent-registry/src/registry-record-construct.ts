@@ -90,10 +90,10 @@ export class RegistryRecordConstruct extends Construct {
     const descriptorPayload = renderDescriptorPayload(props.spec);
     const physicalId = `AgenticAI-RegistryRecord-${props.spec.recordId}`;
 
-    // SEC-028 (Holmes CSR): the AgentCore control-plane action-family
+    // SEC-028 (security review): the AgentCore control-plane action-family
     // evaluator rejects narrow per-action lists for registry-record
-    // create/submit/approve/delete (live-verified — see CLAUDE.md landmine
-    // §1), so the ACTION must stay a service-scoped wildcard on these
+    // create/submit/approve/delete (live-verified), so the ACTION
+    // must stay a service-scoped wildcard on these
     // short-lived CDK custom-resource Lambdas. We nonetheless scope the
     // RESOURCE to this registry and its records rather than '*'. This is a
     // provisioning-only grant bounded by (1) the CDK-managed Lambda lifetime,

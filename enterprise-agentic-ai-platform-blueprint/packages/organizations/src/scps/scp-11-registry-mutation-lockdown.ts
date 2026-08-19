@@ -11,7 +11,7 @@
  * and the workload account's root — must be denied at the Org boundary.
  *
  * Actions denied (paired with the curator + admin actions in
- * `IAM_PERMISSIONS.md` from the AgentCore Registry samples):
+ * the AgentCore Registry sample IAM documentation):
  *   - bedrock-agentcore:CreateRegistry
  *   - bedrock-agentcore:DeleteRegistry
  *   - bedrock-agentcore:UpdateRegistry

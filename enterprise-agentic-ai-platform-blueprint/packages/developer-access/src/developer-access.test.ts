@@ -79,7 +79,7 @@ describe('renderInlinePolicy — Developer', () => {
     expect(repoActions).toContain('codecommit:GitPush');
   });
 
-  // Holmes CSR: pipeline write grants must be scoped to the workstream, not '*'.
+  // Security review: pipeline write grants must be scoped to the workstream, not '*'.
   it('scopes pipeline/repo/build write grants to the workstream id, never "*"', () => {
     const p = asPolicy(renderInlinePolicy('Developer', { workstreamId: 'acme' }));
     for (const sid of ['PipelineDeployForOwnWorkstream', 'RepoAccessForOwnWorkstream', 'BuildForOwnWorkstream']) {
