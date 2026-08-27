@@ -273,6 +273,10 @@ def _auto_register_in_aws_registry(
     runtimes, else a CUSTOM descriptor with the agent's identity/endpoint. The
     record starts in DRAFT — a curator approves it via the registry router
     (visibility/integration gating enforced elsewhere). Loom-study 0.4.
+
+    Registry GA renamed the record classifier from ``descriptorType`` to
+    ``recordType`` and dropped the ``A2A`` value in favour of ``AGENT``, so an
+    A2A runtime is now an AGENT record carrying an ``a2aAgentCard`` descriptor.
     """
     from app.services.aws_agent_registry import (
         build_a2a_descriptor,
@@ -287,14 +291,14 @@ def _auto_register_in_aws_registry(
         return  # idempotent — already registered
 
     if is_a2a:
-        descriptor_type = "a2a"
+        record_type = "AGENT"
         descriptors = build_a2a_descriptor(
             name=friendly_runtime_name,
             description=f"Agent {friendly_runtime_name} deployed via the platform",
             url=runtime_endpoint or runtime_arn or "",
         )
     else:
-        descriptor_type = "custom"
+        record_type = "CUSTOM"
         descriptors = build_custom_descriptor(
             {
                 "name": friendly_runtime_name,
@@ -306,7 +310,7 @@ def _auto_register_in_aws_registry(
 
     result = registry.register(
         name=friendly_runtime_name,
-        descriptor_type=descriptor_type,
+        record_type=record_type,
         descriptors=descriptors,
         description=f"Auto-registered on deploy: {friendly_runtime_name}",
     )
@@ -535,8 +539,13 @@ def handler(event: dict, context) -> dict:
                 friendly_runtime_name=friendly_runtime_name or runtime_id or deployment_id,
                 is_a2a=str(_protocol).upper() == "A2A",
             )
-        except Exception:  # noqa: BLE001
-            logger.warning("AWS Agent Registry auto-register skipped (best-effort)")
+        except Exception as _reg_exc:  # noqa: BLE001
+            # Include the reason: the commonest cause is an old boto3 bundle with
+            # no agent-registry service model, which is invisible otherwise.
+            logger.warning(
+                "AWS Agent Registry auto-register skipped (best-effort): %s",
+                str(_reg_exc)[:200],
+            )
 
         return {
             "deployment_id": deployment_id,

@@ -466,7 +466,10 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     # peers. Collect the connected external identifiers (endpoint URLs / names)
     # and reject the deploy if any is not APPROVED. No-op when federation is off.
     try:
-        from app.services.aws_agent_registry import unapproved_integrations
+        from app.services.aws_agent_registry import (
+            RegistryQueryFailed,
+            unapproved_integrations,
+        )
 
         _idents: list[str] = []
         _mcp = request.mcp_server_config or {}
@@ -478,7 +481,25 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         if isinstance(_a2a, dict):
             for u in _a2a.get("peer_allowlist") or _a2a.get("peerAllowlist") or []:
                 _idents.append(str(u))
-        _blocked = unapproved_integrations(_idents)
+        try:
+            _blocked = unapproved_integrations(_idents)
+        except RegistryQueryFailed as _rqe:
+            # Still fail CLOSED — a governance control that opens on error is not a
+            # control. But 503, not 403, and name the real cause: approval status is
+            # UNKNOWN, not "denied". Reporting this as 403 would send the operator to
+            # approve records that may already be approved, while the actual fix is an
+            # IAM action or the registry id.
+            logger.error("integration gating could not resolve approval status: %s", _rqe)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Integration gating is enabled but the Agent Registry could not be "
+                    f"queried, so approval status is unknown ({_rqe}). Refusing the deploy "
+                    "rather than let an unreviewed integration through. Check that the "
+                    "deployment role holds agent-registry:ListRegistryRecords and that the "
+                    "configured registry id is correct."
+                ),
+            ) from _rqe
         if _blocked:
             raise HTTPException(
                 status_code=403,

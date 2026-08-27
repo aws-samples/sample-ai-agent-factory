@@ -331,14 +331,45 @@ class AwsRegistryEnableRequest(BaseModel):
 
 @router.get("/aws-config", dependencies=[Depends(require_scopes("registry:read"))])
 async def aws_registry_config(caller_sub: str = Depends(get_caller_sub)) -> dict:
-    """Return whether AWS Agent Registry federation is enabled + reachable."""
-    from app.services.aws_agent_registry import get_configured_registry_id, get_registry
+    """Return whether AWS Agent Registry federation is enabled + reachable.
 
+    ``sdk_supported`` distinguishes the two very different reasons federation can
+    be unreachable: a bad registryId / missing IAM (fixable in the console) vs a
+    Lambda bundle whose boto3 predates the GA ``agent-registry`` service models
+    (fixable only by redeploying with boto3 >= 1.43.66). Without it the UI can
+    only say "unreachable", which sends admins hunting the wrong problem.
+    ``status`` covers the third case: a valid, permitted registry that is not yet
+    READY. It is None when the registry could not be read at all.
+    """
+    from app.services.aws_agent_registry import (
+        REGISTRY_STATUS_READY,
+        agent_registry_supported,
+        get_configured_registry_id,
+        get_registry,
+    )
+
+    sdk_ok = agent_registry_supported()
     rid = get_configured_registry_id()
     if not rid:
-        return {"enabled": False, "registry_id": None, "available": False}
+        return {
+            "enabled": False,
+            "registry_id": None,
+            "available": False,
+            "sdk_supported": sdk_ok,
+            "status": None,
+        }
     reg = get_registry()
-    return {"enabled": True, "registry_id": rid, "available": bool(reg and reg.available())}
+    # `status` splits the third reason federation can look broken: the registry is
+    # real and permitted but not READY (CREATING/UPDATING/DELETING). available()
+    # alone renders that identically to a bad registryId.
+    status = reg.registry_status() if reg else None
+    return {
+        "enabled": True,
+        "registry_id": rid,
+        "available": status == REGISTRY_STATUS_READY,
+        "sdk_supported": sdk_ok,
+        "status": status,
+    }
 
 
 @router.post("/aws-config", dependencies=[Depends(require_scopes("registry:write"))])
@@ -350,13 +381,42 @@ async def aws_registry_enable(
     """Enable AWS Agent Registry federation with a registryId. Admin only."""
     if not is_admin:
         raise HTTPException(status_code=403, detail="Requires registry-admin role")
-    from app.services.aws_agent_registry import AwsAgentRegistry, set_configured_registry_id
+    from app.services.aws_agent_registry import (
+        MIN_BOTO3,
+        REGISTRY_STATUS_READY,
+        AwsAgentRegistry,
+        agent_registry_supported,
+        set_configured_registry_id,
+    )
 
-    # Validate reachability before persisting so a typo fails loudly here.
-    if not AwsAgentRegistry(body.registry_id).available():
+    # An old bundle has no agent-registry client at all, so available() would be
+    # False for a perfectly valid registryId. Say so, rather than blaming the id.
+    if not agent_registry_supported():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This deployment's AWS SDK predates the GA Agent Registry API. "
+                f"Redeploy with boto3 >= {'.'.join(str(p) for p in MIN_BOTO3)}."
+            ),
+        )
+    # Validate reachability before persisting so a typo fails loudly here. Read the
+    # status rather than just available(), so "still being created" is not reported
+    # as "wrong registryId" — a registry takes tens of seconds to reach READY, and
+    # enabling federation right after creating one is the normal sequence.
+    status = AwsAgentRegistry(body.registry_id).registry_status()
+    if status is None:
         raise HTTPException(
             status_code=400,
             detail="Registry not reachable (check the registryId / region / permissions)",
+        )
+    if status != REGISTRY_STATUS_READY:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Registry {body.registry_id} exists but its status is {status}, not "
+                f"{REGISTRY_STATUS_READY}; it cannot accept records yet. "
+                "Retry once it finishes provisioning."
+            ),
         )
     set_configured_registry_id(body.registry_id)
     return {"enabled": True, "registry_id": body.registry_id, "available": True}
@@ -367,13 +427,45 @@ async def aws_registry_search(
     q: str = Query(min_length=1, max_length=256),
     caller_sub: str = Depends(get_caller_sub),
 ) -> dict:
-    """Semantic search across the AWS Agent Registry (empty when disabled)."""
-    from app.services.aws_agent_registry import get_registry
+    """Semantic search across the AWS Agent Registry (empty when disabled).
+
+    Results come from the data plane's search index, whose per-record ``status``
+    lags the control plane — a record demoted APPROVED -> DRAFT (which is what a
+    redeploy does, since register() upserts) keeps being served as APPROVED. This
+    is a governance surface, so showing that stale badge would tell a reviewer an
+    integration is approved when it is waiting on re-review.
+
+    So each hit's status is overwritten from the authoritative control-plane
+    listing. Best-effort by design: if that listing fails we drop ``status``
+    rather than fail the request or pass the index's version through, because
+    "unknown" is honest and the other two options are respectively useless and
+    misleading. ``status_authoritative`` tells the UI which case it got.
+    """
+    from app.services.aws_agent_registry import RegistryQueryFailed, get_registry
 
     reg = get_registry()
     if reg is None:
         return {"enabled": False, "results": []}
-    return {"enabled": True, "results": reg.search(q)}
+
+    results = reg.search(q)
+    authoritative = True
+    try:
+        truth = {r.get("recordId"): r.get("status") for r in reg.list_records_strict() if r.get("recordId")}
+    except RegistryQueryFailed as e:
+        logger.info("could not reconcile search statuses against the control plane: %s", e)
+        truth, authoritative = {}, False
+
+    for hit in results:
+        if not isinstance(hit, dict):
+            continue
+        if authoritative:
+            # A hit absent from the control plane was deleted but not yet
+            # de-indexed; report it as gone rather than as its last known status.
+            hit["status"] = truth.get(hit.get("recordId"), "DELETED")
+        else:
+            hit.pop("status", None)
+
+    return {"enabled": True, "results": results, "status_authoritative": authoritative}
 
 
 @router.get("/{slug}", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:read"))])

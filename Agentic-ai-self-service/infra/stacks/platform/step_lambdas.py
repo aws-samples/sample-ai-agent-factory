@@ -743,6 +743,44 @@ def _create_step_role(
             )
         )
 
+    # Phase 6 (Loom) — AWS Agent Registry federation (opt-in). The status_update
+    # step auto-registers a just-deployed agent as a DRAFT record
+    # (_auto_register_in_aws_registry), so THIS role — not the deployment
+    # Lambda's — is the principal on CreateRegistryRecord.
+    #
+    # This grant was missing entirely, which the best-effort wrapper around the
+    # auto-register hid: every deploy logged "auto-register skipped" and the
+    # federation feature silently never produced a record.
+    #
+    # Action prefix is `agent-registry:`, NOT `bedrock-agentcore:` — at GA the
+    # Registry became its own AWS service (boto3 `agent-registry-control` /
+    # `agent-registry`), and both planes authorize under the control model's
+    # signingName, which is `agent-registry`. Hence a separate statement rather
+    # than an entry in the agentcore_steps map above.
+    if step_name == "status_update":
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "agent-registry:GetRegistry",
+                    "agent-registry:CreateRegistryRecord",
+                    "agent-registry:GetRegistryRecord",
+                    "agent-registry:ListRegistryRecords",
+                    # Redeploying an agent hits the name+recordVersion uniqueness
+                    # key, so register() falls back to updating the existing record
+                    # in place (see AwsAgentRegistry.register). Without this action
+                    # that fallback AccessDenies and the best-effort wrapper hides
+                    # it, leaving the record pinned to the FIRST deployment's
+                    # runtime ARN — stale, and silently so.
+                    "agent-registry:UpdateRegistryRecord",
+                    "agent-registry:DeleteRegistryRecord",
+                    "agent-registry:TagResource",
+                ],
+                # The registryId is configured by an admin at runtime (opt-in),
+                # so registry/record ARNs are unknowable at synth time.
+                resources=["*"],
+            )
+        )
+
     # Bug 196 — auto-cleanup on failure. When a deployment fails, the
     # status_update step iterates created_resources and deletes them to
     # prevent orphans (KB, Cognito pools, gateways, IAM roles, Lambdas,
