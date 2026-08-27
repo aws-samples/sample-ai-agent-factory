@@ -141,8 +141,28 @@ export async function rejectRegistry(
 // AWS Agent Registry Federation (Phase 6)
 // ============================================================================
 
-/** Phase 6 (Loom) — AWS Agent Registry federation config/status. */
-export async function getAwsRegistryConfig(): Promise<{ enabled: boolean; registry_id: string | null; available: boolean }> {
+/**
+ * Phase 6 (Loom) — AWS Agent Registry federation config/status.
+ *
+ * `sdk_supported` is optional because an older backend won't return it: false
+ * means the backend's boto3 lacks the GA `agent-registry` service models, which
+ * is a redeploy, not a config fix.
+ *
+ * `status` is the registry's own lifecycle state (READY / CREATING / UPDATING /
+ * DELETING / *_FAILED), or null when it could not be read. A registry that is
+ * not READY is unavailable but perfectly valid — it just needs another moment —
+ * so the UI must not report it as a bad registryId.
+ *
+ * NOTE: `ApiClient.getAwsRegistryConfig()` in ../api.ts declares this same shape
+ * independently. Keep the two in step; only `tsc -b` catches a divergence.
+ */
+export async function getAwsRegistryConfig(): Promise<{
+  enabled: boolean;
+  registry_id: string | null;
+  available: boolean;
+  sdk_supported?: boolean;
+  status?: string | null;
+}> {
   return apiRequest(`/api/registry/aws-config`);
 }
 
@@ -154,7 +174,14 @@ export async function enableAwsRegistry(registryId: string): Promise<{ enabled: 
   });
 }
 
-/** Phase 6 — semantic search across the AWS Agent Registry. */
-export async function searchAwsRegistry(q: string): Promise<{ enabled: boolean; results: Array<Record<string, unknown>> }> {
+/** Phase 6 — semantic search across the AWS Agent Registry.
+ *
+ * Each hit's `status` is reconciled against the control plane, because the search
+ * index keeps serving a redeployed record as APPROVED after it has been demoted to
+ * DRAFT. `status_authoritative: false` means that reconciliation failed and `status`
+ * was omitted rather than served stale. Declared independently in ../api.ts — only
+ * `tsc -b` catches the two drifting apart.
+ */
+export async function searchAwsRegistry(q: string): Promise<{ enabled: boolean; results: Array<Record<string, unknown>>; status_authoritative?: boolean }> {
   return apiRequest(`/api/registry/aws-search?q=${encodeURIComponent(q)}`);
 }

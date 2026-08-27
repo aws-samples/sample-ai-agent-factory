@@ -31,9 +31,16 @@ class _FakeRegistry:
     def __init__(self):
         self.registered = None
 
-    def register(self, name, descriptor_type, descriptors, description=""):  # noqa: ARG002
-        self.registered = {"name": name, "type": descriptor_type, "descriptors": descriptors}
-        return {"record_id": "rec-123", "arn": "arn:...:record/rec-123", "status": "DRAFT"}
+    def register(self, name, record_type, descriptors, description=""):  # noqa: ARG002
+        # GA signature: `record_type` (was `descriptor_type`), carrying a value
+        # from the recordType enum MCP/AGENT/CUSTOM/SKILL.
+        self.registered = {"name": name, "type": record_type, "descriptors": descriptors}
+        return {
+            "record_id": "rec4567890ab",
+            "arn": "arn:aws:agent-registry:us-east-1:123456789012:registry/reg1/record/rec4567890ab",
+            "status": "DRAFT",
+            "record_type": record_type,
+        }
 
 
 def _patch_registry(monkeypatch, registry):
@@ -82,9 +89,9 @@ def test_custom_descriptor_for_non_a2a(monkeypatch):
         friendly_runtime_name="agent1",
         is_a2a=False,
     )
-    assert reg.registered["type"] == "custom"
+    assert reg.registered["type"] == "CUSTOM"
     assert "custom" in reg.registered["descriptors"]
-    assert store.saved == ("d1", "rec-123", "DRAFT")
+    assert store.saved == ("d1", "rec4567890ab", "DRAFT")
 
 
 def test_a2a_descriptor_for_a2a_runtime(monkeypatch):
@@ -99,6 +106,9 @@ def test_a2a_descriptor_for_a2a_runtime(monkeypatch):
         friendly_runtime_name="peer-agent",
         is_a2a=True,
     )
-    assert reg.registered["type"] == "a2a"
-    assert "a2a" in reg.registered["descriptors"]
-    assert store.saved[1] == "rec-123"
+    # GA: an A2A runtime becomes an AGENT record carrying an a2aAgentCard
+    # descriptor. The preview "A2A" recordType no longer exists.
+    assert reg.registered["type"] == "AGENT"
+    assert "a2aAgentCard" in reg.registered["descriptors"]
+    assert "a2a" not in reg.registered["descriptors"]
+    assert store.saved[1] == "rec4567890ab"

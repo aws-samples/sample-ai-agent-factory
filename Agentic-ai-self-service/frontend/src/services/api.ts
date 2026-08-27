@@ -431,7 +431,12 @@ export class ApiClient {
   }
 
   // AWS Registry (Phase 6)
-  async getAwsRegistryConfig(): Promise<{ enabled: boolean; registry_id: string | null; available: boolean }> {
+  /** `sdk_supported` is optional: an older backend omits it. False means that
+   *  backend's boto3 lacks the GA `agent-registry` service models (a redeploy,
+   *  not a config fix). `status` is the registry's lifecycle state, null if it
+   *  could not be read — a non-READY registry is valid but not yet writable.
+   *  Mirrors the declaration in services/api/registry.ts; keep both in step. */
+  async getAwsRegistryConfig(): Promise<{ enabled: boolean; registry_id: string | null; available: boolean; sdk_supported?: boolean; status?: string | null }> {
     return apiRequest(`/api/registry/aws-config`, {}, this.baseUrl);
   }
 
@@ -439,7 +444,10 @@ export class ApiClient {
     return apiRequest(`/api/registry/aws-config`, { method: 'POST', body: JSON.stringify({ registry_id: registryId }) }, this.baseUrl);
   }
 
-  async searchAwsRegistry(q: string): Promise<{ enabled: boolean; results: Array<Record<string, unknown>> }> {
+  // `status_authoritative: false` means each hit's `status` was dropped because the
+  // control plane couldn't be reached — the data plane's own status is stale after a
+  // redeploy, so it is not served as a fallback. Mirrored in ./api/registry.ts.
+  async searchAwsRegistry(q: string): Promise<{ enabled: boolean; results: Array<Record<string, unknown>>; status_authoritative?: boolean }> {
     return apiRequest(`/api/registry/aws-search?q=${encodeURIComponent(q)}`, {}, this.baseUrl);
   }
 

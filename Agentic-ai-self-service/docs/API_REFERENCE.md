@@ -85,6 +85,24 @@ Every API endpoint the platform exposes, plus deploy-time configuration variable
 | `POST` | `/api/registry/{slug}/approve` | **Admin only** — approve a pending entry (403 otherwise) |
 | `POST` | `/api/registry/{slug}/reject` | **Admin only** — reject with optional reason (403 otherwise) |
 
+#### AWS Agent Registry federation (opt-in)
+
+Federates deployed agents into the **AWS Agent Registry** — a GA AWS service in
+its own right (it is no longer part of `bedrock-agentcore`). Requires the backend
+to run **boto3 >= 1.43.66**, the first release carrying the `agent-registry`
+service models, and the `agent-registry:*` IAM actions.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/registry/aws-config` | Federation status: `{enabled, registry_id, available, sdk_supported}` |
+| `POST` | `/api/registry/aws-config` | **Admin only** — enable federation with a `registry_id` (reachability validated before persisting) |
+| `GET` | `/api/registry/aws-search?q=` | Discovery search across the registry (`SearchDiscoverableRegistryRecords`) |
+
+`sdk_supported: false` means this deployment's boto3 predates the GA API, so no
+`agent-registry` client can be built — a redeploy, not a configuration change.
+`POST` returns `400` naming the SDK in that case rather than blaming the
+`registry_id`.
+
 ### Prompt Library
 
 | Method | Endpoint | Description |
