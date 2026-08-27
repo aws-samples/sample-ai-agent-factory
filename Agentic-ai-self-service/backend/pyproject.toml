@@ -24,6 +24,11 @@ dev = [
     "httpx>=0.28.0",
     "moto[dynamodb]>=5.0.0",
     "requests>=2.31.0",
+    # Exact pin, unlike everything else here: a formatter's output changes between
+    # minor releases, so `>=` would mean `ruff format --check` locally and in CI
+    # could disagree while both were "satisfied". Must match the `version:` pinned
+    # on the ruff-action steps in .github/workflows/ci.yml.
+    "ruff==0.16.4",
 ]
 deploy = [
     "bedrock-agentcore-starter-toolkit",

@@ -98,17 +98,23 @@ Airtable, Zoom, Canva**.
 from app.services.gateway_deployer import deploy_external_mcp_target
 from app.services.mcp_catalog import get_mcp_server
 
-entry = get_mcp_server("aws-knowledge")           # Tier 1, no creds
+entry = get_mcp_server("aws-knowledge")  # Tier 1, no creds
 deploy_external_mcp_target(agentcore_ctrl, gateway_id=gid, catalog_entry=entry)
 
-entry = get_mcp_server("exa")                      # Tier 2, static key
-deploy_external_mcp_target(agentcore_ctrl, gateway_id=gid, catalog_entry=entry,
-                           secret_arn="<secrets-manager-arn-holding-the-key>")
+entry = get_mcp_server("exa")  # Tier 2, static key
+deploy_external_mcp_target(
+    agentcore_ctrl, gateway_id=gid, catalog_entry=entry, secret_arn="<secrets-manager-arn-holding-the-key>"
+)
 
-entry = get_mcp_server("databricks")               # Tier 3, machine OAuth
-deploy_external_mcp_target(agentcore_ctrl, gateway_id=gid, catalog_entry=entry,
-                           endpoint="https://myws.cloud.databricks.com/api/2.0/mcp/sql",
-                           oauth_provider_arn="<oauth-provider-arn>", oauth_scopes=["sql"])
+entry = get_mcp_server("databricks")  # Tier 3, machine OAuth
+deploy_external_mcp_target(
+    agentcore_ctrl,
+    gateway_id=gid,
+    catalog_entry=entry,
+    endpoint="https://myws.cloud.databricks.com/api/2.0/mcp/sql",
+    oauth_provider_arn="<oauth-provider-arn>",
+    oauth_scopes=["sql"],
+)
 ```
 
 ## Live verification
