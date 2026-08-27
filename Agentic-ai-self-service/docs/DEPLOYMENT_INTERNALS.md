@@ -342,16 +342,14 @@ Each tool has an MCP-compliant schema registered in `GATEWAY_TOOL_SCHEMAS`:
 
 ```python
 GATEWAY_TOOL_SCHEMAS = {
-    'duckduckgo_search': {
-        'name': 'duckduckgo_search',
-        'description': 'Search the web using DuckDuckGo...',
-        'inputSchema': {
-            'type': 'object',
-            'properties': {
-                'query': {'type': 'string', 'description': 'The search query'}
-            },
-            'required': ['query']
-        }
+    "duckduckgo_search": {
+        "name": "duckduckgo_search",
+        "description": "Search the web using DuckDuckGo...",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "The search query"}},
+            "required": ["query"],
+        },
     },
     # ... wikipedia_search, weather_api, web_page_fetcher
 }
