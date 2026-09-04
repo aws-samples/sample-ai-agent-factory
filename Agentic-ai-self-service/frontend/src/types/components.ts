@@ -88,8 +88,21 @@ export interface VPCConfiguration {
 // Gateway Configuration
 // ============================================================================
 
+/**
+ * Which MCP gateway implementation deploys this node.
+ * - `agentcore` — the default. The platform creates a real AgentCore Gateway
+ *   from `targetType`/`targetConfig`/`targets`.
+ * - `litellm` — point the agent at a LiteLLM MCP Gateway the customer already
+ *   runs. Nothing is created in AWS beyond a secret for the virtual key, so the
+ *   target fields are unused.
+ * Omitted on every saved canvas from before this shipped, which is exactly why
+ * `agentcore` is the default everywhere it is read.
+ */
+export type GatewayProvider = 'agentcore' | 'litellm';
+
 export interface GatewayConfiguration {
   name: string;
+  gatewayProvider?: GatewayProvider;
   /**
    * Single-target legacy fields. Kept for backward compatibility with saved
    * canvases and existing tests. When `targets` is present and non-empty it is
@@ -97,6 +110,17 @@ export interface GatewayConfiguration {
    */
   targetType: GatewayTargetType;
   targetConfig: GatewayTargetConfig;
+  /** LiteLLM proxy base URL (https). Required when gatewayProvider is 'litellm'. */
+  litellmBaseUrl?: string;
+  /**
+   * LiteLLM virtual key. WRITE-ONLY: the backend mints it into Secrets Manager
+   * and returns only `litellmApiKeyRef`. Never persisted on the canvas.
+   */
+  litellmApiKey?: string;
+  /** Secrets Manager ARN that replaces `litellmApiKey` after a deploy. */
+  litellmApiKeyRef?: string;
+  /** Pin specific LiteLLM MCP server aliases. Empty means "all the key can see". */
+  litellmServers?: string[];
   /**
    * Multiple targets of different families on ONE gateway. Each entry is a
    * discriminated union on `.type`. When present and non-empty this supersedes
@@ -148,6 +172,13 @@ export interface MCPServerTargetConfig {
   endpointVars?: Record<string, string>;
   /** Tier-2 API key (write-only — minted into Secrets Manager, never persisted). */
   apiKey?: string;
+  /** Header the API key is sent in, for a custom endpoint. Defaults to
+   *  `Authorization`; a LiteLLM proxy also accepts `x-litellm-api-key`. */
+  apiKeyHeader?: string;
+  /** How the key is formatted in that header: `bearer` sends `Bearer <key>`
+   *  (the default, and what LiteLLM's MCP endpoint requires), `raw` sends the
+   *  key with no scheme, for servers that want a bare value. */
+  apiKeyFormat?: 'bearer' | 'raw';
   /** Tier-3 OAuth client-credentials (write-only). */
   oauth?: { clientId?: string; clientSecret?: string; discoveryUrl?: string; scopes?: string[] };
 }

@@ -12,9 +12,10 @@ Import-safe: boto3 is imported but no client is CREATED until list_models() runs
 from __future__ import annotations
 
 import logging
-import os
 
 import boto3
+
+from app.services.region_models import current_region, regionalize_catalog
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,10 @@ _CURATED: dict[str, dict] = {
 }
 
 # Fallback set when Bedrock discovery is unavailable (mirrors the frontend static
-# list so the picker is never empty).
+# list so the picker is never empty). Written with `us.` prefixes and re-pointed
+# at the caller's region by `_fallback_for` — a `us.` inference profile does not
+# exist in eu-central-1, so serving this list verbatim there would offer the
+# picker three models that fail on every invoke.
 _FALLBACK: list[dict] = [
     {"provider": "bedrock", "modelId": "us.anthropic.claude-sonnet-5", "label": "Claude Sonnet 5", "maxTokens": 200000},
     {"provider": "bedrock", "modelId": "us.anthropic.claude-opus-4-8", "label": "Claude Opus 4.8", "maxTokens": 200000},
@@ -43,6 +47,11 @@ _FALLBACK: list[dict] = [
         "maxTokens": 200000,
     },
 ]
+
+
+def _fallback_for(region: str) -> list[dict]:
+    """The curated fallback list, with cross-region prefixes matching ``region``."""
+    return regionalize_catalog(_FALLBACK, region)
 
 
 def _curated_for(model_id: str) -> dict:
@@ -64,11 +73,11 @@ def list_models(region: str | None = None) -> list[dict]:
     (a chat/agent picker). Inference-profile ids (us./eu./ap. prefixed) are
     preferred where present since those are what agents actually invoke.
     """
-    region = region or os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1"))
+    region = region or current_region()
     try:
         client = boto3.client("bedrock", region_name=region)
     except Exception:  # noqa: BLE001
-        return list(_FALLBACK)
+        return _fallback_for(region)
 
     out: dict[str, dict] = {}
 
@@ -116,7 +125,7 @@ def list_models(region: str | None = None) -> list[dict]:
         logger.info("list_foundation_models unavailable: %s", str(e)[:120])
 
     if not out:
-        return list(_FALLBACK)
+        return _fallback_for(region)
     # Curated/known families first, then the rest, alphabetized within.
     models = list(out.values())
     models.sort(key=lambda m: (0 if _curated_for(m["modelId"]) else 1, m["label"].lower()))

@@ -18,6 +18,7 @@ import zipfile
 import boto3
 
 from app.services.aws_errors import is_error
+from app.services.resource_ownership import owner_tag_list
 
 logger = logging.getLogger(__name__)
 
@@ -144,10 +145,11 @@ def create_runtime_iam_role(
     # cost-center/…) so cost attribution + ABAC work off real AWS resource tags.
     # IAM keys/values must be strings; the ManagedBy tag is always last so it
     # can't be overridden by a caller-supplied governance tag of the same key.
-    _managed_tag = [
-        {"Key": str(k), "Value": str(v)} for k, v in (resource_tags or {}).items() if k and k != "ManagedBy"
-    ]
-    _managed_tag.append({"Key": "ManagedBy", "Value": "agentcore-flows"})
+    # Also carries AgentCoreStack={project}-{env}-{region}: ManagedBy identifies
+    # the PRODUCT, so two deployments of it in one account are indistinguishable,
+    # and IAM role names are account-global. cleanup.sh gates role deletion on
+    # the stack tag — see services/resource_ownership.py.
+    _managed_tag = owner_tag_list(region, extra=resource_tags)
     try:
         resp = iam_client.create_role(
             RoleName=role_name,

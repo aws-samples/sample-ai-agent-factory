@@ -8,6 +8,7 @@ Requirements: 5.3
 """
 
 import fnmatch
+import hashlib
 import io
 import ipaddress
 import json
@@ -23,6 +24,7 @@ import boto3
 
 from app.services import codegen_templates
 from app.services.aws_errors import is_error
+from app.services.resource_ownership import owner_tag_list, owner_tags
 
 logger = logging.getLogger(__name__)
 
@@ -91,16 +93,33 @@ _DISALLOWED_NETWORKS: tuple[ipaddress._BaseNetwork, ...] = tuple(
 )
 
 
+_OIDC_ALLOWLIST_ENV = "OIDC_DISCOVERY_HOST_ALLOWLIST"
+_OUTBOUND_ALLOWLIST_ENV = "OUTBOUND_HOST_ALLOWLIST"
+
+
+def _load_host_allowlist(*env_vars: str) -> tuple[tuple[str, ...], str] | None:
+    """First of *env_vars* that is set wins. Returns (host globs, var name) or None.
+
+    The var name is returned so a rejection can name the variable that actually
+    blocked the host rather than a variable the operator never set.
+    """
+    for var in env_vars:
+        raw = os.environ.get(var, "").strip()
+        if not raw:
+            continue
+        parts = tuple(p.strip().lower() for p in raw.split(",") if p.strip())
+        if parts:
+            return parts, var
+    return None
+
+
 def _load_oidc_host_allowlist() -> tuple[str, ...] | None:
     """Return tuple of allowed host glob patterns from env, or None if no allowlist set.
 
     Env var: OIDC_DISCOVERY_HOST_ALLOWLIST=*.okta.com,*.auth0.com,*.amazoncognito.com
     """
-    raw = os.environ.get("OIDC_DISCOVERY_HOST_ALLOWLIST", "").strip()
-    if not raw:
-        return None
-    parts = tuple(p.strip().lower() for p in raw.split(",") if p.strip())
-    return parts or None
+    found = _load_host_allowlist(_OIDC_ALLOWLIST_ENV)
+    return found[0] if found else None
 
 
 def _host_matches_allowlist(host: str, allowlist: tuple[str, ...]) -> bool:
@@ -108,7 +127,11 @@ def _host_matches_allowlist(host: str, allowlist: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatchcase(host, pattern) for pattern in allowlist)
 
 
-def _validate_discovery_url(url: str) -> str:
+def _validate_discovery_url(
+    url: str,
+    label: str = "OIDC discovery URL",
+    allowlist_env: tuple[str, ...] = (_OIDC_ALLOWLIST_ENV,),
+) -> str:
     """Validate that ``url`` is safe to fetch from a server-side context.
 
     Raises ``_DiscoveryUrlInvalid`` for structural problems and
@@ -121,20 +144,35 @@ def _validate_discovery_url(url: str) -> str:
     by requiring a strict urlopen timeout in the caller. To eliminate the race
     entirely, one would have to issue the HTTP request against a pinned IP with
     SNI/Host overrides — out of scope here.
+
+    *label* names the thing being validated in the raised messages. It defaults to
+    the original wording so every pre-existing caller's message is unchanged. It
+    exists because this guard is now reused for URLs that have nothing to do with
+    OIDC (connector spec URLs, a LiteLLM gateway base URL), and a rejection that
+    says "OIDC discovery URL" sends an operator to the wrong piece of config.
+
+    *allowlist_env* is the same idea applied to the host allowlist. An operator who
+    sets ``OIDC_DISCOVERY_HOST_ALLOWLIST=*.okta.com`` to pin their identity provider
+    was also, silently, pinning every other outbound URL this guard validates — so a
+    LiteLLM base URL got rejected for not being an Okta host. Non-OIDC callers pass
+    ``(_OUTBOUND_ALLOWLIST_ENV, _OIDC_ALLOWLIST_ENV)``: the neutral variable wins
+    when set, and the OIDC one is still honoured as the fallback. That ordering is
+    deliberate — it means this change never loosens an existing deployment, it only
+    gives an operator a way to state the two policies separately.
     """
     if not url or not isinstance(url, str):
-        raise _DiscoveryUrlInvalid("OIDC discovery URL is empty")
+        raise _DiscoveryUrlInvalid(f"{label} is empty")
 
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme != "https":
-        raise _DiscoveryUrlInvalid(f"OIDC discovery URL must use https scheme (got '{parsed.scheme}')")
+        raise _DiscoveryUrlInvalid(f"{label} must use https scheme (got '{parsed.scheme}')")
     host = parsed.hostname
     if not host:
-        raise _DiscoveryUrlInvalid("OIDC discovery URL has no host component")
+        raise _DiscoveryUrlInvalid(f"{label} has no host component")
 
-    allowlist = _load_oidc_host_allowlist()
-    if allowlist is not None and not _host_matches_allowlist(host, allowlist):
-        raise _DiscoveryUrlBlocked(f"OIDC discovery host '{host}' is not on OIDC_DISCOVERY_HOST_ALLOWLIST")
+    found = _load_host_allowlist(*allowlist_env)
+    if found is not None and not _host_matches_allowlist(host, found[0]):
+        raise _DiscoveryUrlBlocked(f"{label} host '{host}' is not on {found[1]}")
 
     # Resolve every A/AAAA record under a strict timeout so an attacker cannot stall
     # us on DNS to keep a half-validated socket alive.
@@ -144,12 +182,12 @@ def _validate_discovery_url(url: str) -> str:
         try:
             infos = socket.getaddrinfo(host, 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
         except (TimeoutError, socket.gaierror, OSError) as e:
-            raise _DiscoveryUrlBlocked(f"OIDC discovery URL host '{host}' could not be resolved: {e}") from e
+            raise _DiscoveryUrlBlocked(f"{label} host '{host}' could not be resolved: {e}") from e
     finally:
         socket.setdefaulttimeout(prev_timeout)
 
     if not infos:
-        raise _DiscoveryUrlBlocked(f"OIDC discovery URL host '{host}' returned no DNS records")
+        raise _DiscoveryUrlBlocked(f"{label} host '{host}' returned no DNS records")
 
     for info in infos:
         sockaddr = info[4]
@@ -160,26 +198,42 @@ def _validate_discovery_url(url: str) -> str:
         try:
             ip_obj = ipaddress.ip_address(ip_str)
         except ValueError as e:
-            raise _DiscoveryUrlBlocked(f"OIDC discovery URL resolved to unparseable IP '{ip_str}': {e}") from e
+            raise _DiscoveryUrlBlocked(f"{label} resolved to unparseable IP '{ip_str}': {e}") from e
         for net in _DISALLOWED_NETWORKS:
             # ip_address(v4) in ip_network(v6) raises TypeError, so guard on family.
             if ip_obj.version != net.version:
                 continue
             if ip_obj in net:
-                raise _DiscoveryUrlBlocked(f"OIDC discovery URL resolves to disallowed IP ({ip_str} in {net})")
+                raise _DiscoveryUrlBlocked(f"{label} resolves to disallowed IP ({ip_str} in {net})")
 
     return url
 
 
-def _validate_outbound_url(url: str, allowlist_hosts: tuple[str, ...] | None = None) -> str:
+def _validate_outbound_url(
+    url: str,
+    allowlist_hosts: tuple[str, ...] | None = None,
+    label: str = "OIDC discovery URL",
+) -> str:
     """Validate any user-supplied outbound URL (e.g. a connector OpenAPI spec URL).
 
     Generalizes :func:`_validate_discovery_url` (same https-only + DNS-resolved
     private/IMDS denylist + optional operator allowlist via env). When
     *allowlist_hosts* is provided (e.g. a connector's vetted hosts), the URL's host
     must additionally match one of those globs. Returns the validated URL.
+
+    *label* is forwarded so a caller validating something that is not an OIDC
+    discovery document gets a rejection message naming what it actually rejected.
+
+    The host allowlist reads ``OUTBOUND_HOST_ALLOWLIST`` first and falls back to
+    ``OIDC_DISCOVERY_HOST_ALLOWLIST``, so nothing an existing operator configured
+    stops being enforced, but pinning an identity provider no longer implicitly
+    pins every connector spec and LiteLLM base URL to that same host list.
     """
-    validated = _validate_discovery_url(url)
+    validated = _validate_discovery_url(
+        url,
+        label=label,
+        allowlist_env=(_OUTBOUND_ALLOWLIST_ENV, _OIDC_ALLOWLIST_ENV),
+    )
     if allowlist_hosts:
         host = (urllib.parse.urlparse(validated).hostname or "").lower()
         if not any(fnmatch.fnmatchcase(host, pat.lower()) for pat in allowlist_hosts):
@@ -384,6 +438,34 @@ def _sanitize_provider_name(raw: str) -> str:
     return name or "connector-cred"
 
 
+def _scoped_provider_name(raw: str, scope: str | None) -> str:
+    """Provider name for *raw*, made unique to *scope* (the gateway it serves).
+
+    **AgentCore credential providers live in ONE account-global token vault**,
+    but every name this module derives comes from a catalog id, a connector id,
+    or a user-typed target label — none of which are per-tenant. Without a scope,
+    two different platform users who both wire, say, the ``exa`` catalog entry
+    both land on the provider ``mcp-mcp-exa``. The second deploy takes the
+    "already exists" branch, so that user's target authenticates with the FIRST
+    user's API key while their own freshly minted secret is never read: a
+    cross-tenant credential crossover, plus a rotation that silently no-ops.
+
+    Verified on real AWS, which is the only reason we know: two deployments of
+    the same custom MCP target minted two new secrets, and both reused a
+    provider created by an earlier deployment whose ``lastUpdatedTime`` never
+    moved off its ``createdTime``. A deliberately invalid key still produced a
+    READY target, because the wrong key was never the one being sent.
+
+    The scope is folded in as a short digest rather than appended raw: names are
+    capped at 64 chars and a gateway id would push a long target name over,
+    where a blind truncation could re-collide the very names we are separating.
+    """
+    if not scope:
+        return _sanitize_provider_name(raw)
+    digest = hashlib.sha256(scope.encode("utf-8")).hexdigest()[:10]
+    return _sanitize_provider_name(f"{_sanitize_provider_name(raw)[:52]}-{digest}")
+
+
 def _put_connector_secret(region: str, owner_sub: str, payload: dict) -> str:
     """Create a Secrets Manager secret holding a connector credential payload.
 
@@ -400,11 +482,30 @@ def _put_connector_secret(region: str, owner_sub: str, payload: dict) -> str:
         Name=resource_name,
         SecretString=json.dumps(payload),
         Description="AgentCore SaaS connector credential (auto-managed)",
+        # The agentcore-connector/ prefix marks the PRODUCT, not the deployment, so a
+        # prefix sweep over that namespace deletes every deployment's connector
+        # credentials in the account — the worst case being one customer teardown
+        # destroying another live deployment's raw customer API keys. The owner tag
+        # is what makes the sweep in cleanup.sh safe.
+        Tags=owner_tag_list(region),
     )
     # SECURITY (CodeQL py/clear-text-logging-sensitive-data): log a CONSTANT only
     # — never the generated name or the payload. The caller gets the ARN.
     logger.info("Created connector credential resource")
     return resp["ARN"]
+
+
+def _is_platform_connector_secret(secret_arn: str) -> bool:
+    """True when *secret_arn* names a secret THIS platform minted.
+
+    Teardown deletes what it created. A secret ARN can also arrive from the caller
+    (``secret_arn`` on a connector/MCP selection), and deleting one of those would
+    destroy a credential the platform does not own. The ``agentcore-connector/``
+    prefix from _put_connector_secret is the ownership marker; the ARN's name
+    segment is everything after ``:secret:``.
+    """
+    name = str(secret_arn or "").partition(":secret:")[2] or str(secret_arn or "")
+    return name.startswith("agentcore-connector/")
 
 
 def _ensure_api_key_credential_provider(
@@ -413,13 +514,22 @@ def _ensure_api_key_credential_provider(
     *,
     secret_arn: str,
     json_key: str = "apiKey",
+    scope: str | None = None,
 ) -> str:
     """Create (or reuse) an API-key credential provider backed by our own secret.
 
     Returns the credential provider ARN. Idempotent: on conflict the existing
-    provider is looked up and its ARN returned.
+    provider is looked up and its ARN returned — but *reuse means reuse of the
+    name, never of a stale credential*. If the existing provider points at a
+    different secret it is repointed at ``secret_arn`` before its ARN is
+    returned, because the alternative is an agent that keeps sending the key it
+    was deployed with the first time and ignores every rotation after that.
+
+    ``scope`` (the gateway id) namespaces the provider — see
+    ``_scoped_provider_name`` for why an unscoped name is a cross-tenant
+    credential problem, not just an untidy one.
     """
-    provider_name = _sanitize_provider_name(name)
+    provider_name = _scoped_provider_name(name, scope)
     try:
         resp = agentcore_ctrl.create_api_key_credential_provider(
             name=provider_name,
@@ -439,10 +549,39 @@ def _ensure_api_key_credential_provider(
         if is_error(e, "ConflictException") or "already exists" in str(e):
             try:
                 got = agentcore_ctrl.get_api_key_credential_provider(name=provider_name)
-                return got.get("credentialProviderArn") or got.get("apiKeyCredentialProviderArn", "")
             except Exception:  # noqa: BLE001
                 # SECURITY: constant only — provider_name is taint-flagged (see above).
                 logger.debug("API-key provider conflict lookup failed; re-raising original error")
+                raise e from None
+            arn = got.get("credentialProviderArn") or got.get("apiKeyCredentialProviderArn", "")
+            secret_ref = got.get("apiKeySecretArn")
+            existing = (secret_ref if isinstance(secret_ref, dict) else {}).get("secretArn") or ""
+            if secret_arn and existing and existing != secret_arn:
+                # The key changed (rotation, or a redeploy with a new value).
+                # Reusing the name while leaving the OLD secret attached is how a
+                # corrected key silently fails to take effect. Note this repoint is
+                # OUTSIDE the lookup's try: a failure here must surface as itself,
+                # not be folded back into the original "already exists" error.
+                try:
+                    agentcore_ctrl.update_api_key_credential_provider(
+                        name=provider_name,
+                        apiKeySecretConfig={"secretId": secret_arn, "jsonKey": json_key},
+                        apiKeySecretSource="EXTERNAL",
+                    )
+                except Exception as ue:  # noqa: BLE001
+                    # Deliberately fatal. Returning the ARN anyway would hand back a
+                    # provider still bound to the previous secret, so the agent would
+                    # authenticate with a key the deployer already knows is stale —
+                    # the exact silent failure this branch exists to close.
+                    raise RuntimeError(
+                        "An API-key credential provider already exists for this gateway target but is "
+                        f"bound to an older secret, and it could not be repointed ({type(ue).__name__}). "
+                        "Deploying anyway would send the previous key. Grant "
+                        "bedrock-agentcore:UpdateApiKeyCredentialProvider, or delete the provider and retry."
+                    ) from ue
+                # SECURITY: constant only — the ARNs are taint-flagged.
+                logger.info("Repointed an existing API-key credential provider at the current secret")
+            return arn
         raise
 
 
@@ -469,6 +608,7 @@ def _ensure_oauth2_credential_provider(
     discovery_url: str | None = None,
     delegation_mode: str = "m2m",
     obo_grant_type: str | None = None,
+    scope: str | None = None,
 ) -> str:
     """Create (or reuse) an OAuth2 credential provider for a connector.
 
@@ -488,7 +628,10 @@ def _ensure_oauth2_credential_provider(
     """
     from app.services.connectors import vendor_config_key
 
-    provider_name = _sanitize_provider_name(name)
+    # ``scope`` (the gateway id) namespaces the provider for the reason spelled out
+    # in _scoped_provider_name — and it matters more here than for an API key,
+    # since the shared credential would be an OAuth *client secret*.
+    provider_name = _scoped_provider_name(name, scope)
     config_key = vendor_config_key(vendor)
 
     _obo = str(delegation_mode or "m2m").lower() == "obo"
@@ -538,6 +681,19 @@ def _ensure_oauth2_credential_provider(
         if is_error(e, "ConflictException") or "already exists" in str(e):
             try:
                 got = agentcore_ctrl.get_oauth2_credential_provider(name=provider_name)
+                # Repoint at the config we were just asked for, for the same
+                # reason the API-key path does: a reused name must not pin an
+                # agent to the client id / secret of whoever deployed first.
+                # Best-effort — a provider we cannot update is still usable, so a
+                # failure here must not fail an otherwise valid deploy.
+                try:
+                    agentcore_ctrl.update_oauth2_credential_provider(
+                        name=provider_name,
+                        credentialProviderVendor=vendor,
+                        oauth2ProviderConfigInput={config_key: provider_config},
+                    )
+                except Exception:  # noqa: BLE001 — constant-only log, see above
+                    logger.warning("Could not repoint an existing OAuth2 credential provider; reusing it as-is")
                 return got.get("credentialProviderArn", "")
             except Exception:  # noqa: BLE001
                 # SECURITY: constant only — provider_name is taint-flagged.
@@ -1176,11 +1332,15 @@ def _create_cognito_oauth(cognito_client, gateway_name: str, region: str) -> dic
     """
     pool_name = f"AgentCore-{gateway_name}"
 
-    # Create User Pool
+    # Create User Pool. Tagged with the owning stack because the pool NAME derives
+    # from the user's gateway name and carries no deployment identity, so a
+    # name-prefix sweep over "AgentCore*" cannot tell this pool from another
+    # deployment's — or another product's. cleanup.sh now gates on this tag.
     pool_resp = cognito_client.create_user_pool(
         PoolName=pool_name,
         AutoVerifiedAttributes=[],
         UsernameAttributes=["email"],
+        UserPoolTags=owner_tags(region),
         Policies={
             "PasswordPolicy": {
                 "MinimumLength": 8,
@@ -2036,6 +2196,47 @@ def _build_openapi_schema(spec_str: str, *, connector_id: str, region: str) -> d
     return {"s3": s3_block}
 
 
+def purge_credential_provider(agentcore_ctrl, name: str) -> tuple[bool, str]:
+    """Delete *name* from BOTH credential-provider namespaces. Returns (ok, message).
+
+    Needed because the two namespaces are independent and the API is not honest
+    about it: ``delete_oauth2_credential_provider`` on an API-key provider returns
+    success WITHOUT deleting anything (verified live against bedrock-agentcore-
+    control). A teardown that trusts a recorded type therefore reports success and
+    strands the provider — exactly what happened to five providers in a live
+    account before this existed.
+
+    The discriminator is the matching **getter**: ``get_api_key_credential_provider``
+    raises ResourceNotFound for an OAuth provider and vice versa, so probing with it
+    tells us which namespace the name actually lives in. Deleting only what the
+    probe found also keeps this idempotent, which teardown retries depend on.
+    """
+    msgs: list[str] = []
+    ok = True
+    for kind, deleter, getter in (
+        ("API_KEY", "delete_api_key_credential_provider", "get_api_key_credential_provider"),
+        ("OAUTH", "delete_oauth2_credential_provider", "get_oauth2_credential_provider"),
+    ):
+        try:
+            getattr(agentcore_ctrl, getter)(name=name)
+        except Exception as e:  # noqa: BLE001
+            if is_error(e, "ResourceNotFoundException", "NotFoundException"):
+                continue  # not in this namespace
+            # Probe failed for another reason (throttle, perms) — attempt the
+            # delete anyway rather than silently skipping a live resource.
+        try:
+            getattr(agentcore_ctrl, deleter)(name=name)
+            msgs.append(f"{kind} credential provider {name} deleted")
+        except Exception as e:  # noqa: BLE001
+            if is_error(e, "ResourceNotFoundException", "NotFoundException"):
+                continue
+            ok = False
+            msgs.append(f"{kind} provider {name} delete error: {e}")
+    if not msgs:
+        return True, f"Credential provider {name} already gone"
+    return ok, "; ".join(msgs)
+
+
 def _delete_connector_credential_provider(agentcore_ctrl, entry: str) -> tuple[bool, str]:
     """Delete one connector credential provider. Returns (deleted, message).
 
@@ -2050,13 +2251,6 @@ def _delete_connector_credential_provider(agentcore_ctrl, entry: str) -> tuple[b
         ptype, name = entry.split(":", 1)
     else:
         ptype, name = "", entry
-
-    def _is_gone(get_fn) -> bool:
-        try:
-            get_fn(name=name)
-            return False
-        except Exception as e:  # noqa: BLE001
-            return is_error(e, "ResourceNotFoundException", "NotFoundException")
 
     if ptype == "API_KEY":
         try:
@@ -2075,20 +2269,8 @@ def _delete_connector_credential_provider(agentcore_ctrl, entry: str) -> tuple[b
                 return True, f"Credential provider {name} already gone"
             return False, f"OAUTH provider {name} delete error: {e}"
 
-    # Untyped (legacy): try BOTH, but verify the matching get reports gone.
-    for deleter, getter in (
-        ("delete_api_key_credential_provider", "get_api_key_credential_provider"),
-        ("delete_oauth2_credential_provider", "get_oauth2_credential_provider"),
-    ):
-        try:
-            getattr(agentcore_ctrl, deleter)(name=name)
-        except Exception as e:  # noqa: BLE001
-            if is_error(e, "ResourceNotFoundException", "NotFoundException"):
-                continue
-        # Verify the provider of THIS type is actually gone.
-        if _is_gone(getattr(agentcore_ctrl, getter)):
-            return True, f"Credential provider {name} deleted"
-    return False, f"Credential provider {name} could not be confirmed deleted"
+    # Untyped (legacy record): the namespace is unknown, so probe both.
+    return purge_credential_provider(agentcore_ctrl, name)
 
 
 def _deploy_connector_targets(
@@ -2258,6 +2440,7 @@ def _deploy_connector_targets_inner(
                 discovery_url=discovery_url,
                 delegation_mode=delegation_mode,
                 obo_grant_type=obo_grant_type,
+                scope=gateway_id,
             )
             # OBO fix (Loom-study 0.3): the credential PROVIDER is minted for
             # on-behalf-of exchange when delegation_mode=obo, but the target's
@@ -2281,7 +2464,9 @@ def _deploy_connector_targets_inner(
         else:  # API_KEY
             if not secret_arn:
                 raise RuntimeError(f"Connector '{connector_id}' api_key auth requires a secret_arn or secret_value")
-            provider_arn = _ensure_api_key_credential_provider(agentcore_ctrl, provider_name, secret_arn=secret_arn)
+            provider_arn = _ensure_api_key_credential_provider(
+                agentcore_ctrl, provider_name, secret_arn=secret_arn, scope=gateway_id
+            )
             cred_cfg = {
                 "credentialProviderType": "API_KEY",
                 "credentialProvider": {
@@ -2307,10 +2492,16 @@ def _deploy_connector_targets_inner(
                     else catalog.get("credential_prefix")
                 )
             )
+            # Right-stripped for the same reason as _mcp_api_key_cred_config:
+            # AgentCore supplies the space between prefix and key, so a
+            # user-typed "Bearer " would be sent as "Bearer  <key>" and refused.
+            prefix = (prefix or "").rstrip()
             if prefix:
                 cred_cfg["credentialProvider"]["apiKeyCredentialProvider"]["credentialPrefix"] = prefix
 
-        created_providers.append(f"{provider_type}:{provider_name}")
+        # The SCOPED name, matching what the ensure_* helpers actually created —
+        # recording the bare name would leave the real provider behind on delete.
+        created_providers.append(f"{provider_type}:{_scoped_provider_name(provider_name, gateway_id)}")
 
         openapi_schema = _build_openapi_schema(spec_inline, connector_id=connector_id or "generic", region=region)
         # If the spec was staged to S3, remember the key so teardown deletes it.
@@ -3132,24 +3323,63 @@ def deploy_gateway(
         # so a failed deploy leaves no orphan gateway/role/Lambda-grant behind.
         _leaked_gateway = locals().get("gateway") or {}
         _leaked_gw_id = _leaked_gateway.get("gatewayId") if isinstance(_leaked_gateway, dict) else None
+        # The inventory of everything provisioned before the failure. Returned to
+        # the caller (below) as well as handed to the abort cleanup, because the
+        # abort is best-effort and can leave resources behind — see the two
+        # failure modes documented at the `cleanup_gateway_resources` call.
+        #
+        # client_info is REDUCED to the one field teardown needs. The full dict
+        # nests client_secret, and unlike `result` this dict travels into a
+        # RuntimeError message and an SFN failure cause, so the secret must not
+        # be in it (CodeQL py/clear-text-logging-sensitive-data).
+        #
+        # Read `cognito_response` FIRST, not just `client_info`. The pool is created
+        # near the top of this function but `client_info` is not bound until the very
+        # end (after the tool plane is confirmed), so for a failure anywhere in
+        # between — which is most of the deploy, including all target creation — a
+        # `client_info`-only lookup finds nothing and the pool is invisible to both
+        # the abort cleanup below and the manifest. That is why every stranded
+        # gateway found in the live account had a stranded Cognito pool beside it.
+        _ci = locals().get("client_info") or (locals().get("cognito_response") or {}).get("client_info") or {}
+        _partial = {
+            "gateway_id": _leaked_gw_id,
+            "gateway_name": locals().get("gateway_name"),
+            "client_info": {
+                "provider": _ci.get("provider", "cognito"),
+                "user_pool_id": _ci.get("user_pool_id"),
+            }
+            if _ci.get("user_pool_id")
+            else None,
+            "lambda_function_name": locals().get("lambda_function_name") or "AgentCoreLambdaTestFunction",
+            "custom_tool_lambdas": locals().get("custom_tool_lambdas") or [],
+            "custom_tool_roles": locals().get("custom_tool_roles") or [],
+            "connector_credential_providers": locals().get("connector_credential_providers") or [],
+            "connector_secret_arns": locals().get("connector_secret_arns") or [],
+            "connector_spec_s3_uris": locals().get("connector_spec_s3_uris") or [],
+        }
         if _leaked_gw_id:
             try:
-                _abort_cfg = {
-                    "gateway_id": _leaked_gw_id,
-                    "gateway_name": locals().get("gateway_name"),
-                    "client_info": locals().get("client_info"),
-                    "lambda_function_name": locals().get("lambda_function_name") or "AgentCoreLambdaTestFunction",
-                    "custom_tool_lambdas": locals().get("custom_tool_lambdas") or [],
-                    "custom_tool_roles": locals().get("custom_tool_roles") or [],
-                    "connector_credential_providers": locals().get("connector_credential_providers") or [],
-                    "connector_secret_arns": locals().get("connector_secret_arns") or [],
-                    "connector_spec_s3_uris": locals().get("connector_spec_s3_uris") or [],
-                }
-                cleanup_gateway_resources("gateway-deploy-abort", region, _abort_cfg)
-                logger.info("Released leaked gateway %s after failed deploy", _leaked_gw_id)
+                # cleanup_gateway_resources NEVER raises: it collects per-resource
+                # failures into its returned list. Discarding that list (which this
+                # did) meant a failed gateway delete was invisible AND the caller
+                # logged unconditional success — verified live, where a deploy that
+                # failed at CreateApiKeyCredentialProvider left an orphan gateway
+                # and Cognito pool behind with no log line and no manifest row.
+                # Inspect what it reports and say so out loud.
+                _msgs = cleanup_gateway_resources("gateway-deploy-abort", region, _partial) or []
+                _bad = [m for m in _msgs if "error" in str(m).lower()]
+                if _bad:
+                    logger.warning("Abort-cleanup left resources behind: %s", "; ".join(_bad)[:400])
+                else:
+                    logger.info("Released leaked gateway %s after failed deploy", _leaked_gw_id)
             except Exception as _ce:  # noqa: BLE001 — abort cleanup is best-effort
                 logger.warning("Abort-cleanup after failed gateway deploy failed: %s", str(_ce)[:160])
-        return {"success": False, "error": str(e)}
+        # Return the inventory so the step handler can write manifest rows for it.
+        # The abort above is the fast path; the manifest is the durable one — with
+        # rows present, the normal teardown finishes the job on a later delete,
+        # which is the only thing that turns a silent permanent orphan into a
+        # recoverable one.
+        return {"success": False, "error": str(e), **_partial}
 
 
 # ---------------------------------------------------------------------------
@@ -3416,18 +3646,60 @@ def _mcp_api_key_cred_config(provider_arn: str, descriptor: dict) -> dict:
     """Build an API_KEY credentialProviderConfiguration from a catalog descriptor.
 
     ``descriptor`` = {location: HEADER|QUERY_PARAMETER, parameter_name, prefix}.
+
+    The prefix is right-stripped, and that is load-bearing rather than cosmetic:
+    **AgentCore joins ``credentialPrefix`` to the key with its own single space.**
+    So a descriptor saying ``"Bearer "`` yields the header value ``Bearer  <key>``
+    (two spaces), which is not a valid credential — servers reject it. Verified
+    against real AWS on a live LiteLLM proxy: three otherwise-identical
+    ``mcpServer`` targets on one gateway, ``prefix="Bearer"`` reached READY while
+    ``prefix="Bearer "`` went FAILED with *"returned HTTP 400 to the initialize
+    handshake"*. Stripping here fixes every caller at once — the curated catalog,
+    a custom canvas endpoint, and an OpenAPI target's user-typed prefix — and no
+    caller can legitimately want a trailing space, since AgentCore supplies the
+    separator itself. A prefix that is only whitespace collapses to empty and is
+    therefore dropped, which is the same "send the raw key" meaning as ``""``.
     """
     api_key_cfg: dict = {
         "providerArn": provider_arn,
         "credentialParameterName": descriptor.get("parameter_name") or "Authorization",
         "credentialLocation": descriptor.get("location") or "HEADER",
     }
-    prefix = descriptor.get("prefix")
+    prefix = (descriptor.get("prefix") or "").rstrip()
     if prefix:
         api_key_cfg["credentialPrefix"] = prefix
     return {
         "credentialProviderType": "API_KEY",
         "credentialProvider": {"apiKeyCredentialProvider": api_key_cfg},
+    }
+
+
+def _custom_api_key_descriptor(sel: dict) -> dict:
+    """The API-key descriptor for a CUSTOM (non-catalog) MCP endpoint.
+
+    Curated catalog entries ship an explicit descriptor, so only this path has to
+    pick a default — and the default matters, because a wrong one produces a
+    target that authenticates against nothing. It is ``Authorization: Bearer
+    <key>``: a bare ``Authorization: <key>`` carries no auth scheme, is not valid
+    per RFC 7235, and is refused by real servers. Verified against a live LiteLLM
+    proxy: bare ``Authorization`` answers 500 on ``/mcp/`` where the Bearer form
+    returns a valid MCP handshake.
+
+    A caller needing another shape sends ``parameter_name`` (LiteLLM also accepts
+    its own ``x-litellm-api-key``; some servers want ``x-api-key``). An explicit
+    ``prefix: ""`` means send the raw key with no scheme — distinct from omitting
+    ``prefix``, which takes the ``Bearer`` default.
+
+    Note the default carries **no trailing space**: AgentCore inserts the
+    separator between prefix and key itself, so a trailing space would produce
+    ``Bearer  <key>``. ``_mcp_api_key_cred_config`` right-strips as a backstop.
+    """
+    raw = sel.get("api_key_descriptor") or sel.get("apiKeyDescriptor") or {}
+    prefix = raw.get("prefix")
+    return {
+        "location": raw.get("location") or "HEADER",
+        "parameter_name": raw.get("parameter_name") or raw.get("parameterName") or "Authorization",
+        "prefix": "Bearer" if prefix is None else str(prefix),
     }
 
 
@@ -3475,7 +3747,9 @@ def build_external_mcp_target_params(
         if not secret_arn:
             raise RuntimeError(f"MCP '{catalog_entry.get('id')}' needs an API key — provide a secret_arn.")
         descriptor = catalog_entry.get("api_key_descriptor") or {}
-        provider_arn = _ensure_api_key_credential_provider(agentcore_ctrl, f"mcp-{target_name}", secret_arn=secret_arn)
+        provider_arn = _ensure_api_key_credential_provider(
+            agentcore_ctrl, f"mcp-{target_name}", secret_arn=secret_arn, scope=gateway_id
+        )
         cred_configs.append(_mcp_api_key_cred_config(provider_arn, descriptor))
     elif auth_type == "oauth2_client_credentials":
         if not oauth_provider_arn:
@@ -3540,6 +3814,53 @@ def deploy_external_mcp_target(
         catalog_entry.get("auth_type"),
     )
     return _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, name, params)
+
+
+def _wait_for_mcp_target_ready(
+    agentcore_ctrl, gateway_id: str, target_id: str, target_name: str, timeout: int = 120
+) -> None:
+    """Block until an external ``mcpServer`` target leaves CREATING; raise if FAILED.
+
+    ``create_gateway_target`` returns while the target is still CREATING —
+    AgentCore then performs its own ``initialize`` handshake against the remote
+    endpoint and settles on READY or FAILED. Without this gate a bad endpoint,
+    key, or credential prefix produced a **green deploy with a toolless agent**:
+    the same silent-empty-tool-plane failure ``_wait_for_gateway_to_serve_tools``
+    exists to prevent on the gateway itself, which this path had no equivalent of.
+    Observed for real — a target whose prefix made the outbound header malformed
+    sat at FAILED with *"returned HTTP 400 to the initialize handshake"* while the
+    deployment recorded ``succeeded``.
+
+    AgentCore's ``statusReasons`` are specific and name the remote status code, so
+    they are surfaced verbatim: that message is the whole diagnostic value. A
+    FAILED target is deleted before raising so a corrected redeploy is not blocked
+    by the leftover name. Polling errors are tolerated (propagation races); only a
+    definitive FAILED, or a timeout, stops the deploy.
+    """
+    deadline = time.time() + timeout
+    last_status = "UNKNOWN"
+    while time.time() < deadline:
+        try:
+            detail = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway_id, targetId=target_id)
+        except Exception as e:  # noqa: BLE001 — a read race must not fail the deploy
+            logger.warning("Could not read MCP target '%s' status (will retry): %s", target_name, e)
+            time.sleep(5)
+            continue
+        last_status = detail.get("status") or "UNKNOWN"
+        if last_status == "FAILED":
+            reasons = "; ".join(detail.get("statusReasons") or []) or "no reason reported"
+            try:
+                agentcore_ctrl.delete_gateway_target(gatewayIdentifier=gateway_id, targetId=target_id)
+            except Exception:  # noqa: BLE001 — best-effort so a retry isn't name-blocked
+                logger.warning("Could not delete FAILED MCP target '%s'", target_name)
+            raise RuntimeError(f"External MCP target '{target_name}' failed to connect: {reasons}")
+        if last_status not in ("CREATING", "UPDATING", "SYNCHRONIZING"):
+            logger.info("External MCP target '%s' is %s", target_name, last_status)
+            return
+        time.sleep(5)
+    raise RuntimeError(
+        f"External MCP target '{target_name}' did not become ready within {timeout}s (last status {last_status})."
+    )
 
 
 def _fill_endpoint_placeholders(endpoint: str, endpoint_vars: dict) -> str:
@@ -3632,7 +3953,7 @@ def _deploy_external_mcp_targets(
                         "oauth2_client_credentials": "direct-oauth",
                         "iam_sigv4": "direct-iam",
                     }[custom_auth],
-                    "api_key_descriptor": sel.get("api_key_descriptor") or {},
+                    "api_key_descriptor": _custom_api_key_descriptor(sel),
                 }
             else:
                 if not server_id:
@@ -3640,6 +3961,20 @@ def _deploy_external_mcp_targets(
                 entry = get_mcp_server(server_id)
                 if entry is None:
                     raise RuntimeError(f"Unknown MCP server id: {server_id}")
+                # Warn, don't block: a region-restricted endpoint (aws-mcp is
+                # us-east-1-only) still creates a valid target, it just won't
+                # resolve at invoke time. Saying so here beats an opaque
+                # connect error later.
+                allowed_regions = entry.get("region_restricted")
+                if allowed_regions and region not in allowed_regions:
+                    logger.warning(
+                        "MCP server %r is hosted only in %s — this deployment is in %s, "
+                        "so its endpoint %s will not be reachable at invoke time.",
+                        server_id,
+                        ", ".join(allowed_regions),
+                        region,
+                        entry.get("endpoint"),
+                    )
 
             endpoint = _fill_endpoint_placeholders(
                 entry.get("endpoint") or "", sel.get("endpoint_vars") or sel.get("endpointVars") or {}
@@ -3651,11 +3986,26 @@ def _deploy_external_mcp_targets(
             oauth_scopes = None
 
             # Tier 2 — mint an owner-scoped secret for a raw API key.
+            _minted_here = False
             if auth_type == "api_key" and not secret_arn:
                 raw_key = sel.get("secret_value") or sel.get("secretValue")
                 if not raw_key:
                     raise RuntimeError(f"MCP '{server_id}' needs an API key (secret_value).")
                 secret_arn = _put_connector_secret(region, owner_sub, {"apiKey": raw_key})
+                _minted_here = True
+            # Track every secret this server CONSUMES — minted just above on the
+            # direct path, OR pre-minted by gateway_step, which mints early so the raw
+            # key is dropped before the SFN event is re-emitted. Tracking only what we
+            # minted HERE orphaned the SFN-minted secret on every delete, leaving the
+            # customer's raw API key in the account after the agent was gone (nine of
+            # them, found by reading a live account). Same fix as the connector path.
+            #
+            # A secret_arn we did not mint is only claimed when it lives in the
+            # platform's own ``agentcore-connector/`` namespace, so a caller who points
+            # a target at a long-lived secret of their own does not have it deleted
+            # along with the agent.
+            _ours = _minted_here or _is_platform_connector_secret(secret_arn)
+            if secret_arn and _ours and secret_arn not in created_secrets:
                 created_secrets.append(secret_arn)
 
             # Tier 3 — create the OAuth2 client-credentials provider from user creds.
@@ -3682,16 +4032,30 @@ def _deploy_external_mcp_targets(
                     client_id=client_id,
                     client_secret_arn=cs_arn,
                     discovery_url=discovery_url,
+                    scope=gateway_id,
                 )
-                created_providers.append(_sanitize_provider_name(f"mcp-{server_id}"))
+                # TYPE-prefixed, matching the connector path (see the OAUTH:/API_KEY:
+                # convention where connector providers are recorded). gateway_step.py
+                # turns each entry into a manifest row and defaults an *untyped* name
+                # to oauth2_credential_provider, so an unprefixed API-key provider is
+                # deleted from the wrong vault namespace and survives teardown while
+                # the delete still reports success.
+                created_providers.append(f"OAUTH:{_scoped_provider_name(f'mcp-{server_id}', gateway_id)}")
                 oauth_scopes = oauth.get("scopes") or (entry.get("oauth_descriptor") or {}).get("scopes")
 
             # Tier-2's API-key provider is created inside deploy_external_mcp_target;
-            # track its name so teardown can remove it (target_name → mcp-<id>).
+            # track its name so teardown can remove it. The derivation MIRRORS that
+            # function's own (target_name = mcp-<id> truncated to 48, provider =
+            # mcp-<target_name>, then gateway-scoped) rather than re-spelling it —
+            # a name that does not match byte-for-byte silently orphans a
+            # credential provider on delete. The API_KEY: prefix is what routes the
+            # manifest row to delete_api_key_credential_provider; without it the row
+            # is recorded as oauth2 and the provider is never actually deleted.
             if auth_type == "api_key":
-                created_providers.append(_sanitize_provider_name(f"mcp-mcp-{server_id}"))
+                _tname = _sanitize_provider_name(f"mcp-{server_id}")[:48]
+                created_providers.append(f"API_KEY:{_scoped_provider_name(f'mcp-{_tname}', gateway_id)}")
 
-            deploy_external_mcp_target(
+            created = deploy_external_mcp_target(
                 agentcore_ctrl,
                 gateway_id=gateway_id,
                 catalog_entry=entry,
@@ -3700,6 +4064,19 @@ def _deploy_external_mcp_targets(
                 oauth_provider_arn=oauth_provider_arn,
                 oauth_scopes=oauth_scopes,
             )
+
+            # Prove the target actually connected. The create call returns while
+            # AgentCore is still handshaking with the remote endpoint, so without
+            # this a wrong endpoint/key/prefix deploys "successfully" and the
+            # agent simply has no tools. See _wait_for_mcp_target_ready.
+            target_id = (created or {}).get("targetId")
+            if target_id:
+                _wait_for_mcp_target_ready(
+                    agentcore_ctrl,
+                    gateway_id,
+                    target_id,
+                    (created or {}).get("name") or str(server_id),
+                )
     except Exception:
         logger.error("External MCP deploy failed mid-loop; rolling back partial resources")
         _rollback_partial()
@@ -3770,7 +4147,9 @@ def _default_lambda_tool_schema(function_arn: str) -> dict:
     }
 
 
-def _openapi_target_cred_config(agentcore_ctrl, target: dict, base_name: str) -> dict | None:
+def _openapi_target_cred_config(
+    agentcore_ctrl, target: dict, base_name: str, gateway_id: str | None = None
+) -> dict | None:
     """Pick the outbound credential provider for an OpenAPI ``targets[]`` entry.
 
     OpenAPI targets are arbitrary external HTTP APIs, so ``GATEWAY_IAM_ROLE``
@@ -3797,7 +4176,7 @@ def _openapi_target_cred_config(agentcore_ctrl, target: dict, base_name: str) ->
             )
             return None
         provider_arn = _ensure_api_key_credential_provider(
-            agentcore_ctrl, f"openapi-{base_name}", secret_arn=secret_arn
+            agentcore_ctrl, f"openapi-{base_name}", secret_arn=secret_arn, scope=gateway_id
         )
         descriptor = {
             "parameter_name": target.get("credential_parameter_name") or target.get("credentialParameterName"),
@@ -3899,7 +4278,7 @@ def _deploy_config_targets(
             # B). Valid providers are API_KEY / OAUTH, or none at all for a public
             # spec. The modal collects only the spec, so the default is public
             # (omit the block); api_key/oauth are honored if present in the payload.
-            cred_cfg = _openapi_target_cred_config(agentcore_ctrl, target, base_name)
+            cred_cfg = _openapi_target_cred_config(agentcore_ctrl, target, base_name, gateway_id)
             if cred_cfg is not None:
                 create_params["credentialProviderConfigurations"] = [cred_cfg]
             _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, base_name, create_params)

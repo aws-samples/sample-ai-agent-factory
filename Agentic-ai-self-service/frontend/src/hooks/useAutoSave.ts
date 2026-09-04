@@ -8,6 +8,7 @@ import { useWorkflowStore } from '../store/workflowStore';
 import type { AgentCoreNode } from '../store/workflowStore';
 import { useFlowStore } from '../store/flowStore';
 import type { Edge } from '@xyflow/react';
+import { getDeploymentRegion } from '../utils/awsRegion';
 
 /**
  * Return value of {@link useAutoSave}.
@@ -182,7 +183,7 @@ export function useAutoSave(
             metadata: {
               author: 'system',
               tags: [],
-              aws_region: 'us-east-1',
+              aws_region: getDeploymentRegion(),
               deployment_status: 'not_deployed',
             },
             created_at: now,

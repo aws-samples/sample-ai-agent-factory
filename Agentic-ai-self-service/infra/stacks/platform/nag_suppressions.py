@@ -12,6 +12,8 @@ from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_stepfunctions as sfn
 from constructs import IConstruct
 
+from .config import is_home_region
+
 
 @jsii.implements(cdk.IAspect)
 class _OverflowPolicyNagSuppressor:
@@ -151,19 +153,35 @@ def apply_nag_suppressions(
     )
 
     # ---- CloudFront: distribution-only.
-    _suppress(
-        distribution,
-        [
+    cloudfront_reasons = [
+        (
+            "AwsSolutions-CFR1",
+            "CloudFront geo restrictions not required — internal development tool",
+        ),
+        (
+            "AwsSolutions-CFR4",
+            "Using CloudFront default certificate — custom domain with ACM planned for production",
+        ),
+    ]
+    if not is_home_region(stack):
+        # A distribution accepts ONLY a scope=CLOUDFRONT WebACL, and AWS creates
+        # those exclusively in us-east-1 — a single-region stack outside
+        # us-east-1 has none to attach. The equivalent protection is applied to
+        # the Cognito user pool via a REGIONAL WebACL with the same rule set
+        # (build_waf_web_acl). Operators who want edge filtering as well can
+        # create a CLOUDFRONT ACL in us-east-1 and pass its ARN via the
+        # `cloudfront_web_acl_arn` context key.
+        cloudfront_reasons.append(
             (
-                "AwsSolutions-CFR1",
-                "CloudFront geo restrictions not required — internal development tool",
-            ),
-            (
-                "AwsSolutions-CFR4",
-                "Using CloudFront default certificate — custom domain with ACM planned for production",
-            ),
-        ],
-    )
+                "AwsSolutions-CFR2",
+                "CLOUDFRONT-scoped WAF WebACLs only exist in us-east-1 and a "
+                "distribution accepts no other scope; this stack deploys to "
+                f"{stack.region}, where the same WAF rule set is applied "
+                "REGIONALly to the Cognito user pool instead. Supply "
+                "`-c cloudfront_web_acl_arn=...` to also attach an edge ACL.",
+            )
+        )
+    _suppress(distribution, cloudfront_reasons)
 
     # ---- API Gateway: APIG1 (access logging) and APIG4 (route auth)
     # apply only to the HTTP API. /health is intentionally unauthenticated.

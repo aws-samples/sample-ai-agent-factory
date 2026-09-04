@@ -19,14 +19,23 @@ Tenant model (see registry_store docstring):
 Until Gap 2E wires Cognito-group-backed orgs, every caller is in
 ``DEFAULT_ORG_ID`` so ``org`` ≈ "all platform users". This is called out in
 the responses via the ``org_id`` field so the frontend can label it.
+
+Workstream B: the backend behind these handlers is pluggable. They call
+``get_registry_provider()`` instead of ``get_registry_store()``; with the default
+``dynamodb`` provider that resolves to the same ``RegistryStore`` methods as
+before, which is why the store and RBAC suites pass unedited. A provider that
+cannot back part of the surface says so via ``capabilities()`` and the handler
+answers 501 — see ``_registry_errors`` and ``_assert_mutable``.
 """
 
 from __future__ import annotations
 
+import functools
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -38,14 +47,85 @@ from app.services.auth import (
     is_registry_admin,
 )
 from app.services.rbac import require_scopes
+from app.services.registry_providers import get_registry_provider
 from app.services.registry_store import (
     DEFAULT_ORG_ID,
     RegistryEntry,
-    get_registry_store,
     slugify,
 )
 
 logger = logging.getLogger(__name__)
+
+_F = TypeVar("_F", bound=Callable[..., Awaitable[Any]])
+
+
+def _registry_errors(handler: _F) -> _F:
+    """Map the provider seam's exceptions onto honest HTTP status codes.
+
+    Applied to every handler rather than to the few that "can" raise, so a new
+    provider or a new call site cannot leak one of these as a 500. The three cases
+    are deliberately distinct status codes:
+
+    * ``RegistryQueryFailed`` -> **503**. The catalog could not be READ, so the
+      answer is unknown. Never 404/200-with-fewer-rows: a governance catalog that
+      silently returns a short list reads as "that entry does not exist".
+    * ``UnsupportedRegistryOperation`` -> **501**. The active backend genuinely
+      cannot do this. The provider's message names why and what to do instead.
+    * ``RegistryEntryConflict`` -> **409**. The write collides with something the
+      backend already owns.
+
+    ``functools.wraps`` matters here: FastAPI reads the handler signature via
+    ``inspect.signature``, which follows ``__wrapped__``, so dependency injection
+    and the response model keep working through the wrapper.
+    """
+
+    @functools.wraps(handler)
+    async def _wrapped(*args, **kwargs):
+        from app.services.aws_agent_registry import RegistryQueryFailed
+        from app.services.registry_providers.base import UnsupportedRegistryOperation
+
+        try:
+            return await handler(*args, **kwargs)
+        except RegistryQueryFailed as e:
+            logger.error("registry backend could not be queried: %s", e)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The configured registry backend could not be queried, so the catalog "
+                    f"is unavailable ({e}). Refusing to answer with a partial catalog."
+                ),
+            ) from e
+        except UnsupportedRegistryOperation as e:
+            raise HTTPException(status_code=501, detail=e.detail) from e
+        except ValueError as e:
+            # RegistryEntryConflict subclasses ValueError; keep the import local so
+            # the default path never imports the LiteLLM module.
+            from app.services.registry_providers.litellm import RegistryEntryConflict
+
+            if isinstance(e, RegistryEntryConflict):
+                raise HTTPException(status_code=409, detail=str(e)) from e
+            raise
+
+    return _wrapped  # type: ignore[return-value]
+
+
+def _assert_mutable(entry: RegistryEntry, provider, verb: str) -> None:
+    """Refuse a mutation on an entry the active backend projects read-only.
+
+    Per-ENTRY, not per-operation: under the LiteLLM backend the catalog is mixed —
+    rows projected from LiteLLM are read-only, while platform-published rows keep
+    the full review workflow. Refusing the whole operation would strand every
+    sidecar row at ``pending`` and hide it from non-owners forever.
+    """
+    caps = provider.capabilities()
+    if caps.is_read_only(entry):
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                f"'{entry.agent_slug}' is projected from {caps.authoritative_catalog} and "
+                f"cannot be {verb} here. {caps.notes}"
+            ),
+        )
 
 
 def _validate_slug(slug: str) -> str:
@@ -130,6 +210,12 @@ class RegistryEntryResponse(BaseModel):
     reviewed_by: str | None = None
     reviewed_at: str | None = None
     rejection_reason: str | None = None
+    # Which catalog this row came from. With a third possible backend the UI can no
+    # longer assume every row is a platform DynamoDB entry, so it needs a
+    # provenance badge — and a read-only row needs to render without edit controls
+    # that would only 501.
+    source: str = "platform"
+    read_only: bool = False
     # Populated ONLY on single-entry GET (detail view's Components tab), never in
     # the list response — including the full snapshot in every browse-grid card
     # would bloat the list payload. None on list items by design.
@@ -142,6 +228,7 @@ class RegistryEntryResponse(BaseModel):
         caller_sub: str,
         *,
         include_snapshot: bool = False,
+        read_only: bool = False,
     ) -> RegistryEntryResponse:
         return cls(
             org_id=e.org_id,
@@ -160,6 +247,8 @@ class RegistryEntryResponse(BaseModel):
             reviewed_by=e.reviewed_by,
             reviewed_at=e.reviewed_at,
             rejection_reason=e.rejection_reason,
+            source=getattr(e, "source", "platform"),
+            read_only=read_only,
             canvas_snapshot=e.canvas_snapshot if include_snapshot else None,
         )
 
@@ -191,6 +280,7 @@ def _visible_to(entry: RegistryEntry, caller_sub: str, caller_org: str) -> bool:
 
 
 @router.post("", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:write"))])
+@_registry_errors
 async def publish(
     body: PublishRequest,
     caller_sub: str = Depends(get_caller_sub),
@@ -203,7 +293,7 @@ async def publish(
     Bug 122 — never let a tenant-supplied name collide across owners).
     """
     org_id = _caller_org_id(caller_sub)
-    store = get_registry_store()
+    store = get_registry_provider()
     base_slug = slugify(body.display_name)
     slug = base_slug
 
@@ -251,6 +341,7 @@ async def publish(
 
 
 @router.get("", response_model=list[RegistryEntryResponse], dependencies=[Depends(require_scopes("registry:read"))])
+@_registry_errors
 async def search(
     q: str | None = Query(default=None, max_length=200),
     tag: str | None = Query(default=None, max_length=64),
@@ -268,7 +359,7 @@ async def search(
         when status=='approved' AND _visible_to.
     """
     org_id = _caller_org_id(caller_sub)
-    store = get_registry_store()
+    store = get_registry_provider()
 
     if scope == "pending":
         if is_admin:
@@ -306,7 +397,8 @@ async def search(
 
     # Newest-updated first.
     visible.sort(key=lambda e: e.updated_at, reverse=True)
-    return [RegistryEntryResponse.from_entry(e, caller_sub) for e in visible]
+    caps = store.capabilities()
+    return [RegistryEntryResponse.from_entry(e, caller_sub, read_only=caps.is_read_only(e)) for e in visible]
 
 
 def _can_view(entry: RegistryEntry, caller_sub: str, caller_org: str, is_admin: bool) -> bool:
@@ -468,7 +560,201 @@ async def aws_registry_search(
     return {"enabled": True, "results": results, "status_authoritative": authoritative}
 
 
+# ---------------------------------------------------------------------------
+# Workstream B — LiteLLM as the registry backend. Opt-in; dynamodb is default.
+# ALSO DECLARED BEFORE the /{slug} routes, for the same reason the /aws-* routes
+# are: FastAPI matches in declaration order, so a literal path after /{slug}
+# would be swallowed by the path parameter.
+#
+# Every handler imports the litellm service module INSIDE its body — the same
+# convention the /aws-* handlers follow, and the only reason tests can
+# monkeypatch module-level functions on it.
+# ---------------------------------------------------------------------------
+
+
+class LiteLLMRegistryConfigRequest(BaseModel):
+    base_url: str = Field(min_length=1, max_length=2048)
+    # The raw virtual key. exclude+repr=False so it cannot land in a log line, an
+    # error body, or a model_dump; it is minted into Secrets Manager and dropped.
+    api_key: str | None = Field(default=None, max_length=512, exclude=True, repr=False)
+    # Or reference an already-minted secret (redeploy / rotate-out-of-band).
+    api_key_ref: str | None = Field(default=None, max_length=2048)
+    # Whether to also switch the platform registry backend to litellm. Separated so
+    # an admin can save and probe the config before flipping the whole catalog over.
+    activate: bool = True
+
+
+@router.get("/litellm-config", dependencies=[Depends(require_scopes("registry:read"))])
+async def litellm_registry_config(caller_sub: str = Depends(get_caller_sub)) -> dict:
+    """The active registry backend plus the LiteLLM config, if any.
+
+    Never returns the virtual key — only the ARN it lives at. ``verified`` is
+    False when the proxy could not be probed from the control plane, which for a
+    private LiteLLM is normal and not an error.
+    """
+    from app.services.registry_providers import default_registry_provider
+    from app.services.registry_providers.litellm import get_litellm_registry_config
+
+    provider = default_registry_provider()
+    cfg = get_litellm_registry_config()
+    caps = get_registry_provider().capabilities()
+    return {
+        "provider": provider,
+        "configured": cfg is not None,
+        "base_url": (cfg or {}).get("base_url"),
+        "api_key_ref": (cfg or {}).get("api_key_ref") or None,
+        "verified": bool((cfg or {}).get("verified")),
+        "capabilities": caps.model_dump(),
+    }
+
+
+@router.post("/litellm-config", dependencies=[Depends(require_scopes("registry:write"))])
+async def litellm_registry_enable(
+    body: LiteLLMRegistryConfigRequest,
+    caller_sub: str = Depends(get_caller_sub),
+    is_admin: bool = Depends(caller_is_admin),
+) -> dict:
+    """Point the registry at a LiteLLM proxy. Admin only."""
+    if not is_admin:
+        raise HTTPException(status_code=403, detail="Requires registry-admin role")
+    from app.services.gateway_deployer import _validate_outbound_url
+    from app.services.registry_providers import set_default_registry_provider
+    from app.services.registry_providers.litellm import (
+        probe_litellm_registry,
+        put_registry_secret,
+        set_litellm_registry_config,
+        validate_secret_ref,
+    )
+
+    # SSRF: the existing shared guard — https-only, plus the DNS-resolved
+    # private/IMDS denylist. The label is passed so a rejection names the registry
+    # base URL rather than the guard's original subject ("OIDC discovery URL"),
+    # which would send an admin to their IdP config. A private-IP base URL is a
+    # 400 here and NOT saved-as-unverified: unreachable is tolerable, pointing the
+    # control plane at link-local or RFC1918 space is not.
+    try:
+        base_url = _validate_outbound_url(body.base_url.strip(), label="LiteLLM registry base URL rejected —")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    try:
+        api_key_ref = validate_secret_ref((body.api_key_ref or "").strip())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    raw_key = (body.api_key or "").strip()
+    if not raw_key and not api_key_ref:
+        raise HTTPException(
+            status_code=400,
+            detail="A LiteLLM virtual key is required (api_key, or api_key_ref for an existing secret).",
+        )
+
+    if raw_key:
+        probe_key = raw_key
+    else:
+        from app.services.registry_providers.litellm import _read_api_key
+
+        try:
+            probe_key = _read_api_key(api_key_ref)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"Could not read the stored key: {type(e).__name__}") from e
+
+    try:
+        probe = probe_litellm_registry(base_url, probe_key)
+    except ValueError as e:
+        # A rejected key or a wrong base URL is the admin's to fix — 400, not saved.
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # Mint only AFTER the probe, so a typo does not leave an orphan secret behind
+    # on every failed attempt (same ordering as the LiteLLM gateway deployer).
+    if raw_key:
+        try:
+            api_key_ref = put_registry_secret(raw_key)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"Could not store the key: {type(e).__name__}") from e
+
+    set_litellm_registry_config(base_url, api_key_ref, verified=bool(probe["reachable"]))
+    if body.activate:
+        set_default_registry_provider("litellm")
+
+    return {
+        "provider": "litellm" if body.activate else "dynamodb",
+        "configured": True,
+        "base_url": base_url,
+        "api_key_ref": api_key_ref,
+        "verified": bool(probe["reachable"]),
+        "detail": probe["detail"],
+    }
+
+
+@router.delete("/litellm-config", dependencies=[Depends(require_scopes("registry:write"))])
+async def litellm_registry_disable(
+    caller_sub: str = Depends(get_caller_sub),
+    is_admin: bool = Depends(caller_is_admin),
+) -> dict:
+    """Revert the registry to the platform's own catalog. Admin only.
+
+    The config row is cleared and the backend goes back to ``dynamodb``. The
+    minted secret is deliberately left in place: it may be shared with a gateway
+    node, and deleting a credential as a side effect of changing a setting is not
+    something an admin asked for. Its ARN is returned so it can be removed
+    explicitly.
+    """
+    if not is_admin:
+        raise HTTPException(status_code=403, detail="Requires registry-admin role")
+    from app.services.registry_providers import set_default_registry_provider
+    from app.services.registry_providers.litellm import (
+        clear_litellm_registry_config,
+        get_litellm_registry_config,
+    )
+
+    cfg = get_litellm_registry_config() or {}
+    set_default_registry_provider("dynamodb")
+    clear_litellm_registry_config()
+    return {
+        "provider": "dynamodb",
+        "configured": False,
+        "orphaned_api_key_ref": cfg.get("api_key_ref") or None,
+    }
+
+
+@router.get("/litellm-servers", dependencies=[Depends(require_scopes("registry:read"))])
+@_registry_errors
+async def litellm_registry_servers(caller_sub: str = Depends(get_caller_sub)) -> dict:
+    """The MCP servers LiteLLM is serving, as the admin panel sees them.
+
+    Distinct from ``GET /api/registry``: this shows the RAW upstream catalog with
+    disabled servers included and flagged, so an admin can tell "LiteLLM does not
+    have it" apart from "LiteLLM has it disabled" — which the projected catalog
+    deliberately cannot show, since a disabled server is not in the catalog at all.
+    """
+    from app.services.registry_providers.litellm import (
+        _server_description,
+        _server_is_enabled,
+        _server_name,
+        get_litellm_registry_config,
+        list_litellm_servers,
+    )
+
+    if get_litellm_registry_config() is None:
+        return {"configured": False, "servers": []}
+    return {
+        "configured": True,
+        "servers": [
+            {
+                "name": _server_name(s),
+                "slug": slugify(_server_name(s)),
+                "description": _server_description(s),
+                "enabled": _server_is_enabled(s),
+            }
+            for s in list_litellm_servers()
+            if _server_name(s)
+        ],
+    }
+
+
 @router.get("/{slug}", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:read"))])
+@_registry_errors
 async def get_entry(
     slug: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -476,14 +762,20 @@ async def get_entry(
 ) -> RegistryEntryResponse:
     slug = _validate_slug(slug)
     org_id = _caller_org_id(caller_sub)
-    entry = get_registry_store().get(org_id, slug)
+    store = get_registry_provider()
+    entry = store.get(org_id, slug)
     if entry is None or not _can_view(entry, caller_sub, org_id, is_admin):
         # 404 (not 403) — don't disclose existence of entries the caller
         # can't see. Same rule as services/auth.assert_owner.
         raise HTTPException(status_code=404, detail="Not found")
     # Single-entry detail view carries the snapshot so the UI's Components tab
     # can render the blueprint's nodes/edges without a clone side-effect.
-    return RegistryEntryResponse.from_entry(entry, caller_sub, include_snapshot=True)
+    return RegistryEntryResponse.from_entry(
+        entry,
+        caller_sub,
+        include_snapshot=True,
+        read_only=store.capabilities().is_read_only(entry),
+    )
 
 
 # Clone is a CONSUME action (copy a blueprint onto your own canvas) — it does NOT
@@ -492,6 +784,7 @@ async def get_entry(
 # org catalog exists to serve (browse + reuse) couldn't clone. Publish/approve/
 # reject/update/delete remain registry:write (govern).
 @router.post("/{slug}/clone", response_model=CloneResponse, dependencies=[Depends(require_scopes("registry:read"))])
+@_registry_errors
 async def clone(
     slug: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -506,10 +799,14 @@ async def clone(
     """
     slug = _validate_slug(slug)
     org_id = _caller_org_id(caller_sub)
-    store = get_registry_store()
+    store = get_registry_provider()
     entry = store.get(org_id, slug)
     if entry is None or not _can_view(entry, caller_sub, org_id, is_admin):
         raise HTTPException(status_code=404, detail="Not found")
+    # A projected external entry has no canvas snapshot to clone — an MCP server
+    # is not a blueprint. Returning an empty snapshot would drop an empty canvas
+    # on the user with no explanation, so say what it is instead.
+    _assert_mutable(entry, store, "cloned onto a canvas — it has no blueprint")
     store.increment_usage(org_id, slug)
     return CloneResponse(
         agent_slug=entry.agent_slug,
@@ -519,6 +816,7 @@ async def clone(
 
 
 @router.put("/{slug}", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:write"))])
+@_registry_errors
 async def update_entry(
     slug: str,
     body: UpdateRequest,
@@ -527,10 +825,15 @@ async def update_entry(
 ) -> RegistryEntryResponse:
     slug = _validate_slug(slug)
     org_id = _caller_org_id(caller_sub)
-    store = get_registry_store()
+    store = get_registry_provider()
     entry = store.get(org_id, slug)
     if entry is None:
         raise HTTPException(status_code=404, detail="Not found")
+    # Before assert_owner deliberately. A projected entry's owner_sub is a sentinel
+    # nobody matches, so assert_owner would 404 it for EVERY caller and hide the
+    # real reason. Answering 501 first discloses nothing: a projected entry is
+    # org-visible and approved, so any caller with registry:read can already list it.
+    _assert_mutable(entry, store, "updated")
     assert_owner(entry.owner_sub, caller_sub)  # 404 on mismatch
 
     updates = {k: v for k, v in body.model_dump(exclude_none=True).items()}
@@ -549,6 +852,7 @@ async def update_entry(
 
 
 @router.delete("/{slug}", dependencies=[Depends(require_scopes("registry:write"))])
+@_registry_errors
 async def delete_entry(
     slug: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -556,10 +860,11 @@ async def delete_entry(
 ) -> dict:
     slug = _validate_slug(slug)
     org_id = _caller_org_id(caller_sub)
-    store = get_registry_store()
+    store = get_registry_provider()
     entry = store.get(org_id, slug)
     if entry is None:
         raise HTTPException(status_code=404, detail="Not found")
+    _assert_mutable(entry, store, "deleted")
     # Owner OR registry-admin may delete. Non-owner non-admin -> 404 (no
     # existence disclosure), so check admin before falling back to assert_owner.
     if not is_admin:
@@ -580,6 +885,7 @@ class RejectRequest(BaseModel):
 @router.post(
     "/{slug}/approve", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:write"))]
 )
+@_registry_errors
 async def approve_entry(
     slug: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -590,9 +896,14 @@ async def approve_entry(
         raise HTTPException(status_code=403, detail="Requires registry-admin role")
     slug = _validate_slug(slug)
     org_id = _caller_org_id(caller_sub)
-    store = get_registry_store()
-    if store.get(org_id, slug) is None:
+    store = get_registry_provider()
+    _entry = store.get(org_id, slug)
+    if _entry is None:
         raise HTTPException(status_code=404, detail="Not found")
+    # Review state belongs to whoever owns the entry. Under an external backend a
+    # projected row's approval lives THERE (enable/disable the MCP server), so
+    # writing a platform verdict onto it would be a badge that governs nothing.
+    _assert_mutable(_entry, store, "approved")
     now = datetime.now(timezone.utc).isoformat()
     updated = store.update(
         org_id,
@@ -612,6 +923,7 @@ async def approve_entry(
 @router.post(
     "/{slug}/reject", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:write"))]
 )
+@_registry_errors
 async def reject_entry(
     slug: str,
     body: RejectRequest | None = None,
@@ -623,9 +935,11 @@ async def reject_entry(
         raise HTTPException(status_code=403, detail="Requires registry-admin role")
     slug = _validate_slug(slug)
     org_id = _caller_org_id(caller_sub)
-    store = get_registry_store()
-    if store.get(org_id, slug) is None:
+    store = get_registry_provider()
+    _entry = store.get(org_id, slug)
+    if _entry is None:
         raise HTTPException(status_code=404, detail="Not found")
+    _assert_mutable(_entry, store, "rejected")
     now = datetime.now(timezone.utc).isoformat()
     updated = store.update(
         org_id,

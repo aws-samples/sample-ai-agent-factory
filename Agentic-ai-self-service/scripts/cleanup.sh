@@ -323,9 +323,19 @@ for item in items:
     local conn_providers conn_secrets
     conn_providers=$(echo "${dep_json}" | python3 -c "import sys,json; print(' '.join(json.load(sys.stdin).get('connector_credential_providers',[])))" 2>/dev/null)
     conn_secrets=$(echo "${dep_json}" | python3 -c "import sys,json; print(' '.join(json.load(sys.stdin).get('connector_secret_arns',[])))" 2>/dev/null)
-    for cp_name in ${conn_providers}; do
+    for cp_entry in ${conn_providers}; do
+      # Records are TYPE-prefixed ("API_KEY:name" / "OAUTH:name") — the same shape
+      # _record_gateway_resources partitions on in step_handlers/gateway_step.py.
+      # Passing the raw entry as --name makes BOTH deletes below fail with
+      # ValidationException, because the ':' violates the provider-name pattern
+      # [a-zA-Z0-9\-_]+ — verified live. `|| true` swallows it, so the provider
+      # and the credential inside it survive the teardown with nothing logged.
+      # Strip the prefix; a legacy bare name contains no ':' and is unchanged.
+      cp_name="${cp_entry#*:}"
       log_info "    Deleting connector credential provider: ${cp_name}"
-      # Provider may be either API-key or OAuth2 — try both (the wrong one is a no-op).
+      # Try both namespaces. The TYPE prefix is a hint only — deleting an API-key
+      # provider through the OAuth2 API reports success WITHOUT deleting it, so
+      # the recorded type can never be trusted as a discriminator.
       aws bedrock-agentcore-control delete-api-key-credential-provider \
         --name "${cp_name}" --region "${AWS_REGION}" 2>/dev/null || true
       aws bedrock-agentcore-control delete-oauth2-credential-provider \
@@ -401,6 +411,109 @@ for item in items:
   log_success "Per-deployment cleanup complete."
 }
 
+# ── Resource ownership: who is allowed to delete what ────────────────
+#
+# Why this exists: sweeps 8-12 below match on an account-global NAME PREFIX —
+# Cognito pools "AgentCore*", secrets "agentcore-connector/" and
+# "agentcore-otel/", IAM roles "AgentCoreMemory-*". None of those names carry
+# any deployment identity, so tearing down one deployment deleted a *different*
+# live deployment's resources in the same account, including the secrets holding
+# raw customer API keys. Customers deploy and delete this platform often, so two
+# co-resident deployments (dev + prod, or two teams) is routine — not an edge
+# case, and not something an operator gets warned about.
+#
+# The fix is a tag, not a narrower prefix, because no name is available to
+# narrow on: backend/src/app/services/resource_ownership.py stamps
+# AgentCoreStack={project}-{env}-{region} on every account-global resource the
+# platform creates, and the sweeps delete only what carries THIS stack's value.
+# The identity is recomputed here from the same three inputs rather than looked
+# up, which is exactly why resource_ownership.stack_id() is defined to match.
+#
+# It fails CLOSED. An untagged resource counts as foreign and is skipped,
+# because a resource created before this tag existed and a resource belonging to
+# someone else are indistinguishable — and only one of those two mistakes is
+# recoverable. Every skip is reported by name so an operator can finish by hand,
+# and CLEANUP_INCLUDE_UNTAGGED=1 restores the old prefix-only behavior for a
+# single-deployment account that predates the tag.
+OWNER_TAG_KEY="AgentCoreStack"
+STACK_OWNER_ID="${PROJECT_NAME}-${ENVIRONMENT_NAME}-${AWS_REGION}"
+SKIPPED_FOREIGN=0
+
+# True when a tag value read off a resource proves this stack created it.
+# "None"/"" is what the AWS CLI prints for a missing tag with --output text.
+is_owned_by_this_stack() {
+  local tag_value="${1:-}"
+  if [[ "${tag_value}" == "${STACK_OWNER_ID}" ]]; then
+    return 0
+  fi
+  if [[ "${CLEANUP_INCLUDE_UNTAGGED:-0}" == "1" && ( -z "${tag_value}" || "${tag_value}" == "None" ) ]]; then
+    return 0
+  fi
+  return 1
+}
+
+skip_foreign() {
+  SKIPPED_FOREIGN=$((SKIPPED_FOREIGN + 1))
+  local tag_value="${2:-}"
+  if [[ -z "${tag_value}" || "${tag_value}" == "None" ]]; then
+    log_warn "  SKIPPED (untagged, cannot prove ownership): $1"
+  else
+    log_warn "  SKIPPED (owned by ${tag_value}, not ${STACK_OWNER_ID}): $1"
+  fi
+}
+
+# Reads one tag off an IAM role. list-roles does not return tags, unlike
+# list-secrets, so this costs one extra call per candidate role.
+iam_role_owner_tag() {
+  aws iam list-role-tags --role-name "$1" \
+    --query "Tags[?Key=='${OWNER_TAG_KEY}'].Value | [0]" \
+    --output text 2>/dev/null || echo "None"
+}
+
+# Deletes only the secrets under a name prefix that this stack owns, and reports
+# the rest. $1 = human label, $2 = extra JMESPath predicate (already ANDed).
+#
+# ListSecrets returns Tags inline, so ownership costs no extra call. It is
+# resolved with two filtered list calls rather than one call emitting
+# "ARN<TAB>tag" pairs, because a JMESPath filter that matches nothing prints as
+# an EMPTY field under --output text — the columns silently shift and the tag of
+# one secret gets read as the tag of another. Set arithmetic can't misalign.
+sweep_owned_secrets() {
+  local label="$1" predicate="$2"
+  local owned_pred="Tags[?Key=='${OWNER_TAG_KEY}' && Value=='${STACK_OWNER_ID}']"
+  if [[ "${CLEANUP_INCLUDE_UNTAGGED:-0}" == "1" ]]; then
+    owned_pred="(${owned_pred} || !Tags[?Key=='${OWNER_TAG_KEY}'])"
+  fi
+
+  local all_arns owned_arns
+  all_arns=$(aws secretsmanager list-secrets --region "${AWS_REGION}" \
+    --query "SecretList[?${predicate}].ARN" --output text 2>/dev/null || echo "")
+  owned_arns=$(aws secretsmanager list-secrets --region "${AWS_REGION}" \
+    --query "SecretList[?${predicate} && ${owned_pred}].ARN" --output text 2>/dev/null || echo "")
+
+  # --output text separates with TABS, so normalise to single spaces before the
+  # membership test below — a tab would make every " ${arn} " lookup miss and
+  # the sweep would skip everything, including its own secrets.
+  owned_arns=" $(printf '%s' "${owned_arns}" | tr '[:space:]' ' ') "
+
+  local s_arn
+  for s_arn in ${all_arns}; do
+    if [[ "${owned_arns}" == *" ${s_arn} "* ]]; then
+      log_info "  Deleting orphan ${label}: ${s_arn}"
+      aws secretsmanager delete-secret \
+        --secret-id "${s_arn}" --force-delete-without-recovery \
+        --region "${AWS_REGION}" 2>/dev/null || true
+    else
+      # One extra call, only on the rare skip path, so the operator is told WHO
+      # owns it rather than just that it wasn't us.
+      local other
+      other=$(aws secretsmanager describe-secret --secret-id "${s_arn}" --region "${AWS_REGION}" \
+        --query "Tags[?Key=='${OWNER_TAG_KEY}'].Value | [0]" --output text 2>/dev/null || echo "None")
+      skip_foreign "${label} ${s_arn}" "${other}"
+    fi
+  done
+}
+
 # ── Step 5: Sweep for orphaned AgentCore-* resources ─────────────────
 
 sweep_orphan_resources() {
@@ -410,7 +523,14 @@ sweep_orphan_resources() {
   # Verified 2026-05-15 — the broader `AgentCore*` filter wiped a foreign
   # runtime's IAM role; see tasks/lessons.md Bug 20.
 
-  # 1. AgentCoreRuntime-${PROJECT_NAME}-* Lambda functions only
+  # 1. Deliberately unreachable, kept as a tripwire. Nothing in the platform
+  #    creates a Lambda named "AgentCoreRuntime-*": agents run on AgentCore
+  #    Runtime, and the only Lambdas the product mints are gateway tool targets
+  #    (gateway_deployer) and the temp test Lambda (tool_tester), none of which
+  #    use this prefix. Do NOT "fix" the filter by widening it — a bare
+  #    "AgentCoreRuntime-" match over Lambda would reach other products' functions
+  #    with nothing to distinguish them, which is the class of bug the owner tag
+  #    below exists to stop.
   local lambdas
   lambdas=$(aws lambda list-functions \
     --region "${AWS_REGION}" \
@@ -421,12 +541,42 @@ sweep_orphan_resources() {
     aws lambda delete-function --function-name "${fn}" --region "${AWS_REGION}" 2>/dev/null || true
   done
 
-  # 2. AgentCoreRuntime-${PROJECT_NAME}-* IAM roles only (detach policies first)
+  # 2. Runtime execution roles. Dynamically created ones are named
+  #    "AgentCoreRuntime-{runtime name}" (runtime_deployer.create_runtime_iam_role,
+  #    per_agent_identity._ROLE_NAME_PREFIX) and now carry the owner tag, so match
+  #    on the bare prefix and let the tag decide.
+  #
+  #    The old filter here was "AgentCoreRuntime-${PROJECT_NAME}", which looked
+  #    conservative and was the opposite. IAM is not regional, and the CDK shared
+  #    runtime role is named AgentCoreRuntime-{project}-{env}-shared in the home
+  #    region and AgentCoreRuntime-{project}-{env}-{region}-shared elsewhere
+  #    (infra/stacks/platform/lambdas.py:82), so BOTH names start with
+  #    "AgentCoreRuntime-{project}". Verified live 2026-09-04 against this
+  #    account: a us-east-1 teardown matched
+  #    AgentCoreRuntime-agentcore-workflow-dev-eu-central-1-shared and deleted the
+  #    *Frankfurt* deployment's shared role, which every agent there assumes —
+  #    unrecoverable without a redeploy plus AgentCore's 17-20 min IAM-cache wait
+  #    (see the Bug 60 note in lambdas.py). Deleting dev broke prod.
+  #
+  #    The "-shared" roles are excluded outright rather than left to the tag gate:
+  #    they are CloudFormation-owned, so cdk destroy (step 7) deletes this
+  #    region's and no one should ever delete another region's. IAM roles get no
+  #    aws:cloudformation:* system tags, so the name is the only signal available.
   local roles
   roles=$(aws iam list-roles \
-    --query "Roles[?starts_with(RoleName, 'AgentCoreRuntime-${PROJECT_NAME}')].RoleName" \
+    --query "Roles[?starts_with(RoleName, 'AgentCoreRuntime-')].RoleName" \
     --output text 2>/dev/null || echo "")
   for role_name in ${roles}; do
+    if [[ "${role_name}" == *-shared ]]; then
+      log_info "  Leaving CloudFormation-managed shared runtime role to cdk destroy: ${role_name}"
+      continue
+    fi
+    local rt_owner
+    rt_owner=$(iam_role_owner_tag "${role_name}")
+    if ! is_owned_by_this_stack "${rt_owner}"; then
+      skip_foreign "runtime IAM role ${role_name}" "${rt_owner}"
+      continue
+    fi
     log_info "  Deleting orphan IAM role: ${role_name}"
     # Detach managed policies
     local policies
@@ -548,17 +698,38 @@ sweep_orphan_resources() {
       --policy-engine-id "${eng_id}" --region "${AWS_REGION}" 2>/dev/null || true
   done
 
-  # 8. Cognito user pools created by gateway deployments (AgentCore-* pattern)
-  # Loop to handle pagination (list-user-pools returns max 60 at a time)
+  # 8. Cognito user pools created by gateway deployments. The pool NAME is
+  #    "AgentCore-{user's gateway name}", so the "AgentCore" prefix matches any
+  #    pool from any deployment of this platform — and any unrelated product that
+  #    happens to name a pool that way. gateway_deployer._create_cognito_oauth
+  #    stamps the owner tag at creation; that tag, not the prefix, authorizes the
+  #    delete. Pools that don't carry it are reported and left alone.
+  #
+  #    The pagination loop re-lists after each pass and stops when nothing is
+  #    left, so it must not spin forever on pools it deliberately skips: track
+  #    whether a pass deleted anything and bail when a pass deletes none.
+  #    Skips are recorded and reported only after the loop ends: a pool the gate
+  #    refuses to delete stays in every subsequent listing, so reporting inline
+  #    would warn about the same foreign pool once per pass and inflate the
+  #    skipped count.
+  local skipped_pools=""
   while true; do
-    local pools
+    local pools deleted_a_pool=0
     pools=$(aws cognito-idp list-user-pools --max-results 60 --region "${AWS_REGION}" \
       --query "UserPools[?starts_with(Name, 'AgentCore')].Id" \
       --output text 2>/dev/null || echo "")
     if [[ -z "${pools}" ]]; then
       break
     fi
+    skipped_pools=""
     for pool_id in ${pools}; do
+      local pool_owner
+      pool_owner=$(aws cognito-idp describe-user-pool --user-pool-id "${pool_id}" --region "${AWS_REGION}" \
+        --query "UserPool.UserPoolTags.${OWNER_TAG_KEY}" --output text 2>/dev/null || echo "None")
+      if ! is_owned_by_this_stack "${pool_owner}"; then
+        skipped_pools+="${pool_id}=${pool_owner} "
+        continue
+      fi
       log_info "  Deleting orphan Cognito user pool: ${pool_id}"
       # Delete domain first (required before pool deletion)
       local domain
@@ -570,7 +741,15 @@ sweep_orphan_resources() {
       fi
       aws cognito-idp delete-user-pool \
         --user-pool-id "${pool_id}" --region "${AWS_REGION}" 2>/dev/null || true
+      deleted_a_pool=1
     done
+    if [[ "${deleted_a_pool}" == "0" ]]; then
+      break
+    fi
+  done
+  local pool_entry
+  for pool_entry in ${skipped_pools}; do
+    skip_foreign "Cognito user pool ${pool_entry%%=*}" "${pool_entry#*=}"
   done
 
   # 9. OTEL auth-header secrets created by /api/observability/credentials.
@@ -581,31 +760,23 @@ sweep_orphan_resources() {
   #    by design (see scripts/bootstrap-otel-secret.sh header).
   #    Verified 2026-05-15: cleanup.sh used to delete the platform secret
   #    silently, breaking the next deploy. See tasks/lessons.md Bug 24.
-  local otel_secrets
-  otel_secrets=$(aws secretsmanager list-secrets --region "${AWS_REGION}" \
-    --query "SecretList[?starts_with(Name, 'agentcore-otel/') && !starts_with(Name, 'agentcore-otel/platform/')].ARN" \
-    --output text 2>/dev/null || echo "")
-  for s_arn in ${otel_secrets}; do
-    log_info "  Deleting orphan per-agent OTEL secret: ${s_arn}"
-    aws secretsmanager delete-secret \
-      --secret-id "${s_arn}" --force-delete-without-recovery \
-      --region "${AWS_REGION}" 2>/dev/null || true
-  done
+  #    The "agentcore-otel/" prefix names the PRODUCT, so it matches every
+  #    deployment's per-agent OTEL secrets in the account — hence the owner-tag
+  #    gate, stamped by routers/observability.py at creation.
+  sweep_owned_secrets "per-agent OTEL secret" \
+    "starts_with(Name, 'agentcore-otel/') && !starts_with(Name, 'agentcore-otel/platform/')"
 
   # 10. SaaS connector secrets minted by the gateway step / direct deploy.
   #     Owner-scoped naming: agentcore-connector/{owner}/{uuid}. These hold the
   #     raw API key / OAuth client secret, so sweep any that survived a
   #     partial-failed deploy whose deployment record never landed.
-  local connector_secrets
-  connector_secrets=$(aws secretsmanager list-secrets --region "${AWS_REGION}" \
-    --query "SecretList[?starts_with(Name, 'agentcore-connector/')].ARN" \
-    --output text 2>/dev/null || echo "")
-  for s_arn in ${connector_secrets}; do
-    log_info "  Deleting orphan connector secret: ${s_arn}"
-    aws secretsmanager delete-secret \
-      --secret-id "${s_arn}" --force-delete-without-recovery \
-      --region "${AWS_REGION}" 2>/dev/null || true
-  done
+  #
+  #     This is the worst case for an unscoped prefix sweep and the reason the
+  #     owner tag exists: {owner} is a Cognito sub, which is unique per POOL, not
+  #     per account, so nothing in the name distinguishes deployments. Tearing
+  #     down one deployment used to destroy another live deployment's raw
+  #     customer credentials, unrecoverably and without a warning.
+  sweep_owned_secrets "connector secret" "starts_with(Name, 'agentcore-connector/')"
 
   # 11. SaaS connector credential providers (acc- name prefix) — opt-in only,
   #     same shared-account guard as the OAuth2/memory/engine sweep above.
@@ -634,12 +805,24 @@ sweep_orphan_resources() {
   # 12. AgentCoreMemory-* IAM exec roles (memory_step / direct deploy mint these
   #     as AgentCoreMemory-<memory_name>). Defense-in-depth for the in-product
   #     manifest path: a partial-failed deploy whose record never landed can
-  #     leave the role behind. Prefix-scoped so it cannot touch foreign roles.
+  #     leave the role behind.
+  #
+  #     IAM is not regional and the role name is just AgentCoreMemory-{memory
+  #     name}, so this prefix matches every deployment's memory roles in the
+  #     account — including the same {project}-{env} deployed to a second region.
+  #     That is why the owner tag carries the region too. memory_step.py and
+  #     services/deployment.py stamp it at create_role time.
   local memory_roles
   memory_roles=$(aws iam list-roles \
     --query "Roles[?starts_with(RoleName, 'AgentCoreMemory-')].RoleName" \
     --output text 2>/dev/null || echo "")
   for role_name in ${memory_roles}; do
+    local mem_owner
+    mem_owner=$(iam_role_owner_tag "${role_name}")
+    if ! is_owned_by_this_stack "${mem_owner}"; then
+      skip_foreign "memory IAM role ${role_name}" "${mem_owner}"
+      continue
+    fi
     log_info "  Deleting orphan memory IAM role: ${role_name}"
     local mem_managed mem_inline
     mem_managed=$(aws iam list-attached-role-policies \
@@ -677,6 +860,12 @@ sweep_orphan_resources() {
     done
   fi
 
+  if [[ "${SKIPPED_FOREIGN}" -gt 0 ]]; then
+    log_warn "Left ${SKIPPED_FOREIGN} resource(s) in place because they are not tagged ${OWNER_TAG_KEY}=${STACK_OWNER_ID}."
+    log_warn "  This is intentional: another deployment in this account may still be using them."
+    log_warn "  Each one is listed above. If they really are yours, delete them by hand,"
+    log_warn "  or re-run with CLEANUP_INCLUDE_UNTAGGED=1 to also sweep UNTAGGED resources."
+  fi
   log_success "Orphan resource sweep complete."
 }
 
@@ -812,4 +1001,10 @@ main() {
   print_summary
 }
 
-main "$@"
+# Only run when executed, not when sourced. Sourcing is how the ownership gate in
+# sweep_orphan_resources gets tested against real AWS (scripts/verify-cleanup-ownership.sh):
+# the whole point of that gate is which resources it refuses to delete, and a
+# transcription of the logic into a test would not be the logic that ships.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

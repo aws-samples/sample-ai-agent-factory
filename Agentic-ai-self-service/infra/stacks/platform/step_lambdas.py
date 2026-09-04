@@ -46,7 +46,11 @@ def _create_step_role(
     tables.runtime_slots.grant_read_write_data(role)
     # Loom-study 2.2 — runtime_configure/harness steps READ approval policies
     # (tag-policy table) to inject LOOM_APPROVAL_POLICIES into the runtime.
-    if step_name in {"runtime_configure", "harness"}:
+    # Workstream A — the gateway step reads the SETTING#gateway_provider row from
+    # the same generic settings store to resolve the platform-default gateway
+    # provider. Read-only: without this the lookup silently degrades to
+    # "agentcore" and an admin's chosen default would be ignored.
+    if step_name in {"runtime_configure", "harness", "gateway"}:
         tables.tag_policy.grant_read_data(role)
     role.add_to_policy(
         iam.PolicyStatement(
@@ -153,6 +157,13 @@ def _create_step_role(
                 actions=["secretsmanager:GetSecretValue"],
                 resources=[
                     f"arn:aws:secretsmanager:{stack.region}:{stack.account}:secret:agentcore-provider/*",
+                    # Workstream A: a LiteLLM MCP Gateway authenticates with a
+                    # static virtual key that the gateway step minted under the
+                    # agentcore-connector/ namespace. runtime_configure resolves it
+                    # and injects GATEWAY_API_KEY, because the runtime itself has no
+                    # secretsmanager grant. READ ONLY and namespace-locked — the
+                    # gateway step keeps sole ownership of create/delete.
+                    f"arn:aws:secretsmanager:{stack.region}:{stack.account}:secret:agentcore-connector/*",
                 ],
             )
         )
@@ -505,6 +516,13 @@ def _create_step_role(
             "bedrock-agentcore:GetApiKeyCredentialProvider",
             "bedrock-agentcore:DeleteApiKeyCredentialProvider",
             "bedrock-agentcore:ListApiKeyCredentialProviders",
+            # Update*: a provider reused by name must be REPOINTED at the current
+            # secret. Without these the reuse path 403s and, worse, would silently
+            # keep sending the key the provider was first created with — a
+            # rotation that never takes effect. See
+            # gateway_deployer._ensure_api_key_credential_provider.
+            "bedrock-agentcore:UpdateApiKeyCredentialProvider",
+            "bedrock-agentcore:UpdateOauth2CredentialProvider",
             # CreateOauth2CredentialProvider transparently provisions a
             # token vault under the account's identity directory if one
             # doesn't exist. Without these, mcp-server-gateway-target
@@ -691,6 +709,9 @@ def _create_step_role(
             "bedrock-agentcore:GetOauth2CredentialProvider",
             "bedrock-agentcore:DeleteOauth2CredentialProvider",
             "bedrock-agentcore:ListOauth2CredentialProviders",
+            # Repoint an existing provider rather than reuse a stale client
+            # secret (see the gateway step's policy for the full reasoning).
+            "bedrock-agentcore:UpdateOauth2CredentialProvider",
             # Bug 153 (caught live): the FIRST CreateOauth2CredentialProvider in
             # an account/region implicitly provisions the default token-vault,
             # so the caller needs CreateTokenVault/GetTokenVault or it fails with
@@ -1006,6 +1027,14 @@ def build_step_lambdas(
                 "TAG_POLICY_TABLE_NAME": tables.tag_policy.table_name,
                 "ARTIFACTS_BUCKET_NAME": artifacts_bucket.bucket_name,
                 "ENVIRONMENT": cfg.env,
+                # These three together form the resource-owner tag
+                # ({project}-{env}-{region}) that services/resource_ownership.py
+                # stamps on account-global resources — Cognito pools, connector and
+                # OTEL secrets, AgentCoreMemory-* roles — and that cleanup.sh gates
+                # deletion on. Without PROJECT_NAME the handler falls back to the
+                # default project name and tags resources for the wrong stack, which
+                # is exactly the cross-deployment deletion this prevents.
+                "PROJECT_NAME": cfg.project,
                 "APP_AWS_REGION": stack.region,
                 "PYTHONPATH": "/var/task/src:/var/task:/var/task/lib",
                 # Shared runtime execution role — pre-created at stack

@@ -21,6 +21,8 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+
 _BACKEND = Path(__file__).resolve().parents[1]
 _REPO_ROOT = _BACKEND.parent
 _STACKS_DIR = _REPO_ROOT / "infra" / "stacks"
@@ -270,6 +272,162 @@ def test_legacy_record_types_are_aliases_only():
 
     assert set(ar._LEGACY_RECORD_TYPES.values()) <= set(ar.RECORD_TYPES)
     assert not set(ar._LEGACY_RECORD_TYPES) & set(ar.RECORD_TYPES)
+
+
+# -- recordType / descriptor pairing against the real GA model ---------------
+
+
+def _ga_record_type_enum() -> set[str]:
+    """Pull the RecordType enum straight out of the installed botocore model.
+
+    Reading the shipped service-2.json is the only way to assert our constant
+    against what the SDK will actually accept — a hand-copied list is exactly the
+    thing that drifted and made normalize_record_type("GATEWAY") return "CUSTOM".
+    Skips rather than fails when the bundle predates the agent-registry models.
+    """
+    import gzip
+    import json
+    import pathlib
+
+    import botocore
+
+    root = pathlib.Path(botocore.__file__).parent / "data" / "agent-registry-control"
+    candidates = sorted(root.glob("*/service-2.json.gz")) if root.is_dir() else []
+    if not candidates:
+        pytest.skip("installed botocore has no agent-registry-control model")
+    with gzip.open(candidates[-1], "rt") as fh:
+        model = json.load(fh)
+    return set(model["shapes"]["RecordType"]["enum"])
+
+
+def test_record_types_matches_the_installed_ga_enum():
+    from app.services import aws_agent_registry as ar
+
+    assert set(ar.RECORD_TYPES) == _ga_record_type_enum()
+
+
+def test_gateway_is_a_first_class_record_type_not_silently_downgraded():
+    """The regression this constant fix exists for.
+
+    Before GATEWAY was in RECORD_TYPES it fell through the membership check and
+    landed on the "unknown -> CUSTOM" fallback, so a gateway record would have
+    been created in AWS under the wrong recordType with no error anywhere.
+    """
+    from app.services.aws_agent_registry import normalize_record_type
+
+    assert normalize_record_type("GATEWAY") == "GATEWAY"
+    assert normalize_record_type("gateway") == "GATEWAY"
+
+
+def test_every_record_type_has_a_descriptor_key():
+    """register_record indexes DESCRIPTOR_KEY_FOR_TYPE by recordType.
+
+    A member of RECORD_TYPES with no entry is not a soft gap — it is a KeyError
+    on the deploy path.
+    """
+    from app.services import aws_agent_registry as ar
+
+    assert set(ar.DESCRIPTOR_KEY_FOR_TYPE) == set(ar.RECORD_TYPES)
+
+
+def test_source_only_descriptors_are_not_paired_with_a_record_type():
+    """http/agui are keyed to a PROTOCOL SOURCE, not to a recordType.
+
+    They carry no inline content, so pairing either with a recordType would make
+    us demand a descriptor that can never hold a payload.
+    """
+    from app.services import aws_agent_registry as ar
+
+    assert not set(ar.SOURCE_ONLY_DESCRIPTOR_KEYS) & set(ar.DESCRIPTOR_KEY_FOR_TYPE.values())
+    assert set(ar.DESCRIPTOR_KEYS) == set(ar.DESCRIPTOR_KEY_FOR_TYPE.values()) | set(ar.SOURCE_ONLY_DESCRIPTOR_KEYS)
+
+
+def test_descriptor_keys_match_the_installed_descriptors_shape():
+    import gzip
+    import json
+    import pathlib
+
+    import botocore
+    from app.services import aws_agent_registry as ar
+
+    root = pathlib.Path(botocore.__file__).parent / "data" / "agent-registry-control"
+    candidates = sorted(root.glob("*/service-2.json.gz")) if root.is_dir() else []
+    if not candidates:
+        pytest.skip("installed botocore has no agent-registry-control model")
+    with gzip.open(candidates[-1], "rt") as fh:
+        model = json.load(fh)
+    assert set(ar.DESCRIPTOR_KEYS) == set(model["shapes"]["Descriptors"]["members"])
+
+
+def test_a_source_only_descriptor_satisfies_any_record_type():
+    """A record whose content syncs from an HTTP source has no inline descriptor.
+
+    The pairing check must not reject it — the service accepts it, so refusing it
+    locally would be us inventing a constraint.
+    """
+    from app.services.aws_agent_registry import AwsAgentRegistry
+
+    reg = AwsAgentRegistry.__new__(AwsAgentRegistry)
+    calls = {}
+
+    class _Control:
+        def create_registry_record(self, **kw):
+            calls.update(kw)
+            return {"recordArn": "arn:aws:agent-registry:us-east-1:1:registry/reg-1/record/r-1"}
+
+    reg.registry_id = "reg-1"
+    reg.region = "us-east-1"
+    reg.control = _Control()
+    reg.data = None
+
+    out = reg.register(
+        name="synced",
+        record_type="MCP",
+        descriptors={"http": {"source": {"uri": "https://example.com/openapi.json"}}},
+    )
+    assert out["record_type"] == "MCP"
+    assert "http" in calls["descriptors"]
+
+
+def test_the_inline_pairing_check_still_rejects_a_genuine_mismatch():
+    """Relaxing for source-only descriptors must not disable the check itself."""
+    from app.services.aws_agent_registry import AwsAgentRegistry
+
+    reg = AwsAgentRegistry.__new__(AwsAgentRegistry)
+    reg.registry_id = "reg-1"
+    reg.region = "us-east-1"
+    # Non-None so the "no client" early return cannot be what makes this pass.
+    reg.control = object()
+    reg.data = None
+
+    with pytest.raises(ValueError, match="mcpServer"):
+        reg.register(
+            name="mismatched",
+            record_type="MCP",
+            descriptors={"a2aAgentCard": {"data": "{}"}},
+        )
+
+
+def test_descriptor_key_reverse_lookup_is_unambiguous_for_mcpserver():
+    """mcpServer now belongs to two record types, so the reverse map is explicit.
+
+    Inverting DESCRIPTOR_KEY_FOR_TYPE would resolve "mcpServer" by dict insertion
+    order. MCP is the intended answer; assert it directly so a reordering of that
+    dict cannot change behaviour.
+    """
+    from app.services.aws_agent_registry import normalize_record_type
+
+    assert normalize_record_type("mcpServer") == "MCP"
+    assert normalize_record_type("a2aAgentCard") == "AGENT"
+    assert normalize_record_type("agentSkillsDefinition") == "SKILL"
+
+
+def test_the_module_docstring_states_the_correct_enum():
+    """The docstring is the only place a reader learns the enum. It drifted once."""
+    from app.services import aws_agent_registry as ar
+
+    doc = ar.__doc__ or ""
+    assert "recordType ∈ {MCP, AGENT, CUSTOM, SKILL, GATEWAY}" in doc
 
 
 # -- dependency floor --------------------------------------------------------

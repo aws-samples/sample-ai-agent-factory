@@ -10,6 +10,7 @@ import type { Edge } from '@xyflow/react';
 import type { SaveStatus } from '../types/workflow';
 import { WorkflowSerializer, type SerializedMetadata } from './serialization';
 import { getApiClient, isApiError } from '../services/api';
+import { getDeploymentRegion } from './awsRegion';
 
 // ============================================================================
 // Constants
@@ -351,7 +352,7 @@ export function createBackendSaveFunction(
         metadata: workflowData.metadata || {
           author: '',
           tags: [],
-          awsRegion: 'us-east-1',
+          awsRegion: getDeploymentRegion(),
           deploymentStatus: 'not_deployed',
         },
       };

@@ -14,7 +14,7 @@ import type {
 } from '../types/components';
 import type { ValidationError } from '../types/validation';
 import { CONNECTION_COMPATIBILITY, REQUIRED_FIELDS } from '../types/validation';
-import { isValidLambdaArn } from './gatewayConfig';
+import { isLiteLLMGateway, isValidLambdaArn } from './gatewayConfig';
 import { validateCredentialFormat } from './identityConfig';
 
 // ============================================================================
@@ -85,8 +85,14 @@ export function validateComponentConfiguration(
     return { nodeId, status: 'error', errors, warnings };
   }
 
-  // Validate required fields
-  const requiredFields = REQUIRED_FIELDS[componentType];
+  // Validate required fields.
+  // A LiteLLM gateway has no AgentCore target, so targetType/targetConfig are
+  // swapped for litellmBaseUrl. Done here rather than in REQUIRED_FIELDS because
+  // the required set depends on the node's own config, not just its type.
+  let requiredFields: readonly string[] = REQUIRED_FIELDS[componentType];
+  if (componentType === 'gateway' && isLiteLLMGateway(configuration as GatewayConfiguration)) {
+    requiredFields = ['name', 'litellmBaseUrl'];
+  }
   for (const field of requiredFields) {
     const value = getNestedValue(configuration as unknown as Record<string, unknown>, field);
     if (value === undefined || value === null || value === '') {
@@ -199,6 +205,29 @@ function validateGatewayConfig(
   errors: ValidationError[],
   warnings: ValidationError[]
 ): void {
+  // A LiteLLM gateway is validated on its own terms — the AgentCore target
+  // checks below would all be false-negatives against fields it never sets.
+  if (isLiteLLMGateway(config)) {
+    const base = (config.litellmBaseUrl || '').trim();
+    if (base && !/^https:\/\/[^\s/]+/i.test(base)) {
+      errors.push({
+        componentId: nodeId,
+        field: 'litellmBaseUrl',
+        message: 'LiteLLM base URL must be an https:// URL',
+        severity: 'error',
+      });
+    }
+    if (!config.litellmApiKey && !config.litellmApiKeyRef) {
+      errors.push({
+        componentId: nodeId,
+        field: 'litellmApiKey',
+        message: 'A LiteLLM virtual key is required to authenticate to the gateway',
+        severity: 'error',
+      });
+    }
+    return;
+  }
+
   // Validate Lambda ARN if target type is lambda
   if (config.targetType === 'lambda' && config.targetConfig) {
     const lambdaConfig = config.targetConfig as LambdaTargetConfig;

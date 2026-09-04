@@ -103,6 +103,34 @@ service models, and the `agent-registry:*` IAM actions.
 `POST` returns `400` naming the SDK in that case rather than blaming the
 `registry_id`.
 
+#### LiteLLM as the catalog backend (opt-in)
+
+Makes a LiteLLM proxy the **authoritative** catalog in place of the internal
+DynamoDB one. Additive: the default backend is `dynamodb` and nothing above
+changes until an admin activates this. See
+[Registry & RBAC](REGISTRY_AND_RBAC.md#bring-your-own-registry--litellm-as-the-catalog).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/registry/litellm-config` | Active backend + config: `{provider, configured, base_url, api_key_ref, verified, capabilities}` — never the key itself |
+| `POST` | `/api/registry/litellm-config` | **Admin only** — save `{base_url, api_key, activate}`; the key is minted into `agentcore-registry/` and dropped |
+| `DELETE` | `/api/registry/litellm-config` | **Admin only** — revert to the platform catalog (DynamoDB entries were never touched) |
+| `GET` | `/api/registry/litellm-servers` | The MCP servers LiteLLM serves, with enablement. Returns `{configured: false, servers: []}` when LiteLLM is not configured — not an error |
+
+`activate: false` saves and probes the config **without** switching the catalog
+over, so reachability can be tested first. `verified: false` means the control
+plane could not probe the proxy — normal for a VPC-private LiteLLM, since the
+control plane has no VPC egress, and not an error.
+
+Because LiteLLM has no write API for MCP server records, entries **projected from
+LiteLLM** are read-only: publish, update, delete, approve, reject and clone return
+**`501`** naming LiteLLM rather than silently accepting a write that would then
+diverge. Entries published from a canvas live in the platform sidecar and stay
+fully mutable — the limit is per entry, not per operation. `capabilities`
+(including `read_only_sources`) on `GET /litellm-config` is the machine-readable
+form of that. The pre-deploy governance gate stays **fail-closed**: if the catalog
+cannot be read, deploys referencing an integration return `503`.
+
 ### Prompt Library
 
 | Method | Endpoint | Description |
@@ -144,7 +172,7 @@ Deploy-time variables consumed by `./scripts/deploy.sh` and passed as CDK contex
 | `ENVIRONMENT_NAME` | `dev` | Environment identifier (e.g., `dev`, `staging`, `prod`) |
 | `AWS_REGION` | `us-east-1` | Target AWS region |
 | `PROJECT_NAME` | `agentcore-workflow` | Project name used for resource naming and tagging |
-| `COGNITO_USERS` | *(none)* | Comma-separated emails for pre-created Cognito users (e.g., `user1@example.com,user2@example.com`). **Users are created in NO group → no scopes → read-only until you assign a persona** (see [Registry & RBAC](REGISTRY_AND_RBAC.md)). |
+| `COGNITO_USERS` | *(carried forward)* | Comma-separated emails for pre-created Cognito users (e.g., `user1@example.com,user2@example.com`). **Users are created in NO group → no scopes → read-only until you assign a persona** (see [Registry & RBAC](REGISTRY_AND_RBAC.md)). Each email becomes a custom resource whose **deletion deletes the Cognito user**, so dropping an email is how you offboard someone. Because an omitted variable is indistinguishable from an intentionally emptied one, leaving it **unset on a redeploy carries the already-provisioned users forward** rather than deleting them — `deploy.sh` prints a warning naming them. Pass `COGNITO_USERS=none` to genuinely remove them all. A re-provisioned user gets a **new emailed temporary password** and loses their group memberships. This carry-forward lives in `scripts/deploy.sh`, so bypassing it — running `npx cdk deploy` or `cdk diff` directly — plans the deletion again; pass `--context cognito_users=a@b.com,...` yourself in that case. |
 | `OTEL_ENDPOINT` | *(unset)* | OTLP HTTP endpoint for platform-level observability (e.g. `https://cloud.langfuse.com/api/public/otel`). When set, every platform Lambda + every deployed agent exports traces here. Per-canvas Observability nodes can still add resource attributes additively but cannot override the endpoint. |
 | `OTEL_AUTH_SECRET_ARN` | *(unset)* | ARN of a Secrets Manager secret holding the precomputed `Authorization` header value (e.g. `Basic <base64>`). Created by `scripts/bootstrap-otel-secret.sh`. Required when `OTEL_ENDPOINT` is set. |
 | `OTEL_SAMPLE_RATE` | `1.0` | Trace sampling ratio (0.0–1.0). |

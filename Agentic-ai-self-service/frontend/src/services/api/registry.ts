@@ -25,6 +25,20 @@ export interface RegistryEntry {
   reviewed_by?: string | null;
   reviewed_at?: string | null;
   rejection_reason?: string | null;
+  /**
+   * Which catalog this row came from — 'platform' (the built-in DynamoDB
+   * registry) or the name of an external backend that projected it, e.g.
+   * 'litellm'. Optional because an older backend omits it; absent means
+   * platform.
+   *
+   * `read_only` is the backend's own verdict on this row, not something the UI
+   * should infer from `source`: which operations a projected entry supports is
+   * the active provider's `capabilities()` decision, and the backend answers 501
+   * either way. Trusting a locally-derived guess would let the UI offer a Clone
+   * button that can only fail.
+   */
+  source?: string;
+  read_only?: boolean;
   // Populated only by the single-entry GET (detail view). Null on list results —
   // the browse grid does not carry full snapshots. Lets the Components tab render
   // the blueprint's nodes/edges without triggering a clone.
@@ -184,4 +198,105 @@ export async function enableAwsRegistry(registryId: string): Promise<{ enabled: 
  */
 export async function searchAwsRegistry(q: string): Promise<{ enabled: boolean; results: Array<Record<string, unknown>>; status_authoritative?: boolean }> {
   return apiRequest(`/api/registry/aws-search?q=${encodeURIComponent(q)}`);
+}
+
+// ============================================================================
+// LiteLLM registry backend (Workstream B)
+// ============================================================================
+
+/**
+ * The active registry backend, plus the LiteLLM connection if one is configured.
+ *
+ * `verified: false` is NOT an error state. A self-hosted LiteLLM is often only
+ * reachable from inside a VPC, and the control-plane Lambda has no VPC egress, so
+ * a perfectly good config saves as unverified. The UI must say "could not be
+ * reached from here" rather than "misconfigured" — a 401/404 is rejected outright
+ * at save time and never reaches this state.
+ *
+ * Never carries the virtual key, only the Secrets Manager ARN it lives at.
+ *
+ * NOTE: mirrored on `ApiClient` in ../api.ts, like the AWS federation shapes
+ * above. Only `tsc -b` catches the two drifting apart.
+ */
+export interface LiteLLMRegistryConfig {
+  provider: 'dynamodb' | 'litellm' | string;
+  configured: boolean;
+  base_url?: string | null;
+  api_key_ref?: string | null;
+  verified: boolean;
+  /**
+   * What the ACTIVE backend supports, straight from its `capabilities()` — not a
+   * property of LiteLLM in the abstract. Returned by GET so the panel can name
+   * the authoritative catalog and explain the read-only rows without hardcoding
+   * a second copy of the backend's own rules.
+   */
+  capabilities?: RegistryCapabilities;
+  /** Present on POST only: why a save came back unverified. */
+  detail?: string;
+}
+
+export interface RegistryCapabilities {
+  provider: string;
+  authoritative_catalog: string;
+  supports_publish: boolean;
+  supports_update: boolean;
+  supports_delete: boolean;
+  supports_review: boolean;
+  supports_clone: boolean;
+  read_only_sources: string[];
+  notes: string;
+}
+
+export interface LiteLLMServer {
+  name: string;
+  slug: string;
+  description?: string;
+  enabled: boolean;
+}
+
+/** Read the registry backend setting and the LiteLLM connection, if any. */
+export async function getLiteLLMRegistryConfig(): Promise<LiteLLMRegistryConfig> {
+  return apiRequest(`/api/registry/litellm-config`);
+}
+
+/**
+ * Point the registry at a LiteLLM proxy (admin). `activate` is what actually
+ * switches the platform over; without it the connection is saved and probed but
+ * the built-in catalog stays authoritative, so an admin can verify connectivity
+ * before changing what every developer sees.
+ */
+export async function enableLiteLLMRegistry(data: {
+  base_url: string;
+  api_key?: string;
+  api_key_ref?: string;
+  activate?: boolean;
+}): Promise<LiteLLMRegistryConfig> {
+  return apiRequest(`/api/registry/litellm-config`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+/**
+ * Revert to the platform's own catalog (admin). Returns the ARN of the minted
+ * key, which is deliberately NOT deleted — it may be shared with a gateway node.
+ */
+export async function disableLiteLLMRegistry(): Promise<
+  LiteLLMRegistryConfig & { orphaned_api_key_ref?: string | null }
+> {
+  return apiRequest(`/api/registry/litellm-config`, { method: 'DELETE' });
+}
+
+/**
+ * The RAW upstream LiteLLM catalog, disabled servers included and flagged.
+ *
+ * Distinct from `searchRegistry()`, which projects only ENABLED servers: an admin
+ * needs to tell "LiteLLM does not have it" apart from "LiteLLM has it disabled",
+ * because only the second explains why a deploy was just blocked.
+ */
+export async function listLiteLLMServers(): Promise<{
+  configured: boolean;
+  servers: LiteLLMServer[];
+}> {
+  return apiRequest(`/api/registry/litellm-servers`);
 }

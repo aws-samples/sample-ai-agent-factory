@@ -12,13 +12,21 @@ import os
 
 import boto3
 
+from app.services.region_models import to_regional_model_id
+
 logger = logging.getLogger(__name__)
 
-TOOL_GENERATOR_MODEL_ID = os.environ.get(
-    "TOOL_GENERATOR_MODEL_ID",
-    # Bedrock flagged the dated Sonnet 4 (May 2025) IDs as Legacy in 2026-Q2.
-    # Use the current date-less generation. See tasks/lessons.md Bug 26.
-    "us.anthropic.claude-sonnet-5",
+# CDK sets TOOL_GENERATOR_MODEL_ID with the region's own prefix
+# (infra/stacks/platform/lambdas.py); the fallback below is written `us.` and is
+# regionalized so local dev — or a Lambda that somehow lost the env var — does
+# not reach for a `us.` inference profile that does not exist in eu-central-1.
+TOOL_GENERATOR_MODEL_ID = to_regional_model_id(
+    os.environ.get(
+        "TOOL_GENERATOR_MODEL_ID",
+        # Bedrock flagged the dated Sonnet 4 (May 2025) IDs as Legacy in 2026-Q2.
+        # Use the current date-less generation. See tasks/lessons.md Bug 26.
+        "us.anthropic.claude-sonnet-5",
+    )
 )
 
 

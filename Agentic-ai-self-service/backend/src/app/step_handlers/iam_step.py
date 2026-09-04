@@ -16,6 +16,7 @@ from app.services.observability import (
     _validate_user_otel_secret_arn,
     get_platform_observability_defaults,
 )
+from app.services.resource_ownership import owner_tag_list
 from app.services.runtime_deployer import create_runtime_iam_role, sanitize_runtime_name
 
 logger = logging.getLogger(__name__)
@@ -117,7 +118,11 @@ def handler(event: dict, context) -> dict:
             # the tag-scoped delete grant can clean it up on teardown. Without the
             # tag, a future tightening of the role/AgentCore* grant would orphan
             # per-agent roles on deletion. (PR #3 review — mNemlaghi.)
-            _managed_tag = [{"Key": "ManagedBy", "Value": "agentcore-flows"}]
+            # Also carries AgentCoreStack={project}-{env}-{region}; see
+            # services/resource_ownership.py. ManagedBy names the product, so it
+            # cannot distinguish two deployments sharing this account, and IAM
+            # role names are account-global.
+            _managed_tag = owner_tag_list(region)
             try:
                 iam_client.create_role(
                     RoleName=pa_role_name,

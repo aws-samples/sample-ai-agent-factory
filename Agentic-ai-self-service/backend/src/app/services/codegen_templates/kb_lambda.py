@@ -11,7 +11,10 @@ import os
 
 import boto3
 
-bedrock_runtime = boto3.client("bedrock-agent-runtime", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+bedrock_runtime = boto3.client(
+    "bedrock-agent-runtime",
+    region_name=os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")),
+)
 
 
 def lambda_handler(event, context):

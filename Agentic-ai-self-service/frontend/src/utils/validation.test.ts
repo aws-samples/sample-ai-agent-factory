@@ -576,3 +576,92 @@ describe('Validation Engine Utilities', () => {
     expect(nameError).toBeDefined();
   });
 });
+
+// ============================================================================
+// Gateway provider validation (Workstream A)
+// ============================================================================
+
+describe('LiteLLM gateway validation', () => {
+  const litellm = (over: Partial<GatewayConfiguration> = {}): GatewayConfiguration =>
+    ({
+      name: 'gw',
+      gatewayProvider: 'litellm',
+      litellmBaseUrl: 'https://litellm.example.com',
+      litellmApiKey: 'sk-test',
+      enableSemanticSearch: true,
+      // Deliberately absent: targetType / targetConfig. A LiteLLM gateway has
+      // no AgentCore target, and REQUIRED_FIELDS.gateway hard-demands both.
+      ...over,
+    } as unknown as GatewayConfiguration);
+
+  it('accepts a LiteLLM gateway with no targetType or targetConfig', () => {
+    const result = validateComponentConfiguration('n1', 'gateway', litellm());
+    expect(result.errors.map((e) => e.field)).not.toContain('targetType');
+    expect(result.errors.map((e) => e.field)).not.toContain('targetConfig');
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it('still requires targetType and targetConfig for an AgentCore gateway', () => {
+    // The pre-existing rule must survive the LiteLLM carve-out.
+    const result = validateComponentConfiguration('n1', 'gateway', {
+      name: 'gw',
+      enableSemanticSearch: true,
+    } as unknown as GatewayConfiguration);
+    expect(result.errors.map((e) => e.field)).toContain('targetType');
+    expect(result.errors.map((e) => e.field)).toContain('targetConfig');
+  });
+
+  it('requires a base URL', () => {
+    const result = validateComponentConfiguration('n1', 'gateway', litellm({ litellmBaseUrl: '' }));
+    expect(result.status).toBe('error');
+    expect(result.errors.map((e) => e.field)).toContain('litellmBaseUrl');
+  });
+
+  it('rejects a non-https base URL before it ever reaches the backend', () => {
+    const result = validateComponentConfiguration(
+      'n1',
+      'gateway',
+      litellm({ litellmBaseUrl: 'http://litellm.example.com' })
+    );
+    expect(result.errors.find((e) => e.field === 'litellmBaseUrl')?.message).toMatch(/https/);
+  });
+
+  it('requires either an inline key or a stored key reference', () => {
+    const missing = validateComponentConfiguration(
+      'n1',
+      'gateway',
+      litellm({ litellmApiKey: undefined })
+    );
+    expect(missing.errors.map((e) => e.field)).toContain('litellmApiKey');
+
+    // After a deploy the raw key is gone and only the ARN comes back. That must
+    // not read as "unconfigured" and block every subsequent save.
+    const stored = validateComponentConfiguration(
+      'n1',
+      'gateway',
+      litellm({
+        litellmApiKey: undefined,
+        litellmApiKeyRef: 'arn:aws:secretsmanager:eu-central-1:1:secret:agentcore-connector/x',
+      })
+    );
+    expect(stored.errors).toHaveLength(0);
+  });
+
+  it('does not warn about semantic search, which is an AgentCore-only concept', () => {
+    const result = validateComponentConfiguration(
+      'n1',
+      'gateway',
+      litellm({ enableSemanticSearch: false })
+    );
+    expect(result.warnings.map((w) => w.field)).not.toContain('enableSemanticSearch');
+  });
+
+  it('does not apply the Lambda ARN check to a LiteLLM gateway', () => {
+    const result = validateComponentConfiguration(
+      'n1',
+      'gateway',
+      litellm({ targetType: 'lambda', targetConfig: { type: 'lambda', functionArn: 'not-an-arn' } })
+    );
+    expect(result.errors).toHaveLength(0);
+  });
+});

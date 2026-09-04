@@ -51,6 +51,8 @@ Functions, DynamoDB, and CloudFront. Drag-and-drop AgentCore components onto a c
 13 model providers, deploy through a Step Functions orchestration, and test agents in-canvas —
 plus enterprise capabilities like agent versioning & rollback, Cedar policy enforcement,
 evaluation, cost analytics, a two-persona agent registry, and CloudFormation / Python export.
+Deploys to any region, and can optionally use **your own LiteLLM proxy** as an MCP gateway and/or
+as the agent catalog instead of the built-in ones.
 See [`Agentic-ai-self-service/README.md`](Agentic-ai-self-service/README.md).
 
 ### `enterprise-mcp-governance-gateway/` — govern every tool call

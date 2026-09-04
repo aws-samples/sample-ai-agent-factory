@@ -155,16 +155,45 @@ class OAuth2Credentials(BaseModel):
 
 
 class GatewayConfiguration(BaseModel):
-    """Configuration for AgentCore Gateway component.
+    """Configuration for a Gateway component (AgentCore or a customer's LiteLLM).
 
     Aligns with agentcore gateway CLI commands.
+
+    ``gateway_provider`` selects WHICH MCP gateway implementation deploys this
+    node. ``agentcore`` (the default, so every stored canvas keeps working with
+    no migration) creates a real AgentCore Gateway from ``target_type`` /
+    ``target_config``. ``litellm`` instead points the agent at a LiteLLM MCP
+    Gateway the customer already runs — nothing is created in AWS beyond a
+    Secrets Manager entry for the virtual key, so the target fields are unused
+    and NOT required. See ``services/litellm_gateway_deployer.py``.
     """
+
+    model_config = ConfigDict(populate_by_name=True)
 
     component_type: Literal["gateway"] = "gateway"
     name: str = Field(min_length=1, max_length=100)
-    target_type: GatewayTargetType
-    target_config: GatewayTargetConfig
+    gateway_provider: Literal["agentcore", "litellm"] = Field(alias="gatewayProvider", default="agentcore")
+    # Required for the agentcore provider, enforced in validate_target_config_type.
+    # Optional at the field level because a LiteLLM gateway has no AgentCore target.
+    target_type: GatewayTargetType | None = None
+    target_config: GatewayTargetConfig | None = None
     enable_semantic_search: bool = True
+
+    # ---- LiteLLM MCP Gateway (gateway_provider == "litellm") ----
+    # Base URL of the customer's LiteLLM proxy. Validated against the SSRF
+    # denylist (https-only, no private/IMDS addresses) by the deployer, not here,
+    # so that guard stays in one place.
+    litellm_base_url: str | None = Field(alias="litellmBaseUrl", default=None, max_length=2048)
+    # Write-only raw virtual key — minted into Secrets Manager then dropped, same
+    # hygiene contract as ConnectorConfig.secret_value. exclude=True keeps it out
+    # of every model_dump() (canvas JSON, deployment record, logs); repr=False
+    # keeps it out of __repr__ and exception output.
+    litellm_api_key: str | None = Field(alias="litellmApiKey", default=None, exclude=True, repr=False)
+    # The Secrets Manager ARN that replaces the raw key. This is what persists.
+    litellm_api_key_ref: str | None = Field(alias="litellmApiKeyRef", default=None)
+    # Optional: pin specific LiteLLM MCP server aliases instead of the aggregate
+    # endpoint. Empty means "all servers the key can see".
+    litellm_servers: list[str] = Field(alias="litellmServers", default_factory=list)
 
     @field_validator("name")
     @classmethod
@@ -195,7 +224,22 @@ class GatewayConfiguration(BaseModel):
         """Ensure target_config type matches target_type. Reject target types
         whose plumbing isn't implemented yet so callers get a clean 422
         instead of a silently-fallback deploy. See tasks/lessons.md Bug 106.
+
+        Also owns the per-provider required-field split: an AgentCore gateway
+        still MUST carry target_type + target_config (they became Optional only
+        so the LiteLLM provider can omit them), and a LiteLLM gateway MUST carry
+        a base URL. Both are 422s at the API boundary either way.
         """
+        if self.gateway_provider == "litellm":
+            if not (self.litellm_base_url or "").strip():
+                raise ValueError("litellm_base_url is required when gateway_provider is 'litellm'")
+            # A LiteLLM gateway has no AgentCore target; ignore any that rode
+            # along rather than failing a canvas the user simply switched over.
+            return self
+
+        if self.target_type is None or self.target_config is None:
+            raise ValueError("target_type and target_config are required when gateway_provider is 'agentcore'")
+
         type_mapping = {
             GatewayTargetType.OPENAPI: "openapi",
             GatewayTargetType.LAMBDA: "lambda",

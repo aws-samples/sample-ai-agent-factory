@@ -49,6 +49,11 @@ from copy import deepcopy
 # ---------------------------------------------------------------------------
 
 
+# A prefix here carries NO trailing space. AgentCore joins credentialPrefix to
+# the key with its own single space, so "Bearer " would be sent as "Bearer  <key>"
+# and refused. Proven against real AWS: on one gateway, two identical mcpServer
+# targets differing only in this — "Bearer" went READY, "Bearer " went FAILED with
+# "returned HTTP 400 to the initialize handshake".
 def _header_key(param_name: str, prefix: str = "") -> dict:
     return {"location": "HEADER", "parameter_name": param_name, "prefix": prefix}
 
@@ -58,7 +63,7 @@ def _query_key(param_name: str) -> dict:
 
 
 def _bearer() -> dict:
-    return _header_key("Authorization", "Bearer ")
+    return _header_key("Authorization", "Bearer")
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +223,7 @@ MCP_SERVERS: dict[str, dict] = {
         "tier": "direct-apikey",
         "verified": "docs",
         "auth_type": "api_key",
-        "api_key_descriptor": _header_key("Authorization", "Sentry-Bearer "),
+        "api_key_descriptor": _header_key("Authorization", "Sentry-Bearer"),
         "credentials_needed": "Sentry access token (Authorization: Sentry-Bearer <token>). OAuth also supported.",
         "example_tools": ["search_events", "search_issues", "use_sentry", "triage"],
         "live_testable": False,
@@ -343,7 +348,7 @@ MCP_SERVERS: dict[str, dict] = {
         "tier": "direct-apikey",
         "verified": "docs",
         "auth_type": "api_key",
-        "api_key_descriptor": _header_key("Authorization", "ApiKey "),
+        "api_key_descriptor": _header_key("Authorization", "ApiKey"),
         "credentials_needed": "Elasticsearch API key (Authorization: ApiKey <key>). Elastic 9.2+/Serverless.",
         "example_tools": ["search", "esql", "list_indices", "get_mappings"],
         "live_testable": False,
@@ -361,6 +366,11 @@ MCP_SERVERS: dict[str, dict] = {
         "credentials_needed": "AWS credentials (SigV4). IAM permissions for the AWS APIs invoked.",
         "example_tools": ["call_aws", "suggest_aws_commands", "get_execution_plan"],
         "live_testable": False,
+        # The preview endpoint is hosted ONLY in us-east-1 — the hostname is not a
+        # regional alias. Surfaced so a Frankfurt deployment warns up front
+        # instead of failing opaquely on a DNS/connect error at gateway-target
+        # creation time. See region_restricted_servers().
+        "region_restricted": ["us-east-1"],
     },
     # ---- Tier 4a: 3LO / dynamic client registration → adapter required -----
     "notion": {
@@ -534,3 +544,24 @@ def list_by_tier(tier: str) -> list[dict]:
 def live_testable_servers() -> list[dict]:
     """Entries that can be end-to-end tested with NO vendor credentials."""
     return [deepcopy(e) for e in MCP_SERVERS.values() if e.get("live_testable")]
+
+
+def is_available_in_region(server_id: str, region: str) -> bool:
+    """Whether a catalog entry's endpoint is reachable from ``region``.
+
+    Most MCP endpoints are vendor SaaS and region-independent, so the default is
+    True. An entry carrying ``region_restricted`` is hosted only in the listed
+    AWS regions (``aws-mcp`` is us-east-1-only) and is unusable elsewhere.
+    """
+    entry = MCP_SERVERS.get(server_id)
+    if entry is None:
+        return True
+    allowed = entry.get("region_restricted")
+    return True if not allowed else region in allowed
+
+
+def region_restricted_servers(region: str) -> list[str]:
+    """IDs of catalog entries that are NOT usable from ``region``."""
+    return [
+        sid for sid, e in MCP_SERVERS.items() if e.get("region_restricted") and region not in e["region_restricted"]
+    ]

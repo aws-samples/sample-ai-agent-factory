@@ -25,6 +25,9 @@ export interface McpServerDeployEntry {
   name?: string;
   endpoint_vars?: Record<string, string>;
   secret_value?: string;
+  /** How the gateway sends the API key outbound (custom endpoints only).
+   *  `prefix: ''` explicitly means "raw key, no scheme". */
+  api_key_descriptor?: { location: string; parameter_name: string; prefix: string };
   oauth?: { client_id?: string; client_secret?: string; discovery_url?: string; scopes?: string[] };
 }
 
@@ -49,6 +52,18 @@ export function mapMcpTargetToDeployEntry(tc: MCPServerTargetConfig): McpServerD
 
   if (tc.endpointVars && Object.keys(tc.endpointVars).length) entry.endpoint_vars = tc.endpointVars;
   if (tc.apiKey) entry.secret_value = tc.apiKey;
+  // Catalog entries carry their own descriptor server-side; only a custom
+  // endpoint needs one sent, and only when it authenticates with an API key.
+  // The prefix carries NO trailing space: AgentCore inserts the separator
+  // between prefix and key itself, so 'Bearer ' would be sent as 'Bearer  <key>'
+  // and the target fails its initialize handshake (proven against real AWS).
+  if (isCustom && tc.authType === 'api_key') {
+    entry.api_key_descriptor = {
+      location: 'HEADER',
+      parameter_name: tc.apiKeyHeader?.trim() || 'Authorization',
+      prefix: tc.apiKeyFormat === 'raw' ? '' : 'Bearer',
+    };
+  }
   if (tc.oauth?.clientId) {
     entry.oauth = {
       client_id: tc.oauth.clientId,
@@ -138,10 +153,22 @@ export function createDefaultTargetConfig(targetType: GatewayTargetType): Gatewa
 export function createDefaultGatewayConfig(): GatewayConfiguration {
   return {
     name: '',
+    // AgentCore stays the default so a freshly dropped Gateway node behaves
+    // exactly as it did before the LiteLLM provider existed.
+    gatewayProvider: 'agentcore',
     targetType: 'lambda',
     targetConfig: createDefaultTargetConfig('lambda'),
     enableSemanticSearch: true,
   };
+}
+
+/**
+ * True when this gateway node delegates to a customer-run LiteLLM MCP Gateway.
+ * Treats a missing `gatewayProvider` as `agentcore`, which is what every canvas
+ * saved before this feature has.
+ */
+export function isLiteLLMGateway(config: GatewayConfiguration | null | undefined): boolean {
+  return (config?.gatewayProvider ?? 'agentcore') === 'litellm';
 }
 
 /**

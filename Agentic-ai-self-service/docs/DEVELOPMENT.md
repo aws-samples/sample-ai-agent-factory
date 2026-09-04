@@ -87,6 +87,23 @@ pytest -m integration tests/integration/test_template_deployments.py -v
 
 Integration tests deploy each of the 7 built-in templates, invoke the deployed runtimes, verify responses, and clean up all resources.
 
+### Live verification scripts
+
+Standalone probes for the paths whose unit tests can only assert what we *believe*
+an external system returns. Each drives the shipped product code against the real
+thing and prints a PASS/FAIL line per check, exiting non-zero on any failure.
+
+| Script | Proves | Needs |
+|---|---|---|
+| `scripts/verify-external-mcp.py <catalog-slug>` | A real AgentCore Gateway targeting a real external MCP, invoked end-to-end, then torn down | AWS credentials |
+| `scripts/verify-litellm.py [base_url] [key]` | The LiteLLM gateway + registry path against a real LiteLLM proxy: payload shapes, parsers, fail-loud readiness gate, catalog projection, governance gate, sidecar merge | A LiteLLM proxy (setup recipe is in the script's docstring); `AGENT_REGISTRY_TABLE_NAME` to also exercise the real merge |
+| `scripts/verify-otel.py` | Platform OTEL wiring reaches the configured OTLP endpoint | A deployed stack with `OTEL_ENDPOINT` set |
+
+`verify-litellm.py` issues only reads and refused writes, so it is safe to point at
+a live registry table. See
+[MCP Gateway Integration](MCP_GATEWAY_INTEGRATION.md#live-verification) for what it
+found that mocks could not.
+
 ### Frontend Tests
 
 ```bash

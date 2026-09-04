@@ -134,6 +134,10 @@ docs/decks/
 # Local agent config — personal working notes, not part of the sample
 CLAUDE.md
 
+# Internal briefs / customer collateral — same reasoning as docs/decks/ above.
+# These are authored for a specific engagement and are not part of the sample.
+*.docx
+
 # CDK runs via npx; no local npm project in infra/ — don't recreate the empty stub
 infra/package-lock.json
 /package-lock.json

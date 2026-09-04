@@ -5,7 +5,13 @@
 
 import { describe, it, expect } from 'vitest';
 import * as fc from 'fast-check';
-import { isValidLambdaArn, resolveGatewayTargets, mapGatewayDeployTargets } from './gatewayConfig';
+import {
+  isValidLambdaArn,
+  resolveGatewayTargets,
+  mapGatewayDeployTargets,
+  isLiteLLMGateway,
+  createDefaultGatewayConfig,
+} from './gatewayConfig';
 import type { GatewayConfiguration } from '../types/components';
 
 // ============================================================================
@@ -245,5 +251,123 @@ describe('mapGatewayDeployTargets', () => {
     };
     expect(mapGatewayDeployTargets(config).externalMcpServers).toHaveLength(0);
     expect(mapGatewayDeployTargets(null).externalMcpServers).toHaveLength(0);
+  });
+
+  // The third supported shape: a LiteLLM proxy as an mcp_server TARGET inside an
+  // AgentCore Gateway (rather than replacing the gateway). The descriptor is what
+  // decides how the gateway authenticates outbound; with none sent, the backend
+  // used to fall back to a bare `Authorization: <key>`, which LiteLLM rejects.
+  const customApiKeyTarget = (extra: Record<string, unknown> = {}) => ({
+    name: 'gw',
+    targetType: 'mcp_server' as const,
+    targetConfig: {
+      type: 'mcp_server' as const,
+      serverId: '__custom__',
+      serverUrl: 'https://litellm.example.com/mcp/',
+      authType: 'api_key' as const,
+      apiKey: 'sk-secret',
+      ...extra,
+    },
+    enableSemanticSearch: true,
+  });
+
+  it('sends an Authorization: Bearer descriptor for a custom api_key endpoint', () => {
+    const [entry] = mapGatewayDeployTargets(customApiKeyTarget()).externalMcpServers;
+    expect(entry.secret_value).toBe('sk-secret');
+    expect(entry.api_key_descriptor).toEqual({
+      location: 'HEADER',
+      parameter_name: 'Authorization',
+      prefix: 'Bearer',
+    });
+  });
+
+  it('leaves NO trailing space on the prefix', () => {
+    // AgentCore joins credentialPrefix to the key with its own single space, so a
+    // trailing space here is sent as `Bearer  <key>` and the target fails its
+    // initialize handshake with HTTP 400. Verified against real AWS.
+    const [entry] = mapGatewayDeployTargets(customApiKeyTarget()).externalMcpServers;
+    expect(entry.api_key_descriptor?.prefix).not.toMatch(/\s$/);
+  });
+
+  it("honours LiteLLM's own header when the user names it", () => {
+    const cfg = customApiKeyTarget({ apiKeyHeader: 'x-litellm-api-key' });
+    const [entry] = mapGatewayDeployTargets(cfg).externalMcpServers;
+    expect(entry.api_key_descriptor?.parameter_name).toBe('x-litellm-api-key');
+    expect(entry.api_key_descriptor?.prefix).toBe('Bearer');
+  });
+
+  it('sends an empty prefix when the raw format is chosen', () => {
+    const cfg = customApiKeyTarget({ apiKeyHeader: 'x-api-key', apiKeyFormat: 'raw' as const });
+    const [entry] = mapGatewayDeployTargets(cfg).externalMcpServers;
+    expect(entry.api_key_descriptor).toEqual({
+      location: 'HEADER',
+      parameter_name: 'x-api-key',
+      prefix: '',
+    });
+  });
+
+  it('sends no descriptor for a catalog entry or a non-api_key custom endpoint', () => {
+    // Catalog entries carry their own descriptor server-side — sending one from
+    // the canvas would override a verified value with a guess.
+    const catalog = mapGatewayDeployTargets({
+      name: 'gw',
+      targetType: 'mcp_server',
+      targetConfig: { type: 'mcp_server', serverId: 'aws-knowledge', apiKeyHeader: 'nope' },
+      enableSemanticSearch: true,
+    } as GatewayConfiguration);
+    expect(catalog.externalMcpServers[0].api_key_descriptor).toBeUndefined();
+
+    const noAuth = mapGatewayDeployTargets(
+      customApiKeyTarget({ authType: 'none' as const }) as GatewayConfiguration,
+    );
+    expect(noAuth.externalMcpServers[0].api_key_descriptor).toBeUndefined();
+  });
+});
+
+// ============================================================================
+// Gateway provider (Workstream A) — LiteLLM as an ADDITIONAL provider
+// ============================================================================
+
+describe('gateway provider selection', () => {
+  it('defaults a freshly dropped Gateway node to AgentCore', () => {
+    expect(createDefaultGatewayConfig().gatewayProvider).toBe('agentcore');
+  });
+
+  it('treats a canvas saved before this feature as AgentCore', () => {
+    // Every stored flow predates `gatewayProvider`. Reading `undefined` as
+    // LiteLLM would silently repoint existing agents at a proxy that isn't there.
+    const legacy: GatewayConfiguration = {
+      name: 'gw',
+      targetType: 'lambda',
+      targetConfig: { type: 'lambda', functionArn: 'arn:aws:lambda:us-west-2:123456789012:function:a' },
+      enableSemanticSearch: true,
+    };
+    expect(isLiteLLMGateway(legacy)).toBe(false);
+    expect(isLiteLLMGateway(null)).toBe(false);
+    expect(isLiteLLMGateway(undefined)).toBe(false);
+  });
+
+  it('recognizes an explicit LiteLLM gateway', () => {
+    const config: GatewayConfiguration = {
+      ...createDefaultGatewayConfig(),
+      gatewayProvider: 'litellm',
+      litellmBaseUrl: 'https://litellm.example.com',
+    };
+    expect(isLiteLLMGateway(config)).toBe(true);
+  });
+
+  it('leaves the AgentCore target mapping untouched for a LiteLLM gateway', () => {
+    // The deploy payload keeps carrying whatever targets the node happens to
+    // have; the backend ignores them for a LiteLLM provider. Asserted so this
+    // mapper is never quietly taught to branch on the provider.
+    const config: GatewayConfiguration = {
+      name: 'gw',
+      gatewayProvider: 'litellm',
+      litellmBaseUrl: 'https://litellm.example.com',
+      targetType: 'mcp_server',
+      targetConfig: { type: 'mcp_server', serverId: 'aws-knowledge' },
+      enableSemanticSearch: true,
+    };
+    expect(mapGatewayDeployTargets(config).externalMcpServers).toEqual([{ server_id: 'aws-knowledge' }]);
   });
 });

@@ -4,6 +4,7 @@
  */
 
 import type { StrandsModelProvider } from '../types/components';
+import { getDeploymentRegion, getRegionPrefixFor } from './awsRegion';
 
 // ============================================================================
 // Model Definitions
@@ -21,10 +22,21 @@ export interface ModelOption {
  * US regions → "us.", EU regions → "eu.", AP regions → "ap.", default → "us."
  */
 export function getRegionPrefix(): string {
-  const region = import.meta.env.VITE_AWS_REGION || '';
-  if (region.startsWith('eu-')) return 'eu';
-  if (region.startsWith('ap-')) return 'ap';
-  return 'us';
+  return getRegionPrefixFor(getDeploymentRegion());
+}
+
+/**
+ * Re-point a `us.`-prefixed cross-region Bedrock model ID at the deployment
+ * region. The catalog below and {@link createDefaultRuntimeConfig} are both
+ * written with `us.` baked in; in eu-central-1 that profile does not exist and
+ * the agent fails on every invoke, so the prefix has to be rewritten.
+ *
+ * IDs with no `us.` prefix (`ai21.jamba-…`, `openai.gpt-oss-…`) are on-demand
+ * rather than cross-region and are returned untouched.
+ */
+export function regionalizeModelId(modelId: string): string {
+  if (!modelId.startsWith('us.')) return modelId;
+  return `${getRegionPrefix()}.${modelId.slice(3)}`;
 }
 
 /**
@@ -32,13 +44,9 @@ export function getRegionPrefix(): string {
  * correct prefix for the deployment region.
  */
 function regionalize(models: ModelOption[]): ModelOption[] {
-  const prefix = getRegionPrefix();
-  return models.map((m) => {
-    if (m.provider === 'bedrock' && m.modelId.startsWith('us.')) {
-      return { ...m, modelId: `${prefix}.${m.modelId.slice(3)}` };
-    }
-    return m;
-  });
+  return models.map((m) =>
+    m.provider === 'bedrock' ? { ...m, modelId: regionalizeModelId(m.modelId) } : m
+  );
 }
 
 /**
@@ -234,7 +242,9 @@ export function createDefaultRuntimeConfig(): RuntimeConfiguration {
     framework: 'strands_agents',
     model: {
       provider: 'bedrock',
-      modelId: 'us.anthropic.claude-sonnet-5',
+      // Regionalized: the `us.` profile does not exist outside US regions, and
+      // this default is what a user gets if they never open the model picker.
+      modelId: regionalizeModelId('us.anthropic.claude-sonnet-5'),
       temperature: 0.7,
       topP: 0.9,
     },

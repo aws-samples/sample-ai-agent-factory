@@ -68,6 +68,17 @@ class RegistryEntry(BaseModel):
     reviewed_by: str | None = None
     reviewed_at: str | None = None
     rejection_reason: str | None = None
+    # Which catalog this row came from — "platform" (this DynamoDB table) or the
+    # name of an external backend that projected it (see services/
+    # registry_providers). Defaults to "platform" so every pre-existing row, which
+    # has no such attribute, deserializes as a normal mutable platform entry.
+    #
+    # Load-bearing next to `status` above: a provider that projects an EXTERNAL
+    # catalog into this model gets `status="approved"` for free from that default,
+    # which would hand approval to anything the external system happens to list.
+    # `source` is what lets the router refuse to treat a projected row as a
+    # platform-reviewed one instead of trusting a defaulted field.
+    source: str = "platform"
 
 
 def slugify(name: str) -> str:

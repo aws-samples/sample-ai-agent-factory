@@ -71,10 +71,15 @@ def build_shared_runtime_role(
     need strict per-tenant IAM should override `RUNTIME_EXEC_ROLE_ARN` with
     a pre-existing role per agent.
     """
+    # IAM role names are account-global, so the region has to be part of the
+    # name for a second regional deployment to stand up alongside the first.
+    # cfg.global_resource_name keeps the legacy name in us-east-1 (renaming a
+    # role there would replace it, and AgentCore's IAM cache would need another
+    # 17-20 min to propagate the replacement — see the Bug 60 note above).
     role = iam.Role(
         stack,
         "SharedRuntimeExecRole",
-        role_name=f"AgentCoreRuntime-{cfg.project}-{cfg.env}-shared",
+        role_name=f"AgentCoreRuntime-{cfg.global_resource_name(stack, 'shared')}",
         assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
         description=(
             "Shared execution role used by every AgentCore runtime "
@@ -276,6 +281,11 @@ def build_workflow_lambda(
             "DYNAMODB_TABLE_NAME": workflows_table.table_name,
             "DYNAMODB_FLOWS_TABLE_NAME": flows_table.table_name,
             "ENVIRONMENT": cfg.env,
+            # PROJECT_NAME + ENVIRONMENT + APP_AWS_REGION form the resource-owner tag
+            # in services/resource_ownership.py; routers/observability.py stamps it on
+            # every agentcore-otel/ secret it creates so cleanup.sh can tell this
+            # deployment's secrets from a co-resident deployment's.
+            "PROJECT_NAME": cfg.project,
             "APP_AWS_REGION": stack.region,
             "POWERTOOLS_SERVICE_NAME": "workflow",
             "PYTHONPATH": "/var/task/src:/var/task:/var/task/lib",
@@ -515,6 +525,13 @@ def build_deployment_lambda(
                 "bedrock-agentcore:GetOauth2CredentialProvider",
                 "bedrock-agentcore:DeleteOauth2CredentialProvider",
                 "bedrock-agentcore:ListOauth2CredentialProviders",
+                # Update*: reusing an existing provider by name must REPOINT it at
+                # the current secret. Without these the "already exists" path
+                # 403s and, worse, silently keeps sending the key the provider was
+                # first created with — a rotation that never takes effect. See
+                # gateway_deployer._ensure_api_key_credential_provider.
+                "bedrock-agentcore:UpdateApiKeyCredentialProvider",
+                "bedrock-agentcore:UpdateOauth2CredentialProvider",
                 "bedrock-agentcore:CreateMemory",
                 "bedrock-agentcore:GetMemory",
                 "bedrock-agentcore:DeleteMemory",
@@ -795,6 +812,12 @@ def build_deployment_lambda(
                 # gateway step. Secrets live ONLY here — never in canvas
                 # JSON, DDB, or logs.
                 f"arn:aws:secretsmanager:{stack.region}:{stack.account}:secret:agentcore-connector/*",
+                # Workstream B: the LiteLLM registry backend's virtual key. Its own
+                # prefix on purpose — agentcore-provider/ is scoped to model-provider
+                # keys, and agentcore-connector/ is swept by per-deployment teardown,
+                # while a registry credential outlives every deployment. This role
+                # serves /api/registry, so it is the only one that needs the grant.
+                f"arn:aws:secretsmanager:{stack.region}:{stack.account}:secret:agentcore-registry/*",
                 # Bug 184 — TEARDOWN parity for the harness->gateway outbound
                 # OAuth2 credential provider. handle_delete_runtime (this
                 # role) calls delete_oauth2_credential_provider, which
@@ -867,9 +890,10 @@ def build_deployment_lambda(
             "OIDC_GROUP_MAP": stack.node.try_get_context("oidc_group_map") or "",
             "ARTIFACTS_BUCKET_NAME": artifacts_bucket.bucket_name,
             "ENVIRONMENT": cfg.env,
+            "PROJECT_NAME": cfg.project,
             "APP_AWS_REGION": stack.region,
             "POWERTOOLS_SERVICE_NAME": "deployment",
-            "TOOL_GENERATOR_MODEL_ID": f"{'eu' if stack.region.startswith('eu-') else 'ap' if stack.region.startswith('ap-') else 'us'}.anthropic.claude-sonnet-5",
+            "TOOL_GENERATOR_MODEL_ID": f"{'eu' if stack.region.startswith('eu-') else 'apac' if stack.region.startswith('ap-') else 'us'}.anthropic.claude-sonnet-5",
             "PYTHONPATH": "/var/task/src:/var/task:/var/task/lib",
             # Needed by destroy_runtime to skip cascade-deletion of the
             # stack-managed shared runtime role (Bug 62).
@@ -1041,6 +1065,7 @@ def build_stream_lambda(
             "DEPLOYMENTS_TABLE_NAME": deployments_table.table_name,
             "DEPLOYMENT_TABLE_NAME": deployments_table.table_name,
             "ENVIRONMENT": cfg.env,
+            "PROJECT_NAME": cfg.project,
             "APP_AWS_REGION": stack.region,
             "POWERTOOLS_SERVICE_NAME": "stream",
             "PYTHONPATH": "/var/task/src:/var/task:/var/task/lib",

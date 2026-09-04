@@ -197,7 +197,11 @@ class PlatformStack(cdk.Stack):
         )
 
         # --- S3 + CloudFront + WAF ---
-        self.web_acl = build_waf_web_acl(self, cfg)
+        # Scope depends on the region: CLOUDFRONT (attached to the distribution)
+        # in us-east-1, REGIONAL (attached to the Cognito user pool) everywhere
+        # else, because AWS only offers CLOUDFRONT-scoped WebACLs in us-east-1
+        # and a distribution will not accept any other scope.
+        self.web_acl = build_waf_web_acl(self, cfg, user_pool=self.user_pool)
         # NOTE: We previously attempted a regional WAF on the API Gateway stage
         # to prevent direct execute-api.amazonaws.com bypass of the CloudFront
         # WAF, but WAFv2 only supports REST API Gateway (v1), NOT HTTP API

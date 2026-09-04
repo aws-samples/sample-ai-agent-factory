@@ -12,6 +12,7 @@ import type {
   ValidationStatus,
   DeploymentStatus,
 } from '../types/workflow';
+import { getDeploymentRegion } from './awsRegion';
 
 // ============================================================================
 // Serialized Types (JSON-safe versions)
@@ -283,7 +284,7 @@ export class WorkflowSerializer {
     return {
       author: metadata?.author ?? '',
       tags: metadata?.tags ?? [],
-      awsRegion: metadata?.awsRegion ?? 'us-east-1',
+      awsRegion: metadata?.awsRegion ?? getDeploymentRegion(),
       deploymentStatus: metadata?.deploymentStatus ?? 'not_deployed',
       lastDeployedAt: metadata?.lastDeployedAt,
       endpointUrl: metadata?.endpointUrl,

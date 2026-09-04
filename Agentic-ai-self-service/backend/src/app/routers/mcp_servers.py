@@ -51,6 +51,12 @@ class McpServerSummary(BaseModel):
     auth_type: str
     live_testable: bool
     endpoint: str | None = None
+    # Regions the endpoint is actually hosted in, when it is not a regional
+    # alias (``aws-mcp`` is us-east-1-only). ``None`` means "available
+    # everywhere". Surfaced so a Frankfurt deployment can warn on the card
+    # rather than let the user wire up a target that never resolves; the
+    # gateway deployer logs the same fact server-side.
+    region_restricted: list[str] | None = None
 
 
 class McpServerDetail(McpServerSummary):
@@ -73,6 +79,7 @@ def _summary(e: dict) -> McpServerSummary:
         auth_type=e["auth_type"],
         live_testable=bool(e.get("live_testable")),
         endpoint=e.get("endpoint"),
+        region_restricted=e.get("region_restricted"),
     )
 
 

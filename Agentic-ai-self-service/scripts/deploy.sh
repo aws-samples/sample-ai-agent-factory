@@ -25,7 +25,17 @@ ENVIRONMENT_NAME="${ENVIRONMENT_NAME:-dev}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 PROJECT_NAME="${PROJECT_NAME:-agentcore-workflow}"
 COGNITO_USERS="${COGNITO_USERS:-}"
+# Scope enforcement. Ships advisory (empty → the stack defaults to "false"), which
+# logs a would-deny and allows; see docs/RBAC_ROLLOUT.md for the rollout. Exposed
+# here because the alternative — a raw `cdk deploy -c rbac_enforce=true` — skips
+# the COGNITO_USERS carry-forward below and would delete every provisioned user.
+RBAC_ENFORCE="${RBAC_ENFORCE:-}"
 STACK_NAME="${PROJECT_NAME}-${ENVIRONMENT_NAME}"
+
+# Set when the frontend uploaded but its CloudFront cache could not be cleared.
+# The summary still prints (the URLs are the useful part) and then the script
+# exits non-zero, because a stale edge cache serves the PREVIOUS build.
+INVALIDATION_FAILED=0
 
 # Resolve project root relative to this script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,8 +51,23 @@ log_success() {
   echo -e "\n\033[1;32m[SUCCESS]\033[0m $*"
 }
 
+log_warning() {
+  echo -e "\n\033[1;33m[WARNING]\033[0m $*" >&2
+}
+
 log_error() {
   echo -e "\n\033[1;31m[ERROR]\033[0m $*" >&2
+}
+
+# Reduce a URL to its bare host, so a CloudFront distribution can be looked up by
+# the one attribute that is unique to it. Deliberately a separate function: it is
+# pure string work, which means infra/tests can run this exact code.
+cf_domain_from_url() {
+  local url="${1:-}"
+  url="${url#http://}"
+  url="${url#https://}"
+  url="${url%%/*}"
+  printf '%s' "${url}"
 }
 
 get_stack_output() {
@@ -114,15 +139,31 @@ check_prerequisites() {
 
 check_aws_credentials() {
   log_info "Checking AWS credentials..."
-  # The stack creates a CLOUDFRONT-scoped WAFv2 WebACL, which AWS only
-  # accepts in us-east-1. Deploying elsewhere also collides with the
-  # account-global CloudFront OAC / response-headers-policy / IAM role
-  # names of an existing deployment. Fail fast (AWS_REGION env vars from
-  # the calling shell silently override the us-east-1 default).
-  if [[ "${AWS_REGION}" != "us-east-1" ]]; then
-    log_error "AWS_REGION is '${AWS_REGION}', but this stack requires us-east-1"
-    log_error "(CLOUDFRONT-scoped WAF WebACL). Unset AWS_REGION or set AWS_REGION=us-east-1."
+  # The stack is region-agnostic, but two things differ outside us-east-1 and
+  # the operator should know about them before a 15-minute deploy starts:
+  #
+  #   1. WAF. A CloudFront distribution accepts ONLY a CLOUDFRONT-scoped WebACL
+  #      and AWS creates those exclusively in us-east-1. Outside us-east-1 the
+  #      same rule set is applied REGIONALly to the Cognito user pool instead,
+  #      and the distribution runs without a WebACL unless you pass
+  #      CLOUDFRONT_WEB_ACL_ARN pointing at one you created in us-east-1.
+  #   2. Account-global names (IAM role, CloudFront OAC, response-headers
+  #      policy) are region-qualified outside us-east-1 so both can coexist.
+  #
+  # A malformed region is still a hard failure — it would otherwise surface as
+  # an opaque CDK/CloudFormation error much later.
+  if [[ ! "${AWS_REGION}" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]]; then
+    log_error "AWS_REGION='${AWS_REGION}' is not a valid AWS region name."
     exit 1
+  fi
+  if [[ "${AWS_REGION}" != "us-east-1" ]]; then
+    log_info "Deploying to '${AWS_REGION}' (not us-east-1)."
+    log_info "  * CloudFront will have NO WebACL; the WAF rule set is applied to"
+    log_info "    the Cognito user pool instead (CLOUDFRONT-scoped ACLs are"
+    log_info "    us-east-1 only). Pass CLOUDFRONT_WEB_ACL_ARN=arn:... to also"
+    log_info "    attach an edge ACL you created in us-east-1."
+    log_info "  * Account-global resource names are suffixed with the region so"
+    log_info "    this deployment can coexist with a us-east-1 one."
   fi
   if ! aws sts get-caller-identity --region "${AWS_REGION}" > /dev/null 2>&1; then
     log_error "AWS credentials are not configured or are invalid."
@@ -134,6 +175,41 @@ check_aws_credentials() {
   log_success "Authenticated to AWS account: ${account_id}"
   log_info "Deployment target: stack '${STACK_NAME}' in region '${AWS_REGION}'"
   log_info "(Override with AWS_REGION=... or ENVIRONMENT_NAME=... before invoking this script.)"
+  check_agentcore_availability
+}
+
+# ── Step 2b: Probe AgentCore availability in the target region ────────
+
+check_agentcore_availability() {
+  # Agents are deployed to Bedrock AgentCore Runtime at *use* time, not at
+  # stack-deploy time — so an unsupported region produces a stack that comes up
+  # clean and then fails on the first agent deploy. Probe the control plane now
+  # instead of maintaining a hardcoded region allowlist that goes stale.
+  #
+  # A permissions failure must NOT block the deploy: the deploying principal is
+  # not necessarily the one that will create runtimes.
+  log_info "Probing Bedrock AgentCore availability in ${AWS_REGION}..."
+  local probe
+  if probe=$(aws bedrock-agentcore-control list-agent-runtimes \
+    --region "${AWS_REGION}" --max-results 1 2>&1); then
+    log_success "Bedrock AgentCore control plane is reachable in ${AWS_REGION}."
+    return
+  fi
+  if grep -qiE 'AccessDenied|not authorized|UnrecognizedClient|ExpiredToken' <<< "${probe}"; then
+    log_info "AgentCore probe was denied by IAM — cannot confirm availability."
+    log_info "Proceeding: the deploying principal need not be able to list runtimes."
+    return
+  fi
+  if grep -qiE 'Could not connect|EndpointConnectionError|endpoint|InvalidClientTokenId|does not exist' <<< "${probe}"; then
+    log_error "Bedrock AgentCore does not appear to be available in ${AWS_REGION}."
+    log_error "The stack will deploy, but every AGENT deploy will fail at runtime creation."
+    log_error "Set AGENTCORE_SKIP_REGION_CHECK=true to proceed anyway."
+    log_error "AWS said: $(head -2 <<< "${probe}")"
+    [[ "${AGENTCORE_SKIP_REGION_CHECK:-false}" == "true" ]] || exit 1
+    log_info "AGENTCORE_SKIP_REGION_CHECK=true — continuing."
+    return
+  fi
+  log_info "AgentCore probe was inconclusive; continuing. AWS said: $(head -2 <<< "${probe}")"
 }
 
 # ── Step 3: Install CDK dependencies ─────────────────────────────────
@@ -228,6 +304,63 @@ preflight_restore_tables() {
   log_success "DynamoDB preflight complete."
 }
 
+# ── Step 5b: Never silently delete provisioned Cognito users ──────────
+
+# Each COGNITO_USERS email becomes a custom resource whose Delete handler calls
+# AdminDeleteUser. So dropping an email from the list is the OFFBOARDING
+# mechanism — deliberate and worth keeping. The hazard is that an *omitted*
+# variable is indistinguishable from an intentionally emptied one: a routine
+# `./scripts/deploy.sh` with COGNITO_USERS unset removes every provisioner and
+# deletes every user it created, taking their password and group memberships
+# with them. That is silent, unprompted data loss on the most ordinary command
+# in the repo.
+#
+# So: an EMPTY list against an EXISTING stack carries forward whoever is already
+# provisioned. Removing a user stays possible, but now requires saying so —
+# either pass the reduced list, or COGNITO_USERS=none to clear it entirely.
+preserve_existing_cognito_users() {
+  if [[ "${COGNITO_USERS}" == "none" ]]; then
+    log_warning "COGNITO_USERS=none — any users provisioned by a previous deploy WILL be deleted."
+    COGNITO_USERS=""
+    return
+  fi
+  [[ -n "${COGNITO_USERS}" ]] && return   # explicit list wins, removals included
+
+  local existing
+  existing="$(aws cloudformation get-template \
+    --stack-name "${STACK_NAME}" --region "${AWS_REGION}" \
+    --query 'TemplateBody' --output json 2>/dev/null \
+    | python3 -c '
+import json, sys
+try:
+    body = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(body, str):          # get-template can hand back a YAML string
+    sys.exit(0)
+# Key on the PROPERTY SHAPE (UserPoolId + a literal Email), not the resource
+# type: CDK emits these as AWS::CloudFormation::CustomResource, not Custom::*,
+# and that distinction is invisible until this returns nothing and the guard
+# silently fails to guard.
+emails = sorted({
+    p["Email"]
+    for r in (body.get("Resources") or {}).values()
+    if isinstance(r, dict)
+    for p in [r.get("Properties") or {}]
+    if isinstance(p, dict) and "UserPoolId" in p
+    and isinstance(p.get("Email"), str) and "@" in p["Email"]
+})
+print(",".join(emails))
+' 2>/dev/null || true)"
+
+  if [[ -n "${existing}" ]]; then
+    COGNITO_USERS="${existing}"
+    log_warning "COGNITO_USERS was not set, but '${STACK_NAME}' already provisions: ${existing}"
+    log_warning "Carrying them forward — deploying without the variable would DELETE them."
+    log_info    "To remove a user, pass the reduced list explicitly; COGNITO_USERS=none clears all."
+  fi
+}
+
 # ── Step 6: Run CDK deploy ────────────────────────────────────────────
 
 run_cdk_deploy() {
@@ -244,6 +377,8 @@ run_cdk_deploy() {
     -c aws_region="${AWS_REGION}" \
     -c project_name="${PROJECT_NAME}" \
     -c cognito_users="${COGNITO_USERS}" \
+    -c cloudfront_web_acl_arn="${CLOUDFRONT_WEB_ACL_ARN:-}" \
+    -c rbac_enforce="${RBAC_ENFORCE}" \
     -c otel_endpoint="${OTEL_ENDPOINT:-}" \
     -c otel_auth_secret_arn="${OTEL_AUTH_SECRET_ARN:-}" \
     -c otel_sample_rate="${OTEL_SAMPLE_RATE:-1.0}" \
@@ -262,18 +397,29 @@ extract_stack_outputs() {
   USER_POOL_ID=$(get_stack_output "UserPoolId")
   USER_POOL_CLIENT_ID=$(get_stack_output "UserPoolClientId")
 
-  # Look up CloudFront distribution ID for cache invalidation
-  DISTRIBUTION_ID=$(aws cloudfront list-distributions \
-    --region "${AWS_REGION}" \
-    --query "DistributionList.Items[?Comment=='${PROJECT_NAME}-${ENVIRONMENT_NAME} distribution'].Id" \
-    --output text 2>/dev/null || echo "")
-
   if [[ -z "${CLOUDFRONT_URL}" || -z "${S3_BUCKET_NAME}" ]]; then
     log_error "Failed to extract one or more stack outputs."
     log_error "CloudFront URL: ${CLOUDFRONT_URL:-<empty>}"
     log_error "S3 Bucket:      ${S3_BUCKET_NAME:-<empty>}"
     exit 1
   fi
+
+  # Look up the CloudFront distribution ID for cache invalidation.
+  #
+  # Match on this stack's own distribution DOMAIN, not on Comment. CloudFront is a
+  # global service, so --region does not scope the listing, and every region's
+  # distribution carries the identical comment "<project>-<env> distribution"
+  # (infra/stacks/platform/cloudfront_waf.py). Deploying a second region therefore
+  # returned two tab-separated ids, and create-invalidation failed with
+  # NoSuchDistribution — seen for real on the first eu-central-1 deploy while
+  # us-east-1 was already live. The DomainName is per-distribution and the
+  # CloudFrontUrl output above already carries exactly this stack's.
+  local cf_domain
+  cf_domain=$(cf_domain_from_url "${CLOUDFRONT_URL}")
+  DISTRIBUTION_ID=$(aws cloudfront list-distributions \
+    --region "${AWS_REGION}" \
+    --query "DistributionList.Items[?DomainName=='${cf_domain}'].Id" \
+    --output text 2>/dev/null || echo "")
 
   log_success "API Gateway URL: ${API_GATEWAY_URL}"
   log_success "CloudFront URL:  ${CLOUDFRONT_URL}"
@@ -305,8 +451,17 @@ upload_frontend_to_s3() {
 # ── Step 10: Invalidate CloudFront cache ──────────────────────────────
 
 invalidate_cloudfront_cache() {
+  # Not "skip quietly": the frontend is already in S3 at this point, so an
+  # un-invalidated distribution keeps serving the previous build from its edges and
+  # the deploy looks successful while the browser shows stale code.
   if [[ -z "${DISTRIBUTION_ID}" || "${DISTRIBUTION_ID}" == "None" ]]; then
-    log_info "Skipping CloudFront invalidation — distribution ID not found."
+    log_error "Could not resolve a CloudFront distribution for ${CLOUDFRONT_URL} — cache NOT invalidated."
+    INVALIDATION_FAILED=1
+    return
+  fi
+  if [[ "${DISTRIBUTION_ID}" == *[[:space:]]* ]]; then
+    log_error "CloudFront lookup was ambiguous (${DISTRIBUTION_ID}) — cache NOT invalidated."
+    INVALIDATION_FAILED=1
     return
   fi
   log_info "Invalidating CloudFront cache for distribution ${DISTRIBUTION_ID} ..."
@@ -351,12 +506,19 @@ main() {
   install_agentcore_deps
   bootstrap_cdk
   preflight_restore_tables
+  preserve_existing_cognito_users
   run_cdk_deploy
   extract_stack_outputs
   build_frontend
   upload_frontend_to_s3
   invalidate_cloudfront_cache
   print_summary
+
+  if [[ "${INVALIDATION_FAILED}" == "1" ]]; then
+    log_error "Deployment finished, but the CloudFront cache was NOT invalidated (see above)."
+    log_error "The edges may still serve the previous frontend build. Re-run, or invalidate manually."
+    exit 1
+  fi
 }
 
 main "$@"
