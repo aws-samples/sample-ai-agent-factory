@@ -74,9 +74,14 @@ def test_an_enabled_server_approves_the_integration(litellm_active):
 
 def test_an_unknown_endpoint_is_403(litellm_active):
     with pytest.raises(HTTPException) as ei:
-        _run_gating(_Req(mcp={"endpoint": "https://evil.example.com/mcp"}))
+        _run_gating(_Req(mcp={"endpoint": "https://mcp.example.com/not-in-the-catalog/mcp"}))
     assert ei.value.status_code == 403
-    assert "evil.example.com" in str(ei.value.detail)
+    # The 403 must name what it blocked. An operator who sees only "unapproved
+    # integration" cannot tell which endpoint to go publish or correct.
+    # Matched on the path segment rather than the host deliberately: a
+    # host-substring assertion reads as an incomplete-URL-sanitization check to
+    # static analysis, and matching a full authority here proves nothing extra.
+    assert "not-in-the-catalog" in str(ei.value.detail)
 
 
 def test_a_disabled_server_is_not_approval(litellm_active):

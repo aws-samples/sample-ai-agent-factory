@@ -3369,7 +3369,16 @@ def deploy_gateway(
                 _msgs = cleanup_gateway_resources("gateway-deploy-abort", region, _partial) or []
                 _bad = [m for m in _msgs if "error" in str(m).lower()]
                 if _bad:
-                    logger.warning("Abort-cleanup left resources behind: %s", "; ".join(_bad)[:400])
+                    # Count + resource kinds, not the message bodies — see
+                    # classify_cleanup_failures for why those cannot be logged.
+                    # This still answers the question that matters here ("did the
+                    # abort leave something behind, and of what kind"); the
+                    # manifest rows returned below are what actually recovers it.
+                    logger.warning(
+                        "Abort-cleanup left resources behind (%d failure(s)): %s",
+                        len(_bad),
+                        ", ".join(classify_cleanup_failures(_bad)),
+                    )
                 else:
                     logger.info("Released leaked gateway %s after failed deploy", _leaked_gw_id)
             except Exception as _ce:  # noqa: BLE001 — abort cleanup is best-effort
@@ -3385,6 +3394,57 @@ def deploy_gateway(
 # ---------------------------------------------------------------------------
 # Gateway cleanup
 # ---------------------------------------------------------------------------
+
+# Distinctive fixed substring -> resource kind, for reporting WHICH kinds of
+# cleanup failed without echoing the message bodies. Ordered most-specific first,
+# because "Custom tool Lambda delete error" also contains "Lambda delete error"
+# and "Gateway IAM role cleanup error" also contains "IAM role cleanup error";
+# first match wins.
+#
+# Why classify at all instead of logging the messages: cleanup_gateway_resources
+# builds them from `client_info` — which also carries `client_secret` — and from
+# raw exception text, and a botocore ParamValidationError echoes the failing
+# call's parameters. Neither belongs in a log line. CodeQL flags the same thing
+# as py/clear-text-logging-sensitive-data.
+_CLEANUP_FAILURE_KINDS: tuple[tuple[str, str], ...] = (
+    ("Custom tool Lambda delete error", "custom-tool-lambda"),
+    ("Shared tool Lambda delete error", "shared-tool-lambda"),
+    ("Gateway IAM role cleanup error", "gateway-iam-role"),
+    ("IAM role cleanup error", "iam-role"),
+    ("Target cleanup error", "gateway-target"),
+    ("Gateway delete error", "gateway"),
+    ("Cognito cleanup error", "cognito-pool"),
+    ("Lambda delete error", "tool-lambda"),
+    ("Connector secret delete error", "connector-secret"),
+    ("API_KEY provider", "credential-provider"),
+    ("OAUTH provider", "credential-provider"),
+)
+
+
+def classify_cleanup_failures(messages) -> list[str]:
+    """Resource kinds named by *messages*, as constants rather than excerpts.
+
+    Returning entries from ``_CLEANUP_FAILURE_KINDS`` — never a slice of the
+    input — is the whole point: a substring of a string carrying a secret still
+    carries it, so mapping to a fixed vocabulary is what actually keeps the
+    message bodies out of the log.
+
+    An unrecognized failure yields ``"unclassified"`` rather than being dropped,
+    so a message this vocabulary has not caught up with still gets counted and
+    still gets seen. ``test_gateway_cleanup_failure_labels.py`` asserts the
+    vocabulary stays exhaustive against the source, so that fallback should never
+    fire in practice.
+    """
+    kinds: set[str] = set()
+    for message in messages:
+        text = str(message)
+        for needle, kind in _CLEANUP_FAILURE_KINDS:
+            if needle in text:
+                kinds.add(kind)
+                break
+        else:
+            kinds.add("unclassified")
+    return sorted(kinds)
 
 
 # Tool Lambdas created once and reused by EVERY gateway deploy. They must never

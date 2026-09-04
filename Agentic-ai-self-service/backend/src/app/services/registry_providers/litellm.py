@@ -60,6 +60,7 @@ import os
 import urllib.error
 
 from app.services.aws_agent_registry import RegistryQueryFailed
+from app.services.gateway_deployer import _DiscoveryUrlBlocked, _DiscoveryUrlInvalid
 from app.services.litellm_gateway_deployer import (
     _SERVERS_PATH,
     _get_json,
@@ -314,6 +315,19 @@ def probe_litellm_registry(base_url: str, api_key: str) -> dict:
     """
     try:
         payload = _get_json(base_url.rstrip("/") + _SERVERS_PATH, api_key)
+    except (_DiscoveryUrlInvalid, _DiscoveryUrlBlocked) as e:
+        # Must be caught BEFORE the generic handler below, which would file it as
+        # "unreachable, saved unverified". A private/link-local/non-https base URL
+        # is not an unreachable proxy — it is a URL we refuse to fetch at all, and
+        # tolerating it as unverified would persist exactly the SSRF target the
+        # guard exists to reject.
+        #
+        # BOTH classes, deliberately: a bad scheme raises _DiscoveryUrlInvalid and
+        # a disallowed address raises _DiscoveryUrlBlocked. Catching only the
+        # second lets `http://` fall through to the lenient path below. Not
+        # `except ValueError`, which would also swallow json.JSONDecodeError and
+        # turn a proxy answering with garbage into a hard 400.
+        raise ValueError(str(e)) from e
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             raise ValueError(

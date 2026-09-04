@@ -112,6 +112,18 @@ KEY = sys.argv[2] if len(sys.argv) > 2 else "sk-verify-1234"
 
 _failures: list[str] = []
 
+# _get_json validates its URL at the sink (https-only + a DNS-resolved
+# private/IMDS denylist), which rejects a loopback http proxy BY DESIGN. Stand it
+# down for this run — the same way the registry config and key lookups are stubbed
+# below — so the layers above it can be exercised against a real proxy. That
+# layering is the entire reason this script exists: the guard is unit-tested and
+# live-proven against the deployed API (it is what returns the 400s there), while
+# the parse layer's contract with LiteLLM is what nothing else can prove.
+#
+# Point this at a real https proxy and the guard runs for real, unpatched.
+if BASE.startswith("http://"):
+    G._validate_outbound_url = lambda url, *a, **k: url
+
 
 def check(label: str, got, want=None, predicate=None) -> None:
     """Assert and keep going, so one failure does not hide the rest."""
