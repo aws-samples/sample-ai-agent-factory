@@ -223,7 +223,18 @@ def _get_json(url: str, api_key: str, servers: list[str] | None = None) -> objec
     which urllib does not expose.
     """
     validated = _validate_outbound_url(url, label="LiteLLM URL rejected —")
-    req = urllib.request.Request(validated, headers=_headers(api_key, servers), method="GET")
+    # CodeQL reports py/full-ssrf here, and it is right that the URL is
+    # customer-controlled: the entire feature is "point the platform at YOUR LiteLLM
+    # proxy", so a path from the request body to this constructor exists by design
+    # and cannot be removed without removing the feature. What it cannot see is that
+    # the line above is a barrier — a validator that raises is not something the
+    # query models — so the mitigation is asserted here rather than inferred:
+    # https-only, every resolved A/AAAA record checked against the private /
+    # link-local / IMDS denylist, plus an optional host allowlist. Unconditional, at
+    # the sink, covered by test_litellm_ssrf_sink.py. The residual risk is DNS
+    # rebinding, documented in the docstring above; no validation at this layer
+    # closes it.
+    req = urllib.request.Request(validated, headers=_headers(api_key, servers), method="GET")  # codeql[py/full-ssrf]
     # nosemgrep: dynamic-urllib-use-detected -- validated on the line above
     # (https-only + DNS-resolved private/IMDS denylist).
     with urllib.request.urlopen(req, timeout=_PROBE_TIMEOUT) as resp:  # noqa: S310
