@@ -34,8 +34,11 @@ VALID_AUTH = {"none", "api_key", "oauth2_client_credentials", "oauth2_3lo", "iam
 class _FakeCtrl:
     """Minimal fake agentcore_ctrl for API-key provider creation."""
 
-    def __init__(self):
+    def __init__(self, target_status="READY", target_reasons=None):
         self.created = []
+        self.target_status = target_status
+        self.target_reasons = target_reasons or []
+        self.deleted_targets = []
 
     def create_api_key_credential_provider(self, **kw):
         self.created.append(kw)
@@ -43,6 +46,17 @@ class _FakeCtrl:
 
     def get_api_key_credential_provider(self, **kw):
         return {"credentialProviderArn": "arn:aws:...:provider/fake-apikey"}
+
+    # The deploy path waits for a new mcpServer target to finish AgentCore's
+    # own `initialize` handshake before calling the deploy a success, so the
+    # double has to answer that poll. Default READY keeps these tests about
+    # target *parameters*; pass target_status="FAILED" to model a target that
+    # could not connect. See _wait_for_mcp_target_ready.
+    def get_gateway_target(self, gatewayIdentifier, targetId):  # noqa: N803 — boto3 casing
+        return {"status": self.target_status, "statusReasons": self.target_reasons}
+
+    def delete_gateway_target(self, gatewayIdentifier, targetId):  # noqa: N803
+        self.deleted_targets.append(targetId)
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +155,10 @@ def test_tier2_query_param_and_prefix_variants():
     assert ak["credentialLocation"] == "QUERY_PARAMETER"
     assert ak["credentialParameterName"] == "tavilyApiKey"
 
-    # Firecrawl uses Authorization: Bearer <key> (prefix present).
+    # Firecrawl uses Authorization: Bearer <key> — prefix present, and with NO
+    # trailing space: AgentCore joins credentialPrefix to the key with its own
+    # single space, so "Bearer " goes out as `Bearer  <key>` and the target fails
+    # its initialize handshake with HTTP 400 (proven against real AWS).
     fc = build_external_mcp_target_params(
         _FakeCtrl(),
         gateway_id="gw",
@@ -152,7 +169,7 @@ def test_tier2_query_param_and_prefix_variants():
     )
     ak = fc["credentialProviderConfigurations"][0]["credentialProvider"]["apiKeyCredentialProvider"]
     assert ak["credentialParameterName"] == "Authorization"
-    assert ak["credentialPrefix"] == "Bearer "
+    assert ak["credentialPrefix"] == "Bearer"
 
 
 def test_tier2_requires_secret_arn():
@@ -355,6 +372,25 @@ def test_deploy_external_mcp_custom_endpoint_api_key(monkeypatch):
     )
     assert out["secret_arns"] == ["arn:aws:secretsmanager:...:secret:fake"]
     assert captured[0]["params"]["credentialProviderConfigurations"][0]["credentialProviderType"] == "API_KEY"
+
+
+def test_deploy_external_mcp_fails_when_the_target_never_connects(monkeypatch):
+    """The readiness gate is wired into the orchestration path, not just unit-
+    testable in isolation: a target AgentCore could not hand-shake with must fail
+    the deploy. Without this, a wrong endpoint/key/prefix recorded ``succeeded``
+    and left the agent silently toolless — observed for real on a live gateway.
+    """
+    _patch_target_capture(monkeypatch)
+    monkeypatch.setattr(gd.time, "sleep", lambda *_: None)
+    reason = "MCP server 'https://example.com/mcp' returned HTTP 400 to the initialize handshake."
+    with pytest.raises(RuntimeError, match="failed to connect"):
+        gd._deploy_external_mcp_targets(
+            _FakeCtrl(target_status="FAILED", target_reasons=[reason]),
+            "gw-1",
+            "us-east-1",
+            [{"endpoint": "https://example.com/mcp", "auth_type": "none", "name": "My MCP"}],
+            owner_sub="alice",
+        )
 
 
 def test_deploy_external_mcp_custom_endpoint_rejects_non_https(monkeypatch):

@@ -24,10 +24,17 @@ import type {
 import {
   TARGET_TYPE_OPTIONS,
   isValidLambdaArn,
+  isLiteLLMGateway,
   createDefaultGatewayConfig,
   createDefaultTargetConfig,
   resolveGatewayTargets,
 } from '../../utils/gatewayConfig';
+
+/** Provider selector options. AgentCore is listed first: it is the default. */
+const GATEWAY_PROVIDER_OPTIONS = [
+  { value: 'agentcore', label: 'AgentCore Gateway (managed by this platform)' },
+  { value: 'litellm', label: 'LiteLLM MCP Gateway (your own proxy)' },
+];
 
 // ============================================================================
 // Props Interface
@@ -93,6 +100,21 @@ export function GatewayConfigurationModal({
 
     if (!config.name.trim()) {
       errors.push({ field: 'name', message: 'Name is required' });
+    }
+
+    // A LiteLLM gateway has no AgentCore targets at all — validating them would
+    // block a perfectly valid config on fields the provider never uses.
+    if (isLiteLLMGateway(config)) {
+      const base = (config.litellmBaseUrl || '').trim();
+      if (!base) {
+        errors.push({ field: 'litellmBaseUrl', message: 'LiteLLM base URL is required' });
+      } else if (!/^https:\/\/[^\s/]+/i.test(base)) {
+        errors.push({ field: 'litellmBaseUrl', message: 'Base URL must be an https:// URL' });
+      }
+      if (!config.litellmApiKey && !config.litellmApiKeyRef) {
+        errors.push({ field: 'litellmApiKey', message: 'A LiteLLM virtual key is required' });
+      }
+      return errors;
     }
 
     if (targets.length === 0) {
@@ -330,6 +352,33 @@ export function GatewayConfigurationModal({
                 helpText="Stored in Secrets Manager at deploy; never persisted in the canvas."
               />
             )}
+            {/* How the key is sent. Catalog entries define this themselves; a
+                custom endpoint needs it, and the default (Authorization: Bearer)
+                is wrong for servers that want a named header — e.g. a LiteLLM
+                proxy also accepts x-litellm-api-key. */}
+            {isCustom && effectiveAuth === 'api_key' && (
+              <>
+                <TextField
+                  id={`apiKeyHeader_${index}`}
+                  label="API Key Header"
+                  value={mcpCfg.apiKeyHeader || ''}
+                  onChange={(value) => updateTargetField(index, 'apiKeyHeader', value)}
+                  placeholder="Authorization"
+                  helpText="Defaults to Authorization. A LiteLLM proxy also accepts x-litellm-api-key."
+                />
+                <SelectField
+                  id={`apiKeyFormat_${index}`}
+                  label="Key Format"
+                  value={mcpCfg.apiKeyFormat || 'bearer'}
+                  onChange={(value) => updateTargetField(index, 'apiKeyFormat', value)}
+                  options={[
+                    { value: 'bearer', label: 'Bearer <key>' },
+                    { value: 'raw', label: 'Raw key (no scheme)' },
+                  ]}
+                  helpText="Bearer suits most servers, including LiteLLM. Pick raw only if the server rejects a scheme."
+                />
+              </>
+            )}
             {/* Tier-3 OAuth client-credentials */}
             {effectiveAuth === 'oauth2_client_credentials' && (
               <>
@@ -366,9 +415,9 @@ export function GatewayConfigurationModal({
       validationErrors.find((e) => e.field === field)?.message;
 
     const targetFieldPrefixes = ['specUrl', 'functionArn', 'serverUrl'];
+    const isLiteLLM = isLiteLLMGateway(config);
 
-    return [
-    {
+    const generalTab = {
       id: 'general',
       label: 'General',
       hasError: validationErrors.some((e) => e.field === 'name'),
@@ -384,10 +433,78 @@ export function GatewayConfigurationModal({
               required
               error={getFieldError('name')}
             />
+            <SelectField
+              id="gatewayProvider"
+              label="Gateway Provider"
+              value={config.gatewayProvider ?? 'agentcore'}
+              onChange={(value) => updateConfig('gatewayProvider', value as 'agentcore' | 'litellm')}
+              options={GATEWAY_PROVIDER_OPTIONS}
+              required
+              helpText="AgentCore Gateway is created and managed for you. LiteLLM points this agent at an MCP gateway you already run — nothing is created in AWS beyond a secret for your virtual key."
+            />
           </FormSection>
         </div>
       ),
-    },
+    };
+
+    const liteLLMTab = {
+      id: 'litellm',
+      label: 'LiteLLM',
+      hasError: validationErrors.some((e) => e.field === 'litellmBaseUrl' || e.field === 'litellmApiKey'),
+      content: (
+        <div className="space-y-6" data-testid="gateway-litellm">
+          <FormSection
+            title="LiteLLM MCP Gateway"
+            description="Your LiteLLM proxy serves the MCP tools this agent will discover. The platform validates the endpoint and stores your virtual key in AWS Secrets Manager — it is never saved on the canvas."
+          >
+            <TextField
+              id="litellmBaseUrl"
+              label="Base URL"
+              type="url"
+              value={config.litellmBaseUrl ?? ''}
+              onChange={(value) => updateConfig('litellmBaseUrl', value)}
+              placeholder="https://litellm.example.com"
+              required
+              error={getFieldError('litellmBaseUrl')}
+              helpText="The proxy root, not an MCP path. Must be https and publicly reachable so the endpoint can be verified before deploy."
+            />
+            <TextField
+              id="litellmApiKey"
+              label="Virtual Key"
+              type="password"
+              value={config.litellmApiKey ?? ''}
+              onChange={(value) => updateConfig('litellmApiKey', value)}
+              placeholder={config.litellmApiKeyRef ? 'Stored — leave blank to keep' : 'sk-...'}
+              required={!config.litellmApiKeyRef}
+              error={getFieldError('litellmApiKey')}
+              helpText="Sent as x-litellm-api-key. Write-only: it is minted into Secrets Manager on deploy and never returned."
+            />
+            <TextField
+              id="litellmServers"
+              label="MCP Servers (optional)"
+              value={(config.litellmServers ?? []).join(', ')}
+              onChange={(value) =>
+                updateConfig(
+                  'litellmServers',
+                  value.split(',').map((s) => s.trim()).filter(Boolean),
+                )
+              }
+              placeholder="github, jira"
+              helpText="Comma-separated server aliases to scope this agent to. Leave blank to use every server your key can see."
+            />
+          </FormSection>
+        </div>
+      ),
+    };
+
+    if (isLiteLLM) {
+      // Targets and semantic search are AgentCore-only concepts; showing them
+      // here would imply they do something.
+      return [generalTab, liteLLMTab];
+    }
+
+    return [
+    generalTab,
     {
       id: 'target',
       label: 'Targets',
@@ -471,7 +588,7 @@ export function GatewayConfigurationModal({
       isOpen={isOpen}
       onClose={onClose}
       onSave={handleSave}
-      title="Configure AgentCore Gateway"
+      title={isLiteLLMGateway(config) ? 'Configure LiteLLM MCP Gateway' : 'Configure AgentCore Gateway'}
       tabs={tabs}
       validationErrors={validationErrors}
     />

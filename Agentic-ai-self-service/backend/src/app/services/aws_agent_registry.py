@@ -41,9 +41,16 @@ Verified against the boto3 1.43.72 service models:
            TagResource, UntagResource, ListTagsForResource
   data:    SearchDiscoverableRegistryRecords, ListDiscoverableRegistryRecords,
            BatchGetDiscoverableRegistryRecord
-  recordType ∈ {MCP, AGENT, CUSTOM, SKILL}
+  recordType ∈ {MCP, AGENT, CUSTOM, SKILL, GATEWAY}
   status     ∈ {DRAFT, PENDING_APPROVAL, APPROVED, REJECTED, DEPRECATED,
                 CREATING, UPDATING, CREATE_FAILED, UPDATE_FAILED}
+  Descriptors has six members: mcpServer, a2aAgentCard, agentSkillsDefinition,
+  custom, http, agui. The first four are recordType-keyed and carry inline
+  content. http/agui are PROTOCOL-keyed, not recordType-keyed ("populated for
+  records detected from an HTTP/AG-UI protocol source"), and are source-only:
+  their shape has a `source` member and no inline data. The model documents no
+  descriptor pairing for GATEWAY — see DESCRIPTOR_KEY_FOR_TYPE for the choice
+  made here.
 
 Degrades gracefully: the Registry may be absent in a region, on an account, or
 in an older boto3 bundle. Every call is best-effort; failures are logged and
@@ -72,8 +79,13 @@ DATA_SERVICE = "agent-registry"
 # First boto3 release shipping the agent-registry service models.
 MIN_BOTO3 = (1, 43, 66)
 
-# GA recordType enum (was descriptorType in preview).
-RECORD_TYPES = ("MCP", "AGENT", "CUSTOM", "SKILL")
+# GA recordType enum (was descriptorType in preview). GATEWAY is real — verified
+# against the botocore agent-registry-control 2025-12-01 model, whose RecordType
+# enum is {MCP, AGENT, CUSTOM, SKILL, GATEWAY}. Omitting it made
+# normalize_record_type("GATEWAY") fall through and silently return "CUSTOM",
+# which was latent only because production had no gateway-provider concept to
+# register. It has one now.
+RECORD_TYPES = ("MCP", "AGENT", "CUSTOM", "SKILL", "GATEWAY")
 
 # Preview spellings we still accept from persisted rows / older callers, mapped
 # onto their GA equivalents. "a2a"/"custom" are the lowercase descriptor keys the
@@ -92,6 +104,38 @@ DESCRIPTOR_KEY_FOR_TYPE = {
     "AGENT": "a2aAgentCard",
     "SKILL": "agentSkillsDefinition",
     "CUSTOM": "custom",
+    # A GATEWAY record describes an MCP endpoint (that is what a gateway serves),
+    # so it carries the mcpServer descriptor. The service model documents a
+    # descriptor for each of the other four record types but names none for
+    # GATEWAY, so this pairing is our choice rather than a documented one — it is
+    # also the only inline-content descriptor that fits. An entry here is not
+    # optional: register_record() indexes this dict by recordType, so a GATEWAY
+    # with no entry would be a KeyError on the deploy path.
+    "GATEWAY": "mcpServer",
+}
+
+# Descriptor members that carry no inline content at all — the service
+# synchronizes them from a configured source URL ("source-only"). They are keyed
+# to a PROTOCOL, not to a recordType, which is why they are deliberately absent
+# from DESCRIPTOR_KEY_FOR_TYPE above: no recordType requires one, and any
+# recordType may legitimately arrive carrying one.
+SOURCE_ONLY_DESCRIPTOR_KEYS = ("http", "agui")
+
+# Every descriptor member the GA Descriptors shape accepts. Exactly one is
+# populated per record.
+DESCRIPTOR_KEYS = (*dict.fromkeys(DESCRIPTOR_KEY_FOR_TYPE.values()), *SOURCE_ONLY_DESCRIPTOR_KEYS)
+
+# Reverse map for normalize_record_type: descriptor key -> recordType. Spelled out
+# rather than inverted from DESCRIPTOR_KEY_FOR_TYPE because that mapping is no
+# longer injective — MCP and GATEWAY both use "mcpServer", so an inversion would
+# resolve "mcpServer" by dict insertion order. MCP is the right answer (a bare
+# descriptor key names a plain MCP server; a gateway is only ever named by the
+# explicit "GATEWAY" recordType), and this makes that intentional.
+_TYPE_FOR_DESCRIPTOR_KEY = {
+    "mcpServer": "MCP",
+    "a2aAgentCard": "AGENT",
+    "agentSkillsDefinition": "SKILL",
+    "custom": "CUSTOM",
 }
 
 # CreateRegistryRecord input constraints (from the service model).
@@ -202,9 +246,8 @@ def normalize_record_type(value: str | None) -> str:
     if upper in RECORD_TYPES:
         return upper
     # Lowercase descriptor keys ("a2aAgentCard", "mcpServer", ...) -> their type.
-    for rtype, key in DESCRIPTOR_KEY_FOR_TYPE.items():
-        if raw == key:
-            return rtype
+    if raw in _TYPE_FOR_DESCRIPTOR_KEY:
+        return _TYPE_FOR_DESCRIPTOR_KEY[raw]
     logger.info("Unknown recordType %r — registering as CUSTOM", raw)
     return "CUSTOM"
 
@@ -548,8 +591,15 @@ class AwsAgentRegistry:
 
         rtype = normalize_record_type(record_type)
         expected_key = DESCRIPTOR_KEY_FOR_TYPE[rtype]
+        # A source-only descriptor (http/agui) satisfies any recordType: its
+        # content is synchronized from a source URL, so the type-specific inline
+        # descriptor is legitimately absent. Rejecting those here would refuse a
+        # record the service itself accepts.
         if descriptors and expected_key not in descriptors:
-            raise ValueError(f"recordType {rtype} requires the {expected_key!r} descriptor, got {sorted(descriptors)}")
+            if not any(k in descriptors for k in SOURCE_ONLY_DESCRIPTOR_KEYS):
+                raise ValueError(
+                    f"recordType {rtype} requires the {expected_key!r} descriptor, got {sorted(descriptors)}"
+                )
 
         record_name = sanitize_record_name(name)
         # description has min length 1 in the service model — never send "".
@@ -809,6 +859,11 @@ def unapproved_integrations(identifiers: list[str]) -> list[str]:
     identifiers (server name or endpoint URL), return those that are NOT
     APPROVED in the AWS Agent Registry.
 
+    Provider-dispatched (Workstream B): when the active registry backend is
+    LiteLLM, that backend answers the gate instead — see
+    ``registry_providers.unapproved_integrations_for_provider``. Everything below
+    describes the AWS Agent Registry path, which is what runs by default.
+
     No-op ([]) when federation is disabled — gating only applies once an org
     opts into registry governance. Matching is by record name OR by a URL
     substring within any descriptor, so a connected server is considered
@@ -832,6 +887,21 @@ def unapproved_integrations(identifiers: list[str]) -> list[str]:
     """
     if not identifiers:
         return []
+
+    # Workstream B: the gate is provider-dispatched. The dispatch lives HERE, not
+    # in deployment_handler, so the triad at the call site (RegistryQueryFailed ->
+    # 503, non-empty -> 403, other -> logged and proceed) is untouched and keeps
+    # its tests. `None` means "the active registry backend does not govern this
+    # gate" and falls through to the AWS federation path below; a backend that
+    # governs returns a list, and [] from it is a real "all approved" verdict.
+    # Lazy import: registry_providers imports this module, so a top-level import
+    # would be circular.
+    from app.services.registry_providers import unapproved_integrations_for_provider
+
+    delegated = unapproved_integrations_for_provider(identifiers)
+    if delegated is not None:
+        return delegated
+
     reg = get_registry()
     if reg is None:
         return []  # federation off → no gating

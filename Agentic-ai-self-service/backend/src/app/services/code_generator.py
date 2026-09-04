@@ -43,11 +43,13 @@ If you are tempted to convert this to Jinja or a code-AST builder, please:
   3. Run the full matrix-tester suite end-to-end before merging.
 """
 
-import os
+import logging
 
 from app.models.deployment_models import RuntimeConfig
-from app.services import codegen_templates
+from app.services import codegen_templates, region_models
 from app.services.agentic_rag_codegen import agentic_rag_tool_name, agentic_rag_tool_source
+
+logger = logging.getLogger(__name__)
 
 # Canonical built-in tool implementations (single source of truth, shared with
 # gateway_deployer and cfn_template_generator). Injected into generated agent
@@ -80,66 +82,38 @@ PROVIDER_PACKAGES: dict[str, str] = {
 FRAMEWORK_PACKAGES = {"strands_agents": "strands-agents", "custom": ""}
 
 
-def _to_cross_region_model_id(model_id: str) -> str:
-    """Convert on-demand model IDs to cross-region inference profile format.
-
-    On-demand model IDs like ``anthropic.claude-sonnet-5`` fail with
-    ValidationException on Bedrock converse API.  Cross-region inference
-    profiles (``us.anthropic.…``) work reliably.
-
-    Already-prefixed IDs (``us.…``, ``global.…``) are returned as-is.
-
-    Appends the ``-v1:0`` version suffix only to LEGACY date-suffixed IDs
-    that are missing it (e.g. ``us.anthropic.claude-haiku-4-5-20251001`` →
-    ``…-20251001-v1:0``). Current-generation IDs
-    (``us.anthropic.claude-sonnet-5``, ``us.anthropic.claude-opus-4-8``)
-    carry NO date suffix and NO ``:N`` version suffix — appending one would
-    produce an invalid model ID, so they pass through unchanged.
-    """
-    if not model_id.startswith(("us.", "global.", "eu.", "ap.")):
-        model_id = f"us.{model_id}"
-    # Only legacy DATED Bedrock inference profiles require a -v1:0 style
-    # version suffix. Dateless current-generation IDs must NOT get one.
-    if "anthropic." in model_id and _has_date_suffix(model_id) and not _has_version_suffix(model_id):
-        model_id = f"{model_id}-v1:0"
-    return model_id
-
-
-def _has_version_suffix(model_id: str) -> bool:
-    """Check if model ID already has a version suffix like -v1:0 or -v2:0."""
-    import re
-
-    return bool(re.search(r"-v\d+:\d+$", model_id))
-
-
-def _has_date_suffix(model_id: str) -> bool:
-    """Check if model ID ends with a legacy date segment like ``-20251001``.
-
-    Current-generation model IDs (``claude-sonnet-5``, ``claude-opus-4-8``)
-    have no date segment and must not receive a ``-v1:0`` suffix.
-    """
-    import re
-
-    return bool(re.search(r"-\d{8}$", model_id))
+# Bedrock cross-region inference-profile handling lives in one place —
+# app.services.region_models — because four implementations of the prefix rule
+# have to agree (see that module's docstring). These are re-exported under their
+# historical names so existing importers keep working.
+_CROSS_REGION_PREFIXES = region_models.CROSS_REGION_PREFIXES
+region_inference_prefix = region_models.region_inference_prefix
+_to_cross_region_model_id = region_models.to_cross_region_model_id
+to_regional_model_id = region_models.to_regional_model_id
+_has_version_suffix = region_models.has_version_suffix
+_has_date_suffix = region_models.has_date_suffix
 
 
 def _get_model_id(config: RuntimeConfig) -> str:
     """Extract model ID from RuntimeConfig, with a sensible default.
 
-    Converts to cross-region inference profile format so the Bedrock
-    converse API works reliably in any region.
+    Converts to the cross-region inference profile format for the DEPLOYMENT
+    region so the Bedrock converse API works reliably wherever the platform is
+    deployed. The stored default below is ``us.``-prefixed, and stored
+    workflows may be too, so ``to_regional_model_id`` re-points the prefix
+    rather than passing it through — in eu-central-1 a ``us.`` profile does not
+    exist and the agent would fail at invoke time.
 
     SECURITY: Validates the model ID to prevent code injection via
     f-string interpolation in generated code templates.
     """
     model_id = config.model.get("modelId", "us.anthropic.claude-sonnet-5")
-    model_id = _to_cross_region_model_id(model_id)
-    return _sanitize_identifier(model_id)
+    return _sanitize_identifier(to_regional_model_id(model_id))
 
 
 def _get_region() -> str:
     """Read AWS region from environment."""
-    return os.getenv("APP_AWS_REGION", os.getenv("AWS_REGION", "us-east-1"))
+    return region_models.current_region()
 
 
 import re as _re
@@ -422,8 +396,13 @@ app = BedrockAgentCoreApp()
 
 SYSTEM_PROMPT = """{system_prompt}"""
 MODEL_ID = os.environ.get("MODEL_ID", "{model_id}")
-REGION = os.environ.get("AWS_REGION", "us-east-1")
+REGION = os.environ.get("AWS_REGION", "{_get_region()}")
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
+# "oauth2" (AgentCore Gateway, the default) exchanges client credentials for a
+# token. "static_bearer" (a LiteLLM MCP Gateway) sends a long-lived virtual key.
+GATEWAY_AUTH_MODE = os.environ.get("GATEWAY_AUTH_MODE", "oauth2")
+GATEWAY_API_KEY = os.environ.get("GATEWAY_API_KEY", "")
+GATEWAY_MCP_SERVERS = os.environ.get("GATEWAY_MCP_SERVERS", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID") or os.environ.get("OAUTH_CLIENT_ID", "")
 COGNITO_CLIENT_SECRET = os.environ.get("COGNITO_CLIENT_SECRET") or os.environ.get("OAUTH_CLIENT_SECRET", "")
 COGNITO_TOKEN_ENDPOINT = os.environ.get("COGNITO_TOKEN_ENDPOINT") or os.environ.get("OAUTH_TOKEN_ENDPOINT", "")
@@ -432,6 +411,9 @@ COGNITO_SCOPE = os.environ.get("COGNITO_SCOPE") or os.environ.get("OAUTH_SCOPE",
 
 def _get_gateway_token():
     """Get OAuth2 access token from Cognito for Gateway authentication."""
+    if GATEWAY_AUTH_MODE == "static_bearer":
+        # LiteLLM: the virtual key IS the credential — no token exchange exists.
+        return GATEWAY_API_KEY
     if not COGNITO_CLIENT_ID or not COGNITO_TOKEN_ENDPOINT:
         return ""
     try:
@@ -474,6 +456,95 @@ def get_full_tools_list(client):
     if len(tools) > _max_tools:
         _gw_logger.warning("Capping %d gateway tools to %d to fit the model context window (MAX_GATEWAY_TOOLS)", len(tools), _max_tools)
         tools = tools[:_max_tools]
+    return _fit_tool_names_for_bedrock(client, tools)
+
+
+def _fit_tool_names_for_bedrock(client, tools, _limit=64):
+    """Alias gateway tool names that exceed Bedrock's 64-char tool-name cap.
+
+    AgentCore Gateway namespaces every tool it serves as ``<targetName>___<toolName>``.
+    When the upstream ALREADY namespaces its own tools -- a LiteLLM MCP Gateway
+    prefixes each tool with its server alias -- the composed name runs past the
+    limit Bedrock enforces on toolConfig.tools[].toolSpec.name, and then EVERY
+    invocation fails with ValidationException, not just one using that tool.
+
+    Observed live on a READY LiteLLM target whose 6 tools discovered correctly and
+    whose every invoke returned 500:
+    'mcp-custom-litellm-proxy___aws_knowledge-aws___get_regional_availability' (72).
+
+    The alias keeps the leaf tool name -- the informative part, since the prefixes
+    are plumbing -- and appends a short digest of the FULL name so two targets
+    exposing the same leaf stay distinct. Dropping the over-long tools instead
+    would be the silent-toolless-agent failure again.
+
+    WHICH attribute to rename depends on the installed strands, and both
+    generations are in the wild because this dependency is deliberately unpinned:
+
+      * 1.54 -- tool_name/tool_spec read a private ``_agent_tool_name`` captured at
+        construction (what its ``name_override`` argument sets), while ``stream()``
+        sends ``mcp_tool.name``. Only the model-facing attribute may be touched.
+      * 1.9  -- ``tool_name`` IS ``mcp_tool.name``, and so is the outbound call, so
+        renaming it also needs the call mapped back to the published name.
+
+    Guessing wrong is not a loud failure, it is exactly the 500 above: renaming
+    ``mcp_tool.name`` on 1.54 changed the wire name and left the spec over-long.
+    So the rename is applied and then VERIFIED by re-reading ``tool_name``, and a
+    name that still will not fit is logged at ERROR rather than left to poison the
+    whole toolConfig.
+    """
+    import hashlib as _gw_hashlib
+    import logging as _gw_log
+    _logger = _gw_log.getLogger("agentcore.gateway")
+    published = dict()
+    for _t in tools:
+        _mcp = getattr(_t, "mcp_tool", None)
+        # tool_name is what lands in toolSpec.name -- the value Bedrock measures.
+        _name = getattr(_t, "tool_name", None) or getattr(_mcp, "name", "") or ""
+        if not _name or len(_name) <= _limit:
+            continue
+        _leaf = _name.split("___")[-1] or _name
+        _alias = _leaf[: _limit - 9] + "_" + _gw_hashlib.sha256(_name.encode("utf-8")).hexdigest()[:8]
+        _wire_before = getattr(_mcp, "name", None)
+        if hasattr(_t, "_agent_tool_name"):
+            _t._agent_tool_name = _alias
+        if getattr(_t, "tool_name", None) != _alias and _mcp is not None:
+            _mcp.name = _alias
+        if getattr(_t, "tool_name", None) != _alias:
+            _logger.error(
+                "Gateway tool name %r exceeds Bedrock's %d-char cap and could not be shortened; "
+                "every invocation will fail until it is",
+                _name, _limit,
+            )
+            continue
+        _wire_after = getattr(_mcp, "name", None)
+        if _wire_before and _wire_after != _wire_before:
+            published[_wire_after] = _wire_before
+        _logger.warning("Gateway tool name %r is over Bedrock's %d-char cap; exposing it as %r", _name, _limit, _alias)
+    if not published:
+        return tools
+
+    def _remap(args, kw):
+        if "name" in kw:
+            kw["name"] = published.get(kw["name"], kw["name"])
+        elif len(args) > 1 and isinstance(args[1], str):
+            args = (args[0], published.get(args[1], args[1])) + tuple(args[2:])
+        return args, kw
+
+    # Reached only on the generation where renaming the model-facing name also
+    # changed the name sent upstream. Wrap the CLIENT rather than subclassing the
+    # tool, so the gateway still receives the name it actually published.
+    _orig_async = getattr(client, "call_tool_async", None)
+    _orig_sync = getattr(client, "call_tool_sync", None)
+    if _orig_async is not None:
+        async def _call_tool_async(*args, **kw):
+            args, kw = _remap(args, kw)
+            return await _orig_async(*args, **kw)
+        client.call_tool_async = _call_tool_async
+    if _orig_sync is not None:
+        def _call_tool_sync(*args, **kw):
+            args, kw = _remap(args, kw)
+            return _orig_sync(*args, **kw)
+        client.call_tool_sync = _call_tool_sync
     return tools
 
 
@@ -481,7 +552,17 @@ def get_full_tools_list(client):
 
 def _create_transport():
     token = _get_gateway_token()
-    headers = {{"Authorization": f"Bearer {{token}}"}} if token else {{}}
+    if GATEWAY_AUTH_MODE == "static_bearer":
+        # LiteLLM reads its virtual key from its own header, and scopes the
+        # request to specific MCP servers via x-mcp-servers. The value needs the
+        # "Bearer " prefix — LiteLLM's /mcp/ endpoint rejects a bare key (it
+        # falls through to a virtual-key DB lookup) and strips the prefix itself.
+        _lkey = token if token.startswith("Bearer ") else f"Bearer {{token}}"
+        headers = {{"x-litellm-api-key": _lkey}} if token else {{}}
+        if GATEWAY_MCP_SERVERS:
+            headers["x-mcp-servers"] = GATEWAY_MCP_SERVERS
+    else:
+        headers = {{"Authorization": f"Bearer {{token}}"}} if token else {{}}
     return streamablehttp_client(GATEWAY_URL, headers=headers)
 
 
@@ -1132,6 +1213,11 @@ def _generate_memory_agent(
 from mcp.client.streamable_http import streamablehttp_client"""
         gateway_env = """
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
+# "oauth2" (AgentCore Gateway, the default) exchanges client credentials for a
+# token. "static_bearer" (a LiteLLM MCP Gateway) sends a long-lived virtual key.
+GATEWAY_AUTH_MODE = os.environ.get("GATEWAY_AUTH_MODE", "oauth2")
+GATEWAY_API_KEY = os.environ.get("GATEWAY_API_KEY", "")
+GATEWAY_MCP_SERVERS = os.environ.get("GATEWAY_MCP_SERVERS", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID") or os.environ.get("OAUTH_CLIENT_ID", "")
 COGNITO_CLIENT_SECRET = os.environ.get("COGNITO_CLIENT_SECRET") or os.environ.get("OAUTH_CLIENT_SECRET", "")
 COGNITO_TOKEN_ENDPOINT = os.environ.get("COGNITO_TOKEN_ENDPOINT") or os.environ.get("OAUTH_TOKEN_ENDPOINT", "")
@@ -1139,6 +1225,9 @@ COGNITO_SCOPE = os.environ.get("COGNITO_SCOPE") or os.environ.get("OAUTH_SCOPE",
         gateway_functions = '''
 
 def _get_gateway_token():
+    if GATEWAY_AUTH_MODE == "static_bearer":
+        # LiteLLM: the virtual key IS the credential — no token exchange exists.
+        return GATEWAY_API_KEY
     if not COGNITO_CLIENT_ID or not COGNITO_TOKEN_ENDPOINT:
         return ""
     try:
@@ -1181,12 +1270,111 @@ def get_full_tools_list(client):
     if len(tools) > _max_tools:
         _gw_logger.warning("Capping %d gateway tools to %d to fit the model context window (MAX_GATEWAY_TOOLS)", len(tools), _max_tools)
         tools = tools[:_max_tools]
+    return _fit_tool_names_for_bedrock(client, tools)
+
+
+def _fit_tool_names_for_bedrock(client, tools, _limit=64):
+    """Alias gateway tool names that exceed Bedrock's 64-char tool-name cap.
+
+    AgentCore Gateway namespaces every tool it serves as ``<targetName>___<toolName>``.
+    When the upstream ALREADY namespaces its own tools -- a LiteLLM MCP Gateway
+    prefixes each tool with its server alias -- the composed name runs past the
+    limit Bedrock enforces on toolConfig.tools[].toolSpec.name, and then EVERY
+    invocation fails with ValidationException, not just one using that tool.
+
+    Observed live on a READY LiteLLM target whose 6 tools discovered correctly and
+    whose every invoke returned 500:
+    'mcp-custom-litellm-proxy___aws_knowledge-aws___get_regional_availability' (72).
+
+    The alias keeps the leaf tool name -- the informative part, since the prefixes
+    are plumbing -- and appends a short digest of the FULL name so two targets
+    exposing the same leaf stay distinct. Dropping the over-long tools instead
+    would be the silent-toolless-agent failure again.
+
+    WHICH attribute to rename depends on the installed strands, and both
+    generations are in the wild because this dependency is deliberately unpinned:
+
+      * 1.54 -- tool_name/tool_spec read a private ``_agent_tool_name`` captured at
+        construction (what its ``name_override`` argument sets), while ``stream()``
+        sends ``mcp_tool.name``. Only the model-facing attribute may be touched.
+      * 1.9  -- ``tool_name`` IS ``mcp_tool.name``, and so is the outbound call, so
+        renaming it also needs the call mapped back to the published name.
+
+    Guessing wrong is not a loud failure, it is exactly the 500 above: renaming
+    ``mcp_tool.name`` on 1.54 changed the wire name and left the spec over-long.
+    So the rename is applied and then VERIFIED by re-reading ``tool_name``, and a
+    name that still will not fit is logged at ERROR rather than left to poison the
+    whole toolConfig.
+    """
+    import hashlib as _gw_hashlib
+    import logging as _gw_log
+    _logger = _gw_log.getLogger("agentcore.gateway")
+    published = dict()
+    for _t in tools:
+        _mcp = getattr(_t, "mcp_tool", None)
+        # tool_name is what lands in toolSpec.name -- the value Bedrock measures.
+        _name = getattr(_t, "tool_name", None) or getattr(_mcp, "name", "") or ""
+        if not _name or len(_name) <= _limit:
+            continue
+        _leaf = _name.split("___")[-1] or _name
+        _alias = _leaf[: _limit - 9] + "_" + _gw_hashlib.sha256(_name.encode("utf-8")).hexdigest()[:8]
+        _wire_before = getattr(_mcp, "name", None)
+        if hasattr(_t, "_agent_tool_name"):
+            _t._agent_tool_name = _alias
+        if getattr(_t, "tool_name", None) != _alias and _mcp is not None:
+            _mcp.name = _alias
+        if getattr(_t, "tool_name", None) != _alias:
+            _logger.error(
+                "Gateway tool name %r exceeds Bedrock's %d-char cap and could not be shortened; "
+                "every invocation will fail until it is",
+                _name, _limit,
+            )
+            continue
+        _wire_after = getattr(_mcp, "name", None)
+        if _wire_before and _wire_after != _wire_before:
+            published[_wire_after] = _wire_before
+        _logger.warning("Gateway tool name %r is over Bedrock's %d-char cap; exposing it as %r", _name, _limit, _alias)
+    if not published:
+        return tools
+
+    def _remap(args, kw):
+        if "name" in kw:
+            kw["name"] = published.get(kw["name"], kw["name"])
+        elif len(args) > 1 and isinstance(args[1], str):
+            args = (args[0], published.get(args[1], args[1])) + tuple(args[2:])
+        return args, kw
+
+    # Reached only on the generation where renaming the model-facing name also
+    # changed the name sent upstream. Wrap the CLIENT rather than subclassing the
+    # tool, so the gateway still receives the name it actually published.
+    _orig_async = getattr(client, "call_tool_async", None)
+    _orig_sync = getattr(client, "call_tool_sync", None)
+    if _orig_async is not None:
+        async def _call_tool_async(*args, **kw):
+            args, kw = _remap(args, kw)
+            return await _orig_async(*args, **kw)
+        client.call_tool_async = _call_tool_async
+    if _orig_sync is not None:
+        def _call_tool_sync(*args, **kw):
+            args, kw = _remap(args, kw)
+            return _orig_sync(*args, **kw)
+        client.call_tool_sync = _call_tool_sync
     return tools
 
 
 def _create_transport():
     token = _get_gateway_token()
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    if GATEWAY_AUTH_MODE == "static_bearer":
+        # LiteLLM reads its virtual key from its own header, and scopes the
+        # request to specific MCP servers via x-mcp-servers. The value needs the
+        # "Bearer " prefix — LiteLLM's /mcp/ endpoint rejects a bare key (it
+        # falls through to a virtual-key DB lookup) and strips the prefix itself.
+        _lkey = token if token.startswith("Bearer ") else f"Bearer {token}"
+        headers = {"x-litellm-api-key": _lkey} if token else {}
+        if GATEWAY_MCP_SERVERS:
+            headers["x-mcp-servers"] = GATEWAY_MCP_SERVERS
+    else:
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
     return streamablehttp_client(GATEWAY_URL, headers=headers)
 
 
@@ -1509,6 +1697,15 @@ def _get_model_init_code(provider: str, model_id: str, region: str) -> tuple[str
     # SECURITY: Sanitize model_id and region to prevent code injection via f-string interpolation
     model_id = _sanitize_identifier(model_id)
     if region and not _REGION_PATTERN.match(region):
+        # Injection guard, not a region default: an unparseable region must not
+        # be interpolated into generated code. Log loudly — silently baking
+        # us-east-1 into an agent meant for another region produces an agent
+        # that deploys fine and then talks to the wrong region.
+        logger.warning(
+            "Region %r does not match the expected AWS region format; "
+            "falling back to us-east-1 in generated model init code.",
+            region,
+        )
         region = "us-east-1"
     if provider in ("bedrock", ""):
         return (
@@ -2170,7 +2367,7 @@ def human_approval(action: str, reason: str = "") -> str:
     import secrets as _hitl_secrets
     import boto3 as _hitl_boto3
 
-    region = _hitl_os.environ.get("AWS_REGION", _hitl_os.environ.get("APP_AWS_REGION", "us-east-1"))
+    region = _hitl_os.environ.get("APP_AWS_REGION", _hitl_os.environ.get("AWS_REGION", "us-east-1"))
     table_name = _hitl_os.environ.get("HITL_REQUESTS_TABLE_NAME", "")
     runtime_id = _hitl_os.environ.get("HITL_RUNTIME_ID", "")
     owner_sub = _hitl_os.environ.get("RUNTIME_OWNER_SUB", "")
@@ -2209,7 +2406,7 @@ def _hitl_record_pending(tool_name, tool_input):
     runtime_id = _hitl_os.environ.get("HITL_RUNTIME_ID", "")
     if not table_name or not runtime_id:
         return ""
-    region = _hitl_os.environ.get("AWS_REGION", _hitl_os.environ.get("APP_AWS_REGION", "us-east-1"))
+    region = _hitl_os.environ.get("APP_AWS_REGION", _hitl_os.environ.get("AWS_REGION", "us-east-1"))
     ms = int(_t.time() * 1000)
     request_id = "%012x%s" % (ms, _s.token_hex(10))
     try:

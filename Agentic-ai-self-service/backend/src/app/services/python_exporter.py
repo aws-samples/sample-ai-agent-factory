@@ -26,6 +26,7 @@ import zipfile
 from app.models.deployment_models import DeployRequest, RuntimeConfig
 from app.services.cfn_template_generator import _sanitize_gateway_name
 from app.services.code_generator import PROVIDER_PACKAGES, generate_agent_code
+from app.services.region_models import to_regional_model_id
 
 # Runtime SDK packages the generated agent.py always imports but that
 # PROVIDER_PACKAGES intentionally omits (PROVIDER_PACKAGES only lists the
@@ -144,6 +145,12 @@ def build_env_example(config: RuntimeConfig, connected_tools=None) -> str:
     model_id = ""
     if isinstance(config.model, dict):
         model_id = config.model.get("modelId") or config.model.get("model_id") or ""
+    if model_id and provider == "bedrock":
+        # This value is what the user copies into .env and runs with, so it has
+        # to name a profile that exists where they are: a stored `us.` ID is not
+        # resolvable in eu-central-1. Bedrock only — an OpenAI/Anthropic-direct
+        # model name must never gain a geography prefix.
+        model_id = to_regional_model_id(model_id)
 
     lines = [
         "# Standalone agent configuration. Copy to .env and fill in.",

@@ -14,7 +14,7 @@ import type { GatewayConfiguration } from '../../types/components';
 // The MCP catalog fetch is lazy + async; a resolved empty list keeps the
 // mcp_server row rendering its "Custom endpoint…" option without network.
 vi.mock('../../services/api', () => ({
-  listMcpServers: vi.fn().mockResolvedValue([]),
+  listMcpServersApi: vi.fn().mockResolvedValue([]),
 }));
 
 describe('GatewayConfigurationModal — multiple targets', () => {
@@ -100,5 +100,160 @@ describe('GatewayConfigurationModal — multiple targets', () => {
     const saved = onSave.mock.calls[0][0] as GatewayConfiguration;
     expect(saved.targets).toHaveLength(1);
     expect(saved.targets?.[0].type).toBe('lambda');
+  });
+});
+
+describe('GatewayConfigurationModal — custom MCP endpoint outbound auth', () => {
+  /** An AgentCore gateway whose single target is a raw MCP endpoint — the shape
+   *  used to wire a LiteLLM proxy as a TARGET rather than as the gateway. */
+  const openCustomMcpRow = () => {
+    render(
+      <GatewayConfigurationModal
+        isOpen
+        onClose={() => {}}
+        onSave={() => {}}
+        initialConfig={{
+          name: 'gw',
+          targetType: 'mcp_server',
+          targetConfig: { type: 'mcp_server', serverId: '__custom__', serverUrl: 'https://litellm.example.com/mcp/' },
+          enableSemanticSearch: true,
+        }}
+      />
+    );
+    fireEvent.click(screen.getByTestId('tab-target'));
+  };
+
+  it('hides the key-shape controls until a custom endpoint uses an API key', () => {
+    openCustomMcpRow();
+    expect(screen.queryByTestId('field-apiKeyHeader_0')).toBeNull();
+    fireEvent.change(screen.getByTestId('field-customAuthType_0'), { target: { value: 'api_key' } });
+    expect(screen.getByTestId('field-apiKeyHeader_0')).toBeTruthy();
+    expect((screen.getByTestId('field-apiKeyFormat_0') as HTMLSelectElement).value).toBe('bearer');
+  });
+
+  it('saves the header name and format so the deploy can build a descriptor', () => {
+    const onSave = vi.fn();
+    render(
+      <GatewayConfigurationModal
+        isOpen
+        onClose={() => {}}
+        onSave={onSave}
+        initialConfig={{
+          name: 'gw',
+          targetType: 'mcp_server',
+          targetConfig: { type: 'mcp_server', serverId: '__custom__', serverUrl: 'https://litellm.example.com/mcp/' },
+          enableSemanticSearch: true,
+        }}
+      />
+    );
+    fireEvent.click(screen.getByTestId('tab-target'));
+    fireEvent.change(screen.getByTestId('field-customAuthType_0'), { target: { value: 'api_key' } });
+    fireEvent.change(screen.getByTestId('field-apiKeyHeader_0'), { target: { value: 'x-litellm-api-key' } });
+    fireEvent.change(screen.getByTestId('field-apiKeyFormat_0'), { target: { value: 'raw' } });
+    fireEvent.click(screen.getByTestId('modal-save-button'));
+
+    const saved = onSave.mock.calls[0][0] as GatewayConfiguration;
+    const target = saved.targets?.[0] as { apiKeyHeader?: string; apiKeyFormat?: string };
+    expect(target.apiKeyHeader).toBe('x-litellm-api-key');
+    expect(target.apiKeyFormat).toBe('raw');
+  });
+});
+
+describe('GatewayConfigurationModal — gateway provider (Workstream A)', () => {
+  const litellmInitial: Partial<GatewayConfiguration> = {
+    name: 'litellm-gw',
+    gatewayProvider: 'litellm',
+    litellmBaseUrl: 'https://litellm.example.com',
+    litellmApiKey: 'sk-test',
+    enableSemanticSearch: true,
+  };
+
+  it('defaults to AgentCore and shows the target editor', () => {
+    render(
+      <GatewayConfigurationModal
+        isOpen
+        onClose={() => {}}
+        onSave={() => {}}
+        initialConfig={{ name: 'gw', targetType: 'lambda', targetConfig: { type: 'lambda', functionArn: '' }, enableSemanticSearch: true }}
+      />
+    );
+    expect((screen.getByTestId('field-gatewayProvider') as HTMLSelectElement).value).toBe('agentcore');
+    expect(screen.getByTestId('tab-target')).toBeTruthy();
+    expect(screen.queryByTestId('tab-litellm')).toBeNull();
+  });
+
+  it('swaps the target tabs for a LiteLLM tab when the provider changes', () => {
+    render(
+      <GatewayConfigurationModal isOpen onClose={() => {}} onSave={() => {}} initialConfig={{ name: 'gw', targetType: 'lambda', targetConfig: { type: 'lambda', functionArn: '' }, enableSemanticSearch: true }} />
+    );
+    fireEvent.change(screen.getByTestId('field-gatewayProvider'), { target: { value: 'litellm' } });
+
+    // Targets and semantic search are AgentCore-only; leaving them visible would
+    // imply they still do something.
+    expect(screen.queryByTestId('tab-target')).toBeNull();
+    expect(screen.queryByTestId('tab-advanced')).toBeNull();
+    fireEvent.click(screen.getByTestId('tab-litellm'));
+    expect(screen.getByTestId('gateway-litellm')).toBeTruthy();
+  });
+
+  it('renders the LiteLLM tab for a stored LiteLLM node', () => {
+    render(
+      <GatewayConfigurationModal isOpen onClose={() => {}} onSave={() => {}} initialConfig={litellmInitial} />
+    );
+    fireEvent.click(screen.getByTestId('tab-litellm'));
+    expect((screen.getByTestId('field-litellmBaseUrl') as HTMLInputElement).value).toBe(
+      'https://litellm.example.com'
+    );
+  });
+
+  it('masks the virtual key input', () => {
+    // It is a live credential typed into a browser; `type=password` is the
+    // minimum, and the field is write-only server-side.
+    render(
+      <GatewayConfigurationModal isOpen onClose={() => {}} onSave={() => {}} initialConfig={litellmInitial} />
+    );
+    fireEvent.click(screen.getByTestId('tab-litellm'));
+    expect((screen.getByTestId('field-litellmApiKey') as HTMLInputElement).type).toBe('password');
+  });
+
+  it('saves base URL, key and comma-split server aliases', () => {
+    const onSave = vi.fn();
+    render(
+      <GatewayConfigurationModal isOpen onClose={() => {}} onSave={onSave} initialConfig={litellmInitial} />
+    );
+    fireEvent.click(screen.getByTestId('tab-litellm'));
+    fireEvent.change(screen.getByTestId('field-litellmServers'), {
+      target: { value: 'github, jira ,, ' },
+    });
+    fireEvent.click(screen.getByTestId('modal-save-button'));
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const saved = onSave.mock.calls[0][0] as GatewayConfiguration;
+    expect(saved.gatewayProvider).toBe('litellm');
+    expect(saved.litellmBaseUrl).toBe('https://litellm.example.com');
+    // Blanks dropped and each alias trimmed — a stray comma would otherwise
+    // become an empty alias the proxy cannot resolve.
+    expect(saved.litellmServers).toEqual(['github', 'jira']);
+  });
+
+  it('blocks save until a base URL is supplied', () => {
+    const onSave = vi.fn();
+    render(
+      <GatewayConfigurationModal
+        isOpen
+        onClose={() => {}}
+        onSave={onSave}
+        initialConfig={{ ...litellmInitial, litellmBaseUrl: '' }}
+      />
+    );
+    fireEvent.click(screen.getByTestId('modal-save-button'));
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('names the provider in the modal title', () => {
+    render(
+      <GatewayConfigurationModal isOpen onClose={() => {}} onSave={() => {}} initialConfig={litellmInitial} />
+    );
+    expect(screen.getByText('Configure LiteLLM MCP Gateway')).toBeTruthy();
   });
 });

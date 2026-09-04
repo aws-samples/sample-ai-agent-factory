@@ -456,7 +456,14 @@ def test_connector_providers_recorded_with_type_prefix():
         }
     ]
     result = gd._deploy_connector_targets(ctrl, "gw-1", "us-west-2", connectors, owner_sub="o")
-    assert result["credential_provider_names"] == ["API_KEY:acc-github-0"]
+    # The recorded name is gateway-SCOPED, and must match the name actually
+    # created byte-for-byte or teardown orphans the provider. Provider names live
+    # in one account-global vault, so an unscoped "acc-github-0" would be shared
+    # by every user who wires the GitHub connector — see
+    # tests/test_credential_provider_scoping.py.
+    scoped = gd._scoped_provider_name("acc-github-0", "gw-1")
+    assert result["credential_provider_names"] == [f"API_KEY:{scoped}"]
+    assert ctrl.create_api_key_credential_provider.call_args.kwargs["name"] == scoped
 
 
 # ---------------------------------------------------------------------------

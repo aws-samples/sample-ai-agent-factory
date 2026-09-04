@@ -17,6 +17,7 @@ import socket
 from unittest.mock import patch
 
 import pytest
+from app.services import gateway_deployer as gd
 from app.services.gateway_deployer import (
     _DiscoveryUrlBlocked,
     _DiscoveryUrlInvalid,
@@ -284,3 +285,66 @@ def test_create_external_oauth_config_no_url_skips_validation() -> None:
     out = _create_external_oauth_config(identity_config, region="us-east-1")
     assert out["client_info"]["token_endpoint"] == ""
     assert out["authorizer_config"]["customJWTAuthorizer"]["discoveryUrl"] == ""
+
+
+# ---------------------------------------------------------------------------
+# OUTBOUND_HOST_ALLOWLIST vs OIDC_DISCOVERY_HOST_ALLOWLIST
+# ---------------------------------------------------------------------------
+# `_validate_outbound_url` is reused for things that are not OIDC discovery
+# documents (connector spec URLs, a LiteLLM gateway/registry base URL). It read
+# the OIDC allowlist for all of them, so an operator who pinned their identity
+# provider silently pinned their LiteLLM proxy to the same host list and got a
+# rejection naming OIDC config they had set for an unrelated reason.
+
+
+class TestOutboundAllowlistIsSeparableFromOidc:
+    _LITELLM = "https://litellm.corp.example.com/v1"
+
+    def test_the_oidc_allowlist_is_still_honoured_when_it_is_the_only_one_set(self, monkeypatch):
+        """The fallback. This is the pre-change behaviour and must not loosen:
+        an operator with only the OIDC var set keeps getting it enforced."""
+        monkeypatch.delenv("OUTBOUND_HOST_ALLOWLIST", raising=False)
+        monkeypatch.setenv("OIDC_DISCOVERY_HOST_ALLOWLIST", "*.okta.com")
+        with pytest.raises(gd._DiscoveryUrlBlocked) as ei:
+            gd._validate_outbound_url(self._LITELLM, label="LiteLLM base URL")
+        assert "OIDC_DISCOVERY_HOST_ALLOWLIST" in str(ei.value)
+
+    def test_the_neutral_allowlist_wins_when_both_are_set(self, monkeypatch):
+        monkeypatch.setenv("OIDC_DISCOVERY_HOST_ALLOWLIST", "*.okta.com")
+        monkeypatch.setenv("OUTBOUND_HOST_ALLOWLIST", "*.corp.example.com")
+        # Would be blocked by the OIDC list; the neutral list permits it. DNS is
+        # stubbed because the allowlist check is all this test is about.
+        monkeypatch.setattr(gd.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 443))])
+        assert gd._validate_outbound_url(self._LITELLM, label="LiteLLM base URL") == self._LITELLM
+
+    def test_the_neutral_allowlist_still_blocks_and_names_itself(self, monkeypatch):
+        monkeypatch.delenv("OIDC_DISCOVERY_HOST_ALLOWLIST", raising=False)
+        monkeypatch.setenv("OUTBOUND_HOST_ALLOWLIST", "*.trusted.example.com")
+        with pytest.raises(gd._DiscoveryUrlBlocked) as ei:
+            gd._validate_outbound_url(self._LITELLM, label="LiteLLM base URL")
+        msg = str(ei.value)
+        assert "OUTBOUND_HOST_ALLOWLIST" in msg
+        assert "OIDC" not in msg, "must not send the operator to config they did not set"
+
+    def test_oidc_discovery_itself_ignores_the_neutral_variable(self, monkeypatch):
+        """Separable in both directions: a general outbound allowlist must not
+        widen which identity providers the platform will fetch metadata from."""
+        monkeypatch.delenv("OIDC_DISCOVERY_HOST_ALLOWLIST", raising=False)
+        monkeypatch.setenv("OUTBOUND_HOST_ALLOWLIST", "*.corp.example.com")
+        monkeypatch.setattr(gd.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 443))])
+        # No OIDC allowlist set → the discovery path applies none at all, rather
+        # than adopting the outbound one.
+        assert gd._validate_discovery_url("https://anything.example.org/.well-known/openid-configuration")
+
+    def test_no_allowlist_anywhere_is_unchanged(self, monkeypatch):
+        monkeypatch.delenv("OIDC_DISCOVERY_HOST_ALLOWLIST", raising=False)
+        monkeypatch.delenv("OUTBOUND_HOST_ALLOWLIST", raising=False)
+        monkeypatch.setattr(gd.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 443))])
+        assert gd._validate_outbound_url(self._LITELLM, label="LiteLLM base URL") == self._LITELLM
+
+    def test_the_private_ip_denylist_is_not_bypassable_by_an_allowlist(self, monkeypatch):
+        """The allowlist is a narrowing control, never a widening one."""
+        monkeypatch.setenv("OUTBOUND_HOST_ALLOWLIST", "*.corp.example.com")
+        monkeypatch.setattr(gd.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("169.254.169.254", 443))])
+        with pytest.raises(gd._DiscoveryUrlBlocked):
+            gd._validate_outbound_url(self._LITELLM, label="LiteLLM base URL")

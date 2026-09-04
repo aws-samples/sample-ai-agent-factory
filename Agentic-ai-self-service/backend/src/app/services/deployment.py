@@ -37,6 +37,7 @@ from app.models import (
 from app.models.enums import StrandsModelProvider
 from app.services import runtime_deployer
 from app.services.observability import build_otel_env_vars, get_platform_observability_defaults
+from app.services.resource_ownership import owner_tag_list
 from app.services.runtime_deployer import (
     create_agent_runtime,
     create_runtime_iam_role,
@@ -949,22 +950,54 @@ class WorkflowExecutor:
 
                 gw_config_dict = {"name": gw_name}
 
-                from app.services.gateway_deployer import (
-                    deploy_gateway as boto3_deploy_gateway,
+                # Workstream A: this direct path must dispatch on gateway_provider
+                # too, or a canvas that chose LiteLLM would silently get an
+                # AgentCore Gateway here. Note this path deliberately rebuilds a
+                # minimal config dict, so the LiteLLM fields have to be copied
+                # across explicitly — they are not carried by gw_config_dict.
+                from app.services.litellm_gateway_deployer import (
+                    deploy_litellm_gateway,
+                    resolve_gateway_provider,
                 )
 
-                gateway_result = await asyncio.to_thread(
-                    boto3_deploy_gateway,
-                    gateway_config=gw_config_dict,
-                    region=self.region,
-                    template_id=template_id,
-                    gateway_tools=gateway_tools,
-                    identity_config=identity_config,
-                    custom_tools=custom_tools,
-                    connectors=connectors,
-                    owner_sub=owner_sub,
-                    mcp_server_runtime_arn=mcp_server_runtime_arn,
+                gw_node_cfg = (
+                    gateway_node.data if gateway_node and isinstance(gateway_node.data, GatewayConfiguration) else None
                 )
+                gw_provider = resolve_gateway_provider(
+                    {"gateway_provider": getattr(gw_node_cfg, "gateway_provider", None)}
+                )
+
+                if gw_provider == "litellm":
+                    gateway_result = await asyncio.to_thread(
+                        deploy_litellm_gateway,
+                        gateway_config={
+                            "name": gw_name,
+                            "litellm_base_url": getattr(gw_node_cfg, "litellm_base_url", None),
+                            "litellm_api_key": getattr(gw_node_cfg, "litellm_api_key", None),
+                            "litellm_api_key_ref": getattr(gw_node_cfg, "litellm_api_key_ref", None),
+                            "litellm_servers": getattr(gw_node_cfg, "litellm_servers", None) or [],
+                        },
+                        region=self.region,
+                        owner_sub=owner_sub,
+                        deployment_id=deployment_id,
+                    )
+                else:
+                    from app.services.gateway_deployer import (
+                        deploy_gateway as boto3_deploy_gateway,
+                    )
+
+                    gateway_result = await asyncio.to_thread(
+                        boto3_deploy_gateway,
+                        gateway_config=gw_config_dict,
+                        region=self.region,
+                        template_id=template_id,
+                        gateway_tools=gateway_tools,
+                        identity_config=identity_config,
+                        custom_tools=custom_tools,
+                        connectors=connectors,
+                        owner_sub=owner_sub,
+                        mcp_server_runtime_arn=mcp_server_runtime_arn,
+                    )
 
                 if not gateway_result.get("success"):
                     raise RuntimeError(f"Gateway deployment failed: {gateway_result.get('error', 'unknown')}")
@@ -984,7 +1017,12 @@ class WorkflowExecutor:
                     _record_resource_best_effort(
                         deployment_id, self.region, {"type": "gateway", "id": _gw["gateway_id"]}
                     )
-                if _gw.get("gateway_name"):
+                # Gated on gateway_id, not gateway_name: the AgentCoreGateway-*
+                # execution role only exists when an AgentCore Gateway was actually
+                # created. A LiteLLM gateway reports a name but no id, and recording
+                # a phantom role would make teardown attempt (and log) a delete of
+                # something that never existed.
+                if _gw.get("gateway_id") and _gw.get("gateway_name"):
                     _record_resource_best_effort(
                         deployment_id,
                         self.region,
@@ -1297,6 +1335,11 @@ class WorkflowExecutor:
                                 RoleName=memory_role_name,
                                 AssumeRolePolicyDocument=_json.dumps(trust_policy),
                                 Description=f"Memory execution role for {mem_name}",
+                                # Same reason as the Step Functions copy in
+                                # step_handlers/memory_step.py: the role name is
+                                # account-global, so only this tag distinguishes one
+                                # deployment's memory roles from another's.
+                                Tags=owner_tag_list(self.region),
                             )
                             memory_role_arn = role_resp["Role"]["Arn"]
                             iam_client.put_role_policy(

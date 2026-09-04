@@ -28,6 +28,7 @@ from app.models.deployment_models import DeployRequest, RuntimeConfig
 from app.services import codegen_templates
 from app.services.code_generator import generate_agent_code
 from app.services.observability import build_otel_env_vars
+from app.services.region_models import current_region, repoint_regional_prefix, to_regional_model_id
 
 logger = logging.getLogger(__name__)
 
@@ -413,7 +414,11 @@ class CfnTemplateGenerator:
                 },
                 "ModelId": {
                     "Type": "String",
-                    "Default": "us.anthropic.claude-sonnet-5",
+                    # The cross-region prefix is baked at generation time from the
+                    # platform's own region: a `us.` inference profile does not
+                    # exist in eu-central-1. The stack owner can still override the
+                    # parameter if they deploy the template somewhere else.
+                    "Default": to_regional_model_id("us.anthropic.claude-sonnet-5"),
                     "Description": "Bedrock model ID (cross-region inference profile)",
                 },
                 "ArtifactsBucket": {
@@ -1225,7 +1230,12 @@ def handler(event, context):
     def _add_kb_tool_lambda_and_target(self, template: dict, deployment_name: str, kb_config: dict) -> None:
         """Add a Lambda function and Gateway Target for the Knowledge Base tool."""
         kb_mode = kb_config.get("kbMode", "existing")
-        foundation_model_id = kb_config.get("foundationModelId", "us.anthropic.claude-sonnet-5")
+        # repoint_regional_prefix, not to_regional_model_id: this ID lands in a
+        # `foundation-model/` ARN, and an on-demand ID that never had a
+        # geography prefix must not gain one (see knowledge_base_step).
+        foundation_model_id = repoint_regional_prefix(
+            kb_config.get("foundationModelId", "us.anthropic.claude-sonnet-5")
+        )
 
         # For "existing" mode, KB ID is a parameter; for "create_new", it's created by the KB resources
         if kb_mode == "existing":
@@ -1514,7 +1524,7 @@ def handler(event, context):
                 "BedrockDataAutomationConfiguration": {"ParsingModality": "MULTIMODAL"},
             }
         elif parsing_strategy == "bedrock_foundation_model":
-            parsing_model_id = kb_config.get("parsingModelId", "us.anthropic.claude-sonnet-5")
+            parsing_model_id = repoint_regional_prefix(kb_config.get("parsingModelId", "us.anthropic.claude-sonnet-5"))
             fm_cfg: dict = {
                 "ModelArn": {"Fn::Sub": f"arn:aws:bedrock:${{AWS::Region}}::foundation-model/{parsing_model_id}"},
                 "ParsingModality": "MULTIMODAL",
@@ -2570,7 +2580,7 @@ aws s3 cp mcp-server-code.zip "s3://${BUCKET}/cfn-assets/${STACK_NAME}/mcp-serve
 set -euo pipefail
 
 STACK_NAME="${{1:-{deployment_name}}}"
-REGION="${{2:-us-east-1}}"
+REGION="${{2:-{current_region()}}}"
 BUCKET="${{3:-}}"
 
 if [[ -z "$BUCKET" ]]; then
@@ -2676,12 +2686,12 @@ echo "Deployment complete!"
 '''
 
     def _generate_teardown_script(self) -> str:
-        return """#!/usr/bin/env bash
+        return f"""#!/usr/bin/env bash
 # teardown.sh — Delete AgentCore CloudFormation stack
 set -euo pipefail
 
-STACK_NAME="${1:-}"
-REGION="${2:-us-east-1}"
+STACK_NAME="${{1:-}}"
+REGION="${{2:-{current_region()}}}"
 
 if [[ -z "$STACK_NAME" ]]; then
     echo "Usage: ./teardown.sh <stack-name> [region]"
@@ -2740,7 +2750,7 @@ Upload: `aws s3 cp strands-mcp.zip s3://YOUR-BUCKET/{STRANDS_BUNDLE_KEY}`
 
 ```bash
 chmod +x deploy.sh teardown.sh
-./deploy.sh my-agent us-east-1 my-artifacts-bucket
+./deploy.sh my-agent {current_region()} my-artifacts-bucket
 ```
 
 ## Parameters
@@ -2748,7 +2758,7 @@ chmod +x deploy.sh teardown.sh
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | DeploymentName | {deployment_name} | Base name for all resources |
-| ModelId | {config.model.get("id", "us.anthropic.claude-sonnet-5")} | Bedrock model ID |
+| ModelId | {to_regional_model_id(config.model.get("id", "us.anthropic.claude-sonnet-5"))} | Bedrock model ID |
 | ArtifactsBucket | (required) | S3 bucket for code and bundles |
 | DependencyBundleKey | {STRANDS_BUNDLE_KEY} | S3 key for dependency bundle |
 
@@ -2764,7 +2774,7 @@ configuration from environment variables — no hardcoded credentials.
 ## Teardown
 
 ```bash
-./teardown.sh my-agent us-east-1
+./teardown.sh my-agent {current_region()}
 ```
 
 ## Architecture

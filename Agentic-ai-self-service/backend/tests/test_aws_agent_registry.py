@@ -36,8 +36,17 @@ def test_ga_service_names():
 
 
 def test_ga_record_type_enum():
-    """recordType replaced descriptorType; A2A/AGENT_SKILLS were renamed."""
-    assert set(ar.RECORD_TYPES) == {"MCP", "AGENT", "CUSTOM", "SKILL"}
+    """recordType replaced descriptorType; A2A/AGENT_SKILLS were renamed.
+
+    GATEWAY was missing from this list until it was checked against the installed
+    botocore model, whose RecordType enum is
+    {MCP, AGENT, CUSTOM, SKILL, GATEWAY}. The omission was silent — a GATEWAY
+    record fell through normalize_record_type's membership check onto the
+    "unknown -> CUSTOM" fallback and was registered under the wrong type with no
+    error raised. test_agent_registry_ga.py now asserts this set against the
+    shipped service model rather than a hand-copy, so the two cannot drift again.
+    """
+    assert set(ar.RECORD_TYPES) == {"MCP", "AGENT", "CUSTOM", "SKILL", "GATEWAY"}
     assert "A2A" not in ar.RECORD_TYPES
     assert "AGENT_SKILLS" not in ar.RECORD_TYPES
 

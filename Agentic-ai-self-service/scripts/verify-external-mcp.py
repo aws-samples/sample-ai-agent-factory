@@ -13,6 +13,16 @@ Usage:  AWS_REGION=us-west-2 python3 scripts/verify-external-mcp.py [catalog_id]
         catalog_id defaults to "aws-knowledge" (live-verified 2026-07-16).
         Only Tier-1 (auth_type="none") catalog ids are safe to run credential-free.
 
+        MCP_TARGET_MODE=custom drives the CUSTOM-endpoint branch instead of a
+        catalog lookup (``_deploy_external_mcp_targets`` with a raw ``endpoint``
+        and no ``server_id``). That branch is how a self-hosted MCP server — a
+        customer's LiteLLM proxy, for instance — becomes a Gateway ``mcpServer``
+        target, i.e. the third supported gateway shape alongside "AgentCore
+        Gateway" and "LiteLLM instead of the Gateway". It was covered only by
+        unit tests, which cannot show that AgentCore accepts the target params we
+        synthesize. Uses the same public MCP endpoint, so the only thing that
+        differs is our code path.
+
 Note: uses curl for HTTPS (macOS system Python often lacks CA roots for urllib).
 """
 
@@ -33,6 +43,8 @@ sys.path.insert(0, os.path.join(_HERE, "..", "backend", "src"))
 REGION = os.environ.get("AWS_REGION", "us-west-2")
 SUFFIX = "mcpext"
 CATALOG_ID = sys.argv[1] if len(sys.argv) > 1 else "aws-knowledge"
+# "catalog" (default) or "custom" — see the module docstring.
+TARGET_MODE = os.environ.get("MCP_TARGET_MODE", "catalog").strip().lower()
 ctrl = boto3.client("bedrock-agentcore-control", region_name=REGION)
 cog = boto3.client("cognito-idp", region_name=REGION)
 
@@ -123,14 +135,33 @@ def main():
         time.sleep(5)
     log(f"gateway status READY, url={gurl}")
 
-    # 3. Add AWS Knowledge MCP as external target via NEW code path
-    from app.services.gateway_deployer import deploy_external_mcp_target
-    from app.services.mcp_catalog import get_mcp_server
+    # 3. Add the MCP server as an external target via the NEW code path
+    if TARGET_MODE == "custom":
+        # No server_id: the caller hands us a raw https endpoint, which is the
+        # branch a self-hosted proxy (e.g. LiteLLM) goes through. Exercised via
+        # the plural wiring function because that is where the branch lives.
+        from app.services.gateway_deployer import _deploy_external_mcp_targets
+        from app.services.mcp_catalog import get_mcp_server
 
-    entry = get_mcp_server(CATALOG_ID)
-    assert entry, f"unknown catalog id {CATALOG_ID}"
-    tgt = deploy_external_mcp_target(ctrl, gateway_id=gid, catalog_entry=entry)
-    log(f"external MCP target created: {tgt.get('targetId') if tgt else None}")
+        entry = get_mcp_server(CATALOG_ID)
+        assert entry, f"unknown catalog id {CATALOG_ID}"
+        raw_endpoint = entry["endpoint"]
+        log(f"CUSTOM-endpoint mode: wiring raw endpoint {raw_endpoint} with no catalog id")
+        res = _deploy_external_mcp_targets(
+            ctrl,
+            gid,
+            REGION,
+            [{"name": "aws-knowledge", "endpoint": raw_endpoint, "auth_type": "none"}],
+        )
+        log(f"custom MCP target result: {json.dumps(res)[:300]}")
+    else:
+        from app.services.gateway_deployer import deploy_external_mcp_target
+        from app.services.mcp_catalog import get_mcp_server
+
+        entry = get_mcp_server(CATALOG_ID)
+        assert entry, f"unknown catalog id {CATALOG_ID}"
+        tgt = deploy_external_mcp_target(ctrl, gateway_id=gid, catalog_entry=entry)
+        log(f"external MCP target created: {tgt.get('targetId') if tgt else None}")
     # wait target READY
     for _ in range(20):
         ts = ctrl.list_gateway_targets(gatewayIdentifier=gid).get("items", [])

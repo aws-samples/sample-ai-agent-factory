@@ -21,6 +21,7 @@ import uuid
 from datetime import datetime, timezone
 
 import boto3
+from botocore.config import Config as BotoConfig
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
@@ -51,6 +52,7 @@ from app.services.gateway_deployer import (
     _release_shared_tool_lambda,
     cleanup_gateway_resources,
     get_cognito_token,
+    purge_credential_provider,
 )
 from app.services.harness_deployer import destroy_harness, invoke_harness
 from app.services.runtime_deployer import destroy_runtime
@@ -495,9 +497,11 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
                 detail=(
                     "Integration gating is enabled but the Agent Registry could not be "
                     f"queried, so approval status is unknown ({_rqe}). Refusing the deploy "
-                    "rather than let an unreviewed integration through. Check that the "
-                    "deployment role holds agent-registry:ListRegistryRecords and that the "
-                    "configured registry id is correct."
+                    "rather than let an unreviewed integration through. Check the active "
+                    "registry backend: for AWS Agent Registry, that the deployment role "
+                    "holds agent-registry:ListRegistryRecords and the registry id is "
+                    "correct; for a LiteLLM catalog, that the proxy is reachable and its "
+                    "virtual key is still valid."
                 ),
             ) from _rqe
         if _blocked:
@@ -1438,16 +1442,18 @@ def _delete_managed_resource(res: dict, region: str) -> str:
                         continue
                     raise
             return f"[manifest] gateway {rid} deleted"
-        if rtype == "oauth2_credential_provider":
-            boto3.client("bedrock-agentcore-control", region_name=res_region).delete_oauth2_credential_provider(
-                name=rname or rid
+        if rtype in ("oauth2_credential_provider", "api_key_credential_provider"):
+            # Purge from BOTH namespaces rather than trusting the recorded type.
+            # Manifest rows written before the external-MCP path emitted a TYPE:
+            # prefix defaulted to oauth2, and delete_oauth2_credential_provider on
+            # an API-key provider returns success without deleting it — so a
+            # mis-typed row reported a clean teardown and stranded the provider.
+            _ok, _msg = purge_credential_provider(
+                boto3.client("bedrock-agentcore-control", region_name=res_region), rname or rid
             )
-            return f"[manifest] oauth2 provider {rname or rid} deleted"
-        if rtype == "api_key_credential_provider":
-            boto3.client("bedrock-agentcore-control", region_name=res_region).delete_api_key_credential_provider(
-                name=rname or rid
-            )
-            return f"[manifest] apikey provider {rname or rid} deleted"
+            if not _ok:
+                raise RuntimeError(_msg)
+            return f"[manifest] {_msg}"
         if rtype == "secret":
             boto3.client("secretsmanager", region_name=res_region).delete_secret(
                 SecretId=rid, ForceDeleteWithoutRecovery=True
@@ -1621,6 +1627,14 @@ def _delete_managed_resource(res: dict, region: str) -> str:
                         continue
                     raise
             return f"[manifest] cognito pool {rid} deleted"
+        if rtype == "litellm_gateway":
+            # Informational only. A LiteLLM gateway is the CUSTOMER's proxy — we
+            # created no AWS resource for it and must never try to delete it. The
+            # one resource that deploy DID create, the virtual-key secret, is
+            # recorded separately as type "secret" and torn down by that arm.
+            # This arm exists so the row reads as deliberate rather than as an
+            # unrecognized type falling through the default below.
+            return f"[manifest] litellm gateway {rid} is external — nothing to delete"
         # Unknown type: no-op (do not fail teardown).
         return ""
     except Exception as e:  # noqa: BLE001
@@ -1876,8 +1890,11 @@ def _run_delete_cleanup(runtime_id: str, caller_sub: str | None) -> DeleteRespon
     # Bug 44 only flipped the success flag for runtime-destroy; gateway / KB /
     # memory / guardrail / policy-engine / mcp-server cleanups still swallowed
     # exceptions silently into cleanup_messages while returning success=True.
-    # Now: any failure here flips overall_success to False so the caller gets
-    # an honest signal that resources may have leaked.
+    # Now: any failure to delete an AWS RESOURCE flips overall_success to False so
+    # the caller gets an honest signal that resources may have leaked. The one
+    # deliberate exception is the slots/versions name release near the end — it
+    # frees a DynamoDB name lock, not an AWS resource, and its own comment explains
+    # why it must never fail a teardown.
     cleanup_failures: list[str] = []
     region = config.aws_region
 
@@ -1937,6 +1954,13 @@ def _run_delete_cleanup(runtime_id: str, caller_sub: str | None) -> DeleteRespon
     # fully succeeded (observed live in the free-form matrix). Old records that
     # predate the manifest have no created_resources and still use the fallbacks.
     manifest_used = bool(deployment_record and deployment_record.get("created_resources"))
+    # Did the manifest itself own the runtime delete? A manifest can exist while
+    # holding no agent_runtime row (a deploy that failed before the runtime was
+    # recorded), and in that case the legacy fallback below IS the real delete and
+    # must keep reporting. Only when this is True is the fallback pure duplication.
+    manifest_deleted_runtime = any(
+        str(r.get("type")) == "agent_runtime" for r in ((deployment_record or {}).get("created_resources") or [])
+    )
     if manifest_used:
         seen_mres: set = set()
         # Bug 167: tear down in DEPENDENCY order. A "primary" resource whose
@@ -1950,6 +1974,9 @@ def _run_delete_cleanup(runtime_id: str, caller_sub: str | None) -> DeleteRespon
             "agent_runtime": 1,
             "harness": 1,
             "gateway": 2,
+            # Informational row for a customer-run LiteLLM proxy; deletes nothing.
+            # Sits in the gateway band purely for symmetry with the arm above.
+            "litellm_gateway": 2,
             "policy_engine": 2,
             "lambda": 5,
             "memory": 6,
@@ -2258,7 +2285,6 @@ def _run_delete_cleanup(runtime_id: str, caller_sub: str | None) -> DeleteRespon
     else:
         try:
             destroy_result = destroy_runtime(runtime_id, region)
-            cleanup_messages.append(destroy_result.get("message", "Runtime destroy completed"))
             # destroy_runtime returns success:false on AccessDenied / other errors;
             # propagate that to the top-level response. See tasks/lessons.md Bug 44
             # — previously this handler returned success:true even when the
@@ -2268,8 +2294,27 @@ def _run_delete_cleanup(runtime_id: str, caller_sub: str | None) -> DeleteRespon
             # already-gone OR mid-state-transition and report success:false — that
             # is NOT a real failure (the resource is gone). Only count it when the
             # manifest did NOT handle the runtime.
-            if not destroy_result.get("success", True) and not manifest_used:
+            _destroy_ok = destroy_result.get("success", True)
+            if not _destroy_ok and not manifest_used:
                 runtime_destroy_failed = True
+            # ...and don't SHOW it either. Bug 159 stopped counting the spurious
+            # failure but still appended its message, so a fully successful
+            # teardown reported e.g. "Runtime destroy error: ConflictException ...
+            # Current status: DELETING" right after "Runtime X deleted" — observed
+            # live on a clean delete, us-east-1. In the other race the second call
+            # wins and the message is merely duplicated ("... deleted; ...
+            # deleted") — seen live in eu-central-1. Both are noise: when the
+            # manifest owned the runtime it already emitted the authoritative
+            # "[manifest] runtime ..." line. Customers delete often, so this is
+            # the string they read every time; suppress it rather than explain it.
+            if manifest_deleted_runtime:
+                logger.info(
+                    "Suppressing duplicate post-manifest runtime destroy report for %s: %s",
+                    runtime_id,
+                    str(destroy_result.get("message", ""))[:200],
+                )
+            else:
+                cleanup_messages.append(destroy_result.get("message", "Runtime destroy completed"))
         except Exception:
             logger.exception("Runtime destroy error for %s", runtime_id)
             cleanup_messages.append("Runtime destroy error (check server logs)")
@@ -2577,6 +2622,28 @@ async def handle_generate_canvas(request: AgentGenerateRequest, raw_request: Req
         ) from exc
 
 
+def _artifacts_s3_client(region: str):
+    """An S3 client whose PRESIGNED URLs carry the regional endpoint.
+
+    botocore resolves ``s3`` to the global ``s3.amazonaws.com`` host by default
+    no matter what ``region_name`` says. Requests still succeed, because the
+    region redirector transparently retries a 301 — but
+    ``generate_presigned_url`` performs no request, so the wrong host ends up
+    baked into a SigV4 signature that covers ``Host``. The browser then gets a
+    307 to the regional host and a 403 SignatureDoesNotMatch on the retry.
+
+    Invisible in us-east-1, where the global host IS the regional one; broken in
+    every other region. Pinning the endpoint keeps the same virtual-hosted URL
+    shape and is correct in us-east-1 too.
+    """
+    return boto3.client(
+        "s3",
+        region_name=region,
+        endpoint_url=f"https://s3.{region}.amazonaws.com",
+        config=BotoConfig(s3={"addressing_style": "virtual"}, signature_version="s3v4"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # POST /api/generate-cfn-template
 # ---------------------------------------------------------------------------
@@ -2599,7 +2666,7 @@ async def handle_generate_cfn_template(request: DeployRequest):
         # Try to upload to S3 and return presigned URL
         bucket = os.environ.get("ARTIFACTS_BUCKET_NAME", "")
         if bucket:
-            s3_client = boto3.client("s3", region_name=config.aws_region)
+            s3_client = _artifacts_s3_client(config.aws_region)
             s3_key = f"cfn-templates/{bundle.deployment_name}-{uuid.uuid4().hex[:8]}.zip"
             s3_client.put_object(Bucket=bucket, Key=s3_key, Body=zip_bytes)
 
@@ -2645,7 +2712,7 @@ async def handle_export_python(request: DeployRequest, raw_request: Request):
         bucket = os.environ.get("ARTIFACTS_BUCKET_NAME", "")
         if bucket:
             caller_sub = _get_user_id(raw_request) or "anonymous"
-            s3_client = boto3.client("s3", region_name=config.aws_region)
+            s3_client = _artifacts_s3_client(config.aws_region)
             s3_key = f"python-exports/{caller_sub}/{deployment_name}-{uuid.uuid4().hex[:8]}.zip"
             s3_client.put_object(Bucket=bucket, Key=s3_key, Body=zip_bytes)
 
@@ -2718,7 +2785,10 @@ def _handle_async_test(event: dict):
         result = test_tool(
             lambda_code=event["lambda_code"],
             test_cases=event["test_cases"],
-            region=event.get("region", "us-east-1"),
+            # The publisher always sets "region"; fall back to THIS deployment's
+            # region rather than a literal, so a missing key cannot silently run
+            # the Bedrock/Lambda call in the wrong region.
+            region=event.get("region") or config.aws_region,
         )
 
         table.update_item(
@@ -2753,7 +2823,10 @@ def _handle_async_generate(event: dict):
             prompt=event["prompt"],
             conversation_history=event.get("conversation_history"),
             existing_tool=event.get("existing_tool"),
-            region=event.get("region", "us-east-1"),
+            # The publisher always sets "region"; fall back to THIS deployment's
+            # region rather than a literal, so a missing key cannot silently run
+            # the Bedrock/Lambda call in the wrong region.
+            region=event.get("region") or config.aws_region,
         )
 
         tool_data = result.get("tool")

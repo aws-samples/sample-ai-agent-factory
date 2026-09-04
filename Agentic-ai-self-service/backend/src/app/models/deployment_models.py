@@ -4,6 +4,8 @@ These models support the serverless deployment orchestration via Step Functions,
 deployment state persistence in DynamoDB, and the Deployment Lambda API surface.
 """
 
+import ipaddress
+import urllib.parse
 from datetime import datetime
 from enum import Enum
 from typing import Literal, Optional
@@ -83,13 +85,21 @@ def _validate_bedrock_model_id(model_id: str) -> None:
     )
     for legacy in _LEGACY_SUBSTRINGS:
         if legacy in model_id:
+            # Suggest IDs with THIS region's cross-region prefix — a `us.`
+            # inference profile does not exist in eu-central-1, so a Frankfurt
+            # deployment telling the user to type `us.…` sends them in circles.
+            # Imported lazily: app.services.__init__ imports app.models, so a
+            # module-level import here would be a cycle.
+            from app.services.region_models import region_inference_prefix
+
+            p = region_inference_prefix()
             raise ValueError(
                 f"Bedrock model '{model_id}' is outside the supported window "
                 f"(Oct 2025 – May 2026) and Bedrock flags it Legacy. "
                 f"Use a current ID such as "
-                f"us.anthropic.claude-sonnet-5, "
-                f"us.anthropic.claude-opus-4-8, "
-                f"or us.amazon.nova-2-lite-v1:0. "
+                f"{p}.anthropic.claude-sonnet-5, "
+                f"{p}.anthropic.claude-opus-4-8, "
+                f"or {p}.amazon.nova-2-lite-v1:0. "
                 f"See tasks/lessons.md Bug 113."
             )
     # Validator only runs when the caller sets model_provider="bedrock", so we
@@ -102,6 +112,62 @@ def _validate_bedrock_model_id(model_id: str) -> None:
             f"and may have been decommissioned. If this is a new model, "
             f"add its substring to _BEDROCK_ACTIVE_MODEL_SUBSTRINGS."
         )
+
+
+def _validate_provider_base_url(url: str) -> str:
+    """Validate a customer-supplied model-provider base URL.
+
+    ``provider_base_url`` is injected as ``PROVIDER_BASE_URL`` (see
+    ``step_handlers/runtime_configure_step.py``) and is read only by the OpenAI
+    and LiteLLM model inits — both of which send ``PROVIDER_API_KEY`` to it as a
+    bearer credential. Until now the field had no validation beyond a 512-char
+    cap, so a typo'd or hostile value silently became the destination of the
+    customer's provider key.
+
+    Deliberately NOT routed through ``gateway_deployer._validate_outbound_url``,
+    even though that is this repo's SSRF guard for user-supplied URLs, because
+    the two have different dialers. That guard resolves DNS and rejects every
+    private CIDR, which is correct when the *control plane* fetches the URL. Here
+    the fetcher is the AgentCore Runtime, which supports VPC egress via
+    ``vpc_config`` — so a self-hosted LiteLLM or OpenAI-compatible proxy on a
+    private address is the intended configuration for this field, and a
+    private-CIDR denylist would reject the very setup it exists to serve. The
+    checks below are therefore pure string validation with no network I/O, which
+    also keeps them safe to run on every /api/deploy request.
+    """
+    candidate = url.strip()
+    if not candidate:
+        raise ValueError("providerBaseUrl was provided but is empty")
+    # Control characters (notably \n) would be injected verbatim into the
+    # runtime's environment, where a newline can forge a second variable.
+    if any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in candidate):
+        raise ValueError("providerBaseUrl must not contain whitespace or control characters")
+
+    parsed = urllib.parse.urlparse(candidate)
+    # https only: the provider API key is transmitted to this host, so plaintext
+    # http would leak it on the wire. Neither the OpenAI nor the LiteLLM init has
+    # any http-only use case — `ollama` is the one provider that would want a
+    # plaintext local host, and its init does not read PROVIDER_BASE_URL at all.
+    if parsed.scheme != "https":
+        raise ValueError(
+            f"providerBaseUrl must use https (got '{parsed.scheme or 'no scheme'}') — the provider API key is sent to it"
+        )
+    if not parsed.hostname:
+        raise ValueError(f"providerBaseUrl '{candidate}' has no host")
+    # Credentials in the URL end up in logs and deployment records.
+    if parsed.username or parsed.password:
+        raise ValueError("providerBaseUrl must not embed credentials (user:pass@)")
+    # Link-local covers the 169.254.169.254 instance-metadata endpoint. Only
+    # literal IPs are checked — resolving names here is the DNS lookup this
+    # validator deliberately avoids (see the docstring).
+    try:
+        ip = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        ip = None
+    if ip is not None and ip.is_link_local:
+        raise ValueError(f"providerBaseUrl must not point at a link-local address ({parsed.hostname})")
+
+    return candidate
 
 
 # ============================================================================
@@ -275,6 +341,11 @@ class RuntimeConfig(BaseModel):
     # Multi-agent pattern
     multi_agent_pattern: str = Field(alias="multiAgentPattern", default="none")
     multi_agent_config: dict | None = Field(alias="multiAgentConfig", default=None)
+
+    @field_validator("provider_base_url")
+    @classmethod
+    def _check_provider_base_url(cls, v: str | None) -> str | None:
+        return None if v is None else _validate_provider_base_url(v)
 
     @field_validator("name")
     @classmethod

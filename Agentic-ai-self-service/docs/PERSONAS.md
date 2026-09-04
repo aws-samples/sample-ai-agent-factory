@@ -74,9 +74,11 @@ assignment happens in your IdP — zero platform code change.
 ## Enforcement is opt-in
 
 RBAC ships **advisory** (`RBAC_ENFORCE=false`): would-be denials are logged +
-surfaced as a CloudWatch `WouldDeny` metric, but allowed. Flip to enforce
-(`-c rbac_enforce=true` or the Lambda env) once group grants are validated — see
-`RBAC_ROLLOUT.md`. In local dev (no Cognito) every scope is granted.
+surfaced as a CloudWatch `WouldDeny` metric, but allowed. Flip to enforce with
+`RBAC_ENFORCE=true ./scripts/deploy.sh` (or the Lambda env var directly) once group
+grants are validated — see `RBAC_ROLLOUT.md`, which explains why this must go
+through `deploy.sh` rather than a raw `cdk deploy`. In local dev (no Cognito) every
+scope is granted.
 
 ## Changing personas
 

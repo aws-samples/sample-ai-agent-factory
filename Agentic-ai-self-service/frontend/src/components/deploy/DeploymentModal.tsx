@@ -5,6 +5,7 @@
 
 import { useCallback } from 'react';
 import type { DeploymentResult } from '../../services/api';
+import { getDeploymentRegion } from '../../utils/awsRegion';
 
 export type DeploymentState =
   | { status: 'idle' }
@@ -91,7 +92,12 @@ function DeploymentConfigForm({ onDeploy, onCancel }: DeploymentConfigFormProps)
     [onDeploy]
   );
 
-  const regions = [
+  // Default to the region the platform itself is deployed to, not a hardcoded
+  // us-east-1 — on a Frankfurt deployment that default would silently send the
+  // agent to a different region than everything else it talks to.
+  const defaultRegion = getDeploymentRegion();
+
+  const knownRegions = [
     { value: 'us-east-1', label: 'US East (N. Virginia)' },
     { value: 'us-west-2', label: 'US West (Oregon)' },
     { value: 'eu-west-1', label: 'Europe (Ireland)' },
@@ -100,6 +106,12 @@ function DeploymentConfigForm({ onDeploy, onCancel }: DeploymentConfigFormProps)
     { value: 'ap-southeast-1', label: 'Asia Pacific (Singapore)' },
     { value: 'ap-southeast-2', label: 'Asia Pacific (Sydney)' },
   ];
+
+  // A `defaultValue` that isn't among the options is ignored by the browser and
+  // the first option wins, so make sure the deployment region is always listed.
+  const regions = knownRegions.some((r) => r.value === defaultRegion)
+    ? knownRegions
+    : [{ value: defaultRegion, label: defaultRegion }, ...knownRegions];
 
   return (
     <>
@@ -129,7 +141,7 @@ function DeploymentConfigForm({ onDeploy, onCancel }: DeploymentConfigFormProps)
             <select
               id="region"
               name="region"
-              defaultValue="us-east-1"
+              defaultValue={defaultRegion}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
             >
               {regions.map((region) => (

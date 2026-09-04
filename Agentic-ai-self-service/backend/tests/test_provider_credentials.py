@@ -12,6 +12,9 @@ from __future__ import annotations
 import ast
 import sys
 
+import pytest
+from pydantic import ValidationError
+
 sys.path.insert(0, "src")
 
 from app.services.code_generator import _get_model_init_code  # noqa: E402
@@ -77,3 +80,64 @@ def test_provider_secret_arn_namespace_validation():
     bad = "arn:aws:secretsmanager:us-east-1:111122223333:secret:someone-elses-secret"
     assert ":secret:agentcore-provider/" in good
     assert ":secret:agentcore-provider/" not in bad
+
+
+# ---------------------------------------------------------------------------
+# providerBaseUrl validation
+# ---------------------------------------------------------------------------
+# The sibling of the ARN namespace lock above. `provider_api_key_ref` was
+# namespace-locked at the API boundary; `provider_base_url` — the URL that same
+# key is *sent to* by the OpenAI/LiteLLM model init — had no validation at all
+# beyond a length cap. These pin the boundary checks.
+
+
+def _runtime_config(**kw):
+    from app.models.deployment_models import RuntimeConfig
+
+    return RuntimeConfig(
+        name="agent",
+        model={"modelId": "us.anthropic.claude-sonnet-5"},
+        modelProvider="litellm",
+        **kw,
+    )
+
+
+def test_provider_base_url_accepts_a_private_https_proxy():
+    """The point of the field: a self-hosted LiteLLM behind VPC egress. The
+    AgentCore Runtime is the dialer, not the control-plane Lambda, so a private
+    address must NOT be rejected the way gateway_deployer._validate_outbound_url
+    rejects one. If this ever fails, the customer's own proxy stopped working."""
+    cfg = _runtime_config(providerBaseUrl="https://litellm.internal.corp:4000/v1")
+    assert cfg.provider_base_url == "https://litellm.internal.corp:4000/v1"
+    assert _runtime_config(providerBaseUrl="https://10.0.4.17:4000/v1").provider_base_url
+
+
+def test_provider_base_url_rejects_plaintext_http():
+    # The provider API key is sent to this host as a bearer credential.
+    with pytest.raises(ValidationError) as ei:
+        _runtime_config(providerBaseUrl="http://litellm.internal.corp:4000/v1")
+    assert "https" in str(ei.value)
+
+
+@pytest.mark.parametrize(
+    "bad,because",
+    [
+        ("file:///etc/passwd", "non-http scheme"),
+        ("litellm.internal.corp:4000", "no scheme"),
+        ("https://", "no host"),
+        ("https://user:pw@litellm.corp/v1", "credentials in the URL reach logs"),
+        ("https://169.254.169.254/latest/meta-data", "instance metadata endpoint"),
+        ("https://litellm.corp/v1\nAWS_SECRET=x", "newline forges a second env var"),
+        ("   ", "empty after stripping"),
+    ],
+)
+def test_provider_base_url_rejects(bad, because):
+    with pytest.raises(ValidationError, match=r".") as ei:
+        _runtime_config(providerBaseUrl=bad)
+    assert "providerBaseUrl" in str(ei.value), f"rejection for {because!r} must name the field"
+
+
+def test_provider_base_url_stays_optional():
+    # Every existing deploy omits it; validation must not make it required.
+    assert _runtime_config().provider_base_url is None
+    assert _runtime_config(providerBaseUrl=None).provider_base_url is None

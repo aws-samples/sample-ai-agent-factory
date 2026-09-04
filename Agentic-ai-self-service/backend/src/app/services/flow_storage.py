@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from app.models import Flow
 from app.models.enums import DeploymentStatus
+from app.services.region_models import current_region
 
 from .dynamodb_storage import (
     _convert_decimals_to_floats,
@@ -86,7 +87,10 @@ def _create_empty_workflow() -> dict:
         "viewport": {"x": 0, "y": 0, "zoom": 1.0},
         "metadata": {
             "author": "system",
-            "aws_region": "us-east-1",
+            # This lands in stored user data and pre-fills the deploy modal's
+            # region, so a literal would show a Frankfurt user "us-east-1" on
+            # every new workflow.
+            "aws_region": current_region(),
             "tags": [],
             "deployment_status": "not_deployed",
         },

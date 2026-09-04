@@ -20,6 +20,7 @@ from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepNam
 from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.naming import sanitize_agentcore_name
+from app.services.resource_ownership import owner_tag_list
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +220,11 @@ def handler(event: dict, context) -> dict:
                     RoleName=memory_role_name,
                     AssumeRolePolicyDocument=json.dumps(trust_policy),
                     Description=f"Memory execution role for {memory_name}",
+                    # IAM roles are account-global with no region in the name, so a
+                    # teardown sweeping "AgentCoreMemory-*" would delete every
+                    # deployment's memory roles in the account. cleanup.sh reads this
+                    # tag instead of trusting the name prefix.
+                    Tags=owner_tag_list(region),
                 )
                 memory_role_arn = role_resp["Role"]["Arn"]
                 iam_client.put_role_policy(

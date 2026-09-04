@@ -18,6 +18,7 @@ from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepNam
 from app.services import step_clients
 from app.services.aws_errors import error_code
 from app.services.deployment_state_store import DeploymentStateStore
+from app.services.region_models import repoint_regional_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,17 @@ def _get_deployment_store() -> DeploymentStateStore:
 
 
 def _build_model_arn(region: str, model_id: str) -> str:
-    """Build a Bedrock foundation model ARN."""
-    return f"arn:aws:bedrock:{region}::foundation-model/{model_id}"
+    """Build a Bedrock foundation model ARN.
+
+    An existing cross-region prefix is re-pointed at ``region`` first: the
+    defaults and stored KB configs carry ``us.``, and there is no
+    ``us.anthropic.…`` profile in eu-central-1 — Bedrock would reject the ARN.
+
+    Repoint-only, never add: this same helper builds the ``embeddingModelId``
+    ARN, and embedding models (``amazon.titan-embed-text-v2:0``) have no
+    cross-region profiles, so ``eu.amazon.titan-…`` would be invalid.
+    """
+    return f"arn:aws:bedrock:{region}::foundation-model/{repoint_regional_prefix(model_id, region)}"
 
 
 def _get_account_id(event: dict) -> str:

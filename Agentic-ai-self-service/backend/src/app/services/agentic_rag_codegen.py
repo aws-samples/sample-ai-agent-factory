@@ -29,6 +29,13 @@ Design constraints (Bug 125 — codegen injection safety):
     reranker judge defaults to ``us.anthropic.claude-haiku-4-5-20251001-v1:0``
     (Bedrock model window Oct-2025..May-2026, Bug 113), overridable via
     ``RERANK_JUDGE_MODEL_ID``.
+  * Both model IDs pass through the generated ``_rag_regional_model`` helper,
+    which re-points the ``us.``/``eu.``/``ap.`` geography prefix at the region
+    the runtime is actually executing in. The defaults here are written ``us.``,
+    and a ``us.`` inference profile does not exist in eu-central-1 — Bedrock
+    accepts the ID and then fails every invoke. Deriving the prefix at RUNTIME
+    rather than at codegen time also means an agent whose code was generated
+    before the platform became region-agnostic still works.
 
 No new DDB table, no new IAM: the shared runtime exec role already grants
 ``bedrock:Retrieve`` + ``bedrock:InvokeModel*`` / ``Converse*`` on ``*``.
@@ -59,7 +66,24 @@ import boto3 as _rag_boto3
 
 
 def _rag_region():
-    return _rag_os.environ.get("AWS_REGION", _rag_os.environ.get("APP_AWS_REGION", "us-east-1"))
+    # APP_AWS_REGION is the platform's own variable and wins, matching the rest
+    # of the backend; AWS_REGION is Lambda/AgentCore's injected fallback.
+    return _rag_os.environ.get("APP_AWS_REGION", _rag_os.environ.get("AWS_REGION", "us-east-1"))
+
+
+def _rag_regional_model(model_id):
+    """Re-point a cross-region Bedrock inference profile at THIS region.
+
+    A `us.` profile does not exist in eu-central-1 — Bedrock accepts the ID and
+    then fails the invoke — so the geography prefix is derived at runtime rather
+    than baked in at codegen time. `global.` and bare on-demand IDs pass through.
+    """
+    region = _rag_region()
+    prefix = "eu" if region.startswith("eu-") else "apac" if region.startswith("ap-") else "us"
+    for geo in ("us.", "eu.", "ap."):
+        if model_id.startswith(geo):
+            return prefix + "." + model_id[len(geo):]
+    return model_id
 
 
 def _rag_kb_id():
@@ -153,7 +177,7 @@ def retrieve_multi_hop(query: str, max_hops: int = 3) -> str:
     except Exception:
         max_hops = 3
 
-    agent_model = _rag_os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-5")
+    agent_model = _rag_regional_model(_rag_os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-5"))
 
     def _decompose(q, prior):
         """Ask the agent model for the next sub-question (or DONE)."""
@@ -293,9 +317,9 @@ def retrieve_reranked(query: str, top_n: int = 20, return_n: int = 5) -> str:
     if not candidates:
         return _rag_json.dumps({"query": query, "strategy": "reranked", "results": [], "count": 0})
 
-    judge_model = _rag_os.environ.get("RERANK_JUDGE_MODEL_ID", "'''
+    judge_model = _rag_regional_model(_rag_os.environ.get("RERANK_JUDGE_MODEL_ID", "'''
     + _DEFAULT_JUDGE_MODEL_ID
-    + """")
+    + """"))
 
     numbered = "\\n\\n".join(
         "[%d] %s" % (i, (c["text"] or "")[:1000]) for i, c in enumerate(candidates)

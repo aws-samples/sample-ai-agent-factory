@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from app.services.auth import get_caller_sub
 from app.services.rbac import require_scopes
+from app.services.resource_ownership import owner_tag_list
 
 logger = logging.getLogger(__name__)
 
@@ -165,13 +166,19 @@ def store_credentials(
             Name=secret_name,
             SecretString=header_value,
             Description=f"OTLP auth header for {request.provider} (agentcore-flows)",
-            Tags=[
-                {"Key": "ManagedBy", "Value": "agentcore-flows"},
-                {"Key": "Purpose", "Value": "user-otel-auth"},
-                {"Key": "Provider", "Value": request.provider},
-                {"Key": "owner_sub", "Value": owner_sub},
-                {"Key": "created_at", "Value": created_at_iso},
-            ],
+            # ManagedBy stays (unchanged, appended by owner_tag_list) but names the
+            # PRODUCT, so a sweep over the agentcore-otel/ prefix cannot tell this
+            # secret from another deployment's in the same account. The owner tag
+            # names the stack instance, which is what cleanup.sh gates deletion on.
+            Tags=owner_tag_list(
+                region,
+                extra={
+                    "Purpose": "user-otel-auth",
+                    "Provider": request.provider,
+                    "owner_sub": owner_sub,
+                    "created_at": created_at_iso,
+                },
+            ),
         )
     except ClientError as e:
         logger.exception("Failed to store OTEL credentials in Secrets Manager")

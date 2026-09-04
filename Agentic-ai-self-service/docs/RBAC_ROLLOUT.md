@@ -36,9 +36,16 @@ The platform emits a CloudWatch metric from the advisory log line:
    grant before proceeding.
 4. **Reach zero would-deny.** When `WouldDeny` sits at 0 across a representative
    window, the grants cover real usage.
-5. **Enforce.** Redeploy with `-c rbac_enforce=true` (sets `RBAC_ENFORCE=true`),
-   OR flip the env var on the workflow + deployment Lambdas directly for an
-   instant, reversible cutover (`aws lambda update-function-configuration`).
+5. **Enforce.** Redeploy with `RBAC_ENFORCE=true ./scripts/deploy.sh` (sets
+   `RBAC_ENFORCE=true` on the Lambdas), OR flip the env var on the workflow +
+   deployment Lambdas directly for an instant, reversible cutover
+   (`aws lambda update-function-configuration`).
+
+   Go through `deploy.sh`, not a raw `cdk deploy -c rbac_enforce=true`. The
+   `COGNITO_USERS` carry-forward guard lives in `deploy.sh`, so a bare `cdk
+   deploy` with the context flag but no `-c cognito_users=...` drops every user
+   provisioner and **deletes the users it created** — see the CHANGELOG entry
+   "a plain redeploy silently deleted every provisioned Cognito user".
 6. **Verify + keep the rollback ready.** A read-only user should get 200 on GET,
    403 on POST. If anything breaks, set `RBAC_ENFORCE=false` again — it takes
    effect in seconds (no redeploy needed).

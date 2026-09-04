@@ -3,11 +3,14 @@
  * Updated for Strands-only with provider-based model filtering.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import * as fc from 'fast-check';
 import {
   getModelsForProvider,
   estimateTokenCount,
+  getRegionPrefix,
+  regionalizeModelId,
+  createDefaultRuntimeConfig,
   AVAILABLE_MODELS,
   PROVIDER_OPTIONS,
 } from './runtimeConfig';
@@ -165,5 +168,60 @@ describe('Runtime Configuration Utilities', () => {
     const bedrock = PROVIDER_OPTIONS.find((p) => p.value === 'bedrock');
     expect(bedrock).toBeDefined();
     expect(bedrock?.requiresApiKey).toBe(false);
+  });
+});
+
+// ============================================================================
+// Regional Bedrock inference profiles
+// ============================================================================
+
+describe('Regional inference profiles', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('rewrites a us. prefix to the deployment region', () => {
+    vi.stubEnv('VITE_AWS_REGION', 'eu-central-1');
+    expect(getRegionPrefix()).toBe('eu');
+    expect(regionalizeModelId('us.anthropic.claude-sonnet-5')).toBe(
+      'eu.anthropic.claude-sonnet-5'
+    );
+  });
+
+  it('leaves on-demand model IDs alone', () => {
+    // These are not cross-region inference profiles — prefixing them would
+    // produce an ID Bedrock rejects.
+    vi.stubEnv('VITE_AWS_REGION', 'eu-central-1');
+    expect(regionalizeModelId('ai21.jamba-1-5-large-v1:0')).toBe('ai21.jamba-1-5-large-v1:0');
+    expect(regionalizeModelId('openai.gpt-oss-120b-1:0')).toBe('openai.gpt-oss-120b-1:0');
+    expect(regionalizeModelId('gpt-4o')).toBe('gpt-4o');
+  });
+
+  it('is a no-op in a US region', () => {
+    vi.stubEnv('VITE_AWS_REGION', 'us-west-2');
+    expect(regionalizeModelId('us.anthropic.claude-sonnet-5')).toBe(
+      'us.anthropic.claude-sonnet-5'
+    );
+  });
+
+  it('regionalizes the default runtime config model', () => {
+    // The default is what a user gets if they never open the model picker; a
+    // `us.` profile does not exist in eu-central-1.
+    vi.stubEnv('VITE_AWS_REGION', 'eu-central-1');
+    expect(createDefaultRuntimeConfig().model?.modelId).toBe('eu.anthropic.claude-sonnet-5');
+  });
+
+  it('regionalizes the whole bedrock catalog at import time', async () => {
+    vi.stubEnv('VITE_AWS_REGION', 'ap-southeast-2');
+    vi.resetModules();
+    const fresh = await import('./runtimeConfig');
+    const crossRegion = fresh
+      .getModelsForProvider('bedrock')
+      .filter((m) => /^(us|eu|apac)\./.test(m.modelId));
+    expect(crossRegion.length).toBeGreaterThan(0);
+    for (const model of crossRegion) {
+      // `apac.`, not `ap.` — `ap.` is not a real Bedrock prefix in any region.
+      expect(model.modelId.startsWith('apac.')).toBe(true);
+    }
   });
 });

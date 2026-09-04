@@ -154,11 +154,22 @@ export {
   getAwsRegistryConfig,
   enableAwsRegistry,
   searchAwsRegistry,
+  getLiteLLMRegistryConfig,
+  enableLiteLLMRegistry,
+  disableLiteLLMRegistry,
+  listLiteLLMServers,
   type RegistryEntry,
   type PublishRegistryRequest,
   type RegistryCanvasSnapshot,
   type RegistryCloneResponse,
+  type LiteLLMRegistryConfig,
+  type LiteLLMServer,
+  type RegistryCapabilities,
 } from './api/registry';
+
+// `export … from` re-exports without binding locally, so the ApiClient methods
+// below need their own type import.
+import type { LiteLLMRegistryConfig, LiteLLMServer } from './api/registry';
 
 // ============================================================================
 // Re-export connectors domain
@@ -449,6 +460,30 @@ export class ApiClient {
   // redeploy, so it is not served as a fallback. Mirrored in ./api/registry.ts.
   async searchAwsRegistry(q: string): Promise<{ enabled: boolean; results: Array<Record<string, unknown>>; status_authoritative?: boolean }> {
     return apiRequest(`/api/registry/aws-search?q=${encodeURIComponent(q)}`, {}, this.baseUrl);
+  }
+
+  // LiteLLM registry backend (Workstream B) — an ALTERNATIVE catalog, not a
+  // replacement for the two above: AgentCore/AWS federation stays untouched and
+  // the built-in DynamoDB catalog remains the default.
+  //
+  // These reuse the LiteLLMRegistryConfig / LiteLLMServer types from
+  // ./api/registry rather than re-declaring them inline, which is what the AWS
+  // methods above do and what keeps drifting. Same reason the JSDoc there says
+  // "keep both in step".
+  async getLiteLLMRegistryConfig(): Promise<LiteLLMRegistryConfig> {
+    return apiRequest(`/api/registry/litellm-config`, {}, this.baseUrl);
+  }
+
+  async enableLiteLLMRegistry(data: { base_url: string; api_key?: string; api_key_ref?: string; activate?: boolean }): Promise<LiteLLMRegistryConfig> {
+    return apiRequest(`/api/registry/litellm-config`, { method: 'POST', body: JSON.stringify(data) }, this.baseUrl);
+  }
+
+  async disableLiteLLMRegistry(): Promise<LiteLLMRegistryConfig & { orphaned_api_key_ref?: string | null }> {
+    return apiRequest(`/api/registry/litellm-config`, { method: 'DELETE' }, this.baseUrl);
+  }
+
+  async listLiteLLMServers(): Promise<{ configured: boolean; servers: LiteLLMServer[] }> {
+    return apiRequest(`/api/registry/litellm-servers`, {}, this.baseUrl);
   }
 
   // Admin (Phase 7)

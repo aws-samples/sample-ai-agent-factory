@@ -6,7 +6,6 @@ Requirements: 3.5
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
 import logging
 import os
-import re
 
 import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import (
@@ -17,6 +16,7 @@ from app.models.deployment_models import (
 from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.observability import build_otel_env_vars, get_platform_observability_defaults
+from app.services.region_models import region_inference_prefix, to_regional_model_id
 from app.services.runtime_deployer import create_agent_runtime, sanitize_runtime_name
 
 logger = logging.getLogger(__name__)
@@ -26,23 +26,11 @@ def _get_env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
-def _to_cross_region_model_id(model_id: str) -> str:
-    """Ensure model ID uses cross-region inference profile format.
-
-    Appends the ``-v1:0`` version suffix only to LEGACY date-suffixed IDs
-    (e.g. ``us.anthropic.claude-haiku-4-5-20251001``). Current-generation
-    dateless IDs (``us.anthropic.claude-sonnet-5``) must pass through
-    unchanged — appending ``-v1:0`` produces an invalid model identifier.
-    Mirrors code_generator._to_cross_region_model_id.
-    """
-    if not model_id:
-        return model_id
-    if not model_id.startswith(("us.", "global.", "eu.", "ap.")):
-        model_id = f"us.{model_id}"
-    # Only legacy DATED inference profiles require a -v1:0 version suffix.
-    if "anthropic." in model_id and re.search(r"-\d{8}$", model_id) and not re.search(r"-v\d+:\d+$", model_id):
-        model_id = f"{model_id}-v1:0"
-    return model_id
+# The prefix rule lives in app.services.region_models so codegen and this
+# handler cannot drift: whatever MODEL_ID we set here is what the deployed agent
+# actually invokes, and a `us.` inference profile does not exist in eu-central-1.
+_region_inference_prefix = region_inference_prefix
+_to_cross_region_model_id = to_regional_model_id
 
 
 def _get_deployment_store() -> DeploymentStateStore:
@@ -95,7 +83,7 @@ def handler(event: dict, context) -> dict:
                 raw_model_id = model_cfg.get("modelId", model_cfg.get("model_id", ""))
             else:
                 raw_model_id = ""
-            env_vars["MODEL_ID"] = _to_cross_region_model_id(raw_model_id)
+            env_vars["MODEL_ID"] = _to_cross_region_model_id(raw_model_id, region)
 
         # Non-Bedrock providers (openai/anthropic/gemini/litellm/mistral/…) read
         # their credential from PROVIDER_API_KEY. Resolve it from the agent's
@@ -146,7 +134,41 @@ def handler(event: dict, context) -> dict:
         client_info = gateway_result.get("client_info") or {}
         idp_provider = client_info.get("provider", "cognito")
 
-        if idp_provider == "cognito" or not idp_provider:
+        if idp_provider == "litellm":
+            # Workstream A: a LiteLLM MCP Gateway authenticates with a STATIC
+            # virtual key, not an OAuth2 client-credentials exchange. Tell the
+            # generated agent to skip the token endpoint entirely and send the key
+            # on every MCP request. The key itself is resolved from Secrets Manager
+            # HERE (the runtime has no secretsmanager grant of its own) and only the
+            # resolved value is injected as an env var — the ARN never leaves the
+            # control plane and the raw value is never logged.
+            env_vars["GATEWAY_AUTH_MODE"] = "static_bearer"
+            # Pinned MCP server aliases ride the x-mcp-servers header. Only set
+            # when the canvas pinned some — empty means "every server the key sees".
+            _litellm_servers = [str(s) for s in (gateway_result.get("litellm_servers") or []) if str(s).strip()]
+            if _litellm_servers:
+                env_vars["GATEWAY_MCP_SERVERS"] = ",".join(_litellm_servers)
+            _key_ref = client_info.get("api_key_ref")
+            if _key_ref:
+                try:
+                    import json as _json
+
+                    import boto3 as _boto3
+
+                    _sm = _boto3.client(
+                        "secretsmanager",
+                        region_name=_get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1")),
+                    )
+                    _payload = _json.loads(_sm.get_secret_value(SecretId=_key_ref)["SecretString"])
+                    _resolved = str(_payload.get("apiKey") or "")
+                    if _resolved:
+                        env_vars["GATEWAY_API_KEY"] = _resolved
+                    else:
+                        logger.warning("LiteLLM gateway secret had no apiKey field")
+                except Exception:  # noqa: BLE001
+                    # Log the FACT only — never the ARN or the payload.
+                    logger.warning("Could not resolve the LiteLLM gateway virtual key")
+        elif idp_provider == "cognito" or not idp_provider:
             # Cognito env vars (existing behavior)
             if client_info.get("client_id"):
                 env_vars["COGNITO_CLIENT_ID"] = client_info["client_id"]

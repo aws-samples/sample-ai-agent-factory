@@ -22,15 +22,21 @@ import os
 
 import boto3
 
+from app.services.region_models import repoint_regional_prefix, to_regional_model_id
+
 logger = logging.getLogger(__name__)
 
 
-AGENT_GENERATOR_MODEL_ID = os.environ.get(
-    "AGENT_GENERATOR_MODEL_ID",
+# Regionalized: a `us.` inference profile does not exist in eu-central-1, and
+# both env vars may carry a `us.` value from an older deployment.
+AGENT_GENERATOR_MODEL_ID = to_regional_model_id(
     os.environ.get(
-        "TOOL_GENERATOR_MODEL_ID",
-        "us.anthropic.claude-sonnet-5",
-    ),
+        "AGENT_GENERATOR_MODEL_ID",
+        os.environ.get(
+            "TOOL_GENERATOR_MODEL_ID",
+            "us.anthropic.claude-sonnet-5",
+        ),
+    )
 )
 
 
@@ -262,9 +268,24 @@ def _normalize_spec(spec: dict) -> None:
     correct family is `lambda` (the deploy turns tool nodes into Lambda
     targets), so default the missing fields instead of relying on prompt
     compliance. In-place; tolerant of malformed nodes (validation catches those).
+
+    Also re-points the runtime's Bedrock model ID at the deployment region.
+    GENERATION_PROMPT shows the model a `us.`-prefixed example and the model
+    copies it, but a `us.` inference profile does not exist in eu-central-1 —
+    the user would be handed a canvas showing a model that cannot be invoked.
     """
     for n in spec.get("nodes") or []:
-        if not isinstance(n, dict) or n.get("type") != "gateway":
+        if not isinstance(n, dict):
+            continue
+        if n.get("type") == "runtime":
+            cfg = n.get("configuration")
+            model = cfg.get("model") if isinstance(cfg, dict) else None
+            if isinstance(model, dict) and isinstance(model.get("modelId"), str):
+                # Repoint-only: an on-demand ID the model chose deliberately
+                # must not silently gain a prefix on the user's canvas.
+                model["modelId"] = repoint_regional_prefix(model["modelId"])
+            continue
+        if n.get("type") != "gateway":
             continue
         cfg = n.get("configuration")
         if not isinstance(cfg, dict):

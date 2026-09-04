@@ -11,6 +11,7 @@ import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.gateway_deployer import _SHARED_TOOL_LAMBDAS, _put_connector_secret, deploy_gateway
+from app.services.litellm_gateway_deployer import deploy_litellm_gateway, resolve_gateway_provider
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,8 @@ def _record_gateway_resources(
     All best-effort (record_resource swallows its own errors). Recorded TYPE
     strings match the _delete_managed_resource dispatcher exactly:
     gateway / cognito_user_pool / lambda / iam_role / secret /
-    api_key_credential_provider / oauth2_credential_provider.
+    api_key_credential_provider / oauth2_credential_provider /
+    litellm_gateway (informational; deletes nothing).
     """
 
     def _rec(resource: dict) -> None:
@@ -45,9 +47,26 @@ def _record_gateway_resources(
     if gw_id:
         _rec({"type": "gateway", "id": gw_id})
 
-    # The gateway's own execution role (AgentCoreGateway-<gateway_name>).
     gw_name = gateway_result.get("gateway_name")
-    if gw_name:
+
+    # A LiteLLM gateway is the CUSTOMER's own proxy, so record one informational
+    # row naming what the deploy pointed at. It deletes nothing — see the
+    # "litellm_gateway" arm in _delete_managed_resource. Crucially this REPLACES
+    # the AgentCoreGateway-<name> role row: that role only exists on the AgentCore
+    # path, and recording it here would make every LiteLLM teardown issue a delete
+    # for an IAM role that was never created. The rows further down are already
+    # no-ops for LiteLLM (no pool_id, no tool Lambdas), except the virtual-key
+    # secret, which is a normal "secret" row we do still want — hence no early
+    # return.
+    if gateway_result.get("gateway_provider") == "litellm":
+        base_url = gateway_result.get("litellm_base_url")
+        if base_url:
+            entry = {"type": "litellm_gateway", "id": base_url}
+            if gw_name:
+                entry["name"] = gw_name
+            _rec(entry)
+    elif gw_name:
+        # The gateway's own execution role (AgentCoreGateway-<gateway_name>).
         _rec({"type": "iam_role", "name": f"AgentCoreGateway-{gw_name}"})
 
     # The Cognito pool fronting the gateway's CUSTOM_JWT auth.
@@ -88,7 +107,9 @@ def _record_gateway_resources(
             continue
         kind, _, prov_name = str(entry).partition(":")
         if not prov_name:
-            # Legacy bare name (no type prefix) — default to oauth2 provider.
+            # Legacy bare name (no type prefix). The recorded type is a hint only:
+            # teardown purges BOTH namespaces for either row type, because the two
+            # deleters silently no-op on each other's providers.
             kind, prov_name = "OAUTH", str(entry)
         res_type = "api_key_credential_provider" if kind.upper() == "API_KEY" else "oauth2_credential_provider"
         _rec({"type": res_type, "name": prov_name})
@@ -156,6 +177,47 @@ def handler(event: dict, context) -> dict:
 
         knowledge_base_result = event.get("knowledge_base_result") or {}
 
+        # Provider dispatch (Workstream A). AgentCore is the default and its call
+        # below is untouched. A LiteLLM gateway is a customer-run proxy: nothing
+        # is created in AWS beyond the virtual-key secret, and the return contract
+        # is identical, which is why the state machine needs no new branch.
+        gateway_provider = resolve_gateway_provider(gateway_config)
+        if gateway_provider == "litellm":
+            # Same secret hygiene as connectors: mint the key into Secrets Manager
+            # and DROP the raw value before {**event} re-emits the payload to SFN.
+            # The deployer needs the raw key for its readiness probe, so hand it
+            # over explicitly rather than leaving it on the shared config dict.
+            # Pop BOTH spellings unconditionally — `a.pop() or b.pop()` would skip
+            # the second when the first hit, leaving plaintext on the dict that
+            # {**event} re-emits. Same edge case the connector block calls out.
+            _snake = gateway_config.pop("litellm_api_key", None)
+            _camel = gateway_config.pop("litellmApiKey", None)
+            raw_key = _snake or _camel
+            litellm_result = deploy_litellm_gateway(
+                gateway_config={**gateway_config, "litellm_api_key": raw_key},
+                region=region,
+                owner_sub=owner_sub,
+                deployment_id=deployment_id if deployment_id else None,
+            )
+            del raw_key
+            if not litellm_result.get("success"):
+                raise RuntimeError(f"Gateway deployment failed: {litellm_result.get('error', 'unknown error')}")
+
+            # Persist only the ARN back onto the config so a redeploy reuses it.
+            key_ref = (litellm_result.get("client_info") or {}).get("api_key_ref")
+            if key_ref:
+                gateway_config["litellm_api_key_ref"] = key_ref
+                # Key MUST be "id", not "arn": _delete_managed_resource derives its
+                # target as ``res.get("id") or res.get("name")`` and would otherwise
+                # call delete_secret(SecretId="").
+                store.record_resource(deployment_id, {"type": "secret", "id": key_ref, "region": region})
+
+            return {
+                **event,
+                "gateway_config": gateway_config,
+                "gateway_result": litellm_result,
+            }
+
         gateway_result = deploy_gateway(
             gateway_config=gateway_config,
             region=region,
@@ -173,6 +235,16 @@ def handler(event: dict, context) -> dict:
         )
 
         if not gateway_result.get("success"):
+            # Record the partial inventory BEFORE raising. deploy_gateway tries its
+            # own abort cleanup, but that is best-effort and returns per-resource
+            # failures it used to discard; when it leaves something behind there is
+            # no runtime, so nothing else ever names those resources and they are
+            # orphaned permanently. Verified live: a deploy that failed at
+            # CreateApiKeyCredentialProvider left an orphan gateway + Cognito pool
+            # with created_resources still null. With rows written, the normal
+            # manifest-driven teardown cleans them up on a later delete (which
+            # accepts a deployment_id precisely for this partial-failure case).
+            _record_gateway_resources(store, deployment_id, region, gateway_result)
             raise RuntimeError(f"Gateway deployment failed: {gateway_result.get('error', 'unknown error')}")
 
         # Manifest: record every AWS sub-resource deploy_gateway created so the

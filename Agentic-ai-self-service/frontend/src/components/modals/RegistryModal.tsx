@@ -18,6 +18,7 @@ import {
 } from '../../services/api';
 import { useIsRegistryAdmin } from '../../auth/useIsRegistryAdmin';
 import { AwsRegistryPanel } from './AwsRegistryPanel';
+import { LiteLLMRegistryPanel } from './LiteLLMRegistryPanel';
 import { DeployTargetsPanel } from './DeployTargetsPanel';
 import { RegistryEntryDetail } from './registry/RegistryEntryDetail';
 import { McpServersPanel } from './registry/McpServersPanel';
@@ -267,6 +268,12 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
           <div className="mt-3">
             <AwsRegistryPanel />
           </div>
+          {/* Workstream B — LiteLLM as an alternative registry backend (opt-in).
+              A sibling of the AWS panel above, not a replacement for it: the
+              built-in catalog stays the default until an admin activates this. */}
+          <div className="mt-3">
+            <LiteLLMRegistryPanel />
+          </div>
           {/* Phase 7 — multi-region / multi-account deployment targets (opt-in). */}
           <div className="mt-3">
             <DeployTargetsPanel />
@@ -321,7 +328,13 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
             <div className="grid grid-cols-1 gap-3">
               {visibleEntries.map((entry) => {
                 const status = entry.status || 'approved';
-                const canClone = status === 'approved' || entry.is_owner;
+                // A row projected from an external catalog has no canvas snapshot to
+                // clone — there is no blueprint behind it, only an MCP server record —
+                // so the backend answers 501. Disable the button rather than let it
+                // fail, and say why in the tooltip. `read_only` is the backend's own
+                // verdict (from the active provider's capabilities), not inferred here.
+                const readOnly = entry.read_only === true;
+                const canClone = (status === 'approved' || entry.is_owner) && !readOnly;
                 const showApprovalActions = isAdmin && status === 'pending';
 
                 return (
@@ -373,6 +386,24 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
                               owner
                             </span>
                           )}
+                          {/* Provenance. With a pluggable backend the grid can no
+                              longer assume every row is a platform-published
+                              blueprint, and the difference is not cosmetic: a
+                              projected row is governed elsewhere and cannot be
+                              edited, reviewed or cloned here. */}
+                          {entry.source && entry.source !== 'platform' && (
+                            <span
+                              className="inline-flex items-center px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 text-[10px] font-medium uppercase tracking-wide"
+                              title={`Projected from the ${entry.source} catalog`}
+                            >
+                              {entry.source}
+                            </span>
+                          )}
+                          {readOnly && (
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 text-[10px] font-medium uppercase tracking-wide">
+                              read-only
+                            </span>
+                          )}
                         </div>
                         <p className="text-xs text-gray-600 mb-2 line-clamp-2">
                           {entry.description || 'No description provided.'}
@@ -417,7 +448,13 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
                           onClick={() => void handleClone(entry)}
                           disabled={cloning !== null || !onClone || !canClone}
                           className="px-3 py-1.5 text-xs font-semibold bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-150 whitespace-nowrap flex items-center gap-1.5"
-                          title={canClone ? 'Clone this agent to your canvas' : 'Only approved agents can be cloned'}
+                          title={
+                            readOnly
+                              ? 'Projected from an external catalog — it is an MCP server record, not a canvas blueprint, so there is nothing to clone'
+                              : canClone
+                              ? 'Clone this agent to your canvas'
+                              : 'Only approved agents can be cloned'
+                          }
                           aria-label={`Clone ${entry.display_name} to canvas`}
                         >
                           {cloning === entry.agent_slug ? (
