@@ -262,6 +262,15 @@ def _create_step_role(
                     "cognito-idp:CreateUserPoolDomain",
                     "cognito-idp:DeleteUserPoolClient",
                     "cognito-idp:DeleteUserPoolDomain",
+                    # REQUIRED by CreateUserPool's UserPoolTags argument, which
+                    # create_gateway_cognito_auth passes so teardown can tell this
+                    # pool from another deployment's (the pool NAME comes from the
+                    # user's gateway name and carries no deployment identity).
+                    # Cognito authorizes the tagging half of that one call as a
+                    # separate TagResource check against the not-yet-created pool,
+                    # so omitting it fails the whole CreateUserPool with
+                    # AccessDeniedException — the tags are not silently skipped.
+                    "cognito-idp:TagResource",
                 ],
                 resources=[f"arn:aws:cognito-idp:{stack.region}:{stack.account}:userpool/*"],
             )

@@ -547,3 +547,39 @@ class TestStackOutputs:
         """Old ECS cluster output should not exist."""
         outputs = template_json.get("Outputs", {})
         assert "EcsClusterName" not in outputs, "EcsClusterName output should be removed"
+
+
+# ---------------------------------------------------------------
+# Step-lambda IAM grants
+# ---------------------------------------------------------------
+
+
+class TestStepLambdaCognitoGrants:
+    """Guard the CreateUserPool/TagResource pairing in the gateway step role."""
+
+    def test_create_user_pool_is_paired_with_tag_resource(self, template_json):
+        """Any role allowed to CreateUserPool must also be allowed TagResource.
+
+        create_gateway_cognito_auth passes UserPoolTags, and Cognito authorizes
+        that as a separate cognito-idp:TagResource check against the not-yet-
+        created pool. Without the pairing the whole CreateUserPool call fails
+        with AccessDeniedException — the tags are not silently dropped — so the
+        gateway deploy dies at the first step.
+        """
+        offenders = []
+        for logical_id, resource in template_json.get("Resources", {}).items():
+            if resource.get("Type") != "AWS::IAM::Policy":
+                continue
+            statements = resource["Properties"]["PolicyDocument"]["Statement"]
+            granted = set()
+            for statement in statements:
+                if statement.get("Effect") != "Allow":
+                    continue
+                action = statement.get("Action", [])
+                granted.update([action] if isinstance(action, str) else action)
+            if "cognito-idp:CreateUserPool" in granted and "cognito-idp:TagResource" not in granted:
+                offenders.append(logical_id)
+
+        assert not offenders, (
+            f"these policies grant cognito-idp:CreateUserPool without cognito-idp:TagResource: {offenders}"
+        )

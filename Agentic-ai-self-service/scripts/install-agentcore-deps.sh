@@ -97,6 +97,24 @@ main() {
     "opentelemetry-exporter-otlp-proto-http"
   )
 
+  # PIN, do not float. Everything code_generator.py / deployment.py emits is
+  # mcp 1.x: `from mcp.client.streamable_http import streamablehttp_client`
+  # and `from mcp.server.fastmcp import FastMCP`. mcp 2.x renamed BOTH
+  # (streamable_http_client, mcp.server.mcpserver.MCPServer) with no
+  # back-compat alias, and 2.x's own migration note says to pin "mcp<2" to
+  # keep v1 code running.
+  #
+  # Left unpinned this broke every gateway-connected agent AND every generated
+  # MCP server: the container died at import, so the only symptom surfaced to
+  # the user was InvokeAgentRuntime's "Runtime initialization time exceeded.
+  # Please make sure that initialization completes in 30s" — which reads like a
+  # cold-start/perf problem and sends you looking in the wrong place entirely.
+  # The two bundles below even resolved to *different* versions in one build
+  # run (2.1.1 and 2.2.0), which is what an unpinned transitive floats to.
+  # Bump this only together with the emitted imports in
+  # backend/src/app/services/{code_generator,deployment}.py.
+  local mcp_pin="mcp<2"
+
   # Bundle 1: base (bedrock-agentcore + boto3 + opentelemetry)
   log_info "Building base bundle (bedrock-agentcore + boto3 + opentelemetry)..."
   local base_dir="${OUTPUT_DIR}/base"
@@ -106,7 +124,7 @@ main() {
   # Bundle 2: strands-mcp (everything in base + strands-agents + strands-agents-tools + mcp)
   log_info "Building strands-mcp bundle (bedrock-agentcore + boto3 + strands-agents + strands-agents-tools + mcp + opentelemetry)..."
   local strands_dir="${OUTPUT_DIR}/strands-mcp"
-  install_packages "${strands_dir}" bedrock-agentcore boto3 strands-agents strands-agents-tools mcp "${otel_packages[@]}"
+  install_packages "${strands_dir}" bedrock-agentcore boto3 strands-agents strands-agents-tools "${mcp_pin}" "${otel_packages[@]}"
   create_bundle_zip "${strands_dir}" "${OUTPUT_DIR}/strands-mcp.zip"
 
   # Bundle 3: mcp-lean (Bug 171) — the generated MCP SERVER only does
@@ -120,7 +138,7 @@ main() {
   # strands-mcp.zip if absent.
   log_info "Building mcp-lean bundle (bedrock-agentcore + boto3 + mcp only — fast MCP-server cold start)..."
   local mcplean_dir="${OUTPUT_DIR}/mcp-lean"
-  install_packages "${mcplean_dir}" bedrock-agentcore boto3 mcp
+  install_packages "${mcplean_dir}" bedrock-agentcore boto3 "${mcp_pin}"
   create_bundle_zip "${mcplean_dir}" "${OUTPUT_DIR}/mcp-lean.zip"
 
   local base_size strands_size mcplean_size
