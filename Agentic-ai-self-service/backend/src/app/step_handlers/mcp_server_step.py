@@ -22,6 +22,7 @@ from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepNam
 from app.services import step_clients
 from app.services.deployment import generate_mcp_server_code
 from app.services.deployment_state_store import DeploymentStateStore
+from app.services.resource_ownership import owner_tags
 from app.services.runtime_deployer import (
     create_agent_runtime,
     create_runtime_iam_role,
@@ -197,10 +198,15 @@ def handler(event: dict, context) -> dict:
         resource_id = f"agentcore-mcp-{gateway_name}"
         scope_name = "invoke"
 
+        # Tagged for the same reason the gateway pool is: cleanup.sh sweeps pools
+        # by the "AgentCore" name prefix and then refuses to delete any whose owner
+        # tag is not this stack's. An untagged AgentCore-mcp-* pool is matched by
+        # that sweep but skipped as foreign on every pass, so it leaks forever.
         pool_resp = cognito.create_user_pool(
             PoolName=pool_name,
             AutoVerifiedAttributes=[],
             UsernameAttributes=["email"],
+            UserPoolTags=owner_tags(region),
             Policies={
                 "PasswordPolicy": {
                     "MinimumLength": 8,
