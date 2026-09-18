@@ -4356,6 +4356,62 @@ class TestGeneratedDocumentation:
         assert "client_credentials" in readme
         assert "describe-user-pool-client" in readme, "must say how to read the secret it refuses to output"
 
+    def test_the_gateway_smoke_test_is_one_that_can_actually_fail(self):
+        """The documented smoke test used to be a GET, which proves nothing.
+
+        Run live against a deployed export: `curl "$GATEWAY_URL" -H "Authorization:
+        Bearer $ACCESS_TOKEN"` returns `405 Method Not Allowed` from the load balancer,
+        and it returns the same 405 for a deliberately invalid token — the request never
+        reaches the authorizer. So a recipient following the README saw a failure whether
+        their credentials worked or not, which is worse than no smoke test: it makes a
+        working deploy look broken and a broken one look the same.
+
+        The MCP POST is the check that discriminates: 200 with the tool list on a good
+        token, 401 "Invalid Bearer token" on a bad one. Both verified live.
+        """
+        readme = _generate(gateway_config=AGENTCORE_GATEWAY).readme
+        section = readme.split("## Authenticating to the Gateway")[1].split("\n## ")[0]
+        assert '"method":"tools/list"' in section, "the smoke test is not an MCP call"
+        assert "-X POST" in section
+        # Streamable HTTP: the gateway rejects a POST that does not accept both.
+        assert "Accept: application/json, text/event-stream" in section
+        assert "405" in section, "the recipient is not warned what a GET returns"
+        assert "401" in section, "nothing tells the recipient what a real auth failure looks like"
+        # A GET with only an Authorization header is the command that was wrong; it must
+        # not reappear as the thing a recipient is told to run.
+        assert 'curl -s "$GATEWAY_URL" -H "Authorization' not in section
+
+    def test_the_readme_explains_a_policy_denial_before_it_looks_like_a_bug(self):
+        """Authentication succeeding and authorization denying look alike to a caller.
+
+        Verified live on a deployed export: with the generated policy in place the tool
+        call returns 200 and the tool's output; with the policy deleted, the identical
+        call returns `Tool Execution Denied ... [No policy applies to the request (denied
+        by default).]` — inside a JSON-RPC error, with HTTP 200. A recipient who reads
+        that as a broken gateway will go looking in the wrong place, so the README names
+        the message and says it is the default-deny working.
+        """
+        readme = _generate(**COMPONENT_COMBINATIONS["gateway+kb+default-policy"]).readme
+        assert "denied by default" in readme
+        assert "ENFORCE" in readme, "the recipient is not told the engine is enforcing"
+
+    def test_the_readme_says_an_empty_tool_list_is_a_policy_result(self):
+        """`tools/list` is policy-filtered, which makes its failure mode look like success.
+
+        Found live, and it is the one response shape a recipient will misread: with the
+        generated policy in place the call returns the tool; with the policy deleted the
+        SAME call returns `{"tools":[]}` and HTTP 200 — no error, no denial, nothing to
+        search for. Someone debugging that will suspect the gateway target or the tool
+        lambda, neither of which is involved.
+        """
+        section = (
+            _generate(gateway_config=AGENTCORE_GATEWAY)
+            .readme.split("## Authenticating to the Gateway")[1]
+            .split("\n## ")[0]
+        )
+        assert '{"tools":[]}' in section
+        assert "filtered by the policy engine" in section, "the list looks complete but is not"
+
     def test_readme_warns_that_the_secret_does_not_belong_in_state(self):
         readme = _generate(gateway_config=AGENTCORE_GATEWAY).readme
         assert "Terraform state" in readme

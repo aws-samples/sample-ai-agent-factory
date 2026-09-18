@@ -6579,8 +6579,35 @@ ACCESS_TOKEN=$(curl -s -X POST "$TOKEN_URL" \\
   -u "$CLIENT_ID:$CLIENT_SECRET" \\
   -d "grant_type=client_credentials&scope=$SCOPE" | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
 
-curl -s "$GATEWAY_URL" -H "Authorization: Bearer $ACCESS_TOKEN"
+# The gateway speaks MCP over JSON-RPC, so the smoke test is a POST, not a GET. A GET
+# on this URL returns `405 Method Not Allowed` from the load balancer BEFORE any token
+# is looked at — it answers 405 for a valid and an invalid token alike, so it tells you
+# nothing about your credentials. This POST does: a wrong token gets `401` and
+# `"Invalid Bearer token"`.
+curl -s -X POST "$GATEWAY_URL" \\
+  -H "Authorization: Bearer $ACCESS_TOKEN" \\
+  -H 'Content-Type: application/json' \\
+  -H 'Accept: application/json, text/event-stream' \\
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
+
+That lists the tools you are permitted to call — not every tool the gateway fronts. The
+list is filtered by the policy engine, under the ids AgentCore gives the tools,
+`<TargetName>___<toolName>`, which is also how the Cedar policies name them. So
+`{"tools":[]}` with HTTP 200 is the quiet failure worth knowing about: the gateway and
+your token are both fine, and no policy permits you anything. Verified by deleting this
+stack's policy and repeating the call. To call a tool, keep the same headers and send:
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"tools/call",
+ "params":{"name":"MyTarget___my_tool","arguments":{}}}
+```
+
+If a call comes back `Tool Execution Denied: Tool call not allowed due to policy
+enforcement [No policy applies to the request (denied by default).]`, authentication
+worked and authorization did not: the gateway's policy engine is in ENFORCE mode and no
+Cedar policy names that tool. That is the default-deny this stack relies on, not a
+misconfiguration.
 
 Treat `CLIENT_SECRET` as a credential: do not commit it, echo it into CI logs, or store
 it in Terraform state. For anything beyond a smoke test, put it in AWS Secrets Manager
