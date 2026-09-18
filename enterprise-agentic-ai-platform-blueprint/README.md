@@ -204,6 +204,8 @@ npx cdk bootstrap "aws://$CDK_DEFAULT_ACCOUNT/$CDK_DEFAULT_REGION" --qualifier h
 4. Set `agenticai/inferenceModelRateLimits` to a JSON array of provider-qualified model IDs and positive RPM/TPM allocations. Example: `[{"qualifiedModelId":"openai.gpt-oss-120b","requestsPerMinute":10,"tokensPerMinute":10000}]`. The construct appends a zero-rate `*` fallback; omit the connector prefix (`bedrock-mantle/`) from each rate-limit key.
 5. `npx cdk deploy --context stage=pipeline ... AgenticAI-PlatformPipelineStack AgenticAI-WorkloadPipelineStack` — the pipeline self-mutates and deploys platform + workload stacks with the evaluation gate + manual approval.
 
+The CodeConnections source is the parent `aws-samples/sample-ai-agent-factory` repository. Each pipeline synth step therefore enters `enterprise-agentic-ai-platform-blueprint/` before running npm/CDK commands; it also accepts a standalone checkout where this blueprint is already the repository root, and fails closed for any other source layout.
+
 ### 6.3 Path B — Centralised platform (D-03)
 
 ```bash

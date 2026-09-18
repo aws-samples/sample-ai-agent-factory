@@ -304,6 +304,10 @@ describe('Round 1 integration — CDK app self-synth contract', () => {
     resolve(__dirname, '../../bin/agentic-ai-platform.ts'),
     'utf8',
   );
+  const synthCommandsSource = readFileSync(
+    resolve(__dirname, '../../pipelines/synth-commands.ts'),
+    'utf8',
+  );
   const packageDocument = JSON.parse(
     readFileSync(resolve(__dirname, '../../package.json'), 'utf8'),
   ) as { scripts: Record<string, string> };
@@ -311,6 +315,15 @@ describe('Round 1 integration — CDK app self-synth contract', () => {
   it('uses an explicit, meaningful stage for the default npm synth', () => {
     expect(packageDocument.scripts.synth).toContain('--strict');
     expect(packageDocument.scripts.synth).toContain('--context stage=management');
+  });
+
+  it('enters the blueprint package for a multi-project source checkout', () => {
+    expect(synthCommandsSource).toContain(
+      "const BLUEPRINT_SOURCE_DIRECTORY = 'enterprise-agentic-ai-platform-blueprint'",
+    );
+    expect(synthCommandsSource).toContain('if [ -f package.json ]; then :;');
+    expect(synthCommandsSource).toContain('blueprint package.json not found');
+    expect(synthCommandsSource).toContain('exit 1');
   });
 
   it('rejects a missing stage instead of emitting an empty assembly', () => {
