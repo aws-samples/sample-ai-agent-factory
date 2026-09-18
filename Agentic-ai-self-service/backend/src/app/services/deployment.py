@@ -485,6 +485,69 @@ if __name__ == "__main__":
 """
 
 
+# The tool names generate_mcp_server_code has a built-in implementation for. Any
+# other name has to arrive with its own body, or the generated server simply will not
+# have that tool — see validate_mcp_server_tools.
+MCP_BUILTIN_TOOLS = frozenset(
+    {
+        "get_order",
+        "get_customer",
+        "list_orders",
+        "process_refund",
+        "duckduckgo_search",
+        "wikipedia_search",
+    }
+)
+
+
+def validate_mcp_server_tools(tools) -> list[str]:
+    """Return the problems with an ``mcpServerConfig.tools`` list, empty if fine.
+
+    ``mcpServerConfig.tools`` is a free-form list — strings, or dicts under any of
+    three name keys and two body keys (Bug 174). That tolerance is deliberate, and it
+    means generate_mcp_server_code cannot tell a tool it does not recognise from a
+    tool the caller mistyped: both produce a server without that tool. The consequence
+    is not a Python error, it is a gateway target that fails at deploy time with "MCP
+    server ... has no tools", or worse a runtime that comes up missing one tool and
+    says nothing.
+
+    Checking here means the caller is told which entry is wrong while they can still
+    fix it, instead of reading it out of a CloudFormation event later.
+    """
+    problems: list[str] = []
+    if tools is None:
+        return problems
+    if not isinstance(tools, list):
+        return [f"mcpServerConfig.tools must be a list, got {type(tools).__name__}"]
+    if not tools:
+        # Not an error, because generate_mcp_server_code substitutes its demo tools —
+        # but silently shipping four order-management tools to somebody who asked for
+        # none is worth saying out loud.
+        return ["mcpServerConfig.tools is empty; the generated server will expose the four sample support tools"]
+    for i, tool in enumerate(tools):
+        if isinstance(tool, str):
+            name, has_body = tool, False
+        elif isinstance(tool, dict):
+            name = tool.get("toolName") or tool.get("tool_name") or tool.get("name") or ""
+            has_body = bool(tool.get("implementation") or tool.get("code"))
+        else:
+            problems.append(f"tools[{i}] must be a string or an object, got {type(tool).__name__}")
+            continue
+        if not name:
+            problems.append(f"tools[{i}] has no name (expected one of toolName, tool_name or name)")
+            continue
+        if not name.isidentifier():
+            # It becomes a Python function name in the generated server.
+            problems.append(f"tools[{i}] name {name!r} is not a valid Python identifier")
+            continue
+        if name not in MCP_BUILTIN_TOOLS and not has_body:
+            problems.append(
+                f"tools[{i}] {name!r} is not a built-in tool and carries no implementation or code, "
+                "so the generated MCP server would not expose it"
+            )
+    return problems
+
+
 def generate_mcp_server_code(
     server_name: str = "MCP Server Agent",
     tools: list[str] | None = None,
@@ -734,6 +797,55 @@ def generate_requirements(runtime_config: RuntimeConfiguration) -> str:
 # ============================================================================
 # Workflow Executor
 # ============================================================================
+
+
+def _await_policies_active(agentcore_ctrl, engine_id: str, policy_names: list) -> None:
+    """Block until every named policy on *engine_id* is ACTIVE, or fail.
+
+    ``CreatePolicy`` is asynchronous in a way that is easy to miss: it returns 200
+    with ``status: CREATING`` for statements the engine goes on to refuse, and the
+    refusal appears only in ``statusReasons`` on a later read. Reporting success on
+    the 200 is how a deployment ends up with an ENFORCE policy engine holding no
+    policy — and under default-deny that is an agent whose every tool call is denied.
+
+    A stricter ``validationMode`` is not the answer, and asking for one makes things
+    worse — see policy_step._create_policy_when_engine_ready: on a gateway created
+    moments ago the validation step cannot reach the gateway to resolve action
+    schemas, and FAIL_ON_ANY_FINDINGS leaves the policy CREATE_FAILED for 8+ minutes
+    over an authorization race rather than a bad statement. Polling the real status is
+    what distinguishes the two.
+    """
+    import time as _t
+
+    wanted = set(policy_names)
+    deadline = _t.monotonic() + 180
+    while wanted and _t.monotonic() < deadline:
+        seen = {}
+        try:
+            resp = agentcore_ctrl.list_policies(policyEngineId=engine_id, maxResults=100)
+            for item in resp.get("policies", resp.get("items", [])):
+                seen[item.get("name")] = item
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not list policies on engine %s: %s", engine_id, exc)
+
+        for name in sorted(wanted):
+            item = seen.get(name)
+            if not item:
+                continue
+            status_value = item.get("status", "")
+            if status_value in ("ACTIVE", "READY"):
+                wanted.discard(name)
+            elif status_value.endswith("_FAILED") or status_value in ("DELETING", "DELETED"):
+                reasons = "; ".join(item.get("statusReasons", [])) or "no reason reported"
+                raise RuntimeError(f"Cedar policy {name} on engine {engine_id} is {status_value}: {reasons}")
+        if wanted:
+            _t.sleep(5)
+
+    if wanted:
+        raise RuntimeError(
+            f"Cedar policies {sorted(wanted)} on engine {engine_id} did not become ACTIVE within 180s. "
+            "Refusing to attach a policy engine whose policies are not in force."
+        )
 
 
 class WorkflowExecutor:
@@ -1095,50 +1207,134 @@ class WorkflowExecutor:
                             engine_id = pe_resp.get("policyEngineId", "")
                             engine_arn = pe_resp.get("policyEngineArn", "")
 
-                            # Wait for engine to be ready
+                            # Recorded before anything else can fail, so teardown
+                            # reclaims it. Without this a failed policy phase leaves
+                            # a policy engine behind that nothing owns; the Step
+                            # Functions path records it for exactly this reason.
+                            _record_resource_best_effort(
+                                deployment_id,
+                                self.region,
+                                {"type": "policy_engine", "id": engine_id, "region": self.region},
+                            )
+
+                            # Wait for the engine to be usable. The old loop read the
+                            # status and then fell through regardless, so a
+                            # CREATE_FAILED engine went on to have policies written to
+                            # it and be attached to the gateway.
                             import time as _time_pe
 
-                            for _ in range(12):
-                                pe_status = agentcore_ctrl_policy.get_policy_engine(policyEngineId=engine_id)
-                                if pe_status.get("status") in ("ACTIVE", "READY"):
+                            engine_status = ""
+                            for _ in range(24):
+                                engine_status = agentcore_ctrl_policy.get_policy_engine(policyEngineId=engine_id).get(
+                                    "status", ""
+                                )
+                                if engine_status in ("ACTIVE", "READY") or engine_status.endswith("_FAILED"):
                                     break
                                 _time_pe.sleep(5)
+                            if engine_status not in ("ACTIVE", "READY"):
+                                raise RuntimeError(
+                                    f"Policy engine {engine_id} is {engine_status or 'unreadable'} rather than "
+                                    "ACTIVE; refusing to bind policies to it."
+                                )
 
-                        # Create policies from config or default permit-all
-                        _pc_policies = _pc.get("policies", [])
-                        if _pc_policies:
-                            for pol in _pc_policies:
-                                pol_name = pol.get("name", "policy")
-                                pol_statement = pol.get("statement", "")
-                                if not pol_statement:
-                                    continue
-                                try:
-                                    agentcore_ctrl_policy.create_policy(
-                                        policyEngineId=engine_id,
-                                        name=pol_name,
-                                        description=pol.get("description", ""),
-                                        definition={"cedar": {"statement": pol_statement}},
-                                    )
-                                except Exception as pol_err:
-                                    if "already exists" not in str(pol_err).lower():
-                                        logger.warning("Could not create policy %s: %s", pol_name, pol_err)
-                        else:
-                            # Default permit-all (Cedar requires a when clause)
-                            default_statement = (
-                                f'permit(principal, action, resource == AgentCore::Gateway::"{gateway_arn}")\nwhen {{ true }};'
+                        # Create policies from config, or a permit over the tools the
+                        # gateway actually exposes.
+                        #
+                        # There is no permit-all in AgentCore. This branch used to
+                        # emit `permit(principal, action, resource == <gateway>)
+                        # when { true }`, and every deployment that took it shipped a
+                        # policy engine with NOTHING in it: CreatePolicy returns 200
+                        # and CREATING, the engine then rejects the statement as
+                        # "Overly Permissive ... (Any Future Tools)" seconds later,
+                        # and the except below logged that at WARNING and carried on
+                        # to attach the engine in ENFORCE mode. Default-deny plus an
+                        # empty policy set means every tool call the agent makes is
+                        # denied, on a deployment that reported success.
+                        #
+                        # The Step Functions path (step_handlers/policy_step.py) had
+                        # already worked this out against the live engine. The tool
+                        # enumeration is imported from there rather than reimplemented
+                        # so the two paths cannot drift: a Cedar action must name a
+                        # tool that exists in the gateway manifest as
+                        # AgentCore::Action::"{Target}___{tool}", and the list form is
+                        # required even for a single tool (`action ==` is rejected the
+                        # same way a bare `action` is).
+                        from app.step_handlers.policy_step import (
+                            _create_policy_when_engine_ready,
+                            _read_gateway_tool_actions,
+                        )
+
+                        _pc_policies = [p for p in (_pc.get("policies") or []) if p.get("statement")]
+                        if not _pc_policies:
+                            qualified_tools = _read_gateway_tool_actions(agentcore_ctrl_policy, gateway_id)
+                            if not qualified_tools:
+                                # Fail closed rather than attach an ENFORCE engine
+                                # with no policy on it. An empty policy set under
+                                # default-deny is a gateway that serves no tools, and
+                                # nothing downstream would report why.
+                                raise RuntimeError(
+                                    f"Gateway {gateway_id} exposes no tool whose Cedar action can be named, so "
+                                    "no authorization policy can be created. Refusing to attach a policy engine "
+                                    "that would deny every tool call."
+                                )
+                            principal_type = _pc.get("principal_type") or "AgentCore::OAuthUser"
+                            resource_scope = (
+                                f'resource == AgentCore::Gateway::"{gateway_arn}"'
                                 if gateway_arn
-                                else "permit(principal, action, resource is AgentCore::Gateway)\nwhen { true };"
+                                else "resource is AgentCore::Gateway"
                             )
+                            action_list = ", ".join(f'AgentCore::Action::"{q}"' for q in qualified_tools)
+                            _pc_policies = [
+                                {
+                                    "name": "allow_permitted_tools",
+                                    "description": f"Permits the {len(qualified_tools)} tool(s) this gateway exposes",
+                                    "statement": (
+                                        f"permit(principal is {principal_type}, "
+                                        f"action in [{action_list}], {resource_scope});"
+                                    ),
+                                }
+                            ]
+
+                        # Policy names are ACCOUNT-global, not engine-scoped, and
+                        # CreatePolicy caps the name well under 50 characters — both
+                        # established live on the Step Functions path. Two gateways
+                        # emitting the same policy name collide with a
+                        # ConflictException, so the engine name prefixes every name to
+                        # keep it unique across gateways while staying stable across a
+                        # retry of this same deployment.
+                        created_names = []
+                        for pol in _pc_policies:
+                            base_name = re.sub(r"[^A-Za-z0-9_]", "_", pol.get("name", "policy"))
+                            prefix = engine_name[: max(0, 48 - len(base_name) - 1)]
+                            pol_name = (f"{prefix}_{base_name}" if prefix else base_name)[:48]
+                            created_names.append(pol_name)
                             try:
-                                agentcore_ctrl_policy.create_policy(
-                                    policyEngineId=engine_id,
-                                    name="default_permit_all",
-                                    description="Default permit-all policy for gateway tools",
-                                    definition={"cedar": {"statement": default_statement}},
+                                # The Step Functions path's helper, not a second copy
+                                # of it: it also retries the ConflictException where
+                                # the engine reports ACTIVE but the first
+                                # create_policy still says "is CREATING", and it
+                                # carries the validationMode reasoning.
+                                _create_policy_when_engine_ready(
+                                    agentcore_ctrl_policy,
+                                    engine_id,
+                                    pol_name,
+                                    pol.get("description", ""),
+                                    pol["statement"],
                                 )
                             except Exception as pol_err:
-                                if "already exists" not in str(pol_err).lower():
-                                    logger.warning("Could not create policy: %s", pol_err)
+                                if "already exists" in str(pol_err).lower():
+                                    continue
+                                # Not a warning. A policy that does not exist is a
+                                # tool the agent cannot call once the engine is
+                                # attached in ENFORCE mode below.
+                                raise RuntimeError(f"Could not create Cedar policy {pol_name}: {pol_err}") from pol_err
+
+                        # And CreatePolicy returning 200 does not mean the policy
+                        # exists: the validation findings land asynchronously in
+                        # statusReasons. Poll to a terminal status so a rejection
+                        # fails this phase instead of surfacing later as an agent
+                        # with no tools.
+                        _await_policies_active(agentcore_ctrl_policy, engine_id, created_names)
 
                         # Attach policy engine to gateway
                         gw_detail = agentcore_ctrl_policy.get_gateway(gatewayIdentifier=gateway_id)
@@ -1180,7 +1376,20 @@ class WorkflowExecutor:
                                 break
                             _time_gw.sleep(5)
                 except Exception as policy_err:
-                    logger.warning("Policy deployment failed (non-fatal): %s", policy_err)
+                    # Not "non-fatal", which is what this used to log before carrying
+                    # on. Both ways this phase can fail leave the deployment worse
+                    # than the caller was told:
+                    #
+                    #   * failing before the engine is attached means the
+                    #     authorization the caller asked for is simply absent, and the
+                    #     gateway serves every tool to every principal;
+                    #   * failing after it is attached means an ENFORCE engine with no
+                    #     policy in force, which under default-deny is an agent whose
+                    #     every tool call is denied.
+                    #
+                    # Neither is something to report as a successful deployment, so
+                    # the phase fails and rollback reclaims what it created.
+                    raise RuntimeError(f"Policy engine deployment failed: {policy_err}") from policy_err
 
             # ------------------------------------------------------------------
             # Phase 1.6: Deploy Guardrails (if guardrails node is connected)
@@ -1354,8 +1563,13 @@ class WorkflowExecutor:
                                                 "Action": [
                                                     "bedrock:InvokeModel",
                                                     "bedrock:InvokeModelWithResponseStream",
+                                                    # One namespace covers both planes: there is no
+                                                    # `bedrock-agentcore-control:` IAM prefix, so the entry that
+                                                    # used to sit here authorized nothing. An IAM service prefix is
+                                                    # the SigV4 signing name, and both the data-plane and
+                                                    # control-plane clients sign as `bedrock-agentcore`. See the
+                                                    # prefix note in services/per_agent_identity.py.
                                                     "bedrock-agentcore:*",
-                                                    "bedrock-agentcore-control:*",
                                                 ],
                                                 "Resource": "*",
                                             }

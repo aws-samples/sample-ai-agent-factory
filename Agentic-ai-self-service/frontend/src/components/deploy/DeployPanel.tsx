@@ -319,7 +319,19 @@ export function DeployPanel({
           tagProfile: resourceTagState.profileName || undefined,
         }),
       });
-      if (!response.ok) throw new Error(`Template generation failed (${response.status})`);
+      if (!response.ok) {
+        // A 4xx here is the generator refusing a canvas it cannot export
+        // faithfully (e.g. a LiteLLM gateway), and its `detail` names the
+        // workaround. Surface it verbatim — the bare status code this used to
+        // throw told the user nothing about how to proceed. 5xx detail is the
+        // generic "Internal server error" string, so fall back to the status.
+        let message = `Template generation failed (${response.status})`;
+        if (response.status < 500) {
+          const detail = await response.json().catch(() => null);
+          if (typeof detail?.detail === 'string') message = detail.detail;
+        }
+        throw new Error(message);
+      }
       const result = await response.json();
       if (result.download_url) {
         const a = document.createElement('a');

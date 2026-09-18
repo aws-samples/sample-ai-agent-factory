@@ -550,6 +550,20 @@ class DeployRequest(BaseModel):
     # sts:AssumeRole and targetRegion selects an allowlisted region.
     target_account_id: str | None = Field(alias="targetAccountId", default=None, pattern=r"^\d{12}$")
     target_region: str | None = Field(alias="targetRegion", default=None, max_length=32)
+    # CloudFormation export only. Sets DeletionPolicy/UpdateReplacePolicy on the
+    # data-bearing resources of the exported template (Cognito user pools, the
+    # Knowledge Base and its data source, AgentCore Memory). "Retain" is the
+    # default because the alternative is that one `cfn delete-stack` or
+    # `terraform destroy` silently takes user identities and conversation history
+    # with it. "Delete" is for throwaway demo stacks that should tear down clean.
+    #
+    # Deliberately a generation-time choice, not a template Parameter:
+    # DeletionPolicy and UpdateReplacePolicy are CloudFormation *attributes* and
+    # accept only literal values, so `{"Ref": ...}` is not valid there. The value
+    # has to be baked into the YAML when it is generated.
+    data_retention_policy: Literal["Retain", "Delete"] | None = Field(
+        alias="dataRetentionPolicy", default="Retain"
+    )
 
     @model_validator(mode="after")
     def _check_kb_config(self) -> "DeployRequest":
@@ -614,6 +628,9 @@ class TestResponse(BaseModel):
     request_id: str | None = Field(alias="requestId", default=None)
     arn: str | None = None
     logs: str | None = None
+    # W3C trace id sent on InvokeHarness (harness mode). Lets a caller jump from
+    # a test turn to the harness + Memory spans in aws/spans.
+    trace_id: str | None = Field(alias="traceId", default=None)
 
 
 class DeleteResponse(BaseModel):

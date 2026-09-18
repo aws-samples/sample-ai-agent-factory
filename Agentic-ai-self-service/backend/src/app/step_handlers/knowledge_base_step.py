@@ -18,7 +18,7 @@ from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepNam
 from app.services import step_clients
 from app.services.aws_errors import error_code
 from app.services.deployment_state_store import DeploymentStateStore
-from app.services.region_models import repoint_regional_prefix
+from app.services.region_models import is_inference_profile_id, repoint_regional_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +34,8 @@ def _get_deployment_store() -> DeploymentStateStore:
     )
 
 
-def _build_model_arn(region: str, model_id: str) -> str:
-    """Build a Bedrock foundation model ARN.
+def _build_model_arn(region: str, model_id: str, account_id: str = "") -> str:
+    """Build the Bedrock ARN for *model_id* — profile or foundation model.
 
     An existing cross-region prefix is re-pointed at ``region`` first: the
     defaults and stored KB configs carry ``us.``, and there is no
@@ -44,8 +44,32 @@ def _build_model_arn(region: str, model_id: str) -> str:
     Repoint-only, never add: this same helper builds the ``embeddingModelId``
     ARN, and embedding models (``amazon.titan-embed-text-v2:0``) have no
     cross-region profiles, so ``eu.amazon.titan-…`` would be invalid.
+
+    A geography-prefixed id is an **inference profile**, and this used to emit it
+    as a foundation model, which names nothing. Confirmed against the live API:
+
+        aws bedrock get-foundation-model \\
+            --model-identifier us.anthropic.claude-sonnet-4-5-20250929-v1:0
+        ResourceNotFoundException: Model not found.
+
+    while ``get-inference-profile`` on the same id answers with
+    ``arn:aws:bedrock:us-east-1:<account>:inference-profile/us.anthropic.…``. Note
+    the account id, which a ``foundation-model`` ARN never carries and which this
+    therefore needs — hence *account_id*. Without it the only ARN this could build
+    is the invalid one, so it raises rather than quietly emitting that: Bedrock's own
+    rejection arrives later and says "unable to assume the given role", which sends
+    the reader to the IAM policy for a problem that is in the model ARN.
     """
-    return f"arn:aws:bedrock:{region}::foundation-model/{repoint_regional_prefix(model_id, region)}"
+    resolved = repoint_regional_prefix(model_id, region)
+    if is_inference_profile_id(resolved):
+        if not account_id:
+            raise ValueError(
+                f"{resolved} is a cross-region inference profile, whose ARN includes the "
+                "account id, and the account id could not be resolved. Either pass one or "
+                "use the plain on-demand model id (no us./eu./apac./global. prefix)."
+            )
+        return f"arn:aws:bedrock:{region}:{account_id}:inference-profile/{resolved}"
+    return f"arn:aws:bedrock:{region}::foundation-model/{resolved}"
 
 
 def _get_account_id(event: dict) -> str:
@@ -809,7 +833,10 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
 
     kb_mode = kb_config.get("kbMode", "existing")
     foundation_model_id = kb_config.get("foundationModelId", "us.anthropic.claude-sonnet-5")
-    foundation_model_arn = _build_model_arn(region, foundation_model_id)
+    # Resolved once: the default above and every other model id in this step are
+    # geography-prefixed, so their ARNs are inference profiles and carry the account.
+    account_id = _get_account_id(event)
+    foundation_model_arn = _build_model_arn(region, foundation_model_id, account_id)
 
     bedrock_agent = step_clients.client(event, "bedrock-agent")
 
@@ -839,7 +866,7 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
         kb_name = kb_config.get("kbName", f"agentcore-kb-{deployment_id[:8]}")
         kb_description = kb_config.get("kbDescription", "Knowledge Base created by AgentCore Flow")
         embedding_model_id = kb_config.get("embeddingModelId", "amazon.titan-embed-text-v2:0")
-        embedding_model_arn = _build_model_arn(region, embedding_model_id)
+        embedding_model_arn = _build_model_arn(region, embedding_model_id, account_id)
 
         # Step 1: Create IAM role with permissions based on data source + vector store
         iam_client = step_clients.client(event, "iam")
@@ -1065,7 +1092,7 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
         elif parsing_strategy == "bedrock_foundation_model":
             parsing_model_id = kb_config.get("parsingModelId", "us.anthropic.claude-sonnet-5")
             fm_config: dict = {
-                "modelArn": _build_model_arn(region, parsing_model_id),
+                "modelArn": _build_model_arn(region, parsing_model_id, account_id),
                 "parsingModality": "MULTIMODAL",
             }
             parsing_prompt = kb_config.get("parsingPrompt", "")

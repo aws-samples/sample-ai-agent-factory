@@ -111,6 +111,17 @@ def _get_model_id(config: RuntimeConfig) -> str:
     return _sanitize_identifier(to_regional_model_id(model_id))
 
 
+# Public alias. The CloudFormation exporter has to arrive at the *same* model the
+# generated agent code embeds, and it did not: it hardcoded
+# ``to_regional_model_id("us.anthropic.claude-sonnet-5")`` as the ModelId default and
+# ignored ``config.model`` entirely, so a canvas built on Opus 4.8 exported a template
+# that deployed Sonnet 5 — a silent substitution, with a CREATE_COMPLETE stack. Sharing
+# this function is what makes the two paths incapable of disagreeing; do not reimplement
+# the ``modelId`` lookup anywhere else. Note the key: it is ``modelId``, and the export
+# side had ``config.model.get("id", ...)``, which always missed.
+resolve_model_id = _get_model_id
+
+
 def _get_region() -> str:
     """Read AWS region from environment."""
     return region_models.current_region()
@@ -402,18 +413,67 @@ GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
 # token. "static_bearer" (a LiteLLM MCP Gateway) sends a long-lived virtual key.
 GATEWAY_AUTH_MODE = os.environ.get("GATEWAY_AUTH_MODE", "oauth2")
 GATEWAY_API_KEY = os.environ.get("GATEWAY_API_KEY", "")
+# The CloudFormation export passes the virtual key BY REFERENCE. See
+# _resolve_gateway_key below for why that is not the same as passing the value.
+GATEWAY_API_KEY_SECRET_ARN = os.environ.get("GATEWAY_API_KEY_SECRET_ARN", "")
 GATEWAY_MCP_SERVERS = os.environ.get("GATEWAY_MCP_SERVERS", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID") or os.environ.get("OAUTH_CLIENT_ID", "")
 COGNITO_CLIENT_SECRET = os.environ.get("COGNITO_CLIENT_SECRET") or os.environ.get("OAUTH_CLIENT_SECRET", "")
 COGNITO_TOKEN_ENDPOINT = os.environ.get("COGNITO_TOKEN_ENDPOINT") or os.environ.get("OAUTH_TOKEN_ENDPOINT", "")
 COGNITO_SCOPE = os.environ.get("COGNITO_SCOPE") or os.environ.get("OAUTH_SCOPE", "")
 
+_gateway_key_cache = {{}}
+
+
+def _resolve_gateway_key():
+    """The LiteLLM virtual key: from the environment, or from Secrets Manager.
+
+    The platform's own deploy path resolves the secret in the control plane and
+    injects the value as GATEWAY_API_KEY. The CloudFormation export cannot do
+    that: a template is a file people commit and paste into tickets, and a
+    CloudFormation dynamic reference would resolve the plaintext into this
+    runtime's own configuration, where DescribeAgentRuntime shows it and a
+    rotated key keeps serving the old value until the next stack update. So the
+    export hands over GATEWAY_API_KEY_SECRET_ARN and the key is read here, with
+    the runtime role scoped to that one secret.
+
+    Cached: every MCP transport needs it and the value does not change within a
+    container's life.
+    """
+    if GATEWAY_API_KEY:
+        return GATEWAY_API_KEY
+    if not GATEWAY_API_KEY_SECRET_ARN:
+        return ""
+    if "value" not in _gateway_key_cache:
+        import boto3
+        _sm = boto3.client("secretsmanager", region_name=REGION)
+        _raw = _sm.get_secret_value(SecretId=GATEWAY_API_KEY_SECRET_ARN)["SecretString"]
+        try:
+            _payload = json.loads(_raw)
+        except (ValueError, TypeError):
+            _payload = None
+        # The platform stores {{"apiKey": "..."}}; a secret a customer created by
+        # hand is usually just the key as plain text. Accept both rather than
+        # telling someone their own secret is the wrong shape.
+        if isinstance(_payload, dict):
+            _key = str(_payload.get("apiKey") or _payload.get("api_key") or "")
+        else:
+            _key = _raw.strip()
+        if not _key:
+            # Never echo the payload — only the fact and the ARN.
+            raise RuntimeError(
+                f"The gateway key secret {{GATEWAY_API_KEY_SECRET_ARN}} holds no key. "
+                'Expected either a plain-text key or {{"apiKey": "<key>"}}.'
+            )
+        _gateway_key_cache["value"] = _key
+    return _gateway_key_cache["value"]
+
 
 def _get_gateway_token():
     """Get OAuth2 access token from Cognito for Gateway authentication."""
     if GATEWAY_AUTH_MODE == "static_bearer":
         # LiteLLM: the virtual key IS the credential — no token exchange exists.
-        return GATEWAY_API_KEY
+        return _resolve_gateway_key()
     if not COGNITO_CLIENT_ID or not COGNITO_TOKEN_ENDPOINT:
         return ""
     try:
@@ -1217,17 +1277,66 @@ GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
 # token. "static_bearer" (a LiteLLM MCP Gateway) sends a long-lived virtual key.
 GATEWAY_AUTH_MODE = os.environ.get("GATEWAY_AUTH_MODE", "oauth2")
 GATEWAY_API_KEY = os.environ.get("GATEWAY_API_KEY", "")
+# The CloudFormation export passes the virtual key BY REFERENCE. See
+# _resolve_gateway_key below for why that is not the same as passing the value.
+GATEWAY_API_KEY_SECRET_ARN = os.environ.get("GATEWAY_API_KEY_SECRET_ARN", "")
 GATEWAY_MCP_SERVERS = os.environ.get("GATEWAY_MCP_SERVERS", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID") or os.environ.get("OAUTH_CLIENT_ID", "")
 COGNITO_CLIENT_SECRET = os.environ.get("COGNITO_CLIENT_SECRET") or os.environ.get("OAUTH_CLIENT_SECRET", "")
 COGNITO_TOKEN_ENDPOINT = os.environ.get("COGNITO_TOKEN_ENDPOINT") or os.environ.get("OAUTH_TOKEN_ENDPOINT", "")
-COGNITO_SCOPE = os.environ.get("COGNITO_SCOPE") or os.environ.get("OAUTH_SCOPE", "")"""
+COGNITO_SCOPE = os.environ.get("COGNITO_SCOPE") or os.environ.get("OAUTH_SCOPE", "")
+
+_gateway_key_cache = {}"""
         gateway_functions = '''
+
+def _resolve_gateway_key():
+    """The LiteLLM virtual key: from the environment, or from Secrets Manager.
+
+    The platform's own deploy path resolves the secret in the control plane and
+    injects the value as GATEWAY_API_KEY. The CloudFormation export cannot do
+    that: a template is a file people commit and paste into tickets, and a
+    CloudFormation dynamic reference would resolve the plaintext into this
+    runtime's own configuration, where DescribeAgentRuntime shows it and a
+    rotated key keeps serving the old value until the next stack update. So the
+    export hands over GATEWAY_API_KEY_SECRET_ARN and the key is read here, with
+    the runtime role scoped to that one secret.
+
+    Cached: every MCP transport needs it and the value does not change within a
+    container's life.
+    """
+    if GATEWAY_API_KEY:
+        return GATEWAY_API_KEY
+    if not GATEWAY_API_KEY_SECRET_ARN:
+        return ""
+    if "value" not in _gateway_key_cache:
+        import boto3
+        _sm = boto3.client("secretsmanager", region_name=REGION)
+        _raw = _sm.get_secret_value(SecretId=GATEWAY_API_KEY_SECRET_ARN)["SecretString"]
+        try:
+            _payload = json.loads(_raw)
+        except (ValueError, TypeError):
+            _payload = None
+        # The platform stores {"apiKey": "..."}; a secret a customer created by
+        # hand is usually just the key as plain text. Accept both rather than
+        # telling someone their own secret is the wrong shape.
+        if isinstance(_payload, dict):
+            _key = str(_payload.get("apiKey") or _payload.get("api_key") or "")
+        else:
+            _key = _raw.strip()
+        if not _key:
+            # Never echo the payload — only the fact and the ARN.
+            raise RuntimeError(
+                f"The gateway key secret {GATEWAY_API_KEY_SECRET_ARN} holds no key. "
+                'Expected either a plain-text key or {"apiKey": "<key>"}.'
+            )
+        _gateway_key_cache["value"] = _key
+    return _gateway_key_cache["value"]
+
 
 def _get_gateway_token():
     if GATEWAY_AUTH_MODE == "static_bearer":
         # LiteLLM: the virtual key IS the credential — no token exchange exists.
-        return GATEWAY_API_KEY
+        return _resolve_gateway_key()
     if not COGNITO_CLIENT_ID or not COGNITO_TOKEN_ENDPOINT:
         return ""
     try:

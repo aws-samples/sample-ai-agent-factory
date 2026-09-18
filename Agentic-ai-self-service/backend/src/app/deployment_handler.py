@@ -1012,6 +1012,7 @@ async def handle_test_runtime(request: TestRequest, raw_request: Request) -> Tes
                 error=None if harness_ok else "Harness invocation failed",
                 session_id=session_id,
                 arn=harness_arn,
+                trace_id=result.get("trace_id"),
             )
 
         # Get runtime ARN
@@ -1212,7 +1213,7 @@ async def handle_test_runtime_stream(request: TestRequest):
             token = word + (" " if i < len(words) - 1 else "")
             lines.append(f"data: {json.dumps({'type': 'token', 'token': token})}\n\n")
         lines.append(
-            f"data: {json.dumps({'type': 'done', 'session_id': request.session_id or runtime_id, 'full_response': out})}\n\n"
+            f"data: {json.dumps({'type': 'done', 'session_id': request.session_id or runtime_id, 'full_response': out, 'trace_id': result.get('trace_id')})}\n\n"
         )
         return PlainTextResponse("".join(lines), media_type="text/event-stream")
 
@@ -2656,9 +2657,15 @@ async def handle_generate_cfn_template(request: DeployRequest):
     Returns a presigned S3 URL to download the zip, or the zip bytes
     directly if no S3 bucket is configured.
     """
-    try:
-        from app.services.cfn_template_generator import CfnTemplateGenerator
+    # Imported outside the try on purpose: the `except CfnExportUnsupportedError`
+    # below has to resolve that name, so a failed import here would turn into a
+    # NameError raised from the handler rather than the ImportError that happened.
+    from app.services.cfn_template_generator import (
+        CfnExportUnsupportedError,
+        CfnTemplateGenerator,
+    )
 
+    try:
         generator = CfnTemplateGenerator()
         bundle = generator.generate(request)
         zip_bytes = bundle.to_zip()
@@ -2684,6 +2691,14 @@ async def handle_generate_cfn_template(request: DeployRequest):
             "zip_base64": base64.b64encode(zip_bytes).decode(),
             "filename": f"{bundle.deployment_name}-cfn.zip",
         }
+
+    except CfnExportUnsupportedError as exc:
+        # Not a server fault and not a secret: the generator refused a canvas it
+        # cannot represent, and its message names the workaround. Pass it through
+        # verbatim — collapsing it into the generic 500 below is what made the
+        # LiteLLM gap invisible in the first place.
+        logger.warning("CFN export refused: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     except Exception as exc:
         logger.exception("CFN template generation failed")

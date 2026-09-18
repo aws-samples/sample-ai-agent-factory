@@ -188,12 +188,38 @@ class TestRegionalizedDefaultsAcrossTheSweep:
     generators' own model, and the spec the agent-generator LLM emits.
     """
 
-    def test_cfn_export_model_id_parameter(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("canvas_model", "expected"),
+        [
+            ("us.anthropic.claude-opus-4-8", "eu.anthropic.claude-opus-4-8"),
+            ("eu.anthropic.claude-sonnet-5", "eu.anthropic.claude-sonnet-5"),
+            ("anthropic.claude-sonnet-5", "eu.anthropic.claude-sonnet-5"),
+        ],
+        # No "canvas with no model" case: RuntimeConfig rejects an empty ``model``
+        # ("model.modelId is required"), so ``_get_model_id``'s own default is
+        # unreachable through the export path and is covered above on a duck-typed
+        # config instead.
+        ids=["us-prefixed-canvas-model", "already-correct", "unprefixed"],
+    )
+    def test_cfn_export_model_id_parameter(self, monkeypatch, canvas_model, expected):
+        """The exported default is the canvas model, repointed at the platform region.
+
+        Both halves matter and each was broken on its own. The parameter used to be
+        hardcoded to ``us.anthropic.claude-sonnet-5``, so an Opus canvas exported a
+        template that deployed Sonnet — silently, with a CREATE_COMPLETE stack and a
+        working agent that was not the designed one. It now resolves through
+        ``code_generator.resolve_model_id``, the same function the generated agent
+        source uses, which is also where the regional prefix is applied: a ``us.``
+        inference profile does not exist in eu-central-1, so a Frankfurt export
+        carrying one fails on every invoke.
+        """
+        from app.models.deployment_models import RuntimeConfig
         from app.services.cfn_template_generator import CfnTemplateGenerator
 
         monkeypatch.setenv("APP_AWS_REGION", "eu-central-1")
-        template = CfnTemplateGenerator()._init_template("demo", None)
-        assert template["Parameters"]["ModelId"]["Default"] == "eu.anthropic.claude-sonnet-5"
+        config = RuntimeConfig(name="demo", model={"modelId": canvas_model})
+        template = CfnTemplateGenerator()._init_template("demo", None, config)
+        assert template["Parameters"]["ModelId"]["Default"] == expected
 
     def test_cfn_export_teardown_script_region(self, monkeypatch):
         from app.services.cfn_template_generator import CfnTemplateGenerator
@@ -204,10 +230,73 @@ class TestRegionalizedDefaultsAcrossTheSweep:
         assert "us-east-1" not in script
 
     def test_knowledge_base_model_arn_follows_its_region_argument(self):
+        """A geography-prefixed id is an inference profile, not a foundation model.
+
+        Both halves of this assertion were wrong before. The prefix was not
+        repointed, so a Frankfurt KB got a ``us.`` profile that does not exist
+        there; and the ARN said ``foundation-model``, which for a prefixed id
+        names nothing at all. Verified against the live API in us-east-1:
+        ``get-foundation-model --model-identifier us.anthropic.claude-…``
+        answers ResourceNotFoundException, while ``get-inference-profile`` on
+        the same id returns an ARN that carries the account id.
+        """
         from app.step_handlers.knowledge_base_step import _build_model_arn
 
-        assert _build_model_arn("eu-central-1", "us.anthropic.claude-sonnet-5") == (
-            "arn:aws:bedrock:eu-central-1::foundation-model/eu.anthropic.claude-sonnet-5"
+        assert _build_model_arn("eu-central-1", "us.anthropic.claude-sonnet-5", "111122223333") == (
+            "arn:aws:bedrock:eu-central-1:111122223333:inference-profile/eu.anthropic.claude-sonnet-5"
+        )
+
+    def test_an_unknown_account_is_an_error_not_a_broken_arn(self):
+        """Without the account there is no valid profile ARN to build, so raise.
+
+        ``_get_account_id`` swallows its failures and returns ``""``. Emitting
+        ``arn:aws:bedrock:<region>::inference-profile/…`` from that would be
+        accepted by ``create_knowledge_base`` and fail later inside Bedrock as
+        "unable to assume the given role", pointing every reader at the IAM
+        policy for a defect that is in the model ARN.
+        """
+        from app.step_handlers.knowledge_base_step import _build_model_arn
+
+        with pytest.raises(ValueError, match="inference profile"):
+            _build_model_arn("eu-central-1", "us.anthropic.claude-sonnet-5")
+
+    @pytest.mark.parametrize(
+        ("model_id", "is_profile"),
+        [
+            ("us.anthropic.claude-sonnet-5", True),
+            ("eu.anthropic.claude-sonnet-5", True),
+            ("apac.anthropic.claude-sonnet-5", True),
+            ("ap.anthropic.claude-sonnet-5", True),
+            ("anthropic.claude-sonnet-5", False),
+            ("amazon.titan-embed-text-v2:0", False),
+            ("cohere.embed-english-v3", False),
+            # ``global.`` is region-INDEPENDENT, so repoint_regional_prefix must
+            # leave it alone — but it is still a profile, and its ARN still
+            # carries the account. ``list-inference-profiles`` in us-east-1
+            # returns global.anthropic.*, global.cohere.embed-v4:0 and others
+            # with account-bearing inference-profile ARNs.
+            ("global.anthropic.claude-sonnet-5", True),
+            ("global.cohere.embed-v4:0", True),
+        ],
+    )
+    def test_is_inference_profile_id(self, model_id, is_profile):
+        from app.services.region_models import is_inference_profile_id
+
+        assert is_inference_profile_id(model_id) is is_profile
+
+    def test_a_global_profile_keeps_its_prefix_but_gets_a_profile_arn(self):
+        """The two rules pull in different directions and both must hold.
+
+        ``global.`` is region-independent, so it must not be rewritten to
+        ``eu.`` — that would name a different profile. But it IS a profile, so
+        the ARN must be the account-bearing ``inference-profile`` form. An
+        earlier draft of ``is_inference_profile_id`` reused the repoint-only
+        geography set and got the second half wrong for every global model.
+        """
+        from app.step_handlers.knowledge_base_step import _build_model_arn
+
+        assert _build_model_arn("eu-central-1", "global.anthropic.claude-sonnet-5", "111122223333") == (
+            "arn:aws:bedrock:eu-central-1:111122223333:inference-profile/global.anthropic.claude-sonnet-5"
         )
 
     @pytest.mark.parametrize(

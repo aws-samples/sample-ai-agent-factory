@@ -24,10 +24,30 @@ dev = [
     "httpx>=0.28.0",
     "moto[dynamodb]>=5.0.0",
     "requests>=2.31.0",
+    # The lint gate over the exported CloudFormation template. Declared here rather
+    # than left to whatever the developer happens to have installed, because
+    # tests/test_cfn_export_contract.py skips the check when cfn-lint is missing — so
+    # an undeclared dependency means the only lint that ever runs against our
+    # customer-facing artifact silently does not run.
+    "cfn-lint>=1.22.0",
+    # checkov is deliberately NOT here, even though the same test suite runs it.
+    # checkov pins `boto3==1.35.49`; this package requires `boto3>=1.43.66` for the GA
+    # Agent Registry service models. pip does not report that as a conflict — it
+    # backtracks and installs an older checkov with a different rule set than the
+    # accepted-findings baseline in that test was recorded against, so the policy gate
+    # would quietly start checking something else. Install it isolated instead:
+    #     pipx install checkov==3.3.1      # or: uv tool install checkov==3.3.1
+    # The test finds it on PATH. See _require_scanner in
+    # tests/test_cfn_export_contract.py.
     # Exact pin, unlike everything else here: a formatter's output changes between
     # minor releases, so `>=` would mean `ruff format --check` locally and in CI
-    # could disagree while both were "satisfied". Must match the `version:` pinned
-    # on the ruff-action steps in .github/workflows/ci.yml.
+    # could disagree while both were "satisfied". Must match the version installed by
+    # the `lint` job in the repository-root workflow
+    # .github/workflows/agentic-ai-self-service-ci.yml — note that is at the ROOT of
+    # this monorepo, not under Agentic-ai-self-service/, because GitHub Actions reads
+    # workflows only from the root. This pin is not hypothetical: a ruff installed
+    # outside this extra reformats three files differently, so run
+    # `pip install -e '.[dev]'` rather than relying on a system-wide ruff.
     "ruff==0.16.4",
 ]
 deploy = [

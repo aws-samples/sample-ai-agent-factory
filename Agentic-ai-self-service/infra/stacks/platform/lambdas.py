@@ -159,9 +159,13 @@ def build_shared_runtime_role(
                 "bedrock-agentcore:RetrieveMemoryRecords",
                 "bedrock-agentcore:GetMemoryRecord",
                 "bedrock-agentcore:ListMemoryRecords",
-                # Legacy memory data-plane verbs kept for older SDK paths.
-                "bedrock-agentcore:GetLastKTurns",
-                "bedrock-agentcore:RetrieveMemories",
+                # No "legacy verbs kept for older SDK paths" here. GetLastKTurns
+                # and RetrieveMemories used to sit on the two lines below this
+                # comment and are not AgentCore IAM actions at all -- IAM accepts a
+                # nonexistent action without complaint and authorizes nothing, so
+                # they never did anything. The real verbs are RetrieveMemoryRecords
+                # and ListEvents, both already above. Confirmed with IAM Access
+                # Analyzer (INVALID_ACTION) and botocore's service model.
                 "bedrock:ApplyGuardrail",
                 "bedrock:GetGuardrail",
                 # Knowledge Base retrieve (called by retrieve_from_kb tool
