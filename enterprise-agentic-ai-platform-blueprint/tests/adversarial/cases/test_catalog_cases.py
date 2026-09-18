@@ -103,15 +103,10 @@ def test_adversarial_case(
         finished_at=finished_at,
         notes=result.notes,
     )
-    if verdict == "pass":
-        evidence_writer.record(record)
-    else:
-        # A failing record is still retained, but it must never be blocked from
-        # being written by its own incompleteness.
-        try:
-            evidence_writer.record(record)
-        except Exception:  # noqa: BLE001 - the assertion failure is the signal
-            pass
+    # Failed verdicts permit incomplete correlation/twin data, but every record
+    # must still pass sanitization and schema validation. A writer failure is a
+    # harness failure, never a silent evidence omission.
+    evidence_writer.record(record)
 
     if failure is not None:
         raise failure

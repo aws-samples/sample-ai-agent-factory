@@ -199,9 +199,13 @@ class EvidenceRecord:
         if not self.observed:
             issues.append("observedResult is required")
 
-        if self.live_mode and not (self.request_id or self.trace_id):
+        if (
+            self.live_mode
+            and self.verdict == "pass"
+            and not (self.request_id or self.trace_id)
+        ):
             issues.append(
-                "a live record must carry a requestId or traceId so it can be "
+                "a passing live record must carry a requestId or traceId so it can be "
                 "correlated with provider-side logs"
             )
 

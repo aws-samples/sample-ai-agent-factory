@@ -304,6 +304,14 @@ describe('Round 1 integration — CDK app self-synth contract', () => {
     resolve(__dirname, '../../bin/agentic-ai-platform.ts'),
     'utf8',
   );
+  const packageDocument = JSON.parse(
+    readFileSync(resolve(__dirname, '../../package.json'), 'utf8'),
+  ) as { scripts: Record<string, string> };
+
+  it('uses an explicit, meaningful stage for the default npm synth', () => {
+    expect(packageDocument.scripts.synth).toContain('--strict');
+    expect(packageDocument.scripts.synth).toContain('--context stage=management');
+  });
 
   it('rejects a missing stage instead of emitting an empty assembly', () => {
     expect(appSource).toMatch(/case undefined:\s*throw new Error\(/);

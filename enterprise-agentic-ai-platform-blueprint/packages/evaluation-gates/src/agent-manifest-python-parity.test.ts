@@ -8,12 +8,18 @@ const PYTHON_CONTRACT = path.resolve(
   '../../../scripts/live-agentcore-gateway-spike/manifest_contract.py',
 );
 
-function buildWithPython(input: AgentManifestInput) {
-  const output = execFileSync('python3', [PYTHON_CONTRACT], {
+function buildWithPython(input: AgentManifestInput): {
+  raw: string;
+  manifest: ReturnType<typeof buildAgentManifest>;
+} {
+  const raw = execFileSync('python3', [PYTHON_CONTRACT], {
     input: JSON.stringify({ input, now: FIXED_NOW().toISOString() }),
     encoding: 'utf8',
   });
-  return JSON.parse(output);
+  return {
+    raw,
+    manifest: JSON.parse(raw) as ReturnType<typeof buildAgentManifest>,
+  };
 }
 
 describe('Python Agent Manifest parity', () => {
@@ -47,6 +53,9 @@ describe('Python Agent Manifest parity', () => {
   it.each(fixtures)('matches TypeScript byte semantics for %#', (input) => {
     const expected = buildAgentManifest(input, FIXED_NOW);
     const actual = buildWithPython(input);
-    expect(actual).toEqual(expected);
+    expect(actual.manifest).toEqual(expected);
+    expect(Buffer.from(actual.raw, 'utf8')).toEqual(
+      Buffer.from(`${JSON.stringify(expected)}\n`, 'utf8'),
+    );
   });
 });

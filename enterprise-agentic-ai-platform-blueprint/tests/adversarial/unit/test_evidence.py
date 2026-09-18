@@ -185,8 +185,14 @@ def test_a_successful_call_cannot_be_a_passing_denial():
         record.validate()
 
 
-def test_a_failing_record_is_not_required_to_carry_twin_or_audit():
-    negative_record(verdict="fail", audit_evidence=(), positive_twin_test_id=None).validate()
+def test_a_failing_record_is_not_required_to_carry_correlation_twin_or_audit():
+    negative_record(
+        verdict="fail",
+        request_id=None,
+        trace_id=None,
+        audit_evidence=(),
+        positive_twin_test_id=None,
+    ).validate()
 
 
 def test_unknown_verdict_is_rejected():

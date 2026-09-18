@@ -241,7 +241,7 @@ python3 tests/smoke/smoke.py            # read-only sanity checks
 pytest tests/integration/ -v            # full D-03 harness (needs live creds)
 ```
 
-Fast checks: `npm test` green; `npx cdk synth --strict` cdk-nag-clean with only the documented `SEC-0NN` suppressions; SCPs attached; VPCEs present; `bedrock:InvokeModel` without a `GuardrailIdentifier` returns `AccessDenied`; a non-allow-listed model returns `AccessDenied`.
+Fast checks: `npm test` green; `npm run synth` emits the credential-free Management stack and is cdk-nag-clean with only the documented `SEC-0NN` suppressions. To validate the full pipeline topology, populate every required `agenticai/*` context value and run `npx cdk synth --strict --context stage=pipeline`. In a deployed environment, confirm SCPs are attached, VPCEs are present, `bedrock:InvokeModel` without a `GuardrailIdentifier` returns `AccessDenied`, and a non-allow-listed model returns `AccessDenied`.
 
 Repository hygiene gates, runnable locally and suitable for wiring into CI: `npm run scrub` (fails on any AWS account ID, internal reference, or hardcoded developer path in the tree) and `gitleaks detect --config .gitleaks.toml`.
 
