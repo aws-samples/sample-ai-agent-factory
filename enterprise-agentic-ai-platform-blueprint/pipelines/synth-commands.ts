@@ -30,7 +30,7 @@ export interface StageAwareSynthOptions {
   /** Cloud Assembly artifact ID of the pipeline's own stack. */
   readonly expectedStackArtifactId: string;
   /**
-   * Globs relative to the repository root that must each resolve to a nested
+   * Globs relative to the blueprint package that must each resolve to a nested
    * stage assembly containing at least one CloudFormation stack.
    */
   readonly expectedStageAssemblyGlobs: readonly string[];
@@ -53,6 +53,28 @@ function enterBlueprintSourceDirectory(): string {
   );
 }
 
+/** Render one complete shell command; CodeBuild validates each list item alone. */
+function validateStageAssembliesCommand(globs: readonly string[]): string {
+  return [
+    `for asm in ${globs.join(' ')}; do`,
+    'if [ ! -f "$asm/manifest.json" ]; then echo "ERROR: cdk synth produced no stage assembly at $asm"; exit 1; fi;',
+    'if ! grep -q "aws:cloudformation:stack" "$asm/manifest.json"; then echo "ERROR: stage assembly $asm declares no stacks"; exit 1; fi;',
+    'done',
+  ].join(' ');
+}
+
+/**
+ * ShellStep collects `cdk.out` from the CodeBuild source root. Move a nested
+ * package's validated assembly there without overwriting another output.
+ */
+function publishCloudAssemblyFromCheckoutRootCommand(): string {
+  return (
+    'if [ -n "${CODEBUILD_SRC_DIR:-}" ] && [ "$PWD" != "$CODEBUILD_SRC_DIR" ]; then ' +
+    'if [ -e "$CODEBUILD_SRC_DIR/cdk.out" ]; then echo "ERROR: checkout-root cdk.out already exists"; exit 1; fi; ' +
+    'mv cdk.out "$CODEBUILD_SRC_DIR/cdk.out"; fi'
+  );
+}
+
 /**
  * Build a stage-aware synth command sequence that rejects unknown source
  * layouts and empty assemblies.
@@ -69,9 +91,7 @@ export function stageAwareSynthCommands(options: StageAwareSynthOptions): string
     'test -f cdk.out/manifest.json',
     `test -f cdk.out/${shellQuote(options.expectedStackArtifactId)}.template.json`,
     'grep -q "aws:cloudformation:stack" cdk.out/manifest.json',
-    `for asm in ${options.expectedStageAssemblyGlobs.join(' ')}; do`,
-    '  if [ ! -f "$asm/manifest.json" ]; then echo "ERROR: cdk synth produced no stage assembly at $asm"; exit 1; fi',
-    '  if ! grep -q "aws:cloudformation:stack" "$asm/manifest.json"; then echo "ERROR: stage assembly $asm declares no stacks"; exit 1; fi',
-    'done',
+    validateStageAssembliesCommand(options.expectedStageAssemblyGlobs),
+    publishCloudAssemblyFromCheckoutRootCommand(),
   ];
 }

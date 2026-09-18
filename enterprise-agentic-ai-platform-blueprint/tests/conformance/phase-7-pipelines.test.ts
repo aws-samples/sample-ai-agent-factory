@@ -7,6 +7,7 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -14,6 +15,7 @@ import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 
 import { PlatformPipelineStack } from '../../pipelines/platform-pipeline-stack';
+import { stageAwareSynthCommands } from '../../pipelines/synth-commands';
 import { WorkloadPipelineStack } from '../../pipelines/workload-pipeline-stack';
 
 const GITHUB_CONNECTION =
@@ -428,6 +430,27 @@ describe('Round 1 integration — CDK app self-synth contract', () => {
     expect(synthCommandsSource).toContain('if [ -f package.json ]; then :;');
     expect(synthCommandsSource).toContain('blueprint package.json not found');
     expect(synthCommandsSource).toContain('exit 1');
+  });
+
+  it('emits independently valid POSIX commands and publishes root cdk.out', () => {
+    const commands = stageAwareSynthCommands({
+      stage: 'pipeline',
+      context: {},
+      expectedStackArtifactId: 'AgenticAI-PlatformPipelineStack',
+      expectedStageAssemblyGlobs: [
+        'cdk.out/assembly-*Nonprod',
+        'cdk.out/assembly-*Prod',
+      ],
+    });
+
+    for (const command of commands) {
+      expect(() => execFileSync('/bin/sh', ['-n', '-c', command])).not.toThrow();
+    }
+
+    const assemblyLoop = commands.find((command) => command.startsWith('for asm in'));
+    expect(assemblyLoop).toContain('done');
+    expect(commands[commands.length - 1]).toContain('CODEBUILD_SRC_DIR/cdk.out');
+    expect(commands[commands.length - 1]).toContain('mv cdk.out');
   });
 
   it('rejects a missing stage instead of emitting an empty assembly', () => {
