@@ -206,6 +206,8 @@ npx cdk bootstrap "aws://$CDK_DEFAULT_ACCOUNT/$CDK_DEFAULT_REGION" --qualifier h
 
 The CodeConnections source is the parent `aws-samples/sample-ai-agent-factory` repository. Each pipeline synth step therefore enters `enterprise-agentic-ai-platform-blueprint/` before running npm/CDK commands; it also accepts a standalone checkout where this blueprint is already the repository root, and fails closed for any other source layout.
 
+Both root pipelines use explicit CMK-encrypted artifact buckets with key rotation, five allocation tags, 30-day object expiry, seven-day incomplete-upload cleanup, and automatic object deletion on stack rollback or teardown. KMS keys use AWS's minimum seven-day pending-deletion window.
+
 ### 6.3 Path B — Centralised platform (D-03)
 
 ```bash

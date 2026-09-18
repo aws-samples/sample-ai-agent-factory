@@ -44,6 +44,11 @@ import { Construct } from 'constructs';
 
 import { WorkloadNetworkStack } from '../apps/workload-account/lib/workload-network-stack';
 import { WorkloadAppStack } from '../apps/workload-account/lib/workload-app-stack';
+import {
+  applyPipelineResourceTags,
+  createPipelineArtifactBucket,
+  type PipelineResourceTags,
+} from './pipeline-artifacts';
 import { stageAwareSynthCommands } from './synth-commands';
 
 export interface WorkloadStageProps extends StageProps {
@@ -163,6 +168,20 @@ export class WorkloadPipelineStack extends Stack {
   constructor(scope: Construct, id: string, props: WorkloadPipelineStackProps) {
     super(scope, id, props);
 
+    const resourceTags: PipelineResourceTags = {
+      applicationId: props.tenantId,
+      agentId: props.agentId,
+      tenantId: props.tenantId,
+      costCentre: props.costCentre,
+      environment: 'pipeline',
+    };
+    applyPipelineResourceTags(this, resourceTags);
+    const artifactBucket = createPipelineArtifactBucket(
+      this,
+      'WorkloadPipelineArtifacts',
+      resourceTags,
+    );
+
     const source = CodePipelineSource.connection(
       props.githubRepo,
       props.githubBranch ?? 'main',
@@ -172,6 +191,7 @@ export class WorkloadPipelineStack extends Stack {
     );
 
     this.pipeline = new CodePipeline(this, 'WorkloadPipeline', {
+      artifactBucket,
       pipelineName: `agenticai-workload-${props.tenantId}-${props.agentId}`,
       pipelineType: PipelineType.V2,
       crossAccountKeys: true,
@@ -335,24 +355,22 @@ export class WorkloadPipelineStack extends Stack {
     NagSuppressions.addStackSuppressions(
       this,
       [
-        { id: 'AwsSolutions-CB4', reason: 'SEC-017: CDK Pipelines CodeBuild artifact encryption is managed by CDK.' },
+        { id: 'AwsSolutions-CB4', reason: 'SEC-017: CodeBuild artifacts flow through the explicit customer-managed, rotating pipeline artifact CMK.' },
         { id: 'AwsSolutions-IAM5', reason: 'SEC-011: Pipeline roles require wildcards for CDK bootstrap.' },
-        { id: 'AwsSolutions-S1', reason: 'SEC-001: CDK Pipelines artifact bucket is self-logging.' },
+        { id: 'AwsSolutions-S1', reason: 'SEC-001: Pipeline artifacts expire after 30 days; CodePipeline execution history and CloudTrail provide the audit trail without a recursive access-log bucket.' },
         { id: 'AwsSolutions-L1', reason: 'SEC-006: CDK Pipelines-generated Lambdas track aws-cdk-lib.' },
         { id: 'NIST.800.53.R5-CodeBuildProjectEnvVarAwsCred', reason: 'SEC-018: CodeBuild reads bootstrap role creds via STS, not env vars.' },
-        { id: 'NIST.800.53.R5-CodeBuildProjectKMSEncryptedArtifacts', reason: 'SEC-017: CDK Pipelines manages artifact CMK sharing.' },
+        { id: 'NIST.800.53.R5-CodeBuildProjectKMSEncryptedArtifacts', reason: 'SEC-017: The explicit pipeline artifact bucket uses a customer-managed rotating KMS key shared with cross-account stages.' },
         { id: 'NIST.800.53.R5-CodeBuildProjectPrivilegedModeDisabled', reason: 'SEC-019: Synth/build run in standard non-privileged containers.' },
         { id: 'NIST.800.53.R5-CodeBuildProjectSourceRepoUrl', reason: 'SEC-020: Source via CodeStar Connections (GitHub V2 managed path).' },
         { id: 'NIST.800.53.R5-IAMNoInlinePolicy', reason: 'SEC-005: CDK Pipelines auto-generates inline policies.' },
-        { id: 'NIST.800.53.R5-S3BucketLoggingEnabled', reason: 'SEC-001: CDK Pipelines artifact bucket is self-logging.' },
+        { id: 'NIST.800.53.R5-S3BucketLoggingEnabled', reason: 'SEC-001: The short-lived artifact bucket uses a 30-day lifecycle; pipeline execution history and CloudTrail retain access evidence.' },
         { id: 'NIST.800.53.R5-S3BucketReplicationEnabled', reason: 'SEC-002: CRR deferred to v2 DR roadmap.' },
-        { id: 'NIST.800.53.R5-S3DefaultEncryptionKMS', reason: 'SEC-003: CDK Pipelines manages artifact bucket encryption.' },
-        { id: 'NIST.800.53.R5-LambdaConcurrency', reason: 'SEC-007: Self-mutate Lambdas are provisioning-time only.' },
+        { id: 'NIST.800.53.R5-S3DefaultEncryptionKMS', reason: 'SEC-003: The artifact bucket uses an explicit customer-managed rotating KMS key.' },
+        { id: 'NIST.800.53.R5-LambdaConcurrency', reason: 'SEC-007: Self-mutate and artifact-cleanup Lambdas are provisioning-time only.' },
         { id: 'NIST.800.53.R5-LambdaDLQ', reason: 'SEC-008: CFN custom-resource Lambdas surface failures via stack events.' },
-        { id: 'NIST.800.53.R5-LambdaInsideVPC', reason: 'SEC-009: Pipeline Lambdas call AWS control plane via managed endpoints.' },
-        { id: 'AwsSolutions-KMS5', reason: 'SEC-021: CDK Pipelines-generated artifact-bucket KMS key does not expose rotation toggle; tracks CDK defaults.' },
-        { id: 'NIST.800.53.R5-KMSBackingKeyRotationEnabled', reason: 'SEC-021: Same as SEC-021 above — CDK-managed key.' },
-        { id: 'NIST.800.53.R5-S3BucketVersioningEnabled', reason: 'SEC-022: CDK-Pipelines artifact bucket is ephemeral + lifecycle-managed; versioning adds cost without recovery value for pipeline artifacts.' },
+        { id: 'NIST.800.53.R5-LambdaInsideVPC', reason: 'SEC-009: Pipeline Lambdas call AWS control planes via managed endpoints.' },
+        { id: 'NIST.800.53.R5-S3BucketVersioningEnabled', reason: 'SEC-022: Pipeline artifacts are immutable per execution, expire after 30 days, and are automatically removed with the stack.' },
       ],
       true,
     );

@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Replaced the D-03 NLB/PrivateLink/LiteLLM placeholder in `@agenticai/platform-inference-gateway` with the real AgentCore inference path.
 - Platform and pipeline synthesis now fail when `agenticai/inferenceModelRateLimits` is absent or malformed.
+- Pipeline synthesis accepts both the parent multi-project checkout and a standalone blueprint checkout, and fails closed for every other source layout.
+- Root pipeline artifact stores are explicit CMK-encrypted, rotating, five-tagged, lifecycle-bounded, and automatically emptied on rollback or teardown instead of leaving retained untracked buckets.
 - Teardown now includes `AgenticAI-Platform-InferenceGatewayStack` and requires the deployment's model-rate context.
 
 ### Verification

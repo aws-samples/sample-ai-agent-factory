@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { App } from 'aws-cdk-lib';
-import { Template } from 'aws-cdk-lib/assertions';
+import { Match, Template } from 'aws-cdk-lib/assertions';
 
 import { PlatformPipelineStack } from '../../pipelines/platform-pipeline-stack';
 import { WorkloadPipelineStack } from '../../pipelines/workload-pipeline-stack';
@@ -64,6 +64,60 @@ function synthWorkload() {
   return Template.fromStack(stack);
 }
 
+function expectCleanupSafeArtifactStore(
+  template: Template,
+  expectedTags: Record<string, string>,
+): void {
+  template.resourceCountIs('AWS::S3::Bucket', 1);
+  template.hasResource('AWS::S3::Bucket', {
+    DeletionPolicy: 'Delete',
+    UpdateReplacePolicy: 'Delete',
+    Properties: Match.objectLike({
+      BucketEncryption: Match.anyValue(),
+      LifecycleConfiguration: {
+        Rules: Match.arrayWith([
+          Match.objectLike({
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 7 },
+            ExpirationInDays: 30,
+            Status: 'Enabled',
+          }),
+        ]),
+      },
+      OwnershipControls: {
+        Rules: [{ ObjectOwnership: 'BucketOwnerEnforced' }],
+      },
+      PublicAccessBlockConfiguration: {
+        BlockPublicAcls: true,
+        BlockPublicPolicy: true,
+        IgnorePublicAcls: true,
+        RestrictPublicBuckets: true,
+      },
+    }),
+  });
+  template.resourceCountIs('AWS::KMS::Key', 1);
+  template.hasResource('AWS::KMS::Key', {
+    DeletionPolicy: 'Delete',
+    UpdateReplacePolicy: 'Delete',
+    Properties: Match.objectLike({
+      EnableKeyRotation: true,
+      PendingWindowInDays: 7,
+    }),
+  });
+
+  for (const resourceType of ['AWS::S3::Bucket', 'AWS::KMS::Key']) {
+    const resources = Object.values(template.findResources(resourceType)) as any[];
+    const tagMap = Object.fromEntries(
+      resources[0].Properties.Tags.map((tag: { Key: string; Value: string }) => [
+        tag.Key,
+        tag.Value,
+      ]),
+    );
+    expect(tagMap).toMatchObject(expectedTags);
+  }
+
+  template.resourceCountIs('Custom::S3AutoDeleteObjects', 1);
+}
+
 describe('Phase 7 — Platform pipeline', () => {
   it('emits a single CodePipeline', () => {
     const t = synthPlatform();
@@ -89,6 +143,25 @@ describe('Phase 7 — Platform pipeline', () => {
       (s: any) => s?.ArtifactStore?.EncryptionKey?.Type === 'KMS' || s?.EncryptionKey?.Type === 'KMS',
     );
     expect(usesKms).toBe(true);
+  });
+});
+
+describe('Phase 7 — pipeline artifact stores', () => {
+  it('encrypts, tags, expires and removes Platform and Workload artifacts', () => {
+    expectCleanupSafeArtifactStore(synthPlatform(), {
+      'application-id': 'platform-inference',
+      'agent-id': 'shared',
+      'tenant-id': 'shared',
+      'cost-centre': 'platform',
+      environment: 'pipeline',
+    });
+    expectCleanupSafeArtifactStore(synthWorkload(), {
+      'application-id': 'demo',
+      'agent-id': 'primary',
+      'tenant-id': 'demo',
+      'cost-centre': 'engineering',
+      environment: 'pipeline',
+    });
   });
 });
 
