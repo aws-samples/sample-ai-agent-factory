@@ -182,6 +182,17 @@ describe('Phase 7 — cross-account bootstrap role contract', () => {
     expect(workload).toContain(
       'cdk-hnb659fds-cfn-exec-role-444444444444-us-west-2',
     );
+
+    const bootstrapSource = readFileSync(
+      resolve(__dirname, '../../pipelines/bootstrap/bootstrap-cross-account.sh'),
+      'utf8',
+    );
+    expect(bootstrapSource).toContain(
+      'iam:PassedToService=codepipeline.amazonaws.com',
+    );
+    expect(bootstrapSource).toContain(
+      'iam:PassedToService=cloudformation.amazonaws.com',
+    );
   });
 });
 
