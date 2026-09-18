@@ -192,7 +192,7 @@ export CDK_DEFAULT_REGION=us-west-2
 npx cdk bootstrap "aws://$CDK_DEFAULT_ACCOUNT/$CDK_DEFAULT_REGION" --qualifier hnb659fds
 ```
 
-> **Least privilege.** Set the CDK CloudFormation execution policy to a customer-managed policy scoped to the services these stacks provision — do **not** use `AdministratorAccess`. See `pipelines/bootstrap/bootstrap-cross-account.sh` (requires `CFN_EXECUTION_POLICY_ARN`); the required scope is documented inline there.
+> **Least privilege.** Set the CDK CloudFormation execution policy to a customer-managed policy scoped to the services these stacks provision — do **not** use `AdministratorAccess`. See `pipelines/bootstrap/bootstrap-cross-account.sh` (requires `CFN_EXECUTION_POLICY_ARN`); the required scope is documented inline there. The Platform-account execution policy must additionally allow `iam:PassRole` on each target account's exact `cdk-hnb659fds-deploy-role-<account>-<region>` and `cdk-hnb659fds-cfn-exec-role-<account>-<region>` ARN, conditioned on `iam:PassedToService=codepipeline.amazonaws.com`; CodePipeline validates both role classes when the cross-account pipeline is created.
 
 > **Worked example.** [`examples/reference-deployment-us-west-2/`](examples/reference-deployment-us-west-2/) is a complete 7-account `us-west-2` walkthrough with a fully populated `cdk.context.json` template (placeholder account ids), the Phase 1 → 8 deploy sequence, and the matching teardown. Use it as the concrete reference for the abstract steps below.
 

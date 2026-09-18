@@ -30,6 +30,13 @@ QUALIFIER="hnb659fds"
 # scoped to exactly the services these stacks provision (IAM, Lambda, DynamoDB,
 # S3, KMS, ECS, Bedrock/AgentCore, CloudWatch, EventBridge, Step Functions,
 # SNS/SQS, EC2/VPC) via CFN_EXECUTION_POLICY_ARN.
+#
+# The policy attached to the Platform account's CloudFormation execution role
+# must also allow iam:PassRole on every target account's exact
+# cdk-hnb659fds-deploy-role-<account>-<region> AND
+# cdk-hnb659fds-cfn-exec-role-<account>-<region>, conditioned on
+# iam:PassedToService=codepipeline.amazonaws.com. CodePipeline validates both
+# role classes when CloudFormation creates a cross-account pipeline.
 # The default below is intentionally NOT AdministratorAccess so a copy-paste
 # run fails safe and forces an explicit choice.
 CFN_EXECUTION_POLICY_ARN="${CFN_EXECUTION_POLICY_ARN:-}"

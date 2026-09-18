@@ -165,6 +165,26 @@ describe('Phase 7 — pipeline artifact stores', () => {
   });
 });
 
+describe('Phase 7 — cross-account bootstrap role contract', () => {
+  it('references both deploy and CloudFormation execution roles in target accounts', () => {
+    const platform = JSON.stringify(synthPlatform().toJSON());
+    expect(platform).toContain(
+      'cdk-hnb659fds-deploy-role-333333333333-us-west-2',
+    );
+    expect(platform).toContain(
+      'cdk-hnb659fds-cfn-exec-role-333333333333-us-west-2',
+    );
+
+    const workload = JSON.stringify(synthWorkload().toJSON());
+    expect(workload).toContain(
+      'cdk-hnb659fds-deploy-role-444444444444-us-west-2',
+    );
+    expect(workload).toContain(
+      'cdk-hnb659fds-cfn-exec-role-444444444444-us-west-2',
+    );
+  });
+});
+
 describe('Phase 7 — Workload pipeline has mandatory stages + eval gate', () => {
   it('emits an evaluation-gate CodeBuild with the 5 SLO threshold env vars', () => {
     const t = synthWorkload();

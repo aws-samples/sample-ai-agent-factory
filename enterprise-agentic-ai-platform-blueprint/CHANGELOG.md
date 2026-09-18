@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Platform and pipeline synthesis now fail when `agenticai/inferenceModelRateLimits` is absent or malformed.
 - Pipeline synthesis accepts both the parent multi-project checkout and a standalone blueprint checkout, and fails closed for every other source layout.
 - Root pipeline artifact stores are explicit CMK-encrypted, rotating, five-tagged, lifecycle-bounded, and automatically emptied on rollback or teardown instead of leaving retained untracked buckets.
+- Cross-account pipeline bootstrap guidance now requires exact `iam:PassRole` grants for both target CDK deploy roles and CloudFormation execution roles, scoped to CodePipeline.
 - Teardown now includes `AgenticAI-Platform-InferenceGatewayStack` and requires the deployment's model-rate context.
 
 ### Verification
