@@ -765,6 +765,127 @@ class TestSourceIntegrity:
         assert len(digests) == 2, "the two archives were identical; the test proves nothing"
 
 
+class TestTheLambdaZipsAreContentAddressed:
+    """The zips that bypass the packaging step need the digest in the S3 KEY.
+
+    ``AgentCodeDigest`` above solves this for the code-packaging path, but three
+    zips go straight into ``AWS::Lambda::Function.Code``: cfn-provider.zip,
+    tool-lambdas.zip and custom-tools.zip. CloudFormation only replaces a
+    function's code when ``Code`` changes, and ``Code.S3Key`` was a bare ``Ref`` to
+    a parameter deploy.sh set to a FIXED key. So uploading a new zip over that key
+    changed nothing CloudFormation could see: "No changes to deploy", green stack,
+    old code still running.
+
+    Found live, not by reading. A fixed cfn-provider.zip was uploaded to stack
+    ``logprobe0918``, the deploy re-run, and the same bug reproduced from the same
+    Lambda — because it was still the old bytes. The fix puts the digest in the key
+    so changed bytes are a changed parameter.
+    """
+
+    # The parameters deploy.sh must content-address, and the local zip each is
+    # built from. Not "every code key": AgentCodeKey and McpServerCodeKey go to the
+    # packaging Custom Resource, which has its own digest parameter and re-reads the
+    # object on every stack update, so a fixed key is correct for those.
+    DIRECT_TO_LAMBDA = {
+        "CfnProviderCodeKey": ("cfn-provider.zip", "CFN_PROVIDER_KEY"),
+        "ToolLambdaCodeKey": ("tool-lambdas.zip", "TOOL_LAMBDA_KEY"),
+        "CustomToolCodeKey": ("custom-tools.zip", "CUSTOM_TOOL_KEY"),
+    }
+
+    def _staged_key(self, script, path, name, stack="my-agent"):
+        """Run the ``staged_key`` helper the generated deploy.sh actually ships."""
+        helpers = re.findall(
+            r"^(?:sha256_stdin|staged_key)\(\).*?^\}$",
+            script,
+            re.MULTILINE | re.DOTALL,
+        )
+        assert len(helpers) == 2, "deploy.sh no longer defines sha256_stdin and staged_key"
+        proc = subprocess.run(
+            ["bash", "-c", f'STACK_NAME="{stack}"\n' + "\n".join(helpers) + '\nstaged_key "$@"', "_", str(path), name],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout.strip()
+
+    @ALL_COMBINATIONS
+    def test_the_deploy_script_uploads_to_a_key_it_derived_from_the_bytes(self, combo):
+        script = _generate(**combo).deploy_sh
+        for parameter, (zip_name, shell_var) in self.DIRECT_TO_LAMBDA.items():
+            stem = zip_name.removesuffix(".zip")
+            assert f"{shell_var}=$(staged_key {zip_name} {stem})" in script, parameter
+            assert f'aws s3 cp {zip_name} "s3://$BUCKET/${shell_var}"' in script, parameter
+            assert f'"{parameter}=${shell_var}"' in script, parameter
+            # And the fixed key it used to upload to is gone, in both places.
+            assert f"${{STACK_NAME}}/{zip_name}" not in script, f"{parameter} is still a fixed key"
+
+    def test_changed_bytes_change_the_key(self, tmp_path):
+        """The property the whole fix rests on."""
+        script = _generate().deploy_sh
+        zip_path = tmp_path / "cfn-provider.zip"
+
+        zip_path.write_bytes(b"PK\x03\x04 first build")
+        first = self._staged_key(script, zip_path, "cfn-provider")
+        zip_path.write_bytes(b"PK\x03\x04 second build, one byte longer")
+        second = self._staged_key(script, zip_path, "cfn-provider")
+
+        assert first != second, "a changed zip produced the same key; CloudFormation will skip it"
+        assert first.startswith("cfn-assets/my-agent/cfn-provider-")
+        assert first.endswith(".zip")
+        # Identical bytes must round-trip to the same key, or every deploy churns
+        # the Lambda and the bucket fills with duplicates of one build.
+        zip_path.write_bytes(b"PK\x03\x04 first build")
+        assert self._staged_key(script, zip_path, "cfn-provider") == first
+
+    def test_the_key_is_a_sha256_prefix_and_not_something_weaker(self, tmp_path):
+        """Per ARCC cnt_NBPcOqwR3163yt: SHA-256, and enough of it to collide on."""
+        zip_path = tmp_path / "custom-tools.zip"
+        zip_path.write_bytes(b"PK\x03\x04 payload")
+        key = self._staged_key(_generate().deploy_sh, zip_path, "custom-tools")
+
+        digest = key.removeprefix("cfn-assets/my-agent/custom-tools-").removesuffix(".zip")
+        assert re.fullmatch(r"[0-9a-f]{16}", digest), key
+        assert hashlib.sha256(b"PK\x03\x04 payload").hexdigest().startswith(digest)
+
+    @ALL_COMBINATIONS
+    def test_no_function_takes_its_code_from_a_key_that_can_go_stale(self, combo):
+        """The structural half: a fourth Lambda added later gets caught here.
+
+        Anything reading ``Code.S3Key`` from a parameter has to be a parameter
+        deploy.sh content-addresses, or it inherits the bug this class exists for.
+        """
+        template = _template(**combo)
+        functions = {
+            name: body for name, body in template["Resources"].items() if body["Type"] == "AWS::Lambda::Function"
+        }
+        assert functions, "no Lambda functions at all; this test would pass vacuously"
+
+        for name, body in functions.items():
+            key = body["Properties"]["Code"].get("S3Key")
+            if not isinstance(key, dict) or "Ref" not in key:
+                continue  # inline or Fn::Sub'd code is not staged, so cannot go stale
+            assert key["Ref"] in self.DIRECT_TO_LAMBDA, (
+                f"{name} takes its code from parameter {key['Ref']!r}, which deploy.sh does not "
+                "content-address, so a code change will not be deployed"
+            )
+
+    @ALL_COMBINATIONS
+    def test_the_parameters_say_they_are_content_addressed(self, combo):
+        """A hand-rolled `cloudformation deploy` has to be told, or it hits the bug."""
+        params = _template(**combo)["Parameters"]
+        for parameter in self.DIRECT_TO_LAMBDA:
+            if parameter not in params:
+                continue
+            assert "content-addressed" in params[parameter]["Description"], parameter
+
+    def test_the_readme_explains_why_the_old_objects_are_left_behind(self):
+        readme = _generate().readme
+        assert "cfn-provider-<digest>.zip" in readme
+        # A recipient tidying the bucket would break exactly the rollback that needs
+        # the previous object, so the README has to say so.
+        assert "rollback" in readme.lower()
+
+
 class TestDependencyBundleIntegrity:
     """The bundle is the larger half of what runs, and it was merged on trust.
 
@@ -1834,6 +1955,12 @@ EXPECTED_CMK_PROPERTY = {
     # logs service principal, not by a role in this stack, so it is authorized in
     # the key policy (see the generated README) rather than by an inline policy.
     "AWS::Logs::LogGroup": "KmsKeyId",
+    # The log groups AgentCore creates for the runtime itself, which no declared
+    # resource can reach. ``KmsKeyArn`` and not ``KmsKeyId`` because this is a
+    # Custom Resource property read by our own Lambda, not a Logs API field — and
+    # unlike ``AWS::Logs::LogGroup`` it DOES cost a role grant, because that Lambda
+    # is the caller CloudWatch Logs validates the key against.
+    "Custom::RuntimeLogGroup": "KmsKeyArn",
     # Encrypts the function's environment variables. Only functions that HAVE
     # environment variables — see _encryptable.
     "AWS::Lambda::Function": "KmsKeyArn",
@@ -1942,6 +2069,13 @@ class TestCustomerManagedKey:
             # as AccessDenied on CreatePolicy — a stack that deploys the engine and
             # then cannot put a single rule in it.
             expected.add("CfnProviderRole")
+        if "Custom::RuntimeLogGroup" in encrypted_types:
+            # The same Lambda, for a different reason: it hands the key ARN to
+            # CreateLogGroup and AssociateKmsKey, and CloudWatch Logs validates the
+            # key against the CALLER. Without this grant the failure is an
+            # AccessDenied from the logs call, which reads like a missing logs
+            # permission rather than a missing kms one.
+            expected.add("CfnProviderRole")
         # A Lambda whose environment is encrypted cannot start unless its own
         # execution role can decrypt, so the expectation is read off the function's
         # Role property rather than hardcoded — same as the generator does.
@@ -1957,17 +2091,23 @@ class TestCustomerManagedKey:
         assert granted == expected & set(_roles(template)), f"key access granted to {granted}, expected {expected}"
 
     @ALL_COMBINATIONS
-    def test_no_role_gets_key_access_it_does_not_need(self, combo):
+    def test_the_runtime_role_gets_no_key_access_it_does_not_need(self, combo):
         """The complement of the above, stated separately because it is the half
-        that regresses: a stack with nothing encrypted must grant nobody the key,
-        and the runtime role — which exists in every combination — is the one that
-        would pick it up from a static list."""
+        that regresses. The runtime role is the one that would pick the grant up
+        from a static list: it exists in every combination, and in a runtime-only
+        export nothing it touches is encrypted with the customer key.
+
+        This used to be phrased as "a combination with nothing encrypted grants
+        nobody the key", and it skipped itself the moment every export started
+        governing the runtime's log groups — every combination now encrypts
+        something. Narrowed to the one role rather than left as a permanent skip.
+        """
         template = _template(**combo)
-        if _encryptable(template):
-            pytest.skip("combination encrypts something; covered by the test above")
-        for logical_id, role in _roles(template).items():
-            names = [p["PolicyName"] for p in _inline_policies(role)]
-            assert "CustomerManagedKeyAccess" not in names, f"{logical_id} granted a key it cannot use"
+        encrypted_types = {r["Type"] for r in _encryptable(template).values()}
+        if {"AWS::BedrockAgentCore::Memory", "AWS::BedrockAgentCore::Gateway"} & encrypted_types:
+            pytest.skip("this combination legitimately gives the runtime role the key")
+        names = [p["PolicyName"] for p in _inline_policies(_roles(template)["RuntimeExecutionRole"])]
+        assert "CustomerManagedKeyAccess" not in names, "the runtime role was granted a key it cannot use"
 
     def test_key_access_is_scoped_to_the_one_supplied_key(self):
         """``kms:Decrypt`` on ``*`` would defeat the point: the customer could no
@@ -3106,6 +3246,151 @@ class TestLambdaLogsAreOwnedAndBounded:
             assert resource["UpdateReplacePolicy"] == "Delete", logical_id
 
 
+RUNTIME_LOG_PREFIX = "/aws/bedrock-agentcore/runtimes/"
+
+
+def _governance_resources(template):
+    return {k: v for k, v in template["Resources"].items() if v["Type"] == "Custom::RuntimeLogGroup"}
+
+
+def _governed_names(resource):
+    """The literal ``Fn::Sub`` strings a governance resource will resolve."""
+    return [entry["Fn::Sub"][0] for entry in resource["Properties"]["LogGroupNames"]]
+
+
+class TestTheRuntimesOwnLogGroupsAreGoverned:
+    """The agent's conversations live in groups no declared resource can reach.
+
+    ``AWS::BedrockAgentCore::Runtime`` has no logging or encryption properties at all.
+    AgentCore creates ``/aws/bedrock-agentcore/runtimes/<runtimeId>-<endpoint>`` itself,
+    at stack-create time and before any invoke, with no retention and no key — so the
+    groups that hold what the agent was asked and answered were the only data in this
+    export that ignored both ``LogRetentionInDays`` and ``CustomerManagedKeyArn``.
+    Declaring them as ``AWS::Logs::LogGroup`` is impossible: they already exist and
+    belong to nobody, so CloudFormation cannot adopt them. Hence a Custom Resource
+    that creates-or-adopts.
+
+    Verified live before any of this was written: runtime
+    ``logprobe0918_runtime-pRuBlMHsuB`` with one named endpoint produced BOTH
+    ``-DEFAULT`` and ``-logprobe0918_endpoint``, both ungoverned, and an invoke against
+    the named qualifier wrote to the NAMED group while ``-DEFAULT`` stayed empty. A pass
+    that governed only ``-DEFAULT`` would have governed the empty one and looked right.
+    """
+
+    @ALL_COMBINATIONS
+    def test_every_runtime_gets_exactly_one_governance_resource(self, combo):
+        resources = _template(**combo)["Resources"]
+        runtimes = {k for k, v in resources.items() if v["Type"] == "AWS::BedrockAgentCore::Runtime"}
+        assert runtimes, "no runtime in this combination — the assertions below would be vacuous"
+        governed = {k: v for k, v in resources.items() if v["Type"] == "Custom::RuntimeLogGroup"}
+        assert set(governed) == {f"{runtime}LogGroups" for runtime in runtimes}
+
+    @ALL_COMBINATIONS
+    def test_every_endpoint_of_every_runtime_is_covered(self, combo):
+        """The one that catches the real mistake. An endpoint added to the generator
+        without being added here gets a log group that is never governed, and nothing
+        else in the template or the stack events would say so.
+        """
+        resources = _template(**combo)["Resources"]
+        for runtime in [k for k, v in resources.items() if v["Type"] == "AWS::BedrockAgentCore::Runtime"]:
+            names = _governed_names(resources[f"{runtime}LogGroups"])
+            # DEFAULT always exists: the service creates it whether or not the
+            # template declares a named endpoint.
+            assert any(name.endswith("-DEFAULT") for name in names), f"{runtime}: -DEFAULT is ungoverned"
+            for endpoint_id, endpoint in resources.items():
+                if endpoint["Type"] != "AWS::BedrockAgentCore::RuntimeEndpoint":
+                    continue
+                if endpoint["Properties"]["AgentRuntimeId"]["Fn::GetAtt"][0] != runtime:
+                    continue
+                qualifier = endpoint["Properties"]["Name"]["Fn::Sub"]
+                assert any(name.endswith(f"-{qualifier}") for name in names), (
+                    f"{endpoint_id}'s log group is ungoverned; the service will still create it"
+                )
+
+    @ALL_COMBINATIONS
+    def test_the_names_are_built_from_the_id_the_service_mints(self, combo):
+        """``AgentRuntimeId`` is not knowable at template-authoring time, which is the
+        other half of why this cannot be a declared log group."""
+        resources = _template(**combo)["Resources"]
+        for logical_id, resource in _governance_resources(_template(**combo)).items():
+            runtime = logical_id.removesuffix("LogGroups")
+            for entry in resource["Properties"]["LogGroupNames"]:
+                template_string, variables = entry["Fn::Sub"]
+                assert template_string.startswith(f"{RUNTIME_LOG_PREFIX}${{RuntimeId}}-"), template_string
+                assert variables == {"RuntimeId": {"Fn::GetAtt": [runtime, "AgentRuntimeId"]}}
+        assert resources  # the loop above is over the same template
+
+    @ALL_COMBINATIONS
+    def test_no_two_entries_share_one_dict_object(self, combo):
+        """A YAML anchor is not a template. ``yaml.dump`` emits ``&id001``/``*id001``
+        for the same object reached twice, and CloudFormation rejects the file outright
+        — so the identical ``{"RuntimeId": ...}`` maps have to be rebuilt per entry,
+        not shared. This failed once already and the error was at deploy time.
+        """
+        for resource in _governance_resources(_template(**combo)).values():
+            variable_maps = [entry["Fn::Sub"][1] for entry in resource["Properties"]["LogGroupNames"]]
+            assert len({id(m) for m in variable_maps}) == len(variable_maps), "shared object will become a YAML alias"
+
+    @ALL_COMBINATIONS
+    def test_retention_is_the_same_knob_as_the_declared_log_groups(self, combo):
+        """One parameter governs all logs, per ARCC cnt_sSTfcrsdyTSviN item 6. Two knobs
+        is how a recipient ends up with the Lambda logs expiring and the conversations
+        kept for ever."""
+        for logical_id, resource in _governance_resources(_template(**combo)).items():
+            assert resource["Properties"]["RetentionInDays"] == {"Ref": "LogRetentionInDays"}, logical_id
+
+    @ALL_COMBINATIONS
+    def test_governance_waits_for_the_endpoints_it_names(self, combo):
+        """The endpoint is what makes the service create the named group. Running before
+        it means creating the group ourselves — which works, but then the group exists
+        with our key before the service has ever written to it, and any ordering bug
+        there is invisible. Depend on the endpoint instead.
+        """
+        resources = _template(**combo)["Resources"]
+        for logical_id, resource in _governance_resources(_template(**combo)).items():
+            runtime = logical_id.removesuffix("LogGroups")
+            endpoints = [
+                k
+                for k, v in resources.items()
+                if v["Type"] == "AWS::BedrockAgentCore::RuntimeEndpoint"
+                and v["Properties"]["AgentRuntimeId"]["Fn::GetAtt"][0] == runtime
+            ]
+            if not endpoints:
+                continue
+            assert set(endpoints) <= set(resource.get("DependsOn", [])), f"{logical_id} does not wait for {endpoints}"
+
+    def test_the_provider_role_can_govern_these_groups_and_only_these(self):
+        """``logs:DisassociateKmsKey`` on ``log-group:*`` would let this Lambda make an
+        unrelated team's existing log data unreadable. The grant is prefix-scoped for
+        that reason and not merely for tidiness.
+        """
+        template = _template(**COMPONENT_COMBINATIONS["everything"])
+        policies = [
+            p
+            for p in _inline_policies(_roles(template)["CfnProviderRole"])
+            if p["PolicyName"] == "RuntimeLogGroupGovernance"
+        ]
+        assert len(policies) == 1, "the provider role cannot govern the runtime log groups"
+        for statement in policies[0]["PolicyDocument"]["Statement"]:
+            actions = set(_as_list(statement["Action"]))
+            assert {"logs:PutRetentionPolicy", "logs:AssociateKmsKey", "logs:DisassociateKmsKey"} <= actions
+            for resource in _as_list(statement["Resource"]):
+                assert resource["Fn::Sub"].endswith(f"log-group:{RUNTIME_LOG_PREFIX}*"), (
+                    f"the grant is not scoped to the runtime log groups: {resource}"
+                )
+
+    def test_the_readme_says_the_logs_survive_a_teardown(self):
+        """They do, and deliberately — the handler's Delete is a no-op, so a recipient
+        who tears the stack down still finds the groups and is charged for them. Saying
+        so, with the command to remove them, is the difference between a documented
+        choice and a surprise.
+        """
+        for policy in ("Retain", "Delete"):
+            readme = _generate(**COMPONENT_COMBINATIONS["everything"], data_retention_policy=policy).readme
+            assert "aws logs delete-log-group" in readme, f"{policy}: no way to remove them is documented"
+            assert RUNTIME_LOG_PREFIX in readme, f"{policy}: the group names are not stated"
+
+
 class TestOutputs:
     def test_a_knowledge_base_stack_exports_its_ids(self):
         """The knowledge base was created and then never named in the outputs.
@@ -3530,16 +3815,20 @@ class TestTheShippedScriptsAreExecutable:
 
 class TestCustomResources:
     """Alvaro Fernandez-Moris asked whether the three custom resources in
-    ``cfn_provider/handler.py`` were the complete set. They are — but the module
+    ``cfn_provider/handler.py`` were the complete set. They were — but the module
     docstring, the internals doc and the generated README all said there was one,
     which is very likely what prompted the question. These tests make the three
     statements impossible to drift apart again.
+
+    There are four now: ``Custom::RuntimeLogGroup`` was added for the log groups
+    AgentCore creates for the runtime itself, which no declared resource can reach.
     """
 
     EXPECTED = {
         "Custom::AgentCodePackage",
         "Custom::OAuth2CredentialProvider",
         "Custom::AgentCorePolicy",
+        "Custom::RuntimeLogGroup",
     }
 
     def test_the_generator_emits_no_custom_resource_type_the_handler_cannot_serve(self):
@@ -3558,7 +3847,7 @@ class TestCustomResources:
         handler = _import_cfn_provider_handler()
         assert handler.SUPPORTED_RESOURCE_TYPES == self.EXPECTED
 
-    def test_all_three_are_reachable_from_some_canvas(self):
+    def test_all_four_are_reachable_from_some_canvas(self):
         """A type in the allowlist that nothing emits is dead code; a type
         something emits that is not in the allowlist now fails closed."""
         emitted = set()
@@ -3582,6 +3871,9 @@ class TestCustomResources:
     def test_runtime_only_readme_does_not_advertise_resources_it_lacks(self):
         readme = _generate().readme
         assert "Custom::AgentCodePackage" in readme
+        # Present in every bundle, because every bundle has a runtime and every
+        # runtime gets log groups the recipient has to be told about.
+        assert "Custom::RuntimeLogGroup" in readme
         assert "Custom::AgentCorePolicy" not in readme, "README lists a custom resource this bundle has no use for"
         assert "Custom::OAuth2CredentialProvider" not in readme
 
@@ -4097,17 +4389,26 @@ class TestGeneratedDocumentation:
         assert "aws logs delete-log-group" in section
         assert "no user identities" in section, "a runtime-only stack must not imply it holds user data"
 
-    def test_readme_names_the_log_group_the_stack_does_not_own(self):
-        """The runtime's own group escapes the template's retention and CMK wiring.
+    def test_readme_names_the_log_groups_the_stack_governs_but_does_not_declare(self):
+        """The runtime's own groups are the ones holding the conversations.
 
-        The AgentCore service creates `/aws/bedrock-agentcore/runtimes/<id>-DEFAULT`
-        itself — verified live with `retentionInDays: None` and `kmsKeyId: None` — so a
-        recipient who reads only the retention parameter will believe the export covers
-        every log group it produces. It does not, and one accumulates per deploy.
+        The AgentCore service creates them itself, one per endpoint, during this
+        stack's own create — verified live arriving with `retentionInDays: None` and
+        `kmsKeyId: None`. No declared resource can reach them, so the README used to
+        say they escaped the retention and CMK wiring entirely. `Custom::RuntimeLogGroup`
+        now adopts them, and the README has to say which of the two it is: governed,
+        but deliberately not deleted, so a recipient reading the retention parameter
+        is neither over- nor under-promised.
         """
         section = _generate().readme.split("## Data Protection")[1].split("\n## ")[0]
         assert "/aws/bedrock-agentcore/runtimes/" in section
-        assert "no customer-managed key" in section
+        assert "Custom::RuntimeLogGroup" in section, "the recipient is not told what governs them"
+        assert "CustomerManagedKeyArn" in section
+        assert "per endpoint" in section, "one group per endpoint, not one per runtime"
+        # Governed is not the same as deleted, and conflating the two is how an
+        # investigation loses the only record of what the agent was asked.
+        assert "survive teardown" in section
+        assert "aws logs delete-log-group" in section
 
     def test_teardown_says_why_a_same_name_redeploy_will_fail(self):
         """Retained log groups break the next deploy, with an error naming no resource.

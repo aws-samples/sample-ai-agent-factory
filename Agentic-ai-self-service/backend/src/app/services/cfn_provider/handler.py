@@ -1,6 +1,6 @@
 """Custom Resource Lambda for AgentCore CloudFormation stacks.
 
-Handles three Custom Resource types — the complete set, enforced by
+Handles four Custom Resource types — the complete set, enforced by
 SUPPORTED_RESOURCE_TYPES below:
 
 1. Custom::AgentCodePackage
@@ -41,6 +41,28 @@ SUPPORTED_RESOURCE_TYPES below:
        Description      — Optional description
    Returns:
        PolicyId, PolicyEngineId
+
+4. Custom::RuntimeLogGroup
+   Applies the stack's retention period and customer-managed key to the log groups
+   the AgentCore runtime creates for itself. Exists because
+   ``AWS::BedrockAgentCore::Runtime`` has no logging properties at all: the service
+   creates ``/aws/bedrock-agentcore/runtimes/<runtimeId>-<qualifier>`` on its own,
+   with no retention and the AWS-owned key, and CloudFormation cannot govern a group
+   it did not declare. Declaring one as AWS::Logs::LogGroup is not an option either —
+   the runtime creates it at stack-create time, before any invoke, so the declared
+   resource would collide with a group that already exists.
+
+   Properties:
+       LogGroupNames    — the log group names to govern. One per endpoint qualifier,
+                          because the service creates one group PER ENDPOINT (a
+                          runtime with a named endpoint has both ``-DEFAULT`` and
+                          ``-<endpointName>``, verified live) and the invoked
+                          qualifier is the one that receives the conversation logs.
+       RetentionInDays  — retention to apply; 0 means never expire
+       KmsKeyArn        — optional customer-managed key ARN; empty reverts the group
+                          to the AWS-owned key
+   Returns:
+       LogGroupNames    — the governed names, comma-separated
 """
 
 import hashlib
@@ -1044,6 +1066,187 @@ def _handle_policy_delete(event: dict) -> tuple[dict, str]:
 
 
 # ---------------------------------------------------------------------------
+# Custom::RuntimeLogGroup
+# ---------------------------------------------------------------------------
+
+
+def _governed_log_group_names(props: dict) -> list[str]:
+    """The log group names to govern, tolerating a single string and empty entries.
+
+    CloudFormation renders custom-resource properties as strings, and every name here
+    arrives from an ``Fn::Sub`` over the runtime id, so a name that came out empty
+    means the substitution produced nothing rather than that there is a group called
+    "". Dropping those beats calling CloudWatch Logs with an invalid name.
+    """
+    names = props.get("LogGroupNames") or []
+    if isinstance(names, str):
+        names = [names]
+    seen = []
+    for name in names:
+        candidate = str(name).strip()
+        # Deduplicated because the template derives the names from a runtime id and
+        # an endpoint name, and a deployment whose endpoint is literally called
+        # "DEFAULT" would otherwise be governed twice.
+        if candidate and candidate not in seen:
+            seen.append(candidate)
+    return seen
+
+
+def _retention_days(props: dict) -> int:
+    """``RetentionInDays`` as an int; 0 (never expire) when absent or unreadable."""
+    raw = str(props.get("RetentionInDays", "")).strip()
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("RetentionInDays %r is not a number; treating as never-expire", raw)
+        return 0
+
+
+def _logs_kms_denied(logs, name: str, key_arn: str, code: str) -> ProviderError:
+    """The actionable failure for a key whose policy does not allow CloudWatch Logs.
+
+    Verified live: both CreateLogGroup and AssociateKmsKey answer
+    ``AccessDeniedException: The specified KMS key does not exist or is not allowed to
+    be used with Arn '<log group arn>'`` when the key policy has no statement for the
+    logs service principal — a message that names neither the missing statement nor
+    the fact that the key itself is fine.
+
+    Built only from literals, the log group name and the key ARN, per ProviderError's
+    contract. Neither is a secret: the ARN is a template parameter value that is
+    already in the stack's parameter list, and no request body passed through here.
+    """
+    region = logs.meta.region_name
+    return ProviderError(
+        f"CloudWatch Logs refused customer-managed key {key_arn} for log group {name} ({code}). "
+        f"The key policy must allow the logs.{region}.amazonaws.com service principal "
+        "kms:Encrypt*, kms:Decrypt*, kms:ReEncrypt*, kms:GenerateDataKey* and kms:Describe*, "
+        "conditioned on ArnLike kms:EncryptionContext:aws:logs:arn "
+        f"arn:aws:logs:{region}:<account>:log-group:*. See README.md > Encryption for the "
+        "exact statement, add it to the key, and retry the stack operation."
+    )
+
+
+def _apply_log_group_governance(logs, name: str, retention: int, key_arn: str) -> None:
+    """Bring one log group to *retention* and *key_arn*, creating it if it is absent.
+
+    Create-first, then fall back to adopting what is there. That order is deliberate:
+    the runtime creates these groups itself at stack-create time, so the normal case
+    is adoption — but a group can legitimately be missing (a runtime whose named
+    endpoint has not been created yet, or a group an operator deleted), and creating
+    it with the key and retention already set is both fewer calls and the only way to
+    govern a group BEFORE the service writes its first event into it.
+    """
+    create_kwargs = {"logGroupName": name}
+    if key_arn:
+        create_kwargs["kmsKeyId"] = key_arn
+
+    try:
+        logs.create_log_group(**create_kwargs)
+        logger.info("created log group %s (retention %s, key %s)", name, retention, key_arn or "aws-owned")
+    except ClientError as e:
+        code = _error_code(e)
+        if code == "AccessDeniedException" and key_arn:
+            raise _logs_kms_denied(logs, name, key_arn, code) from e
+        if code != "ResourceAlreadyExistsException":
+            raise
+        # The expected path: the runtime already made the group, so the key has to be
+        # applied to it separately.
+        #
+        # Both calls are made unconditionally, without first reading the group's
+        # current key, and that is a deliberate change from the obvious design. Reading
+        # it means DescribeLogGroups, which cannot be granted here: it is a list
+        # operation, so IAM authorizes it against
+        # `arn:aws:logs:<region>:<account>:log-group::log-stream:` — an EMPTY log group
+        # name — and no resource-scoped grant can ever match that. Verified live: a
+        # grant on `log-group:/aws/bedrock-agentcore/runtimes/*` failed the stack with
+        # "not authorized to perform: logs:DescribeLogGroups on resource:
+        # arn:aws:logs:us-east-1:...:log-group::log-stream:". The alternatives were to
+        # widen the grant to every log group in the account, or to stop reading. Both
+        # calls are idempotent — also verified live: AssociateKmsKey with the key that
+        # is already attached succeeds, and DisassociateKmsKey on a group with no key
+        # succeeds — so not reading costs one no-op call per group per stack update and
+        # keeps DisassociateKmsKey scoped to the runtime's own groups.
+        if key_arn:
+            try:
+                logs.associate_kms_key(logGroupName=name, kmsKeyId=key_arn)
+                logger.info("associated key %s with existing log group %s", key_arn, name)
+            except ClientError as assoc_error:
+                assoc_code = _error_code(assoc_error)
+                if assoc_code == "AccessDeniedException":
+                    raise _logs_kms_denied(logs, name, key_arn, assoc_code) from assoc_error
+                raise
+        else:
+            # The stack dropped CustomerManagedKeyArn on an update, or never had one.
+            # Reverting to the AWS-owned key keeps the group matching the template
+            # rather than leaving it on a key the recipient may be about to delete —
+            # which would make every existing event in it unreadable.
+            logs.disassociate_kms_key(logGroupName=name)
+            logger.info("log group %s left on the AWS-owned key", name)
+
+    if retention > 0:
+        logs.put_retention_policy(logGroupName=name, retentionInDays=retention)
+    else:
+        # 0 is CloudWatch's "never expire", which is the ABSENCE of a retention
+        # policy rather than a value. Unreachable from the emitted template, whose
+        # LogRetentionInDays has AllowedValues, but reachable from a hand-edited one.
+        try:
+            logs.delete_retention_policy(logGroupName=name)
+        except ClientError as e:
+            if _error_code(e) not in _BENIGN_DELETE_CODES:
+                raise
+    logger.info("log group %s governed: retention %s, key %s", name, retention or "never", key_arn or "aws-owned")
+
+
+def _handle_runtime_log_group_create_update(event: dict) -> tuple[dict, str]:
+    props = event.get("ResourceProperties", {})
+    names = _governed_log_group_names(props)
+    retention = _retention_days(props)
+    key_arn = str(props.get("KmsKeyArn", "") or "").strip()
+
+    logs = boto3.client("logs")
+    for name in names:
+        _apply_log_group_governance(logs, name, retention, key_arn)
+
+    if not names:
+        logger.warning("no log group names to govern for %s", event.get("LogicalResourceId", ""))
+
+    return {"LogGroupNames": ",".join(names)}, _runtime_log_group_physical_id(event)
+
+
+def _runtime_log_group_physical_id(event: dict) -> str:
+    """A physical id that never changes, so an update is never a replacement.
+
+    If this returned a different id on an update, CloudFormation would follow up with
+    a Delete for the old one. The Delete below is a no-op, so nothing would break
+    today — but the id is what the next reader would reasonably use to name the
+    groups, and an id that changes is how a future Delete-that-does-something ends up
+    deleting the log groups of the resource that just replaced it.
+    """
+    return event.get("PhysicalResourceId") or f"runtime-log-groups/{event.get('LogicalResourceId', '')}"
+
+
+def _handle_runtime_log_group_delete(event: dict) -> tuple[dict, str]:
+    """Deliberately a no-op: a stack deletion must not delete the agent's logs.
+
+    The groups belong to the runtime, not to this resource — it only sets two
+    properties on them — and they hold the record of what the agent was asked and
+    what it answered. Per ARCC cnt_bO6I1SM60fP0J4 security-relevant logs are retained
+    for years, and an incident investigation that starts after a teardown is exactly
+    when they are needed. Whatever retention was last applied still expires them on
+    schedule; the recipient can delete them explicitly if they want them gone sooner.
+    """
+    names = _governed_log_group_names(event.get("ResourceProperties", {}))
+    logger.info(
+        "Delete for %s: leaving log group(s) %s in place, including their retention and "
+        "encryption settings. This resource governs the runtime's own log groups and never "
+        "deletes them; delete them explicitly if they are no longer wanted.",
+        event.get("LogicalResourceId", ""),
+        ", ".join(names) or "(none recorded)",
+    )
+    return {}, _runtime_log_group_physical_id(event)
+
+
+# ---------------------------------------------------------------------------
 # Router — dispatches by resource type
 # ---------------------------------------------------------------------------
 
@@ -1055,12 +1258,13 @@ def _get_resource_type(event: dict) -> str:
 
 # The complete set of resource types this Lambda serves. Must match the
 # "Type": "Custom::..." values emitted by cfn_template_generator.py; there is no
-# fourth one. Kept as an explicit set so dispatch can fail closed — see handler().
+# fifth one. Kept as an explicit set so dispatch can fail closed — see handler().
 SUPPORTED_RESOURCE_TYPES = frozenset(
     {
         "Custom::AgentCodePackage",
         "Custom::OAuth2CredentialProvider",
         "Custom::AgentCorePolicy",
+        "Custom::RuntimeLogGroup",
     }
 )
 
@@ -1148,13 +1352,34 @@ def handler(event: dict, context) -> None:
         # "Type" — or a fourth custom resource added without wiring it up here —
         # ran the WRONG handler and reported SUCCESS. A stack that silently built
         # the wrong resource is much harder to diagnose than one that refuses.
-        if resource_type not in SUPPORTED_RESOURCE_TYPES:
+        if resource_type not in SUPPORTED_RESOURCE_TYPES and request_type == "Delete":
+            # Except on Delete, where failing closed is what wedges a stack.
+            #
+            # Found live. Adding Custom::RuntimeLogGroup to a stack whose provider
+            # Lambda predated it failed the create, and the rollback then reverted the
+            # Lambda's code BEFORE sending the Delete — so the Delete arrived at a
+            # handler that had never heard of the type. Three DELETE_FAILED retries
+            # later the stack finished UPDATE_ROLLBACK_COMPLETE with "One or more
+            # resources could not be deleted". The same thing happens to a recipient
+            # rolling back any update that introduced a new custom resource type.
+            #
+            # Succeeding here is safe in a way that succeeding on Create/Update is not:
+            # a Delete this code cannot interpret names nothing it could destroy, so
+            # the only thing it can get wrong is leaving a resource behind — the
+            # direction this handler already errs in deliberately.
+            logger.warning(
+                "Delete for %s of unsupported type %r: reporting success so the stack is not "
+                "wedged. Nothing was deleted; if this type owned anything, remove it by hand.",
+                logical_id,
+                resource_type,
+            )
+            data, physical_id = {}, event.get("PhysicalResourceId") or logical_id
+        elif resource_type not in SUPPORTED_RESOURCE_TYPES:
             raise ValueError(
                 f"Unsupported custom resource type {resource_type!r}. "
                 f"This Lambda serves only: {', '.join(sorted(SUPPORTED_RESOURCE_TYPES))}."
             )
-
-        if resource_type == "Custom::OAuth2CredentialProvider":
+        elif resource_type == "Custom::OAuth2CredentialProvider":
             if request_type == "Create":
                 data, physical_id = _handle_oauth2_cred_create(event)
             elif request_type == "Update":
@@ -1168,6 +1393,13 @@ def handler(event: dict, context) -> None:
                 data, physical_id = _handle_policy_create_update(event, context)
             elif request_type == "Delete":
                 data, physical_id = _handle_policy_delete(event)
+            else:
+                raise ValueError(f"Unknown RequestType: {request_type}")
+        elif resource_type == "Custom::RuntimeLogGroup":
+            if request_type in ("Create", "Update"):
+                data, physical_id = _handle_runtime_log_group_create_update(event)
+            elif request_type == "Delete":
+                data, physical_id = _handle_runtime_log_group_delete(event)
             else:
                 raise ValueError(f"Unknown RequestType: {request_type}")
         else:

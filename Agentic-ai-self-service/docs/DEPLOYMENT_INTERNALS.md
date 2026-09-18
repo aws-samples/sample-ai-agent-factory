@@ -34,7 +34,7 @@ These are frequently confused, so to be explicit:
 | Produced by | `npx cdk deploy` (synthesizes a template) | A hand-built Python `dict` serialized with `yaml.dump` |
 | Consumer | The team operating this platform | An external customer, with no access to this repo |
 | CDK bootstrap needed | Yes | No |
-| Custom resources | CDK-synthesized helpers (`Custom::LogRetention`, `Custom::S3AutoDeleteObjects`, `Custom::CDKBucketDeployment`) plus a Cognito user provisioner in `infra/stacks/platform/cognito_auth.py` | Exactly three, all served by `cfn_provider/handler.py` — see [CloudFormation Export](#cloudformation-export) |
+| Custom resources | CDK-synthesized helpers (`Custom::LogRetention`, `Custom::S3AutoDeleteObjects`, `Custom::CDKBucketDeployment`) plus a Cognito user provisioner in `infra/stacks/platform/cognito_auth.py` | Exactly four, all served by `cfn_provider/handler.py` — see [CloudFormation Export](#cloudformation-export) |
 
 There is **no CDK path for the exported agent stack**, and none is planned. The export is
 deliberately plain CloudFormation so that customers can consume it with their own tooling
@@ -416,7 +416,7 @@ Any template or free-form diagram can be exported as a self-contained CloudForma
 |------|---------|
 | `template.yaml` | CloudFormation template with all AWS resources |
 | `agent-code/agent.py` | Generated agent code |
-| `cfn-provider.zip` | Custom Resource Lambda backing all three custom resources (code packaging, OAuth2 credential provider, Cedar policy) |
+| `cfn-provider.zip` | Custom Resource Lambda backing all four custom resources (code packaging, runtime log group governance, OAuth2 credential provider, Cedar policy) |
 | `tool-lambdas.zip` | Gateway tool Lambda implementations (if gateway tools are used) |
 | `deploy.sh` | One-command deploy script (`./deploy.sh <stack-name> <region> <s3-bucket>`) |
 | `teardown.sh` | One-command teardown script (`./teardown.sh <stack-name> <region>`) |
@@ -434,15 +434,27 @@ Any template or free-form diagram can be exported as a self-contained CloudForma
 ### Custom Resources in the Exported Stack
 
 The exported template is plain CloudFormation and uses native `AWS::BedrockAgentCore::*`
-types wherever they exist. Three things have no native CFN type, so they are Custom
-Resources. All three are served by the **single** `cfn-provider.zip` Lambda that the
+types wherever they exist. Four things cannot be expressed natively, so they are Custom
+Resources. All four are served by the **single** `cfn-provider.zip` Lambda that the
 template creates, and the dispatch lives in `backend/src/app/services/cfn_provider/handler.py`:
 
 | Custom resource | When emitted | What it does |
 |-----------------|--------------|--------------|
 | `Custom::AgentCodePackage` | Always | Downloads the prebuilt dependency bundle, merges the generated agent code into it, uploads the final `code.zip`. Deletes the object on stack delete. |
+| `Custom::RuntimeLogGroup` | Always, one per runtime | Applies `LogRetentionInDays` and, if set, `CustomerManagedKeyArn` to the CloudWatch log groups AgentCore creates for the runtime. Its Delete is deliberately a no-op. |
 | `Custom::OAuth2CredentialProvider` | MCP-server path only | Creates the AgentCore OAuth2 credential provider that authenticates the Gateway to the MCP Server Runtime, and computes the URL-encoded MCP endpoint (CFN has no url-encode intrinsic). |
 | `Custom::AgentCorePolicy` | When a policy is configured | Creates the Cedar policy attached to the PolicyEngine, with idempotent reuse if the policy already exists. |
+
+`Custom::RuntimeLogGroup` is the one that is not about a missing CFN type.
+`AWS::BedrockAgentCore::Runtime` has no logging or encryption properties at all, and the
+service creates `/aws/bedrock-agentcore/runtimes/<runtimeId>-<endpointName>` itself at
+stack-create time — one group per endpoint, including `-DEFAULT` — with no retention and
+no customer key. Those groups hold what the agent was asked and answered. They cannot be
+declared as `AWS::Logs::LogGroup` either: by the time the stack could adopt them they
+already exist and belong to nobody, which fails the create with "already exists". So the
+resource creates-or-adopts each group by name, and its Delete leaves them in place so that
+tearing a stack down does not destroy the audit trail (`teardown.sh` prints the
+`aws logs delete-log-group` command for removing them deliberately instead).
 
 That is the complete set. Anything else matching `Custom::` in this repository belongs to
 the platform's own CDK stack under `infra/` and is never shipped to a customer.
@@ -627,7 +639,7 @@ Policy --> Runtime, Gateway
 |   |   |   +-- iam_manager.py            # Scoped IAM role management for tools
 |   |   |   +-- tool_generator.py         # AI Tool Generator -- Claude Sonnet on Bedrock for Lambda code generation
 |   |   |   +-- cfn_template_generator.py # CloudFormation template generator (templates + free-form diagrams → CFN stacks)
-|   |   |   +-- cfn_provider/             # Custom Resource Lambda for CFN stacks (code packaging + OAuth2 credential provider + Cedar policy)
+|   |   |   +-- cfn_provider/             # Custom Resource Lambda for CFN stacks (code packaging + runtime log groups + OAuth2 credential provider + Cedar policy)
 |   |   |   |   +-- handler.py            # CloudFormation Custom Resource handler
 |   |   |   |   +-- cfn_response.py       # CFN response helper
 |   |   |   +-- validation.py             # Connection compatibility + field validation

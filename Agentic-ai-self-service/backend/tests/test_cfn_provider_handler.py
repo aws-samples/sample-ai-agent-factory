@@ -1051,6 +1051,41 @@ class TestDispatch:
         assert status == provider.cfn_response.FAILED
         assert kwargs["physical_resource_id"] == "Mystery"
 
+    def test_a_delete_of_an_unrecognised_type_succeeds_instead_of_wedging_the_stack(self, monkeypatch, sent):
+        """The one exception to failing closed, and it was found live.
+
+        Adding ``Custom::RuntimeLogGroup`` to a stack whose provider Lambda predated it
+        failed the create; the rollback then reverted the Lambda's CODE before sending
+        the Delete, so the Delete arrived at a handler that had never heard of the type.
+        Failing it produced three DELETE_FAILED retries and left the stack
+        UPDATE_ROLLBACK_COMPLETE with "One or more resources could not be deleted" — and
+        a recipient hits the same thing rolling back any update that adds a new type.
+
+        Succeeding is safe here in a way it is not on Create: a Delete this code cannot
+        interpret names nothing it could destroy.
+        """
+        s3 = FakeS3()
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: s3)
+
+        provider.handler(
+            {
+                "RequestType": "Delete",
+                "StackId": STACK_ID,
+                "LogicalResourceId": "FromTheFuture",
+                "ResourceType": "Custom::SomethingThisCodeIsOlderThan",
+                "PhysicalResourceId": "whatever-the-newer-code-returned",
+                "ResourceProperties": {},
+            },
+            _Context(),
+        )
+
+        assert s3.calls == [], "the delete of an unknown type touched something"
+        ((status, kwargs),) = sent
+        assert status == provider.cfn_response.SUCCESS
+        # Echoed back unchanged: CloudFormation matches the response to the resource by
+        # this id, and inventing a new one on a Delete leaves it unable to.
+        assert kwargs["physical_resource_id"] == "whatever-the-newer-code-returned"
+
     def test_an_unknown_request_type_fails_too(self, monkeypatch, sent):
         monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: FakeS3())
 
@@ -1066,9 +1101,14 @@ class TestDispatch:
         )
         assert sent[0][0] == provider.cfn_response.FAILED
 
-    def test_the_three_supported_types_are_the_three_the_template_emits(self):
+    def test_the_supported_types_are_the_ones_the_template_emits(self):
         assert provider.SUPPORTED_RESOURCE_TYPES == frozenset(
-            {"Custom::AgentCodePackage", "Custom::OAuth2CredentialProvider", "Custom::AgentCorePolicy"}
+            {
+                "Custom::AgentCodePackage",
+                "Custom::OAuth2CredentialProvider",
+                "Custom::AgentCorePolicy",
+                "Custom::RuntimeLogGroup",
+            }
         )
 
     def test_a_provider_error_reaches_the_operator_but_a_client_error_does_not(self, monkeypatch, sent):
@@ -1171,3 +1211,535 @@ class TestResponseDelivery:
             provider.handler(self._event(monkeypatch, ResponseURL=self.URL), _Context())
         assert "X-Amz-Signature" not in str(excinfo.value)
         assert "s3.amazonaws.com" not in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Custom::RuntimeLogGroup — the runtime's own logs are the conversation
+# ---------------------------------------------------------------------------
+
+
+DEFAULT_GROUP = "/aws/bedrock-agentcore/runtimes/demo_runtime-aBcDeF1234-DEFAULT"
+NAMED_GROUP = "/aws/bedrock-agentcore/runtimes/demo_runtime-aBcDeF1234-demo_endpoint"
+KEY_ARN = f"arn:aws:kms:us-east-1:{ACCOUNT}:key/12345678-1234-1234-1234-123456789012"
+OTHER_KEY_ARN = f"arn:aws:kms:us-east-1:{ACCOUNT}:key/87654321-4321-4321-4321-210987654321"
+
+
+def _accepted_by_the_logs_model(operation: str, kwargs: dict) -> None:
+    """Validate one call against the real CloudWatch Logs model.
+
+    Same argument as ``_accepted_by_the_real_model``: a fake that happily accepts
+    ``kmsKeyArn`` where the API wants ``kmsKeyId``, or a retention value the API
+    rejects, lets a green suite ship a handler that fails on the recipient's first
+    deploy. Every method on ``FakeLogs`` runs this before doing anything.
+    """
+    try:
+        shape = botocore.session.get_session().get_service_model("logs").operation_model(operation).input_shape
+    except Exception as e:  # pragma: no cover - an older botocore may not know it
+        pytest.skip(f"this botocore cannot describe logs.{operation}: {e}")
+    validate_parameters(kwargs, shape)
+
+
+class FakeLogs:
+    """A CloudWatch Logs stand-in holding only the state the handler branches on.
+
+    ``groups`` maps a log group name to its ``kmsKeyId``, mirroring what
+    DescribeLogGroups reports. A group the AgentCore runtime created for itself is
+    present with an empty key and no retention — the exact state this resource exists
+    to change, and the one the live probe found on both of its groups.
+    """
+
+    def __init__(
+        self,
+        groups=None,
+        *,
+        create_raises=None,
+        associate_raises=None,
+        delete_retention_raises=None,
+        region="us-east-1",
+    ):
+        self.groups = dict(groups or {})
+        self.retention: dict[str, int] = {}
+        self.calls: list[tuple[str, dict]] = []
+        self._create_raises = create_raises
+        self._associate_raises = associate_raises
+        self._delete_retention_raises = delete_retention_raises
+        self.meta = type("Meta", (), {"region_name": region})()
+
+    @property
+    def operations(self) -> list[str]:
+        return [name for name, _kwargs in self.calls]
+
+    def _record(self, operation: str, api_operation: str, kwargs: dict) -> None:
+        self.calls.append((operation, kwargs))
+        _accepted_by_the_logs_model(api_operation, kwargs)
+
+    def create_log_group(self, **kwargs):
+        self._record("create_log_group", "CreateLogGroup", kwargs)
+        if self._create_raises:
+            raise self._create_raises
+        name = kwargs["logGroupName"]
+        if name in self.groups:
+            raise _client_error("ResourceAlreadyExistsException", "CreateLogGroup")
+        self.groups[name] = kwargs.get("kmsKeyId", "")
+
+    def describe_log_groups(self, **kwargs):
+        self._record("describe_log_groups", "DescribeLogGroups", kwargs)
+        prefix = kwargs.get("logGroupNamePrefix", "")
+        return {
+            "logGroups": [
+                {"logGroupName": name, "kmsKeyId": key} for name, key in self.groups.items() if name.startswith(prefix)
+            ]
+        }
+
+    def associate_kms_key(self, **kwargs):
+        self._record("associate_kms_key", "AssociateKmsKey", kwargs)
+        if self._associate_raises:
+            raise self._associate_raises
+        self.groups[kwargs["logGroupName"]] = kwargs["kmsKeyId"]
+
+    def disassociate_kms_key(self, **kwargs):
+        self._record("disassociate_kms_key", "DisassociateKmsKey", kwargs)
+        self.groups[kwargs["logGroupName"]] = ""
+
+    def put_retention_policy(self, **kwargs):
+        self._record("put_retention_policy", "PutRetentionPolicy", kwargs)
+        self.retention[kwargs["logGroupName"]] = kwargs["retentionInDays"]
+
+    def delete_retention_policy(self, **kwargs):
+        self._record("delete_retention_policy", "DeleteRetentionPolicy", kwargs)
+        if self._delete_retention_raises:
+            raise self._delete_retention_raises
+        self.retention.pop(kwargs["logGroupName"], None)
+
+
+def _install_logs(monkeypatch, fake: FakeLogs) -> FakeLogs:
+    """Hand the handler *fake* instead of a real client, and only for ``logs``."""
+
+    def client(service_name, *args, **kwargs):
+        assert service_name == "logs", f"the log group resource asked for a {service_name} client"
+        return fake
+
+    monkeypatch.setattr(provider.boto3, "client", client)
+    return fake
+
+
+def _log_group_event(request_type="Create", names=(DEFAULT_GROUP, NAMED_GROUP), **props):
+    """A Create/Update/Delete event for the resource the generator emits.
+
+    ``RetentionInDays`` is a string because that is what it is by the time it arrives:
+    CloudFormation stringifies every Custom Resource property, so the handler's own
+    int conversion is on the live path and not a defensive nicety.
+    """
+    return {
+        "RequestType": request_type,
+        "StackId": STACK_ID,
+        "LogicalResourceId": "AgentCoreRuntimeLogGroups",
+        "ResourceType": "Custom::RuntimeLogGroup",
+        "ResourceProperties": {"LogGroupNames": list(names), "RetentionInDays": "7", **props},
+    }
+
+
+class TestRuntimeLogGroupGovernance:
+    """AgentCore creates these groups itself, so the handler adopts rather than owns.
+
+    The live finding that shapes all of this: a runtime with one named endpoint has TWO
+    log groups, ``<id>-DEFAULT`` and ``<id>-<endpointName>``, both created by the
+    service at stack-create time before any invoke, both with no retention and no key —
+    and an invoke against the named qualifier writes to the NAMED one while -DEFAULT
+    stays empty. A resource that governed only the group it created itself, or only
+    -DEFAULT, would have governed the empty one and looked correct doing it.
+    """
+
+    def test_both_existing_groups_get_the_retention_and_the_key(self, monkeypatch):
+        logs = _install_logs(monkeypatch, FakeLogs({DEFAULT_GROUP: "", NAMED_GROUP: ""}))
+
+        data, _physical_id = provider._handle_runtime_log_group_create_update(_log_group_event(KmsKeyArn=KEY_ARN))
+
+        assert logs.groups == {DEFAULT_GROUP: KEY_ARN, NAMED_GROUP: KEY_ARN}
+        assert logs.retention == {DEFAULT_GROUP: 7, NAMED_GROUP: 7}
+        assert data["LogGroupNames"] == f"{DEFAULT_GROUP},{NAMED_GROUP}"
+
+    def test_a_group_the_service_has_not_made_yet_is_created_with_the_key(self, monkeypatch):
+        """Not hypothetical: the group for a named endpoint appears when the endpoint does.
+
+        Creating it with the key already set is also the only way to govern a group
+        before the service writes its first event into it.
+        """
+        logs = _install_logs(monkeypatch, FakeLogs())
+
+        provider._handle_runtime_log_group_create_update(_log_group_event(KmsKeyArn=KEY_ARN))
+
+        assert logs.groups == {DEFAULT_GROUP: KEY_ARN, NAMED_GROUP: KEY_ARN}
+        assert logs.retention == {DEFAULT_GROUP: 7, NAMED_GROUP: 7}
+        assert "associate_kms_key" not in logs.operations
+        assert logs.calls[0] == ("create_log_group", {"logGroupName": DEFAULT_GROUP, "kmsKeyId": KEY_ARN})
+
+    def test_without_a_key_the_group_is_created_on_the_aws_owned_key(self, monkeypatch):
+        """No ``kmsKeyId`` at all rather than an empty string, which the API rejects."""
+        logs = _install_logs(monkeypatch, FakeLogs())
+
+        provider._handle_runtime_log_group_create_update(_log_group_event(KmsKeyArn=""))
+
+        assert logs.calls[0] == ("create_log_group", {"logGroupName": DEFAULT_GROUP})
+        assert logs.groups == {DEFAULT_GROUP: "", NAMED_GROUP: ""}
+
+    def test_the_group_is_never_read_before_being_written(self, monkeypatch):
+        """No DescribeLogGroups, and this is the assertion that keeps it that way.
+
+        DescribeLogGroups is a list operation, so IAM authorizes it against
+        ``arn:aws:logs:<region>:<account>:log-group::log-stream:`` — an EMPTY log group
+        name — which no resource-scoped grant can ever match. Verified live: a grant on
+        ``log-group:/aws/bedrock-agentcore/runtimes/*`` failed the stack create with
+        "not authorized to perform: logs:DescribeLogGroups on resource:
+        arn:aws:logs:us-east-1:...:log-group::log-stream:". Re-introducing the read
+        means either widening the grant to every log group in the account or breaking
+        the deploy, so it is pinned here rather than left to review.
+        """
+        logs = _install_logs(monkeypatch, FakeLogs({DEFAULT_GROUP: "", NAMED_GROUP: ""}))
+
+        provider._handle_runtime_log_group_create_update(_log_group_event(KmsKeyArn=KEY_ARN))
+
+        assert "describe_log_groups" not in logs.operations
+
+    def test_a_group_already_on_the_right_key_is_associated_again(self, monkeypatch):
+        """Not a no-op, because the current key is deliberately not read.
+
+        Verified live that this costs nothing: AssociateKmsKey with the key already
+        attached returns success and changes nothing.
+        """
+        logs = _install_logs(monkeypatch, FakeLogs({DEFAULT_GROUP: KEY_ARN, NAMED_GROUP: KEY_ARN}))
+
+        provider._handle_runtime_log_group_create_update(_log_group_event(KmsKeyArn=KEY_ARN))
+
+        assert logs.groups == {DEFAULT_GROUP: KEY_ARN, NAMED_GROUP: KEY_ARN}
+        assert logs.operations.count("associate_kms_key") == 2
+        assert "disassociate_kms_key" not in logs.operations
+        assert logs.retention == {DEFAULT_GROUP: 7, NAMED_GROUP: 7}
+
+    def test_a_group_on_the_wrong_key_is_re_associated(self, monkeypatch):
+        """The recipient rotated CustomerManagedKeyArn to a different key."""
+        logs = _install_logs(monkeypatch, FakeLogs({DEFAULT_GROUP: OTHER_KEY_ARN, NAMED_GROUP: ""}))
+
+        provider._handle_runtime_log_group_create_update(_log_group_event(KmsKeyArn=KEY_ARN))
+
+        assert logs.groups == {DEFAULT_GROUP: KEY_ARN, NAMED_GROUP: KEY_ARN}
+        assert logs.operations.count("associate_kms_key") == 2
+
+    def test_dropping_the_key_reverts_the_group_to_the_aws_owned_key(self, monkeypatch):
+        """Otherwise the group stays on a key the recipient is now free to delete —
+        which would make every event already written into it permanently unreadable.
+        """
+        logs = _install_logs(monkeypatch, FakeLogs({DEFAULT_GROUP: KEY_ARN, NAMED_GROUP: KEY_ARN}))
+
+        provider._handle_runtime_log_group_create_update(_log_group_event(request_type="Update"))
+
+        assert logs.groups == {DEFAULT_GROUP: "", NAMED_GROUP: ""}
+        assert logs.operations.count("disassociate_kms_key") == 2
+
+    def test_an_unkeyed_group_is_disassociated_anyway(self, monkeypatch):
+        """The price of not reading the group first, and verified live to be safe:
+        DisassociateKmsKey on a group that has no key returns success.
+        """
+        logs = _install_logs(monkeypatch, FakeLogs({DEFAULT_GROUP: "", NAMED_GROUP: ""}))
+
+        provider._handle_runtime_log_group_create_update(_log_group_event())
+
+        assert logs.operations.count("disassociate_kms_key") == 2
+        assert logs.groups == {DEFAULT_GROUP: "", NAMED_GROUP: ""}
+
+    def test_retention_is_applied_to_every_governed_name(self, monkeypatch):
+        """Retention, not the key, is the part ARCC cnt_bO6I1SM60fP0J4 turns on."""
+        logs = _install_logs(monkeypatch, FakeLogs({DEFAULT_GROUP: "", NAMED_GROUP: ""}))
+
+        provider._handle_runtime_log_group_create_update(_log_group_event(RetentionInDays="3653"))
+
+        assert logs.retention == {DEFAULT_GROUP: 3653, NAMED_GROUP: 3653}
+
+    def test_zero_retention_removes_the_policy_rather_than_setting_zero(self, monkeypatch):
+        """CloudWatch's "never expire" is the ABSENCE of a policy; 0 is not a valid value."""
+        logs = _install_logs(monkeypatch, FakeLogs({DEFAULT_GROUP: ""}, region="eu-central-1"))
+
+        provider._handle_runtime_log_group_create_update(_log_group_event(names=(DEFAULT_GROUP,), RetentionInDays="0"))
+
+        assert "put_retention_policy" not in logs.operations
+        assert logs.operations.count("delete_retention_policy") == 1
+
+    def test_a_group_with_no_retention_policy_to_delete_is_not_an_error(self, monkeypatch):
+        """DeleteRetentionPolicy on a group that never had one; the resource is idempotent."""
+        logs = _install_logs(
+            monkeypatch,
+            FakeLogs(
+                {DEFAULT_GROUP: ""},
+                delete_retention_raises=_client_error("ResourceNotFoundException", "DeleteRetentionPolicy"),
+            ),
+        )
+
+        provider._handle_runtime_log_group_create_update(_log_group_event(names=(DEFAULT_GROUP,), RetentionInDays="0"))
+
+        assert logs.operations.count("delete_retention_policy") == 1
+
+    def test_a_real_retention_failure_is_not_swallowed(self, monkeypatch):
+        """Only the benign codes are tolerated: AccessDenied must fail the stack."""
+        _install_logs(
+            monkeypatch,
+            FakeLogs(
+                {DEFAULT_GROUP: ""},
+                delete_retention_raises=_client_error("AccessDeniedException", "DeleteRetentionPolicy"),
+            ),
+        )
+
+        with pytest.raises(ClientError):
+            provider._handle_runtime_log_group_create_update(
+                _log_group_event(names=(DEFAULT_GROUP,), RetentionInDays="0")
+            )
+
+    def test_a_non_numeric_retention_falls_back_to_never_expire(self, monkeypatch):
+        """Never to a number: guessing 30 on a garbled value would silently DELETE logs
+        the recipient asked to keep, and that loss is not recoverable.
+        """
+        logs = _install_logs(monkeypatch, FakeLogs({DEFAULT_GROUP: ""}))
+
+        provider._handle_runtime_log_group_create_update(_log_group_event(names=(DEFAULT_GROUP,), RetentionInDays=""))
+
+        assert "put_retention_policy" not in logs.operations
+
+    def test_a_single_name_as_a_string_is_tolerated(self, monkeypatch):
+        """CloudFormation collapses a one-element list in some paths."""
+        logs = _install_logs(monkeypatch, FakeLogs({DEFAULT_GROUP: ""}))
+
+        data, _physical_id = provider._handle_runtime_log_group_create_update(
+            _log_group_event(LogGroupNames=DEFAULT_GROUP)
+        )
+
+        assert data["LogGroupNames"] == DEFAULT_GROUP
+        assert logs.retention == {DEFAULT_GROUP: 7}
+
+    def test_duplicate_and_empty_names_are_reduced_to_the_real_ones(self, monkeypatch):
+        """A deployment whose endpoint is literally named DEFAULT produces the same name
+        twice from the template, and governing it twice would issue redundant KMS calls.
+        """
+        logs = _install_logs(monkeypatch, FakeLogs({DEFAULT_GROUP: ""}))
+
+        data, _physical_id = provider._handle_runtime_log_group_create_update(
+            _log_group_event(names=(DEFAULT_GROUP, f"  {DEFAULT_GROUP}  ", "", "   "))
+        )
+
+        assert data["LogGroupNames"] == DEFAULT_GROUP
+        assert logs.operations.count("put_retention_policy") == 1
+
+    def test_no_names_at_all_is_a_no_op_rather_than_a_failure(self, monkeypatch):
+        """A template with no runtime emits no names; failing here would fail that stack."""
+        logs = _install_logs(monkeypatch, FakeLogs())
+
+        data, physical_id = provider._handle_runtime_log_group_create_update(_log_group_event(names=()))
+
+        assert data == {"LogGroupNames": ""}
+        assert logs.calls == []
+        assert physical_id == "runtime-log-groups/AgentCoreRuntimeLogGroups"
+
+
+class TestRuntimeLogGroupKeyPolicyFailure:
+    """The one failure a recipient will actually hit, and the one AWS explains worst.
+
+    Live, both CreateLogGroup and AssociateKmsKey answer "The specified KMS key does
+    not exist or is not allowed to be used with Arn '<log group arn>'" when the key
+    policy has no statement for the logs service principal. That message points at the
+    log group and implies the key is missing; the key is fine and the log group is
+    irrelevant. The stack event has to say what to add.
+    """
+
+    DENIED = "AccessDeniedException"
+
+    def _assert_names_the_remedy(self, excinfo):
+        message = str(excinfo.value)
+        assert "logs.us-east-1.amazonaws.com" in message
+        assert "kms:EncryptionContext:aws:logs:arn" in message
+        assert "README.md > Encryption" in message
+        assert KEY_ARN in message
+        assert DEFAULT_GROUP in message
+
+    def test_create_says_which_statement_the_key_policy_needs(self, monkeypatch):
+        _install_logs(monkeypatch, FakeLogs(create_raises=_client_error(self.DENIED, "CreateLogGroup")))
+
+        with pytest.raises(provider.ProviderError) as excinfo:
+            provider._handle_runtime_log_group_create_update(
+                _log_group_event(names=(DEFAULT_GROUP,), KmsKeyArn=KEY_ARN)
+            )
+
+        self._assert_names_the_remedy(excinfo)
+
+    def test_associate_says_the_same_thing_on_an_adopted_group(self, monkeypatch):
+        """The likelier path of the two: the group already exists, so create never runs."""
+        _install_logs(
+            monkeypatch,
+            FakeLogs({DEFAULT_GROUP: ""}, associate_raises=_client_error(self.DENIED, "AssociateKmsKey")),
+        )
+
+        with pytest.raises(provider.ProviderError) as excinfo:
+            provider._handle_runtime_log_group_create_update(
+                _log_group_event(names=(DEFAULT_GROUP,), KmsKeyArn=KEY_ARN)
+            )
+
+        self._assert_names_the_remedy(excinfo)
+
+    def test_the_region_comes_from_the_client_not_a_hardcoded_default(self, monkeypatch):
+        """The handler imports no ``os``, so the service principal has to be read off the
+        client. Hardcoding us-east-1 would send a Frankfurt recipient the wrong statement.
+        """
+        _install_logs(
+            monkeypatch,
+            FakeLogs(
+                {DEFAULT_GROUP: ""},
+                associate_raises=_client_error(self.DENIED, "AssociateKmsKey"),
+                region="eu-central-1",
+            ),
+        )
+
+        with pytest.raises(provider.ProviderError) as excinfo:
+            provider._handle_runtime_log_group_create_update(
+                _log_group_event(names=(DEFAULT_GROUP,), KmsKeyArn=KEY_ARN)
+            )
+
+        assert "logs.eu-central-1.amazonaws.com" in str(excinfo.value)
+        assert "arn:aws:logs:eu-central-1:<account>:log-group:*" in str(excinfo.value)
+
+    def test_access_denied_without_a_key_is_not_reported_as_a_key_problem(self, monkeypatch):
+        """Same code, entirely different cause: the role is missing logs:CreateLogGroup.
+        Handing that operator a key policy to edit would send them days in the wrong place.
+        """
+        _install_logs(monkeypatch, FakeLogs(create_raises=_client_error(self.DENIED, "CreateLogGroup")))
+
+        with pytest.raises(ClientError):
+            provider._handle_runtime_log_group_create_update(_log_group_event(names=(DEFAULT_GROUP,)))
+
+    def test_an_unrelated_create_failure_propagates_untouched(self, monkeypatch):
+        """Throttling is retried by botocore and then real; it must not be mistaken for
+        "the group already exists" and silently skipped.
+        """
+        _install_logs(
+            monkeypatch,
+            FakeLogs(create_raises=_client_error("ThrottlingException", "CreateLogGroup")),
+        )
+
+        with pytest.raises(ClientError):
+            provider._handle_runtime_log_group_create_update(
+                _log_group_event(names=(DEFAULT_GROUP,), KmsKeyArn=KEY_ARN)
+            )
+
+    def test_an_unrelated_associate_failure_propagates_untouched(self, monkeypatch):
+        _install_logs(
+            monkeypatch,
+            FakeLogs({DEFAULT_GROUP: ""}, associate_raises=_client_error("ThrottlingException", "AssociateKmsKey")),
+        )
+
+        with pytest.raises(ClientError):
+            provider._handle_runtime_log_group_create_update(
+                _log_group_event(names=(DEFAULT_GROUP,), KmsKeyArn=KEY_ARN)
+            )
+
+
+class TestRuntimeLogGroupDeleteAndIdentity:
+    """Delete must not delete, and update must not replace."""
+
+    def test_delete_leaves_the_logs_in_place(self, monkeypatch):
+        """The whole point. These groups hold the agent's conversations; per ARCC
+        cnt_bO6I1SM60fP0J4 security-relevant logs are retained for years, and a stack
+        teardown is not authority to destroy the audit trail of what the agent did.
+        No client is created at all, so there is nothing that could delete them.
+        """
+
+        def no_clients(service_name, *args, **kwargs):
+            raise AssertionError(f"Delete built a {service_name} client; it must touch nothing")
+
+        monkeypatch.setattr(provider.boto3, "client", no_clients)
+
+        data, physical_id = provider._handle_runtime_log_group_delete(_log_group_event(request_type="Delete"))
+
+        assert data == {}
+        assert physical_id == "runtime-log-groups/AgentCoreRuntimeLogGroups"
+
+    def test_delete_of_a_resource_with_no_recorded_names_still_succeeds(self, monkeypatch):
+        """A rollback of a failed Create sends a Delete with whatever properties it had.
+        Raising here is what wedges a stack in DELETE_FAILED.
+        """
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: pytest.fail("no client expected"))
+
+        data, _physical_id = provider._handle_runtime_log_group_delete(
+            {"RequestType": "Delete", "LogicalResourceId": "AgentCoreRuntimeLogGroups", "ResourceProperties": {}}
+        )
+
+        assert data == {}
+
+    def test_an_update_keeps_the_physical_id_cloudformation_already_has(self, monkeypatch):
+        """Returning a new id makes CloudFormation treat the update as a replacement and
+        send a Delete for the old one — which for this resource is a no-op, so the stack
+        would look fine while the id churned on every update.
+        """
+        _install_logs(monkeypatch, FakeLogs({DEFAULT_GROUP: ""}))
+        event = _log_group_event(request_type="Update", names=(DEFAULT_GROUP,))
+        event["PhysicalResourceId"] = "runtime-log-groups/SomethingOlder"
+
+        _data, physical_id = provider._handle_runtime_log_group_create_update(event)
+
+        assert physical_id == "runtime-log-groups/SomethingOlder"
+
+    def test_create_and_delete_derive_the_same_id(self, monkeypatch):
+        """They must agree, or a Create whose response never arrived cannot be matched
+        to the Delete that follows it.
+        """
+        _install_logs(monkeypatch, FakeLogs({DEFAULT_GROUP: ""}))
+        create = _log_group_event(names=(DEFAULT_GROUP,))
+
+        _data, created_id = provider._handle_runtime_log_group_create_update(create)
+        _data, deleted_id = provider._handle_runtime_log_group_delete(_log_group_event(request_type="Delete"))
+
+        assert created_id == deleted_id
+
+
+class TestRuntimeLogGroupDispatch:
+    """The router has to reach this handler, which is the bug the router already had."""
+
+    @pytest.fixture
+    def sent(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            provider.cfn_response,
+            "send",
+            lambda event, context, status, **kwargs: calls.append((status, kwargs)) or True,
+        )
+        return calls
+
+    def _event(self, monkeypatch, request_type="Create", **props):
+        event = _log_group_event(request_type, **props)
+        event["ResponseURL"] = "https://cloudformation-custom-resource-response.example/x"
+        return event
+
+    def test_a_create_is_routed_and_reports_success(self, monkeypatch, sent):
+        logs = _install_logs(monkeypatch, FakeLogs({DEFAULT_GROUP: "", NAMED_GROUP: ""}))
+
+        provider.handler(self._event(monkeypatch), _Context())
+
+        status, kwargs = sent[0]
+        assert status == "SUCCESS"
+        assert kwargs["data"]["LogGroupNames"] == f"{DEFAULT_GROUP},{NAMED_GROUP}"
+        assert logs.retention == {DEFAULT_GROUP: 7, NAMED_GROUP: 7}
+
+    def test_a_delete_is_routed_and_reports_success_without_touching_logs(self, monkeypatch, sent):
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: pytest.fail("no client expected"))
+
+        provider.handler(self._event(monkeypatch, request_type="Delete"), _Context())
+
+        assert sent[0][0] == "SUCCESS"
+
+    def test_the_key_policy_remedy_reaches_the_stack_event(self, monkeypatch, sent):
+        """A ProviderError's message is the only place the recipient will read it."""
+        _install_logs(
+            monkeypatch,
+            FakeLogs({DEFAULT_GROUP: ""}, associate_raises=_client_error("AccessDeniedException", "AssociateKmsKey")),
+        )
+
+        provider.handler(self._event(monkeypatch, names=(DEFAULT_GROUP,), KmsKeyArn=KEY_ARN), _Context())
+
+        status, kwargs = sent[0]
+        assert status == "FAILED"
+        assert "README.md > Encryption" in kwargs["reason"]

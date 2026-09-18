@@ -4,12 +4,17 @@ Converts a DeployRequest (workflow definition from the frontend) into a
 complete CloudFormation template bundle using native AWS::BedrockAgentCore::*
 resource types wherever they exist.
 
-Three Custom Resources are emitted, all served by the single cfn-provider
+Four Custom Resources are emitted, all served by the single cfn-provider
 Lambda in ``cfn_provider/handler.py``, because no native CFN type covers them:
 
 - ``Custom::AgentCodePackage`` — merges the agent code with a prebuilt
   dependency bundle and uploads the final code.zip at deploy time. Always
   present.
+- ``Custom::RuntimeLogGroup`` — applies the stack's retention period and
+  customer-managed key to the log groups AgentCore creates for each runtime.
+  ``AWS::BedrockAgentCore::Runtime`` has no logging properties, and the service
+  creates the groups itself, so nothing declared can reach them. One per
+  runtime, always present.
 - ``Custom::OAuth2CredentialProvider`` — creates the AgentCore OAuth2
   credential provider that authenticates the Gateway to an MCP Server
   Runtime. Emitted only on the MCP-server path.
@@ -23,8 +28,8 @@ README (``_generate_readme``). All three have drifted before.
 The generated bundle includes:
 - template.yaml — CloudFormation template
 - agent-code/agent.py — Pre-generated agent code (env-var driven)
-- cfn-provider/ — Custom Resource Lambda (code packaging, OAuth2 credential
-  provider, Cedar policy)
+- cfn-provider/ — Custom Resource Lambda (code packaging, runtime log group
+  governance, OAuth2 credential provider, Cedar policy)
 - tool-lambdas/ — Gateway tool Lambda functions (if applicable)
 - deploy.sh — One-command deployment script
 - teardown.sh — Stack deletion script
@@ -389,6 +394,13 @@ CUSTOMER_KEY_PROPERTIES: dict[str, tuple[str, Callable[[], object]]] = {
     # left out; the generated README's key-policy section now carries the statement.
     # Found by Checkov CKV_AWS_158.
     "AWS::Logs::LogGroup": ("KmsKeyId", _customer_key_ref),
+    # The AgentCore runtime's OWN log groups — the ones holding the conversation.
+    # AWS::BedrockAgentCore::Runtime has no logging or encryption property at all (see
+    # the note above), and the service creates these groups outside CloudFormation, so
+    # Custom::RuntimeLogGroup is the only thing that can reach them. It passes this ARN
+    # to CreateLogGroup/AssociateKmsKey, and the same logs.<region>.amazonaws.com
+    # key-policy statement the entry above needs is what makes that work.
+    "Custom::RuntimeLogGroup": ("KmsKeyArn", _customer_key_ref),
 }
 
 # Role logical id -> the encrypted resource types that role has to be able to use
@@ -410,7 +422,13 @@ CUSTOMER_KEY_ROLE_DEPENDENCIES: dict[str, frozenset[str]] = {
     # different reason: AgentCore's policy APIs run a forward-access-session KMS
     # check against the caller, and a role without kms:Decrypt on the engine's key
     # gets an AccessDenied from the *policy* call, not a decrypt error.
-    "CfnProviderRole": frozenset({"AWS::BedrockAgentCore::PolicyEngine"}),
+    # Custom::RuntimeLogGroup for the same class of reason: the Lambda hands the key
+    # ARN to CreateLogGroup/AssociateKmsKey, and CloudWatch Logs validates the key as
+    # the caller before accepting it. A role holding logs:AssociateKmsKey but nothing
+    # on the key gets an AccessDenied from the LOGS call, which reads as a log-group
+    # permission problem and is not one. This entry is why the whole feature works
+    # from a least-privilege role rather than only from an administrator's.
+    "CfnProviderRole": frozenset({"AWS::BedrockAgentCore::PolicyEngine", "Custom::RuntimeLogGroup"}),
 }
 
 CUSTOMER_KEY_POLICY_NAME = "CustomerManagedKeyAccess"
@@ -610,6 +628,33 @@ def _log_group_resources() -> list[dict]:
     id it mints at create time.
     """
     return [{"Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"}]
+
+
+# Where AgentCore puts a runtime's own logs: one group per endpoint, named
+# ``<prefix>/<runtimeId>-<qualifier>``. Verified live rather than read off the docs,
+# and the finding that matters is the plural: a runtime with a named endpoint has BOTH
+# ``-DEFAULT`` and ``-<endpointName>``, both created at stack-create time before any
+# invoke, and the invoked qualifier is the one that receives the conversation.
+RUNTIME_LOG_GROUP_PREFIX = "/aws/bedrock-agentcore/runtimes"
+
+
+def _runtime_log_group_resources() -> list[dict]:
+    """Only the AgentCore runtime log groups, for the governance custom resource.
+
+    Deliberately narrower than ``_log_group_resources``: that one authorizes writing
+    to any group in the account because AgentCore mints the name, while this
+    authorizes *changing settings on* groups — including DisassociateKmsKey, which on
+    the wrong group would make an unrelated team's existing log data unreadable. The
+    runtime prefix is fixed by the service, so there is no reason for this to be wide.
+    """
+    return [
+        {
+            "Fn::Sub": (
+                "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:"
+                f"log-group:{RUNTIME_LOG_GROUP_PREFIX}/*"
+            )
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1039,6 +1084,105 @@ def _apply_lambda_log_groups(template: dict) -> list[str]:
             depends.append(group_id)
         touched.append(logical_id)
     return sorted(touched)
+
+
+def _runtime_endpoint_qualifier(name: object, endpoint_id: str) -> str:
+    """An endpoint's ``Name`` as text that can sit inside an outer ``Fn::Sub``.
+
+    Flattened rather than nested on purpose: ``Fn::Sub``'s variable map accepts
+    ``Ref`` and ``Fn::GetAtt`` but NOT another ``Fn::Sub``, and the inner string's
+    ``${DeploymentName}`` resolves identically when it is inlined into the outer one.
+
+    Anything else raises. The alternative — skipping a shape this cannot flatten —
+    would silently leave that endpoint's log group with no retention and no key,
+    which is the exact defect this whole pass exists to fix, and it would leave it
+    with no failing test either.
+    """
+    if isinstance(name, str):
+        return name
+    if isinstance(name, dict) and isinstance(name.get("Fn::Sub"), str):
+        return name["Fn::Sub"]
+    raise ValueError(
+        f"runtime endpoint {endpoint_id} has a Name this generator cannot turn into a log "
+        f"group name ({name!r}); Custom::RuntimeLogGroup would leave its logs ungoverned"
+    )
+
+
+def _apply_runtime_log_groups(template: dict) -> list[str]:
+    """Govern the log groups AgentCore creates for each runtime it is asked to run.
+
+    ``AWS::BedrockAgentCore::Runtime`` has no logging properties whatsoever, so
+    nothing in the emitted template reached these groups: the service created
+    ``/aws/bedrock-agentcore/runtimes/<runtimeId>-<qualifier>`` itself, with no
+    retention limit and the AWS-owned key, and a ``delete-stack`` left it behind. That
+    is the agent's conversation — what it was asked and what it answered — kept for
+    ever, unencrypted by the customer's key, in a group no stack owns. ARCC
+    cnt_sSTfcrsdyTSviN item 6 requires customer content to have a retention period and
+    item 8 requires customer-managed-key support so the customer controls it; ARCC
+    cnt_qf7wYkuSRSM5fl requires the retention limit to be set through CloudFormation.
+    The same two knobs already cover the Lambda groups (see _apply_lambda_log_groups);
+    this is the resource that could not be declared.
+
+    Declaring them as ``AWS::Logs::LogGroup`` is not an option, which is why this is a
+    custom resource: the runtime creates the groups during the stack's own create, so a
+    declared group of the same name collides with one that already exists and belongs
+    to nobody. The handler creates-or-adopts instead, and never deletes.
+
+    One resource per runtime, covering EVERY endpoint plus DEFAULT. The service makes a
+    group per endpoint — proven live on a runtime with one named endpoint, which had
+    both — and the named one is where an invoke against that qualifier writes. A pass
+    that governed only ``-DEFAULT`` would have looked correct in the template and
+    covered the empty group.
+    """
+    resources = template.get("Resources", {})
+    added: list[str] = []
+    for runtime_id in sorted(lid for lid, r in resources.items() if r.get("Type") == "AWS::BedrockAgentCore::Runtime"):
+        qualifiers = ["DEFAULT"]
+        endpoints: list[str] = []
+        for endpoint_id, endpoint in sorted(resources.items()):
+            if endpoint.get("Type") != "AWS::BedrockAgentCore::RuntimeEndpoint":
+                continue
+            runtime_ref = endpoint.get("Properties", {}).get("AgentRuntimeId")
+            get_att = runtime_ref.get("Fn::GetAtt") if isinstance(runtime_ref, dict) else None
+            if not get_att or get_att[0] != runtime_id:
+                continue
+            endpoints.append(endpoint_id)
+            qualifiers.append(_runtime_endpoint_qualifier(endpoint["Properties"].get("Name"), endpoint_id))
+
+        logical_id = f"{runtime_id}LogGroups"
+        if logical_id in resources:
+            continue
+        resource = {
+            "Type": "Custom::RuntimeLogGroup",
+            "Properties": {
+                "ServiceToken": {"Fn::GetAtt": ["CfnProviderLambda", "Arn"]},
+                # A fresh dict per entry, never a shared one: two identical objects in
+                # a template become a YAML anchor and an alias on dump, and
+                # CloudFormation rejects the result outright. See _customer_key_ref.
+                "LogGroupNames": [
+                    {
+                        "Fn::Sub": [
+                            f"{RUNTIME_LOG_GROUP_PREFIX}/${{RuntimeId}}-{qualifier}",
+                            {"RuntimeId": {"Fn::GetAtt": [runtime_id, "AgentRuntimeId"]}},
+                        ]
+                    }
+                    for qualifier in qualifiers
+                ],
+                "RetentionInDays": {"Ref": "LogRetentionInDays"},
+                # KmsKeyArn is NOT set here. Custom::RuntimeLogGroup is in
+                # CUSTOMER_KEY_PROPERTIES, so _apply_customer_key adds it under the
+                # same opt-in condition as every other encrypted resource. That pass
+                # has to run after this one — see the call order in generate().
+            },
+        }
+        if endpoints:
+            # The GetAtt above already orders this after the runtime. The endpoints are
+            # a separate matter: their groups do not exist until the endpoint does, and
+            # nothing else in this resource references them.
+            resource["DependsOn"] = endpoints
+        template["Resources"][logical_id] = resource
+        added.append(logical_id)
+    return added
 
 
 def _gateway_invoke_permission(function_logical_id: str) -> dict:
@@ -1978,6 +2122,11 @@ class CfnTemplateGenerator:
         logged_lambdas = _apply_lambda_log_groups(template)
         logger.info("Owned log groups added for %s", ", ".join(logged_lambdas) or "no functions")
 
+        # And the groups the runtime creates for itself, which no declared resource can
+        # reach. Before _apply_customer_key, which is what puts the key on them.
+        governed_runtime_logs = _apply_runtime_log_groups(template)
+        logger.info("Runtime log group governance added: %s", ", ".join(governed_runtime_logs) or "no runtimes")
+
         # Protect the data-bearing resources. Applied here, after every
         # conditional _add_* has run, rather than inside each one: a single pass
         # over the finished Resources block cannot miss a resource that some
@@ -2247,7 +2396,16 @@ class CfnTemplateGenerator:
                 "CfnProviderCodeKey": {
                     "Type": "String",
                     "Default": "cfn-assets/cfn-provider.zip",
-                    "Description": "S3 key for the CFN Custom Resource Lambda zip",
+                    # There is no CfnProviderCodeDigest to go with this, and there
+                    # should not be: this key feeds AWS::Lambda::Function.Code
+                    # directly rather than the code-packaging step, so the KEY itself
+                    # is what has to change for CloudFormation to replace the code.
+                    # deploy.sh therefore puts the zip's digest in it.
+                    "Description": (
+                        "S3 key for the CFN Custom Resource Lambda zip. deploy.sh sets this to a "
+                        "content-addressed key (cfn-provider-<digest>.zip) so that changed code "
+                        "actually gets deployed; a fixed key leaves the old code running."
+                    ),
                 },
                 "DependencyBundleKey": {
                     "Type": "String",
@@ -2521,6 +2679,53 @@ class CfnTemplateGenerator:
                 },
             },
         ]
+
+        # Custom::RuntimeLogGroup applies the stack's retention and key to the log
+        # groups AgentCore creates for the runtime. Always granted, because every
+        # export has a runtime and therefore has those groups; scoped to the runtime
+        # prefix rather than to log-group:* because two of these verbs CHANGE a group
+        # rather than write to it — see _runtime_log_group_resources.
+        policies.append(
+            {
+                "PolicyName": "RuntimeLogGroupGovernance",
+                "PolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Sid": "GovernRuntimeLogGroups",
+                            "Effect": "Allow",
+                            "Action": [
+                                # Create, for the group that does not exist yet; the
+                                # handler expects ResourceAlreadyExistsException on the
+                                # normal path and adopts instead.
+                                "logs:CreateLogGroup",
+                                # Deliberately NO logs:DescribeLogGroups. It is a list
+                                # operation, so IAM authorizes it against
+                                # arn:...:log-group::log-stream: — an EMPTY group name —
+                                # which no resource-scoped grant can match. Verified
+                                # live: with this exact prefix the stack failed with
+                                # "not authorized to perform: logs:DescribeLogGroups on
+                                # resource: arn:aws:logs:...:log-group::log-stream:".
+                                # Granting it would mean every log group in the account,
+                                # so the handler stopped reading instead and relies on
+                                # Associate/Disassociate being idempotent.
+                                "logs:PutRetentionPolicy",
+                                # For the never-expire case, which is the ABSENCE of a
+                                # retention policy rather than a value.
+                                "logs:DeleteRetentionPolicy",
+                                "logs:AssociateKmsKey",
+                                # Needed to REVERT: a stack updated to drop
+                                # CustomerManagedKeyArn must be able to take the key
+                                # back off, or the group keeps a key the recipient is
+                                # then unable to delete.
+                                "logs:DisassociateKmsKey",
+                            ],
+                            "Resource": _runtime_log_group_resources(),
+                        }
+                    ],
+                },
+            }
+        )
 
         # MCP server targets need OAuth2 credential provider management.
         # Exact action list (the Custom::OAuth2CredentialProvider handler only
@@ -3345,7 +3550,13 @@ class CfnTemplateGenerator:
             template["Parameters"]["ToolLambdaCodeKey"] = {
                 "Type": "String",
                 "Default": "cfn-assets/tool-lambdas.zip",
-                "Description": "S3 key for the tool Lambda code zip",
+                # Content-addressed by deploy.sh for the same reason as
+                # CfnProviderCodeKey: this feeds AWS::Lambda::Function.Code directly.
+                "Description": (
+                    "S3 key for the tool Lambda code zip. deploy.sh sets this to a "
+                    "content-addressed key (tool-lambdas-<digest>.zip) so that changed code "
+                    "actually gets deployed."
+                ),
             }
 
     def _resolve_gateway_tools(
@@ -3460,7 +3671,13 @@ class CfnTemplateGenerator:
             template["Parameters"]["CustomToolCodeKey"] = {
                 "Type": "String",
                 "Default": "cfn-assets/custom-tools.zip",
-                "Description": "S3 key for the custom tool Lambda code zip",
+                # Content-addressed by deploy.sh for the same reason as
+                # CfnProviderCodeKey: this feeds AWS::Lambda::Function.Code directly.
+                "Description": (
+                    "S3 key for the custom tool Lambda code zip. deploy.sh sets this to a "
+                    "content-addressed key (custom-tools-<digest>.zip) so that changed code "
+                    "actually gets deployed."
+                ),
             }
 
         for i, tool in enumerate(custom_tools):
@@ -5695,6 +5912,29 @@ content_digest() {{
     )
 }}
 
+# Content-addressed S3 key for a zip CloudFormation hands straight to
+# AWS::Lambda::Function. Usage: staged_key <file> <name>
+#
+# Needed because CloudFormation only replaces a function's code when the Code
+# property CHANGES. Uploading a new zip over cfn-assets/$STACK_NAME/<name>.zip
+# leaves Code identical, so `cloudformation deploy` reports no changes and the OLD
+# code keeps running — with the stack green and the template correct. Found the
+# hard way: a fixed cfn-provider.zip was uploaded and the deploy re-ran the bug.
+# Putting the digest in the key makes changed bytes a changed parameter.
+#
+# Unlike agent-code.zip, these zips ship pre-built in this bundle and are not
+# re-zipped here, so hashing the archive bytes is stable across runs — `zip`
+# embeds mtimes, which is why agent-code.zip hashes file contents instead.
+#
+# Superseded objects are deliberately left in the bucket: a stack rollback
+# reverts the parameter to the previous key, and the previous object has to still
+# be there for that rollback to succeed. They are small; teardown removes the
+# bucket. Per ARCC cnt_NBPcOqwR3163yt, SHA-256.
+staged_key() {{
+    printf 'cfn-assets/%s/%s-%s.zip\\n' \\
+        "$STACK_NAME" "$2" "$(sha256_stdin <"$1" | cut -c1-16)"
+}}
+
 echo "=== AgentCore Stack Deployment ==="
 echo "Stack:  $STACK_NAME"
 echo "Deploy: $DEPLOY_NAME"
@@ -5803,7 +6043,9 @@ fi
 
 # 4. Package and upload assets (stack-specific keys to avoid collisions)
 echo "Packaging CFN provider Lambda..."
-aws s3 cp cfn-provider.zip "s3://$BUCKET/cfn-assets/${{STACK_NAME}}/cfn-provider.zip" --region "$REGION"
+CFN_PROVIDER_KEY=$(staged_key cfn-provider.zip cfn-provider)
+aws s3 cp cfn-provider.zip "s3://$BUCKET/$CFN_PROVIDER_KEY" --region "$REGION"
+echo "  key: $CFN_PROVIDER_KEY"
 
 echo "Packaging agent code..."
 cd agent-code && zip -r ../agent-code.zip . -x '*/__pycache__/*' '*.pyc' && cd ..
@@ -5816,12 +6058,16 @@ echo "Agent code digest: $AGENT_CODE_DIGEST"
 
 if [[ -f tool-lambdas.zip ]]; then
     echo "Uploading tool Lambda code..."
-    aws s3 cp tool-lambdas.zip "s3://$BUCKET/cfn-assets/${{STACK_NAME}}/tool-lambdas.zip" --region "$REGION"
+    TOOL_LAMBDA_KEY=$(staged_key tool-lambdas.zip tool-lambdas)
+    aws s3 cp tool-lambdas.zip "s3://$BUCKET/$TOOL_LAMBDA_KEY" --region "$REGION"
+    echo "  key: $TOOL_LAMBDA_KEY"
 fi
 
 if [[ -f custom-tools.zip ]]; then
     echo "Uploading custom tool Lambda code..."
-    aws s3 cp custom-tools.zip "s3://$BUCKET/cfn-assets/${{STACK_NAME}}/custom-tools.zip" --region "$REGION"
+    CUSTOM_TOOL_KEY=$(staged_key custom-tools.zip custom-tools)
+    aws s3 cp custom-tools.zip "s3://$BUCKET/$CUSTOM_TOOL_KEY" --region "$REGION"
+    echo "  key: $CUSTOM_TOOL_KEY"
 fi
 {mcp_upload}
 # 5. Build parameter overrides
@@ -5830,7 +6076,7 @@ PARAM_OVERRIDES=(
     "ArtifactsBucket=$BUCKET"
     "AgentCodeKey=cfn-assets/${{STACK_NAME}}/agent-code.zip"
     "AgentCodeDigest=$AGENT_CODE_DIGEST"
-    "CfnProviderCodeKey=cfn-assets/${{STACK_NAME}}/cfn-provider.zip"
+    "CfnProviderCodeKey=$CFN_PROVIDER_KEY"
     "DependencyBundleKey=$BUNDLE_KEY"
 )
 
@@ -5842,11 +6088,11 @@ if [[ -n "$BUNDLE_DIGEST" ]]; then
 fi
 {litellm_overrides}
 if [[ -f tool-lambdas.zip ]]; then
-    PARAM_OVERRIDES+=("ToolLambdaCodeKey=cfn-assets/${{STACK_NAME}}/tool-lambdas.zip")
+    PARAM_OVERRIDES+=("ToolLambdaCodeKey=$TOOL_LAMBDA_KEY")
 fi
 
 if [[ -f custom-tools.zip ]]; then
-    PARAM_OVERRIDES+=("CustomToolCodeKey=cfn-assets/${{STACK_NAME}}/custom-tools.zip")
+    PARAM_OVERRIDES+=("CustomToolCodeKey=$CUSTOM_TOOL_KEY")
 fi
 
 # MCP_SERVER_DIGEST is set above only in bundles that ship an MCP server, so it is
@@ -6051,9 +6297,14 @@ that reports no hooks and names no resource. If you intend to redeploy as
 
   aws logs describe-log-groups --log-group-name-prefix /aws/lambda/$STACK_NAME/ --region $REGION --query 'logGroups[].logGroupName' --output text | tr '\\t' '\\n' | xargs -I GROUP aws logs delete-log-group --log-group-name GROUP --region $REGION
 
-The AgentCore runtime's own log group is neither in that list nor in this stack: the
-service creates /aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT itself, so it
-survives regardless of this setting and has to be deleted separately.
+The runtime's OWN log groups are neither in that list nor deleted by this teardown.
+AgentCore creates one per endpoint under /aws/bedrock-agentcore/runtimes/, including
+-DEFAULT, and they hold the agent's conversations. The stack governs their retention and
+encryption but deliberately never deletes them, so they outlive it and expire on the
+retention you set. To remove them now, with the runtime id from the stack outputs you
+noted before teardown:
+
+  aws logs describe-log-groups --log-group-name-prefix /aws/bedrock-agentcore/runtimes/RUNTIME_ID --region $REGION --query 'logGroups[].logGroupName' --output text | tr '\\t' '\\n' | xargs -I GROUP aws logs delete-log-group --log-group-name GROUP --region $REGION
 EOF
 """)
         elif retained:
@@ -6061,6 +6312,11 @@ EOF
 echo "NOTE: this stack was exported with DeletionPolicy=Delete — teardown will"
 echo "      permanently destroy any user pool, knowledge base and conversation"
 echo "      memory it created. There is no recovery."
+echo ""
+echo "      The runtime's own log groups under /aws/bedrock-agentcore/runtimes/ are"
+echo "      the exception: the service owns them, this stack never deletes them, and"
+echo "      they expire on the retention it set. Remove them with"
+echo "      aws logs delete-log-group if you want them gone."
 """)
         # No retained resources at all: no notice. A scary warning about destroying
         # memory this stack never created would just teach the operator to ignore
@@ -6134,7 +6390,14 @@ echo "Stack deleted."
         # the dispatch in cfn_provider/handler.py and the module docstring.
         custom_resources = [
             "- `Custom::AgentCodePackage` — merges `agent-code/agent.py` with the "
-            "prebuilt dependency bundle and uploads the final `code.zip` at deploy time."
+            "prebuilt dependency bundle and uploads the final `code.zip` at deploy time.",
+            "- `Custom::RuntimeLogGroup` — applies `LogRetentionInDays` and, if set, "
+            "`CustomerManagedKeyArn` to the CloudWatch log groups AgentCore creates for "
+            "the runtime (`/aws/bedrock-agentcore/runtimes/<runtimeId>-<endpoint>`). "
+            "`AWS::BedrockAgentCore::Runtime` has no logging properties and the service "
+            "creates those groups itself, so this is the only way to govern them. It "
+            "never deletes them: deleting the stack leaves the agent's logs in place, "
+            "expiring on the retention you set.",
         ]
         if has_mcp_server:
             custom_resources.append(
@@ -6333,11 +6596,24 @@ aws logs describe-log-groups --log-group-name-prefix /aws/lambda/<stack-name>/ \
   | tr '\\t' '\\n' | xargs -I GROUP aws logs delete-log-group --log-group-name GROUP
 ```
 
-The AgentCore runtime's own log group is not one of these and is not in this template:
-the service creates `/aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT` itself, with
-no retention setting and no customer-managed key, and it survives teardown regardless
-of this parameter. Delete it separately, and note that a new group accumulates per
-deployed runtime."""
+The AgentCore runtime's own log groups are not these, and they are the ones holding
+what the agent was asked and what it answered. AgentCore creates one **per endpoint**
+— `/aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT` and
+`/aws/bedrock-agentcore/runtimes/<runtime-id>-<endpoint-name>` — itself, during this
+stack's own create, so CloudFormation cannot declare them. `Custom::RuntimeLogGroup`
+adopts every one of them and applies `LogRetentionInDays` and, if you set it,
+`CustomerManagedKeyArn`.
+
+They survive teardown deliberately, whatever `dataRetentionPolicy` says: they are the
+record an incident investigation needs, and it usually starts after the stack is gone.
+The retention you set still expires them on schedule. They do **not** block a same-name
+redeploy, because their names carry the runtime id rather than the stack name — which
+also means a new group appears per deployed runtime. Delete them explicitly when you
+want them gone:
+
+```bash
+aws logs delete-log-group --log-group-name /aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT
+```"""
                 if retained_logs
                 else ""
             )
@@ -6356,7 +6632,15 @@ for the log groups. There is no recovery. This setting is intended for throwaway
 and test stacks; its one operational advantage is that a same-name redeploy works,
 because nothing is left behind to collide with. Re-export with
 `dataRetentionPolicy: "Retain"` (the default) for anything you would be unhappy to
-lose."""
+lose.
+
+One exception, and it is deliberate: the AgentCore runtime's own log groups
+(`/aws/bedrock-agentcore/runtimes/<runtime-id>-<endpoint>`, one per endpoint) survive
+a teardown even with this setting. AgentCore creates them outside CloudFormation;
+`Custom::RuntimeLogGroup` applies `LogRetentionInDays` and `CustomerManagedKeyArn` to
+them but never deletes them, because they are the record of what the agent did.
+Delete them with `aws logs delete-log-group` if you want them gone — they do not block
+a same-name redeploy."""
 
         if litellm is not None:
             tool_lambdas_md = "N/A — the tools live on your LiteLLM proxy, so this stack ships no tool Lambdas."
@@ -6666,6 +6950,7 @@ resources in and then fail.
 | Authorization policies (the Cedar statements) | `AWS::BedrockAgentCore::PolicyEngine` | `EncryptionKeyArn` |
 | Lambda environment variables | `AWS::Lambda::Function` | `KmsKeyArn` |
 | Lambda logs | `AWS::Logs::LogGroup` | `KmsKeyId` |
+| Agent logs — the conversation | `Custom::RuntimeLogGroup` | `KmsKeyArn` |
 
 **What it does not cover**, because no such property exists on the resource:
 `AWS::Bedrock::KnowledgeBase` (its data lives in the vector bucket and the data
@@ -6673,6 +6958,14 @@ source above, both of which the key does cover), `AWS::BedrockAgentCore::Runtime
 and `AWS::Cognito::UserPool` — Cognito does not support a customer-managed key, so
 the **user directory stays on the AWS-owned key** whatever you pass here. If your
 requirement covers user identities, do not use the built-in Cognito pool.
+
+`AWS::BedrockAgentCore::Runtime` in that list is about the runtime resource itself.
+Its **logs** are covered, by the `Custom::RuntimeLogGroup` row above: AgentCore
+creates a log group per endpoint under
+`/aws/bedrock-agentcore/runtimes/<runtimeId>-<endpoint>` outside CloudFormation, with
+no retention and the AWS-owned key, and that custom resource is what applies both
+settings to them. It governs every endpoint, including `DEFAULT`, because the group
+that receives a request is the one for the qualifier the caller invoked.
 
 ### Permissions the key needs
 
@@ -6694,7 +6987,7 @@ the default `Enable IAM User Permissions` root delegation:
 | Conversation memory (`AWS::BedrockAgentCore::Memory`) | none — its KMS calls run under the deploying principal |
 | Knowledge base (`AWS::Bedrock::KnowledgeBase`, `AWS::Bedrock::DataSource`) | none |
 | Knowledge base vector index (`AWS::S3Vectors::Index`) | **required**, see below |
-| Log groups (`AWS::Logs::LogGroup`) | **required**, see below |
+| Log groups (`AWS::Logs::LogGroup`, `Custom::RuntimeLogGroup`) | **required**, see below |
 
 **The knowledge base vector index needs a statement for S3 Vectors.** S3 Vectors
 performs its indexing asynchronously as a service principal, not under your role, so
@@ -6768,6 +7061,13 @@ roles, so no IAM policy we attach can authorize it. Without this statement
 The `kms:EncryptionContext:aws:logs:arn` condition is what keeps this from being a
 blanket grant to CloudWatch Logs: it limits the service to log groups in this
 account and region.
+
+This one statement covers both kinds of log group — the Lambda groups the template
+declares and the runtime groups `Custom::RuntimeLogGroup` governs. If it is missing,
+the failure on the runtime groups reads `AccessDeniedException: The specified KMS key
+does not exist or is not allowed to be used with Arn '<log group arn>'`, which names
+neither the missing statement nor the key; the custom resource rewrites it into an
+instruction pointing back here.
 
 ### Changing the key later
 
@@ -6886,6 +7186,20 @@ run by the agent's runtime role.
 If you deploy with `aws cloudformation deploy` directly rather than through
 `deploy.sh`, pass `AgentCodeDigest` yourself. Its default is the digest of the code
 as exported, so an edited upload fails the check instead of being deployed silently.
+
+### The Lambda Zips
+
+`cfn-provider.zip`, and `tool-lambdas.zip`/`custom-tools.zip` where this stack has
+them, go straight into `AWS::Lambda::Function` rather than through the packaging
+step, so there is no digest parameter for them. For those, `deploy.sh` puts the
+digest in the S3 KEY instead — `cfn-provider-<digest>.zip` — and passes that as
+`CfnProviderCodeKey`. This matters more than it looks: CloudFormation only replaces
+a function's code when the `Code` property changes, so uploading a new zip over a
+fixed key produces "No changes to deploy" and the old code keeps running behind a
+green stack. Superseded objects are left in the bucket on purpose, because a stack
+rollback reverts to the previous key and needs that object to still exist.
+
+If you deploy by hand, pass keys that differ whenever the bytes differ.
 
 ### Tool Lambdas
 {tool_lambdas_md}
