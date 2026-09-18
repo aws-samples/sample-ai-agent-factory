@@ -112,6 +112,14 @@ export interface AgenticVpcConstructProps {
   readonly enableBrowserInternetEgress?: boolean;
 
   /**
+   * Concrete Availability Zone names resolved for the target account during
+   * preflight. Supplying these prevents CDK context-provider lookups during
+   * synth and lets preflight map AgentCore-supported AZ IDs to account-local
+   * names. At least two distinct zones are required when provided.
+   */
+  readonly availabilityZones?: readonly string[];
+
+  /**
    * AZ-ID allow-list for AgentCore Runtime. When set, the construct emits an
    * `agentcoreCompatibleSubnetIds` CfnOutput listing only the `workload`
    * subnets that sit in one of these AZ IDs. Pass the output to the
@@ -230,11 +238,22 @@ export class AgenticVpcConstruct extends Construct {
 
     const stack = Stack.of(this);
     const cidr = props.vpcCidr ?? '10.20.0.0/16';
+    const availabilityZones = props.availabilityZones
+      ? [...props.availabilityZones]
+      : undefined;
+    if (
+      availabilityZones &&
+      (availabilityZones.length < 2 || new Set(availabilityZones).size !== availabilityZones.length)
+    ) {
+      throw new Error(
+        'AgenticVpcConstruct availabilityZones must contain at least two distinct zone names.',
+      );
+    }
 
     // ---- VPC (no IGW, no NAT; spec §2.3.2 L1034) ----
     this.vpc = new Vpc(this, 'Vpc', {
       ipAddresses: IpAddresses.cidr(cidr),
-      maxAzs: 3,
+      ...(availabilityZones ? { availabilityZones } : { maxAzs: 3 }),
       natGateways: 0,
       subnetConfiguration: [
         {

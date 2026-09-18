@@ -44,7 +44,6 @@ import { Code, Function as LambdaFunction, Runtime } from 'aws-cdk-lib/aws-lambd
 import { RetentionDays } from 'aws-cdk-lib/aws-logs';
 import {
   AwsCustomResource,
-  AwsCustomResourcePolicy,
   PhysicalResourceId,
   PhysicalResourceIdReference,
   Provider,
@@ -166,7 +165,7 @@ export class D03WorkstreamGatewayStack extends Stack {
     }
 
     let subset: readonly ToolSpec[] = [];
-    let resolvedToolArns: Record<string, string> = {};
+    const resolvedToolArns: Record<string, string> = {};
     let cedarPolicy: string;
     /** When using the Registry, each entry is a deploy-time `GetRegistryRecord` validator custom resource. */
     const registryFetchers: Record<string, CustomResource> = {};
@@ -619,7 +618,6 @@ export class D03WorkstreamGatewayStack extends Stack {
     for (const subId of subscribedIds) {
       const resolvedArn = resolvedToolArns[subId];
       const targetName = `target-${subId}`.slice(0, 100);
-      const targetPhysicalId = `AgenticAI-D03-GwTarget-${props.tenantId}-${props.agentId}-${subId}`;
 
       // Description + inputSchema source — legacy uses ToolSpec, v0.5.0 uses
       // a deploy-time-readable token from the registry fetcher.

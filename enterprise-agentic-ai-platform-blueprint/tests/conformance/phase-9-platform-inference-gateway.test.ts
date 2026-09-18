@@ -1,260 +1,296 @@
-/**
- * Phase 9 conformance — D-03 PrivateLink primitive.
- *
- * Pins the shape of `PlatformInferenceGatewayConstruct` against the
- * README §3.3 residual-risks row "Cross-account PrivateLink →
- * LiteLLM attack surface": restrict the endpoint service AllowedPrincipals
- * to the exact workload account root ARNs, emit an internal NLB on :443,
- * and wrap the NLB in a VpcEndpointService with acceptanceRequired=false.
- *
- * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
- * SPDX-License-Identifier: MIT-0
- */
 import { App, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
-import { IpAddresses, SubnetType, Vpc } from 'aws-cdk-lib/aws-ec2';
+
 import {
-  ApplicationLoadBalancer,
-  ApplicationProtocol,
-  ListenerAction,
-} from 'aws-cdk-lib/aws-elasticloadbalancingv2';
+  PlatformInferenceGatewayConstruct,
+  type InferenceModelRateLimit,
+} from '@agenticai/platform-inference-gateway';
 
-import { PlatformInferenceGatewayConstruct } from '@agenticai/platform-inference-gateway';
+const MODEL_LIMITS: readonly InferenceModelRateLimit[] = [
+  {
+    qualifiedModelId: 'openai.gpt-oss-120b',
+    requestsPerMinute: 10,
+    tokensPerMinute: 10_000,
+  },
+  {
+    qualifiedModelId: 'anthropic.claude-sonnet-4-5-20250929-v1:0',
+    requestsPerMinute: 20,
+    tokensPerMinute: 40_000,
+  },
+];
 
-interface SynthOptions {
-  readonly withAlb?: boolean;
-  readonly workloadAccountIds?: readonly string[];
-}
-
-function synth(opts: SynthOptions = {}): {
-  template: Template;
-  stack: Stack;
-} {
+function synth(
+  modelRateLimits: readonly InferenceModelRateLimit[] = MODEL_LIMITS,
+): Template {
   const app = new App();
-  const stack = new Stack(app, 'TestPlatformInferenceGw', {
-    env: { account: '123456789012', region: 'us-east-1' },
+  const stack = new Stack(app, 'TestPlatformInferenceGateway', {
+    env: { account: '123456789012', region: 'us-west-2' },
   });
-  const vpc = new Vpc(stack, 'Vpc', {
-    ipAddresses: IpAddresses.cidr('10.40.0.0/16'),
-    maxAzs: 2,
-    natGateways: 0,
-    subnetConfiguration: [
-      { name: 'platform', subnetType: SubnetType.PRIVATE_ISOLATED, cidrMask: 20 },
-    ],
-    createInternetGateway: false,
+  new PlatformInferenceGatewayConstruct(stack, 'InferenceGateway', {
+    envName: 'nonprod',
+    applicationId: 'platform-inference',
+    agentId: 'shared',
+    tenantId: 'shared',
+    costCentre: 'platform',
+    modelRateLimits,
   });
-
-  let targetAlb: ApplicationLoadBalancer | undefined;
-  if (opts.withAlb) {
-    targetAlb = new ApplicationLoadBalancer(stack, 'TargetAlb', {
-      vpc,
-      internetFacing: false,
-      vpcSubnets: { subnetType: SubnetType.PRIVATE_ISOLATED },
-    });
-    // Use HTTP:80 for the harness so we don't need to provision an ACM cert
-    // at synth. Production wiring passes an HTTPS-terminating ALB via the
-    // LiteLLM construct; the NLB target-group port is independent of the
-    // NLB listener port (TCP:443 → forward to ALB:80 at L4).
-    targetAlb.addListener('AlbListener', {
-      port: 80,
-      protocol: ApplicationProtocol.HTTP,
-      defaultAction: ListenerAction.fixedResponse(200, { messageBody: 'ok' }),
-    });
-  }
-
-  new PlatformInferenceGatewayConstruct(stack, 'Gw', {
-    vpc,
-    workloadAccountIds: opts.workloadAccountIds ?? ['444444444444', '123456789012'],
-    targetAlb,
-    targetAlbPort: opts.withAlb ? 80 : undefined,
-  });
-  return { template: Template.fromStack(stack), stack };
+  return Template.fromStack(stack);
 }
 
-describe('Phase 9 — PlatformInferenceGatewayConstruct NLB shape', () => {
-  it('emits exactly one internal network load balancer', () => {
-    const { template } = synth();
-    const nlbs = template.findResources('AWS::ElasticLoadBalancingV2::LoadBalancer', {
-      Properties: {
-        Scheme: 'internal',
-        Type: 'network',
+function onlyResource(
+  template: Template,
+  type: string,
+): Record<string, unknown> {
+  const resources = template.findResources(type);
+  expect(Object.keys(resources)).toHaveLength(1);
+  return Object.values(resources)[0] as Record<string, unknown>;
+}
+
+function properties(resource: Record<string, unknown>): Record<string, unknown> {
+  return resource.Properties as Record<string, unknown>;
+}
+
+describe('Phase 9 — native Platform inference Gateway', () => {
+  it('emits Gateway, inference target and native rate limit without the old load balancers', () => {
+    const template = synth();
+    template.resourceCountIs('AWS::BedrockAgentCore::Gateway', 1);
+    template.resourceCountIs('AWS::BedrockAgentCore::GatewayTarget', 1);
+    template.resourceCountIs('AWS::BedrockAgentCore::GatewayRateLimit', 1);
+    template.resourceCountIs('AWS::ElasticLoadBalancingV2::LoadBalancer', 0);
+    template.resourceCountIs('AWS::EC2::VPCEndpointService', 0);
+    template.resourceCountIs('AWS::Lambda::Function', 0);
+  });
+
+  it('uses MCP and the Cognito custom-JWT authorizer', () => {
+    const template = synth();
+    const gateway = properties(
+      onlyResource(template, 'AWS::BedrockAgentCore::Gateway'),
+    );
+    expect(gateway.ProtocolType).toBe('MCP');
+    expect(gateway.ProtocolConfiguration).toEqual({
+      Mcp: { SupportedVersions: ['2025-11-25'] },
+    });
+    expect(gateway.AuthorizerType).toBe('CUSTOM_JWT');
+    const authorizer = gateway.AuthorizerConfiguration as {
+      CustomJWTAuthorizer: {
+        DiscoveryUrl: unknown;
+        AllowedClients: unknown[];
+        AllowedScopes: string[];
+      };
+    };
+    expect(authorizer.CustomJWTAuthorizer.AllowedClients).toEqual([
+      expect.objectContaining({ Ref: expect.any(String) }),
+    ]);
+    expect(authorizer.CustomJWTAuthorizer.AllowedScopes).toEqual([
+      'agenticai-inference-nonprod-api/invoke',
+    ]);
+    expect(
+      JSON.stringify(authorizer.CustomJWTAuthorizer.DiscoveryUrl),
+    ).toContain('/.well-known/openid-configuration');
+  });
+
+  it('applies all five required tags to the taggable Gateway', () => {
+    const gateway = properties(
+      onlyResource(synth(), 'AWS::BedrockAgentCore::Gateway'),
+    );
+    expect(gateway.Tags).toEqual({
+      'application-id': 'platform-inference',
+      'agent-id': 'shared',
+      'tenant-id': 'shared',
+      'cost-centre': 'platform',
+      environment: 'nonprod',
+    });
+  });
+
+  it('provisions a confidential client-credentials Cognito client', () => {
+    const template = synth();
+    template.resourceCountIs('AWS::Cognito::UserPool', 1);
+    template.resourceCountIs('AWS::Cognito::UserPoolResourceServer', 1);
+    template.resourceCountIs('AWS::Cognito::UserPoolDomain', 1);
+    template.hasResourceProperties('AWS::Cognito::UserPoolClient', {
+      GenerateSecret: true,
+      AllowedOAuthFlows: ['client_credentials'],
+      AllowedOAuthFlowsUserPoolClient: true,
+      AccessTokenValidity: 5,
+      TokenValidityUnits: { AccessToken: 'minutes' },
+    });
+    template.hasResourceProperties('AWS::Cognito::UserPoolResourceServer', {
+      Identifier: 'agenticai-inference-nonprod-api',
+      Scopes: [
+        {
+          ScopeName: 'invoke',
+          ScopeDescription: 'Invoke the central AgentCore inference Gateway',
+        },
+      ],
+    });
+    const resourceServers = template.findResources(
+      'AWS::Cognito::UserPoolResourceServer',
+    );
+    const resourceServerLogicalId = Object.keys(resourceServers)[0];
+    const client = properties(
+      onlyResource(template, 'AWS::Cognito::UserPoolClient'),
+    );
+    const scopes = JSON.stringify(client.AllowedOAuthScopes);
+    expect(scopes).toContain(resourceServerLogicalId);
+    expect(scopes).toContain('/invoke');
+  });
+
+  it('creates the live-proven Bedrock Mantle inference connector target', () => {
+    const template = synth();
+    const gatewayResources = template.findResources(
+      'AWS::BedrockAgentCore::Gateway',
+    );
+    const gatewayLogicalId = Object.keys(gatewayResources)[0];
+    template.hasResourceProperties('AWS::BedrockAgentCore::GatewayTarget', {
+      GatewayIdentifier: { Ref: gatewayLogicalId },
+      TargetConfiguration: {
+        Inference: {
+          Connector: { Source: { ConnectorId: 'bedrock-mantle' } },
+        },
+      },
+      CredentialProviderConfigurations: [
+        { CredentialProviderType: 'GATEWAY_IAM_ROLE' },
+      ],
+    });
+  });
+
+  it('allows configured model RPM/TPM and zero-rates the wildcard fallback', () => {
+    const rateLimit = properties(
+      onlyResource(synth(), 'AWS::BedrockAgentCore::GatewayRateLimit'),
+    );
+    expect(rateLimit.DimensionKeys).toEqual(['qualifiedModelId']);
+    expect(rateLimit.Entries).toEqual([
+      {
+        Dimensions: { qualifiedModelId: 'openai.gpt-oss-120b' },
+        Requests: [{ Rate: 10, Period: 'minute' }],
+        Tokens: [{ Rate: 10_000, Period: 'minute' }],
+      },
+      {
+        Dimensions: {
+          qualifiedModelId: 'anthropic.claude-sonnet-4-5-20250929-v1:0',
+        },
+        Requests: [{ Rate: 20, Period: 'minute' }],
+        Tokens: [{ Rate: 40_000, Period: 'minute' }],
+      },
+      {
+        Dimensions: { qualifiedModelId: '*' },
+        Requests: [{ Rate: 0, Period: 'second' }],
+      },
+    ]);
+  });
+});
+
+describe('Phase 9 — Gateway IAM boundary and lifecycle ordering', () => {
+  it('trusts AgentCore only from this account and named Gateway ARN', () => {
+    const role = properties(onlyResource(synth(), 'AWS::IAM::Role'));
+    const trust = role.AssumeRolePolicyDocument as {
+      Statement: Array<{
+        Action: string;
+        Effect: string;
+        Principal: Record<string, string>;
+        Condition: {
+          StringEquals: Record<string, string>;
+          ArnLike: Record<string, unknown>;
+        };
+      }>;
+      Version: string;
+    };
+    expect(trust.Version).toBe('2012-10-17');
+    expect(trust.Statement).toHaveLength(1);
+    expect(trust.Statement[0]).toMatchObject({
+      Action: 'sts:AssumeRole',
+      Effect: 'Allow',
+      Principal: { Service: 'bedrock-agentcore.amazonaws.com' },
+      Condition: {
+        StringEquals: { 'aws:SourceAccount': '123456789012' },
       },
     });
-    expect(Object.keys(nlbs)).toHaveLength(1);
-  });
-
-  it('NLB has deletion protection + S3 access logs configured', () => {
-    const { template } = synth();
-    const nlbs = template.findResources('AWS::ElasticLoadBalancingV2::LoadBalancer');
-    const nlb = Object.values(nlbs).find(
-      (r) => (r.Properties as any).Type === 'network',
+    const sourceArn = JSON.stringify(
+      trust.Statement[0].Condition.ArnLike['aws:SourceArn'],
     );
-    expect(nlb).toBeDefined();
-    const attrs = ((nlb!.Properties as any).LoadBalancerAttributes ?? []) as Array<{
-      Key: string;
-      Value: string;
-    }>;
-    const attrMap = Object.fromEntries(attrs.map((a) => [a.Key, a.Value]));
-    expect(attrMap['deletion_protection.enabled']).toBe('true');
-    expect(attrMap['access_logs.s3.enabled']).toBe('true');
+    expect(sourceArn).toContain('AWS::Partition');
+    expect(sourceArn).toContain(
+      ':bedrock-agentcore:us-west-2:123456789012:gateway/agenticai-inference-nonprod-*',
+    );
   });
 
-  it('listener is on port 443 and TCP by default (no cert supplied)', () => {
-    const { template } = synth();
-    template.hasResourceProperties('AWS::ElasticLoadBalancingV2::Listener', {
-      Port: 443,
-      Protocol: 'TCP',
-    });
+  it('grants exactly the two live-proven Bedrock Mantle actions', () => {
+    const policy = JSON.stringify(
+      properties(onlyResource(synth(), 'AWS::IAM::Policy')),
+    );
+    expect(policy).toContain('bedrock-mantle:ListModels');
+    expect(policy).toContain('bedrock-mantle:CreateInference');
+    expect(policy).not.toContain('bedrock:InvokeModel');
+  });
+
+  it('orders target after Gateway and rate limit after target', () => {
+    const template = synth();
+    const targetResources = template.findResources(
+      'AWS::BedrockAgentCore::GatewayTarget',
+    );
+    const targetLogicalId = Object.keys(targetResources)[0];
+    const rateLimit = onlyResource(
+      template,
+      'AWS::BedrockAgentCore::GatewayRateLimit',
+    );
+    const dependencies = rateLimit.DependsOn as string[];
+    expect(dependencies).toContain(targetLogicalId);
   });
 });
 
-describe('Phase 9 — VpcEndpointService principal restriction', () => {
-  it('endpoint service is acceptanceRequired: false and targets the NLB', () => {
-    const { template } = synth();
-    const services = template.findResources('AWS::EC2::VPCEndpointService');
-    expect(Object.keys(services)).toHaveLength(1);
-    const service = Object.values(services)[0];
-    expect((service.Properties as any).AcceptanceRequired).toBe(false);
-    const lbArns = (service.Properties as any).NetworkLoadBalancerArns as unknown[];
-    expect(Array.isArray(lbArns)).toBe(true);
-    expect(lbArns).toHaveLength(1);
-    // The NLB ARN comes through as a Ref — assert the Ref resolves to an NLB
-    // logical id in this stack.
-    const ref = (lbArns[0] as { Ref?: string }).Ref;
-    expect(typeof ref).toBe('string');
-    const nlbKey = Object.keys(
-      template.findResources('AWS::ElasticLoadBalancingV2::LoadBalancer'),
-    )[0];
-    expect(ref).toBe(nlbKey);
+describe('Phase 9 — fail-closed configuration validation', () => {
+  function constructWith(
+    modelRateLimits: readonly InferenceModelRateLimit[],
+  ): () => PlatformInferenceGatewayConstruct {
+    return () => {
+      const stack = new Stack(new App(), 'Reject', {
+        env: { account: '123456789012', region: 'us-west-2' },
+      });
+      return new PlatformInferenceGatewayConstruct(stack, 'Gateway', {
+        envName: 'nonprod',
+        applicationId: 'platform-inference',
+        agentId: 'shared',
+        tenantId: 'shared',
+        costCentre: 'platform',
+        modelRateLimits,
+      });
+    };
+  }
+
+  it('rejects an empty model allocation', () => {
+    expect(constructWith([])).toThrow(/at least one allowed model/i);
   });
 
-  it('VPCEndpointServicePermissions lists the workload account roots exactly', () => {
-    const { template } = synth({
-      workloadAccountIds: ['444444444444', '123456789012'],
-    });
-    // AllowedPrincipals are rendered as Fn::Join over ["arn:", { Ref: "AWS::Partition" }, ":iam::<acct>:root"].
-    // Flatten and look at the trailing account fragment.
-    const perms = template.findResources('AWS::EC2::VPCEndpointServicePermissions');
-    const principals = (Object.values(perms)[0].Properties as any)
-      .AllowedPrincipals as unknown[];
-    expect(principals).toHaveLength(2);
-    const tails = principals.map((p) => {
-      const joined = (p as { 'Fn::Join': [string, unknown[]] })['Fn::Join'];
-      const parts = joined[1];
-      return parts[parts.length - 1] as string;
-    });
-    expect(tails).toEqual([':iam::444444444444:root', ':iam::123456789012:root']);
-  });
-
-  it('each workload account id produces its own root-ARN allowed principal', () => {
-    const { template } = synth({
-      workloadAccountIds: ['111111111111', '222222222222', '333333333333'],
-    });
-    const perms = template.findResources('AWS::EC2::VPCEndpointServicePermissions');
-    const entry = Object.values(perms)[0];
-    const principals = (entry.Properties as any).AllowedPrincipals as Array<{
-      'Fn::Join': [string, unknown[]];
-    }>;
-    expect(principals).toHaveLength(3);
-    const tails = principals.map(
-      (p) => p['Fn::Join'][1][p['Fn::Join'][1].length - 1] as string,
-    );
-    expect(tails).toEqual([
-      ':iam::111111111111:root',
-      ':iam::222222222222:root',
-      ':iam::333333333333:root',
-    ]);
-    // Middle fragment is a Ref to AWS::Partition — assert at least one.
-    const firstMiddle = principals[0]['Fn::Join'][1][1] as { Ref?: string };
-    expect(firstMiddle.Ref).toBe('AWS::Partition');
-  });
-
-  it('empty workload-account list is rejected at synth time', () => {
-    const app = new App();
-    const stack = new Stack(app, 'Reject', {
-      env: { account: '123456789012', region: 'us-east-1' },
-    });
-    const vpc = new Vpc(stack, 'Vpc', {
-      ipAddresses: IpAddresses.cidr('10.40.0.0/16'),
-      maxAzs: 2,
-      natGateways: 0,
-      subnetConfiguration: [
-        { name: 'p', subnetType: SubnetType.PRIVATE_ISOLATED, cidrMask: 20 },
-      ],
-      createInternetGateway: false,
-    });
+  it('rejects connector-prefixed model IDs', () => {
     expect(
-      () =>
-        new PlatformInferenceGatewayConstruct(stack, 'Gw', {
-          vpc,
-          workloadAccountIds: [],
-        }),
-    ).toThrow(/at least one account id/i);
+      constructWith([
+        {
+          qualifiedModelId: 'bedrock-mantle/openai.gpt-oss-120b',
+          requestsPerMinute: 1,
+          tokensPerMinute: 1,
+        },
+      ]),
+    ).toThrow(/without a connector prefix/i);
   });
 
-  it('non-12-digit account ids are rejected', () => {
-    const app = new App();
-    const stack = new Stack(app, 'RejectBad', {
-      env: { account: '123456789012', region: 'us-east-1' },
-    });
-    const vpc = new Vpc(stack, 'Vpc', {
-      ipAddresses: IpAddresses.cidr('10.40.0.0/16'),
-      maxAzs: 2,
-      natGateways: 0,
-      subnetConfiguration: [
-        { name: 'p', subnetType: SubnetType.PRIVATE_ISOLATED, cidrMask: 20 },
-      ],
-      createInternetGateway: false,
-    });
-    expect(
-      () =>
-        new PlatformInferenceGatewayConstruct(stack, 'Gw', {
-          vpc,
-          workloadAccountIds: ['not-an-account'],
-        }),
-    ).toThrow(/12-digit/);
-  });
-});
-
-describe('Phase 9 — NLB target group wiring', () => {
-  it('without targetAlb, target group is ALB-type with no Targets block (wire LiteLLM later)', () => {
-    const { template } = synth({ withAlb: false });
-    template.hasResourceProperties('AWS::ElasticLoadBalancingV2::TargetGroup', {
-      TargetType: 'alb',
-      Port: 443,
-      Protocol: 'TCP',
-    });
-    // With no targets, no `Targets:` property is rendered.
-    const tgs = template.findResources('AWS::ElasticLoadBalancingV2::TargetGroup');
-    const tg = Object.values(tgs)[0];
-    expect((tg.Properties as any).Targets).toBeUndefined();
-  });
-
-  it('with targetAlb supplied, the ALB is registered as the NLB target', () => {
-    const { template } = synth({ withAlb: true });
-    const tgs = template.findResources('AWS::ElasticLoadBalancingV2::TargetGroup');
-    // We have two target groups in this shape: the ALB's own empty TG (from
-    // the fixed-response listener) and the NLB's ALB-type TG. Find the ALB-
-    // type one and assert it has exactly one target whose Id is a Ref to the
-    // ALB resource.
-    const albTg = Object.values(tgs).find(
-      (r) => (r.Properties as any).TargetType === 'alb',
+  it('rejects duplicate models', () => {
+    expect(constructWith([MODEL_LIMITS[0], MODEL_LIMITS[0]])).toThrow(
+      /duplicate qualifiedModelId/i,
     );
-    expect(albTg).toBeDefined();
-    const targets = (albTg!.Properties as any).Targets as Array<{ Id: unknown }>;
-    expect(targets).toHaveLength(1);
-    expect(targets[0].Id).toBeDefined();
   });
-});
 
-describe('Phase 9 — CfnOutput surface', () => {
-  it('emits the endpoint service name as a stack output', () => {
-    const { template } = synth();
-    const outputs = template.findOutputs('*');
-    const names = Object.keys(outputs);
-    const match = names.find((n) => /EndpointServiceName/i.test(n));
-    expect(match).toBeDefined();
-    const exportName = (outputs[match!] as any).Export?.Name;
-    expect(exportName).toMatch(/AgenticAI-D03-PlatformInferenceEndpointServiceName/);
-  });
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER])(
+    'rejects an invalid positive rate %s',
+    (requestsPerMinute) => {
+      expect(
+        constructWith([
+          {
+            qualifiedModelId: 'openai.gpt-oss-120b',
+            requestsPerMinute,
+            tokensPerMinute: 10_000,
+          },
+        ]),
+      ).toThrow(/requestsPerMinute must be an integer/i);
+    },
+  );
 });

@@ -23,7 +23,7 @@
  * SPDX-License-Identifier: MIT-0
  */
 import { App, Stack } from 'aws-cdk-lib';
-import { Template, Match } from 'aws-cdk-lib/assertions';
+import { Template } from 'aws-cdk-lib/assertions';
 import { Topic } from 'aws-cdk-lib/aws-sns';
 
 import { EvaluationGatesConstruct } from '@agenticai/evaluation-gates';

@@ -42,6 +42,8 @@ export interface WorkloadAppStackProps extends StackProps {
    * Subnet ids — at least the 'workload' private subnets.
    */
   readonly workloadSubnetIds: readonly string[];
+  /** Route-table IDs in the same order as `workloadSubnetIds`. */
+  readonly workloadSubnetRouteTableIds: readonly string[];
   readonly vpcCidr: string;
   /**
    * Availability zones covered by the VPC. Must match the source stack
@@ -97,6 +99,7 @@ export class WorkloadAppStack extends Stack {
       vpcId: props.vpcId,
       availabilityZones: [...props.availabilityZones],
       isolatedSubnetIds: [...props.workloadSubnetIds],
+      isolatedSubnetRouteTableIds: [...props.workloadSubnetRouteTableIds],
       vpcCidrBlock: props.vpcCidr,
     });
 

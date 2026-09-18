@@ -265,6 +265,8 @@ export class LiteLLMGatewayConstruct extends Construct {
       cluster: this.cluster,
       taskDefinition: this.taskDefinition,
       desiredCount: props.desiredTaskCount ?? 2,
+      minHealthyPercent: 100,
+      maxHealthyPercent: 200,
       assignPublicIp: false,
       vpcSubnets: props.subnets ?? { subnetType: SubnetType.PRIVATE_ISOLATED },
       securityGroups: [serviceSg],

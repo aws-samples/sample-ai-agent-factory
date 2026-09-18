@@ -6,14 +6,31 @@
  *   Source → Synth → Deploy(workload-nonprod)
  *          → Evaluation gate (CodeBuild) — Strands regression + guardrail-
  *            violation-rate + response-quality + tool-success + p99-latency
- *          → Manual approval → Deploy(workload-prod) → Smoke tests
+ *          → Manual approval → Canary deploy → Canary soak
+ *          → Deploy(workload-prod)
  *
  * Spec: §1.3.5 L210-212 mandatory stage sequence (R-DEVX-002).
+ *
+ * Round 1B fail-closed invariants (tasks/todo.md §Round 1 B):
+ *   1. The synth command is stage-aware. `bin/agentic-ai-platform.ts` routes on
+ *      the `stage` context value. The app rejects a missing stage, and this
+ *      synth step also passes it explicitly before asserting that the assembly
+ *      contains this pipeline's own stack plus a non-empty nested assembly per
+ *      deployment stage.
+ *   2. Promotion order is expressed in the CDK step dependency graph, not by
+ *      array position: EvaluationGate → ProdApproval → CanaryDeploy →
+ *      CanarySoak. Steps without declared dependencies run in PARALLEL in
+ *      CDK Pipelines, so array order alone proves nothing.
+ *   3. No step may convert a missing resource or a failed CLI call into
+ *      success. There are no `|| true` / `|| echo` fallbacks: a missing alarm,
+ *      an unusable alarm state, or an unimplemented canary API all fail the
+ *      pipeline.
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
 import { Duration, Environment, Stack, StackProps, Stage, StageProps } from 'aws-cdk-lib';
+import { PipelineType } from 'aws-cdk-lib/aws-codepipeline';
 import { BuildSpec, LinuxBuildImage } from 'aws-cdk-lib/aws-codebuild';
 import {
   CodeBuildStep,
@@ -27,12 +44,14 @@ import { Construct } from 'constructs';
 
 import { WorkloadNetworkStack } from '../apps/workload-account/lib/workload-network-stack';
 import { WorkloadAppStack } from '../apps/workload-account/lib/workload-app-stack';
+import { stageAwareSynthCommands } from './synth-commands';
 
 export interface WorkloadStageProps extends StageProps {
   readonly envName: 'nonprod' | 'prod';
   readonly tenantId: string;
   readonly agentId: string;
   readonly costCentre: string;
+  readonly availabilityZones: readonly string[];
   readonly auditOamSinkArn?: string;
   readonly notificationEmail?: string;
 }
@@ -46,6 +65,7 @@ export class WorkloadDeploymentStage extends Stage {
 
     this.networkStack = new WorkloadNetworkStack(this, 'Network', {
       env: props.env,
+      availabilityZones: props.availabilityZones,
     });
     this.appStack = new WorkloadAppStack(this, 'App', {
       env: props.env,
@@ -53,6 +73,9 @@ export class WorkloadDeploymentStage extends Stage {
       workloadSubnetIds: this.networkStack.vpc.vpc
         .selectSubnets({ subnetGroupName: 'workload' })
         .subnetIds,
+      workloadSubnetRouteTableIds: this.networkStack.vpc.vpc
+        .selectSubnets({ subnetGroupName: 'workload' })
+        .subnets.map((subnet) => subnet.routeTable.routeTableId),
       vpcCidr: this.networkStack.vpc.vpc.vpcCidrBlock,
       availabilityZones: this.networkStack.vpc.vpc.availabilityZones,
       bedrockRuntimeVpceId: this.networkStack.vpc.endpoints.bedrockRuntime.vpcEndpointId,
@@ -77,6 +100,10 @@ export interface WorkloadPipelineStackProps extends StackProps {
   readonly costCentre: string;
   readonly workloadNonprodEnv: Required<Environment>;
   readonly workloadProdEnv: Required<Environment>;
+  /** Account-specific AZ names produced by read-only preflight. */
+  readonly workloadNonprodAvailabilityZones: readonly string[];
+  /** Account-specific AZ names produced by read-only preflight. */
+  readonly workloadProdAvailabilityZones: readonly string[];
   readonly auditOamSinkArn?: string;
   readonly notificationEmail?: string;
 
@@ -98,6 +125,36 @@ export interface WorkloadPipelineStackProps extends StackProps {
   readonly canaryPercent?: number;
   /** Z7-B — canary soak duration (minutes); default 30. */
   readonly canarySoakMinutes?: number;
+
+  /**
+   * `stage` context value the pipeline's own synth step passes to
+   * `bin/agentic-ai-platform.ts`. Defaults to `pipeline`, the stage that
+   * instantiates this stack. Never omit it — the app's `undefined` stage branch
+   * synthesises an empty assembly and exits 0.
+   */
+  readonly synthStage?: string;
+
+  /**
+   * Extra `agenticai/*` context keys for the synth step, merged over the keys
+   * derived from this stack's own props (explicit wins).
+   *
+   * The `pipeline` stage also requires context this stack does not carry —
+   * `agenticai/organizationId`, `agenticai/platformNonprodAccountId`,
+   * `agenticai/platformProdAccountId`, `agenticai/auditAccountId`,
+   * `agenticai/logArchiveAccountId`, `agenticai/pipelineRoleArn`. Supply those
+   * here. If they are missing the app throws inside the synth step, which fails
+   * the pipeline loudly; it never degrades to an empty assembly.
+   */
+  readonly synthContext?: Record<string, string>;
+
+  /**
+   * Commands that actually shift canary traffic to the new agent version.
+   *
+   * Left unset, `CanaryDeploy` is an explicit fail-closed placeholder that
+   * exits non-zero: no AgentCore traffic-shifting call is implemented yet
+   * (tasks/todo.md Round 4), and a placeholder must never report success.
+   */
+  readonly canaryDeployCommands?: readonly string[];
 }
 
 export class WorkloadPipelineStack extends Stack {
@@ -116,15 +173,22 @@ export class WorkloadPipelineStack extends Stack {
 
     this.pipeline = new CodePipeline(this, 'WorkloadPipeline', {
       pipelineName: `agenticai-workload-${props.tenantId}-${props.agentId}`,
+      pipelineType: PipelineType.V2,
       crossAccountKeys: true,
       synth: new ShellStep('Synth', {
         input: source,
-        commands: [
-          'npm ci',
-          'npm run build',
-          'npm test',
-          'npx cdk synth',
-        ],
+        commands: stageAwareSynthCommands({
+          stage: props.synthStage ?? 'pipeline',
+          context: this.synthContext(props),
+          // `stackName` equals the cloud-assembly artifact id for both this
+          // stack's app-level instantiation and its unit-test instantiation
+          // (the id carries no path separators and no stackName override).
+          expectedStackArtifactId: this.stackName,
+          // Both deployment stages below must appear as non-empty nested
+          // assemblies. The `*` absorbs the parent stack id so the check holds
+          // whatever the stack is named.
+          expectedStageAssemblyGlobs: ['cdk.out/assembly-*Nonprod', 'cdk.out/assembly-*Prod'],
+        }),
       }),
       publishAssetsInParallel: false,
     });
@@ -136,6 +200,7 @@ export class WorkloadPipelineStack extends Stack {
       tenantId: props.tenantId,
       agentId: props.agentId,
       costCentre: props.costCentre,
+      availabilityZones: props.workloadNonprodAvailabilityZones,
       auditOamSinkArn: props.auditOamSinkArn,
       notificationEmail: props.notificationEmail,
     });
@@ -145,7 +210,7 @@ export class WorkloadPipelineStack extends Stack {
     // the just-deployed non-prod app. Fails if any threshold is breached.
     const evalStep = new CodeBuildStep('EvaluationGate', {
       commands: [
-        'set -euo pipefail',
+        'set -eu',
         'echo "Evaluation gate thresholds:"',
         `echo "  regression_pass_rate_min_pct    = ${props.evalRegressionPassRate ?? 95}"`,
         `echo "  guardrail_violation_rate_max_pct = ${props.evalGuardrailViolationRate ?? 1}"`,
@@ -154,6 +219,8 @@ export class WorkloadPipelineStack extends Stack {
         `echo "  first_token_p99_max_ms          = ${props.evalFirstTokenP99Ms ?? 1500}"`,
         `echo "  refusal_rate_min_pct            = ${props.evalRefusalRateMin ?? 99}"`,
         `echo "  cost_per_prompt_max_usd         = ${props.evalCostPerPromptMaxUsd ?? 0.05}"`,
+        // A missing harness is a failed gate, not a skipped one.
+        'if [ ! -f scripts/evaluation_gate.py ]; then echo "ERROR: scripts/evaluation_gate.py is missing; evaluation gate cannot pass"; exit 1; fi',
         // Invoke the eval harness (ships under blueprints/*/eval/). The harness
         // reads the thresholds above, invokes the deployed agent against the
         // regression corpus, and exits non-zero if any metric fails.
@@ -182,20 +249,20 @@ export class WorkloadPipelineStack extends Stack {
       timeout: Duration.minutes(30),
     });
 
-    // Z7-B: Canary stage. Deploys the new agent version with a 5% traffic
-    // weight, soaks for 30 minutes watching the OnlineEval Regressed alarm.
-    // If the alarm transitions to ALARM during the soak, the soak step exits
-    // non-zero and the pipeline halts before Prod.
+    // Z7-B: Canary stage. Shifts a small traffic slice to the new agent
+    // version, then soaks while watching the OnlineEval Regressed composite
+    // alarm. Both steps are fail-closed: an unimplemented traffic shift, a
+    // missing alarm, or an alarm state that is anything other than OK at the
+    // end of the soak halts the pipeline before Prod.
     const canaryPercent = props.canaryPercent ?? 5;
     const canarySoakMinutes = props.canarySoakMinutes ?? 30;
+    const onlineEvalAlarmName = `agenticai-online-eval-nonprod-${props.tenantId}-${props.agentId}`;
+    const describeAlarmState =
+      `aws cloudwatch describe-alarms --alarm-names ${onlineEvalAlarmName}` +
+      ` --alarm-types CompositeAlarm --query 'CompositeAlarms[0].StateValue' --output text`;
+
     const canaryDeployStep = new CodeBuildStep('CanaryDeploy', {
-      commands: [
-        'set -euo pipefail',
-        `echo "Canary deploy: ${canaryPercent}% to nonprod alias CANARY"`,
-        // Real impl: cdk deploy with -c agenticai/canaryPercent=N OR an
-        // alias-flip CLI call. Here we keep the wiring + a reference shell.
-        `aws lambda update-alias --function-name agenticai-${props.tenantId}-${props.agentId}-runtime --name CANARY --routing-config "AdditionalVersionWeights={\\"NEW\\":${canaryPercent / 100}}" || true`,
-      ],
+      commands: this.canaryDeployCommands(props, canaryPercent),
       partialBuildSpec: BuildSpec.fromObject({
         version: '0.2',
         env: { variables: { CANARY_PERCENT: String(canaryPercent) } },
@@ -203,34 +270,66 @@ export class WorkloadPipelineStack extends Stack {
       buildEnvironment: { buildImage: LinuxBuildImage.STANDARD_7_0 },
       timeout: Duration.minutes(15),
     });
+
     const canarySoakStep = new CodeBuildStep('CanarySoak', {
       commands: [
-        'set -euo pipefail',
-        `echo "Soaking canary ${canarySoakMinutes} minutes; watching OnlineEval Regressed alarm"`,
-        // Poll the composite alarm state every 30s. Exit non-zero on ALARM.
-        `for i in $(seq 1 $((${canarySoakMinutes} * 2))); do`,
-        `  STATE=$(aws cloudwatch describe-alarms --alarm-names agenticai-online-eval-nonprod-${props.tenantId}-${props.agentId} --query 'CompositeAlarms[0].StateValue' --output text 2>/dev/null || echo OK)`,
-        `  if [ "$STATE" = "ALARM" ]; then echo "Canary regressed; soak FAILED"; exit 1; fi`,
-        `  sleep 30`,
-        `done`,
+        'set -eu',
+        `echo "Soaking canary ${canarySoakMinutes} minutes against composite alarm ${onlineEvalAlarmName}"`,
+        // The alarm must exist before the soak starts. A missing alarm means
+        // there is no regression signal at all, which is a failed soak.
+        `ALARM_COUNT=$(aws cloudwatch describe-alarms --alarm-names ${onlineEvalAlarmName} --alarm-types CompositeAlarm --query 'length(CompositeAlarms)' --output text)`,
+        `if [ "$ALARM_COUNT" != "1" ]; then echo "ERROR: composite alarm ${onlineEvalAlarmName} not found (describe-alarms returned '$ALARM_COUNT'); soak FAILED"; exit 1; fi`,
+        // Poll every 30s. `set -e` means a failed describe-alarms call aborts
+        // the step rather than being read as a healthy state.
+        `SOAK_POLLS=$((${canarySoakMinutes} * 2))`,
+        'POLL=0',
+        'while [ "$POLL" -lt "$SOAK_POLLS" ]; do',
+        `  STATE=$(${describeAlarmState})`,
+        '  case "$STATE" in',
+        '    ALARM) echo "ERROR: canary regressed (alarm state ALARM); soak FAILED"; exit 1 ;;',
+        '    OK|INSUFFICIENT_DATA) ;;',
+        '    *) echo "ERROR: unusable alarm state \'$STATE\'; soak FAILED"; exit 1 ;;',
+        '  esac',
+        '  POLL=$((POLL + 1))',
+        '  sleep 30',
+        'done',
+        // Ending on INSUFFICIENT_DATA means the soak gathered no evidence.
+        // Absence of evidence is not evidence of health.
+        `FINAL_STATE=$(${describeAlarmState})`,
+        `if [ "$FINAL_STATE" != "OK" ]; then echo "ERROR: soak ended with alarm state '$FINAL_STATE'; OK required; soak FAILED"; exit 1; fi`,
         'echo "Canary soak passed"',
       ],
       buildEnvironment: { buildImage: LinuxBuildImage.STANDARD_7_0 },
       timeout: Duration.minutes(canarySoakMinutes + 5),
     });
 
-    // Prod stage gated by evaluation + canary + manual approval.
+    // Prod stage gated by evaluation + manual approval + canary + soak.
     const prodStage = new WorkloadDeploymentStage(this, 'Prod', {
       env: props.workloadProdEnv,
       envName: 'prod',
       tenantId: props.tenantId,
       agentId: props.agentId,
       costCentre: props.costCentre,
+      availabilityZones: props.workloadProdAvailabilityZones,
       auditOamSinkArn: props.auditOamSinkArn,
       notificationEmail: props.notificationEmail,
     });
+
+    const approvalStep = new ManualApprovalStep('ProdApproval', {
+      comment:
+        'Evaluation gate passed. Approving starts the canary deploy and soak; Prod deploys only if the soak passes.',
+    });
+
+    // Ordering is declared, not implied. CDK Pipelines runs steps with no
+    // declared dependency concurrently, so without these edges the evaluation
+    // gate, approval and canary would share a RunOrder and Prod could be
+    // reached without any of them having produced a verdict.
+    approvalStep.addStepDependency(evalStep);
+    canaryDeployStep.addStepDependency(approvalStep);
+    canarySoakStep.addStepDependency(canaryDeployStep);
+
     this.pipeline.addStage(prodStage, {
-      pre: [evalStep, canaryDeployStep, canarySoakStep, new ManualApprovalStep('ProdApproval')],
+      pre: [evalStep, approvalStep, canaryDeployStep, canarySoakStep],
     });
 
     NagSuppressions.addStackSuppressions(
@@ -257,5 +356,62 @@ export class WorkloadPipelineStack extends Stack {
       ],
       true,
     );
+  }
+
+  /**
+   * Context for the pipeline's own `cdk synth`: everything derivable from this
+   * stack's props, overlaid with any explicit `synthContext` entries.
+   */
+  private synthContext(props: WorkloadPipelineStackProps): Record<string, string> {
+    const derived: Record<string, string> = {
+      'agenticai/githubRepo': props.githubRepo,
+      'agenticai/githubConnectionArn': props.githubConnectionArn,
+      'agenticai/tenantId': props.tenantId,
+      'agenticai/agentId': props.agentId,
+      'agenticai/costCentre': props.costCentre,
+      'agenticai/workloadNonprodAccountId': props.workloadNonprodEnv.account,
+      'agenticai/workloadProdAccountId': props.workloadProdEnv.account,
+      'agenticai/workloadNonprodAvailabilityZones': JSON.stringify(
+        props.workloadNonprodAvailabilityZones,
+      ),
+      'agenticai/workloadProdAvailabilityZones': JSON.stringify(
+        props.workloadProdAvailabilityZones,
+      ),
+    };
+    if (props.githubBranch) {
+      derived['agenticai/githubBranch'] = props.githubBranch;
+    }
+    if (props.auditOamSinkArn) {
+      derived['agenticai/auditOamSinkArn'] = props.auditOamSinkArn;
+    }
+    if (props.notificationEmail) {
+      derived['agenticai/notificationEmail'] = props.notificationEmail;
+    }
+    return { ...derived, ...(props.synthContext ?? {}) };
+  }
+
+  /**
+   * Canary traffic-shift commands.
+   *
+   * With no `canaryDeployCommands` supplied there is nothing that can shift
+   * AgentCore traffic, so the step states that plainly and exits 1. The
+   * previous implementation called `aws lambda update-alias … || true` against
+   * a function this blueprint never creates, which always reported success and
+   * let Prod promotion proceed on no evidence.
+   */
+  private canaryDeployCommands(
+    props: WorkloadPipelineStackProps,
+    canaryPercent: number,
+  ): string[] {
+    if (props.canaryDeployCommands && props.canaryDeployCommands.length > 0) {
+      return ['set -eu', ...props.canaryDeployCommands];
+    }
+    return [
+      'set -eu',
+      `echo "CanaryDeploy: NOT IMPLEMENTED — no AgentCore traffic-shifting call is wired for ${canaryPercent}% canary traffic."`,
+      'echo "This step fails closed on purpose: promoting to Prod without a real canary would be an unverified claim."',
+      'echo "Supply WorkloadPipelineStackProps.canaryDeployCommands with a real AgentCore traffic-shift call to enable it."',
+      'exit 1',
+    ];
   }
 }

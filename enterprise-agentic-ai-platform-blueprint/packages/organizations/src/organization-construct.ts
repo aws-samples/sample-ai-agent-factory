@@ -32,7 +32,6 @@ import {
 import { Construct } from 'constructs';
 
 import {
-  PLATFORM_ALLOWED_MODELS,
   PLATFORM_APPROVED_REGIONS,
   allowedModelArns,
 } from '@agenticai/platform-baselines';

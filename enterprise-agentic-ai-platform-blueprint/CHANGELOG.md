@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Pipeline-owned `InferenceGatewayStack` in both Platform deployment stages.
+- Native `AWS::BedrockAgentCore::Gateway` with Cognito client-credentials JWT authentication and the MCP `2025-11-25` protocol.
+- Native Bedrock Mantle inference target using `GATEWAY_IAM_ROLE` and a source-account/source-Gateway constrained service role.
+- Native Gateway rate limits with explicit provider-qualified model RPM/TPM allocations and a zero-rate wildcard fallback.
+- Five-tag allocation contract on taggable Gateway resources and non-secret CloudFormation outputs for workload integration.
+- Conformance coverage for resource shape, IAM trust, Cognito M2M, model-ID validation, lifecycle ordering, and teardown context.
+
+### Changed
+
+- Replaced the D-03 NLB/PrivateLink/LiteLLM placeholder in `@agenticai/platform-inference-gateway` with the real AgentCore inference path.
+- Platform and pipeline synthesis now fail when `agenticai/inferenceModelRateLimits` is absent or malformed.
+- Teardown now includes `AgenticAI-Platform-InferenceGatewayStack` and requires the deployment's model-rate context.
+
+### Verification
+
+- The preceding compatibility spike passed live in `us-west-2` for IAM and Cognito M2M auth, model discovery, Strands `LiteLLMModel` streaming/non-streaming, exact HTTP 429, and zero-residue cleanup.
+- OTEL rate-limit span correlation remains blocked: `aws/spans` stayed empty under an active CloudWatch Logs trace destination, 100% indexing, configured deliveries, propagation delay, and extended polling. It is not counted as passing evidence.
+
 ## [1.0.0] - 2026-08-18
 
 First public release, published as `enterprise-agentic-ai-platform-blueprint` in [`aws-samples/sample-ai-agent-factory`](https://github.com/aws-samples/sample-ai-agent-factory). Consolidates all development phases below (A-Q). The `v0.x` labels retained in the phase headings are the internal development milestones that produced each change set, kept for traceability.

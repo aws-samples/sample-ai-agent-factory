@@ -44,7 +44,6 @@ import {
   BlockPublicAccess,
   Bucket,
   BucketEncryption,
-  ObjectLockMode,
   ObjectLockRetention,
 } from 'aws-cdk-lib/aws-s3';
 import { Topic } from 'aws-cdk-lib/aws-sns';
