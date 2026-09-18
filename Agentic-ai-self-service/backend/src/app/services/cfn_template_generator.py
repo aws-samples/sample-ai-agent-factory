@@ -906,30 +906,39 @@ def _add_policy_parameters(template: dict) -> None:
     Idempotent, and added only on the path that emits a policy engine, so a template
     without one does not carry a parameter that controls nothing.
 
-    Why the default is the *lenient* value, which is the opposite of what a security
-    review expects: under FAIL_ON_ANY_FINDINGS the service runs its findings analysis,
-    and that analysis calls the gateway to resolve action schemas. On a gateway created
-    moments earlier — always the case here, since the policy DependsOn AgentCoreGateway
-    — the call fails on engine-to-gateway authorization that has not converged, and the
-    policy settles CREATE_FAILED. Measured live, the generated default permit is also
-    rejected under strict mode as "Overly Permissive" *asynchronously*: the call returns
-    200/CREATING and only the status poll in the custom resource catches it. So strict
-    mode here trades a real risk of a failed stack for warnings that do not change what
-    the policy permits. What keeps the policy safe either way is that it names each tool
-    explicitly and AgentCore is default-deny, plus two rejections IGNORE_ALL_FINDINGS
-    does *not* skip: a wildcard resource, and a gateway that does not exist.
+    An earlier version of this docstring explained the lenient default with a race:
+    FAIL_ON_ANY_FINDINGS runs a findings analysis that calls the gateway, the gateway
+    was created moments earlier, and engine-to-gateway authorization had not converged.
+    That explanation was wrong, and the wrong part mattered. ``Insufficient permissions
+    to call gateway with ID <id>`` was a missing IAM grant on ``CfnProviderRole``, and it
+    failed CreatePolicy under BOTH modes — so the shipped default never avoided it. A
+    controlled live experiment settled it: same principal, same statement, gateway READY
+    for many minutes, ``bedrock-agentcore:InvokeGateway`` on that one gateway ARN as the
+    only variable. Without it, CREATE_FAILED in both modes; with it, ACTIVE in both. The
+    grant is now part of AgentCorePolicyGatewayResolution, so a policy naming real tools
+    can be created at all — which, before, it could not.
 
-    The exact reason the service reports on that failure is ``Insufficient permissions
-    to call gateway with ID <id>``, observed live. Whether that is the convergence race
-    above or a genuine IAM gap is NOT settled: ``CfnProviderRole`` is granted GetGateway,
-    ListGatewayTargets and GetGatewayTarget on this stack's own gateway (see
-    AgentCorePolicyGatewayResolution) but not ``InvokeGateway``, and the wording points
-    at the latter. ``InvokeGateway`` is deliberately not granted anyway — it would let a
-    deploy-time Lambda call every tool the gateway fronts, which is a real widening of
-    blast radius to buy warnings that do not change what the policy permits, and ARCC
-    cnt_AGx9pUNpmdOVZB is explicit that an inline policy carries only the actions its
-    identity's function needs. A recipient who wants the strict mode has to add that
-    grant themselves, knowing what it opens.
+    Why the default is still the *lenient* value, which is the opposite of what a
+    security review expects. Not a race: FAIL_ON_ANY_FINDINGS makes any finding fail the
+    stack, including a finding about a statement the RECIPIENT supplied, and rolling back
+    a whole deployment over an advisory finding on someone's own Cedar is not a default
+    worth shipping. Measured live, a permit-all is also rejected under strict mode
+    *asynchronously*: the call returns 200/CREATING and only the status poll in the
+    custom resource catches it. What keeps the policy safe either way is that it names
+    each tool explicitly and AgentCore is default-deny, plus two rejections
+    IGNORE_ALL_FINDINGS does *not* skip: a wildcard resource, and a gateway that does not
+    exist. Strict mode is a supported choice now rather than a trap, and that claim was
+    earned rather than reasoned: a generated gateway+policy export was deployed twice
+    from this bundle, once per mode, and the generated default permit reached ACTIVE with
+    no statusReasons both times. So a recipient who wants findings to gate the deploy can
+    set it.
+
+    What the grant costs is real and is not hidden: for the life of the deploy, the
+    custom-resource Lambda can invoke the tools this stack's gateway fronts. It is
+    scoped to that gateway's ARN and its targets, never account-wide, and README >
+    Authorization says so outright. The alternative was shipping a policy resource that
+    cannot reach ACTIVE, which is not a security posture — it is a broken feature that
+    leaves the gateway's authorization to whatever default-deny does on its own.
 
     Only the strictness-increasing direction is offered. ``enforcementMode`` is
     deliberately NOT a parameter: its other value, LOG_ONLY, *records* a denial instead
@@ -946,14 +955,16 @@ def _add_policy_parameters(template: dict) -> None:
             "AllowedValues": ["IGNORE_ALL_FINDINGS", "FAIL_ON_ANY_FINDINGS"],
             "Description": (
                 "How strictly AgentCore validates the Cedar policies this stack creates. "
-                "Leave as IGNORE_ALL_FINDINGS: the policies name every permitted tool "
-                "explicitly and the engine is default-deny either way, and the findings "
-                "analysis FAIL_ON_ANY_FINDINGS runs calls the gateway this stack has just "
-                "created, which regularly fails on not-yet-converged permissions and leaves "
-                "the policy CREATE_FAILED with 'Insufficient permissions to call gateway'. "
-                "Set FAIL_ON_ANY_FINDINGS only when you want that analysis to gate the "
-                "deploy, and note that the custom-resource role is not granted "
-                "bedrock-agentcore:InvokeGateway, which that analysis may also require."
+                "IGNORE_ALL_FINDINGS, the default, still gets you a default-deny engine whose "
+                "policies name every permitted tool explicitly; it skips the advisory findings "
+                "analysis, not the rejections that matter (a wildcard resource and a "
+                "non-existent gateway are refused in both modes). FAIL_ON_ANY_FINDINGS turns "
+                "any finding into a failed stack, including a finding about a Cedar statement "
+                "you supplied yourself, which is why it is not the default. Both modes work: "
+                "the role that creates the policies is granted bedrock-agentcore:InvokeGateway "
+                "on this stack's own gateway, without which CreatePolicy fails in EITHER mode "
+                "with 'Insufficient permissions to call gateway'. See README > Authorization "
+                "for what that grant allows."
             ),
         },
     )
@@ -2637,14 +2648,15 @@ class CfnTemplateGenerator:
                                 {
                                     # AgentCore resolves the gateway named in the Cedar
                                     # statement while creating the policy, and it does so with
-                                    # the CALLER's permissions, not the engine's. Missing these
-                                    # three, a live deploy produced a policy stuck in
+                                    # the CALLER's permissions, not the engine's. Missing the
+                                    # read actions, a live deploy produced a policy stuck in
                                     # CREATE_FAILED with the statusReason "Insufficient
                                     # permissions to list targets on gateway with ID <id>" — a
                                     # message that names an API nothing in this handler calls,
                                     # which is why reading the handler was never going to find
-                                    # it. Read-only and metadata-only: the role cannot change a
-                                    # gateway or a target with any of them.
+                                    # it. The first three are read-only and metadata-only: the
+                                    # role cannot change a gateway or a target with any of
+                                    # them. The fourth is not, and is explained below.
                                     #
                                     # Kept as its own statement rather than folded into the one
                                     # above, per ARCC cnt_SaTYaDCgBBJTcv (scope permissions to
@@ -2659,6 +2671,44 @@ class CfnTemplateGenerator:
                                         "bedrock-agentcore:GetGateway",
                                         "bedrock-agentcore:ListGatewayTargets",
                                         "bedrock-agentcore:GetGatewayTarget",
+                                        # The fourth was withheld on purpose and that was
+                                        # wrong. It looked like the expensive one — it lets a
+                                        # deploy-time Lambda call the tools this gateway
+                                        # fronts — and the reported failure ("Insufficient
+                                        # permissions to call gateway with ID <id>") was
+                                        # attributed to engine-to-gateway convergence that had
+                                        # not settled yet. A controlled live experiment
+                                        # settled it the other way: same principal, same
+                                        # statement, gateway READY for many minutes, the grant
+                                        # as the only variable. Without it CreatePolicy fails
+                                        # in BOTH validation modes; with it, both reach
+                                        # ACTIVE. So this is not a strict-mode extra, and the
+                                        # shipped default never avoided it.
+                                        #
+                                        # What decides whether a deploy hits it is the shape
+                                        # of the statement, not the mode: an unconstrained
+                                        # `resource is AgentCore::Gateway`, or an action that
+                                        # does not exist, needs nothing resolved and goes
+                                        # ACTIVE. A statement naming real tools on a concrete
+                                        # gateway ARN — what _cedar_permit emits, and the only
+                                        # form AgentCore accepts (see its docstring: a
+                                        # placeholder resource is refused synchronously, an
+                                        # unconstrained one as "Overly Permissive") — is
+                                        # exactly the one that fails. Which is why every test
+                                        # built on a throwaway statement reported this path
+                                        # healthy while every real policy could not be created
+                                        # at all.
+                                        #
+                                        # Granting it is still a real widening, so it is stated
+                                        # plainly in README > Authorization rather than left
+                                        # for the recipient to find. The alternative was
+                                        # shipping a policy resource that cannot reach ACTIVE.
+                                        # ARCC cnt_AGx9pUNpmdOVZB asks for the actions the
+                                        # identity's function needs, and creating the policy IS
+                                        # this identity's function; cnt_pXauQr9E6bKwke asks for
+                                        # each action listed rather than a wildcard, which this
+                                        # does, on this stack's own gateway alone.
+                                        "bedrock-agentcore:InvokeGateway",
                                     ],
                                     # This stack's own gateway, named exactly. The policy
                                     # DependsOn AgentCoreGateway and this role does not, so
@@ -6266,6 +6316,44 @@ They hold user identities, ingested documents and/or conversation history.
 Re-exporting with dataRetentionPolicy="Delete" makes teardown remove them.
 EOF
 """)
+                # Retain pairs the user pools with DeletionProtection: ACTIVE, which is
+                # deliberate (see _apply_data_retention) and has a consequence the notice
+                # above does not cover: the retained pool cannot be deleted in one call,
+                # and while it exists a same-name redeploy dies at
+                # [AWS::EarlyValidation::ResourceExistenceCheck] without naming it.
+                # Found by a teammate clearing up after a rolled-back deploy, which is
+                # the likeliest way to meet it — a rollback retains the pool too.
+                #
+                # Unquoted heredoc so $STACK_NAME and $REGION resolve to values the
+                # operator can paste, which is also why these commands are one line each.
+                pools = [
+                    r
+                    for r in data_stores
+                    if (template or {}).get("Resources", {}).get(r, {}).get("Type") == "AWS::Cognito::UserPool"
+                ]
+                if pools:
+                    sections.append("""
+cat <<EOF
+Those user pools also carry DeletionProtection: ACTIVE, which is why they survive a
+rollback as well as a teardown. Two consequences:
+
+  * Deleting one takes two calls, not one. delete-user-pool on its own returns
+    InvalidParameterException: deletion protection is activated.
+  * While one exists, redeploying under this same stack name fails at
+    [AWS::EarlyValidation::ResourceExistenceCheck], an error that names no resource —
+    the same symptom as the retained log groups, from a different cause.
+
+To remove a pool deliberately, with its id from the stack outputs you noted before
+teardown:
+
+  aws cognito-idp update-user-pool --user-pool-id POOL_ID --region $REGION --deletion-protection INACTIVE
+  aws cognito-idp delete-user-pool --user-pool-id POOL_ID --region $REGION
+
+Run that FIRST command only on a pool you are about to delete. update-user-pool resets
+every setting you do not pass back to it, so on a pool you mean to keep it is not a
+one-field edit — clear the protection from the console instead.
+EOF
+""")
             if log_groups:
                 # The names, not the logical ids: every group this stack creates is
                 # /aws/lambda/<stack>/<function> (see _apply_lambda_log_groups), so one
@@ -6695,21 +6783,42 @@ The policies this stack creates name every tool they permit, one by one, and the
 engine denies anything they do not name. `PolicyValidationMode` controls something
 narrower than that: whether AgentCore's *findings analysis* runs and gates the deploy.
 
-Leave it at `IGNORE_ALL_FINDINGS`. That analysis calls the gateway to resolve action
-schemas, and on a gateway this same stack created seconds earlier the call regularly
-fails on permissions that have not converged yet, leaving the policy `CREATE_FAILED`
-for several minutes. It also flags the generated policy as overly permissive
-*asynchronously* — the create returns success and the failure only surfaces in the
-status poll. Two things it does not skip, so this is narrower than "validation off": a
-statement with a wildcard resource and a statement naming a gateway that does not exist
-are both still hard errors.
+`IGNORE_ALL_FINDINGS`, the default, is the right choice for most recipients — but for a
+narrower reason than "validation is risky". `FAIL_ON_ANY_FINDINGS` turns *any* finding
+into a failed stack, and that includes an advisory finding about a Cedar statement you
+supplied yourself: the policy resource goes `CREATE_FAILED` and the whole deployment
+rolls back over a warning on your own policy.
+Two things `IGNORE_ALL_FINDINGS` does **not** skip, which is why this is narrower than
+"validation off": a statement with a wildcard resource, and a statement naming a gateway
+that does not exist, are both still hard errors. It also does not skip the asynchronous
+"overly permissive" rejection of a permit-all — the create returns success and the
+failure surfaces only in the status poll.
 
-Set `FAIL_ON_ANY_FINDINGS` when you want the analysis to gate the deploy and are
-willing to retry:
+Set `FAIL_ON_ANY_FINDINGS` when you want the analysis to gate the deploy:
 
 ```bash
 POLICY_VALIDATION_MODE=FAIL_ON_ANY_FINDINGS ./deploy.sh my-agent {current_region()} my-artifacts-bucket
 ```
+
+### What creating a policy requires
+
+Worth knowing because the permission is not obvious and the failure names an API that
+nothing here calls. AgentCore resolves the gateway named in a Cedar statement **as the
+caller**, using the custom-resource role's permissions rather than the engine's. A
+statement that names real tools on a concrete gateway ARN — which is the only form
+AgentCore accepts, and what this stack emits — therefore cannot be created at all
+unless that role holds `bedrock-agentcore:InvokeGateway`. Without it, `CreatePolicy`
+fails in **both** validation modes with `Insufficient permissions to call gateway with
+ID <id>`; the mode makes no difference, which is the opposite of what the symptom
+suggests.
+
+This stack grants it, scoped to its own gateway's ARN and that gateway's targets,
+never account-wide. Be clear about what that means: while the stack is deploying or
+updating, the custom-resource Lambda can invoke the tools this gateway fronts. That is
+a genuine widening of what a deploy-time principal can reach, accepted because the
+alternative is a policy resource that can never become `ACTIVE` — leaving the gateway
+with no Cedar policy at all. If your account cannot accept it, the honest answer is to
+turn the policy engine off in the canvas rather than to deploy a policy that will fail.
 
 There is deliberately no parameter for AgentCore's `enforcementMode`. Its other value,
 `LOG_ONLY`, records a denial instead of enforcing it, which would let this stack's

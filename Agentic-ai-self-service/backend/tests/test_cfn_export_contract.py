@@ -1822,13 +1822,22 @@ class TestLeastPrivilegeResources:
 
     @ALL_COMBINATIONS
     def test_the_provider_can_resolve_the_gateway_a_cedar_policy_names(self, combo):
-        """Without these three the policy reaches CREATE_FAILED, and nothing says why.
+        """Without these four the policy reaches CREATE_FAILED, and nothing says why.
 
         AgentCore validates a resource-scoped Cedar statement by resolving the gateway's
         targets as the *caller*, so the permission has to be on this role even though no
         line of the handler calls those APIs. The live statusReason was "Insufficient
         permissions to list targets on gateway with ID <id>" and the stack still reported
         the policy as the only failure — a CREATE_COMPLETE gateway with a dead policy.
+
+        ``InvokeGateway`` is the fourth and was withheld on the theory that the second
+        symptom — "Insufficient permissions to *call* gateway with ID <id>" — was an
+        engine-to-gateway convergence race that the lenient validation mode avoided. A
+        controlled live experiment disproved both halves: same principal, same statement,
+        gateway READY for minutes, the grant as the only variable, CREATE_FAILED in BOTH
+        modes without it and ACTIVE in both with it. Every statement this generator emits
+        names real tools on a concrete gateway ARN, which is the shape that has to be
+        resolved, so without this grant the policy feature did not function at all.
 
         Paired with the negative half in the same test: the grant must be ABSENT when the
         template has no gateway, because it names one by ``GetAtt``. A grant that would be
@@ -1851,11 +1860,37 @@ class TestLeastPrivilegeResources:
             "bedrock-agentcore:GetGateway",
             "bedrock-agentcore:ListGatewayTargets",
             "bedrock-agentcore:GetGatewayTarget",
+            "bedrock-agentcore:InvokeGateway",
         }, actions
-        assert all(a.startswith(("bedrock-agentcore:Get", "bedrock-agentcore:List")) for a in actions), (
-            "policy validation reads the gateway; it must not be able to change it"
-        )
-        assert {"Fn::GetAtt": ["AgentCoreGateway", "GatewayArn"]} in _as_list(resolution[0]["Resource"])
+        # InvokeGateway is the one action here that is not read-only, so it is also the
+        # one whose scope has to be exact: this stack's own gateway and its targets,
+        # never a wildcard that would reach a gateway some other export created.
+        resources = _as_list(resolution[0]["Resource"])
+        assert {"Fn::GetAtt": ["AgentCoreGateway", "GatewayArn"]} in resources
+        assert "*" not in resources, "InvokeGateway on every gateway in the account"
+        for entry in resources:
+            rendered = json.dumps(entry)
+            assert "AgentCoreGateway" in rendered, f"not scoped to this stack's gateway: {entry}"
+
+    @ALL_COMBINATIONS
+    def test_the_grant_that_widens_blast_radius_is_declared_not_buried(self, combo):
+        """A recipient must be able to find out that a deploy can call their tools.
+
+        ``InvokeGateway`` lets the custom-resource Lambda invoke the tools the gateway
+        fronts for as long as the stack is deploying. That is defensible — creating the
+        policy is the role's whole function — but only if it is stated, so the README
+        has to say it rather than leaving it to whoever reads the IAM diff.
+        """
+        bundle = _generate(**combo)
+        template = yaml.safe_load(bundle.template_yaml)
+        if "PolicyValidationMode" not in template.get("Parameters", {}):
+            pytest.skip("this template creates no policy, so the README has no policy section")
+        readme = bundle.readme
+        assert "bedrock-agentcore:InvokeGateway" in readme
+        assert "invoke the tools this gateway fronts" in readme
+        # And it must not repeat the claim the live experiment disproved.
+        assert "have not converged" not in readme, "the README still blames a convergence race"
+        assert "both" in readme.lower(), "the README must say the mode makes no difference"
 
     def test_the_provider_can_create_a_resource_scoped_policy(self):
         """``ManageResourceScopedPolicy`` is undocumented and was missing.
@@ -4424,6 +4459,47 @@ class TestGeneratedDocumentation:
         assert "/aws/bedrock-agentcore/runtimes/" in teardown, (
             "the runtime's own group is outside the stack and outlives this cleanup"
         )
+
+    def test_teardown_says_a_retained_user_pool_takes_two_calls_to_delete(self):
+        """``DeletionProtection: ACTIVE`` makes the documented cleanup command fail.
+
+        The notice above tells the operator the pool survives and to "delete it by
+        hand if you want it gone", and the obvious hand command — ``delete-user-pool``
+        — returns ``InvalidParameterException: deletion protection is activated``.
+        Hit live by a teammate clearing up after a *rolled-back* deploy, which is the
+        likeliest way to meet it: a rollback retains the pool too, and until the pool
+        is gone a same-name redeploy dies at
+        ``[AWS::EarlyValidation::ResourceExistenceCheck]`` naming no resource — the
+        same symptom as the retained log groups, from a different cause.
+
+        The protection itself is correct (see ``TestDataRetention``); what was missing
+        was telling the operator how to clear it.
+        """
+        teardown = _generate(gateway_config=AGENTCORE_GATEWAY).teardown_sh
+        before_delete = teardown.split("aws cloudformation delete-stack")[0]
+        assert "deletion protection is activated" in before_delete, (
+            "the operator is not told why delete-user-pool will fail"
+        )
+        # Both calls, in order, and runnable as printed.
+        update = (
+            "aws cognito-idp update-user-pool --user-pool-id POOL_ID --region $REGION --deletion-protection INACTIVE"
+        )
+        assert update in before_delete
+        assert "aws cognito-idp delete-user-pool --user-pool-id POOL_ID --region $REGION" in before_delete
+        assert before_delete.index(update) < before_delete.index("aws cognito-idp delete-user-pool")
+        assert "ResourceExistenceCheck" in before_delete
+        # update-user-pool is a full replace, not a field edit: pointing it at a pool
+        # the operator means to KEEP would silently reset every setting omitted.
+        assert "resets" in before_delete and "every setting you do not pass back" in before_delete
+
+    def test_that_notice_is_absent_when_the_stack_has_no_user_pool(self):
+        """A Cognito cleanup procedure in a stack with no Cognito teaches the
+        operator to skim the notices that do apply. A memory-only export retains a
+        data store, so the notice above it is present and this is not vacuous."""
+        teardown = _generate(memory_config={"enabled": True}).teardown_sh
+        assert "SURVIVE" in teardown, "no retained data store here — the test proves nothing"
+        assert "cognito-idp" not in teardown
+        assert "deletion protection is activated" not in teardown
 
     def test_the_log_group_cleanup_command_is_the_one_the_operator_can_run(self):
         """An unquoted heredoc, so the operator sees real values, not $STACK_NAME.
