@@ -1419,6 +1419,182 @@ def _needs_strands_bundle(agent_code: str) -> bool:
     return "from strands " in agent_code or "import strands" in agent_code
 
 
+# Table text for the parameters whose own ``Description`` does not open with a
+# sentence that stands alone in a table cell, plus the cross-references the table
+# should carry into the prose below it. Everything not named here is described by
+# the first sentence of its parameter Description, so a parameter added later needs
+# no entry unless its first sentence reads badly out of context.
+_README_PARAMETER_NOTES = {
+    # "true keeps the readable AgentCore*-<stack> role names ..." -- markdown eats
+    # the <stack>, and the interesting half of this knob is what `false` buys.
+    "UseExplicitRoleNames": (
+        "`false` lets CloudFormation name the roles instead of "
+        "`AgentCore<Component>-<stack-name>`, which drops the CAPABILITY_NAMED_IAM requirement"
+    ),
+    # First sentence is the bare instruction "Leave empty.", which in a table cell
+    # reads as though the parameter does nothing.
+    "CognitoDomainSuffix": (
+        "Leave empty and the hosted-UI domain is suffixed with this stack's own id; "
+        "set it only to keep a pre-existing domain working"
+    ),
+    "DependencyBundleDigest": (
+        "sha256 of the dependency bundle zip, verified before it is merged; see [Dependency Bundle](#dependency-bundle)"
+    ),
+    "PolicyValidationMode": (
+        "How strictly AgentCore validates the Cedar policies; see [Policy Validation](#policy-validation)"
+    ),
+    # Its Description ends in a literal {"apiKey": "<key>"}, which markdown renders
+    # as an empty cell followed by nothing.
+    "LiteLLMApiKeySecretArn": (
+        'Secrets Manager ARN of a secret holding your LiteLLM virtual key, as plain text or as `{"apiKey": "..."}`'
+    ),
+}
+
+
+# The parameters deploy.sh sets itself -- from its positional arguments, from the
+# artifacts it uploads, or from an environment variable it already documents. Every
+# other parameter in the template is exposed through the generic pass-through that
+# _deploy_parameter_passthrough emits, and test_cfn_export_contract.py asserts these
+# two sets cover the template's parameters exactly. So a parameter added later is
+# settable from deploy.sh whether or not anyone remembers to wire it up, and a
+# parameter removed from the template fails the test rather than leaving dead script.
+_DEPLOY_SCRIPT_OWNED_PARAMETERS = frozenset(
+    {
+        "DeploymentName",
+        "ModelId",
+        "ArtifactsBucket",
+        "AgentCodeKey",
+        "AgentCodeDigest",
+        "CfnProviderCodeKey",
+        "DependencyBundleKey",
+        "DependencyBundleDigest",
+        "ToolLambdaCodeKey",
+        "CustomToolCodeKey",
+        "McpServerCodeKey",
+        "McpServerCodeDigest",
+        "PermissionsBoundaryArn",
+        "UseExplicitRoleNames",
+        "CustomerManagedKeyArn",
+        "LambdaSubnetIds",
+        "LambdaSecurityGroupIds",
+        "LiteLLMGatewayUrl",
+        "LiteLLMApiKeySecretArn",
+        "LiteLLMMcpServers",
+    }
+)
+
+
+def parameter_env_var(name: str) -> str:
+    """``LogRetentionInDays`` -> ``LOG_RETENTION_IN_DAYS``.
+
+    Public because the README has to name the same variable deploy.sh reads, and the
+    two documents disagreeing about it is the whole failure mode here.
+    """
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).upper()
+
+
+def _deploy_parameter_passthrough(parameters: dict) -> str:
+    """The deploy.sh block that lets the recipient set the remaining parameters.
+
+    Five of the template's parameters could not be set through deploy.sh at all --
+    ``LogRetentionInDays``, ``LambdaReservedConcurrency``, ``AccessTokenValidityMinutes``,
+    ``CognitoDomainSuffix`` and ``PolicyValidationMode``. The README described all
+    five, and the Quick Start tells the recipient to deploy with deploy.sh, so the
+    advice was only actionable by abandoning the script and writing the
+    ``aws cloudformation deploy`` invocation out by hand. ``PolicyValidationMode`` is
+    the one that matters: it is the switch that turns on the Cedar findings analysis,
+    and the README's own example had to bypass the script to reach it.
+
+    One loop rather than five more ``if [[ -n ... ]]`` blocks. The hand-maintained
+    kind is what left these five behind in the first place, and the README's parameter
+    table had the same defect for the same reason.
+    """
+    passthrough = sorted(set(parameters) - _DEPLOY_SCRIPT_OWNED_PARAMETERS)
+    if not passthrough:
+        return ""
+    pairs = " \\\n".join(f'    "{name}:{parameter_env_var(name)}"' for name in passthrough)
+    return f"""
+# Everything else in template.yaml, settable from the environment: a parameter
+# LogRetentionInDays is read from LOG_RETENTION_IN_DAYS, and left at the template's
+# own default when that is unset. See README.md > Parameters.
+for _pair in \\
+{pairs}
+do
+    _param="${{_pair%%:*}}"
+    _var="${{_pair##*:}}"
+    _value="${{!_var:-}}"
+    if [[ -n "$_value" ]]; then
+        PARAM_OVERRIDES+=("$_param=$_value")
+        echo "$_param=$_value"
+    fi
+done
+"""
+
+
+def _readme_parameter_table(parameters: dict, deploy_sh: str = "") -> str:
+    """The README's parameter table, built from the parameters the template HAS.
+
+    This was nine hand-written rows against a template that emits up to twenty, and
+    the eleven it omitted were not the obscure ones: both VPC knobs
+    (``LambdaSubnetIds``, ``LambdaSecurityGroupIds``), ``LogRetentionInDays``,
+    ``AccessTokenValidityMinutes`` and every S3 key and digest. That is most of what
+    an account with its own controls has to set, and the only way to discover any of
+    it was to read the YAML -- in a document whose whole purpose is to save the
+    recipient that. Deriving the table means the next parameter cannot go
+    undocumented, and ``test_cfn_export_contract.py`` pins that for every component
+    combination.
+
+    The description is the first sentence of the parameter's own ``Description``, so
+    the README and the template cannot disagree about what a parameter means either.
+    ``_README_PARAMETER_NOTES`` overrides that where the first sentence does not
+    stand alone.
+
+    The "Set with" column names the environment variable ``deploy.sh`` reads for the
+    parameter, and is read OUT OF *deploy_sh* rather than restated here. Naming the
+    convention in prose is not enough: a recipient who has to infer that
+    ``AccessTokenValidityMinutes`` is ``ACCESS_TOKEN_VALIDITY_MINUTES`` will assume it
+    instead, and be wrong the first time a parameter does not follow the pattern.
+    Deriving the column also keeps it honest for the parameters the script sets from
+    its own arguments and then ALSO honours an override for -- ``ModelId``,
+    ``PermissionsBoundaryArn``, ``CustomerManagedKeyArn`` and the two VPC ones -- which
+    a hand-written column would have listed as unsettable.
+    """
+    rows = [
+        "| Parameter | Default | Set with | Description |",
+        "|-----------|---------|----------|-------------|",
+    ]
+    passthrough = set(parameters) - _DEPLOY_SCRIPT_OWNED_PARAMETERS
+    for name, spec in parameters.items():
+        if "Default" not in spec:
+            default = "(required)"
+        elif spec["Default"] == "":
+            default = "(empty)"
+        else:
+            default = str(spec["Default"])
+        variable = parameter_env_var(name)
+        if name in passthrough or f"${{{variable}:-" in deploy_sh:
+            # Either the generic pass-through emits it, or deploy.sh reads it with its
+            # own default -- ``${VAR:-}`` for most, ``${USE_EXPLICIT_ROLE_NAMES:-true}``
+            # for the one whose default is not empty. Matching the ``:-`` and not the
+            # bare name is what keeps ARTIFACTS_BUCKET and DEPLOYMENT_NAME, which the
+            # script assigns from its positional arguments, out of this column.
+            set_with = f"`{variable}`"
+        else:
+            set_with = "`deploy.sh`"
+        description = _README_PARAMETER_NOTES.get(name)
+        if description is None:
+            # First sentence only. These Descriptions run to paragraphs -- the
+            # PolicyValidationMode one is 636 characters -- and the prose sections
+            # below the table are where that detail belongs.
+            description = spec.get("Description", "").split("\n")[0].split(". ")[0].rstrip(".")
+        # A pipe anywhere in a cell silently ends the column.
+        rows.append(
+            f"| {name} | {default.replace('|', chr(92) + '|')} | {set_with} "
+            f"| {description.replace('|', chr(92) + '|')} |"
+        )
+    return "\n".join(rows)
+
+
 def _to_pascal_case_schema(schema: dict) -> dict:
     """Convert JSON Schema keys to PascalCase for CFN SchemaDefinition.
 
@@ -1942,7 +2118,9 @@ class CfnTemplateGenerator:
             )
 
         # Generate deployment scripts
-        deploy_sh = self._generate_deploy_script(deployment_name, config, has_mcp_server, bundle_key, litellm)
+        deploy_sh = self._generate_deploy_script(
+            deployment_name, config, has_mcp_server, bundle_key, litellm, template=template
+        )
         # The template is passed so the notice can tell a log group from a data store
         # by TYPE rather than by guessing at the logical id — see _split_retained.
         teardown_sh = self._generate_teardown_script(retention_policy, retained_resources, template)
@@ -1961,6 +2139,9 @@ class CfnTemplateGenerator:
             bundle_key,
             has_knowledge_base="BedrockKnowledgeBase" in template["Resources"],
             template=template,
+            # The parameter table's "Set with" column reads the variable names out of
+            # the script, so the two documents cannot name different ones.
+            deploy_sh=deploy_sh,
         )
 
         # Serialize template
@@ -5378,7 +5559,12 @@ def handler(event, context):
         has_mcp_server: bool,
         bundle_key: str = STRANDS_BUNDLE_KEY,
         litellm: dict | None = None,
+        template: dict | None = None,
     ) -> str:
+        # Every parameter this script does not set itself, exposed as an environment
+        # variable. Derived from the template so the script cannot fall behind it.
+        parameter_passthrough = _deploy_parameter_passthrough((template or {}).get("Parameters", {}))
+
         # The design-time model, resolved exactly as the template's ModelId default and
         # the generated agent code resolve it. Named in the script so the recipient can
         # see which model they are about to deploy without reading the template.
@@ -5717,7 +5903,7 @@ if [[ -n "${{LAMBDA_SUBNET_IDS:-}}" ]]; then
     PARAM_OVERRIDES+=("LambdaSecurityGroupIds=$LAMBDA_SECURITY_GROUP_IDS")
     echo "Lambda functions will run in subnets $LAMBDA_SUBNET_IDS"
 fi
-
+{parameter_passthrough}
 # Deploy CloudFormation stack
 echo ""
 echo "Deploying CloudFormation stack..."
@@ -5915,6 +6101,7 @@ echo "Stack deleted."
         bundle_key: str = STRANDS_BUNDLE_KEY,
         has_knowledge_base: bool = False,
         template: dict | None = None,
+        deploy_sh: str = "",
     ) -> str:
         # The README used to name strands-mcp.zip unconditionally, including in
         # bundles whose template defaults to base.zip, so a recipient following it
@@ -6205,26 +6392,19 @@ lose."""
             quick_start = f"""chmod +x deploy.sh teardown.sh
 export LITELLM_API_KEY_SECRET_ARN=arn:aws:secretsmanager:...:secret:my-litellm-key
 ./deploy.sh my-agent {current_region()} my-artifacts-bucket"""
-            litellm_params = f"""
-| LiteLLMGatewayUrl | {litellm["mcp_url"]} | MCP endpoint on your LiteLLM proxy |
-| LiteLLMApiKeySecretArn | {litellm["secret_arn"] or "(required)"} | Secrets Manager ARN of the virtual key |
-| LiteLLMMcpServers | {",".join(litellm.get("servers") or [])} | Comma-separated `x-mcp-servers` scope |"""
         else:
             litellm_prereq = ""
             quick_start = f"""chmod +x deploy.sh teardown.sh
 ./deploy.sh my-agent {current_region()} my-artifacts-bucket"""
-            litellm_params = ""
 
-        # Only on the path that emits a policy engine, so the table does not document a
-        # parameter the recipient's template does not have.
-        policy_params = (
-            "\n| PolicyValidationMode | IGNORE_ALL_FINDINGS | How strictly AgentCore validates "
-            "the Cedar policies; see [Policy Validation](#policy-validation) |"
-            if has_policy
-            else ""
-        )
+        # Built from the template rather than written out here, so the table documents
+        # the parameters this recipient's template actually takes and nothing else --
+        # the conditional LiteLLM and policy rows this replaced had to be appended by
+        # hand, which is exactly how eleven unconditional ones came to be missing.
+        parameter_table = _readme_parameter_table((template or {}).get("Parameters", {}), deploy_sh)
+
         policy_validation_md = (
-            """
+            f"""
 ## Policy Validation
 
 The policies this stack creates name every tool they permit, one by one, and the policy
@@ -6244,7 +6424,7 @@ Set `FAIL_ON_ANY_FINDINGS` when you want the analysis to gate the deploy and are
 willing to retry:
 
 ```bash
-aws cloudformation deploy ... --parameter-overrides PolicyValidationMode=FAIL_ON_ANY_FINDINGS
+POLICY_VALIDATION_MODE=FAIL_ON_ANY_FINDINGS ./deploy.sh my-agent {current_region()} my-artifacts-bucket
 ```
 
 There is deliberately no parameter for AgentCore's `enforcementMode`. Its other value,
@@ -6319,17 +6499,21 @@ the artifacts bucket.
 
 ## Parameters
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| DeploymentName | {deployment_name} | Base name for all resources |
-| ModelId | {resolve_model_id(config)} | Bedrock model ID |
-| ArtifactsBucket | (required) | S3 bucket for code and bundles |
-| DependencyBundleKey | {bundle_key} | S3 key for dependency bundle |
-| DependencyBundleDigest | none | sha256 of the bundle zip, verified before it is merged |
-| PermissionsBoundaryArn | (empty) | Optional IAM permissions boundary for every role created |
-| UseExplicitRoleNames | true | `false` lets CloudFormation name the roles |
-| CustomerManagedKeyArn | (empty) | Optional KMS key ARN for data at rest |
-| LambdaReservedConcurrency | -1 | Concurrency cap for this stack's Lambdas; -1 is uncapped |{policy_params}{litellm_params}
+{parameter_table}
+
+Rows marked `deploy.sh` in **Set with** are filled in by the script itself, from its
+arguments and from the artifacts it uploads -- you do not set those. Every other row
+names an environment variable the script reads; leave it unset and the parameter keeps
+the default above.
+
+```bash
+LOG_RETENTION_IN_DAYS=90 ./deploy.sh my-agent {current_region()} my-artifacts-bucket
+```
+
+To set a parameter the script has no variable for, or to override one it fills in,
+pass it straight to CloudFormation with `--parameter-overrides` and deploy the
+`template.yaml` yourself -- `deploy.sh` is a convenience over `aws cloudformation
+deploy`, not a requirement.
 
 ## IAM
 

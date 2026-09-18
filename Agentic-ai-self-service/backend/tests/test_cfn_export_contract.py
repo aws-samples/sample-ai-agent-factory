@@ -36,6 +36,7 @@ from pathlib import Path
 import pytest
 import yaml
 from app.models.deployment_models import DeployRequest, RuntimeConfig
+from app.services import cfn_template_generator
 from app.services.cfn_template_generator import (
     DATA_BEARING_RESOURCE_TYPES,
     EMPTY_CONTENT_DIGEST,
@@ -3889,6 +3890,127 @@ class TestDependencyBundleIsObtainable:
 
 
 class TestGeneratedDocumentation:
+    @staticmethod
+    def _parameter_rows(readme):
+        """The Parameters table, as ``{name: {"default", "set_with", "description"}}``."""
+        section = readme.split("## Parameters")[1].split("\n## ")[0]
+        rows = [line for line in section.splitlines() if line.startswith("|") and not line.startswith("|-")]
+        cells = [[c.strip() for c in row.strip("|").split("|")] for row in rows]
+        return {
+            name: {"default": default, "set_with": set_with, "description": description}
+            for name, default, set_with, description in cells
+            if name != "Parameter"
+        }
+
+    @ALL_COMBINATIONS
+    def test_every_parameter_the_template_takes_is_documented(self, combo):
+        """The table was nine hand-written rows against a template emitting up to twenty.
+
+        The omissions were not obscure: both VPC knobs, ``LogRetentionInDays``,
+        ``AccessTokenValidityMinutes`` and every S3 key and digest were absent, so the
+        only way to find most of what a controlled account has to set was to read the
+        YAML -- in the document whose purpose is to save the recipient that. Two of the
+        rows that did exist had to be appended conditionally by hand, which is the
+        mechanism by which the unconditional ones went missing.
+
+        Asserted both ways. A parameter with no row is the original bug; a row with no
+        parameter tells the recipient to set something this template will reject.
+        """
+        bundle = _generate(**combo)
+        template = yaml.safe_load(bundle.template_yaml)
+        documented = self._parameter_rows(bundle.readme)
+        assert set(documented) == set(template["Parameters"]), (
+            f"undocumented: {sorted(set(template['Parameters']) - set(documented))}; "
+            f"documented but not in the template: {sorted(set(documented) - set(template['Parameters']))}"
+        )
+
+    @ALL_COMBINATIONS
+    def test_every_parameter_can_be_set_through_deploy_sh(self, combo):
+        """The README describing a parameter the script cannot pass is advice, not a knob.
+
+        Five were in exactly that state -- LogRetentionInDays, LambdaReservedConcurrency,
+        AccessTokenValidityMinutes, CognitoDomainSuffix and PolicyValidationMode. The
+        Quick Start tells the recipient to deploy with deploy.sh, so reaching any of
+        them meant abandoning the script and writing the aws cloudformation deploy
+        invocation by hand -- including PolicyValidationMode, the switch that turns on
+        the Cedar findings analysis, whose own README example had to do exactly that.
+
+        Asserted through the two sets the generator partitions parameters into, because
+        the failure this catches is a parameter belonging to neither. The README's
+        "Set with" column is asserted against the same variable name, since a knob the
+        recipient cannot find the name of is no more reachable than one that does not
+        exist.
+        """
+        bundle = _generate(**combo)
+        template = yaml.safe_load(bundle.template_yaml)
+        parameters = set(template["Parameters"])
+
+        owned = parameters & cfn_template_generator._DEPLOY_SCRIPT_OWNED_PARAMETERS
+        passthrough = parameters - owned
+        stale = cfn_template_generator._DEPLOY_SCRIPT_OWNED_PARAMETERS - parameters
+        documented = self._parameter_rows(bundle.readme)
+
+        for name in owned:
+            assert name in bundle.deploy_sh, (
+                f"{name} is declared as one deploy.sh sets itself, but the script never names it"
+            )
+        for name in passthrough:
+            variable = cfn_template_generator.parameter_env_var(name)
+            assert f'"{name}:{variable}"' in bundle.deploy_sh, (
+                f'{name} can only be set by bypassing deploy.sh; expected the pass-through pair "{name}:{variable}"'
+            )
+            assert documented[name]["set_with"] == f"`{variable}`", (
+                f"deploy.sh reads {variable} for {name}, but the README's Set with column "
+                f"says {documented[name]['set_with']}"
+            )
+        # A row saying `deploy.sh` must be telling the truth: the script has to set that
+        # parameter without asking, or the recipient has been told not to set the one
+        # thing standing between them and a deploy.
+        for name, row in documented.items():
+            if row["set_with"] == "`deploy.sh`":
+                assert name in owned, f"the README tells the recipient deploy.sh sets {name}, and it does not"
+        assert not stale - {
+            # Only emitted when the canvas has gateway tools or custom tools, which
+            # not every combination does; the script sets them when they exist.
+            "ToolLambdaCodeKey",
+            "CustomToolCodeKey",
+            # Only on the LiteLLM path.
+            "LiteLLMGatewayUrl",
+            "LiteLLMApiKeySecretArn",
+            "LiteLLMMcpServers",
+            # Only when the export has an MCP server.
+            "McpServerCodeKey",
+            "McpServerCodeDigest",
+        }, f"declared as deploy.sh-owned but not in this template: {sorted(stale)}"
+
+    def test_the_litellm_parameters_are_owned_by_the_script_not_the_passthrough(self):
+        """The virtual key's ARN is a positional argument, and must stay one.
+
+        If LiteLLMApiKeySecretArn ever fell out of the owned set it would be handled by
+        the generic pass-through instead, which would quietly drop deploy.sh's preflight
+        check -- the one that fails before a single artifact is uploaded when the canvas
+        carried no ARN and the parameter therefore has no default.
+        """
+        bundle = _generate(gateway_config=_litellm())
+        for name in ("LiteLLMGatewayUrl", "LiteLLMApiKeySecretArn", "LiteLLMMcpServers"):
+            assert name in cfn_template_generator._DEPLOY_SCRIPT_OWNED_PARAMETERS
+            assert f'"{name}:' not in bundle.deploy_sh, f"{name} reached the generic pass-through"
+
+    @ALL_COMBINATIONS
+    def test_no_parameter_row_is_empty_or_truncated_mid_markup(self, combo):
+        """The descriptions are derived, so a bad Description shows up here, not in review.
+
+        Two failure shapes the derivation can produce and this catches: a parameter
+        whose Description is missing entirely leaves an empty cell, and one whose first
+        sentence ends inside a code span or a link leaves unbalanced markup that
+        swallows the rest of the row when rendered.
+        """
+        for name, row in self._parameter_rows(_generate(**combo).readme).items():
+            description = row["description"]
+            assert description, f"{name} has an empty description cell"
+            assert description.count("`") % 2 == 0, f"{name} has an unclosed code span: {description}"
+            assert description.count("[") == description.count("]"), f"{name} has an unbalanced link: {description}"
+
     @ALL_COMBINATIONS
     def test_data_protection_section_matches_the_template(self, combo):
         bundle = _generate(**combo)
