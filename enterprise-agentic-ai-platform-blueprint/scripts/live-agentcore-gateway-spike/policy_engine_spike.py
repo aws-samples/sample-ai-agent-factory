@@ -254,16 +254,28 @@ def build_config(args: argparse.Namespace) -> PolicyEngineConfig:
     scratch = os.environ.get("KIROCREW_SCRATCH")
     if not scratch:
         raise SpikeError("KIROCREW_SCRATCH must be set; refusing shared /tmp state")
-    scratch_path = Path(scratch)
-    state_path = (
-        Path(args.state_file)
-        if args.state_file
-        else scratch_path / f"{names.prefix}-policy-engine-state.json"
+    scratch_path = Path(scratch).resolve()
+
+    def scratch_file(raw: str | None, default_name: str, label: str) -> Path:
+        candidate = Path(raw).expanduser() if raw else scratch_path / default_name
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(scratch_path)
+        except ValueError as error:
+            raise SpikeError(f"{label} must remain under KIROCREW_SCRATCH") from error
+        if resolved == scratch_path:
+            raise SpikeError(f"{label} must name a file, not the scratch directory")
+        return resolved
+
+    state_path = scratch_file(
+        args.state_file,
+        f"{names.prefix}-policy-engine-state.json",
+        "--state-file",
     )
-    evidence_path = (
-        Path(args.evidence_file)
-        if args.evidence_file
-        else scratch_path / f"{names.prefix}-policy-engine-evidence.json"
+    evidence_path = scratch_file(
+        args.evidence_file,
+        f"{names.prefix}-policy-engine-evidence.json",
+        "--evidence-file",
     )
     return PolicyEngineConfig(
         account_id=str(args.account_id),
@@ -322,6 +334,15 @@ class SpikeEvidence(Evidence):
             raise SpikeError("Evidence unknowns field is not an array")
         unknowns.append(record)
         self.store.write(self.document)
+
+    def finish(self, status: str) -> None:
+        """Keep a terminal run verdict when a later cleanup-only pass succeeds."""
+        current = self.document.get("status")
+        if status == "cleanup-passed" and current in {"passed", "failed"}:
+            self.document["lastCleanupAt"] = utc_now()
+            self.store.write(self.document)
+            return
+        super().finish(status)
 
 
 # --------------------------------------------------------------------------

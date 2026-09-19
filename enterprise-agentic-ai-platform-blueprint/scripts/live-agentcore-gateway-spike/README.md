@@ -214,7 +214,8 @@ Proof obligations, all recorded without credentials or payload text:
   identity plus tags before every delete. Targets and policies must match the
   finite generated name set; a prefix-sharing resource is not accepted.
 - `all` runs cleanup in `finally`, always includes the expired-token wait, and
-  fails if any resource class remains.
+  fails if any resource class remains. A later cleanup-only pass appends its
+  inventory without overwriting the original `passed` or `failed` verdict.
 - State and evidence are written only under `$KIROCREW_SCRATCH`, mode `0600`.
 - Never stores or prints a password, a client secret, an access token, an
   `Authorization` header, a tool argument value, or a tool response. App clients

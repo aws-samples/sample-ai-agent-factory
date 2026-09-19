@@ -1250,3 +1250,48 @@ def test_auth_failure_status_contract_is_case_specific() -> None:
         "client_not_allow_listed": 403,
     }
     assert spike_module.EXPIRED_TOKEN_HTTP_STATUS == 403
+
+
+@pytest.mark.parametrize("terminal", ["passed", "failed"])
+def test_cleanup_finish_preserves_terminal_run_status(
+    config: spike_module.PolicyEngineConfig,
+    terminal: str,
+) -> None:
+    evidence = spike_module.SpikeEvidence(config.evidence_path, config)
+    evidence.finish(terminal)
+    first = json.loads(config.evidence_path.read_text(encoding="utf-8"))
+    evidence.finish("cleanup-passed")
+    final = json.loads(config.evidence_path.read_text(encoding="utf-8"))
+    assert final["status"] == terminal
+    assert final["finishedAt"] == first["finishedAt"]
+    assert "lastCleanupAt" in final
+
+
+def test_fresh_cleanup_finish_records_cleanup_passed(
+    config: spike_module.PolicyEngineConfig,
+) -> None:
+    evidence = spike_module.SpikeEvidence(config.evidence_path, config)
+    evidence.finish("cleanup-passed")
+    document = json.loads(config.evidence_path.read_text(encoding="utf-8"))
+    assert document["status"] == "cleanup-passed"
+
+
+@pytest.mark.parametrize("field", ["state_file", "evidence_file"])
+def test_config_refuses_explicit_path_outside_scratch(
+    scratch: Path,
+    field: str,
+) -> None:
+    outside = scratch.parent / f"outside-{field}.json"
+    with pytest.raises(SpikeError, match="must remain under KIROCREW_SCRATCH"):
+        spike_module.build_config(_args(**{field: str(outside)}))
+
+
+def test_config_refuses_symlink_escape_from_scratch(scratch: Path) -> None:
+    outside = scratch.parent / "outside-directory"
+    outside.mkdir()
+    link = scratch / "escape"
+    link.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(SpikeError, match="must remain under KIROCREW_SCRATCH"):
+        spike_module.build_config(
+            _args(evidence_file=str(link / "evidence.json"))
+        )
