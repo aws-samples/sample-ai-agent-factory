@@ -952,7 +952,12 @@ class TestSourceIntegrity:
 
         # And states what actually happens, including the limit of it: hashing the
         # object proves provenance from the bucket, not from a build you trust.
-        assert "downloads" in readme and "hashes the bytes themselves" in readme
+        # This wording is narrower than the phrase it replaced ("downloads ... hashes the
+        # bytes themselves"), because the branch that used to hash its own local copy is
+        # gone: the object in the bucket is now the only thing any branch hashes, and the
+        # run that just uploaded it is the case that has to be said out loud.
+        assert "downloading the object from" in readme
+        assert "including on the run that just uploaded it" in readme
         # Substring kept short deliberately: the README is hard-wrapped, so a longer
         # phrase would straddle a newline and fail for reasons of layout, not content.
         assert "cannot, by itself, tell you" in readme
@@ -1201,11 +1206,56 @@ class TestDependencyBundleIntegrity:
         assert proc.returncode == 0, proc.stderr
         handler._verify_bundle_digest(blob.read_bytes(), proc.stdout.strip())  # must not raise
 
-    def test_the_deploy_script_hashes_the_bundle_it_uploads(self):
+    def test_the_deploy_script_hashes_the_object_in_the_bucket(self):
+        """Not the local file — including in the branch that just uploaded it.
+
+        The two can differ, and it is not hypothetical. Measured live: two first-time
+        deploys from one bucket both found ``agentcore-deps/base.zip`` absent, both built
+        it, and both uploaded. Each recorded the digest of ITS OWN local zip, so the one
+        whose upload lost the race had recorded bytes that were no longer in the bucket,
+        and the provider Lambda failed it into ROLLBACK_COMPLETE — correctly, over a
+        difference that was only embedded mtimes. Hashing the object closes the race,
+        including the case where the other build legitimately resolved a newer wheel.
+
+        Pinned as "no branch hashes $BUNDLE_FILE" rather than as the presence of the
+        helper, because the defect was a branch that reached for the local copy.
+        """
         script = _generate().deploy_sh
-        assert 'BUNDLE_DIGEST="sha256:$(sha256_stdin <"$BUNDLE_FILE")"' in script
+        assert 'BUNDLE_DIGEST="$(bundle_digest_in_bucket)"' in script
+        assert script.count('BUNDLE_DIGEST="$(bundle_digest_in_bucket)"') == 2, (
+            "one of the two branches still records a digest of something other than the object"
+        )
+        assert 'sha256_stdin <"$BUNDLE_FILE"' not in script, "a branch hashes the local zip"
         assert '"DependencyBundleDigest=$BUNDLE_DIGEST"' in script
         assert "DEPENDENCY_BUNDLE_DIGEST" in script, "no way to pin the digest by hand"
+
+    def test_a_digest_that_cannot_be_read_back_stops_the_deploy(self):
+        """The alternative is worse: carrying on with no digest turns the one check that
+        catches a substituted bundle into something a transient error silently disables.
+        """
+        helper = _generate().deploy_sh.split("bundle_digest_in_bucket() {", 1)[1].split("\n}\n", 1)[0]
+        assert "exit 1" in helper
+        assert "s3:GetObject" in helper, "the operator is not told which permission is missing"
+
+    def test_the_bundle_build_is_byte_reproducible(self):
+        """Two runs over the same package versions must produce the same bytes.
+
+        Because the recorded digest is a hash of those bytes. Measured before this change:
+        two builds minutes apart came out byte-count identical to the digit (49,926,304)
+        and sha256-different, purely from embedded mtimes. Measured after: identical
+        sha256 (``99fa3455…``), 9,630 members, ``unzip -t`` clean.
+
+        Three causes, all of them inside this script's control: extra fields carrying the
+        local uid/gid and high-precision times (``-X``), per-file mtimes (one fixed
+        ``touch``; 1980-01-01 because an earlier date is not representable in a zip), and
+        member order, which ``zip -r`` takes from filesystem traversal order — so two
+        identical trees can produce two different byte streams with no timestamp involved.
+        """
+        script = _generate().build_bundle_sh
+        assert "zip -q -X" in script, "the archive keeps the extra fields that differ per machine"
+        assert "touch -t 198001010000" in script, "member mtimes are still whatever the build ran at"
+        assert "find . -print | sort | zip" in script, "member order is left to filesystem traversal"
+        assert "zip -r -q " not in script, "a non-deterministic zip -r survived"
 
     def test_the_digest_is_omitted_rather_than_sent_as_none(self):
         """`cloudformation deploy` keeps a parameter it is not given (UsePreviousValue),
@@ -3664,6 +3714,178 @@ class TestMcpServerToolsAreGeneratable:
         assert any("sample support tools" in r.getMessage() for r in caplog.records)
 
 
+def _protocol_of(protocol):
+    """``ProtocolConfiguration`` on the runtime for a canvas that asked for *protocol*."""
+    config = RuntimeConfig(name="exporttest", model={"modelId": MODEL_ID}, protocol=protocol)
+    template = yaml.safe_load(
+        CfnTemplateGenerator().generate(DeployRequest(config=config, nodeId="node-1")).template_yaml
+    )
+    runtimes = [r for r in template["Resources"].values() if r["Type"] == "AWS::BedrockAgentCore::Runtime"]
+    assert len(runtimes) == 1, "expected exactly one runtime to assert about"
+    return runtimes[0]["Properties"]["ProtocolConfiguration"]
+
+
+class TestTheDeclaredProtocolIsTheOneTheContainerSpeaks:
+    """``ProtocolConfiguration`` describes the container, not the canvas.
+
+    AgentCore uses it to decide how to talk to the image. Declare something the code does
+    not serve and the handshake fails before the app is ever reached — which means there
+    is no traceback anywhere, and the absence of errors reads as health.
+    """
+
+    def test_an_a2a_canvas_is_declared_http(self):
+        """Because that is what ``a2a_codegen`` actually emits.
+
+        It emits a ``BedrockAgentCoreApp`` with an ``@app.entrypoint`` — an HTTP server —
+        and implements A2A as an *interop* layer on top: the agent card is a Starlette
+        route at ``/.well-known/agent-card.json`` and peers are reached over plain HTTPS.
+        That is deliberate and documented at ``a2a_codegen.py`` lines 23-26: the dependency
+        bundle ships the Strands and Bedrock A2A glue but not the ``a2a-sdk`` package that
+        glue hard-imports, so ``serve_a2a``/``A2AServer`` would ``ImportError`` at runtime.
+
+        Forwarding ``"A2A"`` therefore declared a protocol the container does not speak.
+        Measured live: the runtime reached READY and ``InvokeAgentRuntime`` returned
+        **HTTP 424** for a plain payload and for a well-formed A2A JSON-RPC
+        ``message/send`` alike. A customer exporting an A2A canvas got a green stack they
+        could never invoke.
+
+        Isolated by a matched pair: two stacks whose ``agent.py`` hashed the same
+        (``6500e75f…``) and whose packaged code digest was the same
+        (``sha256:a920d769…``), differing by one line of template — the declared
+        ``ProtocolConfiguration``. The ``HTTP`` arm returned ``statusCode 200``; the
+        ``A2A`` arm returned HTTP 424. ``serverProtocol`` was read back from the control
+        plane in both arms, so the declaration is what differed, not the code.
+
+        The request never reaches the container, and the oracle for that matters: the
+        first probe cited a zero-byte log group, which is not evidence — ``storedBytes``
+        reads 0 on groups that hold events, and with ``--qualifier <stack>_endpoint`` the
+        container writes to the endpoint-named group, not ``-DEFAULT``. Re-measured on
+        ``lastEventTimestamp`` per stream: ``None`` in the A2A arm, populated in the HTTP
+        arm. Stream existence alone would have proved nothing either.
+        """
+        assert _protocol_of("A2A") == "HTTP"
+
+    def test_mcp_is_passed_through(self):
+        """The MCP path emits a real MCP server, so its declaration is honest.
+
+        Pinned because the A2A fix is a mapping, and a mapping written one line too wide
+        would silently downgrade every MCP export to HTTP — where ``tools/list`` would
+        fail the same unfindable way, from the opposite direction.
+        """
+        assert _protocol_of("MCP") == "MCP"
+
+    def test_the_default_is_http(self):
+        assert _protocol_of("HTTP") == "HTTP"
+
+    def test_the_canvas_a2a_config_reaches_the_generated_agent(self):
+        """The export used to drop ``a2aConfig`` on the floor.
+
+        Found live: two bundles exported from canvases differing only in ``a2aConfig``
+        produced byte-identical ``agent.py`` (sha256 ``4254c923…``), because the
+        ``generate_agent_code`` call in ``generate()`` never passed it, even though both
+        the request field and the parameter existed. The card then advertised no skills
+        and no description — and, worse, ``call_a2a_peer``'s SSRF guard is deliberately
+        fail-closed on an empty allowlist, so an exported A2A agent refused **every**
+        peer. That is the one thing A2A is for, and nothing failed to say so.
+
+        Asserted on the generated source rather than on the live card because the card is
+        built from these values at runtime; a live arm confirmed the builder is sound by
+        injecting ``A2A_CAPABILITIES`` through the runtime environment and getting two
+        fully-formed skills back.
+        """
+        bundle = CfnTemplateGenerator().generate(
+            DeployRequest(
+                config=RuntimeConfig(name="exporttest", model={"modelId": MODEL_ID}, protocol="A2A"),
+                nodeId="node-1",
+                a2aConfig={
+                    "capabilities": ["billing-lookup", "refund-quote"],
+                    "advertised_description": "Handles billing questions.",
+                    "peer_allowlist": ["peer.example.com"],
+                },
+            )
+        )
+
+        code = bundle.agent_code
+        assert "def call_a2a_peer" in code, "not the A2A template — the rest would be vacuous"
+        assert '_DEFAULT_CAPABILITIES = ["billing-lookup", "refund-quote"]' in code
+        assert '_DEFAULT_PEER_ALLOWLIST = ["peer.example.com"]' in code
+        assert "Handles billing questions." in code
+        # The empty literals are what the defect produced, so pin their absence too:
+        # passing the config but reading the wrong key would look identical otherwise.
+        assert "_DEFAULT_CAPABILITIES = []" not in code
+        assert "_DEFAULT_PEER_ALLOWLIST = []" not in code
+
+    def test_the_readme_tells_an_a2a_recipient_how_to_reach_the_agent(self):
+        """Three things an A2A recipient cannot get from the template.
+
+        Why the runtime says ``HTTP`` when they asked for A2A (otherwise the first
+        assumption is that the export is broken); how to fetch the card, given that
+        ``GetAgentCard`` is refused for an HTTP-declared runtime; and that the peer
+        allowlist is fail-closed, which is the one that turns a stack with nothing
+        wrong in it into an agent that refuses every peer.
+        """
+        bundle = CfnTemplateGenerator().generate(
+            DeployRequest(
+                config=RuntimeConfig(name="exporttest", model={"modelId": MODEL_ID}, protocol="A2A"),
+                nodeId="node-1",
+                a2aConfig={
+                    "capabilities": ["billing-lookup"],
+                    "peer_allowlist": ["peer.example.com"],
+                },
+            )
+        )
+
+        readme = bundle.readme
+        assert "## A2A (Agent-to-Agent)" in readme
+        assert "424" in readme, "the cost of declaring A2A instead is the whole reason"
+        assert "agent/getAuthenticatedExtendedCard" in readme
+        assert "GetAgentCard API is only supported for A2A agents" in readme
+        assert "fail-closed" in readme
+        # The lists are per-export, not boilerplate: a README naming a capability the
+        # card does not carry sends the recipient to debug a working deploy.
+        assert "`billing-lookup`" in readme
+        assert "`peer.example.com`" in readme
+        # And the flag that this is not optional CLI trivia — without it the CLI
+        # base64-decodes the payload and the example in the README does not run.
+        assert "--cli-binary-format raw-in-base64-out" in readme
+
+    def test_a_non_a2a_export_gets_no_a2a_section(self):
+        """The negative control. Without it the section could be unconditional and
+        every assertion above would still pass."""
+        readme = (
+            CfnTemplateGenerator()
+            .generate(
+                DeployRequest(
+                    config=RuntimeConfig(name="exporttest", model={"modelId": MODEL_ID}, protocol="HTTP"),
+                    nodeId="node-1",
+                )
+            )
+            .readme
+        )
+
+        assert "## A2A (Agent-to-Agent)" not in readme
+        assert "agent/getAuthenticatedExtendedCard" not in readme
+
+    def test_an_a2a_export_with_no_peers_says_it_refuses_every_peer(self):
+        """A canvas that named no peers exports an agent whose allowlist is empty, and
+        an empty allowlist refuses every peer. Nothing in the template, the stack events
+        or the logs says so, so the README is the only place it can be said."""
+        readme = (
+            CfnTemplateGenerator()
+            .generate(
+                DeployRequest(
+                    config=RuntimeConfig(name="exporttest", model={"modelId": MODEL_ID}, protocol="A2A"),
+                    nodeId="node-1",
+                )
+            )
+            .readme
+        )
+
+        assert "## A2A (Agent-to-Agent)" in readme
+        assert "refuses every peer" in readme
+        assert "A2A_PEER_ALLOWLIST" in readme
+
+
 class TestLambdaLogsAreOwnedAndBounded:
     """Every Lambda's log group belongs to the stack and expires.
 
@@ -3702,7 +3924,10 @@ class TestLambdaLogsAreOwnedAndBounded:
         Adding a log group under the default `/aws/lambda/<function>` name to a stack
         whose Lambda has already run fails the update with "already exists": the group
         exists but belongs to nobody, so CloudFormation cannot adopt it. Naming it
-        under the stack means the name has never existed.
+        under the stack means no existing deployment has a group by that name.
+
+        It does not mean the name is unused for ever — Lambda recreates the stack-scoped
+        one after teardown, which is what the sweep above exists for.
         """
         resources = _template(**COMPONENT_COMBINATIONS["everything"])["Resources"]
         for logical_id, resource in resources.items():
@@ -3741,6 +3966,114 @@ class TestLambdaLogsAreOwnedAndBounded:
                 continue
             assert resource["DeletionPolicy"] == "Delete", logical_id
             assert resource["UpdateReplacePolicy"] == "Delete", logical_id
+
+    def test_teardown_removes_the_log_group_lambda_brings_back(self):
+        """``DeletionPolicy: Delete`` is not enough, because the group returns.
+
+        Measured live on **15 of 15** torn-down stacks: after a clean teardown (rc=0,
+        stack DELETE_COMPLETE) ``/aws/lambda/<STACK>/CfnProviderLambda`` exists again,
+        with a ``creationTime`` equal to the teardown. CloudFormation really does delete
+        the declared group; the provider Lambda goes on logging after sending its CFN
+        response, and Lambda recreates the group to hold what it writes. No template
+        attribute can prevent that — the group that comes back was made by the Lambda
+        service, after the resource that owned it was gone.
+
+        An earlier version of this docstring said the group held "only the provider's own
+        Delete-phase lines". That was measured and it is wrong: one such group, created
+        27s after DELETE_COMPLETE, held **32 events** spanning the whole execution
+        environment — ``INIT_START`` and the Create-phase custom-resource lines from three
+        minutes earlier, through the Delete-phase ones. What survives is the deployment's
+        provider log, not a tail of it, which is why the retention consequence below
+        matters more than the wording suggested.
+
+        So the teardown has to delete it. Two things break otherwise: the next deploy at
+        the same stack name fails at ``[AWS::EarlyValidation::ResourceExistenceCheck]``
+        (isolated by control — deleting only this group made the identical deploy.sh
+        succeed), and the recreated group carries no ``retentionInDays``, so a recipient
+        who chose Delete is left with a group that keeps its contents for ever
+        (ARCC cnt_qf7wYkuSRSM5fl).
+
+        The teardown already *described* all of this and told the operator to run the
+        command themselves. Advice is not a fix: it only appeared on the Retain path, and
+        on the Delete path — the one where the stack is supposed to leave nothing — it was
+        never printed at all.
+        """
+        script = _generate(**COMPONENT_COMBINATIONS["everything"], data_retention_policy="Delete").teardown_sh
+        assert "sweep_resurrected_log_groups" in script, "teardown does not clean up the resurrected groups"
+        # Defined AND called. A helper nothing invokes is the same as the advice it replaced.
+        assert script.count("sweep_resurrected_log_groups") >= 2, "the sweep is defined but never runs"
+        assert "aws logs delete-log-group" in script
+        # After the stack is gone, not before: while the delete is in flight the provider
+        # Lambda has not finished writing, and a group deleted then simply comes back.
+        assert script.index("wait stack-delete-complete") < script.index("\nsweep_resurrected_log_groups")
+
+    def test_the_readme_explains_the_redeploy_trap_on_the_delete_path_too(self):
+        """It used to explain it only where it was already handled.
+
+        The Retain path has a whole section on the ``ResourceExistenceCheck`` failure,
+        because there the groups are kept on purpose and the reader has to deal with it.
+        The Delete path said the opposite — that a same-name redeploy works "because
+        nothing is left behind to collide with" — which is the specific claim 15 of 15
+        live teardowns contradicted. It is true NOW, but only because teardown sweeps, so
+        the reader who deletes the stack from the console needs to know that.
+        """
+        readme = _generate(**COMPONENT_COMBINATIONS["everything"], data_retention_policy="Delete").readme
+        assert "nothing is left behind to collide with" not in readme, "the false claim is back"
+        assert "ResourceExistenceCheck" in readme, "the Delete path does not name the failure"
+        assert "after it has sent its CloudFormation response" in readme, "the cause is not explained"
+        # And how much is in the group it leaves behind, which decides whether a reader
+        # treats the sweep as tidiness or as the retention control it actually is.
+        assert "32 events" in readme, "the Delete path understates what the group holds"
+        assert "/aws/lambda/<stack-name>/" in readme, "no by-hand sweep for a console delete"
+
+    def test_the_sweep_is_confined_to_this_stacks_lambda_groups(self):
+        """It must not reach the groups that hold conversations.
+
+        AgentCore's own groups are under ``/aws/bedrock-agentcore/runtimes/`` and hold the
+        agent's conversations; the stack governs their retention and deliberately never
+        deletes them. A sweep written one prefix too wide would make teardown destroy the
+        transcripts, which is the opposite of the retention choice it is honouring.
+        """
+        script = _generate(**COMPONENT_COMBINATIONS["everything"], data_retention_policy="Delete").teardown_sh
+        sweep = script.split("sweep_resurrected_log_groups() {", 1)[1].split("\n}\n", 1)[0]
+        assert 'prefix="/aws/lambda/$STACK_NAME/"' in sweep, "the sweep is not scoped to this stack"
+        assert RUNTIME_LOG_PREFIX not in sweep, "the sweep would delete the agent's conversation logs"
+
+    def test_the_sweep_does_not_run_when_the_recipient_asked_to_keep_the_logs(self):
+        """Under Retain the groups are kept on purpose, with their contents.
+
+        The same sweep would delete exactly the record the recipient exported the stack to
+        preserve — and it would look like cleanup while doing it. The Retain path keeps the
+        notice that explains the redeploy consequence and leaves the decision with the
+        operator, which is right when the logs are the point.
+        """
+        script = _generate(**COMPONENT_COMBINATIONS["everything"], data_retention_policy="Retain").teardown_sh
+        assert "sweep_resurrected_log_groups" not in script, "teardown would destroy deliberately retained logs"
+        assert "aws logs delete-log-group" in script, "the operator is not told how to remove them by hand"
+
+    def test_the_sweep_says_what_it_could_not_do(self):
+        """Every call in it tolerates failure, so finishing proves nothing.
+
+        Same rule the S3 purge had to learn: a cleanup loop that swallows per-item errors
+        cannot report success by completing. And the diagnostic must not be gated by the
+        permission whose absence it reports — losing ``logs:DescribeLogGroups`` breaks the
+        enumeration itself, which is a different branch from a delete being denied.
+        """
+        script = _generate(**COMPONENT_COMBINATIONS["everything"], data_retention_policy="Delete").teardown_sh
+        sweep = script.split("sweep_resurrected_log_groups() {", 1)[1]
+        assert "logs:DescribeLogGroups" in sweep, "a denied listing is reported without naming what is missing"
+        assert "logs:DeleteLogGroup" in sweep, "a denied delete is reported without naming what is missing"
+        # The symptom an operator will actually meet, in both failure branches, because
+        # the error itself names no resource and points nowhere.
+        assert sweep.count("ResourceExistenceCheck") >= 2
+        # One group that both passes fail to delete is one group. Found by running this
+        # script against a stubbed CLI that refused every delete: the warning named
+        # /aws/lambda/stubstack/CfnProviderLambda twice, which reads as two leftovers.
+        # The list is therefore rebuilt per pass rather than appended across passes.
+        # Between the passes and the deletes, so it is the reset inside the loop rather
+        # than the `local` declaration above it.
+        per_pass = sweep.split("\n}\n", 1)[0].split("for pass in", 1)[1].split("for group in", 1)[0]
+        assert 'left=""' in per_pass, "failures accumulate across passes"
 
 
 RUNTIME_LOG_PREFIX = "/aws/bedrock-agentcore/runtimes/"
@@ -4954,6 +5287,50 @@ class TestDependencyBundleIsObtainable:
         script = _generate().build_bundle_sh
         for flag in ("--platform manylinux2014_aarch64", "--python-version 3.13", "--only-binary=:all:"):
             assert flag in script, f"the build script does not pass {flag}"
+
+    def test_the_build_script_verifies_the_architecture_it_asked_for(self):
+        """Asking pip for aarch64 and checking that it delivered are different things.
+
+        Run from scratch on a developer Mac the script produced a correct bundle, so
+        the flags work — but the failure mode if they ever stop working is the worst
+        one in this project: the stack reaches CREATE_COMPLETE, and the agent fails at
+        invoke with "Runtime initialization time exceeded", which reads as a
+        performance problem, with the real error only in the runtime's own log group.
+        That is worth a build-time check rather than a deploy-time mystery.
+
+        The check must read ELF magic, not filenames. A filename check looks correct
+        and rejects a correct bundle: measured on a real build, 26 of 48 native files
+        carry no architecture in the name — abi3 wheels ship
+        ``cryptography/hazmat/bindings/_rust.abi3.so``, and manylinux wheels vendor
+        bare libraries like ``pillow.libs/libjpeg-45fb3b13.so.62.4.0``.
+        """
+        script = _generate().build_bundle_sh
+        assert "7f454c46" in script, "the check does not verify the ELF magic bytes"
+        assert '"b7"' in script, "the check does not verify e_machine is AArch64"
+        # Both halves matter: Mach-O fails the magic bytes, an x86_64 Linux wheel
+        # passes them and is only caught by e_machine. Verified by patching byte 18 of
+        # a real aarch64 extension to 0x3e and watching the script reject it.
+        assert "not-elf" in script and "other-arch" in script, (
+            "the two failure modes are not distinguished, so the operator cannot tell "
+            "a wrong-OS wheel from a wrong-CPU one"
+        )
+        assert "exit 1" in script, "a wrong-architecture bundle must not be uploadable"
+        # And it must not gate on names, which would reject the 26 untagged files.
+        assert "aarch64-linux-gnu.so" not in script, "the check gates on filenames"
+
+    def test_the_build_script_does_not_end_a_good_build_shouting_error(self):
+        """pip ends a *successful* ``--target`` install with a line beginning "ERROR:".
+
+        Measured on a developer machine: 20 lines of "X requires Y, but you have Z
+        which is incompatible", led by "ERROR: pip's dependency resolver does not
+        currently take into account all the packages that are installed", and exit
+        status 0 with a correct bundle. The conflicts are against the operator's
+        ambient environment, which a ``--target`` install never touches and the
+        runtime never sees. But this script is the one thing we ask the recipient to
+        run before they can deploy at all, so "ERROR" in its output costs us the
+        deployment, not just the polish.
+        """
+        assert "--no-warn-conflicts" in _generate().build_bundle_sh
 
     @ALL_COMBINATIONS
     def test_the_build_script_ships_in_the_download(self, combo):

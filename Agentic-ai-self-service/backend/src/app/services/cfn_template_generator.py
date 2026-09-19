@@ -1133,11 +1133,22 @@ def _apply_lambda_log_groups(template: dict) -> list[str]:
     The group name is deliberately NOT the default ``/aws/lambda/<function>``. Adding
     a log group resource under the default name to a stack whose Lambda has already
     run fails the update with "already exists" — the group exists but belongs to
-    nobody, so CloudFormation cannot adopt it. Naming it under the stack means the
-    name has never existed before, so this is safe to apply to a stack already in
+    nobody, so CloudFormation cannot adopt it. Naming it under the stack means no
+    *existing* deployment has such a group, so this is safe to add to a stack already in
     service; ``LoggingConfig.LogGroup`` points the function at it. The roles authorize
     ``log-group:*`` in this account and region (see _log_group_resources), so no role
     change is needed.
+
+    That does NOT make the name unused for ever, which an earlier version of this comment
+    claimed. Measured live on 15 of 15 torn-down stacks: the provider Lambda goes on
+    logging after sending its CFN response, so Lambda recreates
+    ``/aws/lambda/<stack>/CfnProviderLambda`` seconds after CloudFormation deleted it —
+    without retention, and outside any stack. And not with a tail of the run either: one
+    such group, created 27s after DELETE_COMPLETE, held 32 events from ``INIT_START`` and
+    the Create-phase lines onward. Redeploying at the same stack name then
+    fails at ``[AWS::EarlyValidation::ResourceExistenceCheck]``. Nothing in a template can
+    prevent that; the generated ``teardown.sh`` sweeps it instead, see
+    _TEARDOWN_LOG_GROUP_SWEEP_SH.
 
     ``KmsKeyId`` is not set here either: ``AWS::Logs::LogGroup`` is in
     CUSTOMER_KEY_PROPERTIES, so ``_apply_customer_key`` sets it under the same
@@ -1579,6 +1590,78 @@ _OTEL_PACKAGES = [
 # problem and sends you looking in the wrong place.
 _MCP_PIN = "mcp<2"
 
+# The README section an A2A export gets, and only an A2A export. Three things in it are
+# invisible to a recipient reading the template: why the runtime is declared HTTP when the
+# canvas said A2A, how a peer reaches the agent card given that the data plane refuses
+# GetAgentCard for an HTTP-declared runtime, and -- the one that silently stops the agent
+# doing its job -- that call_a2a_peer's allowlist is fail-closed, so an export with no
+# configured peers refuses every one of them on a stack with nothing wrong in it.
+#
+# A plain string with __TOKEN__ substitution rather than an f-string: the examples are JSON
+# and a heredoc, and doubling every brace in them is how a generated document acquires
+# stray braces. Interpolated into the README f-string, whose values are never rescanned.
+_README_A2A_MD = """
+## A2A (Agent-to-Agent)
+
+This runtime is declared `ProtocolConfiguration: HTTP` deliberately, even though the
+canvas asked for A2A. The container serves a `BedrockAgentCoreApp` entrypoint and
+implements A2A as an interop layer on top of it, because the dependency bundle ships the
+Strands and Bedrock A2A glue but not the `a2a-sdk` package that glue hard-imports.
+Declaring `A2A` instead produces a runtime that reaches READY and then answers **HTTP
+424** to every call — measured — with no traceback anywhere, because the request is
+rejected before it reaches your code.
+
+A peer calls it with an A2A JSON-RPC envelope as the invoke payload:
+
+```bash
+cat > /tmp/send.json <<'JSON'
+{"jsonrpc": "2.0", "id": "1", "method": "message/send",
+ "params": {"message": {"role": "user", "messageId": "m-1",
+                        "parts": [{"kind": "text", "text": "hello"}]}}}
+JSON
+
+aws bedrock-agentcore invoke-agent-runtime \\
+  --agent-runtime-arn <RuntimeArn> --qualifier <endpoint-name> \\
+  --runtime-session-id "$(uuidgen)" --content-type application/json \\
+  --payload file:///tmp/send.json --cli-binary-format raw-in-base64-out \\
+  --region <region> /tmp/send.out
+```
+
+`--cli-binary-format raw-in-base64-out` is not optional: without it the CLI tries to
+base64-*decode* the payload. The response body goes to the outfile, not to stdout. The
+reply is a JSON-RPC response object carrying the `id` you sent. An unsupported method
+comes back as `-32601` and a `message/send` with no text part as `-32602`, and neither
+invokes the model. A plain `{"prompt": "..."}` payload still works as well.
+
+**The agent card.** The container serves it at `GET /.well-known/agent-card.json`, which
+a peer holding only a runtime ARN cannot reach: the data plane's `GetAgentCard` operation
+answers `400 "GetAgentCard API is only supported for A2A agents"` for an HTTP-declared
+runtime, and declaring A2A to unlock it is what causes the 424 above. One declaration
+cannot buy both. Fetch the card through the entrypoint instead, with
+`{"jsonrpc": "2.0", "id": "1", "method": "agent/getAuthenticatedExtendedCard"}`.
+
+**Peers are allowlisted, and the guard is fail-closed.** `call_a2a_peer` refuses any host
+that is not on the allowlist, and an empty allowlist refuses *every* peer — on a stack
+with nothing wrong in it, no error in the template and nothing in the stack events. It
+also refuses plain HTTP, loopback, link-local (including the instance metadata endpoint
+and the Lambda credentials endpoint), and RFC1918 addresses, whatever the allowlist says —
+including when it is the peer's *own card* that names one, since the invoke URL the card
+returns is re-validated before anything is sent to it.
+
+Outbound, the tool fetches `<peer>/.well-known/agent-card.json`, resolves the `url` it
+finds (relative or absolute) and POSTs the same `message/send` envelope shown above. If
+the peer answers with something that is not a JSON-RPC response it retries once as
+`{"prompt": ...}`, which is what an export of this generator from before it spoke
+JSON-RPC understands, and says so in the `note` field of its result.
+
+- Capabilities this export advertises on its card: __CAPS__
+- Peers this export is allowed to call: __ALLOW__
+
+Both are baked into `agent.py` from the canvas. Override either without re-exporting by
+setting `A2A_CAPABILITIES` or `A2A_PEER_ALLOWLIST` (comma-separated) in the runtime
+resource's `EnvironmentVariables`; the environment wins over the baked-in defaults.
+"""
+
 # The two JSON documents deploy.sh applies to a staging bucket it creates. Held here as
 # plain strings rather than inline in the deploy.sh f-string, where every one of their
 # braces would have to be doubled — a single missed brace there is a syntax error in a
@@ -1776,6 +1859,105 @@ EOF
 fi
 """
 
+# Emitted only when the recipient chose DeletionPolicy=Delete. Under Retain these groups are
+# kept on purpose, with their logs and their retention intact, and the teardown notice already
+# explains how to remove them by hand.
+#
+# Deleting log groups CloudFormation has already deleted is not belt-and-braces. Measured live
+# across 15 of 15 torn-down stacks: after a clean teardown (rc=0, stack DELETE_COMPLETE)
+# /aws/lambda/<STACK>/CfnProviderLambda EXISTS again. Its creationTime is the teardown.
+# CloudFormation does delete the declared group; the provider Lambda goes on logging AFTER it has
+# sent its CFN response, and Lambda recreates the group to hold what it writes. So this is not a
+# retained resource and nothing in the template can express it -- the group that comes back was
+# created by the Lambda service, after the resource that owned it was gone.
+#
+# Do not read that as "a few trailing lines". Measured on one such group: created at 21:32:45,
+# 27s after DELETE_COMPLETE, and holding 32 events -- INIT_START and the Create-phase
+# custom-resource lines from 21:29:31 through the Delete-phase ones at 21:32:36. The execution
+# environment's whole stream lands in the new group, so what survives a teardown is the
+# deployment's log, not a tail of it. (Grepped: no system prompt in it. That is this generator's
+# provider only; it is not a general guarantee about what a Lambda logs.)
+#
+# Two consequences, and the quieter one is the reason this runs rather than advises:
+#
+#   * The next deploy under the same stack name fails at
+#     [AWS::EarlyValidation::ResourceExistenceCheck], an error that reports no hooks and names
+#     no resource, so nothing in it points at a log group. Isolated by control: deleting only
+#     this group, changing nothing else, made the identical deploy.sh succeed.
+#   * What comes back is not what the template declared. It has no retentionInDays and no KMS
+#     key, so all of that is kept for ever and unencrypted, which is precisely what
+#     _add_owned_log_groups exists to prevent (ARCC cnt_qf7wYkuSRSM5fl: retention is a property
+#     of the log group and the default is indefinite; cnt_0qPEBTUot0pRyh: keep data no longer
+#     than its purpose requires). The recipient asked for Delete and got an unbounded group.
+_TEARDOWN_LOG_GROUP_SWEEP_SH = """
+sweep_resurrected_log_groups() {
+    local prefix="/aws/lambda/$STACK_NAME/"
+    local pass listing group deleted=0 left="" unreadable=""
+    # Two passes, because the flush races the stack delete: the group can appear a second or
+    # two after DELETE_COMPLETE. Not a long retry loop -- a group that turns up later still is
+    # harmless until someone redeploys, and the notice below says how to find it then.
+    for pass in 1 2; do
+        if [[ "$pass" == "2" ]]; then
+            sleep 5
+        fi
+        # Per pass, not cumulative: a group that both passes fail to delete is ONE group,
+        # and listing it once per attempt reads as two. Each pass re-lists, so the last
+        # pass's failures are the current truth and the earlier ones are stale.
+        left=""
+        listing="$(aws logs describe-log-groups --log-group-name-prefix "$prefix" --region "$REGION" --query 'logGroups[].logGroupName' --output text 2>/dev/null)" || listing="__UNREADABLE__"
+        if [[ "$listing" == "__UNREADABLE__" ]]; then
+            unreadable="yes"
+            break
+        fi
+        for group in $listing; do
+            [[ -z "$group" || "$group" == "None" ]] && continue
+            if aws logs delete-log-group --log-group-name "$group" --region "$REGION" >/dev/null 2>&1; then
+                deleted=$((deleted + 1))
+            else
+                left="$left
+  $group"
+            fi
+        done
+    done
+
+    # Report on what the API says, not on what the deletes claimed -- same rule as the S3
+    # purge. Every call above is tolerant of failure so that one missing permission cannot
+    # abort a teardown, which is exactly why finishing proves nothing.
+    if [[ -n "$unreadable" ]]; then
+        cat <<EOF
+NOTE: could not list this stack's log groups, so any left under /aws/lambda/$STACK_NAME/
+were not removed. That needs logs:DescribeLogGroups. It matters for two reasons: a group
+left there makes the next deploy under this same stack name fail at
+[AWS::EarlyValidation::ResourceExistenceCheck], an error that names no resource, and a
+group recreated this way has no retention, so it keeps its contents indefinitely. Check
+and clear it with a principal that has logs:DescribeLogGroups and logs:DeleteLogGroup:
+
+  aws logs describe-log-groups --log-group-name-prefix /aws/lambda/$STACK_NAME/ --region $REGION --query 'logGroups[].logGroupName' --output text | tr '\\t' '\\n' | xargs -I GROUP aws logs delete-log-group --log-group-name GROUP --region $REGION
+EOF
+    elif [[ -n "$left" ]]; then
+        cat <<EOF
+WARNING: these log groups could not be deleted:$left
+
+Deleting one needs logs:DeleteLogGroup. Until they are gone, redeploying under this same
+stack name fails at [AWS::EarlyValidation::ResourceExistenceCheck] -- an error that
+reports no hooks and names no resource, so nothing in it will point you back here. They
+also have no retention set, because Lambda recreated them after CloudFormation deleted
+the ones this stack declared, so they keep their contents indefinitely.
+EOF
+    elif [[ "$deleted" -gt 0 ]]; then
+        echo "Removed $deleted log group(s) under /aws/lambda/$STACK_NAME/ that Lambda"
+        echo "recreated after CloudFormation had deleted them, holding this deployment's"
+        echo "provider log -- measured as the whole stream, not a tail of it. Deleting the"
+        echo "stack does not remove these, and while they exist a same-name redeploy fails"
+        echo "validation."
+    else
+        echo "No log groups left under /aws/lambda/$STACK_NAME/."
+    fi
+}
+
+sweep_resurrected_log_groups
+"""
+
 # Per ARCC cnt_TFTC9MGIxuXhqa. Both ARNs are needed: the bucket one covers ListBucket
 # and the policy calls, the /* one covers the objects. The partition is a shell variable
 # because a hardcoded "aws" makes this Deny match nothing at all in GovCloud or China —
@@ -1816,12 +1998,114 @@ DEPENDENCY_BUNDLE_PIP_FLAGS = [
     "--python-version 3.13",
     "--implementation cp",
     "--only-binary=:all:",
+    # Without this, pip ends a SUCCESSFUL build with a line starting "ERROR: pip's
+    # dependency resolver does not currently take into account all the packages that
+    # are installed", followed by one line per conflict. Measured on a developer
+    # machine: 20 such lines, exit status 0, bundle correct. The conflicts are
+    # against the *ambient* environment, which a `--target` install does not touch
+    # and the runtime never sees, so they are meaningless here — but the recipient
+    # was told to run this script, reads "ERROR", and reasonably stops.
+    "--no-warn-conflicts",
 ]
+
+# Checked by magic bytes rather than by filename, and the filename version is the
+# trap: it looks right and fails a correct build. abi3 wheels ship extensions with
+# no architecture in the name (cryptography's ``_rust.abi3.so``, protobuf's
+# ``_message.abi3.so``) and manylinux wheels vendor bare shared libraries
+# (``pillow.libs/libjpeg-45fb3b13.so.62.4.0``). Measured on a real bundle: 26 of
+# 48 native files carry no arch tag, so a name check would reject all 26.
+#
+# ELF puts 7f 45 4c 46 in bytes 0-3 and ``e_machine`` at offset 18, which is b7 00
+# for little-endian AArch64.
+_BUNDLE_ARCH_CHECK_SH = """
+# Verify what actually landed, rather than trusting pip's exit status. This is the
+# one mistake in the build with no visible symptom: a wrong-architecture bundle
+# deploys green and the agent fails at invoke with "Runtime initialization time
+# exceeded", which reads as a performance problem, and the real error is only in
+# the runtime's own log group.
+elf_arch() {
+    od -An -tx1 -N 20 "$1" 2>/dev/null | awk '
+        { for (i = 1; i <= NF; i++) byte[++n] = $i }
+        END {
+            if (n < 20) { print "unreadable"; exit }
+            if (byte[1] byte[2] byte[3] byte[4] != "7f454c46") { print "not-elf"; exit }
+            print (byte[19] == "b7" && byte[20] == "00") ? "aarch64" : "other-arch"
+        }'
+}
+
+BAD_ARCH=""
+NATIVE_COUNT=0
+while IFS= read -r so_file; do
+    NATIVE_COUNT=$((NATIVE_COUNT + 1))
+    so_arch="$(elf_arch "$so_file")"
+    if [[ "$so_arch" != "aarch64" ]]; then
+        BAD_ARCH="$BAD_ARCH
+  ${so_file#$BUILD_DIR/} ($so_arch)"
+    fi
+done < <(find "$BUILD_DIR" -type f \\( -name '*.so' -o -name '*.so.*' \\))
+
+if [[ -n "$BAD_ARCH" ]]; then
+    echo "ERROR: the bundle contains native code this runtime cannot import:$BAD_ARCH" >&2
+    echo "" >&2
+    echo "Every native file must be ELF aarch64. Getting this instead usually means pip3" >&2
+    echo "ignored --platform manylinux2014_aarch64 -- most often because a package had no" >&2
+    echo "aarch64 wheel and pip fell back to building from source for this machine." >&2
+    echo "" >&2
+    echo "Do NOT upload this bundle. The stack would reach CREATE_COMPLETE and the agent" >&2
+    echo "would then fail at invoke with 'Runtime initialization time exceeded'." >&2
+    exit 1
+fi
+
+if [[ "$NATIVE_COUNT" -eq 0 ]]; then
+    echo "WARNING: no native extensions found at all, which is unexpected for this" >&2
+    echo "package set. Check the pip3 output above before uploading." >&2
+else
+    echo "Verified $NATIVE_COUNT native file(s): all ELF aarch64."
+fi
+"""
 
 
 def _needs_strands_bundle(agent_code: str) -> bool:
     """Check if generated code imports strands (needs the larger bundle)."""
     return "from strands " in agent_code or "import strands" in agent_code
+
+
+def _runtime_protocol(protocol: str | None) -> str:
+    """What to declare in ``ProtocolConfiguration``, which is not always what was asked.
+
+    It has to describe what the generated container actually serves. For A2A those
+    differ, and deliberately: ``a2a_codegen`` emits a ``BedrockAgentCoreApp`` with an
+    ``@app.entrypoint`` — an HTTP server — and implements A2A as an *interop* layer on
+    top, serving the agent card at ``/.well-known/agent-card.json`` as a Starlette
+    route and discovering peers over plain HTTPS. That is a documented choice, not an
+    oversight: the dependency bundle ships the Strands and Bedrock A2A glue but not the
+    ``a2a-sdk`` package that glue hard-imports, so ``serve_a2a`` and ``A2AServer``
+    would ``ImportError`` at runtime.
+
+    Forwarding ``"A2A"`` therefore declared a protocol the container does not speak.
+    Measured live: the runtime reached READY and ``InvokeAgentRuntime`` returned
+    **HTTP 424** for a plain payload and for a well-formed A2A JSON-RPC ``message/send``
+    alike. So a customer exporting an A2A canvas got a green stack they could never
+    invoke. The control that isolates it to the declaration rather than the code:
+    byte-identical agent code deployed with ``HTTP`` answers normally.
+
+    The request never reaches the app, and it is worth recording how that was
+    established, because the first attempt to establish it was wrong. The original probe
+    reported the container log group at ``storedBytes: 0`` and read that as "nothing
+    arrived". Both halves were unsound: with ``--qualifier <stack>_endpoint`` the
+    container writes to ``/aws/bedrock-agentcore/runtimes/<runtimeId>-<endpointName>``
+    rather than ``-DEFAULT``, and ``describe-log-groups`` reports ``storedBytes: 0`` for
+    groups that demonstrably hold events. Re-measured against the right group with the
+    right oracle — ``lastEventTimestamp`` per log stream, not byte counts, and not the
+    mere existence of a stream — the ``A2A`` arm's streams are ``None`` and the ``HTTP``
+    arm's are populated. So AgentCore rejects the invoke before the container sees it.
+
+    ``MCP`` is forwarded untouched. That path emits a real MCP server and is verified
+    live, so this is only about the one protocol whose emitter serves something else.
+    """
+    if (protocol or "").upper() == "A2A":
+        return "HTTP"
+    return protocol or "HTTP"
 
 
 # Table text for the parameters whose own ``Description`` does not open with a
@@ -2172,6 +2456,7 @@ class CfnTemplateGenerator:
         mcp_server_config = request.mcp_server_config
         evaluation_config = request.evaluation_config
         knowledge_base_config = request.knowledge_base_config
+        a2a_config = request.a2a_config
 
         # Determine what components are needed
         has_gateway = (
@@ -2512,6 +2797,33 @@ class CfnTemplateGenerator:
             portable=True,
             observability_enabled=_obs_enabled,
             kb_config=knowledge_base_config,
+            # Threading this is not cosmetic, and it was missing. Two bundles exported
+            # from canvases differing ONLY in a2aConfig produced BYTE-IDENTICAL agent.py,
+            # with _DEFAULT_CAPABILITIES = [] and _DEFAULT_PEER_ALLOWLIST = []. Three
+            # consequences, worst last: the agent card advertises no skills, so a peer
+            # that reads it learns nothing; the advertised description falls back to a
+            # generic default; and call_a2a_peer's SSRF guard is deliberately fail-closed
+            # on an empty allowlist, so an exported A2A agent refuses EVERY peer -- the
+            # one thing the protocol is for.
+            #
+            # Confirmed live on two deployed arms differing only in a2aConfig, with NO
+            # A2A_* environment variable on either runtime (verified off the control
+            # plane), so the baked constants were the only possible cause: the configured
+            # arm's card carried both capabilities as fully-formed skills and its
+            # canvas description, and an allowlisted peer host got all the way to an
+            # outbound HTTPS request; the control arm's card was empty and it refused the
+            # same host with "no A2A_PEER_ALLOWLIST configured -- all peers are refused".
+            # That refusal fires BEFORE any DNS lookup, which is why the defect gave the
+            # identical answer for every host and was unattributable in the field.
+            #
+            # The oracle is the arm-vs-arm diff, deliberately not a sha of the emitted
+            # file: editing a docstring in the emitter moves every bundle's sha, so a
+            # recorded digest would rot into a false signal.
+            #
+            # The A2A_* env vars still override these at runtime (runtime_configure_step
+            # injects them on the live path), so this only sets the baked-in defaults an
+            # export has to stand on when nothing injects anything.
+            a2a_config=a2a_config,
         )
 
         # Generate MCP server code if needed (FastMCP, not HTTP runtime)
@@ -2612,6 +2924,9 @@ class CfnTemplateGenerator:
             # The parameter table's "Set with" column reads the variable names out of
             # the script, so the two documents cannot name different ones.
             deploy_sh=deploy_sh,
+            # Same object agent.py bakes its card defaults from, so the README's
+            # capability and peer lists are the ones the running agent will use.
+            a2a_config=a2a_config,
         )
 
         # Serialize template
@@ -6148,7 +6463,7 @@ def handler(event, context):
                 },
                 "RoleArn": {"Fn::GetAtt": ["RuntimeExecutionRole", "Arn"]},
                 "NetworkConfiguration": {"NetworkMode": "PUBLIC"},
-                "ProtocolConfiguration": config.protocol or "HTTP",
+                "ProtocolConfiguration": _runtime_protocol(config.protocol),
                 "EnvironmentVariables": env_vars,
                 "Description": {"Fn::Sub": "Runtime for ${DeploymentName}"},
                 "Tags": {"ManagedBy": "CloudFormation", "Stack": {"Ref": "AWS::StackName"}},
@@ -6702,6 +7017,28 @@ BUNDLE_FILE="{bundle_file}"
 # rebuild byte-for-byte), and a digest that fails a deploy for an innocent reason teaches
 # operators to switch it off.
 BUNDLE_DIGEST="${{DEPENDENCY_BUNDLE_DIGEST:-}}"
+
+# The bytes the provider Lambda will fetch, hashed. Both branches below go through this:
+# the digest recorded in the template has to describe the object in the bucket, because
+# the object in the bucket is what gets verified. Prints the digest and nothing else.
+#
+# Failing to read it back is fatal on purpose. The alternative -- carry on with no digest
+# -- turns the one check that catches a substituted bundle into something a transient
+# network error silently disables.
+bundle_digest_in_bucket() {{
+    local tmp
+    tmp="$(mktemp)"
+    if ! aws s3 cp "s3://$BUCKET/$BUNDLE_KEY" "$tmp" --region "$REGION" --quiet; then
+        rm -f "$tmp"
+        echo "ERROR: could not read back s3://$BUCKET/$BUNDLE_KEY to hash it." >&2
+        echo "       That needs s3:GetObject on the key. Not continuing: the digest is" >&2
+        echo "       what stops a substituted dependency bundle from being executed." >&2
+        exit 1
+    fi
+    printf 'sha256:%s' "$(sha256_stdin <"$tmp")"
+    rm -f "$tmp"
+}}
+
 if ! aws s3api head-object --bucket "$BUCKET" --key "$BUNDLE_KEY" --region "$REGION" >/dev/null 2>&1; then
     echo "Dependency bundle not in s3://$BUCKET/$BUNDLE_KEY."
     if [[ ! -f "$BUNDLE_FILE" ]]; then
@@ -6715,7 +7052,16 @@ if ! aws s3api head-object --bucket "$BUCKET" --key "$BUNDLE_KEY" --region "$REG
     fi
     echo "Uploading $BUNDLE_FILE to s3://$BUCKET/$BUNDLE_KEY..."
     aws s3 cp "$BUNDLE_FILE" "s3://$BUCKET/$BUNDLE_KEY" --region "$REGION"
-    BUNDLE_DIGEST="sha256:$(sha256_stdin <"$BUNDLE_FILE")"
+    # Hash what is in the bucket, not the file just uploaded, even though this branch is
+    # the one that uploaded it. The two can differ, and it is not hypothetical: measured
+    # live, two first-time deploys from one bucket both found this key absent, both built
+    # the bundle, and both uploaded. Each recorded a digest of ITS OWN local zip, so the
+    # one whose upload lost the race had recorded bytes that were no longer in the bucket
+    # and the provider Lambda failed it into ROLLBACK_COMPLETE -- correctly, over a
+    # difference that was only embedded mtimes. build-dependency-bundle.sh now builds
+    # deterministically, which removes that cause; reading back the object closes the race
+    # itself, including the case where the other build genuinely resolved a newer wheel.
+    BUNDLE_DIGEST="$(bundle_digest_in_bucket)"
     echo "Dependency bundle digest: $BUNDLE_DIGEST"
 elif [[ -z "$BUNDLE_DIGEST" ]]; then
     # Hash the object that is IN THE BUCKET. Not a local copy, and above all not
@@ -6736,12 +7082,7 @@ elif [[ -z "$BUNDLE_DIGEST" ]]; then
     # switch it off. That was a fair worry about a LOCAL hash. These are the exact
     # bytes the provider Lambda will fetch, so there is no innocent difference left.
     echo "Dependency bundle already in s3://$BUCKET/$BUNDLE_KEY; hashing the object..."
-    BUNDLE_TMP="$(mktemp)"
-    trap 'rm -f "$BUNDLE_TMP"' EXIT
-    aws s3 cp "s3://$BUCKET/$BUNDLE_KEY" "$BUNDLE_TMP" --region "$REGION" --quiet
-    BUNDLE_DIGEST="sha256:$(sha256_stdin <"$BUNDLE_TMP")"
-    rm -f "$BUNDLE_TMP"
-    trap - EXIT
+    BUNDLE_DIGEST="$(bundle_digest_in_bucket)"
     echo "Dependency bundle digest: $BUNDLE_DIGEST"
 fi
 
@@ -6891,6 +7232,9 @@ echo "Deployment complete!"
         bundle_name = bundle_key.rsplit("/", 1)[-1]
         pip_flags = " \\\n    ".join(DEPENDENCY_BUNDLE_PIP_FLAGS)
         package_args = " \\\n    ".join(f'"{p}"' for p in packages)
+        # Interpolated rather than inlined below: the check is awk, so it is full of
+        # braces, and an interpolated value is never rescanned for placeholders.
+        arch_check = _BUNDLE_ARCH_CHECK_SH
         return f"""#!/usr/bin/env bash
 # build-dependency-bundle.sh — build {bundle_name}, the dependency bundle this stack needs
 # Generated by AgentCore Flows
@@ -6931,10 +7275,34 @@ pip3 install \\
 # runtime regenerates them anyway.
 find "$BUILD_DIR" -type d -name '__pycache__' -exec rm -rf {{}} + 2>/dev/null || true
 find "$BUILD_DIR" -type f -name '*.pyc' -delete 2>/dev/null || true
-
+{arch_check}
 OUT_ABS="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
 rm -f "$OUT_ABS"
-(cd "$BUILD_DIR" && zip -r -q "$OUT_ABS" .)
+
+# Build the archive deterministically, so that two people (or two concurrent deploys)
+# running this script over the same package versions get the same bytes.
+#
+# It matters because the digest deploy.sh records is a hash of these bytes. Measured live:
+# two stacks deployed at once from one bucket both found agentcore-deps/base.zip absent,
+# both built it, and both uploaded it. The archives were correct and NOT identical -- the
+# zips differed only in embedded mtimes -- so the stack whose upload lost the race had
+# recorded a digest of bytes that were no longer there, and the provider Lambda's
+# verification failed it into ROLLBACK_COMPLETE. The verification was right; the build was
+# needlessly unrepeatable.
+#
+#   -X            drop the extra fields that carry the local uid/gid and high-precision
+#                 times, which differ per machine.
+#   touch -t      one fixed mtime. 1980-01-01 is the zip epoch -- an earlier date is not
+#                 representable and zip warns and substitutes its own.
+#   find | sort   fixed member order. Directory traversal order is a filesystem detail,
+#                 and `zip -r` follows it, so two identical trees can zip to two different
+#                 byte streams without a single timestamp differing.
+#
+# This removes the causes inside this script's control. It cannot make the *contents*
+# reproducible: run a month apart and pip may resolve a newer patch release. That is why
+# deploy.sh hashes the object in the bucket rather than the file it just built.
+find "$BUILD_DIR" -exec touch -t 198001010000 {{}} + 2>/dev/null || true
+(cd "$BUILD_DIR" && find . -print | sort | zip -q -X "$OUT_ABS" -@)
 
 echo "Built $OUT ($(du -h "$OUT_ABS" | cut -f1))"
 echo "Upload it with:"
@@ -7147,6 +7515,14 @@ echo "      aws logs delete-log-group if you want them gone."
         # memory this stack never created would just teach the operator to ignore
         # the warnings that matter.
         retained_notice = "".join(sections)
+        # Only on the Delete path. Under Retain the groups are kept deliberately, and the
+        # notice above tells the operator how to remove them; sweeping them here would
+        # silently destroy the record the recipient asked to keep. See
+        # _TEARDOWN_LOG_GROUP_SWEEP_SH for what it is cleaning up and why the template
+        # cannot express it. Interpolated rather than inlined: the body is shell with
+        # ${...} expansions and an unquoted heredoc, and an interpolated value is never
+        # rescanned for placeholders.
+        log_group_sweep = "" if retention_policy == "Retain" else _TEARDOWN_LOG_GROUP_SWEEP_SH
 
         return f"""#!/usr/bin/env bash
 # teardown.sh — Delete AgentCore CloudFormation stack
@@ -7176,7 +7552,7 @@ aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION"
 echo "Waiting for deletion..."
 aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION"
 echo "Stack deleted."
-{_TEARDOWN_PURGE_CALL_SH}"""
+{_TEARDOWN_PURGE_CALL_SH}{log_group_sweep}"""
 
     def _generate_readme(
         self,
@@ -7194,6 +7570,7 @@ echo "Stack deleted."
         has_knowledge_base: bool = False,
         template: dict | None = None,
         deploy_sh: str = "",
+        a2a_config: dict | None = None,
     ) -> str:
         # The README used to name strands-mcp.zip unconditionally, including in
         # bundles whose template defaults to base.zip, so a recipient following it
@@ -7552,10 +7929,33 @@ Deleting this stack, or applying a stack update that replaces one of them,
 **permanently destroys** whatever they hold — user identities, ingested documents and
 conversation history for the data stores, and the deployment and custom-resource logs
 for the log groups. There is no recovery. This setting is intended for throwaway demo
-and test stacks; its one operational advantage is that a same-name redeploy works,
-because nothing is left behind to collide with. Re-export with
-`dataRetentionPolicy: "Retain"` (the default) for anything you would be unhappy to
-lose.
+and test stacks; its one operational advantage is that a same-name redeploy works.
+Re-export with `dataRetentionPolicy: "Retain"` (the default) for anything you would be
+unhappy to lose.
+
+That redeploy works because `teardown.sh` sweeps up after CloudFormation, and it has to.
+`DeletionPolicy: Delete` is not sufficient on a Lambda log group: the custom-resource
+Lambda goes on logging after it has sent its CloudFormation response, so Lambda recreates
+`/aws/lambda/<stack>/CfnProviderLambda` seconds after CloudFormation deleted it. Measured
+on 15 of 15 torn-down stacks. Nothing in a template can prevent that — the group that
+comes back was created by the Lambda service, after the resource that owned it was gone.
+Nor is what comes back a stub. One measured group was created 27 seconds after the stack
+reached `DELETE_COMPLETE` and held 32 events covering the whole execution environment:
+`INIT_START`, the Create-phase custom-resource lines from three minutes earlier, and the
+Delete-phase ones. So this is the deployment's log, not a tail of it. Two consequences
+follow: a same-name redeploy fails at
+`[AWS::EarlyValidation::ResourceExistenceCheck]`, an error that reports no hooks and names
+no resource, and the recreated group comes back with no retention and no key, so it keeps
+all of that for ever.
+`teardown.sh` therefore deletes every group under `/aws/lambda/<stack>/` after the stack
+delete and tells you if it could not. If you delete the stack some other way — the
+console, `terraform destroy`, `delete-stack` by hand — do that sweep yourself:
+
+```bash
+aws logs describe-log-groups --log-group-name-prefix /aws/lambda/<stack-name>/ \\
+  --query 'logGroups[].logGroupName' --output text \\
+  | tr '\\t' '\\n' | xargs -I GROUP aws logs delete-log-group --log-group-name GROUP
+```
 
 One exception, and it is deliberate: the AgentCore runtime's own log groups
 (`/aws/bedrock-agentcore/runtimes/<runtime-id>-<endpoint>`, one per endpoint) survive
@@ -7564,6 +7964,30 @@ a teardown even with this setting. AgentCore creates them outside CloudFormation
 them but never deletes them, because they are the record of what the agent did.
 Delete them with `aws logs delete-log-group` if you want them gone — they do not block
 a same-name redeploy."""
+
+        # The A2A section, emitted only for an A2A canvas. The two lists are read through the
+        # same truncation a2a_codegen applies when it bakes them into agent.py (32 items at 64
+        # chars, 64 at 512), because a README that advertises a capability the agent's card
+        # does not carry is worse than one that says nothing: the recipient's first check is
+        # the card, and a mismatch there reads as a broken deploy rather than as a limit.
+        a2a_md = ""
+        if (getattr(config, "protocol", "") or "").upper() == "A2A":
+            peer_config = a2a_config or {}
+            caps = [str(c)[:64] for c in (peer_config.get("capabilities") or [])][:32]
+            allow = [
+                str(u)[:512] for u in (peer_config.get("peer_allowlist") or peer_config.get("peerAllowlist") or [])
+            ][:64]
+            # "none" is the load-bearing case, not the empty one to be tidy about: an export
+            # from a canvas that named no peers refuses every peer at runtime, and the
+            # recipient has to be told that in the words of the thing they will see.
+            caps_md = ", ".join(f"`{c}`" for c in caps) if caps else "none — its card advertises no skills"
+            allow_md = (
+                ", ".join(f"`{u}`" for u in allow)
+                if allow
+                else "**none — so `call_a2a_peer` refuses every peer.** Set `A2A_PEER_ALLOWLIST` "
+                "or re-export from a canvas that names its peers"
+            )
+            a2a_md = _README_A2A_MD.replace("__CAPS__", caps_md).replace("__ALLOW__", allow_md)
 
         if litellm is not None:
             tool_lambdas_md = "N/A — the tools live on your LiteLLM proxy, so this stack ships no tool Lambdas."
@@ -7705,14 +8129,23 @@ execution role, so the code-packaging step verifies it against the
 `DependencyBundleDigest` parameter before merging it, and fails the stack on a
 mismatch.
 
-`deploy.sh` always fills that parameter in. On the run that uploads the bundle it
-hashes the file it uploaded; when the bundle is already in your bucket it downloads
-that object and hashes the bytes themselves. That second case is doing more work than
-integrity: the digest is part of the S3 key the packaged code is written to, so hashing
-the object is also what makes a dependency-only change actually redeploy. Were the
-value left stale instead, every property of the packaging resource would be unchanged,
-CloudFormation would skip the resource, and the previous dependencies would go on
-running under a stack that reported success.
+`deploy.sh` always fills that parameter in, and always by downloading the object from
+your bucket and hashing those bytes — including on the run that just uploaded it. That
+does more than integrity: the digest is part of the S3 key the packaged code is written
+to, so hashing the object is also what makes a dependency-only change actually redeploy.
+Were the value left stale instead, every property of the packaging resource would be
+unchanged, CloudFormation would skip the resource, and the previous dependencies would go
+on running under a stack that reported success.
+
+Reading it back rather than hashing the local file is what makes two deploys at once
+safe. If two stacks are created from the same bucket before the bundle exists, both build
+it and both upload it; whichever lands second is what the bucket holds. A digest taken
+from the local copy would then describe bytes that are no longer there, and the stack that
+lost the race would be failed — correctly — by its own integrity check.
+`build-dependency-bundle.sh` builds reproducibly (fixed member order and mtimes) so that
+two builds of the same package versions are byte-identical and the question does not
+arise, but pip can resolve a newer patch release between them, so the read-back is what
+actually closes it.
 
 Be clear about what that does and does not buy you. Because the hash is taken from the
 object in the bucket, it proves the bytes merged into your agent are the bytes that were
@@ -8297,7 +8730,7 @@ names both, with the command for each, when it finishes.
 ## Data Protection
 
 {data_protection_md}
-
+{a2a_md}
 ## Architecture
 
 {native_types_md}
