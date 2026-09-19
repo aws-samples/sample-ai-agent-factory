@@ -13,6 +13,7 @@ a live test cannot be relied on to reproduce on demand.
 """
 
 import ast
+import logging
 import sys
 from pathlib import Path
 
@@ -854,9 +855,24 @@ class TestOAuth2ProviderDelete:
 
 
 class FakeS3:
+    """Enough of S3 to exercise a versioned bucket.
+
+    ``versions`` is ``{key: [(version_id, "V" | "M")]}`` — "V" for a version, "M" for a
+    delete marker — and it is real state: ``delete_object`` removes the entry it names, so
+    a test can assert on what the bucket holds afterwards rather than on the call list.
+    That distinction is the whole point here. The bug this models was a ``delete_object``
+    with no ``VersionId``, which *succeeds* and leaves the object readable, so any fake
+    that only records calls would have reported it deleted.
+    """
+
     def __init__(self, **behaviour):
         self.calls: list[tuple[str, dict]] = []
         self._behaviour = behaviour
+        self.versions: dict[str, list[tuple[str, str]]] = {
+            key: list(entries) for key, entries in behaviour.get("versions", {}).items()
+        }
+        # Real S3 pages at 1000; a test that wants to exercise pagination sets this to 1.
+        self.page_size = behaviour.get("page_size", 1000)
 
     def get_object(self, **kwargs):
         self.calls.append(("get_object", kwargs))
@@ -866,11 +882,52 @@ class FakeS3:
     def put_object(self, **kwargs):
         self.calls.append(("put_object", kwargs))
 
+    def list_object_versions(self, **kwargs):
+        self.calls.append(("list_object_versions", kwargs))
+        exc = self._behaviour.get("list_raises")
+        if exc:
+            raise exc
+        prefix = kwargs.get("Prefix", "")
+        # Prefix, not equality — that is exactly what the real API does, and why the
+        # handler has to filter.
+        flat = [
+            (key, version_id, kind)
+            for key, entries in sorted(self.versions.items())
+            if key.startswith(prefix)
+            for version_id, kind in entries
+        ]
+        start = 0
+        marker = (kwargs.get("KeyMarker", ""), kwargs.get("VersionIdMarker", ""))
+        if marker != ("", ""):
+            for index, (key, version_id, _) in enumerate(flat):
+                if (key, version_id) == marker:
+                    start = index + 1
+                    break
+        page = flat[start : start + self.page_size]
+        truncated = start + self.page_size < len(flat)
+        response: dict = {
+            "IsTruncated": truncated,
+            "Versions": [{"Key": k, "VersionId": v} for k, v, kind in page if kind == "V"],
+            "DeleteMarkers": [{"Key": k, "VersionId": v} for k, v, kind in page if kind == "M"],
+        }
+        if truncated and page:
+            response["NextKeyMarker"], response["NextVersionIdMarker"] = page[-1][0], page[-1][1]
+        return response
+
     def delete_object(self, **kwargs):
         self.calls.append(("delete_object", kwargs))
         exc = self._behaviour.get("delete_raises")
         if exc:
             raise exc
+        key, version_id = kwargs.get("Key"), kwargs.get("VersionId")
+        if version_id is None:
+            # What the old code did. On a versioned bucket it adds a delete marker and
+            # the object stays readable, so the fake must not treat it as a deletion.
+            self.versions.setdefault(key, []).append(("dm-implicit", "M"))
+            return
+        self.versions[key] = [e for e in self.versions.get(key, []) if e[0] != version_id]
+        if not self.versions[key]:
+            del self.versions[key]
 
 
 class _Body:
@@ -929,11 +986,19 @@ class TestCodePackageDelete:
     def test_a_failed_object_delete_does_not_block_teardown(self, monkeypatch):
         """Deliberately the opposite choice from the policy handler.
 
-        The object is a build artifact, not data; the generated README already says S3
-        artifacts survive teardown. Failing here would block deletion of the whole
-        stack over a few megabytes.
+        Not because the object is unimportant — it is the merged code.zip, so it holds
+        the recipient's agent source and system prompt. Because failing a cleanup step
+        leaves the whole stack in DELETE_FAILED, and the operator then has neither the
+        stack deleted nor the object gone. A leftover policy, by contrast, actively
+        blocks DeletePolicyEngine, so swallowing that one buys nothing.
+
+        What must not happen is silence: the remaining versions are logged, naming the
+        action that is missing. See ``TestDeletingTheMergedCodeZipForReal``.
         """
-        s3 = FakeS3(delete_raises=_client_error("AccessDenied", "DeleteObject"))
+        s3 = FakeS3(
+            versions={"k": [("v1", "V")]},
+            delete_raises=_client_error("AccessDenied", "DeleteObjectVersion"),
+        )
         monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: s3)
 
         provider._handle_code_package_delete(
@@ -944,6 +1009,188 @@ class TestCodePackageDelete:
                 "ResourceProperties": {"ArtifactsBucket": "bkt", "OutputKey": "k"},
             }
         )  # must not raise
+        assert s3.versions == {"k": [("v1", "V")]}, "the fake must still show it survived"
+
+
+class TestDeletingTheMergedCodeZipForReal:
+    """A ``delete_object`` with no ``VersionId`` deletes nothing on a versioned bucket.
+
+    This is not a theory. After a teardown of a live stack that reported success, the
+    merged ``code.zip`` was downloaded by ``VersionId`` and the system prompt read out of
+    it in full; every one of five stacks had one version plus one delete marker.
+    ``aws s3 ls --recursive`` over that prefix printed nothing and exited 1, so the prefix
+    read as empty. And ``deploy.sh`` enables versioning on any bucket it creates, so the
+    versioned bucket is the default case, not the exotic one.
+
+    Per ARCC ``cnt_NfWe8fYjVfR6Gs``: "removing pointers to S3 objects and orphaning data
+    in your service account does not meet the bar" for deletion. A delete marker is
+    precisely a removed pointer over live data.
+    """
+
+    def _delete(self, monkeypatch, s3, key="deployments/demo/abc-def/code.zip"):
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: s3)
+        provider._handle_code_package_delete(
+            {
+                "RequestType": "Delete",
+                "StackId": STACK_ID,
+                "PhysicalResourceId": f"bkt/{key}",
+                "ResourceProperties": {"ArtifactsBucket": "bkt", "OutputKey": key},
+            }
+        )
+
+    def test_every_version_and_marker_is_deleted_by_id(self, monkeypatch):
+        key = "deployments/demo/abc-def/code.zip"
+        s3 = FakeS3(versions={key: [("v2", "V"), ("v1", "V"), ("dm1", "M")]})
+        self._delete(monkeypatch, s3)
+
+        assert s3.versions == {}, "the agent source is still readable by version id"
+        deleted = {kw["VersionId"] for name, kw in s3.calls if name == "delete_object"}
+        assert deleted == {"v2", "v1", "dm1"}
+
+    def test_the_delete_names_a_version_at_all(self, monkeypatch):
+        """The regression itself, asserted directly on the call rather than on the state.
+
+        A ``delete_object`` without ``VersionId`` is a *successful* call, so this is the
+        one defect that no amount of checking the API's return value would catch.
+        """
+        key = "deployments/demo/abc-def/code.zip"
+        s3 = FakeS3(versions={key: [("v1", "V")]})
+        self._delete(monkeypatch, s3)
+
+        deletes = [kw for name, kw in s3.calls if name == "delete_object"]
+        assert deletes, "nothing was deleted"
+        for kwargs in deletes:
+            assert kwargs.get("VersionId"), "a delete with no VersionId only adds a marker"
+
+    def test_an_unversioned_bucket_needs_no_second_code_path(self, monkeypatch):
+        """``VersionId`` is the literal string ``"null"`` there, and delete_object takes
+        it, so the one path covers both kinds of bucket and there is no branch to get
+        wrong."""
+        key = "deployments/demo/abc-def/code.zip"
+        s3 = FakeS3(versions={key: [("null", "V")]})
+        self._delete(monkeypatch, s3)
+
+        assert s3.versions == {}
+        assert (
+            "delete_object",
+            {"Bucket": "bkt", "Key": key, "VersionId": "null", "ExpectedBucketOwner": ACCOUNT},
+        ) in [(name, kwargs) for name, kwargs in s3.calls]
+
+    def test_a_neighbour_sharing_the_prefix_is_neither_touched_nor_counted(self, monkeypatch, caplog):
+        """``list_object_versions`` takes a *prefix*, not a key, so it returns siblings.
+
+        The neighbour is not at risk of deletion — a ``delete_object`` naming this key
+        with the neighbour's ``VersionId`` does not delete the neighbour — but an
+        unfiltered listing is still wrong in a way that matters: it is also what the
+        *re-list* counts. A neighbour would then show up as a version that survived, so
+        every teardown of a stack with a ``code.zip.sha256`` beside its ``code.zip`` would
+        warn that the agent source is still readable when it is not. A warning that fires
+        when nothing is wrong is how the one that matters gets ignored.
+        """
+        key = "deployments/demo/abc-def/code.zip"
+        s3 = FakeS3(versions={key: [("v1", "V")], key + ".sha256": [("v9", "V")]})
+        with caplog.at_level(logging.WARNING, logger=provider.logger.name):
+            self._delete(monkeypatch, s3)
+
+        assert s3.versions == {key + ".sha256": [("v9", "V")]}, "the neighbour was disturbed"
+        deleted = {kw["VersionId"] for name, kw in s3.calls if name == "delete_object"}
+        assert deleted == {"v1"}, "issued a delete for a version belonging to another key"
+        assert "still has" not in caplog.text, "counted the neighbour as a surviving version"
+
+    def test_it_pages_through_more_versions_than_one_response_carries(self, monkeypatch):
+        """A superseded code.zip is kept per deploy, so the count grows with redeploys and
+        a single-page purge would leave the older ones behind."""
+        key = "deployments/demo/abc-def/code.zip"
+        s3 = FakeS3(versions={key: [(f"v{n}", "V") for n in range(7)]}, page_size=2)
+        self._delete(monkeypatch, s3)
+
+        assert s3.versions == {}
+
+    def test_the_re_list_is_what_reports_the_outcome(self, monkeypatch):
+        """The deletes are individually failure-tolerant so one denied version cannot
+        wedge a stack deletion — which means the loop completing proves nothing. The
+        handler re-lists afterwards, and that is the only honest success signal.
+
+        Measured live: a Deny on ``s3:DeleteObject`` alone did not stop the purge, because
+        removing a named version is ``s3:DeleteObjectVersion``.
+        """
+        key = "deployments/demo/abc-def/code.zip"
+        s3 = FakeS3(versions={key: [("v1", "V")]}, delete_raises=_client_error("AccessDenied", "DeleteObjectVersion"))
+        self._delete(monkeypatch, s3)
+
+        names = [name for name, _ in s3.calls]
+        assert names.count("list_object_versions") >= 2, "no re-list, so the failure went unreported"
+        assert names.index("delete_object") < len(names) - 1, "the re-list must come after the deletes"
+
+    def test_the_warning_names_the_permissions_that_are_actually_needed(self, monkeypatch, caplog):
+        """``s3:DeleteObject`` does not cover ``s3:DeleteObjectVersion`` and
+        ``s3:ListBucket`` does not cover ``s3:ListBucketVersions``. An operator reading
+        "AccessDenied" and granting the two obvious actions gets the same silent result,
+        so the warning has to name the right pair."""
+        key = "deployments/demo/abc-def/code.zip"
+        s3 = FakeS3(versions={key: [("v1", "V")]}, delete_raises=_client_error("AccessDenied", "DeleteObjectVersion"))
+        with caplog.at_level(logging.WARNING, logger=provider.logger.name):
+            self._delete(monkeypatch, s3)
+
+        text = caplog.text
+        assert "s3:DeleteObjectVersion" in text
+        assert "s3:ListBucketVersions" in text
+
+    def test_a_listing_failure_is_swallowed_like_any_other(self, monkeypatch):
+        """Without ``s3:ListBucketVersions`` the handler cannot even enumerate. That is
+        still not a reason to fail the stack delete."""
+        s3 = FakeS3(list_raises=_client_error("AccessDenied", "ListBucketVersions"))
+        self._delete(monkeypatch, s3)  # must not raise
+
+    def test_a_denied_enumeration_still_reports_what_is_readable(self, monkeypatch, caplog):
+        """The diagnostic must not be gated by the permission whose absence it reports.
+
+        Found live, not by reading: with a Deny on ``s3:ListBucketVersions`` the stack
+        reached DELETE_COMPLETE with the merged zip still downloadable by ``VersionId``,
+        and the only line in the Lambda log was ``Failed to delete ...: AccessDenied``.
+        The enumeration raises inside ``_delete_every_version`` before any delete is
+        attempted, so ``_count_versions`` — the thing that produces the "agent source
+        remains readable" sentence — never runs. The failure landed on the harder of the
+        two grants to spot: ``s3:DeleteObjectVersion`` missing is loud, because the
+        per-version delete is tolerated and the re-list still happens.
+
+        There is deliberately no count asserted: obtaining one is what failed.
+        """
+        s3 = FakeS3(list_raises=_client_error("AccessDenied", "ListBucketVersions"))
+        with caplog.at_level(logging.WARNING, logger=provider.logger.name):
+            self._delete(monkeypatch, s3)
+
+        text = caplog.text
+        assert "still readable" in text, "an operator cannot tell this is customer content"
+        assert "s3:DeleteObjectVersion" in text
+        assert "s3:ListBucketVersions" in text
+        assert "deployments/demo/abc-def/code.zip" in text, "the message must name the object"
+
+    def test_a_malformed_pagination_response_cannot_spin_forever(self, monkeypatch):
+        """A custom resource that hangs costs an hour before CloudFormation gives up, and
+        this one runs during a stack *delete*, where the operator has no good recovery.
+        So the page loop is bounded and repeats-with-no-progress terminate it."""
+
+        class _AlwaysTruncated(FakeS3):
+            def list_object_versions(self, **kwargs):
+                self.calls.append(("list_object_versions", kwargs))
+                return {"IsTruncated": True, "Versions": [], "DeleteMarkers": []}
+
+        s3 = _AlwaysTruncated()
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: s3)
+        assert list(provider._iter_versions(s3, "bkt", "k", {})) == []
+        assert len(s3.calls) <= provider._MAX_VERSION_PAGES
+
+    def test_every_call_pins_the_bucket_owner(self, monkeypatch):
+        """The bucket name is a resource property, so the listing and the version deletes
+        need ``ExpectedBucketOwner`` for the same reason the merge does."""
+        key = "deployments/demo/abc-def/code.zip"
+        s3 = FakeS3(versions={key: [("v1", "V"), ("dm1", "M")]})
+        self._delete(monkeypatch, s3)
+
+        assert s3.calls
+        for name, kwargs in s3.calls:
+            assert kwargs.get("ExpectedBucketOwner") == ACCOUNT, f"{name} did not pin the bucket owner"
 
 
 class TestTheStagingBucketIsPinnedToItsOwner:

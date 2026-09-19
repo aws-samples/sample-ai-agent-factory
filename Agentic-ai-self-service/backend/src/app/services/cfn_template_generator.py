@@ -1610,10 +1610,17 @@ _STAGING_BUCKET_LIFECYCLE_JSON = """{
 # WHY teardown deletes S3 objects at all. deploy.sh stages the agent code, the provider
 # Lambda and the tool zips under cfn-assets/<stack>/ and deliberately leaves superseded
 # ones in place so a rollback can still reach them. Deleting the stack removed none of it:
-# the merged code.zip goes (the code-packaging resource deletes its own output) but every
-# staged input stayed, and staged_key's comment claimed "teardown removes the bucket" when
-# teardown deleted the stack and nothing else. So a recipient who followed the documented
-# lifecycle exactly was left holding their own agent source, indefinitely.
+# every staged input stayed, and staged_key's comment claimed "teardown removes the bucket"
+# when teardown deleted the stack and nothing else. So a recipient who followed the
+# documented lifecycle exactly was left holding their own agent source, indefinitely.
+#
+# Nor was the merged code.zip under deployments/<stack>/ covered, though this comment used
+# to say it was — "the code-packaging resource deletes its own output". It issued a
+# delete_object with no VersionId, which on a versioned bucket only writes a delete marker.
+# Measured live: after a teardown that reported success the merged zip was downloaded by
+# version id and the system prompt read out of it. The custom resource now deletes every
+# version by id, and this script sweeps that prefix as well, because the custom resource
+# only ever knows about the key it wrote.
 #
 # The bucket lifecycle does not cover this. It expires NONCURRENT versions after 30 days;
 # these objects are current, so they never expire, and on a pre-existing bucket there is no
@@ -1624,10 +1631,22 @@ _STAGING_BUCKET_LIFECYCLE_JSON = """{
 # carry a clear statement of what a deletion does. Both halves are the fix: really delete
 # what this stack owns, and state precisely what is left.
 _TEARDOWN_PURGE_HELPER_SH = """
-# Every object this stack staged lives under one prefix, so "what this stack owns" needs no
-# guessing. The shared dependency bundle does NOT live here, which is why it survives: it
-# is keyed by content for the whole bucket and another stack may be using it.
+# This stack writes TWO prefixes, and the second one is easy to miss because nothing in
+# deploy.sh mentions it. deploy.sh uploads the zips it builds to cfn-assets/<stack>/, and
+# then the code-packaging custom resource writes the MERGED executable -- agent code plus
+# dependencies, so it contains agent.py and therefore the system prompt -- to
+# deployments/<stack>/<digest>/code.zip.
+#
+# An earlier version of this script swept only the first prefix and printed "the whole
+# list" of what it left. That list was wrong: after a clean teardown the merged zip was
+# still downloadable by VersionId and the system prompt was recovered from it. Both
+# prefixes are swept now. Per ARCC cnt_NfWe8fYjVfR6Gs, orphaning data behind a removed
+# pointer does not meet the deletion bar.
+#
+# The shared dependency bundle is under neither prefix, which is why it survives: it is
+# keyed by content for the whole bucket and another stack may still be using it.
 STAGED_PREFIX="cfn-assets/$STACK_NAME/"
+DEPLOYED_PREFIX="deployments/$STACK_NAME/"
 
 # Read BEFORE the delete. Afterwards there is no stack left to read the parameter from,
 # and the bucket name appears in no Output.
@@ -1686,18 +1705,35 @@ _TEARDOWN_PURGE_CALL_SH = """
 if [[ -z "$STAGING_BUCKET" ]]; then
     cat <<EOF
 NOTE: could not read this stack's ArtifactsBucket, so its staged artifacts were left in
-place. They are under cfn-assets/$STACK_NAME/ in whichever bucket you deployed from:
+place. There are two prefixes, in whichever bucket you deployed from:
 
   aws s3 rm "s3://YOUR_BUCKET/cfn-assets/$STACK_NAME/" --recursive --region $REGION
+  aws s3 rm "s3://YOUR_BUCKET/deployments/$STACK_NAME/" --recursive --region $REGION
 
-On a versioned bucket that command leaves the previous version of every object behind.
-See README.md > Staging Bucket for the version-aware form.
+The second holds the merged code.zip the runtime executes, which contains the agent code
+and its system prompt.
+
+On a versioned bucket neither command deletes anything: each writes a delete marker and
+the previous version stays fully readable by version id, while "aws s3 ls" then reports
+the prefix empty. See README.md > Staging Bucket for the version-aware form.
 EOF
-elif purge_staged_objects "$STAGING_BUCKET" "$STAGED_PREFIX" "$REGION"; then
-    echo "Removed staged artifacts from s3://$STAGING_BUCKET/$STAGED_PREFIX (all versions)."
-    cat <<EOF
+else
+    # Both prefixes, and the outcome of each is tracked separately so a failure on one is
+    # not hidden by success on the other.
+    PURGE_LEFTOVERS=""
+    for purge_prefix in "$STAGED_PREFIX" "$DEPLOYED_PREFIX"; do
+        if purge_staged_objects "$STAGING_BUCKET" "$purge_prefix" "$REGION"; then
+            echo "Removed s3://$STAGING_BUCKET/$purge_prefix (all versions)."
+        else
+            PURGE_LEFTOVERS="$PURGE_LEFTOVERS $purge_prefix"
+        fi
+    done
 
-Two things in that bucket are deliberately NOT deleted, and this is the whole list:
+    if [[ -z "$PURGE_LEFTOVERS" ]]; then
+        cat <<EOF
+
+Two things this stack put in that bucket are deliberately NOT deleted, and for THIS
+stack that is the whole list:
 
   * s3://$STAGING_BUCKET/$BUNDLE_KEY — the dependency bundle. It is shared by
     every stack deployed from this bucket and takes minutes to rebuild, so teardown
@@ -1709,20 +1745,34 @@ Two things in that bucket are deliberately NOT deleted, and this is the whole li
       aws s3 rb "s3://$STAGING_BUCKET" --force --region $REGION
     On a versioned bucket --force is not enough: it deletes current versions, and rb then
     fails with BucketNotEmpty because the noncurrent versions and delete markers remain.
-EOF
-else
-    cat <<EOF
-WARNING: some staged artifacts are still in s3://$STAGING_BUCKET/$STAGED_PREFIX. The most
-likely reason is a missing permission: removing a specific version needs
-s3:DeleteObjectVersion, which s3:DeleteObject does NOT cover, and this prefix is version
-aware. They include the agent source this stack deployed, so delete them with a principal
-that has both, plus s3:ListBucketVersions:
 
-  aws s3api list-object-versions --bucket $STAGING_BUCKET --prefix $STAGED_PREFIX --region $REGION --output text --query '[Versions,DeleteMarkers][][].[Key,VersionId]'
+If you deploy several stacks from one bucket, it will still hold their cfn-assets/ and
+deployments/ prefixes after this one is torn down. Those are theirs, not leftovers of
+this teardown; run each stack's own teardown.sh. To see everything that is actually
+left, list versions rather than keys — a delete marker makes "aws s3 ls" print nothing:
+  aws s3api list-object-versions --bucket $STAGING_BUCKET --region $REGION --query '[Versions,DeleteMarkers][][].[Key,VersionId]' --output text
+EOF
+    else
+        for purge_prefix in $PURGE_LEFTOVERS; do
+            cat <<EOF
+WARNING: objects remain in s3://$STAGING_BUCKET/$purge_prefix. They include the agent
+source this stack deployed, and under deployments/ the merged code.zip contains the
+system prompt too, so this is customer content still readable.
+
+The most likely reason is a missing permission: removing a specific version needs
+s3:DeleteObjectVersion, which s3:DeleteObject does NOT cover, and enumerating versions
+needs s3:ListBucketVersions rather than s3:ListBucket. Delete them with a principal that
+has all three:
+
+  aws s3api list-object-versions --bucket $STAGING_BUCKET --prefix $purge_prefix --region $REGION --output text --query '[Versions,DeleteMarkers][][].[Key,VersionId]'
 
 then aws s3api delete-object --bucket $STAGING_BUCKET --key KEY --version-id VERSION for
-each line. The stack itself is deleted; this is the only thing left outstanding.
+each line. Do not check this with "aws s3 ls": over a delete marker it prints nothing and
+exits 1, which reads as an empty prefix. The stack itself is deleted, so this prefix and
+any other WARNING above are all that is left outstanding.
 EOF
+        done
+    fi
 fi
 """
 
@@ -2855,9 +2905,32 @@ class CfnTemplateGenerator:
                     "Statement": [
                         {
                             "Effect": "Allow",
-                            "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+                            # DeleteObjectVersion is not covered by DeleteObject, and its
+                            # absence is silent rather than loud: without it the Delete
+                            # path can only add a delete marker, which leaves the merged
+                            # code.zip -- the recipient's agent source and system prompt
+                            # -- fully readable by VersionId while `aws s3 ls` reports
+                            # the prefix empty. Verified live by downloading it after a
+                            # teardown that reported success. Per ARCC
+                            # cnt_NfWe8fYjVfR6Gs, orphaning data behind a removed
+                            # pointer does not meet the deletion bar.
+                            "Action": [
+                                "s3:GetObject",
+                                "s3:PutObject",
+                                "s3:DeleteObject",
+                                "s3:DeleteObjectVersion",
+                            ],
                             "Resource": {"Fn::Sub": "arn:aws:s3:::${ArtifactsBucket}/*"},
-                        }
+                        },
+                        {
+                            "Effect": "Allow",
+                            # Bucket-level, and a different action from s3:ListBucket:
+                            # enumerating versions to delete them needs
+                            # ListBucketVersions, on the bucket ARN rather than on /*.
+                            "Sid": "EnumerateVersionsToPurge",
+                            "Action": ["s3:ListBucketVersions"],
+                            "Resource": {"Fn::Sub": "arn:aws:s3:::${ArtifactsBucket}"},
+                        },
                     ],
                 },
             },
@@ -8198,6 +8271,28 @@ If you deploy by hand, pass keys that differ whenever the bytes differ.
 ```bash
 ./teardown.sh my-agent YOUR-REGION
 ```
+
+It deletes the stack, then purges this stack's objects from the staging bucket. There are
+**two** prefixes and the second is the one that matters:
+
+| Prefix | Holds |
+|--------|-------|
+| `cfn-assets/<stack-name>/` | the zips `deploy.sh` uploaded, including superseded ones |
+| `deployments/<stack-name>/` | the merged `code.zip` the runtime executes — your agent code and its system prompt |
+
+Both are purged **version by version**, which is not the same as `aws s3 rm --recursive`.
+On a versioned bucket — and `deploy.sh` enables versioning on any bucket it creates —
+`rm` writes a delete marker and leaves the previous version fully readable by version id,
+while `aws s3 ls` then prints nothing and exits 1, so the prefix reads as empty. If you
+clean up by hand, list with `s3api list-object-versions` and delete each `VersionId`.
+
+Deleting a named version needs `s3:DeleteObjectVersion` (which `s3:DeleteObject` does not
+cover) and listing them needs `s3:ListBucketVersions` (not `s3:ListBucket`). Without
+those, teardown prints a WARNING naming the prefix rather than reporting success — it
+re-lists afterwards instead of trusting that the deletes worked.
+
+What teardown does **not** remove: the shared dependency bundle, and the bucket itself. It
+names both, with the command for each, when it finishes.
 
 ## Data Protection
 

@@ -147,6 +147,24 @@ def _walk_for_refs(expr):
             yield from _walk_for_refs(item)
 
 
+def _walk_for_key(node, wanted):
+    """Every value stored under ``wanted`` anywhere inside a nested structure.
+
+    Policies are not always a flat list of dicts: a conditional one arrives as
+    ``{"Fn::If": [cond, policy, {"Ref": "AWS::NoValue"}]}``, so indexing by position
+    breaks the moment another conditional policy is added.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == wanted:
+                yield value
+            else:
+                yield from _walk_for_key(value, wanted)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _walk_for_key(item, wanted)
+
+
 def _runtime_env(template, resource="AgentCoreRuntime"):
     """The environment the agent process actually sees.
 
@@ -5376,9 +5394,10 @@ class TestGeneratedDocumentation:
 
         deploy.sh stages agent-code.zip and the Lambda zips under cfn-assets/<stack>/ and
         deliberately keeps superseded ones so a rollback can reach them. Nothing deleted
-        them: the code-packaging resource removes only the merged code.zip it wrote, and
-        teardown deleted the stack and stopped. staged_key's comment meanwhile promised
-        the teardown disposed of the bucket.
+        them: the code-packaging resource touches only the one key it wrote, and teardown
+        deleted the stack and stopped. staged_key's comment meanwhile promised the teardown
+        disposed of the bucket. (Nor did that resource really delete its own key — see
+        test_teardown_sweeps_the_prefix_the_custom_resource_writes_too.)
 
         The bucket lifecycle does not save it either — it expires NONCURRENT versions, and
         these are current.
@@ -5431,6 +5450,117 @@ class TestGeneratedDocumentation:
         for name, script in (("deploy.sh", bundle.deploy_sh), ("teardown.sh", teardown)):
             assert "teardown removes the bucket" not in script, f"{name} still makes the false claim"
 
+    @ALL_COMBINATIONS
+    def test_teardown_sweeps_the_prefix_the_custom_resource_writes_too(self, combo):
+        """The stack writes TWO prefixes and teardown used to sweep one.
+
+        ``deploy.sh`` stages its zips under ``cfn-assets/<stack>/``, but the
+        code-packaging custom resource writes the MERGED executable — agent code plus
+        dependencies, so ``agent.py`` and therefore the system prompt — to
+        ``deployments/<stack>/<digest>/code.zip``. The MCP server path writes
+        ``mcp-server-code.zip`` under the same prefix.
+
+        The custom resource deletes its own key on Delete, and that is not enough on its
+        own: it knows only the key it wrote, so a superseded digest from an earlier deploy,
+        or a key left by a create that failed after the upload, is outside its reach. This
+        sweep is what covers those.
+
+        Measured live: after a teardown that reported success, the merged zip was
+        downloaded by version id and the system prompt read out of it in full.
+        """
+        teardown = _generate(**combo).teardown_sh
+        assert 'DEPLOYED_PREFIX="deployments/$STACK_NAME/"' in teardown, (
+            "teardown does not name the prefix holding the merged code.zip"
+        )
+        after_delete = teardown.split("wait stack-delete-complete")[1]
+        assert "$DEPLOYED_PREFIX" in after_delete, "the prefix is defined but never purged"
+        # Both prefixes go through the same version-aware purge, rather than one of them
+        # getting an `aws s3 rm` that only writes a delete marker.
+        purge_args = re.findall(r"purge_staged_objects \"\$STAGING_BUCKET\" \"(\$\w+)\"", teardown)
+        assert set(purge_args) == {"$purge_prefix"} or {"$STAGED_PREFIX", "$DEPLOYED_PREFIX"} <= set(purge_args), (
+            f"both prefixes must reach purge_staged_objects, got {purge_args}"
+        )
+
+    def test_teardown_does_not_print_the_whole_list_when_a_purge_failed(self):
+        """ "Two things are deliberately NOT deleted, and this is the whole list" is a
+        promise, and it is false the moment a purge leaves something behind.
+
+        With two prefixes swept independently, one can succeed and the other fail. The
+        success line is per prefix and the "whole list" block is guarded on *both*, so a
+        partial failure produces a WARNING naming the prefix rather than a green summary
+        that contradicts it. Verified by running the generated script against a stubbed
+        AWS CLI with deletes denied under ``deployments/``: the WARNING printed and the
+        "whole list" block did not.
+        """
+        teardown = _generate().teardown_sh
+        after_delete = teardown.split("wait stack-delete-complete")[1]
+        whole_list_at = after_delete.index("the whole list")
+        guard_at = after_delete.index('if [[ -z "$PURGE_LEFTOVERS" ]]')
+        assert guard_at < whole_list_at, "the whole-list claim is not guarded on the purge outcome"
+        # And the WARNING must name which prefix, since there is now more than one.
+        warning = after_delete.split("WARNING")[1]
+        assert "$purge_prefix" in warning, "the warning does not say which prefix still holds objects"
+
+    def test_the_whole_list_claim_is_scoped_to_this_stack(self):
+        """The promise has to be about this stack, not about the bucket.
+
+        Measured live on a shared staging bucket: after one stack's teardown the bucket
+        still held three other stacks' ``cfn-assets/`` prefixes. Nothing was leaked and
+        no purge failed — they belong to stacks that had not been torn down — but the
+        sentence said "in that bucket ... the whole list", so a recipient who deploys
+        several stacks from one bucket reads a true statement as a false one and goes
+        looking for a bug. Answered on a dedicated bucket the claim is exactly true: one
+        object left, the dependency bundle, no delete markers, no incomplete multipart
+        uploads.
+        """
+        teardown = _generate().teardown_sh
+        block = teardown.split("the whole list")[0].rsplit("EOF", 1)[-1]
+        assert "this stack" in block.lower(), "the claim is not scoped to this stack"
+        # And it must say what else may be in there, or the scoping is only a disclaimer.
+        after = teardown.split("the whole list")[1]
+        assert "several stacks" in after, "nothing tells the reader other stacks' prefixes remain"
+        assert "list-object-versions" in after, "the reader is left checking with a command that lies"
+
+    @ALL_COMBINATIONS
+    def test_the_code_packaging_role_can_delete_a_named_version(self, combo):
+        """``s3:DeleteObject`` does not cover ``s3:DeleteObjectVersion``.
+
+        Without the second, the Delete path can only add a delete marker, and the merged
+        code.zip stays fully readable by version id while ``aws s3 ls`` reports the prefix
+        empty. Without ``s3:ListBucketVersions`` — a *bucket*-level action, distinct from
+        ``s3:ListBucket`` — it cannot even enumerate the versions to delete them.
+
+        Both absences are silent, which is what makes them worth pinning: the stack still
+        reaches DELETE_COMPLETE either way.
+        """
+        role = _template(**combo)["Resources"]["CfnProviderRole"]
+        # One of the policies is wrapped in an Fn::If, so read the documents by walking
+        # rather than by index — an index here would break on the next conditional policy.
+        statements = [
+            statement
+            for document in _walk_for_key(role["Properties"]["Policies"], "PolicyDocument")
+            for statement in document.get("Statement", [])
+        ]
+
+        def _actions(statement):
+            action = statement.get("Action", [])
+            return set(action if isinstance(action, list) else [action])
+
+        object_level = [s for s in statements if "s3:PutObject" in _actions(s)]
+        assert object_level, "no statement grants the code-packaging writes at all"
+        assert any("s3:DeleteObjectVersion" in _actions(s) for s in object_level), (
+            "the merged code.zip cannot be hard-deleted without s3:DeleteObjectVersion"
+        )
+
+        listing = [s for s in statements if "s3:ListBucketVersions" in _actions(s)]
+        assert listing, "the versions cannot be enumerated without s3:ListBucketVersions"
+        # Bucket ARN, not /*: a bucket-level action on an object ARN matches nothing and
+        # deploys clean.
+        for statement in listing:
+            resource = statement["Resource"]
+            rendered = resource["Fn::Sub"] if isinstance(resource, dict) else resource
+            assert not rendered.endswith("/*"), f"s3:ListBucketVersions on an object ARN matches nothing: {rendered}"
+
     def test_teardown_reports_a_failed_purge_instead_of_a_false_success(self):
         """Every delete is failure-tolerant so one missing permission cannot abort a
         teardown, which means the loop finishing proves nothing about the outcome.
@@ -5446,6 +5576,25 @@ class TestGeneratedDocumentation:
         # The success line must be guarded by the function's return value, not printed
         # unconditionally after it.
         assert "elif purge_staged_objects" in teardown or "if purge_staged_objects" in teardown
+
+    @ALL_COMBINATIONS
+    def test_readme_names_both_prefixes_teardown_removes(self, combo):
+        """Per ARCC cnt_Hr4zJD4KntOWIt a public-facing document must state clearly what a
+        deletion does. The recipient has to be told about ``deployments/<stack>/`` in
+        particular: it holds the merged code.zip, so it is the one that matters, and
+        nothing in deploy.sh mentions it.
+
+        It also has to be told that ``aws s3 rm --recursive`` does not empty either prefix
+        on a versioned bucket — and deploy.sh enables versioning on any bucket it creates,
+        so that is the default case. Otherwise the recipient's own cleanup leaves the agent
+        source readable while ``aws s3 ls`` reports the prefix empty.
+        """
+        section = _generate(**combo).readme.split("## Teardown")[1].split("\n## ")[0]
+        assert "cfn-assets/<stack-name>/" in section
+        assert "deployments/<stack-name>/" in section, "the prefix holding the merged code.zip is not named"
+        assert "system prompt" in section, "the recipient is not told what is in it"
+        assert "list-object-versions" in section, "no version-aware cleanup command"
+        assert "s3:DeleteObjectVersion" in section and "s3:ListBucketVersions" in section
 
     def test_readme_says_retained_log_groups_block_a_same_name_redeploy(self):
         """The README used to promise the opposite of what happens.

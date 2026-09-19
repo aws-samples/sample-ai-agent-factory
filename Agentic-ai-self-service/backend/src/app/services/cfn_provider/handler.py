@@ -323,13 +323,33 @@ def _handle_code_package_delete(event: dict) -> tuple[dict, str]:
     so the KeyError becomes a FAILED Delete, and a FAILED Delete leaves the stack in
     DELETE_FAILED over an S3 object nobody needs.
 
-    A failed delete is logged and reported as success on purpose. The object is a
-    build artifact, not data: leaving it costs the recipient a few megabytes, and the
-    generated README already says S3 artifacts survive teardown. Failing the resource
-    instead would block the whole stack's deletion on it. The policy handler makes the
-    opposite choice, and for a concrete reason — a leftover policy blocks
+    A failed delete is logged and reported as success on purpose: failing the resource
+    would block the whole stack's deletion on a cleanup step. The policy handler makes
+    the opposite choice, and for a concrete reason — a leftover policy blocks
     DeletePolicyEngine, so swallowing that one only trades a clear failure for an
     obscure one.
+
+    This used to be a bare ``delete_object`` on the key, justified in a comment that
+    called the object "a build artifact, not data". Both halves of that were wrong.
+
+    The object is the merged ``code.zip`` the runtime executes, so it contains the
+    recipient's ``agent.py`` and therefore their system prompt — customer content, not
+    a build artifact. And on a *versioned* bucket a ``delete_object`` without a
+    ``VersionId`` does not delete anything: it adds a delete marker, the object stays
+    fully readable by ``VersionId``, and ``aws s3 ls`` then reports the prefix empty.
+    Measured live: after a clean teardown that reported success, the merged zip was
+    downloaded by ``VersionId`` and the system prompt recovered from it in full.
+
+    Per ARCC ``cnt_NfWe8fYjVfR6Gs``, hard deletion is "the irreversible removal of all
+    affected data" and applies to "all copies of the data", and it names this exact
+    anti-pattern: "removing pointers to S3 objects and orphaning data in your service
+    account does not meet the bar". A delete marker is precisely a removed pointer over
+    live data. So delete every version of the key, by id.
+
+    The bucket's ``NoncurrentVersionExpiration`` is not a substitute. It is 30 days
+    rather than immediate, and per ARCC ``cnt_XL9e2sbGgxAvce`` a bucket the tool did not
+    create carries no lifecycle at all — which is the normal case here, since the
+    recipient may pass a bucket they already had.
     """
     props = event.get("ResourceProperties", {})
     bucket = props.get("ArtifactsBucket", "")
@@ -344,13 +364,119 @@ def _handle_code_package_delete(event: dict) -> tuple[dict, str]:
         return {}, physical_id
 
     s3 = boto3.client("s3")
+    owner = _owner_kwargs(event)
     try:
-        s3.delete_object(Bucket=bucket, Key=output_key, **_owner_kwargs(event))
-        logger.info("Deleted s3://%s/%s", bucket, output_key)
+        deleted = _delete_every_version(s3, bucket, output_key, owner)
+        # Report the count, because "Deleted" on its own was the misleading part: the
+        # old log line said that while the object was still downloadable.
+        logger.info("Deleted %d version(s) of s3://%s/%s", deleted, bucket, output_key)
+        remaining = _count_versions(s3, bucket, output_key, owner)
+        if remaining:
+            # Not a failure of the stack delete, but it must not be silent either: this
+            # is customer content still readable in their bucket.
+            logger.warning(
+                "s3://%s/%s still has %d version(s) after cleanup; the agent source "
+                "remains readable. Needs s3:DeleteObjectVersion and "
+                "s3:ListBucketVersions, which are distinct from s3:DeleteObject and "
+                "s3:ListBucket.",
+                bucket,
+                output_key,
+                remaining,
+            )
     except Exception as e:
-        logger.warning("Failed to delete s3://%s/%s: %s", bucket, output_key, e)
+        # The same sentence as the branch above, deliberately, and this is not
+        # belt-and-braces. Measured live: when s3:ListBucketVersions is the missing
+        # permission, the enumeration inside _delete_every_version raises before any
+        # delete is attempted, so _count_versions never runs and the warning above
+        # cannot fire. The only operator-facing line left used to be "Failed to
+        # delete ...: AccessDenied", which says nothing about what is still readable.
+        # The diagnostic was gated by the very permission whose absence it exists to
+        # report, and it failed quietest on the harder of the two grants to spot.
+        #
+        # There is no count here because obtaining one is the thing that failed; per
+        # ARCC cnt_Hr4zJD4KntOWIt a service must state the activity of a deletion
+        # clearly, and "could not confirm" is the honest statement, not "failed".
+        logger.warning(
+            "Could not confirm deletion of s3://%s/%s: %s. Treat the agent source as "
+            "still readable there. Needs s3:DeleteObjectVersion and "
+            "s3:ListBucketVersions, which are distinct from s3:DeleteObject and "
+            "s3:ListBucket.",
+            bucket,
+            output_key,
+            e,
+        )
 
     return {}, physical_id
+
+
+# One key's versions, at 1000 per page. A hundred pages is 100k versions of a single
+# code.zip, which no real deployment reaches; the bound exists to stop a malformed
+# pagination response spinning, not to cap legitimate work.
+_MAX_VERSION_PAGES = 100
+
+
+def _iter_versions(s3, bucket: str, key: str, owner: dict):
+    """Every version and delete marker whose key is exactly ``key``.
+
+    ``list_object_versions`` takes a *prefix*, so it also returns siblings that merely
+    start with this key — ``code.zip.sha256`` beside ``code.zip``. The equality filter is
+    not there to protect the neighbour from deletion (a ``delete_object`` naming *this*
+    key with the neighbour's ``VersionId`` does not remove the neighbour): it is there
+    because this same function is the re-list that reports the outcome, and an unfiltered
+    count would report a neighbour as a surviving version and warn that the agent source
+    is still readable when it is not.
+
+    Pagination is bounded rather than ``while True``. A response that reports
+    ``IsTruncated`` while returning no usable marker would otherwise spin forever inside a
+    stack Delete, and a custom resource that hangs costs an hour before CloudFormation
+    gives up on it.
+    """
+    token: dict = {}
+    for _ in range(_MAX_VERSION_PAGES):
+        page = s3.list_object_versions(Bucket=bucket, Prefix=key, **owner, **token)
+        for collection in ("Versions", "DeleteMarkers"):
+            for entry in page.get(collection, []):
+                if entry.get("Key") == key:
+                    yield entry["VersionId"]
+        next_token = {
+            "KeyMarker": page.get("NextKeyMarker") or "",
+            "VersionIdMarker": page.get("NextVersionIdMarker") or "",
+        }
+        if not page.get("IsTruncated") or next_token == token:
+            return
+        token = next_token
+
+
+def _delete_every_version(s3, bucket: str, key: str, owner: dict) -> int:
+    """Hard-delete the key. Returns how many versions were removed.
+
+    ``VersionId`` is the literal string ``"null"`` on a bucket that was never versioned
+    and ``delete_object`` accepts it, so this one path covers versioned and unversioned
+    buckets alike and there is no branch to get wrong.
+
+    A failing delete is tolerated rather than propagated, and that is deliberate: one
+    denied version must not skip the re-list below, which is the only thing that can tell
+    the operator their agent source is still readable. The caller's success signal is
+    ``_count_versions``, never this return value.
+    """
+    count = 0
+    for version_id in list(_iter_versions(s3, bucket, key, owner)):
+        try:
+            s3.delete_object(Bucket=bucket, Key=key, VersionId=version_id, **owner)
+            count += 1
+        except Exception as e:
+            logger.warning("Could not delete version %s of s3://%s/%s: %s", version_id, bucket, key, e)
+    return count
+
+
+def _count_versions(s3, bucket: str, key: str, owner: dict) -> int:
+    """What the bucket says is left, which is the only honest success signal.
+
+    The deletes above are individually tolerant so one missing permission cannot wedge a
+    stack deletion, which means their completing proves nothing. Re-listing is what
+    distinguishes a real purge from a loop that swallowed every error.
+    """
+    return sum(1 for _ in _iter_versions(s3, bucket, key, owner))
 
 
 # ---------------------------------------------------------------------------
