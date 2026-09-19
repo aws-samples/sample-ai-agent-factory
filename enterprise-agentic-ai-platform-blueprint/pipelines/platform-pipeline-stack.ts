@@ -86,6 +86,7 @@ export interface PlatformDeploymentStageProps extends StageProps {
   readonly pipelineRoleArn: string;
   readonly auditEnv: Required<Environment>;
   readonly logArchiveEnv: Required<Environment>;
+  readonly retainGovernanceOnDelete: boolean;
   readonly applicationId: string;
   readonly agentId: string;
   readonly tenantId: string;
@@ -97,15 +98,21 @@ export class PlatformDeploymentStage extends Stage {
   constructor(scope: Construct, id: string, props: PlatformDeploymentStageProps) {
     super(scope, id, props);
 
-    new LogArchiveStack(this, 'LogArchive', {
-      env: props.logArchiveEnv,
-      organizationId: props.organizationId,
-      workloadAccountIds: props.workloadAccountIds,
-    });
-    new AuditStack(this, 'Audit', {
-      env: props.auditEnv,
-      organizationId: props.organizationId,
-    });
+    // Management/Governance is shared across Platform environments. Keep these
+    // stacks under the first stage so existing deployed stack identities remain
+    // stable, and never create conflicting copies in the production stage.
+    if (props.envName === 'nonprod') {
+      new LogArchiveStack(this, 'LogArchive', {
+        env: props.logArchiveEnv,
+        organizationId: props.organizationId,
+        workloadAccountIds: props.workloadAccountIds,
+        retainOnDelete: props.retainGovernanceOnDelete,
+      });
+      new AuditStack(this, 'Audit', {
+        env: props.auditEnv,
+        organizationId: props.organizationId,
+      });
+    }
     new GuardrailStack(this, 'Guardrail', {
       env: props.env,
       pipelineRoleArn: props.pipelineRoleArn,
@@ -189,6 +196,7 @@ export class PlatformPipelineStack extends Stack {
         pipelineRoleArn: props.pipelineRoleArn,
         auditEnv: props.audit.env,
         logArchiveEnv: props.logArchive.env,
+        retainGovernanceOnDelete: props.logArchive.envName === 'prod',
         ...sharedGatewayProps,
       }),
     );
@@ -202,6 +210,7 @@ export class PlatformPipelineStack extends Stack {
         pipelineRoleArn: props.pipelineRoleArn,
         auditEnv: props.audit.env,
         logArchiveEnv: props.logArchive.env,
+        retainGovernanceOnDelete: props.logArchive.envName === 'prod',
         ...sharedGatewayProps,
       }),
       { pre: [new ManualApprovalStep('SecurityReview')] },

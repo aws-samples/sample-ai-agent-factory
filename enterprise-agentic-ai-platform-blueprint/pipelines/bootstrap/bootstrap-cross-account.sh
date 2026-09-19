@@ -9,12 +9,14 @@
 # Bootstrap matrix (see README section 13, Multi-account topology):
 #   platform-nonprod  — self-bootstrap
 #   platform-prod     — trust platform-nonprod
+#   log-archive       — trust platform-nonprod (may be Management/Governance)
+#   audit             — trust platform-nonprod (may be Management/Governance)
 #   workload-nonprod  — trust platform-nonprod
 #   workload-prod     — trust platform-nonprod
-#   audit             — trust platform-nonprod
 #   sandbox           — trust platform-nonprod
 #
-# Log Archive is owned by Control Tower and does NOT need CDK bootstrap.
+# Consolidated deployments can map log-archive and audit to the same account;
+# the target list below removes duplicates before bootstrapping.
 #
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
@@ -38,6 +40,10 @@ QUALIFIER="hnb659fds"
 # cdk-hnb659fds-cfn-exec-role-<account>-<region> with
 # iam:PassedToService=cloudformation.amazonaws.com. The pipeline-creation API
 # validates both role classes before accepting a cross-account pipeline.
+# The Management account execution policy additionally needs Kinesis lifecycle
+# actions, IAM lifecycle actions on the exact
+# AgenticAI-LogArchive-CWLDestinationRole, and iam:PassRole on that role with
+# iam:PassedToService=logs.amazonaws.com.
 # The default below is intentionally NOT AdministratorAccess so a copy-paste
 # run fails safe and forces an explicit choice.
 CFN_EXECUTION_POLICY_ARN="${CFN_EXECUTION_POLICY_ARN:-}"
@@ -61,6 +67,7 @@ json() {
 
 PLATFORM_NP="$(json agenticai/platformNonprodAccountId)"
 PLATFORM_PR="$(json agenticai/platformProdAccountId)"
+LOG_ARCHIVE="$(json agenticai/logArchiveAccountId)"
 AUDIT="$(json agenticai/auditAccountId)"
 SANDBOX="$(json agenticai/sandboxAccountId)"
 WORKLOAD_NP="$(json agenticai/workloadNonprodAccountId)"
@@ -73,8 +80,16 @@ fi
 
 echo "Bootstrapping every account with --trust ${PLATFORM_NP}:"
 
-for acct in "$PLATFORM_NP" "$PLATFORM_PR" "$AUDIT" "$SANDBOX" "$WORKLOAD_NP" "$WORKLOAD_PR"; do
+TARGET_ACCOUNTS=()
+for acct in "$PLATFORM_NP" "$PLATFORM_PR" "$LOG_ARCHIVE" "$AUDIT" "$SANDBOX" "$WORKLOAD_NP" "$WORKLOAD_PR"; do
   [[ -z "$acct" ]] && continue
+  if [[ " ${TARGET_ACCOUNTS[*]} " == *" $acct "* ]]; then
+    continue
+  fi
+  TARGET_ACCOUNTS+=("$acct")
+done
+
+for acct in "${TARGET_ACCOUNTS[@]}"; do
   echo ""
   echo "-> Bootstrap aws://${acct}/${REGION}"
   # Expects the OPERATOR to have previously assumed a sufficiently-privileged

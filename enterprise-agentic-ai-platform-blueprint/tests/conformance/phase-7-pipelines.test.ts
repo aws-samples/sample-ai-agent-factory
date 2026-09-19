@@ -133,6 +133,29 @@ describe('Phase 7 — Platform pipeline', () => {
     });
   });
 
+  it('deploys shared Management/Governance stacks exactly once', () => {
+    const pipeline = Object.values(
+      synthPlatform().findResources('AWS::CodePipeline::Pipeline'),
+    )[0] as any;
+    const stages = pipeline.Properties.Stages as any[];
+    const actionNames = (stageName: string): string[] =>
+      stages
+        .find((stage) => stage.Name === stageName)
+        .Actions.map((action: { Name: string }) => action.Name);
+
+    const nonprodActions = actionNames('Nonprod');
+    const prodActions = actionNames('Prod');
+    for (const action of [
+      'Audit.Prepare',
+      'Audit.Deploy',
+      'LogArchive.Prepare',
+      'LogArchive.Deploy',
+    ]) {
+      expect(nonprodActions).toContain(action);
+      expect(prodActions).not.toContain(action);
+    }
+  });
+
   it('configures cross-account keys (required for multi-account stages)', () => {
     const t = synthPlatform();
     // CodePipelines emits encrypted artifact store with KMS key ARN when crossAccountKeys=true.
@@ -195,6 +218,13 @@ describe('Phase 7 — cross-account bootstrap role contract', () => {
     expect(bootstrapSource).toContain(
       'iam:PassedToService=cloudformation.amazonaws.com',
     );
+    expect(bootstrapSource).toContain(
+      'LOG_ARCHIVE="$(json agenticai/logArchiveAccountId)"',
+    );
+    expect(bootstrapSource).toContain(
+      '"$PLATFORM_NP" "$PLATFORM_PR" "$LOG_ARCHIVE" "$AUDIT"',
+    );
+    expect(bootstrapSource).toContain('TARGET_ACCOUNTS+=("$acct")');
   });
 });
 
@@ -414,6 +444,10 @@ describe('Round 1 integration — CDK app self-synth contract', () => {
     resolve(__dirname, '../../pipelines/synth-commands.ts'),
     'utf8',
   );
+  const platformPipelineSource = readFileSync(
+    resolve(__dirname, '../../pipelines/platform-pipeline-stack.ts'),
+    'utf8',
+  );
   const packageDocument = JSON.parse(
     readFileSync(resolve(__dirname, '../../package.json'), 'utf8'),
   ) as { scripts: Record<string, string> };
@@ -451,6 +485,13 @@ describe('Round 1 integration — CDK app self-synth contract', () => {
     expect(assemblyLoop).toContain('done');
     expect(commands[commands.length - 1]).toContain('CODEBUILD_SRC_DIR/cdk.out');
     expect(commands[commands.length - 1]).toContain('mv cdk.out');
+  });
+
+  it('keeps shared governance out of the production Platform stage', () => {
+    expect(platformPipelineSource).toContain("if (props.envName === 'nonprod')");
+    expect(platformPipelineSource).toContain(
+      "retainGovernanceOnDelete: props.logArchive.envName === 'prod'",
+    );
   });
 
   it('rejects a missing stage instead of emitting an empty assembly', () => {

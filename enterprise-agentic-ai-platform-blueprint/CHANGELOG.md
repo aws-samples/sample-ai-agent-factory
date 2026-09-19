@@ -22,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Pipeline synthesis accepts both the parent multi-project checkout and a standalone blueprint checkout, validates stage assemblies in one complete shell command, returns nested `cdk.out` to the ShellStep artifact root, and fails closed for every other source layout.
 - Root pipeline artifact stores are explicit CMK-encrypted, rotating, five-tagged, lifecycle-bounded, and automatically emptied on rollback or teardown instead of leaving retained untracked buckets.
 - Cross-account pipeline bootstrap guidance requires exact `iam:PassRole` grants for target CDK deploy roles scoped to CodePipeline and target CloudFormation execution roles scoped to CloudFormation.
+- Log Archive now provisions its encrypted on-demand Kinesis target and `logs.amazonaws.com` delivery role with sender/recipient `aws:SourceArn` confused-deputy conditions instead of unresolved placeholder ARNs.
+- Nonproduction Log Archive buckets, stream, and CMK use destroy/auto-delete semantics; production retains the audit archive by default. Audit and Log Archive are emitted only once because Management/Governance is shared across environments.
 - Teardown now includes `AgenticAI-Platform-InferenceGatewayStack` and requires the deployment's model-rate context.
 
 ### Verification
