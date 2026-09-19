@@ -33,6 +33,17 @@ repos:
         # "argument --baseline: Invalid path: .secrets.baseline" on every commit.
         # That failure looked like a secret finding and was routinely worked around
         # with --no-verify, which disabled every other hook here too.
+        #
+        # Fixing the argument was only half of it. The baseline's own result *keys* must
+        # be root-relative too, for the same reason: they were written by running
+        # detect-secrets from inside this directory, so they read 'backend/tests/x.py'
+        # while the hook scans 'Agentic-ai-self-service/backend/tests/x.py'. The baseline
+        # then loaded without error and matched nothing, so all 77 reviewed false
+        # positives were unsuppressed and any commit touching one of those 42 files went
+        # red. Proven with one file: flagged when scanned from the git root, silent when
+        # scanned from here. Regenerate only from the git root:
+        #   detect-secrets scan --baseline Agentic-ai-self-service/.secrets.baseline \
+        #     Agentic-ai-self-service
         args: ['--baseline', 'Agentic-ai-self-service/.secrets.baseline']
         exclude: '(package-lock\.json|\.lock)$'
 
