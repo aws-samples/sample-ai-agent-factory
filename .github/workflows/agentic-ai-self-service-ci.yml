@@ -75,6 +75,50 @@ jobs:
       - name: ruff format --check
         run: ruff format --check .
 
+  secret-scan:
+    name: detect-secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # Must equal the `rev:` of the detect-secrets hook in .pre-commit-config.yaml. The
+      # plugin set and its hashing change between releases, so a floating version means
+      # this job and a developer's hook disagree about what the baseline covers.
+      - name: Install detect-secrets at the pre-commit pinned version
+        run: pip install 'detect-secrets==1.5.0'
+      # This gate existed only as a pre-commit hook, and `pre-commit install` is manual,
+      # so on a fresh clone it ran nowhere: not on commit, and not here. That is how the
+      # baseline came to match nothing without anybody noticing.
+      #
+      # Run from the repository root, overriding this workflow's default
+      # working-directory, because that is where pre-commit runs its hooks and therefore
+      # the only directory in which the baseline's paths resolve.
+      - name: Baseline paths must resolve where the scan runs
+        working-directory: .
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          p = "Agentic-ai-self-service/.secrets.baseline"
+          bad = [k for k in json.load(open(p))["results"]
+                 if not k.startswith("Agentic-ai-self-service/")]
+          if bad:
+              sys.exit(
+                  f"{len(bad)} baseline key(s) are not repository-root-relative, e.g. "
+                  f"{bad[0]!r}. detect-secrets resolves result keys against its own "
+                  "working directory, so these match no scanned file: the baseline loads "
+                  "without error and suppresses nothing. Regenerate from the repository "
+                  "root, never from inside the sample."
+              )
+          PY
+      - name: Scan every tracked file in the sample
+        working-directory: .
+        run: |
+          git ls-files -z Agentic-ai-self-service \
+            | xargs -0 detect-secrets-hook \
+                --baseline Agentic-ai-self-service/.secrets.baseline
+
   backend:
     name: backend tests
     runs-on: ubuntu-latest
