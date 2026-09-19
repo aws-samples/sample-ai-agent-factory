@@ -1176,3 +1176,65 @@ def test_lambda_permission_does_not_retry_unrelated_invalid_parameter(
     finally:
         spike.close()
     assert attempts == 1
+
+
+def test_gateway_propagation_retries_explicit_get_policy_engine_access_denial(
+    config: spike_module.PolicyEngineConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spike, _ = _spike(config, populated=False)
+    attempts = 0
+
+    def attempt() -> Mapping[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise spike_module.ClientError(
+                {
+                    "Error": {
+                        "Code": "ValidationException",
+                        "Message": (
+                            "Access denied while calling GetPolicyEngine on Policy Engine; "
+                            "confirm the Gateway role has permission"
+                        ),
+                    }
+                },
+                "UpdateGateway",
+            )
+        return {"ok": True}
+
+    monkeypatch.setattr(spike_module.time, "sleep", lambda _: None)
+    try:
+        assert spike.call_with_propagation("association", attempt) == {"ok": True}
+    finally:
+        spike.close()
+    assert attempts == 2
+
+
+def test_gateway_propagation_does_not_retry_unrelated_validation(
+    config: spike_module.PolicyEngineConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spike, _ = _spike(config, populated=False)
+    attempts = 0
+
+    def attempt() -> Mapping[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        raise spike_module.ClientError(
+            {
+                "Error": {
+                    "Code": "ValidationException",
+                    "Message": "The Cedar schema is invalid",
+                }
+            },
+            "UpdateGateway",
+        )
+
+    monkeypatch.setattr(spike_module.time, "sleep", lambda _: None)
+    try:
+        with pytest.raises(spike_module.ClientError):
+            spike.call_with_propagation("association", attempt)
+    finally:
+        spike.close()
+    assert attempts == 1

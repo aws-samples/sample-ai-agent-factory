@@ -245,7 +245,8 @@ reused only when the existing statement matches. A fresh-role “invalid
 principal” response is retried for up to six minutes, with the exact statement
 ID checked before every attempt. The authorization policies are attached before
 association. Gateway create/target create/mode updates use the same bounded
-propagation window; schema validation errors are never retried.
+propagation window. Validation errors fail immediately except the exact
+live-proven `GetPolicyEngine` access-denied propagation message.
 
 The **management caller** needs `bedrock-agentcore:CreatePolicyEngine`,
 `CreatePolicy`, `UpdatePolicy`, `DeletePolicy`, `DeletePolicyEngine`,

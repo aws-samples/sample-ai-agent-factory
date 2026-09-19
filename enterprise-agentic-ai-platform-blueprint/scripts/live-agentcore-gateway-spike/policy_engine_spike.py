@@ -1205,8 +1205,9 @@ class PolicyEngineSpike:
         """Retry one idempotent AgentCore operation while IAM propagates.
 
         Create callers MUST close over one stable client token; UpdateGateway is
-        itself idempotent. Only explicit transient/propagation codes are retried
-        for six minutes. Validation errors fail immediately.
+        itself idempotent. Only explicit transient codes and the live-proven
+        “Access denied while calling GetPolicyEngine” propagation message are
+        retried for six minutes. Every other validation error fails immediately.
         """
         started = time.monotonic()
         deadline = started + PROPAGATION_TIMEOUT_SECONDS
@@ -1224,7 +1225,13 @@ class PolicyEngineSpike:
                 return response
             except ClientError as error:
                 code = aws_error_code(error)
-                if code not in PROPAGATION_RETRY_CODES:
+                message = str(error).lower()
+                policy_role_propagation = (
+                    code == "ValidationException"
+                    and "access denied while calling getpolicyengine" in message
+                    and "gateway role" in message
+                )
+                if code not in PROPAGATION_RETRY_CODES and not policy_role_propagation:
                     raise
                 if time.monotonic() >= deadline:
                     raise SpikeError(
