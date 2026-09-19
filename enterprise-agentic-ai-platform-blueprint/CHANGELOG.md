@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Pipeline-owned `InferenceGatewayStack` in both Platform deployment stages.
+- Native `AWS::BedrockAgentCore::Gateway` with Cognito client-credentials JWT authentication and the MCP `2025-11-25` protocol.
+- Native Bedrock Mantle inference target using `GATEWAY_IAM_ROLE` and a source-account/source-Gateway constrained service role.
+- Native Gateway rate limits with explicit provider-qualified model RPM/TPM allocations and a zero-rate wildcard fallback.
+- Five-tag allocation contract on taggable Gateway resources and non-secret CloudFormation outputs for workload integration.
+- Conformance coverage for resource shape, IAM trust, Cognito M2M, model-ID validation, lifecycle ordering, and teardown context.
+- Cleanup-first AgentCore Gateway PolicyEngine compatibility runner with four-user `sub`/group semantics, strict Cedar validation, exact JWT negatives, mode rollback, ownership-checked teardown, and 158 focused tests.
+
+### Changed
+
+- Replaced the D-03 NLB/PrivateLink/LiteLLM placeholder in `@agenticai/platform-inference-gateway` with the real AgentCore inference path.
+- Platform and pipeline synthesis now fail when `agenticai/inferenceModelRateLimits` is absent or malformed.
+- Pipeline synthesis accepts both the parent multi-project checkout and a standalone blueprint checkout, validates stage assemblies in one complete shell command, returns nested `cdk.out` to the ShellStep artifact root, and fails closed for every other source layout.
+- Root pipeline artifact stores are explicit CMK-encrypted, rotating, five-tagged, lifecycle-bounded, and automatically emptied on rollback or teardown instead of leaving retained untracked buckets.
+- Cross-account pipeline bootstrap guidance requires exact `iam:PassRole` grants for target CDK deploy roles scoped to CodePipeline and target CloudFormation execution roles scoped to CloudFormation.
+- Log Archive now provisions its encrypted on-demand Kinesis target and `logs.amazonaws.com` delivery role with sender/recipient `aws:SourceArn` confused-deputy conditions instead of unresolved placeholder ARNs.
+- CloudWatch Logs destination access policies now list sender account IDs directly; live `PutDestinationPolicy` rejects IAM root ARNs in `Principal.AWS`.
+- Consolidated Platform test deployments reuse the nonproduction `AgenticAI-GuardrailAdmin` role and suffix only the production baseline guardrail name; separate-account deployments keep the stable unsuffixed names.
+- Cognito M2M token endpoints now come from `UserPoolDomain.baseUrl()`; the first pipeline-owned invocation proved that constructing a managed domain with the AWS API `urlSuffix` produces an unresolvable endpoint.
+- Target-qualified inference model routes now use the exported `InferenceTargetName` rather than the connector ID; live discovery proved AgentCore prefixes model IDs with the target name while rate limits continue to use the provider-qualified ID.
+- Nonproduction Log Archive buckets, stream, and CMK use destroy/auto-delete semantics; production retains the audit archive by default. Audit and Log Archive are emitted only once because Management/Governance is shared across environments.
+- Management bootstrap guidance now covers the stack-scoped IAM role, managed-policy attach/detach, Lambda lifecycle, and Lambda-only `iam:PassRole` required by CDK's nonproduction S3 auto-delete provider; this boundary was proven by the first live Log Archive rollback.
+- Teardown now includes `AgenticAI-Platform-InferenceGatewayStack` and requires the deployment's model-rate context.
+- `TODO-GW-POLICY-ENGINE` now reflects migration debt rather than API availability: the Lambda wrapper remains until the real Workload pipeline passes PolicyEngine behavior parity, rollback, and zero-residual teardown.
+
+### Verification
+
+- The preceding compatibility spike passed live in `us-west-2` for IAM and Cognito M2M auth, model discovery, Strands `LiteLLMModel` streaming/non-streaming, exact HTTP 429, and zero-residue cleanup.
+- Platform pipeline executions passed on exact commits `f037b4e`, `2ca8272`, and `0ef7f50`: Source, Synth, SelfMutate, assets, all five nonproduction deployments, fresh explicit approvals, and all three production deployments. The production Guardrail, Gateway, and inference target are `READY`; the native rate limit is `ACTIVE`; the Management/Governance Log Archive is live; and the pipeline-owned Gateway passed Cognito M2M, 49-model discovery, and Strands `LiteLLMModel` streaming/non-streaming. Sanitized details are in `evidence/live/2026-09-19-platform-pipeline-deployment.md`.
+- The isolated Gateway PolicyEngine run passed on exact commit `46c3a62`: eight strict Cedar policies, 20 subject/group decisions, four filtered tool lists, direct-call denial, exact 401/403 JWT negatives, expired-token denial, `ENFORCE → LOG_ONLY → ENFORCE`, and independent zero-residual inventory. Sanitized details are in `evidence/live/2026-09-19-policyengine-compatibility-spike.md`.
+- OTEL rate-limit span correlation remains blocked: `aws/spans` stayed empty under an active CloudWatch Logs trace destination, 100% indexing, configured deliveries, propagation delay, and extended polling. It is not counted as passing evidence.
+
 ## [1.0.0] - 2026-08-18
 
 First public release, published as `enterprise-agentic-ai-platform-blueprint` in [`aws-samples/sample-ai-agent-factory`](https://github.com/aws-samples/sample-ai-agent-factory). Consolidates all development phases below (A-Q). The `v0.x` labels retained in the phase headings are the internal development milestones that produced each change set, kept for traceability.

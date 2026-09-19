@@ -33,6 +33,7 @@ import { LogArchiveStack } from '../apps/platform-account/lib/log-archive-stack'
 import { AuditStack } from '../apps/platform-account/lib/audit-stack';
 import { GuardrailStack } from '../apps/platform-account/lib/guardrail-stack';
 import { RegistryStack } from '../apps/platform-account/lib/registry-stack';
+import { InferenceGatewayStack } from '../apps/platform-account/lib/inference-gateway-stack';
 import { WorkloadNetworkStack } from '../apps/workload-account/lib/workload-network-stack';
 import { WorkloadAppStack } from '../apps/workload-account/lib/workload-app-stack';
 import { PlatformPipelineStack } from '../pipelines/platform-pipeline-stack';
@@ -41,6 +42,7 @@ import { D03PlatformCoreStack } from '../apps/platform-account/lib/d03-platform-
 import { D03WorkloadAgentStack } from '../apps/workload-account/lib/d03-workload-agent-stack';
 import { D03WorkstreamGatewayStack } from '../apps/platform-account/lib/d03-workstream-gateway-stack';
 import { GapClosureStack } from '../apps/workload-account/lib/gap-closure-stack';
+import type { InferenceModelRateLimit } from '@agenticai/platform-inference-gateway';
 
 const app = new App();
 
@@ -61,6 +63,85 @@ function guardrailAdminRoleArn(): string {
   // Deploy-time placeholder. Using 000000000000 makes it obvious if this
   // leaks into a real environment; SCP-05 will deny everyone until replaced.
   return 'arn:aws:iam::000000000000:role/AgenticAI-PlaceholderUntilPhase3';
+}
+
+function stringArrayContext(key: string): readonly string[] {
+  const raw = app.node.tryGetContext(key);
+  if (raw === undefined) return [];
+
+  let parsed: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(`Context '${key}' must be a JSON array of strings.`, { cause: error });
+    }
+  }
+  if (
+    !Array.isArray(parsed) ||
+    parsed.some((value) => typeof value !== 'string' || value.length === 0)
+  ) {
+    throw new Error(`Context '${key}' must be a JSON array of non-empty strings.`);
+  }
+  return parsed;
+}
+
+function inferenceModelRateLimitsContext(
+  key: string,
+): readonly InferenceModelRateLimit[] {
+  const raw = app.node.tryGetContext(key);
+  if (raw === undefined) return [];
+
+  let parsed: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(`Context '${key}' must be a JSON array.`, { cause: error });
+    }
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Context '${key}' must be an array of model rate limits.`);
+  }
+
+  return parsed.map((value, index) => {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      throw new Error(`Context '${key}[${index}]' must be an object.`);
+    }
+    const entry = value as Record<string, unknown>;
+    if (
+      typeof entry.qualifiedModelId !== 'string' ||
+      typeof entry.requestsPerMinute !== 'number' ||
+      typeof entry.tokensPerMinute !== 'number'
+    ) {
+      throw new Error(
+        `Context '${key}[${index}]' requires qualifiedModelId, requestsPerMinute, and tokensPerMinute.`,
+      );
+    }
+    return {
+      qualifiedModelId: entry.qualifiedModelId,
+      requestsPerMinute: entry.requestsPerMinute,
+      tokensPerMinute: entry.tokensPerMinute,
+    };
+  });
+}
+
+function seedAvailabilityZoneContext(
+  account: unknown,
+  region: string,
+  availabilityZones: readonly string[],
+): void {
+  if (typeof account !== 'string' || availabilityZones.length < 2) {
+    throw new Error('Cannot seed Availability Zone context without an account and two zones.');
+  }
+  const key = `availability-zones:account=${account}:region=${region}`;
+  const existing = app.node.tryGetContext(key);
+  if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(availabilityZones)) {
+    throw new Error(`Conflicting Availability Zone context for ${account} in ${region}.`);
+  }
+  if (existing === undefined) {
+    app.node.setContext(key, [...availabilityZones]);
+  }
 }
 
 switch (stage) {
@@ -112,19 +193,40 @@ switch (stage) {
       });
     }
 
-    // Phase 3 — GuardrailStack deployed into agenticai-platform-{nonprod,prod}.
+    // Platform control-plane stacks deployed into platform-{nonprod,prod}.
     const platformAccount = app.node.tryGetContext('agenticai/platformAccountId');
     const pipelineRoleArn = app.node.tryGetContext('agenticai/pipelineRoleArn');
     const platformEnvName = app.node.tryGetContext('agenticai/envName') ?? 'nonprod';
+    const inferenceModelRateLimits = inferenceModelRateLimitsContext(
+      'agenticai/inferenceModelRateLimits',
+    );
+    const applicationId =
+      app.node.tryGetContext('agenticai/applicationId') ?? 'platform-inference';
+    const tenantId = app.node.tryGetContext('agenticai/tenantId') ?? 'shared';
+    const agentId = app.node.tryGetContext('agenticai/agentId') ?? 'shared';
+    const costCentre = app.node.tryGetContext('agenticai/costCentre') ?? 'platform';
     if (platformAccount && typeof pipelineRoleArn === 'string') {
+      if (inferenceModelRateLimits.length === 0) {
+        throw new Error(
+          "Platform stage requires context 'agenticai/inferenceModelRateLimits'.",
+        );
+      }
       new GuardrailStack(app, 'AgenticAI-Platform-GuardrailStack', {
         env: { account: platformAccount, region },
         pipelineRoleArn,
       });
-      // Phase 5 — Registry stack (replaces notebook-imperative registration).
       new RegistryStack(app, 'AgenticAI-Platform-RegistryStack', {
         env: { account: platformAccount, region },
         envName: platformEnvName,
+      });
+      new InferenceGatewayStack(app, 'AgenticAI-Platform-InferenceGatewayStack', {
+        env: { account: platformAccount, region },
+        envName: String(platformEnvName),
+        applicationId: String(applicationId),
+        tenantId: String(tenantId),
+        agentId: String(agentId),
+        costCentre: String(costCentre),
+        modelRateLimits: inferenceModelRateLimits,
       });
     }
     break;
@@ -134,17 +236,24 @@ switch (stage) {
     // Model Invocation Logging.
     const workloadAccount = app.node.tryGetContext('agenticai/workloadAccountId');
     const vpcCidr = app.node.tryGetContext('agenticai/vpcCidr');
+    const availabilityZones = stringArrayContext('agenticai/availabilityZones');
     const region = process.env.CDK_DEFAULT_REGION ?? 'us-west-2';
 
-    if (!workloadAccount) {
+    const missing: string[] = [];
+    if (!workloadAccount) missing.push('agenticai/workloadAccountId');
+    if (availabilityZones.length < 2) missing.push('agenticai/availabilityZones');
+    if (missing.length > 0) {
       throw new Error(
-        "Workload stage requires context 'agenticai/workloadAccountId' (the target account id).",
+        `Workload stage requires context keys: ${missing.join(', ')}. Availability Zones must be preflight-derived for the target account.`,
       );
     }
+
+    seedAvailabilityZoneContext(workloadAccount, region, availabilityZones);
 
     const networkStack = new WorkloadNetworkStack(app, 'AgenticAI-Workload-NetworkStack', {
       env: { account: workloadAccount, region },
       vpcCidr,
+      availabilityZones,
     });
 
     // Phase 5 — WorkloadAppStack composes LiteLLM + AgentCore + RAG + AgenticApp.
@@ -165,6 +274,9 @@ switch (stage) {
         workloadSubnetIds: networkStack.vpc.vpc
           .selectSubnets({ subnetGroupName: 'workload' })
           .subnetIds,
+        workloadSubnetRouteTableIds: networkStack.vpc.vpc
+          .selectSubnets({ subnetGroupName: 'workload' })
+          .subnets.map((subnet) => subnet.routeTable.routeTableId),
         vpcCidr: networkStack.vpc.vpc.vpcCidrBlock,
         availabilityZones: networkStack.vpc.vpc.availabilityZones,
         bedrockRuntimeVpceId: networkStack.vpc.endpoints.bedrockRuntime.vpcEndpointId,
@@ -392,6 +504,7 @@ switch (stage) {
     // Phase 7 — CDK Pipelines stacks.
     const region = process.env.CDK_DEFAULT_REGION ?? 'us-west-2';
     const githubRepo = app.node.tryGetContext('agenticai/githubRepo');
+    const githubBranch = app.node.tryGetContext('agenticai/githubBranch');
     const githubConnectionArn = app.node.tryGetContext('agenticai/githubConnectionArn');
     const organizationId = app.node.tryGetContext('agenticai/organizationId');
     const platformNonprodAccount = app.node.tryGetContext('agenticai/platformNonprodAccountId');
@@ -401,15 +514,20 @@ switch (stage) {
     const workloadNonprodAccount = app.node.tryGetContext('agenticai/workloadNonprodAccountId');
     const workloadProdAccount = app.node.tryGetContext('agenticai/workloadProdAccountId');
     const pipelineRoleArn = app.node.tryGetContext('agenticai/pipelineRoleArn');
-    const rawWorkloadIds = app.node.tryGetContext('agenticai/workloadAccountIds');
-    const workloadAccountIds: readonly string[] = Array.isArray(rawWorkloadIds)
-      ? rawWorkloadIds
-      : typeof rawWorkloadIds === 'string'
-        ? (JSON.parse(rawWorkloadIds) as string[])
-        : [];
+    const configuredWorkloadAccountIds = stringArrayContext('agenticai/workloadAccountIds');
+    const workloadNonprodAvailabilityZones = stringArrayContext(
+      'agenticai/workloadNonprodAvailabilityZones',
+    );
+    const workloadProdAvailabilityZones = stringArrayContext(
+      'agenticai/workloadProdAvailabilityZones',
+    );
     const tenantId = app.node.tryGetContext('agenticai/tenantId') ?? 'demo';
     const agentId = app.node.tryGetContext('agenticai/agentId') ?? 'primary';
+    const applicationId = app.node.tryGetContext('agenticai/applicationId') ?? tenantId;
     const costCentre = app.node.tryGetContext('agenticai/costCentre') ?? 'engineering';
+    const inferenceModelRateLimits = inferenceModelRateLimitsContext(
+      'agenticai/inferenceModelRateLimits',
+    );
     const auditOamSinkArn = app.node.tryGetContext('agenticai/auditOamSinkArn');
     const notificationEmail = app.node.tryGetContext('agenticai/notificationEmail');
 
@@ -423,16 +541,74 @@ switch (stage) {
     if (!logArchiveAccount) missing.push('agenticai/logArchiveAccountId');
     if (!workloadNonprodAccount) missing.push('agenticai/workloadNonprodAccountId');
     if (!workloadProdAccount) missing.push('agenticai/workloadProdAccountId');
+    if (workloadNonprodAvailabilityZones.length < 2) {
+      missing.push('agenticai/workloadNonprodAvailabilityZones');
+    }
+    if (workloadProdAvailabilityZones.length < 2) {
+      missing.push('agenticai/workloadProdAvailabilityZones');
+    }
     if (typeof pipelineRoleArn !== 'string') missing.push('agenticai/pipelineRoleArn');
+    if (inferenceModelRateLimits.length === 0) {
+      missing.push('agenticai/inferenceModelRateLimits');
+    }
     if (missing.length > 0) {
       throw new Error(
         `Pipeline stage requires context keys: ${missing.join(', ')}. Populate cdk.context.json or pass via -c.`,
       );
     }
 
+    seedAvailabilityZoneContext(
+      workloadNonprodAccount,
+      region,
+      workloadNonprodAvailabilityZones,
+    );
+    seedAvailabilityZoneContext(
+      workloadProdAccount,
+      region,
+      workloadProdAvailabilityZones,
+    );
+
+    const workloadAccountIds = configuredWorkloadAccountIds.length > 0
+      ? configuredWorkloadAccountIds
+      : [...new Set([String(workloadNonprodAccount), String(workloadProdAccount)])];
+    const sharedSynthContext: Record<string, string> = {
+      'agenticai/githubRepo': githubRepo as string,
+      'agenticai/githubConnectionArn': githubConnectionArn as string,
+      'agenticai/organizationId': organizationId as string,
+      'agenticai/platformNonprodAccountId': String(platformNonprodAccount),
+      'agenticai/platformProdAccountId': String(platformProdAccount),
+      'agenticai/auditAccountId': String(auditAccount),
+      'agenticai/logArchiveAccountId': String(logArchiveAccount),
+      'agenticai/workloadNonprodAccountId': String(workloadNonprodAccount),
+      'agenticai/workloadProdAccountId': String(workloadProdAccount),
+      'agenticai/workloadNonprodAvailabilityZones': JSON.stringify(
+        workloadNonprodAvailabilityZones,
+      ),
+      'agenticai/workloadProdAvailabilityZones': JSON.stringify(
+        workloadProdAvailabilityZones,
+      ),
+      'agenticai/pipelineRoleArn': pipelineRoleArn as string,
+      'agenticai/workloadAccountIds': JSON.stringify(workloadAccountIds),
+      'agenticai/tenantId': String(tenantId),
+      'agenticai/agentId': String(agentId),
+      'agenticai/applicationId': String(applicationId),
+      'agenticai/costCentre': String(costCentre),
+      'agenticai/inferenceModelRateLimits': JSON.stringify(inferenceModelRateLimits),
+    };
+    if (typeof githubBranch === 'string') {
+      sharedSynthContext['agenticai/githubBranch'] = githubBranch;
+    }
+    if (typeof auditOamSinkArn === 'string') {
+      sharedSynthContext['agenticai/auditOamSinkArn'] = auditOamSinkArn;
+    }
+    if (typeof notificationEmail === 'string') {
+      sharedSynthContext['agenticai/notificationEmail'] = notificationEmail;
+    }
+
     new PlatformPipelineStack(app, 'AgenticAI-PlatformPipelineStack', {
       env: { account: platformNonprodAccount, region },
       githubRepo: githubRepo as string,
+      githubBranch: typeof githubBranch === 'string' ? githubBranch : undefined,
       githubConnectionArn: githubConnectionArn as string,
       organizationId: organizationId as string,
       logArchive: {
@@ -453,19 +629,29 @@ switch (stage) {
       },
       workloadAccountIds,
       pipelineRoleArn: pipelineRoleArn as string,
+      applicationId: String(applicationId),
+      tenantId: String(tenantId),
+      agentId: String(agentId),
+      costCentre: String(costCentre),
+      inferenceModelRateLimits,
+      synthContext: sharedSynthContext,
     });
 
     new WorkloadPipelineStack(app, 'AgenticAI-WorkloadPipelineStack', {
       env: { account: platformNonprodAccount, region },
       githubRepo: githubRepo as string,
+      githubBranch: typeof githubBranch === 'string' ? githubBranch : undefined,
       githubConnectionArn: githubConnectionArn as string,
       tenantId,
       agentId,
       costCentre,
       workloadNonprodEnv: { account: workloadNonprodAccount, region },
       workloadProdEnv: { account: workloadProdAccount, region },
+      workloadNonprodAvailabilityZones,
+      workloadProdAvailabilityZones,
       auditOamSinkArn: typeof auditOamSinkArn === 'string' ? auditOamSinkArn : undefined,
       notificationEmail: typeof notificationEmail === 'string' ? notificationEmail : undefined,
+      synthContext: sharedSynthContext,
     });
     break;
   }
@@ -515,9 +701,9 @@ switch (stage) {
     break;
   }
   case undefined:
-    // Default: no stage selected. Produces an empty assembly so `cdk synth` succeeds
-    // without touching any account. Useful for CI lint + unit tests.
-    break;
+    throw new Error(
+      "Missing required CDK context 'stage'. Pass --context stage=<management|platform|workload|sandbox|d03-platform|d03-workload|d03-workstream-gateway|pipeline|gap-closure>.",
+    );
   default:
     throw new Error(
       `Unknown stage '${stage}'. Valid stages: management | platform | workload | sandbox | d03-platform | d03-workload | d03-workstream-gateway | pipeline | gap-closure.`,

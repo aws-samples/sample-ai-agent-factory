@@ -1,20 +1,15 @@
 /**
  * PlatformPipelineStack — CDK Pipelines in agenticai-platform-nonprod.
  *
- * Self-mutating pipeline that deploys:
- *   1. Source stage  — GitHub (or CodeCommit) webhook on `main`.
- *   2. Synth stage   — npm ci + build + cdk synth (Jest + conformance).
- *   3. SelfMutate    — pipeline updates itself from new synth output.
- *   4. Deploy Platform non-prod (this account).
- *   5. Manual Approval — security review.
- *   6. Deploy Platform prod.
- *
- * Workload-pipeline is a sibling stack (WorkloadPipelineStack).
+ * The pipeline self-synthesizes and deploys the shared governance stacks plus
+ * the native AgentCore inference Gateway into isolated nonproduction and
+ * production Platform accounts.
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { Stack, StackProps, Environment } from 'aws-cdk-lib';
+import { Stack, StackProps, Environment, Stage, StageProps } from 'aws-cdk-lib';
+import { PipelineType } from 'aws-cdk-lib/aws-codepipeline';
 import {
   CodePipeline,
   CodePipelineSource,
@@ -30,21 +25,22 @@ import { GuardrailStack } from '../apps/platform-account/lib/guardrail-stack';
 import { RegistryStack } from '../apps/platform-account/lib/registry-stack';
 import { LogArchiveStack } from '../apps/platform-account/lib/log-archive-stack';
 import { AuditStack } from '../apps/platform-account/lib/audit-stack';
+import { InferenceGatewayStack } from '../apps/platform-account/lib/inference-gateway-stack';
+import type { InferenceModelRateLimit } from '@agenticai/platform-inference-gateway';
+import {
+  applyPipelineResourceTags,
+  createPipelineArtifactBucket,
+  type PipelineResourceTags,
+} from './pipeline-artifacts';
+import { stageAwareSynthCommands } from './synth-commands';
 
-/**
- * Per-stage account env tuple.
- */
+/** Per-stage account environment tuple. */
 export interface PipelineStageEnv {
   readonly env: Required<Environment>;
   readonly envName: 'nonprod' | 'prod';
 }
 
 export interface PlatformPipelineStackProps extends StackProps {
-  /**
-   * GitHub "owner/repo" identifier (e.g. `aws-samples/sample-ai-agent-factory`).
-   * The pipeline uses GitHub's V2 source connection — the connection ARN is
-   * passed in via `githubConnectionArn`.
-   */
   readonly githubRepo: string;
   readonly githubBranch?: string;
   readonly githubConnectionArn: string;
@@ -54,26 +50,34 @@ export interface PlatformPipelineStackProps extends StackProps {
   readonly platformNonprod: PipelineStageEnv;
   readonly platformProd: PipelineStageEnv;
   readonly workloadAccountIds: readonly string[];
-  /** Role ARN of the pipeline's CodeBuild role — referenced by SCP-05. */
   readonly pipelineRoleArn: string;
+  readonly applicationId: string;
+  readonly agentId: string;
+  readonly tenantId: string;
+  readonly costCentre: string;
+  readonly inferenceModelRateLimits: readonly InferenceModelRateLimit[];
+
+  /** Explicit stage passed to the pipeline's own synth command. */
+  readonly synthStage?: string;
+
+  /** Extra `agenticai/*` context merged over values derived from props. */
+  readonly synthContext?: Record<string, string>;
 }
 
 class PlatformStage extends Stack {
-  constructor(scope: Construct, id: string, props: StackProps & {
-    envName: 'nonprod' | 'prod';
-    organizationId: string;
-    workloadAccountIds: readonly string[];
-    pipelineRoleArn: string;
-  }) {
+  constructor(
+    scope: Construct,
+    id: string,
+    props: StackProps & {
+      envName: 'nonprod' | 'prod';
+      organizationId: string;
+      workloadAccountIds: readonly string[];
+      pipelineRoleArn: string;
+    },
+  ) {
     super(scope, id, props);
   }
 }
-
-/**
- * CDK Pipelines `Stage` subclass that groups all the platform-account stacks
- * deployed per target.
- */
-import { Stage, StageProps } from 'aws-cdk-lib';
 
 export interface PlatformDeploymentStageProps extends StageProps {
   readonly envName: 'nonprod' | 'prod';
@@ -82,28 +86,53 @@ export interface PlatformDeploymentStageProps extends StageProps {
   readonly pipelineRoleArn: string;
   readonly auditEnv: Required<Environment>;
   readonly logArchiveEnv: Required<Environment>;
+  readonly retainGovernanceOnDelete: boolean;
+  readonly existingGuardrailAdminRoleArn?: string;
+  readonly baselineGuardrailName?: string;
+  readonly applicationId: string;
+  readonly agentId: string;
+  readonly tenantId: string;
+  readonly costCentre: string;
+  readonly inferenceModelRateLimits: readonly InferenceModelRateLimit[];
 }
 
 export class PlatformDeploymentStage extends Stage {
   constructor(scope: Construct, id: string, props: PlatformDeploymentStageProps) {
     super(scope, id, props);
 
-    new LogArchiveStack(this, 'LogArchive', {
-      env: props.logArchiveEnv,
-      organizationId: props.organizationId,
-      workloadAccountIds: props.workloadAccountIds,
-    });
-    new AuditStack(this, 'Audit', {
-      env: props.auditEnv,
-      organizationId: props.organizationId,
-    });
+    // Management/Governance is shared across Platform environments. Keep these
+    // stacks under the first stage so existing deployed stack identities remain
+    // stable, and never create conflicting copies in the production stage.
+    if (props.envName === 'nonprod') {
+      new LogArchiveStack(this, 'LogArchive', {
+        env: props.logArchiveEnv,
+        organizationId: props.organizationId,
+        workloadAccountIds: props.workloadAccountIds,
+        retainOnDelete: props.retainGovernanceOnDelete,
+      });
+      new AuditStack(this, 'Audit', {
+        env: props.auditEnv,
+        organizationId: props.organizationId,
+      });
+    }
     new GuardrailStack(this, 'Guardrail', {
       env: props.env,
       pipelineRoleArn: props.pipelineRoleArn,
+      existingAdminRoleArn: props.existingGuardrailAdminRoleArn,
+      baselineGuardrailName: props.baselineGuardrailName,
     });
     new RegistryStack(this, 'Registry', {
       env: props.env,
       envName: props.envName,
+    });
+    new InferenceGatewayStack(this, 'InferenceGateway', {
+      env: props.env,
+      envName: props.envName,
+      applicationId: props.applicationId,
+      agentId: props.agentId,
+      tenantId: props.tenantId,
+      costCentre: props.costCentre,
+      modelRateLimits: props.inferenceModelRateLimits,
     });
   }
 }
@@ -114,30 +143,61 @@ export class PlatformPipelineStack extends Stack {
   constructor(scope: Construct, id: string, props: PlatformPipelineStackProps) {
     super(scope, id, props);
 
+    const resourceTags: PipelineResourceTags = {
+      applicationId: props.applicationId,
+      agentId: props.agentId,
+      tenantId: props.tenantId,
+      costCentre: props.costCentre,
+      environment: 'pipeline',
+    };
+    applyPipelineResourceTags(this, resourceTags);
+    const artifactBucket = createPipelineArtifactBucket(
+      this,
+      'PlatformPipelineArtifacts',
+      resourceTags,
+    );
+
     const source = CodePipelineSource.connection(
       props.githubRepo,
       props.githubBranch ?? 'main',
-      {
-        connectionArn: props.githubConnectionArn,
-      },
+      { connectionArn: props.githubConnectionArn },
     );
 
     this.pipeline = new CodePipeline(this, 'PlatformPipeline', {
+      artifactBucket,
       pipelineName: 'agenticai-platform-pipeline',
+      pipelineType: PipelineType.V2,
       crossAccountKeys: true,
       synth: new ShellStep('Synth', {
         input: source,
-        commands: [
-          'npm ci',
-          'npm run build',
-          'npm test',
-          'npx cdk synth',
-        ],
+        commands: stageAwareSynthCommands({
+          stage: props.synthStage ?? 'pipeline',
+          context: this.synthContext(props),
+          expectedStackArtifactId: this.stackName,
+          expectedStageAssemblyGlobs: [
+            'cdk.out/assembly-*Nonprod',
+            'cdk.out/assembly-*Prod',
+          ],
+        }),
       }),
       publishAssetsInParallel: false,
     });
 
-    // Non-prod stage
+    const sharedGatewayProps = {
+      applicationId: props.applicationId,
+      agentId: props.agentId,
+      tenantId: props.tenantId,
+      costCentre: props.costCentre,
+      inferenceModelRateLimits: props.inferenceModelRateLimits,
+    };
+    const platformAccountIsShared =
+      props.platformNonprod.env.account === props.platformProd.env.account;
+    const platformRegionIsShared =
+      props.platformNonprod.env.region === props.platformProd.env.region;
+    const sharedGuardrailAdminRoleArn = platformAccountIsShared
+      ? `arn:${this.partition}:iam::${props.platformNonprod.env.account}:role/AgenticAI-GuardrailAdmin`
+      : undefined;
+
     this.pipeline.addStage(
       new PlatformDeploymentStage(this, 'Nonprod', {
         env: props.platformNonprod.env,
@@ -147,10 +207,11 @@ export class PlatformPipelineStack extends Stack {
         pipelineRoleArn: props.pipelineRoleArn,
         auditEnv: props.audit.env,
         logArchiveEnv: props.logArchive.env,
+        retainGovernanceOnDelete: props.logArchive.envName === 'prod',
+        ...sharedGatewayProps,
       }),
     );
 
-    // Manual approval + prod stage
     this.pipeline.addStage(
       new PlatformDeploymentStage(this, 'Prod', {
         env: props.platformProd.env,
@@ -160,41 +221,67 @@ export class PlatformPipelineStack extends Stack {
         pipelineRoleArn: props.pipelineRoleArn,
         auditEnv: props.audit.env,
         logArchiveEnv: props.logArchive.env,
+        retainGovernanceOnDelete: props.logArchive.envName === 'prod',
+        existingGuardrailAdminRoleArn: sharedGuardrailAdminRoleArn,
+        baselineGuardrailName:
+          platformAccountIsShared && platformRegionIsShared
+            ? 'agenticai-guardrail-baseline-prod'
+            : undefined,
+        ...sharedGatewayProps,
       }),
-      {
-        pre: [new ManualApprovalStep('SecurityReview')],
-      },
+      { pre: [new ManualApprovalStep('SecurityReview')] },
     );
 
-    // cdk-nag suppression noise from self-mutate Lambdas and pipeline roles.
     NagSuppressions.addStackSuppressions(
       this,
       [
-        { id: 'AwsSolutions-CB4', reason: 'SEC-017: CDK Pipelines CodeBuild uses default KMS key for artifact encryption; crossAccountKeys=true enables cross-account KMS automatically.' },
+        { id: 'AwsSolutions-CB4', reason: 'SEC-017: CodeBuild artifacts flow through the explicit customer-managed, rotating pipeline artifact CMK.' },
         { id: 'AwsSolutions-IAM5', reason: 'SEC-011: Pipeline roles require wildcards for CDK bootstrap operations (CloudFormation CreateStack, asset publishing, etc.).' },
-        { id: 'AwsSolutions-S1', reason: 'SEC-001: Pipeline artifact bucket logging is managed by CDK Pipelines itself.' },
+        { id: 'AwsSolutions-S1', reason: 'SEC-001: Pipeline artifacts expire after 30 days; CodePipeline execution history and CloudTrail provide the audit trail without a recursive access-log bucket.' },
         { id: 'AwsSolutions-L1', reason: 'SEC-006: CDK Pipelines Lambda runtimes track aws-cdk-lib bumps.' },
         { id: 'NIST.800.53.R5-CodeBuildProjectEnvVarAwsCred', reason: 'SEC-018: CDK Pipelines CodeBuild reads CDK bootstrap role credentials via STS at runtime, not env vars.' },
-        { id: 'NIST.800.53.R5-CodeBuildProjectKMSEncryptedArtifacts', reason: 'SEC-017: CDK Pipelines manages artifact encryption keys; cross-account sharing requires the default managed key behaviour.' },
+        { id: 'NIST.800.53.R5-CodeBuildProjectKMSEncryptedArtifacts', reason: 'SEC-017: The explicit pipeline artifact bucket uses a customer-managed rotating KMS key shared with cross-account stages.' },
         { id: 'NIST.800.53.R5-CodeBuildProjectPrivilegedModeDisabled', reason: 'SEC-019: Synth/build steps run in standard (non-privileged) containers.' },
         { id: 'NIST.800.53.R5-CodeBuildProjectSourceRepoUrl', reason: 'SEC-020: Source comes from CodeStar Connections (GitHub V2), which is the recommended managed path.' },
         { id: 'NIST.800.53.R5-IAMNoInlinePolicy', reason: 'SEC-005: CDK Pipelines auto-generated roles use inline policies.' },
-        { id: 'NIST.800.53.R5-S3BucketLoggingEnabled', reason: 'SEC-001: Pipeline artifact bucket.' },
+        { id: 'NIST.800.53.R5-S3BucketLoggingEnabled', reason: 'SEC-001: The short-lived artifact bucket uses a 30-day lifecycle; pipeline execution history and CloudTrail retain access evidence.' },
         { id: 'NIST.800.53.R5-S3BucketReplicationEnabled', reason: 'SEC-002: CRR deferred to v2 DR roadmap.' },
-        { id: 'NIST.800.53.R5-S3DefaultEncryptionKMS', reason: 'SEC-003: Pipeline artifact buckets use CDK-managed encryption.' },
-        { id: 'NIST.800.53.R5-LambdaConcurrency', reason: 'SEC-007: CDK self-mutate Lambdas.' },
+        { id: 'NIST.800.53.R5-S3DefaultEncryptionKMS', reason: 'SEC-003: The artifact bucket uses an explicit customer-managed rotating KMS key.' },
+        { id: 'NIST.800.53.R5-LambdaConcurrency', reason: 'SEC-007: CDK self-mutate and artifact-cleanup Lambdas are provisioning-time only.' },
         { id: 'NIST.800.53.R5-LambdaDLQ', reason: 'SEC-008: CFN custom-resource Lambdas surface failures via stack events.' },
-        { id: 'NIST.800.53.R5-LambdaInsideVPC', reason: 'SEC-009: Pipeline Lambdas call CodePipeline/CloudFormation control plane.' },
-        { id: 'AwsSolutions-KMS5', reason: 'SEC-021: CDK Pipelines-generated artifact-bucket KMS key does not expose rotation toggle; tracks CDK defaults.' },
-        { id: 'NIST.800.53.R5-KMSBackingKeyRotationEnabled', reason: 'SEC-021: Same as SEC-021 above — CDK-managed key.' },
-        { id: 'NIST.800.53.R5-S3BucketVersioningEnabled', reason: 'SEC-022: CDK-Pipelines artifact bucket is ephemeral + lifecycle-managed; versioning adds cost without recovery value for pipeline artifacts.' },
+        { id: 'NIST.800.53.R5-LambdaInsideVPC', reason: 'SEC-009: Pipeline Lambdas call CodePipeline/CloudFormation/S3 control planes.' },
+        { id: 'NIST.800.53.R5-S3BucketVersioningEnabled', reason: 'SEC-022: Pipeline artifacts are immutable per execution, expire after 30 days, and are automatically removed with the stack.' },
       ],
       true,
     );
 
-    // Silence unused imports for future extension hooks.
     void CodeBuildStep;
     void Wave;
     void PlatformStage;
+  }
+
+  private synthContext(props: PlatformPipelineStackProps): Record<string, string> {
+    const derived: Record<string, string> = {
+      'agenticai/githubRepo': props.githubRepo,
+      'agenticai/githubConnectionArn': props.githubConnectionArn,
+      'agenticai/organizationId': props.organizationId,
+      'agenticai/platformNonprodAccountId': props.platformNonprod.env.account,
+      'agenticai/platformProdAccountId': props.platformProd.env.account,
+      'agenticai/auditAccountId': props.audit.env.account,
+      'agenticai/logArchiveAccountId': props.logArchive.env.account,
+      'agenticai/pipelineRoleArn': props.pipelineRoleArn,
+      'agenticai/workloadAccountIds': JSON.stringify(props.workloadAccountIds),
+      'agenticai/applicationId': props.applicationId,
+      'agenticai/agentId': props.agentId,
+      'agenticai/tenantId': props.tenantId,
+      'agenticai/costCentre': props.costCentre,
+      'agenticai/inferenceModelRateLimits': JSON.stringify(
+        props.inferenceModelRateLimits,
+      ),
+    };
+    if (props.githubBranch) {
+      derived['agenticai/githubBranch'] = props.githubBranch;
+    }
+    return { ...derived, ...(props.synthContext ?? {}) };
   }
 }

@@ -48,7 +48,7 @@ import {
   PolicyStatement,
 } from 'aws-cdk-lib/aws-iam';
 import { Key } from 'aws-cdk-lib/aws-kms';
-import { Code, Function, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { Code, Function as LambdaFn, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
 import { ITopic } from 'aws-cdk-lib/aws-sns';
 import { NagSuppressions } from 'cdk-nag';
@@ -91,7 +91,7 @@ export class OnlineEvaluationConstruct extends Construct {
   readonly thresholds: EvalThresholds;
   readonly kmsKey: Key;
   readonly samplesTable: Table;
-  readonly watchdog: Function;
+  readonly watchdog: LambdaFn;
   readonly schedule: Rule;
   readonly compositeAlarm: CompositeAlarm;
 
@@ -160,7 +160,7 @@ export class OnlineEvaluationConstruct extends Construct {
       props.sourceLogGroupName ??
       `/agenticai/agentcore-runtime/${props.envName}/${props.tenantId}/${props.agentId}`;
 
-    this.watchdog = new Function(this, 'Watchdog', {
+    this.watchdog = new LambdaFn(this, 'Watchdog', {
       functionName: `agenticai-online-eval-${props.envName}-${props.tenantId}-${props.agentId}`,
       runtime: Runtime.NODEJS_20_X,
       handler: 'index.handler',

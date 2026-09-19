@@ -16,7 +16,7 @@
     "test": "jest",
     "test:conformance": "jest --testPathPattern=tests/conformance",
     "test:unit": "jest --testPathPattern=tests/unit",
-    "synth": "cdk synth",
+    "synth": "cdk synth --strict --context stage=management",
     "cdk": "cdk",
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write \"**/*.{ts,tsx,json,md,yml,yaml}\"",
