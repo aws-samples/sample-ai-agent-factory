@@ -473,8 +473,27 @@ class GatewaySpike:
         if status != 200:
             raise SpikeError(f"Model discovery returned HTTP {status}")
         payload = json.loads(content)
-        model_ids = [item.get("id") for item in payload.get("data", [])]
+        model_ids = [
+            str(item["id"])
+            for item in payload.get("data", [])
+            if item.get("id")
+        ]
         if self.config.model not in model_ids:
+            model_name = self.config.model.rsplit("/", 1)[-1]
+            related_models = sorted(
+                model_id
+                for model_id in model_ids
+                if model_name in model_id or "gpt-oss" in model_id
+            )[:10]
+            self.evidence.add(
+                "model_discovery_mismatch",
+                httpStatus=status,
+                modelCount=len(model_ids),
+                requestedModel=self.config.model,
+                relatedModels=related_models,
+                sampleModels=sorted(model_ids)[:5],
+                awsRequestId=self.response_request_id(headers),
+            )
             raise SpikeError(
                 f"Required model {self.config.model!r} absent from Gateway discovery"
             )
@@ -717,15 +736,24 @@ class GatewaySpike:
         self.http.close()
 
 
-def validate_config(args: argparse.Namespace) -> Config:
+def validate_config(
+    args: argparse.Namespace,
+    *,
+    required_model_prefix: str | None = "bedrock-mantle/",
+) -> Config:
     if not ACCOUNT_PATTERN.fullmatch(args.account_id):
         raise SpikeError("--account-id must contain exactly 12 digits")
     if not PREFIX_PATTERN.fullmatch(args.prefix):
         raise SpikeError(
             "--prefix must start with a letter and contain 3-40 lowercase letters, digits, or hyphens"
         )
-    if not args.model.startswith("bedrock-mantle/"):
-        raise SpikeError("Phase A requires a target-qualified bedrock-mantle model")
+    if required_model_prefix is not None and not args.model.startswith(
+        required_model_prefix
+    ):
+        raise SpikeError(
+            "Phase A requires a target-qualified "
+            f"{required_model_prefix.removesuffix('/')} model"
+        )
     scratch = os.environ.get("KIROCREW_SCRATCH")
     if not scratch:
         raise SpikeError("KIROCREW_SCRATCH must be set; refusing shared /tmp state")

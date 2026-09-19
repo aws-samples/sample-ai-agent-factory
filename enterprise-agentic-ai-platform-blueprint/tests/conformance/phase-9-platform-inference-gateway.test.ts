@@ -1,6 +1,8 @@
 import { App, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 
+import { InferenceGatewayStack } from '../../apps/platform-account/lib/inference-gateway-stack';
+
 import {
   PlatformInferenceGatewayConstruct,
   type InferenceModelRateLimit,
@@ -177,6 +179,29 @@ describe('Phase 9 — native Platform inference Gateway', () => {
       CredentialProviderConfigurations: [
         { CredentialProviderType: 'GATEWAY_IAM_ROLE' },
       ],
+    });
+  });
+
+  it('outputs the target name used to qualify discovered model routes', () => {
+    const stack = new InferenceGatewayStack(new App(), 'InferenceGatewayStack', {
+      env: { account: '123456789012', region: 'us-west-2' },
+      envName: 'nonprod',
+      applicationId: 'platform-inference',
+      agentId: 'shared',
+      tenantId: 'shared',
+      costCentre: 'platform',
+      modelRateLimits: MODEL_LIMITS,
+    });
+    const template = Template.fromStack(stack);
+
+    expect(stack.inferenceGateway.inferenceTargetName).toBe(
+      'agenticai-inference-nonprod-bedrock',
+    );
+    template.hasResourceProperties('AWS::BedrockAgentCore::GatewayTarget', {
+      Name: 'agenticai-inference-nonprod-bedrock',
+    });
+    template.hasOutput('InferenceTargetName', {
+      Value: 'agenticai-inference-nonprod-bedrock',
     });
   });
 

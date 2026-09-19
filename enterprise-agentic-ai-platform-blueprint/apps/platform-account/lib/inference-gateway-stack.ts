@@ -40,6 +40,11 @@ export class InferenceGatewayStack extends Stack {
       value: this.inferenceGateway.inferenceTargetId,
       description: 'Bedrock Mantle inference-target identifier.',
     });
+    new CfnOutput(this, 'InferenceTargetName', {
+      value: this.inferenceGateway.inferenceTargetName,
+      description:
+        'Gateway target-name prefix for target-qualified inference model IDs.',
+    });
     new CfnOutput(this, 'RateLimitId', {
       value: this.inferenceGateway.rateLimitId,
       description: 'Native Gateway model rate-limit identifier.',

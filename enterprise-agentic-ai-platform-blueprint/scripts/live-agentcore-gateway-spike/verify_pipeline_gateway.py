@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import re
 import sys
+from dataclasses import replace
 from typing import Any, Mapping
 
 from botocore.exceptions import ClientError
@@ -27,10 +28,12 @@ REQUIRED_OUTPUTS = {
     "GatewayIdentifier",
     "GatewayUrl",
     "InferenceTargetId",
+    "InferenceTargetName",
     "OAuthScope",
     "RateLimitId",
     "TokenEndpoint",
 }
+SUCCESSFUL_STACK_STATUSES = {"CREATE_COMPLETE", "UPDATE_COMPLETE"}
 REQUIRED_TAGS = {
     "application-id",
     "agent-id",
@@ -75,9 +78,11 @@ class PipelineGatewayVerifier(CognitoLiteLLMSpike):
         if len(stacks) != 1:
             raise SpikeError(f"Expected one stack named {self.stack_name!r}")
         stack = stacks[0]
-        if stack.get("StackStatus") != "CREATE_COMPLETE":
+        stack_status = str(stack.get("StackStatus"))
+        if stack_status not in SUCCESSFUL_STACK_STATUSES:
+            expected = " or ".join(sorted(SUCCESSFUL_STACK_STATUSES))
             raise SpikeError(
-                f"Stack {self.stack_name} is {stack.get('StackStatus')}, not CREATE_COMPLETE"
+                f"Stack {self.stack_name} is {stack_status}, not {expected}"
             )
 
         outputs = {
@@ -90,6 +95,17 @@ class PipelineGatewayVerifier(CognitoLiteLLMSpike):
             raise SpikeError(f"Stack outputs are missing: {', '.join(missing)}")
 
         self.outputs = outputs
+        provider_model_id = self.config.model
+        target_name = outputs["InferenceTargetName"]
+        resolved_model = f"{target_name}/{provider_model_id}"
+        self.config = replace(self.config, model=resolved_model)
+        self.evidence.document["run"].update(
+            {
+                "model": resolved_model,
+                "providerModelId": provider_model_id,
+                "targetName": target_name,
+            }
+        )
         self._oauth_scope = outputs["OAuthScope"]
         self._token_endpoint = outputs["TokenEndpoint"]
         self.state.update(
@@ -139,6 +155,11 @@ class PipelineGatewayVerifier(CognitoLiteLLMSpike):
         )
         if target.get("status") != "READY":
             raise SpikeError(f"Inference target is {target.get('status')}, not READY")
+        target_name = str(target.get("name", ""))
+        if target_name != self.outputs["InferenceTargetName"]:
+            raise SpikeError(
+                "Inference target name differs from the CloudFormation output"
+            )
         providers = target.get("credentialProviderConfigurations", [])
         if not any(
             item.get("credentialProviderType") == "GATEWAY_IAM_ROLE"
@@ -161,7 +182,9 @@ class PipelineGatewayVerifier(CognitoLiteLLMSpike):
             gatewayStatus=str(gateway["status"]),
             authorizerType=str(gateway["authorizerType"]),
             targetId=self.outputs["InferenceTargetId"],
+            targetName=target_name,
             targetStatus=str(target["status"]),
+            resolvedModel=self.config.model,
             rateLimitId=self.outputs["RateLimitId"],
             rateLimitStatus=str(rate_limit["status"]),
             allocationTagCount=len(REQUIRED_TAGS),
@@ -211,7 +234,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefix", default="pipeline-gateway-verify")
     parser.add_argument(
         "--model",
-        default="bedrock-mantle/openai.gpt-oss-120b",
+        default="openai.gpt-oss-120b",
+        help="Provider-qualified model ID without a Gateway target-name prefix.",
     )
     parser.add_argument("--state-file")
     parser.add_argument("--evidence-file")
@@ -223,10 +247,20 @@ def main() -> int:
     if not GIT_SHA_PATTERN.fullmatch(args.git_head):
         print("FAIL: --git-head must be a 40-character lowercase Git SHA", file=sys.stderr)
         return 2
+    if (
+        not args.model
+        or "/" in args.model
+        or any(char.isspace() for char in args.model)
+    ):
+        print(
+            "FAIL: --model must be a non-empty provider-qualified ID without a Gateway target prefix",
+            file=sys.stderr,
+        )
+        return 2
 
     verifier: PipelineGatewayVerifier | None = None
     try:
-        config = validate_config(args)
+        config = validate_config(args, required_model_prefix=None)
         verifier = PipelineGatewayVerifier(
             config,
             stack_name=args.stack_name,

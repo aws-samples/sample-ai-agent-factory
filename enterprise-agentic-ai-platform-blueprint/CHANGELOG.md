@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - CloudWatch Logs destination access policies now list sender account IDs directly; live `PutDestinationPolicy` rejects IAM root ARNs in `Principal.AWS`.
 - Consolidated Platform test deployments reuse the nonproduction `AgenticAI-GuardrailAdmin` role and suffix only the production baseline guardrail name; separate-account deployments keep the stable unsuffixed names.
 - Cognito M2M token endpoints now come from `UserPoolDomain.baseUrl()`; the first pipeline-owned invocation proved that constructing a managed domain with the AWS API `urlSuffix` produces an unresolvable endpoint.
+- Target-qualified inference model routes now use the exported `InferenceTargetName` rather than the connector ID; live discovery proved AgentCore prefixes model IDs with the target name while rate limits continue to use the provider-qualified ID.
 - Nonproduction Log Archive buckets, stream, and CMK use destroy/auto-delete semantics; production retains the audit archive by default. Audit and Log Archive are emitted only once because Management/Governance is shared across environments.
 - Management bootstrap guidance now covers the stack-scoped IAM role, managed-policy attach/detach, Lambda lifecycle, and Lambda-only `iam:PassRole` required by CDK's nonproduction S3 auto-delete provider; this boundary was proven by the first live Log Archive rollback.
 - Teardown now includes `AgenticAI-Platform-InferenceGatewayStack` and requires the deployment's model-rate context.

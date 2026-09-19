@@ -27,9 +27,10 @@ import { Construct } from 'constructs';
 /**
  * A positive rate allocation for one provider-qualified model ID.
  *
- * `qualifiedModelId` deliberately omits the Gateway connector prefix. For
- * example, callers invoke `bedrock-mantle/openai.gpt-oss-120b`, while the
- * matching rate-limit dimension is `openai.gpt-oss-120b`.
+ * `qualifiedModelId` deliberately omits the Gateway target-name prefix. For
+ * example, a target named `agenticai-inference-prod-bedrock` is invoked as
+ * `agenticai-inference-prod-bedrock/openai.gpt-oss-120b`, while the matching
+ * rate-limit dimension is `openai.gpt-oss-120b`.
  */
 export interface InferenceModelRateLimit {
   readonly qualifiedModelId: string;
@@ -172,6 +173,7 @@ export class PlatformInferenceGatewayConstruct extends Construct {
   readonly gatewayArn: string;
   readonly gatewayUrl: string;
   readonly inferenceTargetId: string;
+  readonly inferenceTargetName: string;
   readonly oauthScope: string;
   readonly discoveryUrl: string;
   readonly tokenEndpoint: string;
@@ -187,6 +189,7 @@ export class PlatformInferenceGatewayConstruct extends Construct {
     const stack = Stack.of(this);
     const gatewayName = props.gatewayName ?? `agenticai-inference-${props.envName}`;
     const targetName = props.targetName ?? `${gatewayName}-bedrock`;
+    this.inferenceTargetName = targetName;
     this.rateLimitId = props.rateLimitId ?? `models-${props.envName}`;
 
     validateName('gatewayName', gatewayName, 48);

@@ -72,8 +72,9 @@ The command must prove, in order:
 10. A second cleanup pass reports no residue and exits successfully.
 
 Evidence contains request IDs, status codes, resource identifiers, manifest SHA,
-and cleanup results. It excludes credentials, authorization headers, and model
-response text.
+and cleanup results. A discovery mismatch records at most ten related public model
+IDs plus five sorted samples for diagnosis. Evidence excludes credentials,
+authorization headers, model prompts, and model response text.
 
 ## Manual recovery
 
@@ -136,11 +137,15 @@ place with the same pinned environment:
   --region us-west-2 \
   --stack-name Prod-InferenceGateway \
   --git-head "$(git rev-parse HEAD)" \
+  --model openai.gpt-oss-120b \
   --evidence-file "$KIROCREW_SCRATCH/pipeline-gateway-evidence.json"
 ```
 
-This verifier reads all resource identifiers from CloudFormation, requires the
-stack, Gateway, target, and native rate limit to be ready, validates the five
+This verifier reads all resource identifiers from CloudFormation and derives the
+exact target-qualified model route as
+`<InferenceTargetName>/<provider-qualified-model-id>`. It requires the stack to
+be in `CREATE_COMPLETE` or `UPDATE_COMPLETE` (rollback states fail), and requires
+the Gateway, target, and native rate limit to be ready. It validates the five
 allocation tags and Cognito client-credentials configuration, then runs model
 discovery plus streaming and non-streaming Strands `LiteLLMModel` invocations.
 It retrieves the Cognito client secret and access tokens only in process memory,

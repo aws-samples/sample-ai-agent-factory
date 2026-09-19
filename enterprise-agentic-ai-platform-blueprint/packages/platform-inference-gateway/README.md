@@ -23,20 +23,26 @@ The construct emits:
 
 The Cognito client secret is managed by Cognito and is never emitted as a
 CloudFormation output. The stack outputs the client ID, token endpoint, OAuth
-scope, Gateway URL, target ID, and rate-limit ID.
+scope, Gateway URL, target ID, target name, and rate-limit ID.
 
 ## Model identifiers
 
-Invocation and rate-limit identifiers are intentionally different:
+Invocation and rate-limit identifiers are intentionally different. AgentCore
+prefixes every discovered model ID with the Gateway **target name**, not the
+connector ID:
 
 ```text
-LiteLLMModel model:  bedrock-mantle/openai.gpt-oss-120b
-Rate-limit key:      openai.gpt-oss-120b
+InferenceTargetName output: agenticai-inference-prod-bedrock
+LiteLLMModel route:         agenticai-inference-prod-bedrock/openai.gpt-oss-120b
+Rate-limit key:             openai.gpt-oss-120b
 ```
 
-Passing the connector-prefixed form as `qualifiedModelId` fails synthesis.
-Duplicate models, missing allocations, fractional rates, zero positive rates,
-and rates above the service maximum also fail synthesis.
+Construct the route as `<InferenceTargetName>/<qualifiedModelId>` or select the
+exact ID returned by `/inference/v1/models`; never hard-code `bedrock-mantle` as
+the route prefix unless that is the target's actual name. Passing a target-prefixed
+route as `qualifiedModelId` fails synthesis. Duplicate models, missing allocations,
+fractional rates, zero positive rates, and rates above the service maximum also
+fail synthesis.
 
 ## CDK usage
 
@@ -80,8 +86,11 @@ anything directly into a workstream account.
 Generated Strands agents configure `LiteLLMModel` with:
 
 ```python
+provider_model_id = "openai.gpt-oss-120b"
+model_route = f"{inference_target_name}/{provider_model_id}"
+
 LiteLLMModel(
-    model_id="openai/bedrock-mantle/openai.gpt-oss-120b",
+    model_id=f"openai/{model_route}",
     client_args={
         "api_base": f"{gateway_url}/inference/v1",
         "api_key": access_token,
@@ -89,7 +98,8 @@ LiteLLMModel(
 )
 ```
 
-The access token comes from the output Cognito token endpoint using the client
+`inference_target_name` comes from the `InferenceTargetName` stack output. The
+access token comes from the output Cognito token endpoint using the client
 credentials grant and the output OAuth scope. The endpoint is derived from
 CDK's `UserPoolDomain.baseUrl()` so managed domains use the required
 `amazoncognito.com` suffix rather than the AWS service API suffix. Secrets and
