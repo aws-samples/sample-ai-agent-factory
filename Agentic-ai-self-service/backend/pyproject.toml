@@ -29,7 +29,17 @@ dev = [
     # tests/test_cfn_export_contract.py skips the check when cfn-lint is missing — so
     # an undeclared dependency means the only lint that ever runs against our
     # customer-facing artifact silently does not run.
-    "cfn-lint>=1.22.0",
+    #
+    # Exact pin, for the same reason as ruff below and checkov above: cfn-lint's rule set
+    # GROWS between minor releases, so `>=` means a new rule can turn this gate red on a
+    # commit that changed nothing, and — worse for a gate we point a regulated customer
+    # at — the strictness of the check silently changes without anyone deciding that it
+    # should. `>=1.22.0` was resolving to 1.57.0 in CI while a developer machine here had
+    # 1.55.1 on PATH; both pass today (verified: the 13 cfn-lint tests in
+    # tests/test_cfn_export_contract.py pass under 1.57.0), so this pin records the
+    # version the gate is calibrated against rather than fixing a present failure.
+    # Bump it deliberately and re-run that file, the same as for checkov.
+    "cfn-lint==1.57.0",
     # checkov is deliberately NOT here, even though the same test suite runs it.
     # checkov pins `boto3==1.35.49`; this package requires `boto3>=1.43.66` for the GA
     # Agent Registry service models. pip does not report that as a conflict — it

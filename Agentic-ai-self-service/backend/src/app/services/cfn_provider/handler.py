@@ -25,7 +25,16 @@ SUPPORTED_RESOURCE_TYPES below:
        ProviderName     — Name for the credential provider
        DiscoveryUrl     — OIDC discovery URL (Cognito)
        ClientId         — OAuth2 client ID
-       ClientSecret     — OAuth2 client secret
+       UserPoolId       — Cognito user pool holding that client. The handler reads the
+                          client secret from Cognito with DescribeUserPoolClient; the
+                          secret is deliberately NOT a property, because CloudFormation
+                          copies a resource's ResourceProperties into the stack event
+                          stream — native types included, not just Custom:: — where
+                          anyone with DescribeStackEvents can read them for 90 days.
+                          See _resolve_client_secret.
+       ClientSecret     — DEPRECATED, and the leak described above. Still accepted so a
+                          stack built from an older template keeps updating, but re-export
+                          to stop sending it.
    Returns:
        CredentialProviderArn — ARN of the created credential provider
 
@@ -354,6 +363,63 @@ def _get_agentcore_ctrl():
     return boto3.client("bedrock-agentcore-control")
 
 
+def _resolve_client_secret(props: dict) -> str:
+    """The Cognito app client's secret, read from Cognito rather than from the event.
+
+    The template hands over ``UserPoolId`` and ``ClientId`` and this reads the secret
+    with ``DescribeUserPoolClient``. It deliberately does NOT arrive as a property.
+
+    CloudFormation copies a resource's resolved ``ResourceProperties`` into the stack's
+    event stream, in every status, and keeps those events for 90 days. A secret placed
+    there is therefore readable by any principal holding
+    ``cloudformation:DescribeStackEvents`` — far wider than the set trusted with the
+    credential — and it cannot be scrubbed afterwards. That was not a theory: the
+    52-character secret was recovered verbatim from three events on a deployed stack.
+    ``NoEcho`` is no defence, because it covers template parameters and this was a
+    ``GetAtt`` on a resource.
+
+    This paragraph used to say "of every ``Custom::`` resource", and that was wrong in a
+    way worth recording, because it is what kept the sibling leak open: measured on a
+    live stack, 78 of 110 events carried ``ResourceProperties``, covering every logical
+    id including NATIVE types. The same secret was sitting in the events of
+    ``AWS::BedrockAgentCore::Runtime`` at the same time as this one. Custom resources are
+    not special here; anything a property resolves to is echoed.
+
+    The legacy ``ClientSecret`` property is still honoured, and only as a fallback, so
+    that a stack created by an older template keeps updating cleanly while its
+    ``cfn-provider.zip`` is newer than its template. That path is the insecure one; it
+    warns, and it disappears once the stack is next exported.
+    """
+    user_pool_id = props.get("UserPoolId", "")
+    client_id = props.get("ClientId", "")
+    if user_pool_id:
+        resp = boto3.client("cognito-idp").describe_user_pool_client(UserPoolId=user_pool_id, ClientId=client_id)
+        secret = resp["UserPoolClient"].get("ClientSecret", "")
+        if not secret:
+            # A client created without GenerateSecret cannot do client_credentials, so
+            # fail here with the cause rather than letting AgentCore reject the config.
+            raise ValueError(
+                f"Cognito app client {client_id} in pool {user_pool_id} has no client "
+                "secret. The OAuth2 credential provider needs one for the "
+                "client_credentials flow; recreate the client with GenerateSecret: true."
+            )
+        return secret
+
+    legacy = props.get("ClientSecret", "")
+    if legacy:
+        logger.warning(
+            "Using the legacy ClientSecret property. This stack's template predates the "
+            "fix that stopped sending the secret through CloudFormation, so the value is "
+            "exposed in this stack's events; re-export to remove it."
+        )  # nosemgrep: python-logger-credential-disclosure -- logs no secret value
+        return legacy
+
+    raise ValueError(
+        "OAuth2 credential provider needs UserPoolId (preferred) or ClientSecret in its "
+        "ResourceProperties, and neither was supplied."
+    )
+
+
 def _mcp_endpoint_data(runtime_arn: str) -> dict:
     """``{"McpEndpointUrl": ...}`` for a runtime ARN, or ``{}`` when there is none.
 
@@ -456,7 +522,7 @@ def _handle_oauth2_cred_create(event: dict) -> tuple[dict, str]:
     name = props["ProviderName"]
     discovery_url = props["DiscoveryUrl"]
     client_id = props["ClientId"]
-    client_secret = props["ClientSecret"]
+    client_secret = _resolve_client_secret(props)
 
     ctrl = _get_agentcore_ctrl()
 
@@ -512,7 +578,7 @@ def _handle_oauth2_cred_update(event: dict) -> tuple[dict, str]:
     name = props["ProviderName"]
     discovery_url = props["DiscoveryUrl"]
     client_id = props["ClientId"]
-    client_secret = props["ClientSecret"]
+    client_secret = _resolve_client_secret(props)
 
     ctrl = _get_agentcore_ctrl()
     try:

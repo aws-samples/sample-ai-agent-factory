@@ -419,10 +419,15 @@ GATEWAY_API_KEY_SECRET_ARN = os.environ.get("GATEWAY_API_KEY_SECRET_ARN", "")
 GATEWAY_MCP_SERVERS = os.environ.get("GATEWAY_MCP_SERVERS", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID") or os.environ.get("OAUTH_CLIENT_ID", "")
 COGNITO_CLIENT_SECRET = os.environ.get("COGNITO_CLIENT_SECRET") or os.environ.get("OAUTH_CLIENT_SECRET", "")
+# Set INSTEAD of COGNITO_CLIENT_SECRET by the CloudFormation export, which passes the
+# secret by reference for the same reason it does so for the gateway key. See
+# _resolve_client_secret below.
+COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_TOKEN_ENDPOINT = os.environ.get("COGNITO_TOKEN_ENDPOINT") or os.environ.get("OAUTH_TOKEN_ENDPOINT", "")
 COGNITO_SCOPE = os.environ.get("COGNITO_SCOPE") or os.environ.get("OAUTH_SCOPE", "")
 
 _gateway_key_cache = {{}}
+_client_secret_cache = {{}}
 
 
 def _resolve_gateway_key():
@@ -469,6 +474,40 @@ def _resolve_gateway_key():
     return _gateway_key_cache["value"]
 
 
+def _resolve_client_secret():
+    """The Cognito app client secret: from the environment, or read from Cognito.
+
+    The platform's own deploy path knows this secret in the control plane and injects
+    the value as COGNITO_CLIENT_SECRET. The CloudFormation export deliberately does
+    not, because a value that reaches a template resource's properties is copied
+    verbatim into the stack's EVENT stream — every status, retained 90 days, readable
+    by anyone holding cloudformation:DescribeStackEvents — and it then also sits in
+    this runtime's own configuration, where GetAgentRuntime returns it in plaintext.
+    Both were confirmed on a live stack: the secret was recovered from the events of
+    AgentCoreRuntime, which is a NATIVE resource, so this is not a custom-resource
+    quirk. ARCC guidance (cnt_n8LpZcqYi2t3I2) is explicit that secrets should be
+    retrieved at runtime rather than held in environment variables, and names
+    accidental logging and same-user process inspection as the reasons.
+
+    So the export hands over COGNITO_USER_POOL_ID instead and the secret is read
+    here, with the runtime role granted DescribeUserPoolClient on that one pool.
+
+    Cached: the token mint runs on every gateway call and the value cannot change
+    within a container's life.
+    """
+    if COGNITO_CLIENT_SECRET:
+        return COGNITO_CLIENT_SECRET
+    if not COGNITO_USER_POOL_ID or not COGNITO_CLIENT_ID:
+        return ""
+    if "value" not in _client_secret_cache:
+        import boto3
+        _idp = boto3.client("cognito-idp", region_name=REGION)
+        _resp = _idp.describe_user_pool_client(
+            UserPoolId=COGNITO_USER_POOL_ID, ClientId=COGNITO_CLIENT_ID)
+        _client_secret_cache["value"] = _resp["UserPoolClient"].get("ClientSecret", "")
+    return _client_secret_cache["value"]
+
+
 def _get_gateway_token():
     """Get OAuth2 access token from Cognito for Gateway authentication."""
     if GATEWAY_AUTH_MODE == "static_bearer":
@@ -478,7 +517,7 @@ def _get_gateway_token():
         return ""
     try:
         form = {{"grant_type": "client_credentials", "client_id": COGNITO_CLIENT_ID,
-                "client_secret": COGNITO_CLIENT_SECRET}}
+                "client_secret": _resolve_client_secret()}}
         if COGNITO_SCOPE:
             form["scope"] = COGNITO_SCOPE
         data = urllib.parse.urlencode(form).encode()
@@ -1283,10 +1322,15 @@ GATEWAY_API_KEY_SECRET_ARN = os.environ.get("GATEWAY_API_KEY_SECRET_ARN", "")
 GATEWAY_MCP_SERVERS = os.environ.get("GATEWAY_MCP_SERVERS", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID") or os.environ.get("OAUTH_CLIENT_ID", "")
 COGNITO_CLIENT_SECRET = os.environ.get("COGNITO_CLIENT_SECRET") or os.environ.get("OAUTH_CLIENT_SECRET", "")
+# Set INSTEAD of COGNITO_CLIENT_SECRET by the CloudFormation export, which passes the
+# secret by reference for the same reason it does so for the gateway key. See
+# _resolve_client_secret below.
+COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_TOKEN_ENDPOINT = os.environ.get("COGNITO_TOKEN_ENDPOINT") or os.environ.get("OAUTH_TOKEN_ENDPOINT", "")
 COGNITO_SCOPE = os.environ.get("COGNITO_SCOPE") or os.environ.get("OAUTH_SCOPE", "")
 
-_gateway_key_cache = {}"""
+_gateway_key_cache = {}
+_client_secret_cache = {}"""
         gateway_functions = '''
 
 def _resolve_gateway_key():
@@ -1333,6 +1377,40 @@ def _resolve_gateway_key():
     return _gateway_key_cache["value"]
 
 
+def _resolve_client_secret():
+    """The Cognito app client secret: from the environment, or read from Cognito.
+
+    The platform's own deploy path knows this secret in the control plane and injects
+    the value as COGNITO_CLIENT_SECRET. The CloudFormation export deliberately does
+    not, because a value that reaches a template resource's properties is copied
+    verbatim into the stack's EVENT stream — every status, retained 90 days, readable
+    by anyone holding cloudformation:DescribeStackEvents — and it then also sits in
+    this runtime's own configuration, where GetAgentRuntime returns it in plaintext.
+    Both were confirmed on a live stack: the secret was recovered from the events of
+    AgentCoreRuntime, which is a NATIVE resource, so this is not a custom-resource
+    quirk. ARCC guidance (cnt_n8LpZcqYi2t3I2) is explicit that secrets should be
+    retrieved at runtime rather than held in environment variables, and names
+    accidental logging and same-user process inspection as the reasons.
+
+    So the export hands over COGNITO_USER_POOL_ID instead and the secret is read
+    here, with the runtime role granted DescribeUserPoolClient on that one pool.
+
+    Cached: the token mint runs on every gateway call and the value cannot change
+    within a container's life.
+    """
+    if COGNITO_CLIENT_SECRET:
+        return COGNITO_CLIENT_SECRET
+    if not COGNITO_USER_POOL_ID or not COGNITO_CLIENT_ID:
+        return ""
+    if "value" not in _client_secret_cache:
+        import boto3
+        _idp = boto3.client("cognito-idp", region_name=REGION)
+        _resp = _idp.describe_user_pool_client(
+            UserPoolId=COGNITO_USER_POOL_ID, ClientId=COGNITO_CLIENT_ID)
+        _client_secret_cache["value"] = _resp["UserPoolClient"].get("ClientSecret", "")
+    return _client_secret_cache["value"]
+
+
 def _get_gateway_token():
     if GATEWAY_AUTH_MODE == "static_bearer":
         # LiteLLM: the virtual key IS the credential — no token exchange exists.
@@ -1341,7 +1419,7 @@ def _get_gateway_token():
         return ""
     try:
         form = {"grant_type": "client_credentials", "client_id": COGNITO_CLIENT_ID,
-                "client_secret": COGNITO_CLIENT_SECRET}
+                "client_secret": _resolve_client_secret()}
         if COGNITO_SCOPE:
             form["scope"] = COGNITO_SCOPE
         data = urllib.parse.urlencode(form).encode()

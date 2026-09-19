@@ -21,6 +21,7 @@ Run against every component combination, because the bugs live in the
 combinations rather than in the common path.
 """
 
+import ast
 import hashlib
 import io
 import json
@@ -29,9 +30,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import types
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 import pytest
 import yaml
@@ -120,6 +124,25 @@ def _generate(**kwargs):
 
 def _template(**kwargs):
     return yaml.safe_load(_generate(**kwargs).template_yaml)
+
+
+def _walk_for_refs(expr):
+    """Every parameter name reachable by ``Ref`` anywhere inside an intrinsic expression.
+
+    Yields names, not the nodes, because callers compare sets of names. Recurses
+    through the intrinsics we actually compose — ``Fn::Join``, ``Fn::Split``,
+    ``Fn::Select`` — since a digest reaches a key through a nest of those rather than
+    as a bare ``Ref``.
+    """
+    if isinstance(expr, dict):
+        for key, value in expr.items():
+            if key == "Ref" and isinstance(value, str):
+                yield value
+            else:
+                yield from _walk_for_refs(value)
+    elif isinstance(expr, list):
+        for item in expr:
+            yield from _walk_for_refs(item)
 
 
 def _runtime_env(template, resource="AgentCoreRuntime"):
@@ -592,6 +615,70 @@ class TestLiteLLMExport:
         assert "_resolve_gateway_key" in code
         assert "get_secret_value" in code
         compile(code, "agent.py", "exec")
+
+    @pytest.mark.parametrize("combo_name", ["gateway", "everything"])
+    def test_the_generated_agent_resolves_its_client_secret_from_cognito(self, combo_name):
+        """Runs the generated function, rather than asserting the string contains it.
+
+        The template stopped passing ``COGNITO_CLIENT_SECRET``, so if this code path is
+        wrong the export deploys green and then cannot mint a token at all — a worse
+        outcome than the leak it replaced. Compiling proves only that it parses, and a
+        substring check proves less than that, so execute it.
+
+        ``agent.py`` cannot be imported whole (it imports ``strands`` at module level),
+        so the function is lifted out by name and run against a fake ``boto3``.
+        """
+        code = _generate(**COMPONENT_COMBINATIONS[combo_name]).agent_code
+        compile(code, "agent.py", "exec")
+        tree = ast.parse(code)
+        source = next(
+            (
+                ast.get_source_segment(code, node)
+                for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "_resolve_client_secret"
+            ),
+            None,
+        )
+        assert source, "the generated agent has no _resolve_client_secret to resolve the secret with"
+
+        calls = []
+
+        class _FakeIdp:
+            def describe_user_pool_client(self, UserPoolId, ClientId):  # noqa: N803 - boto3 casing
+                calls.append((UserPoolId, ClientId))
+                return {"UserPoolClient": {"ClientSecret": "secret-from-cognito"}}
+
+        fake_boto3 = types.SimpleNamespace(client=lambda service, region_name=None: _FakeIdp())
+
+        def _run(env_secret, pool_id, client_id="client-abc"):
+            namespace = {
+                "COGNITO_CLIENT_SECRET": env_secret,
+                "COGNITO_USER_POOL_ID": pool_id,
+                "COGNITO_CLIENT_ID": client_id,
+                "REGION": "us-east-1",
+                "_client_secret_cache": {},
+            }
+            with mock.patch.dict(sys.modules, {"boto3": fake_boto3}):
+                exec(source, namespace)  # noqa: S102 - the point is to run generated code
+                return namespace["_resolve_client_secret"]()
+
+        # The export's path: no secret in the environment, so it must come from Cognito,
+        # asked for against the pool and client the template supplied.
+        assert _run("", "us-east-1_pool") == "secret-from-cognito"
+        assert calls == [("us-east-1_pool", "client-abc")]
+
+        # The platform's Step Functions path still injects the value, and must keep
+        # working without calling AWS at all — that is what keeps this change's blast
+        # radius off the live deployments.
+        calls.clear()
+        assert _run("secret-from-env", "us-east-1_pool") == "secret-from-env"
+        assert calls == [], "the env var must short-circuit before any AWS call"
+
+        # Neither source configured is an empty string, not an exception: the gateway
+        # path is optional and _get_gateway_token already handles an empty credential.
+        calls.clear()
+        assert _run("", "") == ""
+        assert calls == []
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -3555,6 +3642,231 @@ class TestParameters:
                 assert spec.get("NoEcho") is True, f"parameter {name} looks sensitive but has no NoEcho"
 
 
+class TestNoSecretReachesAStackEvent:
+    """The other half of the NoEcho story, and the half that actually leaked.
+
+    ``TestParameters`` above guards template PARAMETERS. This guards resource
+    PROPERTIES, which is a separate exposure with a separate mechanism and no
+    mitigation available at all:
+
+    CloudFormation copies the fully-resolved ``ResourceProperties`` of a resource —
+    NATIVE types included, not only ``Custom::`` ones, measured live as 78 of 110
+    events covering every logical id in the stack — into the stack's event stream, on
+    every event in every status, and retains those events for 90 days. So a secret
+    put in a property is
+    readable by any principal with ``cloudformation:DescribeStackEvents`` — a much
+    wider set than the people trusted with the credential — and there is no way to
+    scrub it afterwards. ``NoEcho`` does not help, because ``NoEcho`` is a property
+    of a parameter and this is a ``GetAtt`` on a resource.
+
+    This is a fixed bug, not a forward-looking guard. The template shipped
+    ``"ClientSecret": {"Fn::GetAtt": ["McpCognitoClient", "ClientSecret"]}`` on
+    ``Custom::OAuth2CredentialProvider``, and on a deployed stack the 52-character
+    Cognito client secret was recovered verbatim out of three stack events by
+    grepping the event JSON for its known value, against a positive control. The fix
+    passes ``UserPoolId`` instead and has the handler call
+    ``DescribeUserPoolClient`` for itself, so the secret never enters CloudFormation.
+
+    The same defect was then found a second time, on a NATIVE resource: the agent
+    runtime's ``COGNITO_CLIENT_SECRET`` environment variable was a ``GetAtt`` on
+    ``CognitoUserPoolClient.ClientSecret``, and the 51-character secret was measured in
+    3 events after create and 5 after one update on the same live stack. That instance
+    survived precisely because the generic scan below was scoped to ``Custom::``
+    resources, so it is now scoped to all of them. That leak had a second mouth as
+    well: an environment variable is also returned in plaintext by
+    ``GetAgentRuntime``. Both are closed by the same fix — pass
+    ``COGNITO_USER_POOL_ID`` and let the agent read the secret itself.
+
+    Asserted generically rather than against those two property names: any future
+    ``GetAtt`` on a secret-shaped attribute, on any resource, in any component
+    combination, fails here. Per ARCC guidance on CloudFormation template secrets, and
+    on runtime secrets (``cnt_n8LpZcqYi2t3I2``, which rejects holding a secret in an
+    environment variable even when it was injected at deploy time), sensitive values
+    belong in Secrets Manager or behind a runtime API call, never in template
+    properties and never in a runtime's configuration.
+    """
+
+    # Attributes whose value IS the credential. Matched on the attribute name at the
+    # end of a GetAtt, so "SecretArn" (a reference) does not trip it but
+    # "ClientSecret" (the thing itself) does.
+    SECRET_ATTRS = ("clientsecret", "password", "privatekey", "secretstring")
+
+    @ALL_COMBINATIONS
+    def test_no_resource_property_getatts_a_secret(self, combo):
+        template = _template(**combo)
+        offenders = []
+
+        def walk(node, path):
+            if isinstance(node, dict):
+                target = node.get("Fn::GetAtt")
+                if target is not None:
+                    parts = target.split(".") if isinstance(target, str) else list(target)
+                    attr = str(parts[-1]).lower() if parts else ""
+                    if any(word in attr for word in self.SECRET_ATTRS):
+                        offenders.append(f"{path} -> Fn::GetAtt {target}")
+                for key, value in node.items():
+                    walk(value, f"{path}.{key}")
+            elif isinstance(node, list):
+                for index, value in enumerate(node):
+                    walk(value, f"{path}[{index}]")
+
+        # EVERY resource, not just Custom::. Scoping this to custom resources is what
+        # left the second instance open: the identical secret was live in the events of
+        # AgentCoreRuntime, a native type, while this test was passing.
+        for name, resource in template.get("Resources", {}).items():
+            if not isinstance(resource, dict):
+                continue
+            walk(resource.get("Properties", {}), f"{name}.Properties")
+
+        assert not offenders, (
+            "a resource property resolves to a secret, which CloudFormation then copies "
+            "into this stack's events for 90 days where DescribeStackEvents can read it, "
+            "and NoEcho cannot prevent it. Pass a reference that is resolved at runtime "
+            "instead — see _resolve_client_secret in cfn_provider/handler.py for the "
+            "custom-resource shape, and the generated agent.py's _resolve_client_secret "
+            f"for the runtime shape. Offending properties: {offenders}"
+        )
+
+    def test_the_oauth2_provider_gets_the_pool_and_not_the_secret(self):
+        """The specific regression, pinned so the generic scan above cannot be satisfied
+        by removing the resource rather than fixing it."""
+        template = _template(**COMPONENT_COMBINATIONS["mcp-server"])
+        props = template["Resources"]["McpOAuth2CredentialProvider"]["Properties"]
+        assert "ClientSecret" not in props, "the client secret is back in a stack-event-visible property"
+        assert props["UserPoolId"] == {"Ref": "McpCognitoUserPool"}, (
+            "the handler needs the pool id to read the secret from Cognito itself"
+        )
+
+    @pytest.mark.parametrize("combo_name", ["gateway", "gateway+memory", "everything"])
+    def test_the_runtime_gets_the_pool_and_not_the_secret(self, combo_name):
+        """The native-resource instance, pinned the same way and for the same reason.
+
+        Also asserts the grant, because the two are what make each other correct: a
+        runtime told to read its own secret without ``DescribeUserPoolClient`` fails at
+        its first gateway call, which is a worse outcome than the leak it replaced.
+        """
+        template = _template(**COMPONENT_COMBINATIONS[combo_name])
+        env = _runtime_env(template)
+        assert "COGNITO_CLIENT_SECRET" not in env, (
+            "the client secret is back in the runtime's environment, where it is both "
+            "echoed into stack events and returned in plaintext by GetAgentRuntime"
+        )
+        assert env["COGNITO_USER_POOL_ID"] == {"Ref": "CognitoUserPool"}, (
+            "the agent needs the pool id to read the secret from Cognito itself"
+        )
+        statements = template["Resources"]["RuntimeExecutionRole"]["Properties"]["Policies"][0]["PolicyDocument"][
+            "Statement"
+        ]
+        grants = [s for s in statements if "cognito-idp:DescribeUserPoolClient" in s.get("Action", [])]
+        assert len(grants) == 1, f"expected exactly one DescribeUserPoolClient grant, got {grants}"
+        assert grants[0]["Resource"] == {"Fn::GetAtt": ["CognitoUserPool", "Arn"]}, (
+            "DescribeUserPoolClient returns the client secret of whatever pool it is "
+            "given, so this must be scoped to this stack's pool and never a wildcard: "
+            f"{grants[0]['Resource']!r}"
+        )
+
+
+class TestAnUpdateActuallyReachesTheRunningCode:
+    """Two defects that both produce a green UPDATE_COMPLETE over unchanged behaviour.
+
+    Both were proven live on the agent runtime, fixed there, and then found still
+    present on the MCP server runtime — which is the reason these are written as
+    invariants over every matching resource instead of as assertions about the two
+    resources that happened to be caught.
+
+    1. A code-package key that does not move. The Runtime resource takes its code
+       prefix from the package resource's ``CodeZipPrefix`` attribute, so if the
+       output key is a constant the attribute is a constant, every property of the
+       Runtime is unchanged, and CloudFormation publishes no new version. Live: a
+       changed system prompt reached UPDATE_COMPLETE with only version 1 ever
+       existing, and the runtime kept answering with the old prompt's marker. The key
+       must therefore be content-addressed on both halves of the merged zip — the
+       agent code AND the dependency bundle, since upgrading a pinned library with no
+       code change is the same no-op by the other route.
+
+    2. An endpoint that does not follow the version. ``AgentRuntimeId`` and ``Name``
+       are both createOnly on a RuntimeEndpoint, so leaving ``AgentRuntimeVersion``
+       unset means nothing about the resource ever changes and it serves the version
+       that existed when it was created, permanently. Live: after an update the
+       DEFAULT endpoint served v2 correctly while the NAMED endpoint — the one the
+       stack's EndpointArn output points at, and the only qualifier a recipient is
+       told to use — still served v1.
+    """
+
+    @ALL_COMBINATIONS
+    def test_every_runtime_endpoint_pins_its_runtime_version(self, combo):
+        endpoints = {
+            name: res
+            for name, res in _template(**combo).get("Resources", {}).items()
+            if isinstance(res, dict) and res.get("Type") == "AWS::BedrockAgentCore::RuntimeEndpoint"
+        }
+        for name, res in endpoints.items():
+            pinned = res.get("Properties", {}).get("AgentRuntimeVersion")
+            assert pinned is not None, (
+                f"{name} does not pin AgentRuntimeVersion, so it will serve whatever "
+                "version existed when it was created and never move again"
+            )
+            assert isinstance(pinned, dict) and "Fn::GetAtt" in pinned, (
+                f"{name} must take the version from its runtime via Fn::GetAtt, not a "
+                f"literal, or it pins the wrong version forever: {pinned!r}"
+            )
+
+    @staticmethod
+    def _parameters_reaching_the_rendered_string(expr):
+        """The parameter names that actually change the value ``expr`` renders to.
+
+        Deliberately not a substring search over the serialized expression. The first
+        version of this test did that, and it passed against a template whose key had
+        been reverted to a constant: an ``Fn::Sub`` carries a variable MAP, and a
+        variable that the format string never interpolates is dead weight that still
+        appears in the JSON. So the assertion held while the rendered key did not move
+        — the exact defect, reported green. Resolve the string instead: collect only the
+        placeholders the string really uses, then follow each one into the map.
+        """
+        if not isinstance(expr, dict):
+            return set()
+        body = expr.get("Fn::Sub")
+        if body is None:
+            return {ref for ref in _walk_for_refs(expr)}
+        fmt, variables = (body, {}) if isinstance(body, str) else (body[0], body[1])
+        used = set()
+        for placeholder in re.findall(r"\$\{([^}]+)\}", fmt):
+            if placeholder in variables:
+                # A local variable: whatever it is built from is what moves the key.
+                used |= set(_walk_for_refs(variables[placeholder]))
+            else:
+                # A direct reference to a parameter or pseudo-parameter.
+                used.add(placeholder)
+        return used
+
+    @ALL_COMBINATIONS
+    def test_every_code_package_key_moves_with_both_digests(self, combo):
+        packages = {
+            name: res
+            for name, res in _template(**combo).get("Resources", {}).items()
+            if isinstance(res, dict) and res.get("Type") == "Custom::AgentCodePackage"
+        }
+        assert packages, "no code packages in this combination, so this proves nothing"
+        for name, res in packages.items():
+            props = res.get("Properties", {})
+            key = props.get("OutputKey")
+            moves_with = self._parameters_reaching_the_rendered_string(key)
+            # Whatever parameter THIS package treats as its source digest, rather than a
+            # hardcoded name: the agent runtime and the MCP server runtime have separate
+            # code parameters and the MCP half is the one that was missed.
+            source = set(_walk_for_refs(props.get("SourceDigest")))
+            assert source, f"{name} has no SourceDigest to key on: {props.get('SourceDigest')!r}"
+            assert source <= moves_with, (
+                f"{name}'s OutputKey renders without {sorted(source - moves_with)}, so "
+                "changing that code re-uploads the bytes under the same key, leaves "
+                f"CodeZipPrefix identical, and publishes no new runtime version: {key!r}"
+            )
+            assert "DependencyBundleDigest" in moves_with, (
+                f"{name}'s OutputKey renders without DependencyBundleDigest, so upgrading "
+                f"a pinned dependency with no code change is a silent no-op: {key!r}"
+            )
+
+
 class TestTheExportedModelIsTheDesignedModel:
     """A CREATE_COMPLETE stack running a model nobody chose.
 
@@ -4318,27 +4630,52 @@ class TestGeneratedDocumentation:
             # not every combination does; the script sets them when they exist.
             "ToolLambdaCodeKey",
             "CustomToolCodeKey",
-            # Only on the LiteLLM path.
-            "LiteLLMGatewayUrl",
+            # Only on the LiteLLM path. The URL and the server list are not here
+            # because they are no longer script-owned: deploy.sh never set them.
             "LiteLLMApiKeySecretArn",
-            "LiteLLMMcpServers",
             # Only when the export has an MCP server.
             "McpServerCodeKey",
             "McpServerCodeDigest",
         }, f"declared as deploy.sh-owned but not in this template: {sorted(stale)}"
 
-    def test_the_litellm_parameters_are_owned_by_the_script_not_the_passthrough(self):
+    def test_the_virtual_key_arn_is_owned_by_the_script_not_the_passthrough(self):
         """The virtual key's ARN is a positional argument, and must stay one.
 
         If LiteLLMApiKeySecretArn ever fell out of the owned set it would be handled by
         the generic pass-through instead, which would quietly drop deploy.sh's preflight
         check -- the one that fails before a single artifact is uploaded when the canvas
         carried no ARN and the parameter therefore has no default.
+
+        Only the ARN. This used to assert the same of LiteLLMGatewayUrl and
+        LiteLLMMcpServers, for which the reason above does not hold and no other was
+        given -- and deploy.sh sets neither, so declaring them owned took them out of
+        the pass-through as well and left the README saying "filled in by the script
+        itself ... you do not set those" about the proxy URL. Proven live: the recipient
+        was told not to set the one value that differs between them and the canvas
+        author, the stack deployed green, and the runtime reached nothing.
         """
         bundle = _generate(gateway_config=_litellm())
-        for name in ("LiteLLMGatewayUrl", "LiteLLMApiKeySecretArn", "LiteLLMMcpServers"):
-            assert name in cfn_template_generator._DEPLOY_SCRIPT_OWNED_PARAMETERS
-            assert f'"{name}:' not in bundle.deploy_sh, f"{name} reached the generic pass-through"
+        assert "LiteLLMApiKeySecretArn" in cfn_template_generator._DEPLOY_SCRIPT_OWNED_PARAMETERS
+        assert '"LiteLLMApiKeySecretArn:' not in bundle.deploy_sh, "the ARN reached the generic pass-through"
+
+    @ALL_COMBINATIONS
+    def test_every_owned_parameter_is_really_assigned_by_the_script(self, combo):
+        """ "Owned" has to mean the script assigns it, not merely that it is on the list.
+
+        The list is what excludes a parameter from the pass-through AND what makes the
+        README's table say the recipient must not set it, so a name on it that deploy.sh
+        never assigns is unsettable by either documented route. That is exactly how the
+        proxy URL became unreachable, and the two tests above it both passed throughout,
+        because each only checked the README against the list and the list is where the
+        wrong claim lived. So check the script's own text.
+        """
+        bundle = _generate(**combo)
+        parameters = set(yaml.safe_load(bundle.template_yaml)["Parameters"])
+        for name in sorted(parameters & cfn_template_generator._DEPLOY_SCRIPT_OWNED_PARAMETERS):
+            assert f'"{name}=' in bundle.deploy_sh, (
+                f"{name} is declared deploy.sh-owned, so nothing else can set it, "
+                f"but deploy.sh never adds it to PARAM_OVERRIDES"
+            )
 
     @ALL_COMBINATIONS
     def test_no_parameter_row_is_empty_or_truncated_mid_markup(self, combo):

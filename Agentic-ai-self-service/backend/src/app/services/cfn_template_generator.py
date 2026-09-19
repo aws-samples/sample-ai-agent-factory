@@ -1632,11 +1632,33 @@ _DEPLOY_SCRIPT_OWNED_PARAMETERS = frozenset(
         "CustomerManagedKeyArn",
         "LambdaSubnetIds",
         "LambdaSecurityGroupIds",
-        "LiteLLMGatewayUrl",
+        # LiteLLMApiKeySecretArn only. LiteLLMGatewayUrl and LiteLLMMcpServers were
+        # listed here too, and deploy.sh sets neither -- so they fell out of the
+        # pass-through loop as well, and the README's table then rendered them as
+        # "filled in by the script itself ... you do not set those". A recipient
+        # whose proxy is not at the canvas author's URL was therefore told, in the
+        # one document meant to help them, not to change the one value they must
+        # change. The stack still deploys green and the runtime then cannot reach
+        # the proxy at all, which is the failure this whole workstream is about.
+        # Verified live: with the two removed, LITELLM_GATEWAY_URL reaches the
+        # parameter and the runtime's MCP session lands on the given endpoint.
         "LiteLLMApiKeySecretArn",
-        "LiteLLMMcpServers",
     }
 )
+
+
+# Parameters whose name carries an acronym the generic conversion cannot split
+# correctly. ``LiteLLMGatewayUrl`` came out as ``LITE_L_L_M_GATEWAY_URL`` -- an
+# underscore before every capital -- which is not what a recipient would type, and
+# an env var nobody types is an env var that silently keeps the template default.
+# ``LITELLM_`` specifically because deploy.sh already documents
+# ``LITELLM_API_KEY_SECRET_ARN`` for the sibling parameter, so anything else in this
+# family reads as a typo.
+_PARAMETER_ENV_VAR_OVERRIDES = {
+    "LiteLLMGatewayUrl": "LITELLM_GATEWAY_URL",
+    "LiteLLMMcpServers": "LITELLM_MCP_SERVERS",
+    "LiteLLMApiKeySecretArn": "LITELLM_API_KEY_SECRET_ARN",
+}
 
 
 def parameter_env_var(name: str) -> str:
@@ -1645,6 +1667,8 @@ def parameter_env_var(name: str) -> str:
     Public because the README has to name the same variable deploy.sh reads, and the
     two documents disagreeing about it is the whole failure mode here.
     """
+    if name in _PARAMETER_ENV_VAR_OVERRIDES:
+        return _PARAMETER_ENV_VAR_OVERRIDES[name]
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).upper()
 
 
@@ -2848,6 +2872,27 @@ class CfnTemplateGenerator:
                                 ],
                                 "Resource": _agentcore_secret_resources(),
                             },
+                            {
+                                # Lets the handler read the Cognito app client's secret
+                                # itself, which is why that secret is no longer passed to
+                                # the custom resource as a property. See the comment on
+                                # McpOAuth2CredentialProvider: CloudFormation echoes the
+                                # ResourceProperties of every Custom:: resource into stack
+                                # events, so a secret placed there is readable by anyone
+                                # holding cloudformation:DescribeStackEvents. Proven live:
+                                # the 52-character client secret was recovered verbatim
+                                # from three events on a deployed stack.
+                                #
+                                # Scoped to this stack's own user pool by ARN, not "*" —
+                                # DescribeUserPoolClient returns the secret for whatever
+                                # pool it is pointed at, so an unscoped grant here would
+                                # let this Lambda read every app client secret in the
+                                # account.
+                                "Sid": "ReadOwnCognitoClientSecret",
+                                "Effect": "Allow",
+                                "Action": ["cognito-idp:DescribeUserPoolClient"],
+                                "Resource": {"Fn::GetAtt": ["McpCognitoUserPool", "Arn"]},
+                            },
                         ],
                     },
                 }
@@ -2921,7 +2966,59 @@ class CfnTemplateGenerator:
                 "ArtifactsBucket": {"Ref": "ArtifactsBucket"},
                 "AgentCodeKey": {"Ref": "AgentCodeKey"},
                 "DependencyBundleKey": {"Ref": "DependencyBundleKey"},
-                "OutputKey": {"Fn::Sub": "deployments/${AWS::StackName}/code.zip"},
+                # Content-addressed, for the same reason deploy.sh's staged_key() puts a
+                # digest in the Lambda zip keys: a key that does not move is a code
+                # update that does not happen.
+                #
+                # This used to be a fixed "deployments/${AWS::StackName}/code.zip". The
+                # custom resource below DID re-run on a code change (SourceDigest moved)
+                # and DID upload the new bytes, but it returned the same CodeZipPrefix,
+                # so AWS::BedrockAgentCore::Runtime saw no property change, published no
+                # new runtime version, and the endpoint went on serving the original
+                # code. Proven live: re-exporting with a changed system prompt moved
+                # AgentCodeDigest, uploaded a fresh agent-code.zip, reached
+                # UPDATE_COMPLETE, and the runtime still answered with the OLD prompt's
+                # marker, with only version 1 in list-agent-runtime-versions.
+                #
+                # Keyed on BOTH digests, because the zip the runtime loads is the merge
+                # of both halves. Keying on the agent code alone left a
+                # dependency-bundle-only change as a silent no-op — upgrade a pinned
+                # library, leave the agent code alone, and the key does not move, so the
+                # Runtime resource sees no property change and never publishes a version
+                # carrying the new dependency. That is the same failure this key exists to
+                # prevent, just reached by the other half of the zip.
+                #
+                # DependencyBundleDigest is the awkward one: it defaults to the literal
+                # "none", which has no ":" to split on, so splitting it directly would put
+                # Fn::Select out of range and fail the whole template rather than just
+                # this resource. Appending ":none" before splitting guarantees a second
+                # element either way — "none" becomes "none:none" and yields "none", while
+                # "sha256:<hex>" becomes "sha256:<hex>:none" and yields the hex.
+                #
+                # Superseded objects accumulate, deliberately: a rollback reverts the
+                # prefix to the previous key and that object has to still be there.
+                # CloudFormation only sends the Delete for the old key during post-update
+                # cleanup, i.e. after the update has already succeeded, so the rollback
+                # path never races the handler's delete_object.
+                "OutputKey": {
+                    "Fn::Sub": [
+                        "deployments/${AWS::StackName}/${Digest}-${BundleDigest}/code.zip",
+                        {
+                            "Digest": {"Fn::Select": [1, {"Fn::Split": [":", {"Ref": "AgentCodeDigest"}]}]},
+                            "BundleDigest": {
+                                "Fn::Select": [
+                                    1,
+                                    {
+                                        "Fn::Split": [
+                                            ":",
+                                            {"Fn::Join": ["", [{"Ref": "DependencyBundleDigest"}, ":none"]]},
+                                        ]
+                                    },
+                                ]
+                            },
+                        },
+                    ]
+                },
                 # Fixes two distinct problems, both of which needed the same field.
                 #
                 # 1. Silent no-op update. Every other property here is a Ref to a
@@ -5153,7 +5250,35 @@ def handler(event, context):
                 "ArtifactsBucket": {"Ref": "ArtifactsBucket"},
                 "AgentCodeKey": {"Ref": "McpServerCodeKey"},
                 "DependencyBundleKey": {"Ref": "DependencyBundleKey"},
-                "OutputKey": {"Fn::Sub": "deployments/${AWS::StackName}/mcp-server-code.zip"},
+                # Content-addressed for the same reason as AgentCodePackage, and it was
+                # missed there: McpServerRuntime takes its code prefix from this
+                # resource's CodeZipPrefix attribute, so while this key was a constant
+                # the attribute was a constant too, and editing the MCP server's code
+                # produced an UPDATE_COMPLETE that published no new runtime version and
+                # left the old server running. Identical to the defect proven live on the
+                # main runtime; this half simply had no test covering it.
+                #
+                # Both digests, and the ":none" guard on the bundle digest, for the
+                # reasons given at AgentCodePackage's OutputKey.
+                "OutputKey": {
+                    "Fn::Sub": [
+                        "deployments/${AWS::StackName}/${Digest}-${BundleDigest}/mcp-server-code.zip",
+                        {
+                            "Digest": {"Fn::Select": [1, {"Fn::Split": [":", {"Ref": "McpServerCodeDigest"}]}]},
+                            "BundleDigest": {
+                                "Fn::Select": [
+                                    1,
+                                    {
+                                        "Fn::Split": [
+                                            ":",
+                                            {"Fn::Join": ["", [{"Ref": "DependencyBundleDigest"}, ":none"]]},
+                                        ]
+                                    },
+                                ]
+                            },
+                        },
+                    ]
+                },
                 # See AgentCodePackage for why these fields exist. The MCP server is
                 # merged with the same bundle, so it gets the same check.
                 "SourceDigest": {"Ref": "McpServerCodeDigest"},
@@ -5205,6 +5330,15 @@ def handler(event, context):
             "Properties": {
                 "AgentRuntimeId": {"Fn::GetAtt": ["McpServerRuntime", "AgentRuntimeId"]},
                 "Name": {"Fn::Sub": "${DeploymentName}_mcp_endpoint"},
+                # Pinned for exactly the reason given on the agent's own endpoint, and
+                # missed here. AgentRuntimeId and Name are both createOnly, so with the
+                # version left unset every property of this resource stays identical
+                # across an update: CloudFormation does not touch it and it serves
+                # whatever version existed when it was created, for the life of the
+                # stack. The gateway target routes to THIS endpoint, so a stale pin here
+                # means the gateway keeps calling the old MCP server while the stack, the
+                # runtime and the new version all look correct.
+                "AgentRuntimeVersion": {"Fn::GetAtt": ["McpServerRuntime", "AgentRuntimeVersion"]},
                 "Description": "MCP Server endpoint",
             },
         }
@@ -5229,7 +5363,34 @@ def handler(event, context):
                     "Fn::Sub": "https://cognito-idp.${AWS::Region}.amazonaws.com/${McpCognitoUserPool}/.well-known/openid-configuration"
                 },
                 "ClientId": {"Ref": "McpCognitoClient"},
-                "ClientSecret": {"Fn::GetAtt": ["McpCognitoClient", "ClientSecret"]},
+                # Pass the POOL, not the secret, and let the handler call
+                # DescribeUserPoolClient for itself.
+                #
+                # This property used to be
+                #     "ClientSecret": {"Fn::GetAtt": ["McpCognitoClient", "ClientSecret"]}
+                # and that leaked the secret. CloudFormation copies the resolved
+                # ResourceProperties of every Custom:: resource into the stack's EVENT
+                # stream, in every status, so the plaintext client secret was readable by
+                # any principal with cloudformation:DescribeStackEvents — a much wider
+                # set than the people trusted with the credential, and it stays readable
+                # for the 90 days CloudFormation retains events.
+                #
+                # Proven live, not inferred: on a deployed stack the 52-character secret
+                # was recovered verbatim by grepping the event JSON for its known value,
+                # against a positive control, on three separate
+                # Custom::OAuth2CredentialProvider events.
+                #
+                # NoEcho cannot fix this. NoEcho applies to template PARAMETERS, and this
+                # was never a parameter — it is a GetAtt on a resource. ARCC guidance on
+                # CloudFormation template secrets is explicit on both halves of that:
+                # sensitive values belong in Secrets Manager rather than in template
+                # properties, and NoEcho is not a confidentiality boundary because the
+                # values stay visible to other authorized principals in the same account.
+                #
+                # Fetching it in the handler also means the secret exists in exactly one
+                # place — Cognito — instead of being copied into the template's resolved
+                # properties, so there is nothing to rotate out of the event history.
+                "UserPoolId": {"Ref": "McpCognitoUserPool"},
                 "RuntimeArn": {"Fn::GetAtt": ["McpServerRuntime", "AgentRuntimeArn"]},
             },
         }
@@ -5508,14 +5669,70 @@ def handler(event, context):
             # and the agent reads it at startup.
             env_vars["GATEWAY_API_KEY_SECRET_ARN"] = {"Ref": "LiteLLMApiKeySecretArn"}
         elif has_gateway:
-            depends.extend(["AgentCoreGateway"])
+            # The domain is a DependsOn, not just a Ref: the agent's eager warm runs at
+            # CONTAINER INIT and calls the token endpoint immediately, so a runtime that
+            # can start before the hosted-UI domain exists starts by failing.
+            depends.extend(["AgentCoreGateway", "CognitoUserPoolDomain"])
             env_vars["GATEWAY_URL"] = {"Fn::GetAtt": ["AgentCoreGateway", "GatewayUrl"]}
             env_vars["COGNITO_CLIENT_ID"] = {"Ref": "CognitoUserPoolClient"}
-            env_vars["COGNITO_CLIENT_SECRET"] = {"Fn::GetAtt": ["CognitoUserPoolClient", "ClientSecret"]}
+            # The POOL ID, not the client secret. This used to be
+            # {"Fn::GetAtt": ["CognitoUserPoolClient", "ClientSecret"]}, which leaked the
+            # secret twice over, both confirmed on a live stack:
+            #
+            # 1. Into the stack EVENT stream. CloudFormation copies a resource's resolved
+            #    properties into describe-stack-events in every status, retained 90 days,
+            #    readable by anyone with cloudformation:DescribeStackEvents. Measured on a
+            #    deployed stack: 3 hits for the 51-character secret after create, 5 after
+            #    one update, at AgentCoreRuntime/CREATE_IN_PROGRESS and CREATE_COMPLETE,
+            #    against positive controls that confirmed the grep worked. Note this is a
+            #    NATIVE resource type — the same leak was first found on a Custom::
+            #    resource and assumed to be a custom-resource quirk, and that assumption
+            #    was wrong: 78 of 110 events carried ResourceProperties, covering every
+            #    logical id in the stack. NoEcho cannot help; it applies to parameters.
+            # 2. Into the runtime's own configuration, where GetAgentRuntime returns it in
+            #    plaintext to anyone who can describe the runtime.
+            #
+            # ARCC guidance cnt_n8LpZcqYi2t3I2 requires secrets be retrieved at runtime
+            # rather than held in environment variables, and explicitly rejects even
+            # deploy-time injection into an env var as carrying the same disclosure risk.
+            # So the agent reads the secret itself: see _resolve_client_secret in the
+            # generated agent.py, which keeps honouring COGNITO_CLIENT_SECRET when it is
+            # set so the platform's own Step Functions deploy path is unaffected.
+            env_vars["COGNITO_USER_POOL_ID"] = {"Ref": "CognitoUserPool"}
+            # Ref the domain resource rather than rebuilding its name. This used to
+            # Fn::Sub "ac-${DeploymentName}-${AWS::AccountId}", which is a name the
+            # CognitoUserPoolDomain resource never takes: that resource is suffixed with
+            # CognitoDomainSuffix, or with a fragment of the stack id when the parameter
+            # is empty. So the runtime was handed a host that does not resolve, and the
+            # failure is invisible from outside — the stack reaches CREATE_COMPLETE, the
+            # CognitoTokenEndpoint OUTPUT is correct because it Refs the resource, and
+            # the README smoke test passes on that output while the agent itself can
+            # never get a token (DNS NXDOMAIN, empty bearer, gateway 401, invoke 500).
+            # Kept character-identical to the CognitoTokenEndpoint output's expression so
+            # the value the agent uses and the value the recipient is told cannot drift.
             env_vars["COGNITO_TOKEN_ENDPOINT"] = {
-                "Fn::Sub": "https://ac-${DeploymentName}-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com/oauth2/token"
+                "Fn::Sub": "https://${CognitoUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com/oauth2/token"
             }
             env_vars["COGNITO_SCOPE"] = {"Fn::Sub": "agentcore-${DeploymentName}/invoke"}
+            # The grant that makes COGNITO_USER_POOL_ID usable, added HERE rather than in
+            # _add_cognito so it is written by the same branch that sets the env var: a
+            # runtime told to read its own secret without permission to do so fails at
+            # the first gateway call, and the two must not be able to drift apart.
+            #
+            # Scoped to this pool's ARN, never "*". DescribeUserPoolClient returns the
+            # client secret of whatever pool it is pointed at, so a wildcard here would
+            # let this runtime read the app-client secrets of every other Cognito pool in
+            # the account — including pools belonging to unrelated workloads.
+            template["Resources"]["RuntimeExecutionRole"]["Properties"]["Policies"][0]["PolicyDocument"][
+                "Statement"
+            ].append(
+                {
+                    "Sid": "ReadOwnCognitoClientSecret",
+                    "Effect": "Allow",
+                    "Action": ["cognito-idp:DescribeUserPoolClient"],
+                    "Resource": {"Fn::GetAtt": ["CognitoUserPool", "Arn"]},
+                }
+            )
 
         if has_memory:
             depends.append("AgentCoreMemory")
@@ -5576,6 +5793,22 @@ def handler(event, context):
             "Properties": {
                 "AgentRuntimeId": {"Fn::GetAtt": ["AgentCoreRuntime", "AgentRuntimeId"]},
                 "Name": {"Fn::Sub": "${DeploymentName}_endpoint"},
+                # Pin the endpoint to the runtime's CURRENT version, explicitly.
+                #
+                # Left unset, the endpoint binds to whatever version existed when it was
+                # created and never moves again: AgentRuntimeId and Name are both
+                # createOnly, so an update that publishes a new runtime version leaves
+                # every property of THIS resource identical, CloudFormation does not touch
+                # it, and liveVersion stays 1 forever. Proven live on one stack in one
+                # moment: after an update that published version 2, the DEFAULT endpoint
+                # served v2 and behaved correctly while this named endpoint — the one the
+                # stack's EndpointArn output points at, and the only qualifier a recipient
+                # is told to invoke — still served v1 with its old environment.
+                #
+                # AgentRuntimeVersion is a readOnly attribute of AWS::BedrockAgentCore::
+                # Runtime and a writable property here, so GetAtt makes the version a real
+                # property change and the endpoint follows the code.
+                "AgentRuntimeVersion": {"Fn::GetAtt": ["AgentCoreRuntime", "AgentRuntimeVersion"]},
                 "Description": "Default endpoint",
             },
         }
@@ -6316,6 +6549,61 @@ They hold user identities, ingested documents and/or conversation history.
 Re-exporting with dataRetentionPolicy="Delete" makes teardown remove them.
 EOF
 """)
+                # The list above is logical ids, and after this teardown there is no stack
+                # left to resolve them against. Verified live (us-east-1, stack
+                # rtn0919-retain): the aws:cloudformation:* tags CloudFormation writes
+                # onto these resources SURVIVE the stack, so one tagging-API call recovers
+                # the whole orphan set — and for the vector bucket it is the only route,
+                # because its name comes from AWS::StackId and no Output carries either.
+                # "Note the ids before teardown" is therefore not advice an operator can
+                # actually follow for every retained resource.
+                #
+                # The knowledge-base paragraph is not about deletion ordering, which is
+                # what it first looked like. A retained KB cannot be deleted AT ALL after
+                # this teardown, in any order, because it purges its vectors using
+                # KnowledgeBaseRole and that role is never retained — Retain covers data
+                # stores, and an IAM role is not one.
+                #
+                # Isolated live (us-east-1, stack rtn0919-retain, two full cycles). With
+                # the vector store and its index fully intact and the KB deleted first,
+                # data source before knowledge base, each delete allowed to finish — i.e.
+                # exactly the ordering the earlier draft of this notice recommended — the
+                # KB still landed in DELETE_UNSUCCESSFUL, "Unable to delete data from
+                # vector store". Recreating ONLY the role, touching nothing else, then made
+                # the same delete succeed. So the role is the whole cause and ordering is
+                # not a mitigation; telling an operator to delete carefully would have sent
+                # them looking for a race that is not there.
+                #
+                # Unquoted heredoc so $STACK_NAME and $REGION resolve to values the
+                # operator can paste, which is why the command is one line.
+                sections.append("""
+cat <<EOF
+You do not need to have written their ids down. CloudFormation's own tags outlive the
+stack, so this recovers the whole set after the fact:
+
+  aws resourcegroupstaggingapi get-resources --tag-filters Key=aws:cloudformation:stack-name,Values=$STACK_NAME --region $REGION --query 'ResourceTagMappingList[].ResourceARN' --output text
+
+For the vector bucket and its index that is the ONLY route: they are named from
+AWS::StackId, which no stack Output carries, so once this stack is gone their names
+cannot be reconstructed from anything you noted.
+
+If a knowledge base is in that list, READ THIS BEFORE YOU TRY TO DELETE IT. It cannot be
+deleted as things stand, and the order you delete things in does not change that. A
+knowledge base purges its vectors using this stack's IAM role, and that role is NOT
+retained — Retain keeps data stores, and a role is not one. So the role is already gone,
+and every delete attempt fails with DELETE_UNSUCCESSFUL, "Unable to delete data from
+vector store". Recreate the role first, then delete:
+
+  aws iam create-role --role-name AgentCoreKBRole-$STACK_NAME --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"bedrock.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+  aws iam put-role-policy --role-name AgentCoreKBRole-$STACK_NAME --policy-name KBCleanup --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3vectors:*"],"Resource":"*"}]}'
+
+Wait ~20s for the role to propagate, then delete the data source, then the knowledge
+base, then this role and the vector bucket.
+
+Delete the vector bucket and index only AFTER the knowledge base is gone: the purge needs
+them to still be there.
+EOF
+""")
                 # Retain pairs the user pools with DeletionProtection: ACTIVE, which is
                 # deliberate (see _apply_data_retention) and has a consequence the notice
                 # above does not cover: the retained pool cannot be deleted in one call,
@@ -6466,7 +6754,21 @@ echo "Stack deleted."
             # proxy is yours and lives outside this stack.
             components.append("LiteLLM Gateway (external proxy)")
         elif has_gateway:
-            components.extend(["Cognito OAuth", "Gateway", "GatewayTargets"])
+            components.extend(["Cognito OAuth", "Gateway"])
+            # Counted from the template rather than implied by has_gateway. A canvas
+            # with a gateway and no tools emits a gateway and no targets at all, and
+            # naming a component the stack does not contain is not a cosmetic slip
+            # here: the one thing a recipient checks after deploying is
+            # `tools/list`, an empty result is indistinguishable from a
+            # policy-filtered one, and a README promising GatewayTargets sends them
+            # to debug Cedar instead of telling them there is nothing to serve.
+            target_count = sum(
+                1
+                for res in (template or {}).get("Resources", {}).values()
+                if isinstance(res, dict) and res.get("Type") == "AWS::BedrockAgentCore::GatewayTarget"
+            )
+            if target_count:
+                components.append("GatewayTargets")
         if has_memory:
             components.append("Memory")
         if has_policy:
@@ -6595,8 +6897,23 @@ That lists the tools you are permitted to call — not every tool the gateway fr
 list is filtered by the policy engine, under the ids AgentCore gives the tools,
 `<TargetName>___<toolName>`, which is also how the Cedar policies name them. So
 `{"tools":[]}` with HTTP 200 is the quiet failure worth knowing about: the gateway and
-your token are both fine, and no policy permits you anything. Verified by deleting this
-stack's policy and repeating the call. To call a tool, keep the same headers and send:
+your token are both fine. It has two causes and they need different fixes, so tell them
+apart before you start debugging Cedar:
+
+```bash
+aws bedrock-agentcore-control list-gateway-targets \\
+  --gateway-identifier "$(get GatewayId)" --region "$REGION" \\
+  --query 'items[].{Name:name,Status:status}'
+```
+
+An empty list means this stack's gateway fronts no targets — there is nothing to serve
+and no policy will change that. That is the expected result when the Components line at
+the top of this README does not list `GatewayTargets`: the canvas defined a gateway but
+no tools on it. If instead the targets are listed and `READY`, the empty tool list is
+the policy engine filtering them and no policy permits you anything — verified by
+deleting this stack's policy and repeating the call.
+
+To call a tool, keep the same headers and send:
 
 ```json
 {"jsonrpc":"2.0","id":2,"method":"tools/call",

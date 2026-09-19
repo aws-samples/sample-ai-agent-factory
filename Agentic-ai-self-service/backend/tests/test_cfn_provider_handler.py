@@ -1743,3 +1743,90 @@ class TestRuntimeLogGroupDispatch:
         status, kwargs = sent[0]
         assert status == "FAILED"
         assert "README.md > Encryption" in kwargs["reason"]
+
+
+# ---------------------------------------------------------------------------
+# The client secret must not travel through CloudFormation
+# ---------------------------------------------------------------------------
+
+
+class _FakeCognito:
+    """Minimal cognito-idp stand-in recording what it was asked for."""
+
+    def __init__(self, secret="not-a-real-secret-from-cognito"):
+        self._secret = secret
+        self.calls = []
+
+    def describe_user_pool_client(self, **kwargs):
+        self.calls.append(kwargs)
+        client = {"ClientId": kwargs["ClientId"]}
+        if self._secret is not None:
+            client["ClientSecret"] = self._secret
+        return {"UserPoolClient": client}
+
+
+class TestTheClientSecretIsReadFromCognitoNotFromTheEvent:
+    """A secret in a Custom:: resource property is a secret in the stack's events.
+
+    CloudFormation copies the resolved ``ResourceProperties`` of every ``Custom::``
+    resource into the event stream, on every event, and keeps them for 90 days — so
+    anyone with ``cloudformation:DescribeStackEvents`` could read the Cognito client
+    secret. This was found live: the 52-character secret was recovered verbatim from
+    three events on a deployed stack, matched against its known value with a positive
+    control. ``NoEcho`` was never a defence, because it applies to parameters and this
+    arrived as a ``GetAtt``.
+
+    So the template now passes ``UserPoolId`` and the handler reads the secret from
+    Cognito itself. These tests pin that the secret is fetched, that the fetch wins
+    over any legacy property, and that the deprecated path still works for a stack
+    whose template is older than its Lambda.
+    """
+
+    def test_the_secret_comes_from_cognito_scoped_to_the_given_pool(self, monkeypatch):
+        cognito = _FakeCognito()
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: cognito)
+
+        secret = provider._resolve_client_secret({"UserPoolId": "us-east-1_abc", "ClientId": "client-a"})
+
+        assert secret == "not-a-real-secret-from-cognito"
+        assert cognito.calls == [{"UserPoolId": "us-east-1_abc", "ClientId": "client-a"}]
+
+    def test_cognito_wins_over_a_legacy_property(self, monkeypatch):
+        """Precedence matters: if the property still won, re-exporting would silently
+        keep using the leaked value and the fix would look applied while doing nothing."""
+        cognito = _FakeCognito()
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: cognito)
+
+        secret = provider._resolve_client_secret(
+            {"UserPoolId": "us-east-1_abc", "ClientId": "client-a", "ClientSecret": "stale-not-a-real-secret"}
+        )
+
+        assert secret == "not-a-real-secret-from-cognito"
+
+    def test_a_client_with_no_secret_fails_with_the_cause(self, monkeypatch):
+        """Better here, naming GenerateSecret, than as an opaque AgentCore rejection."""
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: _FakeCognito(secret=None))
+
+        with pytest.raises(ValueError, match="GenerateSecret"):
+            provider._resolve_client_secret({"UserPoolId": "us-east-1_abc", "ClientId": "client-a"})
+
+    def test_the_legacy_property_still_works_without_a_pool(self, monkeypatch):
+        """A stack created by an older template keeps updating while its
+        cfn-provider.zip is newer than the template that deployed it."""
+
+        def _no_aws(*a, **k):
+            raise AssertionError("must not call AWS when falling back to the legacy property")
+
+        monkeypatch.setattr(provider.boto3, "client", _no_aws)
+
+        assert provider._resolve_client_secret({"ClientSecret": "legacy-not-a-real-secret"}) == (
+            "legacy-not-a-real-secret"
+        )
+
+    def test_neither_source_is_a_hard_error(self, monkeypatch):
+        """Fail closed. Passing "" to AgentCore would create a provider that can never
+        mint a token, and the stack would go green over it."""
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: _FakeCognito())
+
+        with pytest.raises(ValueError, match="UserPoolId"):
+            provider._resolve_client_secret({"ClientId": "client-a"})
