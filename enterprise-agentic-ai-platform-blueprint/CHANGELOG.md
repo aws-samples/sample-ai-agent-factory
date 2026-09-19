@@ -34,7 +34,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Verification
 
 - The preceding compatibility spike passed live in `us-west-2` for IAM and Cognito M2M auth, model discovery, Strands `LiteLLMModel` streaming/non-streaming, exact HTTP 429, and zero-residue cleanup.
-- Platform pipeline execution `08ed2063-7dd5-4c5b-96a3-15493c387c09` passed on exact commit `f037b4e`: Source, Synth, SelfMutate, assets, all five nonproduction deployments, explicit approval, and all three production deployments. The production Guardrail, Gateway, and inference target are `READY`; the rate-limit resource is `CREATE_COMPLETE`; and the Management/Governance Log Archive is live. Sanitized details are in `evidence/live/2026-09-19-platform-pipeline-deployment.md`.
+- Platform pipeline executions passed on exact commits `f037b4e`, `2ca8272`, and `0ef7f50`: Source, Synth, SelfMutate, assets, all five nonproduction deployments, fresh explicit approvals, and all three production deployments. The production Guardrail, Gateway, and inference target are `READY`; the native rate limit is `ACTIVE`; the Management/Governance Log Archive is live; and the pipeline-owned Gateway passed Cognito M2M, 49-model discovery, and Strands `LiteLLMModel` streaming/non-streaming. Sanitized details are in `evidence/live/2026-09-19-platform-pipeline-deployment.md`.
 - OTEL rate-limit span correlation remains blocked: `aws/spans` stayed empty under an active CloudWatch Logs trace destination, 100% indexing, configured deliveries, propagation delay, and extended polling. It is not counted as passing evidence.
 
 ## [1.0.0] - 2026-08-18
