@@ -241,10 +241,11 @@ ARNs and no wildcards:
 ```
 
 The Lambda resource policy names the exact Gateway role ARN and is idempotently
-reused only when the existing statement matches. The authorization policies are
-attached before association. Gateway create/target create/mode updates use a
-bounded six-minute propagation retry; schema validation errors are never
-retried.
+reused only when the existing statement matches. A fresh-role “invalid
+principal” response is retried for up to six minutes, with the exact statement
+ID checked before every attempt. The authorization policies are attached before
+association. Gateway create/target create/mode updates use the same bounded
+propagation window; schema validation errors are never retried.
 
 The **management caller** needs `bedrock-agentcore:CreatePolicyEngine`,
 `CreatePolicy`, `UpdatePolicy`, `DeletePolicy`, `DeletePolicyEngine`,

@@ -1467,39 +1467,89 @@ class PolicyEngineSpike:
         return arn
 
     def ensure_lambda_permission(self, role_arn: str) -> None:
+        """Create one exact-role permission, tolerating IAM propagation safely.
+
+        ``AddPermission`` has no client token. Before every attempt, read the
+        function policy by statement ID; this makes a lost successful response
+        recoverable without issuing a duplicate statement.
+        """
         expected_sid = self.names.lambda_permission_id
-        document = self.api.get_lambda_policy(self.names.lambda_name)
-        statements = [] if document is None else document.get("Statement", [])
-        existing = next(
-            (
-                statement
-                for statement in statements
-                if isinstance(statement, Mapping) and statement.get("Sid") == expected_sid
-            ),
-            None,
-        )
-        if existing is not None:
-            principal = existing.get("Principal", {})
-            actions = existing.get("Action")
-            if (
-                not isinstance(principal, Mapping)
-                or principal.get("AWS") != role_arn
-                or actions not in ("lambda:InvokeFunction", ["lambda:InvokeFunction"])
-                or existing.get("Effect") != "Allow"
-                or existing.get("Condition") not in (None, {})
-            ):
-                raise SpikeError("Existing Lambda permission differs from the exact Gateway role")
-            self.record("lambda_permission_reused", statementId=expected_sid)
+        started = time.monotonic()
+        deadline = started + PROPAGATION_TIMEOUT_SECONDS
+        attempts = 0
+        while True:
+            document = self.api.get_lambda_policy(self.names.lambda_name)
+            statements = [] if document is None else document.get("Statement", [])
+            if not isinstance(statements, list):
+                raise SpikeError("Lambda resource policy Statement is not an array")
+            existing = next(
+                (
+                    statement
+                    for statement in statements
+                    if isinstance(statement, Mapping)
+                    and statement.get("Sid") == expected_sid
+                ),
+                None,
+            )
+            if existing is not None:
+                principal = existing.get("Principal", {})
+                actions = existing.get("Action")
+                if (
+                    not isinstance(principal, Mapping)
+                    or principal.get("AWS") != role_arn
+                    or actions not in ("lambda:InvokeFunction", ["lambda:InvokeFunction"])
+                    or existing.get("Effect") != "Allow"
+                    or existing.get("Condition") not in (None, {})
+                ):
+                    raise SpikeError(
+                        "Existing Lambda permission differs from the exact Gateway role"
+                    )
+                self.record(
+                    "lambda_permission_reused",
+                    statementId=expected_sid,
+                    attempts=attempts,
+                    waitedSeconds=round(time.monotonic() - started, 1),
+                )
+                return
+
+            attempts += 1
+            try:
+                response = self.api.add_permission(
+                    self.names.lambda_name, expected_sid, role_arn
+                )
+            except ClientError as error:
+                code = aws_error_code(error)
+                message = str(error).lower()
+                retryable = code == "ResourceConflictException" or (
+                    code == "InvalidParameterValueException"
+                    and "principal was invalid" in message
+                )
+                if not retryable:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise SpikeError(
+                        "Gateway role did not become a valid Lambda principal within "
+                        f"{PROPAGATION_TIMEOUT_SECONDS}s"
+                    ) from error
+                time.sleep(PROPAGATION_INTERVAL_SECONDS)
+                continue
+            except BotoCoreError as error:
+                if time.monotonic() >= deadline:
+                    raise SpikeError(
+                        "Lambda permission creation did not complete within "
+                        f"{PROPAGATION_TIMEOUT_SECONDS}s"
+                    ) from error
+                time.sleep(PROPAGATION_INTERVAL_SECONDS)
+                continue
+            self.record(
+                "lambda_permission_created",
+                statementId=expected_sid,
+                principalRoleName=self.names.gateway_role_name,
+                attempts=attempts,
+                waitedSeconds=round(time.monotonic() - started, 1),
+                awsRequestId=request_id(response),
+            )
             return
-        response = self.api.add_permission(
-            self.names.lambda_name, expected_sid, role_arn
-        )
-        self.record(
-            "lambda_permission_created",
-            statementId=expected_sid,
-            principalArn=role_arn,
-            awsRequestId=request_id(response),
-        )
 
     def ensure_gateway_role(self, lambda_arn: str) -> str:
         role_arn = self.ensure_role(

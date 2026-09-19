@@ -1109,3 +1109,70 @@ def test_cleanup_refuses_log_group_with_foreign_tags(
     with pytest.raises(SpikeError, match="ownership tags differ"):
         spike.cleanup_compute()
     assert "delete_log_group" not in fake.calls
+
+
+def test_lambda_permission_retries_invalid_principal_propagation(
+    config: spike_module.PolicyEngineConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spike, fake = _spike(config, populated=False)
+    role_arn = f"arn:aws:iam::{ACCOUNT}:role/{config.names.gateway_role_name}"
+    original = fake.add_permission
+    attempts = 0
+
+    def add_permission(name: str, statement_id: str, principal_arn: str) -> Mapping[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            fake._log("add_permission")
+            raise spike_module.ClientError(
+                {
+                    "Error": {
+                        "Code": "InvalidParameterValueException",
+                        "Message": "The provided principal was invalid.",
+                    }
+                },
+                "AddPermission",
+            )
+        return original(name, statement_id, principal_arn)
+
+    fake.add_permission = add_permission  # type: ignore[method-assign]
+    monkeypatch.setattr(spike_module.time, "sleep", lambda _: None)
+    try:
+        spike.ensure_lambda_permission(role_arn)
+    finally:
+        spike.close()
+    assert attempts == 2
+    assert fake.calls.count("add_permission") == 2
+
+
+def test_lambda_permission_does_not_retry_unrelated_invalid_parameter(
+    config: spike_module.PolicyEngineConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spike, fake = _spike(config, populated=False)
+    attempts = 0
+
+    def add_permission(name: str, statement_id: str, principal_arn: str) -> Mapping[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        raise spike_module.ClientError(
+            {
+                "Error": {
+                    "Code": "InvalidParameterValueException",
+                    "Message": "The function name is invalid.",
+                }
+            },
+            "AddPermission",
+        )
+
+    fake.add_permission = add_permission  # type: ignore[method-assign]
+    monkeypatch.setattr(spike_module.time, "sleep", lambda _: None)
+    try:
+        with pytest.raises(spike_module.ClientError):
+            spike.ensure_lambda_permission(
+                f"arn:aws:iam::{ACCOUNT}:role/{config.names.gateway_role_name}"
+            )
+    finally:
+        spike.close()
+    assert attempts == 1
