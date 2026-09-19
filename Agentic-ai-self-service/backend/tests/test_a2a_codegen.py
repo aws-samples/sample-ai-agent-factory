@@ -795,3 +795,33 @@ def test_a_transport_failure_is_reported_not_raised():
 
     assert out["status"] == "ERROR"
     assert "connection reset" in out["error"]
+
+
+@pytest.mark.parametrize(
+    "card_url",
+    [
+        "//evil.example.net/x",  # protocol-relative
+        "///evil.example.net/x",
+        "invocations",  # bare relative, no leading slash
+        "/a?b=c#d",  # query and fragment
+    ],
+)
+def test_a_relative_card_url_cannot_move_the_request_to_another_host(card_url):
+    """A protocol-relative card url must not become a different host.
+
+    ``urllib.parse.urljoin`` is what this join looks like it wants to be, and it would
+    do exactly that: urljoin("https://example.com/", "//evil.example.net/x") is
+    "https://evil.example.net/x". Concatenating after lstrip("/") makes it a path on the
+    validated base instead. The post-join host re-check is the backstop that makes
+    either form safe -- which is why the order (join, then check) is the load-bearing
+    part, and why this test asserts the host of the URL actually posted to.
+    """
+    from urllib.parse import urlparse
+
+    g = _peer(card_url, [_spec_reply("ok")])
+
+    json.loads(g["call_a2a_peer"]("https://example.com", "hi"))
+
+    posted = [u for m, u, _p in _PeerServer.posts if m == "POST"]
+    assert len(posted) == 1, f"expected exactly one POST, got {posted}"
+    assert urlparse(posted[0]).hostname == "example.com", posted[0]

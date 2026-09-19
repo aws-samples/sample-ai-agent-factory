@@ -375,6 +375,15 @@ def call_a2a_peer(peer_url: str, message: str) -> str:
     # measured: no input existed for which this tool reached its POST. Relative first,
     # then https, then the host denylist -- so a card pointing at http or at an
     # internal host is still fail-closed BLOCKED and never silently followed.
+    #
+    # The join is deliberately string concatenation and NOT urllib.parse.urljoin, which
+    # is what it looks like it wants to be. urljoin treats a protocol-relative url as a
+    # host: urljoin("https://example.com/", "//evil.example.net/x") is
+    # "https://evil.example.net/x", so a peer's card could move the request to a host
+    # the allowlist never saw. Concatenating after lstrip("/") turns the same input into
+    # a path on the validated base instead. Re-checking the host after the join is the
+    # backstop that makes either form safe, and it is the order that matters: check
+    # first and join second and the backstop guards the wrong string.
     invoke_parsed = urllib.parse.urlparse(invoke_url)
     if not invoke_parsed.scheme:
         invoke_url = base + "/" + invoke_url.lstrip("/")
