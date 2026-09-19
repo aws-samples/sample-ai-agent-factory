@@ -301,9 +301,7 @@ export class PlatformInferenceGatewayConstruct extends Construct {
     this.discoveryUrl =
       `https://cognito-idp.${stack.region}.${stack.urlSuffix}/` +
       `${this.userPool.userPoolId}/.well-known/openid-configuration`;
-    this.tokenEndpoint =
-      `https://${this.userPoolDomain.domainName}.auth.${stack.region}.` +
-      `${stack.urlSuffix}/oauth2/token`;
+    this.tokenEndpoint = `${this.userPoolDomain.baseUrl()}/oauth2/token`;
 
     this.gateway = new CfnGateway(this, 'Gateway', {
       name: gatewayName,

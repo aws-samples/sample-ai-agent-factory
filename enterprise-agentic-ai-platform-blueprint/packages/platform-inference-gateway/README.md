@@ -90,8 +90,11 @@ LiteLLMModel(
 ```
 
 The access token comes from the output Cognito token endpoint using the client
-credentials grant and the output OAuth scope. Secrets and access tokens stay in
-process memory and must not be written to evidence or logs.
+credentials grant and the output OAuth scope. The endpoint is derived from
+CDK's `UserPoolDomain.baseUrl()` so managed domains use the required
+`amazoncognito.com` suffix rather than the AWS service API suffix. Secrets and
+access tokens stay in process memory and must not be written to evidence or
+logs.
 
 ## Security semantics
 

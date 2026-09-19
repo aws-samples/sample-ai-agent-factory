@@ -102,6 +102,32 @@ describe('Phase 9 — native Platform inference Gateway', () => {
     });
   });
 
+  it('derives the OAuth endpoint from the Cognito hosted domain', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TokenEndpointStack', {
+      env: { account: '123456789012', region: 'us-west-2' },
+    });
+    const gateway = new PlatformInferenceGatewayConstruct(
+      stack,
+      'InferenceGateway',
+      {
+        envName: 'nonprod',
+        applicationId: 'platform-inference',
+        agentId: 'shared',
+        tenantId: 'shared',
+        costCentre: 'platform',
+        modelRateLimits: MODEL_LIMITS,
+      },
+    );
+
+    expect(gateway.tokenEndpoint).toContain(
+      '.auth.us-west-2.amazoncognito.com/oauth2/token',
+    );
+    expect(gateway.tokenEndpoint).not.toContain(
+      '.auth.us-west-2.amazonaws.com/oauth2/token',
+    );
+  });
+
   it('provisions a confidential client-credentials Cognito client', () => {
     const template = synth();
     template.resourceCountIs('AWS::Cognito::UserPool', 1);

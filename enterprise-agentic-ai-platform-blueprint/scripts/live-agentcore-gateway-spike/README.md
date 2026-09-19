@@ -124,3 +124,25 @@ LiteLLMModel(
 The gate passes only when distinct streaming and non-streaming Strands events are
 recorded, the exact 429 names the non-streaming event as its positive twin, and
 both the AgentCore/IAM and Cognito cleanup audits report zero residue.
+
+## Verify a pipeline-owned Gateway without mutation
+
+After the Platform pipeline succeeds, verify its deployed production Gateway in
+place with the same pinned environment:
+
+```bash
+"$VENV/bin/python" "$SPIKE_DIR/verify_pipeline_gateway.py" \
+  --account-id "$PLATFORM_ACCOUNT_ID" \
+  --region us-west-2 \
+  --stack-name Prod-InferenceGateway \
+  --git-head "$(git rev-parse HEAD)" \
+  --evidence-file "$KIROCREW_SCRATCH/pipeline-gateway-evidence.json"
+```
+
+This verifier reads all resource identifiers from CloudFormation, requires the
+stack, Gateway, target, and native rate limit to be ready, validates the five
+allocation tags and Cognito client-credentials configuration, then runs model
+discovery plus streaming and non-streaming Strands `LiteLLMModel` invocations.
+It retrieves the Cognito client secret and access tokens only in process memory,
+never writes or prints them, and performs no create, update, delete, cleanup, or
+rate-limit mutation.

@@ -260,6 +260,7 @@ Repository hygiene gates, runnable locally and suitable for wiring into CI: `npm
 | Cross-account KMS decrypt fails | Bootstrap `aws-cdk-lib` < 2.150 | Re-bootstrap ≥ 2.150 |
 | D-03 `CreateGateway` `not authorized` | Fresh CR role IAM not yet propagated to AgentCore | Pre-create the CR role or rely on the propagation gate |
 | D-03 `CreateGatewayTarget` "role lacks permission to invoke Lambda" | Imported gateway role missing the invoke policy | Attach `lambda:InvokeFunction` on the tool alias ARNs to the pre-created role |
+| Pipeline M2M token endpoint cannot resolve | Hosted-domain URL was built with the AWS API suffix | Derive it from `UserPoolDomain.baseUrl()`; Cognito managed domains use the `amazoncognito.com` suffix |
 | `subnets in unsupported AZ` | AgentCore supports only `use1-az1/az2/az4` in `us-east-1` | Filter subnets by AZ ID (`AgentcoreCompatibleSubnetIdFirst` output) |
 
 Rollback: `npx cdk destroy <stack>` per-stack, or `bash scripts/teardown.sh` for the full sweep.
