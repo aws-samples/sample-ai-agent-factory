@@ -250,15 +250,14 @@ def build_template(config: SpikeConfig, *, inject_invalid_record: bool = False) 
     if inject_invalid_record:
         resources["InvalidRecord"] = {
             "Type": RECORD_TYPE,
-            "DependsOn": "Registry",
             "Properties": {
-                "RegistryId": {"Fn::GetAtt": ["Registry", "RegistryId"]},
+                "RegistryId": "0000000000000000",
                 "Name": config.invalid_record_name,
-                "Description": "Intentional descriptor/type mismatch for rollback proof.",
-                "RecordType": "MCP",
+                "Description": "Intentional nonexistent parent for rollback proof.",
+                "RecordType": "CUSTOM",
                 "RecordVersion": "1.0.0",
                 "Descriptors": {
-                    "Custom": {"Data": '{"intentional":"descriptor-type-mismatch"}'}
+                    "Custom": {"Data": '{"intentional":"nonexistent-parent-registry"}'}
                 },
                 "Tags": cfn_tags(config.tags),
             },
@@ -744,6 +743,19 @@ class RegistryProbe:
         self.evidence.add("data_plane_discovery_verified", matchingRecords=1)
 
     def prove_rollback(self) -> None:
+        rollback_template = build_template(self.config, inject_invalid_record=True)
+        rollback_registry_id = str(
+            rollback_template["Resources"]["InvalidRecord"]["Properties"]["RegistryId"]
+        )
+        if self.aws.get_registry(rollback_registry_id) is not None:
+            raise SpikeError(
+                "Rollback sentinel Registry unexpectedly exists; refusing the update"
+            )
+        self.evidence.add(
+            "rollback_parent_absence_verified",
+            registryId=rollback_registry_id,
+        )
+
         outputs = {key: str(value) for key, value in self.state.items()}
         response = self.aws.inject_failed_update(self.config)
         self.evidence.add("rollback_injection_requested", awsRequestId=request_id(response))

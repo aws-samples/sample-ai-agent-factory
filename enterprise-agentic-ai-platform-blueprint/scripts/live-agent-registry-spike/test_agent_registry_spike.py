@@ -98,7 +98,7 @@ def test_template_carries_all_required_allocation_tags(
             assert required in actual
 
 
-def test_rollback_template_adds_only_an_intentionally_invalid_record(
+def test_rollback_template_adds_only_a_valid_record_with_missing_parent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cfg = config(tmp_path, monkeypatch)
@@ -106,9 +106,41 @@ def test_rollback_template_adds_only_an_intentionally_invalid_record(
     injected = build_template(cfg, inject_invalid_record=True)
     assert set(injected["Resources"]) - set(normal["Resources"]) == {"InvalidRecord"}
     invalid = injected["Resources"]["InvalidRecord"]["Properties"]
-    assert invalid["RecordType"] == "MCP"
+    assert invalid["RegistryId"] == "0000000000000000"
+    assert len(invalid["RegistryId"]) == 16
+    assert invalid["RegistryId"].isalnum()
+    assert invalid["RecordType"] == "CUSTOM"
     assert set(invalid["Descriptors"]) == {"Custom"}
+    assert json.loads(invalid["Descriptors"]["Custom"]["Data"]) == {
+        "intentional": "nonexistent-parent-registry"
+    }
     assert tags_as_map(invalid["Tags"]) == cfg.tags
+
+
+def test_rollback_refuses_update_if_sentinel_parent_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_registry_spike import RegistryProbe
+
+    class ExistingParentAws:
+        update_called = False
+
+        def get_registry(self, registry_id: str) -> dict[str, str] | None:
+            assert registry_id == "0000000000000000"
+            return {"registryId": registry_id}
+
+        def inject_failed_update(self, _config: SpikeConfig) -> dict[str, object]:
+            self.update_called = True
+            return {}
+
+    cfg = config(tmp_path, monkeypatch)
+    aws = ExistingParentAws()
+    probe = RegistryProbe(cfg, aws, RecordingEvidence())  # type: ignore[arg-type]
+
+    with pytest.raises(SpikeError, match="sentinel Registry unexpectedly exists"):
+        probe.prove_rollback()
+
+    assert aws.update_called is False
 
 
 def test_outputs_pin_all_cross_account_identifiers(

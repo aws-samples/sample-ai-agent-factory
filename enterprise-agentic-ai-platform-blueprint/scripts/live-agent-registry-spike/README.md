@@ -13,7 +13,7 @@ A successful `all` run proves, in the selected account and Region, that:
 3. The fixed governance document round-trips byte-semantically through `GetRegistryRecord` without abusing the strict MCP descriptor schema.
 4. A DRAFT record can be submitted and reaches `APPROVED` under `APPROVE_ALL`.
 5. The approved record is visible through the `agent-registry` data plane.
-6. An intentionally mismatched MCP/custom record fails an update, CloudFormation reaches `UPDATE_ROLLBACK_COMPLETE`, the approved record survives, and the invalid record does not.
+6. An otherwise valid custom record targeting a pre-verified nonexistent parent Registry fails an update, CloudFormation reaches `UPDATE_ROLLBACK_COMPLETE`, the approved record survives, and the invalid record does not.
 7. Stack deletion plus an independent control-plane inventory leaves zero exact-prefix registries.
 
 It does **not** prove Workstream integration, cross-account `RegistryReaderRole`, Cedar enforcement, or EMEA regional support. Those remain later pipeline and region-matrix gates.
