@@ -4,6 +4,11 @@ This cleanup-first probe validates the **GA AWS Agent Registry** namespace befor
 
 The public-preview `bedrock-agentcore` Registry namespace reached its documented support deadline on 2026-09-17. New platform code must use `agent-registry-control`, `agent-registry`, `AWS::AgentRegistry::Registry`, and `AWS::AgentRegistry::RegistryRecord` instead.
 
+> **Live proof.** Exact product commit `8e66dc3` passed the complete bounded
+> `us-west-2` contract on 2026-09-19, including explicit approval, discovery,
+> rollback, normal cleanup, and direct independent zero-residual inventory. See
+> [`../../evidence/live/2026-09-19-agent-registry-compatibility-spike.md`](../../evidence/live/2026-09-19-agent-registry-compatibility-spike.md).
+
 ## What it proves
 
 A successful `all` run proves, in the selected account and Region, that:
