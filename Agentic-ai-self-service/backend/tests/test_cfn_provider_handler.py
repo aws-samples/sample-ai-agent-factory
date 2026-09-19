@@ -12,6 +12,7 @@ a rollback after a failed create, a delete that AWS refuses — which is precise
 a live test cannot be relied on to reproduce on demand.
 """
 
+import ast
 import sys
 from pathlib import Path
 
@@ -1830,3 +1831,123 @@ class TestTheClientSecretIsReadFromCognitoNotFromTheEvent:
 
         with pytest.raises(ValueError, match="UserPoolId"):
             provider._resolve_client_secret({"ClientId": "client-a"})
+
+
+class TestTheProviderErrorContractIsEnforced:
+    """``ProviderError`` is the ONE exception whose message reaches a stack event.
+
+    Every other exception is reduced to its class name by ``_safe_failure_reason``,
+    because botocore builds ClientError messages out of the API response and some
+    calls in this module carry a Cognito app client secret in their request
+    parameters. ``ProviderError`` is exempted so the actionable failures — "AgentCore
+    rejected your Cedar statement, and here is what it said" — survive the redaction.
+
+    That exemption is only safe while the messages really are built from literals,
+    resource ids and service status fields. The docstring says so and says it "must be
+    kept", and nothing checked it. Stack events are readable by anyone with
+    DescribeStackEvents, are retained 90 days, cannot be scrubbed afterwards, and under
+    a Terraform ``aws_cloudformation_stack`` wrapper land in state as well — so a single
+    future ``raise ProviderError(f"... {e}")`` would publish whatever that message
+    holds. ARCC cnt_94E30Xo4RZHtSJ is the general form: return generic messages, no
+    internal components or stack traces, and "do not reflect the user-provided input in
+    the message".
+
+    Checked statically over the source rather than by calling each site, because the
+    hazard is a message *shape* and the sites that matter are error paths a test cannot
+    reliably provoke.
+    """
+
+    HANDLER_SOURCE = Path(__file__).resolve().parents[1] / "src" / "app" / "services" / "cfn_provider" / "handler.py"
+
+    @staticmethod
+    def _is_type_name_of(node, caught):
+        """True for ``type(<caught>).__name__`` — the one safe way to mention it.
+
+        It yields a class name and nothing from the response, which is exactly what
+        the redaction would have produced anyway, so the handler uses it deliberately
+        (with a comment saying so) at the two sites that report a failed delete.
+        """
+        return (
+            isinstance(node, ast.Attribute)
+            and node.attr == "__name__"
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "type"
+            and any(isinstance(a, ast.Name) and a.id in caught for a in node.value.args)
+        )
+
+    @classmethod
+    def _leaked_names(cls, node, caught):
+        """Caught-exception names reachable inside an f-string placeholder.
+
+        Walks manually rather than with ``ast.walk`` so a safe subtree can be pruned;
+        ``ast.walk`` would descend into ``type(e).__name__`` and report the ``e``.
+        """
+        if cls._is_type_name_of(node, caught):
+            return
+        if isinstance(node, ast.Name):
+            if node.id in caught:
+                yield node.id
+            return
+        for child in ast.iter_child_nodes(node):
+            yield from cls._leaked_names(child, caught)
+
+    @classmethod
+    def _interpolated_names(cls, node, caught):
+        """Caught names read inside every f-string placeholder in an expression."""
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.FormattedValue):
+                yield from cls._leaked_names(sub.value, caught)
+
+    def test_no_provider_error_message_interpolates_the_exception(self):
+        tree = ast.parse(self.HANDLER_SOURCE.read_text())
+        # The names bound by `except ... as <name>` — these are the ones that carry a
+        # botocore message. Collected from the tree so renaming the handler's `e` to
+        # something else cannot walk past this test.
+        caught = {h.name for h in ast.walk(tree) if isinstance(h, ast.ExceptHandler) and h.name}
+        assert caught, "no `except ... as` in the handler: this test is no longer checking anything"
+
+        offenders = []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)):
+                continue
+            func = node.exc.func
+            if not (isinstance(func, ast.Name) and func.id == "ProviderError"):
+                continue
+            for arg in node.exc.args:
+                # Catches a bare {e}, {str(e)}, {e.args}, {e.response[...]["Message"]}
+                # alike: anything mentioning the caught name that is not the one
+                # allowlisted type(e).__name__ shape.
+                leaked = set(self._interpolated_names(arg, caught))
+                if leaked:
+                    offenders.append((node.lineno, sorted(leaked)))
+
+        assert not offenders, (
+            "these ProviderError messages interpolate a caught exception, and "
+            "_safe_failure_reason passes ProviderError messages through to the stack "
+            f"event stream verbatim: {offenders}. Use the error CODE "
+            "(e.response['Error']['Code']) or type(e).__name__ instead."
+        )
+
+    def test_the_redaction_still_applies_to_everything_else(self):
+        """The other half: a non-ProviderError must not reach the event at all."""
+        secret = "wRoNgIfThIsEverReachesAStackEvent0123456789"  # noqa: S105 - fake
+        reason = provider._safe_failure_reason(
+            ClientError(
+                {"Error": {"Code": "InvalidParameterException", "Message": f"ClientSecret {secret} is invalid"}},
+                "DescribeUserPoolClient",
+            )
+        )
+        assert secret not in reason
+        assert reason == "cfn-provider failed with ClientError"
+
+    def test_a_provider_error_is_passed_through_so_the_exemption_is_real(self):
+        """Guards the opposite failure: redacting everything is also a defect.
+
+        If this ever starts failing closed, the most actionable error this Lambda
+        produces silently becomes "cfn-provider failed with ProviderError".
+        """
+        reason = provider._safe_failure_reason(
+            provider.ProviderError("AgentCore rejected the Cedar policy: unexpected token at line 3")
+        )
+        assert "unexpected token at line 3" in reason

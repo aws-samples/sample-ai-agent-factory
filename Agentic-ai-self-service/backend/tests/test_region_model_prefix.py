@@ -222,11 +222,23 @@ class TestRegionalizedDefaultsAcrossTheSweep:
         assert template["Parameters"]["ModelId"]["Default"] == expected
 
     def test_cfn_export_teardown_script_region(self, monkeypatch):
+        """The export-time region is the LAST fallback, not the second argument's default.
+
+        This asserted ``REGION="${2:-eu-central-1}"`` and went red when teardown.sh was
+        changed to resolve the region the way deploy.sh does — argument, then the
+        operator's own AWS configuration, then the export-time default. That rework is
+        correct and this assertion was pinning the shape rather than the behaviour: a
+        teardown that defaults to a different region from the deploy finds no stack and
+        reports success at having deleted nothing.
+
+        So assert the property that actually matters, which is unchanged: the baked-in
+        default is the configured region and never a hardcoded us-east-1.
+        """
         from app.services.cfn_template_generator import CfnTemplateGenerator
 
         monkeypatch.setenv("APP_AWS_REGION", "eu-central-1")
         script = CfnTemplateGenerator()._generate_teardown_script()
-        assert 'REGION="${2:-eu-central-1}"' in script
+        assert 'REGION="${REGION:-eu-central-1}"' in script
         assert "us-east-1" not in script
 
     def test_knowledge_base_model_arn_follows_its_region_argument(self):

@@ -182,21 +182,35 @@ def _sanitize_string_literal(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
 
 
-def _escape_triple_quotes(text: str) -> str:
-    """Escape text for safe embedding inside triple-double-quoted Python strings.
+def _as_triple_quoted_body(text: str) -> str:
+    '''``text`` escaped so it is safe between a pair of ``"""``.
 
-    SECURITY: Prevents code injection by escaping backslashes first (to avoid
-    creating new escape sequences), then triple-double-quotes and curly braces
-    (to prevent f-string expression evaluation).
-    """
-    # Escape existing backslashes to prevent them from creating escape sequences
-    text = text.replace("\\", "\\\\")
-    # Escape triple-double-quotes
-    text = text.replace('"""', '\\"\\"\\"')
-    # Escape curly braces to prevent f-string injection
-    text = text.replace("{", "{{")
-    text = text.replace("}", "}}")
-    return text
+    Escaping the *sequence* ``"""`` is not enough, and this was live: a prompt
+    *ending* in a quote closes the literal one character early. Given
+    ``Answer only about "orders"`` the emitted line is
+    ``SYSTEM_PROMPT = """Answer only about "orders""""`` -- four quotes in a row, of
+    which the first three close the string and the fourth begins an unterminated one.
+    ``agent.py`` then fails to import, so a deployed runtime is dead on arrival and a
+    single stray quote in a prompt takes the whole agent with it.
+
+    So escape every backslash and then every quote, which is total: no run of
+    characters can terminate the literal early, whatever the canvas sends. Real
+    newlines are deliberately left alone -- a triple-quoted literal is allowed to
+    contain them, and a multi-line prompt stays readable in the emitted source. This
+    is ``_sanitize_string_literal`` minus the newline escaping, which is the only
+    reason the triple-quoted form is worth having.
+
+    Curly braces are *not* doubled, and used to be. That was justified as preventing
+    "f-string injection", which cannot happen: every template here is an f-string
+    evaluated in *this* module's source, and an interpolated value is never rescanned
+    for placeholders -- there is no ``.format()`` call anywhere in this module, in
+    ``a2a_codegen``, in ``deployment`` or in ``cfn_template_generator``. The doubling
+    protected against nothing and corrupted the commonest prompt there is: ``Return
+    JSON like {"id": 1}`` reached the model as ``Return JSON like {{"id": 1}}``. Note
+    that ``_sanitize_string_literal`` above, used for values interpolated into the
+    same templates, has never touched braces.
+    '''
+    return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _extract_gateway_credentials(gateway_config: dict | None) -> dict:
@@ -2063,7 +2077,7 @@ def _generate_graph_agent(
     for ag in agents:
         ag_id = _sanitize_agent_id(ag["agentId"])
         _, ag_init = _get_model_init_code(ag.get("modelProvider", provider), ag.get("modelId", model_id), region)
-        ag_prompt = _escape_triple_quotes(ag.get("systemPrompt", "You are a helpful agent."))
+        ag_prompt = _as_triple_quoted_body(ag.get("systemPrompt", "You are a helpful agent."))
         safe_var = ag_id.replace("-", "_")
         agent_defs += f'''
     {ag_init.replace("model = ", f"model_{safe_var} = ")}
@@ -2145,7 +2159,7 @@ def _generate_swarm_agent(
     for ag in agents:
         ag_id = _sanitize_agent_id(ag["agentId"])
         _, ag_init = _get_model_init_code(ag.get("modelProvider", provider), ag.get("modelId", model_id), region)
-        ag_prompt = _escape_triple_quotes(ag.get("systemPrompt", "You are a helpful agent."))
+        ag_prompt = _as_triple_quoted_body(ag.get("systemPrompt", "You are a helpful agent."))
         safe = ag_id.replace("-", "_")
         # Strands Swarm requires unique agent names across nodes. Without an
         # explicit name= kwarg, Strands defaults all agents to "Strands Agents",
@@ -2214,7 +2228,7 @@ def _generate_workflow_agent(
     for ag in agents:
         ag_id = _sanitize_agent_id(ag["agentId"])
         _, ag_init = _get_model_init_code(ag.get("modelProvider", provider), ag.get("modelId", model_id), region)
-        ag_prompt = _escape_triple_quotes(ag.get("systemPrompt", "You are a helpful agent."))
+        ag_prompt = _as_triple_quoted_body(ag.get("systemPrompt", "You are a helpful agent."))
         safe = ag_id.replace("-", "_")
         agent_defs += f'''
     {ag_init.replace("model = ", f"model_{safe} = ")}
@@ -2907,7 +2921,7 @@ def generate_agent_code(
     provider = getattr(config, "model_provider", "bedrock") or "bedrock"
 
     model_id = _get_model_id(config)
-    system_prompt = _escape_triple_quotes(config.system_prompt)
+    system_prompt = _as_triple_quoted_body(config.system_prompt)
     region = _get_region()
     tools = tools or []
     gateway_tools = gateway_tools or []

@@ -10,6 +10,7 @@ This module provides the WorkflowExecutor class that handles:
 Requirements: 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7
 """
 
+import ast
 import asyncio
 import logging
 import os
@@ -216,9 +217,9 @@ def generate_unified_agent_code(
     Uses official AWS patterns from amazon-bedrock-agentcore-samples.
     """
     region = region or os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1"))
-    from app.services.code_generator import _escape_triple_quotes
+    from app.services.code_generator import _as_triple_quoted_body
 
-    system_prompt = _escape_triple_quotes(runtime_config.system_prompt)
+    system_prompt = _as_triple_quoted_body(runtime_config.system_prompt)
     model_import, model_init = _get_model_code(runtime_config, region)
     tq = '"""'
 
@@ -548,6 +549,104 @@ def validate_mcp_server_tools(tools) -> list[str]:
     return problems
 
 
+def _first_function(source: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """The first top-level function in ``source``, or None if it will not parse.
+
+    Deliberately tolerant. Everything built on this is an improvement to a
+    description, never a correctness requirement, so unparseable code must fall
+    through to the existing behaviour rather than fail an export.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    return next((n for n in tree.body if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)), None)
+
+
+def _tool_code_has_no_description(source: str) -> bool:
+    func = _first_function(source)
+    return func is not None and bool(func.body) and ast.get_docstring(func) is None
+
+
+def _as_docstring_body(description: str) -> str:
+    """``description`` escaped so it is safe between a pair of ``\"\"\"``.
+
+    Escaping only the sequence ``\"\"\"`` is not enough, and this was live: a
+    description *ending* in a quote closes the literal one character early. Given
+    ``Looks up the order by "id"`` the emitted docstring is
+    ``\"\"\"Looks up the order by "id\"\"\"\"`` -- four quotes, of which the first three
+    close the string and the fourth begins an unterminated one. The generated server
+    then fails to import, so a stray quote in one tool's description takes down every
+    tool in the export.
+
+    So escape every backslash and then every quote, which is total: no run of
+    characters can terminate the literal early, whatever the canvas sends. Real
+    newlines are left alone, because a triple-quoted literal is allowed to contain
+    them and a multi-line description stays readable in the emitted source. The
+    escapes do not reach ``__doc__`` -- Python resolves ``\\"`` back to ``"`` -- so
+    the description FastMCP advertises is the one the author typed.
+
+    Delegates rather than repeating the two ``replace`` calls: the system-prompt path
+    had the identical bug, so there is now one place for this to be correct and no way
+    for the docstring rule and the prompt rule to drift apart.
+    """
+    from app.services.code_generator import _as_triple_quoted_body
+
+    return _as_triple_quoted_body(description)
+
+
+def _ensure_tool_docstring(source: str, description: str) -> str:
+    """Give a verbatim-code tool a docstring, if its author did not.
+
+    FastMCP takes a tool's description from its docstring, and an AgentCore gateway
+    that receives an empty description invents one from the tool's own name --
+    observed live as "Tool which performs MCPServerRuntime___msv_probe_marker".
+    That is what the model then reads when it decides whether to call the tool, so
+    an empty docstring is not cosmetic: it is the tool-selection signal missing.
+
+    The dict-defined path below has always emitted the canvas's ``description`` as
+    the docstring. This is the path that did not: code supplied as a complete
+    ``def`` is emitted verbatim, so a function written without a docstring lost the
+    description the canvas had for it.
+
+    An existing docstring always wins -- the author wrote it against their own
+    function, and it is more specific than the canvas field. On any parse failure
+    the source is returned untouched, because this is a nicety and must never be
+    the reason an export fails.
+    """
+    if not _tool_code_has_no_description(source):
+        return source
+    func = _first_function(source)
+    assert func is not None  # _tool_code_has_no_description is False otherwise
+    first = func.body[0]
+    lines = source.splitlines()
+    line = lines[first.lineno - 1]
+    # Everything on the first statement's line that comes before it. Normally just
+    # indentation; the exception is what the branch below is for.
+    prefix = line[: first.col_offset]
+    docstring = f'"""{_as_docstring_body(description)}"""'
+    if prefix.strip():
+        # ``def quick() -> str: return 'x'`` -- the body shares its line with the
+        # header, so there is no line to insert in front of. Doing it anyway put the
+        # docstring above the ``def`` at the body's column, and the generated module
+        # then failed to compile with ``unexpected indent``: one tool written on one
+        # line took down every tool in the export. So split the line instead, which
+        # keeps the description rather than dropping it. Semicolons in the body are
+        # fine -- they move across intact and stay valid.
+        indent = " " * (func.col_offset + 4)
+        lines[first.lineno - 1 : first.lineno] = [
+            prefix.rstrip(),
+            f"{indent}{docstring}",
+            f"{indent}{line[first.col_offset :]}",
+        ]
+    else:
+        # Insert immediately before the first statement, reusing its own leading
+        # whitespace, so a multi-line or decorated signature does not need to be parsed
+        # for where the body begins -- and so a tab-indented function stays tab-indented.
+        lines.insert(first.lineno - 1, f"{prefix}{docstring}")
+    return "\n".join(lines)
+
+
 def generate_mcp_server_code(
     server_name: str = "MCP Server Agent",
     tools: list[str] | None = None,
@@ -682,7 +781,8 @@ def wikipedia_search(query: str) -> str:
         ct_name = re.sub(r"[^a-zA-Z0-9_]", "_", ct_name_raw)
         if not ct_name or not ct_name[0].isalpha():
             ct_name = "tool_" + ct_name
-        ct_desc = ct.get("description", "A custom tool").replace('"""', r"\"\"\"")
+        ct_desc_given = ct.get("description")
+        ct_desc = _as_docstring_body(ct_desc_given or "A custom tool")
         # Bug 174: the body can arrive as `implementation` (a function BODY) or as
         # `code` (often a COMPLETE `def name(...): ...`). If `code` already defines
         # the function, emit it verbatim under @mcp.tool() (just ensure the def name
@@ -693,6 +793,16 @@ def wikipedia_search(query: str) -> str:
             # Point the decorator at whatever function the code defines (its name
             # becomes the MCP tool name). Normalise the registered name to ct_name
             # only if the code's def name is unsafe; otherwise keep the author's.
+            if _tool_code_has_no_description(body):
+                if ct_desc_given:
+                    body = _ensure_tool_docstring(body, ct_desc_given)
+                else:
+                    logger.warning(
+                        "MCP server export: tool %r has neither a docstring nor a description, so "
+                        "the gateway will advertise a description it invents from the tool name and "
+                        "the model has nothing real to select on",
+                        ct_name_raw,
+                    )
             tool_impls.append(f"\n@mcp.tool()\n{body}\n")
             continue
         ct_impl = ct.get("implementation") or ct.get("code") or "return {'result': 'ok'}"

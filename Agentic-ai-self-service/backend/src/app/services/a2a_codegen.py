@@ -38,11 +38,15 @@ Bug 125 ordering discipline: every helper (denylist, allowlist parse, SSRF
 check, the agent-card route handler) is DEFINED BEFORE the ``@tool`` and before
 ``@app.entrypoint``, and uses aliased local imports + env-driven region so the
 module is import-safe on any template. Config values are escaped through the
-same sanitizers code_generator.py uses to prevent f-string injection.
+same sanitizers code_generator.py uses, so a value cannot terminate the literal it
+is embedded in. Not "to prevent f-string injection" -- that was the old framing and
+it is wrong: these templates are f-strings evaluated here, and an interpolated value
+is never rescanned for placeholders. Believing otherwise is what led the shared
+sanitizer to double curly braces and silently corrupt every prompt containing JSON.
 """
 
 from app.services.code_generator import (
-    _escape_triple_quotes,
+    _as_triple_quoted_body,
     _sanitize_string_literal,
 )
 
@@ -73,7 +77,7 @@ def _generate_a2a_agent(
 
     Args:
         system_prompt: Already triple-quote-escaped system prompt (caller in
-            generate_agent_code escapes it via ``_escape_triple_quotes``).
+            generate_agent_code escapes it via ``_as_triple_quoted_body``).
         model_id: Sanitized cross-region model id.
         region: AWS region string.
         peer_config: Optional dict with ``capabilities`` (list[str]),
@@ -97,8 +101,10 @@ def _generate_a2a_agent(
     # Injection-safe literals baked in as fallback defaults.
     caps_literal = _emit_str_list_literal([str(c)[:64] for c in capabilities][:32])
     allow_literal = _emit_str_list_literal([str(u)[:512] for u in peer_allowlist][:64])
-    # advertised_description goes inside a """...""" block — escape triple quotes.
-    desc_escaped = _escape_triple_quotes(str(advertised_description)[:512])
+    # advertised_description goes inside a """...""" block, so every quote has to be
+    # escaped, not just a run of three: a description ending in one closed the literal
+    # early and the emitted module would not import. See _as_triple_quoted_body.
+    desc_escaped = _as_triple_quoted_body(str(advertised_description)[:512])
 
     return f'''"""AgentCore Runtime - A2A (Agent-to-Agent) Interop Agent
 

@@ -127,6 +127,82 @@ DATA_BEARING_RESOURCE_TYPES = frozenset(
 )
 
 
+# Resources that hold no data themselves, but without which a RETAINED data resource
+# cannot be deleted afterwards. Retaining data and then destroying the only means of
+# disposing of it is not protection; it is a resource the operator can never remove.
+#
+# Proven live in us-east-1, then re-proven with a control against real ingested
+# vectors (stacks rtn0919-retain, kbretain-0919150116, kbctl-0919150613).
+#
+# The purge runs when the DATA SOURCE is deleted, using this role — measured, not
+# assumed: list-vectors went 1 -> 0 on delete-data-source, before the knowledge base
+# was touched. AWS::Bedrock::KnowledgeBase re-attempts the same purge on its own
+# delete, naming the same data source id in failureReasons, so both deletes fail if
+# the role is gone. Worth keeping straight, because an operator reading only "the
+# knowledge base purges its vectors" debugs the wrong API call.
+#
+# With the role retained: data source and knowledge base both delete first time.
+# With the role deleted first and the vector store fully intact — the pre-fix
+# situation, in the textbook order — delete-data-source returns DELETE_UNSUCCESSFUL,
+# "Unable to delete data from vector store", the vector count stays at 1, and the
+# knowledge base then fails the same way. Recreating ONLY the role, touching nothing
+# else, makes the identical delete succeed and the count go to 0. So the role is the
+# whole cause and deletion ordering is not a mitigation. The role's inline Policies
+# block travels with it byte-identical across the stack delete (same policy sha256
+# before and after) and is sufficient on its own.
+#
+# Keyed by the data resource's TYPE, for the same reason DATA_BEARING_RESOURCE_TYPES
+# is: a logical-id list stops protecting anything the day somebody renames a resource.
+# The generalisable question when adding a type here is "what does this resource need
+# in order to delete ITSELF, and is that retained too?"
+DELETION_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "AWS::Bedrock::KnowledgeBase": ("KnowledgeBaseRole",),
+}
+
+
+def _apply_deletion_dependencies(template: dict, policy: str) -> list[str]:
+    """Retain whatever a retained data resource needs in order to be deletable.
+
+    Only meaningful for ``Retain``: under ``Delete`` the data resource goes with the
+    stack, so nothing has to outlive it, and leaving an IAM role behind would be a
+    gratuitous orphan.
+
+    The alternative — which this replaces — was to tell the operator in teardown.sh
+    to recreate the role by hand. That is worse on two counts. It is a multi-step
+    recipe run against a stack that no longer exists, and the trust-and-permissions
+    policy an operator can be told to paste in a shell one-liner is far broader than
+    the one the template had (``s3vectors:*`` on ``*``), so the documented workaround
+    ended by advising exactly the unconditioned wildcard ARCC cnt_SFJJhkOueCPRkd
+    warns against. Retaining the real, already-scoped role avoids both.
+    """
+    if policy != "Retain":
+        return []
+
+    present = {resource.get("Type") for resource in template.get("Resources", {}).values()}
+    touched = []
+    for data_type, dependency_ids in DELETION_DEPENDENCIES.items():
+        if data_type not in present:
+            continue
+        for logical_id in dependency_ids:
+            resource = template.get("Resources", {}).get(logical_id)
+            if resource is None:
+                # Not a silent skip: the mapping naming a resource this template does
+                # not have means the two have drifted, and the consequence is an
+                # un-deletable retained resource in the customer's account.
+                logger.warning(
+                    "DELETION_DEPENDENCIES names %s for %s, but this template has no such "
+                    "resource: a retained %s may not be deletable",
+                    logical_id,
+                    data_type,
+                    data_type,
+                )
+                continue
+            resource["DeletionPolicy"] = "Retain"
+            resource["UpdateReplacePolicy"] = "Retain"
+            touched.append(logical_id)
+    return sorted(touched)
+
+
 def _apply_data_retention(template: dict, policy: str) -> list[str]:
     """Stamp *policy* onto every data-bearing resource. Returns the ids touched.
 
@@ -1526,6 +1602,130 @@ _STAGING_BUCKET_LIFECYCLE_JSON = """{
   ]
 }"""
 
+# Held as plain strings for the same reason as the JSON above: they are shell, and inline
+# in the teardown f-string every ${...} and every function body brace would have to be
+# doubled. Interpolating a value sidesteps that entirely — an interpolated value is never
+# rescanned for placeholders.
+#
+# WHY teardown deletes S3 objects at all. deploy.sh stages the agent code, the provider
+# Lambda and the tool zips under cfn-assets/<stack>/ and deliberately leaves superseded
+# ones in place so a rollback can still reach them. Deleting the stack removed none of it:
+# the merged code.zip goes (the code-packaging resource deletes its own output) but every
+# staged input stayed, and staged_key's comment claimed "teardown removes the bucket" when
+# teardown deleted the stack and nothing else. So a recipient who followed the documented
+# lifecycle exactly was left holding their own agent source, indefinitely.
+#
+# The bucket lifecycle does not cover this. It expires NONCURRENT versions after 30 days;
+# these objects are current, so they never expire, and on a pre-existing bucket there is no
+# lifecycle at all because deploy.sh leaves a bucket it did not create untouched.
+#
+# Per ARCC cnt_Hr4zJD4KntOWIt, "removing pointers to S3 objects and orphaning data in your
+# service account does not meet the bar" for deletion, and a public-facing document must
+# carry a clear statement of what a deletion does. Both halves are the fix: really delete
+# what this stack owns, and state precisely what is left.
+_TEARDOWN_PURGE_HELPER_SH = """
+# Every object this stack staged lives under one prefix, so "what this stack owns" needs no
+# guessing. The shared dependency bundle does NOT live here, which is why it survives: it
+# is keyed by content for the whole bucket and another stack may be using it.
+STAGED_PREFIX="cfn-assets/$STACK_NAME/"
+
+# Read BEFORE the delete. Afterwards there is no stack left to read the parameter from,
+# and the bucket name appears in no Output.
+STAGING_BUCKET="$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" --query 'Stacks[0].Parameters[?ParameterKey==`ArtifactsBucket`].ParameterValue' --output text 2>/dev/null || true)"
+if [[ "$STAGING_BUCKET" == "None" ]]; then
+    STAGING_BUCKET=""
+fi
+
+# Delete every version and every delete marker under a prefix.
+#
+# `aws s3 rm --recursive` is not enough and looks like it is: on a versioned bucket -- which
+# deploy.sh enables on any bucket it creates -- it writes a delete marker and the previous
+# version stays, so the agent source is still there and still listable with
+# list-object-versions. Found the hard way clearing up after a live probe.
+#
+# list-object-versions reports versions and delete markers in separate arrays, so both are
+# walked. VersionId is the literal "null" on a bucket that was never versioned, and
+# delete-object accepts that, so one code path covers both kinds of bucket.
+purge_staged_objects() {
+    local bucket="$1" prefix="$2" region="$3"
+    local kind page key version_id round
+    for kind in Versions DeleteMarkers; do
+        # Bounded rather than `while true`: if a delete keeps failing (no s3:DeleteObject,
+        # or an object-lock retention) the listing never shrinks, and a teardown that spins
+        # forever is worse than one that stops and says what is left.
+        for round in 1 2 3 4 5 6 7 8 9 10; do
+            page="$(aws s3api list-object-versions --bucket "$bucket" --prefix "$prefix" --region "$region" --max-keys 500 --output text --query "${kind}[].[Key,VersionId]" 2>/dev/null || true)"
+            if [[ -z "$page" || "$page" == "None" ]]; then
+                break
+            fi
+            while IFS=$'\\t' read -r key version_id; do
+                [[ -z "$key" ]] && continue
+                aws s3api delete-object --bucket "$bucket" --key "$key" --version-id "$version_id" --region "$region" >/dev/null 2>&1 || true
+            done <<< "$page"
+        done
+    done
+    # The honest check: report on what the bucket says now, not on what the deletes
+    # claimed. Each delete above is tolerant of failure precisely so one missing
+    # permission cannot abort a teardown, which means the loop's success proves nothing.
+    #
+    # Measured live against a versioned bucket with a Deny: with only s3:DeleteObject
+    # denied the purge still emptied the prefix, because deleting a named version is
+    # s3:DeleteObjectVersion -- a different action. Denying both is what leaves objects
+    # behind, and this check is what turns that into a warning instead of a green
+    # "Removed staged artifacts" over a prefix that still holds the agent source.
+    local remaining
+    remaining="$(aws s3api list-object-versions --bucket "$bucket" --prefix "$prefix" --region "$region" --output text --query 'length([Versions, DeleteMarkers][][])' 2>/dev/null || echo unknown)"
+    [[ "$remaining" == "0" || "$remaining" == "None" ]]
+}
+"""
+
+# Runs AFTER the stack is gone, deliberately. While the delete is in flight the stack still
+# references these keys, and if it fails it will be retried; `set -e` means a failed delete
+# never reaches this, which is the behaviour we want.
+_TEARDOWN_PURGE_CALL_SH = """
+if [[ -z "$STAGING_BUCKET" ]]; then
+    cat <<EOF
+NOTE: could not read this stack's ArtifactsBucket, so its staged artifacts were left in
+place. They are under cfn-assets/$STACK_NAME/ in whichever bucket you deployed from:
+
+  aws s3 rm "s3://YOUR_BUCKET/cfn-assets/$STACK_NAME/" --recursive --region $REGION
+
+On a versioned bucket that command leaves the previous version of every object behind.
+See README.md > Staging Bucket for the version-aware form.
+EOF
+elif purge_staged_objects "$STAGING_BUCKET" "$STAGED_PREFIX" "$REGION"; then
+    echo "Removed staged artifacts from s3://$STAGING_BUCKET/$STAGED_PREFIX (all versions)."
+    cat <<EOF
+
+Two things in that bucket are deliberately NOT deleted, and this is the whole list:
+
+  * s3://$STAGING_BUCKET/$BUNDLE_KEY — the dependency bundle. It is shared by
+    every stack deployed from this bucket and takes minutes to rebuild, so teardown
+    leaves it. Remove it with:
+      aws s3 rm "s3://$STAGING_BUCKET/$BUNDLE_KEY" --region $REGION
+  * s3://$STAGING_BUCKET itself. deploy.sh creates it only if it is absent and never
+    deletes it, because a bucket that already existed is yours and may hold other things.
+    Empty it and remove it only if this stack was the only thing using it:
+      aws s3 rb "s3://$STAGING_BUCKET" --force --region $REGION
+    On a versioned bucket --force is not enough: it deletes current versions, and rb then
+    fails with BucketNotEmpty because the noncurrent versions and delete markers remain.
+EOF
+else
+    cat <<EOF
+WARNING: some staged artifacts are still in s3://$STAGING_BUCKET/$STAGED_PREFIX. The most
+likely reason is a missing permission: removing a specific version needs
+s3:DeleteObjectVersion, which s3:DeleteObject does NOT cover, and this prefix is version
+aware. They include the agent source this stack deployed, so delete them with a principal
+that has both, plus s3:ListBucketVersions:
+
+  aws s3api list-object-versions --bucket $STAGING_BUCKET --prefix $STAGED_PREFIX --region $REGION --output text --query '[Versions,DeleteMarkers][][].[Key,VersionId]'
+
+then aws s3api delete-object --bucket $STAGING_BUCKET --key KEY --version-id VERSION for
+each line. The stack itself is deleted; this is the only thing left outstanding.
+EOF
+fi
+"""
+
 # Per ARCC cnt_TFTC9MGIxuXhqa. Both ARNs are needed: the bucket one covers ListBucket
 # and the policy calls, the /* one covers the objects. The partition is a shell variable
 # because a hardcoded "aws" makes this Deny match nothing at all in GovCloud or China —
@@ -2175,6 +2375,38 @@ class CfnTemplateGenerator:
                 ", ".join(retained_resources),
             )
 
+        # Deliberately kept out of `retained_resources`: that list is what the README
+        # and the teardown notice enumerate as data the operator must dispose of, and
+        # an IAM role is not data. Conflating them is how the teardown notice came to
+        # describe a Lambda log group as holding user identities.
+        retained_dependencies = _apply_deletion_dependencies(template, retention_policy)
+        if retained_dependencies:
+            logger.info(
+                "Retained so the data resources above stay deletable: %s",
+                ", ".join(retained_dependencies),
+            )
+
+        # A gateway with no targets deploys cleanly and serves nothing: discovery
+        # returns an empty tool list forever, because there is no target behind it to
+        # enumerate. That is faithful to a canvas that defined no gateway tools, so it
+        # is not an error — but it must not be silent. Exporting something useless
+        # without saying so is the same shape as the LiteLLM provider being ignored,
+        # and it cost an operator ~450s of waiting for tools that could never appear
+        # before anyone thought to question the export rather than the deployment.
+        #
+        # Warned here rather than in the gateway branch because only this point knows
+        # the final resource set, after every conditional _add_* has run; a target can
+        # come from the knowledge base or the MCP server, not just from gateway tools.
+        resource_types = [r.get("Type") for r in template.get("Resources", {}).values()]
+        if "AWS::BedrockAgentCore::Gateway" in resource_types and not any(
+            t == "AWS::BedrockAgentCore::GatewayTarget" for t in resource_types
+        ):
+            logger.warning(
+                "Gateway export: the template creates a gateway with no targets, so tool "
+                "discovery against it will return an empty list. Add a gateway tool, a "
+                "knowledge base, or an MCP server target if the agent is meant to call one"
+            )
+
         # Same single-pass reason: make every role the stack creates boundary-aware
         # and its name optional, after all the conditional _add_* calls have run.
         governed_roles = _apply_role_governance(template)
@@ -2307,7 +2539,11 @@ class CfnTemplateGenerator:
         )
         # The template is passed so the notice can tell a log group from a data store
         # by TYPE rather than by guessing at the logical id — see _split_retained.
-        teardown_sh = self._generate_teardown_script(retention_policy, retained_resources, template)
+        # bundle_key so the teardown notice names the actual bundle object it leaves behind
+        # rather than a guess at which of the two bundles this export uses.
+        teardown_sh = self._generate_teardown_script(
+            retention_policy, retained_resources, template, bundle_key=bundle_key
+        )
         build_bundle_sh = self._generate_bundle_build_script(bundle_key)
         readme = self._generate_readme(
             deployment_name,
@@ -2995,11 +3231,15 @@ class CfnTemplateGenerator:
                 # element either way — "none" becomes "none:none" and yields "none", while
                 # "sha256:<hex>" becomes "sha256:<hex>:none" and yields the hex.
                 #
-                # Superseded objects accumulate, deliberately: a rollback reverts the
-                # prefix to the previous key and that object has to still be there.
-                # CloudFormation only sends the Delete for the old key during post-update
-                # cleanup, i.e. after the update has already succeeded, so the rollback
-                # path never races the handler's delete_object.
+                # A superseded object outlives the update that replaced it, deliberately:
+                # a rollback reverts the prefix to the previous key and that object has to
+                # still be there. CloudFormation sends the Delete for the old key only
+                # during post-update cleanup, i.e. after the update has already succeeded,
+                # so the rollback path never races the handler's delete_object.
+                #
+                # They do not pile up, though: measured live, the old key 404s one cleanup
+                # after the update that superseded it. The window is exactly as long as
+                # the rollback needs and no longer.
                 "OutputKey": {
                     "Fn::Sub": [
                         "deployments/${AWS::StackName}/${Digest}-${BundleDigest}/code.zip",
@@ -3622,6 +3862,62 @@ class CfnTemplateGenerator:
                                         "bedrock-agentcore:GetResourceApiKey",
                                     ],
                                     "Resource": "*",
+                                },
+                                {
+                                    # Outbound OAuth is TWO calls, and only one of them was
+                                    # granted. The gateway mints a workload identity token
+                                    # with GetWorkloadAccessToken and only then exchanges it
+                                    # via GetResourceOauth2Token above. Without this the
+                                    # first call is denied, so no request ever leaves the
+                                    # gateway.
+                                    #
+                                    # This was a real, live-diagnosed break of the
+                                    # mcp-server export, and the reason it survived is worth
+                                    # recording: tools/list is served from the gateway's
+                                    # stored catalogue and makes no outbound call, so
+                                    # discovery succeeded and only tools/call failed. The
+                                    # 403 surfaces nowhere near the role — with default
+                                    # exceptionLevel the gateway returns a bare error and
+                                    # the target logs nothing at all, because no request
+                                    # arrives. It took exceptionLevel=DEBUG to see it.
+                                    #
+                                    # Both ARNs are required, and each is checked
+                                    # separately — measured by removing one line at a time
+                                    # from the deployed role: without the parent the 403
+                                    # names the directory, without the child it names the
+                                    # workload identity. Neither line is belt-and-braces.
+                                    #
+                                    # The directory segment is the literal `default` in
+                                    # every account: the whole workload-identity API is
+                                    # keyed by name alone, with no directory parameter on
+                                    # any call and no operation to create or list one, so
+                                    # there is no other directory to address.
+                                    #
+                                    # The child keeps a wildcard because the workload
+                                    # identity's name is the gatewayId, and AgentCore
+                                    # appends a random suffix to that at gateway-create
+                                    # time, so it cannot be known here. Be clear about what
+                                    # the wildcard admits: the runtimes in this same stack
+                                    # get workload identities in the same directory, so this
+                                    # role can in principle mint a token for one of those
+                                    # too. That is the residual breadth of the scoped form,
+                                    # and it is not narrowable without knowing the suffix.
+                                    #
+                                    # Only the OAUTH credential-provider path needs this,
+                                    # which today means the MCP-server target. Lambda
+                                    # targets authorise with GATEWAY_IAM and
+                                    # lambda:InvokeFunction and never reach this code.
+                                    "Sid": "WorkloadIdentityToken",
+                                    "Effect": "Allow",
+                                    "Action": ["bedrock-agentcore:GetWorkloadAccessToken"],
+                                    "Resource": [
+                                        {
+                                            "Fn::Sub": "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/default"
+                                        },
+                                        {
+                                            "Fn::Sub": "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/default/workload-identity/*"
+                                        },
+                                    ],
                                 },
                                 {
                                     # This was Resource "*": every secret in the account,
@@ -5838,6 +6134,18 @@ def handler(event, context):
             "Description": "Runtime Endpoint ARN",
             "Value": {"Fn::GetAtt": ["RuntimeEndpoint", "AgentRuntimeEndpointArn"]},
         }
+        # The invoke call wants the endpoint NAME as its --qualifier, and no output
+        # carried one: the recipient had to know to split the last path segment off
+        # EndpointArn. Cheaper to emit it than to document a string operation, and it
+        # removes the temptation to hand-type the name into a copy-paste example.
+        #
+        # Deliberately the same Fn::Sub as the resource's own Name property rather than
+        # a GetAtt, so the two cannot drift: if the naming scheme changes, it changes in
+        # both places or in neither.
+        template["Outputs"]["EndpointName"] = {
+            "Description": "Runtime Endpoint name, for use as the invoke --qualifier",
+            "Value": {"Fn::Sub": "${DeploymentName}_endpoint"},
+        }
 
         if has_gateway and is_litellm:
             # Same output name as the AgentCore path so a caller reading GatewayUrl
@@ -6147,7 +6455,19 @@ echo "MCP server code digest: $MCP_SERVER_DIGEST"
 set -euo pipefail
 
 STACK_NAME="${{1:-{deployment_name}}}"
-REGION="${{2:-{current_region()}}}"
+# Region precedence: this argument, then your own AWS configuration, and only then the
+# region this bundle was exported from. That last one used to be the sole default, which
+# meant a recipient who omitted the argument deployed to whichever region the machine
+# that generated this bundle happened to be in -- silently, and to a region they may not
+# even operate in. The middle step is the AWS CLI's own precedence, so an omitted
+# argument now puts the stack where every other `aws` command you run would put it.
+REGION="${{2:-}}"
+if [[ -z "$REGION" ]]; then
+    REGION="${{AWS_REGION:-${{AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null || true)}}}}"
+fi
+REGION="${{REGION:-{current_region()}}}"
+# No echo here: the banner below already prints the resolved region, before the first
+# AWS call. Printing it twice for one run reads like the script changed its mind.
 BUCKET="${{3:-}}"
 
 if [[ -z "$BUCKET" ]]; then
@@ -6211,8 +6531,15 @@ content_digest() {{
 #
 # Superseded objects are deliberately left in the bucket: a stack rollback
 # reverts the parameter to the previous key, and the previous object has to still
-# be there for that rollback to succeed. They are small; teardown removes the
-# bucket. Per ARCC cnt_NBPcOqwR3163yt, SHA-256.
+# be there for that rollback to succeed. They are small, and teardown.sh deletes
+# this whole cfn-assets/$STACK_NAME/ prefix once the stack is gone.
+#
+# That last clause used to promise that the teardown disposed of the whole bucket,
+# and nothing did: teardown deleted the stack and stopped there, so every recipient
+# who followed the documented lifecycle kept their own agent source in S3 forever.
+# The bucket itself is still not removed — it may be one you already had — and
+# teardown.sh now names exactly what it leaves and how to remove it.
+# Per ARCC cnt_NBPcOqwR3163yt, SHA-256.
 staged_key() {{
     printf 'cfn-assets/%s/%s-%s.zip\\n' \\
         "$STACK_NAME" "$2" "$(sha256_stdin <"$1" | cut -c1-16)"
@@ -6295,11 +6622,12 @@ fi
 # because it is a build artifact that is not in this download. Build it instead.
 BUNDLE_KEY="{bundle_key}"
 BUNDLE_FILE="{bundle_file}"
-# Set only when this run is the thing that put the bundle in the bucket, so the
-# digest describes bytes this machine has actually seen. Deliberately NOT computed
-# from a stale local copy when S3 already has the object: the two can differ for
-# entirely innocent reasons (a rebuild that was never uploaded), and a digest that
-# fails the deploy for an innocent reason teaches operators to switch it off.
+# Your override, if you set one. Otherwise filled in below: hashed from the file this
+# run uploads, or, when the bundle is already in the bucket, from the bucket's own bytes.
+# Never from a stale local copy while S3 has the object — the two can differ for entirely
+# innocent reasons (a rebuild that was never uploaded, or simply a zip that does not
+# rebuild byte-for-byte), and a digest that fails a deploy for an innocent reason teaches
+# operators to switch it off.
 BUNDLE_DIGEST="${{DEPENDENCY_BUNDLE_DIGEST:-}}"
 if ! aws s3api head-object --bucket "$BUCKET" --key "$BUNDLE_KEY" --region "$REGION" >/dev/null 2>&1; then
     echo "Dependency bundle not in s3://$BUCKET/$BUNDLE_KEY."
@@ -6317,11 +6645,31 @@ if ! aws s3api head-object --bucket "$BUCKET" --key "$BUNDLE_KEY" --region "$REG
     BUNDLE_DIGEST="sha256:$(sha256_stdin <"$BUNDLE_FILE")"
     echo "Dependency bundle digest: $BUNDLE_DIGEST"
 elif [[ -z "$BUNDLE_DIGEST" ]]; then
-    # No override is passed in this case, so an existing stack keeps whatever digest
-    # it recorded — which means a bundle object that changed since then fails the
-    # packaging step, exactly as it should.
-    echo "Dependency bundle already in s3://$BUCKET/$BUNDLE_KEY; leaving its recorded digest alone."
-    echo "  (set DEPENDENCY_BUNDLE_DIGEST=sha256:... to pin it — see README.md > Dependency Bundle)"
+    # Hash the object that is IN THE BUCKET. Not a local copy, and above all not
+    # "leave the recorded digest alone", which is what this branch used to do.
+    #
+    # The comment that used to sit here claimed a changed bundle would "fail the
+    # packaging step, exactly as it should". It does not, and the opposite is true:
+    # the packaging step never runs at all. With the digest left alone, BundleDigest
+    # and AgentCodeDigest both keep their recorded values, so every property of
+    # Custom::AgentCodePackage is byte-identical, CloudFormation skips the resource
+    # entirely, and _verify_bundle_digest is never reached to notice the mismatch.
+    # A green stack, a correct template, and the OLD dependencies still executing —
+    # the same defect as a constant OutputKey, one level down.
+    #
+    # Hashing S3 also answers the objection the old design was built on: that a stale
+    # local $BUNDLE_FILE could differ from the bucket for entirely innocent reasons,
+    # and a digest that fails a deploy for an innocent reason teaches operators to
+    # switch it off. That was a fair worry about a LOCAL hash. These are the exact
+    # bytes the provider Lambda will fetch, so there is no innocent difference left.
+    echo "Dependency bundle already in s3://$BUCKET/$BUNDLE_KEY; hashing the object..."
+    BUNDLE_TMP="$(mktemp)"
+    trap 'rm -f "$BUNDLE_TMP"' EXIT
+    aws s3 cp "s3://$BUCKET/$BUNDLE_KEY" "$BUNDLE_TMP" --region "$REGION" --quiet
+    BUNDLE_DIGEST="sha256:$(sha256_stdin <"$BUNDLE_TMP")"
+    rm -f "$BUNDLE_TMP"
+    trap - EXIT
+    echo "Dependency bundle digest: $BUNDLE_DIGEST"
 fi
 
 # 4. Package and upload assets (stack-specific keys to avoid collisions)
@@ -6363,9 +6711,10 @@ PARAM_OVERRIDES=(
     "DependencyBundleKey=$BUNDLE_KEY"
 )
 
-# Omitted rather than sent as "none" when this run did not upload the bundle:
-# `cloudformation deploy` keeps the previous value of a parameter it is not given,
-# so a stack that once recorded a digest does not quietly stop checking it.
+# Always set by now — uploaded, hashed out of the bucket, or pinned by the operator —
+# so this guard is belt-and-braces rather than the live branch it used to be. Kept
+# because the alternative to omitting an unset one is sending "none", which would turn
+# the integrity check OFF on a stack that had previously recorded a real digest.
 if [[ -n "$BUNDLE_DIGEST" ]]; then
     PARAM_OVERRIDES+=("DependencyBundleDigest=$BUNDLE_DIGEST")
 fi
@@ -6524,6 +6873,7 @@ echo "  aws s3 cp $OUT s3://YOUR-BUCKET/{bundle_key}"
         retention_policy: str = "Retain",
         retained: list[str] | None = None,
         template: dict | None = None,
+        bundle_key: str = STRANDS_BUNDLE_KEY,
     ) -> str:
         # When resources are retained, say so BEFORE deleting, not after. A
         # retained Cognito user pool or AgentCore Memory keeps existing (and, for
@@ -6559,20 +6909,22 @@ EOF
                 # actually follow for every retained resource.
                 #
                 # The knowledge-base paragraph is not about deletion ordering, which is
-                # what it first looked like. A retained KB cannot be deleted AT ALL after
-                # this teardown, in any order, because it purges its vectors using
-                # KnowledgeBaseRole and that role is never retained — Retain covers data
-                # stores, and an IAM role is not one.
+                # what it first looked like. Isolated live (us-east-1): with the vector
+                # store and its index fully intact and the documented order followed
+                # exactly — data source before knowledge base, each delete allowed to
+                # finish — both still landed in DELETE_UNSUCCESSFUL, "Unable to delete
+                # data from vector store", whenever KnowledgeBaseRole was absent.
+                # Recreating ONLY that role, touching nothing else, made the identical
+                # deletes succeed. The role was the whole cause. See
+                # DELETION_DEPENDENCIES for the full measurement, including that the
+                # purge itself runs at the DATA SOURCE delete rather than the knowledge
+                # base's — which is why the wording below names it.
                 #
-                # Isolated live (us-east-1, stack rtn0919-retain, two full cycles). With
-                # the vector store and its index fully intact and the KB deleted first,
-                # data source before knowledge base, each delete allowed to finish — i.e.
-                # exactly the ordering the earlier draft of this notice recommended — the
-                # KB still landed in DELETE_UNSUCCESSFUL, "Unable to delete data from
-                # vector store". Recreating ONLY the role, touching nothing else, then made
-                # the same delete succeed. So the role is the whole cause and ordering is
-                # not a mitigation; telling an operator to delete carefully would have sent
-                # them looking for a race that is not there.
+                # That is now fixed in the template rather than documented around: see
+                # DELETION_DEPENDENCIES, which retains KnowledgeBaseRole whenever a
+                # knowledge base is retained. So this notice no longer hands the operator
+                # a create-role recipe — it tells them the role is theirs and must go
+                # LAST, which is the only ordering constraint that is actually real.
                 #
                 # Unquoted heredoc so $STACK_NAME and $REGION resolve to values the
                 # operator can paste, which is why the command is one line.
@@ -6586,22 +6938,46 @@ stack, so this recovers the whole set after the fact:
 For the vector bucket and its index that is the ONLY route: they are named from
 AWS::StackId, which no stack Output carries, so once this stack is gone their names
 cannot be reconstructed from anything you noted.
+EOF
+""")
+                # Only when there IS a knowledge base. The paragraph below names one
+                # specific role and gives an ordering rule that exists for its sake
+                # alone; printing it to a stack that has no knowledge base is the same
+                # class of wrongness that once had this notice telling a runtime-only
+                # export its Lambda log group held user identities.
+                #
+                # The name is RESOLVED, not assumed. UseExplicitRoleNames defaults to
+                # true and yields AgentCoreKBRole-<stack>, but a regulated account that
+                # deploys with false gets a CloudFormation-generated name instead, and a
+                # teardown notice naming a role that does not exist is worse than one
+                # that says nothing. This runs while the stack is still there — the whole
+                # point of printing before deleting — so the physical id is available;
+                # the fallback covers only the case where that lookup fails.
+                if any(
+                    resource.get("Type") == "AWS::Bedrock::KnowledgeBase"
+                    for resource in (template or {}).get("Resources", {}).values()
+                ):
+                    sections.append("""
+KB_ROLE_NAME="$(aws cloudformation describe-stack-resource --stack-name "$STACK_NAME" --logical-resource-id KnowledgeBaseRole --region "$REGION" --query 'StackResourceDetail.PhysicalResourceId' --output text 2>/dev/null || true)"
+if [[ -z "$KB_ROLE_NAME" || "$KB_ROLE_NAME" == "None" ]]; then
+    KB_ROLE_NAME="AgentCoreKBRole-$STACK_NAME"
+fi
+cat <<EOF
+ONE ORDERING RULE MATTERS for the knowledge base. Its vectors are purged when its DATA
+SOURCE is deleted, using this stack's IAM role, and the knowledge base re-attempts that
+same purge on its own delete. So that role has been retained alongside the data for
+exactly that purpose:
 
-If a knowledge base is in that list, READ THIS BEFORE YOU TRY TO DELETE IT. It cannot be
-deleted as things stand, and the order you delete things in does not change that. A
-knowledge base purges its vectors using this stack's IAM role, and that role is NOT
-retained — Retain keeps data stores, and a role is not one. So the role is already gone,
-and every delete attempt fails with DELETE_UNSUCCESSFUL, "Unable to delete data from
-vector store". Recreate the role first, then delete:
+  $KB_ROLE_NAME
 
-  aws iam create-role --role-name AgentCoreKBRole-$STACK_NAME --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"bedrock.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
-  aws iam put-role-policy --role-name AgentCoreKBRole-$STACK_NAME --policy-name KBCleanup --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3vectors:*"],"Resource":"*"}]}'
+Delete the knowledge base BEFORE that role, and before the vector bucket and its index —
+the purge needs all three to still be there. Get that order wrong and both deletes fail
+with DELETE_UNSUCCESSFUL, "Unable to delete data from vector store", and go on failing
+until you put back what you removed. Expect to see it on the DATA SOURCE first: that is
+where the purge actually runs, so that is where it breaks first.
 
-Wait ~20s for the role to propagate, then delete the data source, then the knowledge
-base, then this role and the vector bucket.
-
-Delete the vector bucket and index only AFTER the knowledge base is gone: the purge needs
-them to still be there.
+Working order: data source, knowledge base, then the vector index, the vector bucket, and
+$KB_ROLE_NAME last.
 EOF
 """)
                 # Retain pairs the user pools with DeletionProtection: ACTIVE, which is
@@ -6704,19 +7080,30 @@ echo "      aws logs delete-log-group if you want them gone."
 set -euo pipefail
 
 STACK_NAME="${{1:-}}"
-REGION="${{2:-{current_region()}}}"
+# Same precedence as deploy.sh, and it has to be the same: a teardown that defaults to a
+# different region from the deploy finds no stack and reports success at having deleted
+# nothing. Argument, then your own AWS configuration, then the export-time region.
+REGION="${{2:-}}"
+if [[ -z "$REGION" ]]; then
+    REGION="${{AWS_REGION:-${{AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null || true)}}}}"
+fi
+REGION="${{REGION:-{current_region()}}}"
 
 if [[ -z "$STACK_NAME" ]]; then
     echo "Usage: ./teardown.sh <stack-name> [region]"
     exit 1
 fi
+echo "Region: $REGION"
+
+BUNDLE_KEY="{bundle_key}"
+{_TEARDOWN_PURGE_HELPER_SH}
 {retained_notice}
 echo "Deleting stack: $STACK_NAME"
 aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION"
 echo "Waiting for deletion..."
 aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION"
 echo "Stack deleted."
-"""
+{_TEARDOWN_PURGE_CALL_SH}"""
 
     def _generate_readme(
         self,
@@ -6834,7 +7221,7 @@ Create the secret (the value is your LiteLLM virtual key):
 
 ```bash
 aws secretsmanager create-secret --name my-litellm-key \\
-  --secret-string 'sk-REPLACE-ME' --region {current_region()}
+  --secret-string 'sk-REPLACE-ME' --region YOUR-REGION
 ```
 
 Both shapes are accepted: a plain-text key, or JSON `{{"apiKey": "sk-..."}}`.
@@ -6843,7 +7230,7 @@ Then deploy with the ARN — as the 4th argument or via the environment:
 
 ```bash
 export LITELLM_API_KEY_SECRET_ARN=arn:aws:secretsmanager:...:secret:my-litellm-key-AbCdEf
-./deploy.sh my-agent {current_region()} my-artifacts-bucket
+./deploy.sh my-agent YOUR-REGION my-artifacts-bucket
 ```
 
 If the proxy is only reachable inside a VPC, the runtime needs network access to it;
@@ -6975,6 +7362,37 @@ with `aws bedrock-agent list-ingestion-jobs --knowledge-base-id <id> --data-sour
         # [AWS::EarlyValidation::ResourceExistenceCheck]. Telling the recipient the
         # redeploy will succeed when it cannot is worse than saying nothing.
         retained_logs, retained_stores = _split_retained(template or {}, retained_resources)
+
+        # Conditional on a knowledge base actually being in this template. The retained
+        # role exists for its sake alone (see DELETION_DEPENDENCIES), and a paragraph
+        # about a resource the recipient does not have is the kind of wrongness that
+        # teaches them to stop reading this section — the same mistake that once had
+        # this notice telling a runtime-only export its Lambda log group held user
+        # identities.
+        kb_role_md = (
+            """
+
+**One IAM role is retained with them, and it is not data.** The vectors a knowledge base
+owns are purged when its *data source* is deleted, using this stack's knowledge-base
+role, and the knowledge base re-attempts the same purge on its own delete. So that role
+is retained too — otherwise retaining the knowledge base would leave you one you could
+never delete, which is exactly what happens without it: both deletes end in
+`DELETE_UNSUCCESSFUL`, "Unable to delete data from vector store". It is the only non-data
+resource that survives, and it must be deleted *after* the data source, the knowledge
+base, the vector index and the vector bucket.
+
+It is `KnowledgeBaseRole` in the template, and the role it creates is named
+`AgentCoreKBRole-<stack-name>` under the default `UseExplicitRoleNames=true`; deploy with
+`false` and CloudFormation generates the name instead. Both names are worth having: the
+logical id is what you pass to `describe-stack-resource` and what stack events call it,
+the physical name is what you delete. `teardown.sh` resolves whichever applies and prints
+it, so you do not have to work it out."""
+            if any(
+                resource.get("Type") == "AWS::Bedrock::KnowledgeBase"
+                for resource in (template or {}).get("Resources", {}).values()
+            )
+            else ""
+        )
         if not retained_resources:
             data_protection_md = (
                 "This stack creates no data-bearing resources (no Cognito user pool, "
@@ -6998,7 +7416,7 @@ destructive as a delete, and would otherwise take the data with it.
 **Trade-off you are accepting.** Because they survive, deleting and re-deploying this
 stack under the same name creates *new* resources alongside the retained ones rather
 than reusing them, and the retained ones keep accruing cost. Delete them by hand, or
-re-export with `dataRetentionPolicy: "Delete"`, when you genuinely want them gone."""
+re-export with `dataRetentionPolicy: "Delete"`, when you genuinely want them gone.{kb_role_md}"""
                 if retained_stores
                 else """This stack creates no data stores (no Cognito user pool, no Knowledge Base, no
 AgentCore Memory), so deleting it destroys no user identities, documents or
@@ -7105,13 +7523,13 @@ a same-name redeploy."""
                 "\n4. A Secrets Manager secret holding your LiteLLM virtual key "
                 "(see [LiteLLM Gateway](#litellm-gateway))"
             )
-            quick_start = f"""chmod +x deploy.sh teardown.sh
+            quick_start = """chmod +x deploy.sh teardown.sh
 export LITELLM_API_KEY_SECRET_ARN=arn:aws:secretsmanager:...:secret:my-litellm-key
-./deploy.sh my-agent {current_region()} my-artifacts-bucket"""
+./deploy.sh my-agent YOUR-REGION my-artifacts-bucket"""
         else:
             litellm_prereq = ""
-            quick_start = f"""chmod +x deploy.sh teardown.sh
-./deploy.sh my-agent {current_region()} my-artifacts-bucket"""
+            quick_start = """chmod +x deploy.sh teardown.sh
+./deploy.sh my-agent YOUR-REGION my-artifacts-bucket"""
 
         # Built from the template rather than written out here, so the table documents
         # the parameters this recipient's template actually takes and nothing else --
@@ -7120,7 +7538,7 @@ export LITELLM_API_KEY_SECRET_ARN=arn:aws:secretsmanager:...:secret:my-litellm-k
         parameter_table = _readme_parameter_table((template or {}).get("Parameters", {}), deploy_sh)
 
         policy_validation_md = (
-            f"""
+            """
 ## Policy Validation
 
 The policies this stack creates name every tool they permit, one by one, and the policy
@@ -7141,7 +7559,7 @@ failure surfaces only in the status poll.
 Set `FAIL_ON_ANY_FINDINGS` when you want the analysis to gate the deploy:
 
 ```bash
-POLICY_VALIDATION_MODE=FAIL_ON_ANY_FINDINGS ./deploy.sh my-agent {current_region()} my-artifacts-bucket
+POLICY_VALIDATION_MODE=FAIL_ON_ANY_FINDINGS ./deploy.sh my-agent YOUR-REGION my-artifacts-bucket
 ```
 
 ### What creating a policy requires
@@ -7212,27 +7630,145 @@ If your environment blocks PyPI, build it on a machine that does not and copy
 **Integrity.** The bundle is most of the code that ends up running under the agent's
 execution role, so the code-packaging step verifies it against the
 `DependencyBundleDigest` parameter before merging it, and fails the stack on a
-mismatch. `deploy.sh` fills that parameter in whenever it is the run that uploads the
-bundle. When the bundle is already in the bucket there is nothing local to hash, so
-the value is left as it is — which means an existing stack keeps checking the digest it
-recorded, and a bundle object that has changed since then will fail. Pin it yourself
-with:
+mismatch.
+
+`deploy.sh` always fills that parameter in. On the run that uploads the bundle it
+hashes the file it uploaded; when the bundle is already in your bucket it downloads
+that object and hashes the bytes themselves. That second case is doing more work than
+integrity: the digest is part of the S3 key the packaged code is written to, so hashing
+the object is also what makes a dependency-only change actually redeploy. Were the
+value left stale instead, every property of the packaging resource would be unchanged,
+CloudFormation would skip the resource, and the previous dependencies would go on
+running under a stack that reported success.
+
+Be clear about what that does and does not buy you. Because the hash is taken from the
+object in the bucket, it proves the bytes merged into your agent are the bytes that were
+in the bucket at deploy time — it cannot, by itself, tell you those were the bytes you
+intended. For that, pin the digest of a bundle you built yourself:
 
 ```bash
 DEPENDENCY_BUNDLE_DIGEST="sha256:$(shasum -a 256 {bundle_file} | cut -d' ' -f1)" \\
-  ./deploy.sh my-agent {current_region()} YOUR-BUCKET
+  ./deploy.sh my-agent YOUR-REGION YOUR-BUCKET
 ```
 
-The default is `none`, which skips the check and says so in the packaging step's
-CloudWatch logs. That is the honest default for a bundle this stack has never seen,
-not an endorsement — pin it in any account where more than one principal can write to
-the artifacts bucket.
+A pinned value takes precedence over anything `deploy.sh` would have computed, so the
+deploy fails if the object in the bucket is not what you pinned. Pin it in any account
+where more than one principal can write to the artifacts bucket.
+
+The parameter's default is `none`, which skips the check and says so in the packaging
+step's CloudWatch logs. With `deploy.sh` you will not see that default; it applies if
+you deploy this template directly — from the console, or through a Terraform or
+CloudFormation wrapper — without supplying a digest of your own.
 
 ## Quick Start
 
 ```bash
 {quick_start}
 ```
+
+## Invoking the Agent
+
+The runtime answers on the **data** plane, `bedrock-agentcore`. That is a different
+service name from the `bedrock-agentcore-control` plane the stack's own resources live
+on, and the invoke call exists only on the former. Both values it needs are outputs:
+
+```bash
+STACK=my-agent
+REGION=YOUR-REGION
+
+RUNTIME_ARN="$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$REGION" \\
+    --query "Stacks[0].Outputs[?OutputKey=='RuntimeArn'].OutputValue" --output text)"
+ENDPOINT_NAME="$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$REGION" \\
+    --query "Stacks[0].Outputs[?OutputKey=='EndpointName'].OutputValue" --output text)"
+
+rm -f response.json
+aws bedrock-agentcore invoke-agent-runtime \\
+    --region "$REGION" \\
+    --agent-runtime-arn "$RUNTIME_ARN" \\
+    --qualifier "$ENDPOINT_NAME" \\
+    --runtime-session-id "$(uuidgen)" \\
+    --content-type application/json \\
+    --cli-binary-format raw-in-base64-out \\
+    --payload '{{"prompt": "hello"}}' \\
+    response.json
+
+cat response.json
+```
+
+Two separate `describe-stacks` calls rather than one query for both keys, deliberately.
+A `[?A || B]` query is a filter over the outputs: it hands them back in whatever order
+the *stack* reports them, which is not the order you named them in and is not something
+you control. Measured on a stack built from this template, the pair came back reversed,
+so `read -r RUNTIME_ARN ENDPOINT_NAME` put the endpoint name into the ARN variable and
+the failure that followed was about a malformed ARN rather than about the order. Two
+calls cost one extra round trip and cannot do that.
+
+A few things about that command are worth knowing before you adapt it.
+
+**`--cli-binary-format raw-in-base64-out` is not optional.** AWS CLI v2 treats blob
+arguments as base64 by default, so without it the CLI tries to *decode* your payload.
+This fails in two different shapes, and the second one is the expensive one. A payload
+containing `{{` or `"` is rejected on your own machine with `Invalid base64` — annoying,
+but it tells you what is wrong. A payload that happens to be valid base64 is decoded to
+binary and sent, and then the error names nothing you can act on:
+
+```
+An error occurred (RuntimeClientError) when calling the InvokeAgentRuntime operation:
+Received error (400) from runtime. Please check your CloudWatch logs for more information.
+```
+
+That reads exactly like a broken deployment, and it is not: it is this flag. The logs it
+sends you to do say so, as a `WARNING` reading `Invalid encoding in request ... 'utf-8'
+codec can't decode byte` — but that sentence never reaches your terminal, so do not wait
+to see it. The byte it names is whatever your decoded payload happened to begin with, so
+there is no fixed string to search for. If a runtime you just deployed answers 400 with
+nothing else to go on, check this flag before you go looking at your agent.
+
+**The output file is a required positional argument, and it takes the answer.** The
+response body is written to `response.json`; only the metadata — `runtimeSessionId`,
+`contentType`, `statusCode` — is printed to your terminal. So a call that looks like it
+returned nothing useful has almost certainly succeeded and put the reply in the file.
+Omit the argument entirely and the CLI refuses the command.
+
+The `rm -f` in front of the invoke is not tidiness. A *failed* call does not create or
+truncate the output file, it leaves whatever was there untouched — verified as the same
+sha256 before and after a rejected invoke. So on the second attempt of a block you are
+still getting right, `cat response.json` hands you a plausible-looking agent reply from
+the attempt that worked, and you conclude the one that just failed succeeded. Delete it
+first and an absent file means what it says.
+
+**Pass `--qualifier` even though it is optional.** It takes an endpoint *name*, not an
+ARN — which is what the `EndpointName` output is for. Left off, it defaults to the
+literal endpoint `DEFAULT`, which AgentCore maintains for you. That is a different
+endpoint from the one this stack creates and updates, so invoking it tells you about
+AgentCore's endpoint rather than about your stack's. Name your own and the thing you
+test is the thing you deployed.
+
+**`--runtime-session-id` has a minimum length of 33 characters.** A shorter one is
+rejected as a validation error before the request leaves your machine, which is
+confusing if you reached for something short and readable. `uuidgen` gives 36. Reuse one
+across calls to continue a conversation; use a fresh one to start a new one.
+
+**Do not lower `--cli-read-timeout`, and do not wrap this call in your own retry loop.**
+The CLI retries a read timeout for you, and each retry runs your agent again. Measured:
+one command with `--cli-read-timeout 2` against a request needing about seven seconds
+printed a single clean `statusCode 200` and exit 0, while the runtime's log showed
+*three* completed invocations under that one session id. Nothing in the CLI's output says
+so. For an agent that only answers a question that is a billing surprise; for an agent
+that writes something, files a ticket or sends a mail, it happens three times.
+
+You should not need the flag at all. A genuine first-ever cold start on a
+freshly deployed stack measured 7.1s against the CLI's 60s default — about eight times
+the headroom — and raising it to 180 measured 7.8s, which is noise, because the flag is a
+socket timeout and cannot make the service faster. Useful latency to expect: roughly 7s
+for a new `--runtime-session-id`, roughly 3s for another call reusing the same one. That
+premium is per session, not per runtime, so every new conversation pays it.
+
+Two honest limits on those numbers. They were measured in one region on an agent that
+makes a single model call, so an agent doing many tool calls or a long generation can
+exceed 60s on its own merits — what is established is that AgentCore's *startup* does not
+threaten the default, not that 60s suits every agent. And if the retries do run out, we
+have not seen what the CLI prints.
 
 ## Parameters
 
@@ -7244,7 +7780,7 @@ names an environment variable the script reads; leave it unset and the parameter
 the default above.
 
 ```bash
-LOG_RETENTION_IN_DAYS=90 ./deploy.sh my-agent {current_region()} my-artifacts-bucket
+LOG_RETENTION_IN_DAYS=90 ./deploy.sh my-agent YOUR-REGION my-artifacts-bucket
 ```
 
 To set a parameter the script has no variable for, or to override one it fills in,
@@ -7259,12 +7795,12 @@ constrain that, both off by default so a demo deploy is unchanged:
 
 ```bash
 # Cap what the created roles can ever be granted.
-PERMISSIONS_BOUNDARY_ARN=arn:aws:iam::123456789012:policy/YourBoundary ./deploy.sh my-agent {current_region()}
+PERMISSIONS_BOUNDARY_ARN=arn:aws:iam::123456789012:policy/YourBoundary ./deploy.sh my-agent YOUR-REGION
 
 # Let CloudFormation generate the role names. This drops the requirement for
 # CAPABILITY_NAMED_IAM — deploy.sh then uses plain CAPABILITY_IAM — which matters
 # in accounts whose SCPs deny named-IAM stacks or mandate a name prefix.
-USE_EXPLICIT_ROLE_NAMES=false ./deploy.sh my-agent {current_region()}
+USE_EXPLICIT_ROLE_NAMES=false ./deploy.sh my-agent YOUR-REGION
 ```
 
 By default the roles are named `AgentCore<Component>-<stack-name>`, which is what
@@ -7345,7 +7881,7 @@ bucket:
 
 ```bash
 BUCKET=YOUR-BUCKET
-REGION={current_region()}
+REGION=YOUR-REGION
 PARTITION=$(aws sts get-caller-identity --query Arn --output text | cut -d: -f2)
 
 aws s3api put-public-access-block --bucket "$BUCKET" --region "$REGION" \\
@@ -7383,8 +7919,8 @@ If you need a key you control instead — so that you can audit every use in
 CloudTrail, and revoke access to the data by disabling the key — pass one:
 
 ```bash
-CUSTOMER_MANAGED_KEY_ARN=arn:aws:kms:{current_region()}:123456789012:key/12345678-1234-1234-1234-123456789012 \\
-  ./deploy.sh my-agent {current_region()}
+CUSTOMER_MANAGED_KEY_ARN=arn:aws:kms:YOUR-REGION:123456789012:key/12345678-1234-1234-1234-123456789012 \\
+  ./deploy.sh my-agent YOUR-REGION
 ```
 
 It must be a **key ARN, not an alias**, and the key must be in the same region as
@@ -7500,12 +8036,12 @@ roles, so no IAM policy we attach can authorize it. Without this statement
 {{
   "Sid": "AllowCloudWatchLogs",
   "Effect": "Allow",
-  "Principal": {{ "Service": "logs.{current_region()}.amazonaws.com" }},
+  "Principal": {{ "Service": "logs.YOUR-REGION.amazonaws.com" }},
   "Action": ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:Describe*"],
   "Resource": "*",
   "Condition": {{
     "ArnLike": {{
-      "kms:EncryptionContext:aws:logs:arn": "arn:aws:logs:{current_region()}:<this-account>:log-group:*"
+      "kms:EncryptionContext:aws:logs:arn": "arn:aws:logs:YOUR-REGION:<this-account>:log-group:*"
     }}
   }}
 }}
@@ -7576,7 +8112,7 @@ subnet behind a security group you own, pass both:
 ```bash
 LAMBDA_SUBNET_IDS=subnet-aaa,subnet-bbb \\
 LAMBDA_SECURITY_GROUP_IDS=sg-ccc \\
-  ./deploy.sh my-agent {current_region()}
+  ./deploy.sh my-agent YOUR-REGION
 ```
 
 Both, not one. A VPC-attached Lambda needs a security group, and supplying only
@@ -7660,7 +8196,7 @@ If you deploy by hand, pass keys that differ whenever the bytes differ.
 {auth_md}## Teardown
 
 ```bash
-./teardown.sh my-agent {current_region()}
+./teardown.sh my-agent YOUR-REGION
 ```
 
 ## Data Protection

@@ -43,11 +43,13 @@ from app.models.deployment_models import DeployRequest, RuntimeConfig
 from app.services import cfn_template_generator
 from app.services.cfn_template_generator import (
     DATA_BEARING_RESOURCE_TYPES,
+    DELETION_DEPENDENCIES,
     EMPTY_CONTENT_DIGEST,
     CfnExportUnsupportedError,
     CfnTemplateGenerator,
     content_digest,
 )
+from app.services.region_models import current_region
 
 MODEL_ID = "us.anthropic.claude-sonnet-5"
 
@@ -196,6 +198,44 @@ ALL_COMBINATIONS = pytest.mark.parametrize("combo", COMPONENT_COMBINATIONS.value
 # ---------------------------------------------------------------------------
 # The gateway provider must be honoured, not ignored
 # ---------------------------------------------------------------------------
+
+
+class TestAnEmptyGatewayIsNotSilent:
+    """A gateway with no targets serves nothing, forever, and used to say nothing.
+
+    It is not an error — a canvas that defines no gateway tools should get what it
+    asked for. But the export is the last moment anyone can tell, and without a word
+    at export time the discovery that returns an empty list looks like a deployment
+    fault. It read as one for ~450s of retries before the export itself was suspected.
+    """
+
+    def test_a_gateway_with_no_targets_warns(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.services.cfn_template_generator"):
+            template = yaml.safe_load(_generate(**COMPONENT_COMBINATIONS["gateway"]).template_yaml)
+
+        # Precondition, so this test fails loudly rather than vacuously if the gateway
+        # combo ever starts emitting a target of its own.
+        types = [r["Type"] for r in template["Resources"].values()]
+        assert "AWS::BedrockAgentCore::Gateway" in types
+        assert "AWS::BedrockAgentCore::GatewayTarget" not in types
+
+        assert any("no targets" in r.getMessage() for r in caplog.records), (
+            "an empty gateway was exported without a word: " + repr([r.getMessage() for r in caplog.records])
+        )
+
+    @pytest.mark.parametrize("combo", ["gateway+kb", "mcp-server", "everything"])
+    def test_a_gateway_that_has_targets_does_not_warn(self, combo, caplog):
+        """The warning has to discriminate, or it is noise that gets filtered out."""
+        with caplog.at_level(logging.WARNING, logger="app.services.cfn_template_generator"):
+            template = yaml.safe_load(_generate(**COMPONENT_COMBINATIONS[combo]).template_yaml)
+
+        assert any(r["Type"] == "AWS::BedrockAgentCore::GatewayTarget" for r in template["Resources"].values())
+        assert not any("no targets" in r.getMessage() for r in caplog.records)
+
+    def test_a_runtime_only_export_does_not_warn_about_a_gateway_it_has_not_got(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.services.cfn_template_generator"):
+            _generate(**COMPONENT_COMBINATIONS["runtime-only"])
+        assert not any("no targets" in r.getMessage() for r in caplog.records)
 
 
 class TestGatewayProviderIsHonoured:
@@ -812,6 +852,93 @@ class TestSourceIntegrity:
         assert '"AgentCodeDigest=$AGENT_CODE_DIGEST"' in script
         assert '"McpServerCodeDigest=$MCP_SERVER_DIGEST"' in script
 
+    def test_a_bundle_already_in_the_bucket_is_still_hashed(self, tmp_path):
+        """The branch where the dependency bundle is ALREADY in S3 must hash it.
+
+        This branch used to leave the recorded digest alone, and that made a
+        dependency-bundle-only change a silent no-op rather than the loud failure
+        the comment there claimed. With the digest unchanged, every property of
+        Custom::AgentCodePackage is identical between deploys, so CloudFormation
+        skips the resource, the packaging step never runs, and the Lambda's
+        _verify_bundle_digest is never reached to notice that the bundle in the
+        bucket is not the one the stack was built against. Green stack, old
+        dependencies.
+
+        Run rather than grepped, with a fake ``aws`` that reports the object
+        present and serves known bytes: the assertion is that the digest the
+        script ends up with is the digest of what is IN THE BUCKET.
+        """
+        script = _generate(**self.MCP_COMBO).deploy_sh
+        region = re.search(
+            r"^# 3\. Check/build/upload the dependency bundle\n(.*?)^# 4\. Package and upload assets",
+            script,
+            re.MULTILINE | re.DOTALL,
+        )
+        assert region, "deploy.sh no longer has a recognisable dependency-bundle section"
+        helpers = re.findall(r"^sha256_stdin\(\).*?^\}$", script, re.MULTILINE | re.DOTALL)
+        assert len(helpers) == 1, "deploy.sh no longer defines sha256_stdin"
+
+        in_the_bucket = b"pretend-dependency-bundle-bytes\n"
+        expected = "sha256:" + hashlib.sha256(in_the_bucket).hexdigest()
+        served = tmp_path / "served.zip"
+        served.write_bytes(in_the_bucket)
+
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        # head-object succeeds (the object is there); cp copies the known bytes to
+        # whatever destination the script chose. Anything else is a failure, so the
+        # test cannot pass by taking some other path through the branch.
+        (fake_bin / "aws").write_text(
+            "#!/bin/bash\n"
+            'if [[ "$1" == "s3api" && "$2" == "head-object" ]]; then exit 0; fi\n'
+            'if [[ "$1" == "s3" && "$2" == "cp" ]]; then cp ' + str(served) + ' "$4"; exit 0; fi\n'
+            'echo "unexpected aws call: $*" >&2; exit 64\n'
+        )
+        (fake_bin / "aws").chmod(0o755)
+
+        proc = subprocess.run(
+            [
+                "bash",
+                "-c",
+                "set -euo pipefail\n"
+                "BUCKET=bkt\nREGION=us-east-1\n"
+                + helpers[0]
+                + "\n"
+                + region.group(1)
+                + '\necho "DIGEST=$BUNDLE_DIGEST"\n',
+            ],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert f"DIGEST={expected}" in proc.stdout, (
+            "the already-in-the-bucket branch did not hash the object it found: " + proc.stdout
+        )
+
+    def test_the_readme_does_not_promise_a_check_that_does_not_happen(self):
+        """The prose and the script have to agree about when the digest is computed.
+
+        Both used to say the value was "left as it is" for a bundle already in the
+        bucket, and both drew the same wrong conclusion from it: that a changed
+        object would therefore fail the deploy. It would not — the resource is
+        skipped and nothing is ever checked. The script is fixed; a README still
+        describing the old behaviour would be worse than one that said nothing,
+        because it tells an operator the account is covered when it is not.
+        """
+        readme = _generate(**COMPONENT_COMBINATIONS["everything"]).readme
+
+        assert "left as it is" not in readme, "README still describes the stale-digest behaviour"
+        assert "nothing local to hash" not in readme
+
+        # And states what actually happens, including the limit of it: hashing the
+        # object proves provenance from the bucket, not from a build you trust.
+        assert "downloads" in readme and "hashes the bytes themselves" in readme
+        # Substring kept short deliberately: the README is hard-wrapped, so a longer
+        # phrase would straddle a newline and fail for reasons of layout, not content.
+        assert "cannot, by itself, tell you" in readme
+
     def test_the_lambda_verifies_the_zip_the_deploy_script_builds(self, tmp_path):
         """End of the chain: the real zip, hashed by the real handler."""
         handler = _import_cfn_provider_handler()
@@ -1309,11 +1436,134 @@ class TestDataRetention:
 
     @ALL_COMBINATIONS
     def test_non_data_resources_are_not_stamped(self, combo):
-        """Retaining an IAM role or a Lambda leaves litter and breaks redeploys."""
+        """Retaining an IAM role or a Lambda leaves litter and breaks redeploys.
+
+        One deliberate exception, and it is allowed here only because it is declared
+        in DELETION_DEPENDENCIES rather than stamped ad hoc: a retained knowledge base
+        cannot purge its vectors without KnowledgeBaseRole, so retaining the data and
+        not the role leaves the operator a resource they can never delete. Litter is
+        the lesser harm. ``test_a_deletion_dependency_is_retained_only_alongside_its_
+        data_resource`` pins the narrowness.
+        """
+        allowed = {dep for deps in DELETION_DEPENDENCIES.values() for dep in deps}
         for logical_id, resource in _template(**combo)["Resources"].items():
-            if resource["Type"] not in DATA_BEARING_RESOURCE_TYPES:
+            if resource["Type"] not in DATA_BEARING_RESOURCE_TYPES and logical_id not in allowed:
                 assert "DeletionPolicy" not in resource, f"{logical_id} ({resource['Type']}) wrongly retained"
                 assert "UpdateReplacePolicy" not in resource, f"{logical_id} wrongly retained"
+
+    def test_a_deletion_dependency_is_retained_only_alongside_its_data_resource(self):
+        """The narrow contract: retained with Retain, never retained with Delete.
+
+        Under Delete the knowledge base goes with the stack, so nothing needs to
+        outlive it and a surviving IAM role would be a gratuitous orphan. Probed by
+        reverting the fix: without it the Retain case leaves the role unstamped and
+        the retained KB is undeletable, which is the live-proven defect
+        (DELETE_UNSUCCESSFUL, "Unable to delete data from vector store").
+        """
+        combo = COMPONENT_COMBINATIONS["gateway+kb"]
+        retained = _template(**combo, data_retention_policy="Retain")["Resources"]
+        assert retained["BedrockKnowledgeBase"]["DeletionPolicy"] == "Retain", "precondition"
+        assert retained["KnowledgeBaseRole"]["DeletionPolicy"] == "Retain", (
+            "a retained knowledge base purges its vectors with this role; without it "
+            "the knowledge base can never be deleted"
+        )
+        assert retained["KnowledgeBaseRole"]["UpdateReplacePolicy"] == "Retain"
+
+        deleted = _template(**combo, data_retention_policy="Delete")["Resources"]
+        assert deleted["BedrockKnowledgeBase"]["DeletionPolicy"] == "Delete", "precondition"
+        assert "DeletionPolicy" not in deleted["KnowledgeBaseRole"], (
+            "under Delete the knowledge base goes with the stack, so retaining the role only leaves an orphan behind"
+        )
+
+    def test_a_combination_with_no_knowledge_base_retains_no_role(self):
+        """The dependency is keyed on the data resource being present, not on the combo."""
+        resources = _template(**COMPONENT_COMBINATIONS["gateway"], data_retention_policy="Retain")["Resources"]
+        assert "BedrockKnowledgeBase" not in resources, "precondition: this combo has no KB"
+        assert "KnowledgeBaseRole" not in resources
+
+    def test_the_teardown_notice_does_not_tell_the_operator_to_build_a_wildcard_role(self):
+        """It used to hand over an ``s3vectors:*`` on ``*`` create-role recipe.
+
+        That was a workaround for the role not being retained. Now that it is, the
+        recipe is both unnecessary and the worst part of the notice — ARCC
+        cnt_SFJJhkOueCPRkd is specifically about not leaving high-privilege wildcards
+        unconditioned, and a documented workaround that ends in one is still one.
+        """
+        script = _generate(**COMPONENT_COMBINATIONS["gateway+kb"], data_retention_policy="Retain").teardown_sh
+        assert "iam create-role" not in script, "teardown still tells the operator to recreate the role"
+        assert "s3vectors:*" not in script
+        # It must still say what the real constraint is, or the role becomes the thing
+        # that wedges the delete instead.
+        assert "AgentCoreKBRole-$STACK_NAME" in script
+        assert "last" in script.lower()
+
+    def test_the_notice_names_the_delete_that_actually_purges(self):
+        """The purge runs at the DATA SOURCE delete, which was measured, not assumed.
+
+        ``list-vectors`` went 1 -> 0 on ``delete-data-source``, before the knowledge
+        base was touched at all; the knowledge base re-attempts the same purge on its
+        own delete, so both fail when the role is missing. The order the notice gives
+        is right either way — but an operator told only that "the knowledge base purges
+        its vectors" goes and debugs ``delete-knowledge-base``, which is the one place
+        the answer is not.
+        """
+        script = _generate(**COMPONENT_COMBINATIONS["gateway+kb"], data_retention_policy="Retain").teardown_sh
+        readme = _generate(**COMPONENT_COMBINATIONS["gateway+kb"], data_retention_policy="Retain").readme
+
+        # Short substrings on purpose: both documents are hard-wrapped, and "DATA
+        # SOURCE is deleted" straddles a newline in the notice. A phrase that spans a
+        # line break fails for layout reasons and tells you nothing about the content.
+        assert "SOURCE is deleted" in script, "the notice still blames the wrong delete"
+        assert "DATA SOURCE first" in script
+        assert "*data source* is deleted" in readme
+
+    def test_the_teardown_notice_resolves_the_role_name_rather_than_assuming_it(self):
+        """``UseExplicitRoleNames=false`` means the readable name is a guess.
+
+        The default is ``true``, which yields ``AgentCoreKBRole-<stack>`` — so a
+        hardcoded name is right in the common case and silently wrong in exactly the
+        accounts that opted out because their naming rules forbade it. Since the notice
+        prints while the stack still exists, it can ask CloudFormation for the physical
+        id instead of guessing, and fall back to the readable form only if that fails.
+        """
+        script = _generate(**COMPONENT_COMBINATIONS["gateway+kb"], data_retention_policy="Retain").teardown_sh
+
+        assert "describe-stack-resource" in script, "the notice still assumes the role name"
+        assert "--logical-resource-id KnowledgeBaseRole" in script
+        assert "StackResourceDetail.PhysicalResourceId" in script
+        # The readable name must survive only as the fallback, not as the claim.
+        assert 'KB_ROLE_NAME="AgentCoreKBRole-$STACK_NAME"' in script
+
+    def test_the_teardown_notice_omits_the_role_paragraph_without_a_knowledge_base(self):
+        """It names one role and gives an ordering rule that exists for its sake alone.
+
+        Printed to a stack with no knowledge base it would be noise at best, and the
+        resolution step above would run a describe-stack-resource for a logical id the
+        stack does not have.
+        """
+        no_kb = _generate(**COMPONENT_COMBINATIONS["gateway"], data_retention_policy="Retain").teardown_sh
+
+        assert "Retain" in no_kb, "precondition: this combo still retains something"
+        assert "ONE ORDERING RULE MATTERS" not in no_kb
+        assert "KnowledgeBaseRole" not in no_kb
+        # The part that applies to every retained stack must still be there.
+        assert "resourcegroupstaggingapi get-resources" in no_kb
+
+    def test_the_readme_mentions_the_retained_role_only_when_there_is_one(self):
+        """A paragraph about a resource the recipient does not have is worse than none.
+
+        The same mistake this notice already made once, when it told a runtime-only
+        export that its retained Lambda log group held user identities: a warning that
+        is wrong once is a warning the recipient stops reading.
+        """
+        marker = "One IAM role is retained with them"
+        with_kb = _generate(**COMPONENT_COMBINATIONS["gateway+kb"], data_retention_policy="Retain").readme
+        assert marker in with_kb
+        assert "AgentCoreKBRole-<stack-name>" in with_kb
+
+        without_kb = _generate(**COMPONENT_COMBINATIONS["gateway"], data_retention_policy="Retain").readme
+        assert "Retain" in without_kb, "precondition: this combo still retains something"
+        assert marker not in without_kb, "promised a retained role to a stack that has none"
 
     def test_the_type_list_covers_every_data_bearing_type_actually_emitted(self):
         """Guard against the set going stale.
@@ -1365,6 +1615,12 @@ class TestDataRetention:
             # they hold what the agent was asked and what it answered.
             "CfnProviderLambdaLogGroup",
             "KBToolLambdaLogGroup",
+            # Not data — the role a retained knowledge base needs in order to purge
+            # its vectors and be deletable at all. Listed here rather than filtered
+            # out because this assertion is a pin on what actually carries a
+            # DeletionPolicy, and quietly excluding a category is how the pin would
+            # stop noticing a resource that gets retained by accident.
+            "KnowledgeBaseRole",
         }, protected
 
 
@@ -1715,6 +1971,90 @@ WILDCARD_ALLOWLIST = {
 def _as_list(value):
     """A policy ``Resource``/``Action`` may be a single value or a list."""
     return value if isinstance(value, list) else [value]
+
+
+class TestOutboundOauthIsGrantedAsAWholeCall:
+    """Outbound OAuth is two calls, and the export granted one of them.
+
+    Diagnosed live. The gateway mints a workload identity token with
+    ``GetWorkloadAccessToken`` and only then exchanges it with
+    ``GetResourceOauth2Token``. Missing the first, the gateway is denied before it
+    issues any request, so an instrumented target sees *nothing* -- no 4xx to read,
+    no log line. `tools/list` still worked, because the gateway serves it from its
+    own stored catalogue without an outbound call, so discovery looked healthy and
+    only `tools/call` failed. Both necessity and sufficiency were measured: adding
+    this one action to the deployed role, changing nothing else, turned the failure
+    into a 200 with the tool's real output.
+
+    The reason it survived review is the thing these tests fix. The only assertion
+    covering this statement was the tuple ``("GatewayRole",
+    "CredentialProviderAccess")`` in WILDCARD_ALLOWLIST -- which pins the Sid's
+    existence and says nothing about the actions inside it, so a least-privilege
+    pass could drop one and stay green. Pinned below as an invariant between the two
+    actions rather than as a literal action list, so it holds wherever the pair is
+    granted rather than only in the statement that had the bug.
+    """
+
+    @staticmethod
+    def _actions_by_role(template):
+        actions = {}
+        for logical_id, resource in template["Resources"].items():
+            if resource["Type"] != "AWS::IAM::Role":
+                continue
+            granted = set()
+            for policy in _inline_policies(resource):
+                for statement in policy["PolicyDocument"]["Statement"]:
+                    if statement.get("Effect") == "Allow":
+                        granted.update(_as_list(statement.get("Action", [])))
+            actions[logical_id] = granted
+        return actions
+
+    @ALL_COMBINATIONS
+    def test_a_role_that_can_exchange_a_token_can_also_mint_one(self, combo):
+        by_role = self._actions_by_role(_template(**combo))
+        exchangers = [r for r, a in by_role.items() if "bedrock-agentcore:GetResourceOauth2Token" in a]
+        for role in exchangers:
+            assert "bedrock-agentcore:GetWorkloadAccessToken" in by_role[role], (
+                f"{role} can exchange a workload identity token but not mint one, so every "
+                "outbound OAuth call it makes is denied before it leaves the gateway"
+            )
+
+    def test_the_mcp_server_export_grants_it(self):
+        """The combination that actually exercises the OAuth path.
+
+        Lambda-backed targets authorise with GATEWAY_IAM and never reach it, which is
+        why the blast radius was this one combination and why no other test noticed.
+        """
+        by_role = self._actions_by_role(_template(**COMPONENT_COMBINATIONS["mcp-server"]))
+        assert "bedrock-agentcore:GetWorkloadAccessToken" in by_role["GatewayRole"]
+
+    def test_the_grant_names_both_arns_the_call_checks(self):
+        """Neither line is belt-and-braces: the call checks both resources separately.
+
+        Measured on a deployed stack by removing one line at a time from the live role
+        and re-invoking, A/B/A/B/A. Parent removed, and the 403 names the parent
+        directory; child wildcard removed instead, and the 403 names the workload
+        identity. Restore either and the `tools/call` returns 200 with the tool's real
+        output again. So a grant naming one of the two is as broken as no grant at all,
+        and fails in the same invisible place -- discovery still works, and the target
+        logs nothing because nothing reaches it.
+        """
+        statements = [
+            statement
+            for policy in _inline_policies(
+                _template(**COMPONENT_COMBINATIONS["mcp-server"])["Resources"]["GatewayRole"]
+            )
+            for statement in policy["PolicyDocument"]["Statement"]
+            if "bedrock-agentcore:GetWorkloadAccessToken" in _as_list(statement.get("Action", []))
+        ]
+        assert len(statements) == 1, "the grant should live in exactly one statement"
+        resources = [r["Fn::Sub"] for r in _as_list(statements[0]["Resource"])]
+        assert any(r.endswith("workload-identity-directory/default") for r in resources), (
+            f"the parent directory is not named: {resources}"
+        )
+        assert any(r.endswith("workload-identity-directory/default/workload-identity/*") for r in resources), (
+            f"the workload identity itself is not named: {resources}"
+        )
 
 
 class TestLeastPrivilegeResources:
@@ -3531,6 +3871,31 @@ class TestTheRuntimesOwnLogGroupsAreGoverned:
 
 
 class TestOutputs:
+    @ALL_COMBINATIONS
+    def test_the_endpoint_name_is_an_output_because_invoking_needs_it(self, combo):
+        """`invoke-agent-runtime --qualifier` takes the endpoint NAME, not an ARN.
+
+        The stack exported EndpointArn and nothing else, so the only way to obtain a
+        qualifier was to know that it is the ARN's last path segment and split it
+        yourself. The alternative a recipient actually reaches for is typing the name
+        from memory, which fails against any stack whose DeploymentName differs.
+        """
+        outputs = _template(**combo)["Outputs"]
+        assert "EndpointName" in outputs, "nothing in the outputs supplies an invoke qualifier"
+
+    def test_the_endpoint_name_output_cannot_drift_from_the_endpoint_it_names(self):
+        """The output is only useful if it is the name of the endpoint that exists.
+
+        Pinned as an equality against the resource rather than against a literal:
+        a rename of the endpoint that forgets the output would otherwise pass here
+        and hand every recipient a qualifier for an endpoint that is not there.
+        """
+        template = _template(**COMPONENT_COMBINATIONS["everything"])
+        assert (
+            template["Outputs"]["EndpointName"]["Value"]
+            == template["Resources"]["RuntimeEndpoint"]["Properties"]["Name"]
+        )
+
     def test_a_knowledge_base_stack_exports_its_ids(self):
         """The knowledge base was created and then never named in the outputs.
 
@@ -4136,6 +4501,93 @@ class TestDeploymentNameCannotBeAValueThatGuaranteesRollback:
         assert self.PATTERN.match(derived), f"stack name {stack_name!r} derives {derived!r}, which the template rejects"
 
 
+class TestTheScriptsDefaultToTheRecipientsRegion:
+    """The region default was the region the *exporting platform* ran in.
+
+    It reached the script through ``current_region()``, so it was not a hardcoded
+    literal -- but from the recipient's seat that is a distinction without a
+    difference: run ``./deploy.sh my-stack`` with the argument omitted and the stack
+    landed in whatever region the machine that generated the bundle happened to be
+    using, which may be a region they do not operate in at all. Nothing said so.
+
+    The fix inserts the AWS CLI's own precedence in front of it, so an omitted
+    argument now agrees with every other ``aws`` command on the recipient's machine.
+    The export-time region survives only as a last resort, which is the one case
+    where there is genuinely nothing better to guess.
+    """
+
+    def test_the_default_consults_the_recipients_own_configuration(self):
+        deploy = _generate().deploy_sh
+        assert "AWS_REGION:-" in deploy, "an omitted argument must respect the caller's own region"
+        assert "AWS_DEFAULT_REGION:-" in deploy
+        assert "aws configure get region" in deploy
+
+    def test_teardown_resolves_the_region_exactly_as_deploy_does(self):
+        """The dangerous asymmetry, not a style point.
+
+        A teardown that defaults to a different region than the deploy finds no stack
+        of that name, and `delete-stack` on a nonexistent stack is not an error -- so
+        it reports success at having deleted nothing while the real stack keeps
+        running and keeps billing. Pinned as an equality between the two scripts so
+        the two defaults cannot drift apart.
+        """
+        bundle = _generate()
+        deploy = [line for line in bundle.deploy_sh.splitlines() if "AWS_DEFAULT_REGION" in line]
+        teardown = [line for line in bundle.teardown_sh.splitlines() if "AWS_DEFAULT_REGION" in line]
+        assert deploy and deploy == teardown, f"deploy resolves {deploy}, teardown resolves {teardown}"
+
+    def test_the_export_time_region_is_only_the_last_resort(self):
+        """It must still be there -- a recipient with no region configured anywhere
+        would otherwise get an empty `--region ""` and a confusing CLI error -- but it
+        must come after the caller's own configuration, not before it.
+        """
+        deploy = _generate().deploy_sh
+        fallback = [line for line in deploy.splitlines() if line.startswith('REGION="${REGION:-')]
+        assert len(fallback) == 1, fallback
+        assert current_region() in fallback[0]
+        assert deploy.index("AWS_REGION:-") < deploy.index(fallback[0]), (
+            "the export-time region is being consulted before the recipient's own"
+        )
+
+    def test_both_scripts_say_which_region_they_picked(self):
+        # A default that is now resolved at run time instead of baked in is only safe
+        # if the operator can see what it resolved to.
+        bundle = _generate()
+        echo = 'echo "Region: $REGION"'
+        # Exactly once each. deploy.sh already printed the region in its banner, so the
+        # obvious place to add this -- next to the resolution -- makes a single run
+        # announce its region twice, which reads like the script changed its mind.
+        assert bundle.deploy_sh.count(echo) == 1, "deploy.sh announces its region twice"
+        assert bundle.teardown_sh.count(echo) == 1
+
+    def test_deploy_names_the_region_before_it_calls_aws(self):
+        """Printing it after the first API call is too late to be a warning."""
+        deploy = _generate().deploy_sh
+        assert deploy.index('echo "Region: $REGION"') < deploy.index("aws sts get-caller-identity")
+
+    def test_the_readme_examples_do_not_bake_in_the_exporting_machines_region(self):
+        """Seventeen example commands used to carry the exporter's region as the value.
+
+        The same root cause as the scripts, and it survived the fix to them: every
+        ``./deploy.sh my-agent <region>`` and ``REGION=`` in the README was rendered from
+        ``current_region()``, so a bundle exported from a machine configured for one
+        region suggested that region to a recipient who may not operate in it -- while
+        the scripts it documents now default to the recipient's own. A README that
+        contradicts the tool it describes is worse than one that says nothing.
+
+        Asserted against an implausible region rather than the real one, so the test
+        cannot pass by coincidence if a genuine region name appears in prose somewhere.
+        """
+        with mock.patch.object(cfn_template_generator, "current_region", return_value="xx-nowhere-9"):
+            bundle = _generate()
+        assert "xx-nowhere-9" not in bundle.readme
+        assert "YOUR-REGION" in bundle.readme, "the placeholder the rest of the README uses"
+        # The scripts are the one place it belongs: there it is the last-resort default,
+        # not an example, and it is only reached when the recipient set nothing at all.
+        assert "xx-nowhere-9" in bundle.deploy_sh
+        assert "xx-nowhere-9" in bundle.teardown_sh
+
+
 class TestTheShippedScriptsAreExecutable:
     """``zipfile.writestr`` with a plain string name stores mode 0600.
 
@@ -4545,6 +4997,105 @@ class TestDependencyBundleIsObtainable:
 # ---------------------------------------------------------------------------
 
 
+class TestTheReadmeSaysHowToInvokeTheAgent:
+    """The bundle documented how to deploy the agent and never how to call it.
+
+    Every fact pinned here was established against the live CLI, and each one costs a
+    recipient real time to rediscover. The substrings are short on purpose: the README is
+    hard-wrapped, so a longer phrase fails when the line happens to break inside it,
+    which tells you about the layout and nothing about the content.
+    """
+
+    @staticmethod
+    def _section(readme):
+        assert "## Invoking the Agent" in readme, "no invoke section at all"
+        return readme.split("## Invoking the Agent")[1].split("\n## ")[0]
+
+    @ALL_COMBINATIONS
+    def test_the_section_is_present_for_every_export(self, combo):
+        # Every combination deploys a runtime, so every recipient needs this.
+        section = self._section(_generate(**combo).readme)
+        assert "invoke-agent-runtime" in section
+
+    def test_it_names_the_flag_whose_absence_reads_as_a_broken_deployment(self):
+        """Omitting --cli-binary-format surfaces as an unexplained runtime 400.
+
+        The rejected-locally case is self-explanatory. The other one is not: a payload
+        that happens to be valid base64 is decoded to binary and sent, and the 400 comes
+        back from the runtime, so it reads like the stack is broken. Naming the error
+        text is the whole point of documenting it -- that is what a recipient will paste
+        into a search box.
+        """
+        section = self._section(_generate().readme)
+        assert "--cli-binary-format raw-in-base64-out" in section
+        assert "Invalid base64" in section
+        assert "RuntimeClientError" in section
+
+    def test_it_puts_the_utf8_decode_message_where_the_caller_will_find_it(self):
+        """The message this section first quoted is never printed to the caller.
+
+        Measured: the terminal gets only `RuntimeClientError ... Received error (400)
+        from runtime. Please check your CloudWatch logs`, and the `Invalid encoding`
+        sentence exists only as a WARNING in the runtime's log group. A recipient told to
+        expect it on the terminal, and not seeing it, concludes the paragraph is about
+        some other problem -- the precise opposite of what documenting it was for. The
+        byte in that message is also whatever the decoded payload began with (0xab in one
+        run, 0xa6 in another), so the README must not name one.
+        """
+        section = self._section(_generate().readme)
+        assert "codec can't decode byte" in section, "still the confirming detail, just not the symptom"
+        assert "CloudWatch" in section, "the reader has to be told where that line lives"
+        assert "0xa6" not in section and "0xab" not in section, "the byte varies with the payload"
+
+    def test_it_deletes_the_output_file_before_invoking(self):
+        """A failed invoke leaves the previous answer in place, byte for byte.
+
+        Verified by sha256 across a rejected call. Without the `rm`, a recipient working
+        through an argument they have wrong sees a plausible reply from an earlier
+        attempt and believes the failing call succeeded. The snippet is built to be run
+        repeatedly, so this is the normal case rather than an edge one.
+        """
+        section = self._section(_generate().readme)
+        assert "rm -f response.json" in section
+        assert section.index("rm -f response.json") < section.index("invoke-agent-runtime")
+
+    def test_it_gets_the_qualifier_from_the_output_rather_than_a_typed_name(self):
+        # A hand-typed endpoint name is wrong for every stack but the one it was
+        # written against, which is why the EndpointName output exists.
+        section = self._section(_generate().readme)
+        assert "$ENDPOINT_NAME" in section
+        assert "OutputKey=='EndpointName'" in section
+
+    def test_it_warns_that_the_answer_goes_to_the_file_not_the_terminal(self):
+        # Otherwise a successful call looks like it returned only metadata.
+        section = self._section(_generate().readme)
+        assert "response.json" in section
+        assert "statusCode" in section
+
+    def test_it_does_not_tell_the_recipient_to_raise_the_read_timeout(self):
+        """This section nearly shipped `--cli-read-timeout 180` as advice, on the
+        plausible-sounding theory that a cold start outruns the 60s default. Measured,
+        a first-ever cold start took 7.1s, and 180 took 7.8s -- noise, because the flag
+        is a client socket timeout and cannot make the service faster.
+
+        Worse, the flag is not inert in the other direction. At `--cli-read-timeout 2`
+        the CLI printed one clean `statusCode 200` and exit 0 while the runtime logged
+        THREE completed invocations under that session id: botocore retried, and each
+        retry re-ran the agent. So the advice we nearly gave points at a foot-gun, and
+        what the README has to say is the opposite of it.
+        """
+        section = self._section(_generate().readme)
+        assert "--cli-read-timeout 180" not in section, "measured as pointless; do not recommend it"
+        assert "Do not lower `--cli-read-timeout`" in section
+        assert "retry runs your agent again" in section
+
+    def test_it_states_the_session_id_minimum(self):
+        # 33 is a validation error client-side, and nothing about the message suggests
+        # a length rule to somebody who reached for a short readable id.
+        section = self._section(_generate().readme)
+        assert "33" in section
+
+
 class TestGeneratedDocumentation:
     @staticmethod
     def _parameter_rows(readme):
@@ -4818,6 +5369,83 @@ class TestGeneratedDocumentation:
         assert "permanently destroy" not in teardown
         assert "user identities" not in teardown, "no data store here — this warning would be false"
         assert "DeletionPolicy=Retain on its data-bearing" not in teardown
+
+    @ALL_COMBINATIONS
+    def test_teardown_removes_the_artifacts_this_stack_staged(self, combo):
+        """Deleting the stack left the recipient's own agent source in S3 forever.
+
+        deploy.sh stages agent-code.zip and the Lambda zips under cfn-assets/<stack>/ and
+        deliberately keeps superseded ones so a rollback can reach them. Nothing deleted
+        them: the code-packaging resource removes only the merged code.zip it wrote, and
+        teardown deleted the stack and stopped. staged_key's comment meanwhile promised
+        the teardown disposed of the bucket.
+
+        The bucket lifecycle does not save it either — it expires NONCURRENT versions, and
+        these are current.
+        """
+        teardown = _generate(**combo).teardown_sh
+        assert "cfn-assets/$STACK_NAME/" in teardown, "teardown does not name the staged prefix"
+        assert "purge_staged_objects" in teardown
+        # After the delete, not before: while the delete is in flight the stack still
+        # references these keys, and a failed delete gets retried.
+        after_delete = teardown.split("wait stack-delete-complete")[1]
+        assert "purge_staged_objects " in after_delete, "the purge must run after the stack is gone"
+
+    @ALL_COMBINATIONS
+    def test_teardown_resolves_the_bucket_before_it_deletes_the_stack(self, combo):
+        """The bucket name is a stack Parameter and no Output carries it, so reading it
+        after the delete reads nothing and the purge silently does nothing."""
+        teardown = _generate(**combo).teardown_sh
+        before_delete = teardown.split("aws cloudformation delete-stack")[0]
+        assert "ArtifactsBucket" in before_delete, "the bucket must be resolved while the stack exists"
+
+    @ALL_COMBINATIONS
+    def test_teardown_purges_versions_rather_than_just_the_current_objects(self, combo):
+        """`aws s3 rm --recursive` looks like it empties the prefix and does not.
+
+        Measured live on a versioned bucket: seven versions and markers under the prefix,
+        `aws s3 rm --recursive` left NINE (it adds a delete marker per object) while
+        `aws s3 ls` reported the prefix empty. The agent source was still fully readable
+        through list-object-versions. So the version-aware form is the fix, not a nicety.
+        """
+        teardown = _generate(**combo).teardown_sh
+        assert "list-object-versions" in teardown
+        assert "DeleteMarkers" in teardown, "delete markers are left behind without this"
+        assert "--version-id" in teardown
+
+    @ALL_COMBINATIONS
+    def test_teardown_does_not_claim_to_have_removed_what_it_leaves(self, combo):
+        """It leaves the shared dependency bundle and the bucket, and says so.
+
+        Per ARCC cnt_Hr4zJD4KntOWIt a public-facing document must carry a clear statement
+        of what a deletion actually does; the previous statement was false. The bundle is
+        shared by every stack deployed from the bucket, and the bucket may be one the
+        recipient already had — deploy.sh leaves an existing bucket untouched for that
+        reason — so neither is deleted, and both are named with the command to remove them.
+        """
+        bundle = _generate(**combo)
+        teardown = bundle.teardown_sh
+        assert "$BUNDLE_KEY" in teardown or "BUNDLE_KEY=" in teardown
+        assert "aws s3 rb" in teardown, "teardown does not say how to remove the bucket it leaves"
+        # The claim that started this: it must not survive anywhere in the bundle.
+        for name, script in (("deploy.sh", bundle.deploy_sh), ("teardown.sh", teardown)):
+            assert "teardown removes the bucket" not in script, f"{name} still makes the false claim"
+
+    def test_teardown_reports_a_failed_purge_instead_of_a_false_success(self):
+        """Every delete is failure-tolerant so one missing permission cannot abort a
+        teardown, which means the loop finishing proves nothing about the outcome.
+
+        Measured live with a Deny on the bucket: denying only s3:DeleteObject did NOT
+        stop the purge, because removing a named version is s3:DeleteObjectVersion.
+        Denying both left the object in place, and the re-listing is what turns that into
+        a warning rather than a green "Removed staged artifacts".
+        """
+        teardown = _generate().teardown_sh
+        assert "WARNING" in teardown
+        assert "s3:DeleteObjectVersion" in teardown, "the warning must name the action that is actually needed"
+        # The success line must be guarded by the function's return value, not printed
+        # unconditionally after it.
+        assert "elif purge_staged_objects" in teardown or "if purge_staged_objects" in teardown
 
     def test_readme_says_retained_log_groups_block_a_same_name_redeploy(self):
         """The README used to promise the opposite of what happens.
