@@ -143,6 +143,147 @@ def test_agentcore_step_grants_fanout_action(step, action):
     )
 
 
+# --------------------------------------------------------------------------- #
+# Creating a gateway-scoped Cedar policy requires calling the gateway.         #
+# --------------------------------------------------------------------------- #
+
+_INVOKE_GATEWAY = "bedrock-agentcore:InvokeGateway"
+
+
+def _policy_statements_granting(action: str) -> list[tuple[str, str, str]]:
+    """Every ``iam.PolicyStatement(...)`` in the platform sources that grants ``action``.
+
+    Returns (file name, enclosing function, source text of ``resources=``) per
+    statement. AST rather than substring matching, because the whole point of these
+    assertions is WHICH statement in WHICH role the action landed in — a text
+    search cannot tell an ARN-scoped statement from the kitchen-sink
+    ``resources=["*"]`` one next to it, nor one role's grant from another's.
+    """
+    found: list[tuple[str, str, str]] = []
+    for path in _platform_source_files():
+        source = path.read_text()
+        for func in ast.walk(ast.parse(source)):
+            if not isinstance(func, ast.FunctionDef):
+                continue
+            for node in ast.walk(func):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+                if name != "PolicyStatement":
+                    continue
+                kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+                actions = kwargs.get("actions")
+                if not isinstance(actions, ast.List):
+                    continue
+                if not any(isinstance(e, ast.Constant) and e.value == action for e in actions.elts):
+                    continue
+                resources = kwargs.get("resources")
+                found.append(
+                    (path.name, func.name, ast.get_source_segment(source, resources) if resources else "")
+                )
+    return found
+
+
+# The two principals that CREATE policies, and the function that builds each
+# one's role. Deliberately not a whole-file search: `build_shared_runtime_role`
+# also grants InvokeGateway, on `*`, because that role is the AGENT calling its
+# own gateway's tools at request time and is shared across every agent in the
+# stack — a different principal with a different justification, and not what
+# these assertions are about.
+_POLICY_CREATING_PRINCIPALS = [
+    ("step_lambdas.py", "_create_step_role"),
+    ("lambdas.py", "build_deployment_lambda"),
+]
+
+
+def test_the_policy_path_can_call_the_gateway_it_scopes_policies_to():
+    """AgentCore resolves the gateway named in a Cedar statement AS THE CALLER.
+
+    So a principal that creates a gateway-scoped policy needs
+    ``bedrock-agentcore:InvokeGateway`` on the gateway ARN — not only the
+    Create/Manage verbs. Without it ``create_policy`` ends CREATE_FAILED with
+    "Insufficient permissions to call gateway with ID <id>" in BOTH validation
+    modes. Proven live on the customer-export path, which had the identical gap:
+    same statement, gateway READY for many minutes, that action as the only
+    variable.
+
+    Two principals need it, and missing it on either is silent: the ``policy``
+    step role, and the deployment Lambda role, which runs both the direct-deploy
+    policy path and the lazy promoter that is supposed to RECOVER a permit the
+    step left CREATE_FAILED. A promoter that cannot call the gateway can never
+    finish that recovery, so the fail-closed engine stays deny-all forever.
+    """
+    granted = {(f, fn) for f, fn, _res in _policy_statements_granting(_INVOKE_GATEWAY)}
+    missing = [p for p in _POLICY_CREATING_PRINCIPALS if p not in granted]
+    assert not missing, (
+        f"no statement grants {_INVOKE_GATEWAY} in {missing} — a policy-creating "
+        "principal that cannot call the gateway cannot create a gateway-scoped "
+        "Cedar policy at all, and the promoter can never recover one"
+    )
+
+
+@pytest.mark.parametrize("source_file,func_name", _POLICY_CREATING_PRINCIPALS)
+def test_the_invoke_gateway_grant_is_scoped_to_gateway_arns(source_file, func_name):
+    """It is a DATA-plane verb, so `*` here would let a deploy-time Lambda call
+    every tool of every gateway in the account.
+
+    ARCC cnt_AGx9pUNpmdOVZB (specific actions on specific resources) and
+    cnt_BBrFTwAEgWxA30 (start at zero, add the minimum): unlike the Create*/List*
+    verbs in the shared statement, InvokeGateway HAS a resource form and the ARN
+    prefix is knowable at synth time, so there is no reason for a wildcard
+    resource. Per-deploy gateway ids are not knowable, so the id stays wildcarded.
+    """
+    scoped = [
+        res
+        for f, fn, res in _policy_statements_granting(_INVOKE_GATEWAY)
+        if (f, fn) == (source_file, func_name)
+    ]
+    assert scoped, f"{_INVOKE_GATEWAY} is not granted in {source_file}::{func_name}"
+    for res in scoped:
+        assert ":gateway/" in res, (
+            f"{_INVOKE_GATEWAY} in {source_file}::{func_name} is granted on {res!r}, which "
+            "is not a gateway ARN — a data-plane invoke verb must not ride along on the "
+            'control-plane resources=["*"] statement'
+        )
+
+
+# Actions that LOOK like AgentCore verbs and are not. IAM accepts a nonexistent
+# action silently and authorizes nothing, so each of these is a grant that reads
+# as capability the role does not have — the failure mode is a reviewer (or the
+# next engineer) believing a call is permitted when it can never be. Each entry
+# was confirmed by BOTH oracles the repo uses: IAM Access Analyzer
+# (`validate-policy` -> INVALID_ACTION "does not exist") and botocore's service
+# model for the relevant client. Add to this list when a new one is retired.
+_NONEXISTENT_ACTIONS = [
+    # Retired 2026-09-19 from the policy step role and the deployment Lambda role.
+    # `ManageResourceScopedPolicy` is real (an IAM-only action with no SDK
+    # operation, which Access Analyzer accepts); these two are not. The
+    # control-plane model has Get/Put/DeleteResourcePolicy — resource-BASED
+    # policies, an unrelated feature.
+    "bedrock-agentcore:GetResourceScopedPolicy",
+    "bedrock-agentcore:ListResourceScopedPolicies",
+    # Retired earlier from build_shared_runtime_role; kept here so they cannot
+    # come back on a copy-paste.
+    "bedrock-agentcore:GetLastKTurns",
+    "bedrock-agentcore:RetrieveMemories",
+]
+
+
+@pytest.mark.parametrize("action", _NONEXISTENT_ACTIONS)
+def test_no_role_grants_an_action_that_does_not_exist(action):
+    """A grant that authorizes nothing is worse than no grant: it misleads."""
+    for path in _platform_source_files():
+        source = path.read_text()
+        # Quoted, so the explanatory comments that name these actions in prose
+        # (which is how the next reader learns why they are gone) do not trip it.
+        assert f'"{action}"' not in source, (
+            f"{path.name} grants {action}, which is not a real IAM action — IAM "
+            "accepts it and authorizes nothing. Remove it; if a call really needs "
+            "authorizing, find the action that exists (Access Analyzer "
+            "validate-policy names the invalid ones)."
+        )
+
+
 def test_harness_block_holds_full_runtime_and_memory_lifecycle():
     """Sanity: the harness block carries BOTH runtime and memory lifecycles.
 

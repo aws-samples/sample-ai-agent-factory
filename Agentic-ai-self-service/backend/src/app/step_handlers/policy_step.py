@@ -548,10 +548,28 @@ def handler(event: dict, context) -> dict:
             # same `action in [...]` permit, CREATE_FAILED then ACTIVE on retry).
             # So before degrading to LOG_ONLY, RETRY each transiently-failed policy
             # (delete + recreate with backoff). Only a persistent failure degrades.
+            #
+            # CAUTION: the first string has TWO causes and only one of them is
+            # transient. The other is a missing `bedrock-agentcore:InvokeGateway`
+            # on THIS role — AgentCore resolves the gateway named in the statement
+            # as the caller — and that one never converges, so retrying it just
+            # spends 6 attempts before attaching a deny-all engine. Proven live on
+            # the customer-export path: same principal, same statement, gateway
+            # READY for many minutes, the grant as the only variable. The grant is
+            # now in infra/stacks/platform/step_lambdas.py, so the transient cause
+            # is again the likely one — but if the retries are exhausted, say so
+            # (see _PERMISSION_HINT below) rather than reporting IAM as a race.
             _TRANSIENT = (
                 "insufficient permissions to call gateway",
                 "is creating",
                 "please wait till it is active",
+            )
+            _PERMISSION_HINT = (
+                " — NOTE: 'insufficient permissions to call gateway' that does NOT clear on retry "
+                "is not the engine<->gateway race; it means this role is missing "
+                "bedrock-agentcore:InvokeGateway on the gateway ARN. Check the policy step role "
+                "(infra/stacks/platform/step_lambdas.py) and the deployment Lambda role, which "
+                "runs the promoter (infra/stacks/platform/lambdas.py)."
             )
             name_to_stmt = {}
             for pol in policies:
@@ -603,6 +621,12 @@ def handler(event: dict, context) -> dict:
                     failed.append((pol_name, reason))
             if failed:
                 failure_detail = "; ".join(f"{n}: {r}" for n, r in failed)
+                # Retries are exhausted, so the gateway-call failure that survived
+                # them is the IAM cause, not the convergence one. Name it in the
+                # reason that reaches the deployment record, or the next reader
+                # repeats the misattribution this comment block describes.
+                if any("insufficient permissions to call gateway" in r.lower() for _n, r in failed):
+                    failure_detail += _PERMISSION_HINT
                 if fail_open_requested:
                     downgrade_to_log_only = True
                     downgrade_reason = (

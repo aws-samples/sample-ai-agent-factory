@@ -10,6 +10,16 @@ statement validates ACTIVE once the gateway settles (proven live). This matches
 the AWS policy workshop, where policy attachment is a SEPARATE lifecycle step
 from gateway creation, not a single-shot deploy.
 
+That message has a SECOND cause, and this module is the one that used to be
+unable to recover from it. AgentCore resolves the gateway named in a Cedar
+statement as the CALLER, so a principal without
+``bedrock-agentcore:InvokeGateway`` on the gateway ARN gets the same wording
+permanently — no amount of promotion converges it, and the fail-closed engine
+stays deny-all. Proven live on the customer-export path (same API, same account,
+that action as the only variable). The grant is now on the deployment Lambda role
+that runs this module, in ``infra/stacks/platform/lambdas.py``; if this text
+turns up again and never clears, check the role before blaming consistency.
+
 Blocking the deploy pipeline for 5 minutes per policy flow is poor UX, so the
 policy step attaches the engine in LOG_ONLY immediately (tools work, policies are
 still evaluated + logged) and records an ``enforce_pending`` payload on the
