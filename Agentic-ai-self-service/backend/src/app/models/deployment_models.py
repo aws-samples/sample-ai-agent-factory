@@ -561,9 +561,7 @@ class DeployRequest(BaseModel):
     # DeletionPolicy and UpdateReplacePolicy are CloudFormation *attributes* and
     # accept only literal values, so `{"Ref": ...}` is not valid there. The value
     # has to be baked into the YAML when it is generated.
-    data_retention_policy: Literal["Retain", "Delete"] | None = Field(
-        alias="dataRetentionPolicy", default="Retain"
-    )
+    data_retention_policy: Literal["Retain", "Delete"] | None = Field(alias="dataRetentionPolicy", default="Retain")
 
     @model_validator(mode="after")
     def _check_kb_config(self) -> "DeployRequest":

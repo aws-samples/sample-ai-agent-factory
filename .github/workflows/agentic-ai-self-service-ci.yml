@@ -1,0 +1,179 @@
+# CI for the Agentic-ai-self-service sample (the AgentCore Visual Workflow Platform).
+#
+# Location matters and is easy to get wrong here. `sample-ai-agent-factory` is a
+# monorepo of four independent samples, and GitHub Actions only reads workflows from
+# `.github/workflows/` at the REPOSITORY ROOT — a workflow committed under
+# `Agentic-ai-self-service/.github/workflows/` is never picked up, silently. Hence
+# this file lives at the root, is named for the sample it covers, and every path
+# below is root-relative. The `paths:` filter keeps a change to one of the other
+# three samples from running this.
+#
+# The export-gate job is the reason the file exists at all. This sample's only
+# customer-facing artifact is the CloudFormation bundle produced by
+# backend/src/app/services/cfn_template_generator.py, and until recently nothing
+# validated it: no cfn-lint, no policy scan, and only two of 118 backend test files
+# mentioned the generator, both incidentally. That is how an entire gateway provider
+# went unhandled without a failing test. It runs as its own job so a red export gate
+# reads as "the thing we ship is broken" rather than as one line in a 2000-test
+# summary.
+#
+# No AWS credentials are used anywhere here. Everything is static analysis over
+# generated text, which is what makes it safe to run on pull requests from forks.
+
+name: Agentic-ai-self-service CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Agentic-ai-self-service/**"
+      - ".github/workflows/agentic-ai-self-service-ci.yml"
+  pull_request:
+    paths:
+      - "Agentic-ai-self-service/**"
+      - ".github/workflows/agentic-ai-self-service-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Read by backend/tests/test_cfn_export_contract.py::_require_scanner: a missing
+  # cfn-lint or checkov must fail the build rather than quietly report "skipped".
+  CI: "true"
+
+defaults:
+  run:
+    # Everything in this workflow is scoped to the one sample. ruff.toml,
+    # .pre-commit-config.yaml and the Makefile all live here, so running from the
+    # repository root would pick up a different (or no) configuration.
+    working-directory: Agentic-ai-self-service
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # Installed by exact version rather than via astral-sh/ruff-action, for two
+      # reasons: the version must equal the pin in backend/pyproject.toml's dev extra
+      # (a formatter's output changes between minor releases, so a floating version
+      # means `ruff format --check` here can disagree with a developer's local run
+      # while both are "satisfied"), and running it as a plain step from this
+      # directory reproduces `make lint` exactly, including ruff.toml discovery.
+      - name: Install ruff at the pinned version
+        run: pip install 'ruff==0.16.4'
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format --check
+        run: ruff format --check .
+
+  backend:
+    name: backend tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: Agentic-ai-self-service/backend/pyproject.toml
+      - name: Install backend with dev extras
+        run: pip install -e './backend[dev]'
+      # -m "not integration" matches `make test-backend`: the integration marker is
+      # for tests that make real AWS calls, which have no credentials here.
+      - name: Run backend suite
+        working-directory: Agentic-ai-self-service/backend
+        run: python3 -m pytest -m "not integration" -q
+
+  export-gate:
+    name: exported template (cfn-lint + checkov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: Agentic-ai-self-service/backend/pyproject.toml
+      - name: Install backend with dev extras
+        run: pip install -e './backend[dev]'
+      # Isolated, and pinned exactly. checkov pins `boto3==1.35.49` while the backend
+      # requires `boto3>=1.43.66`, so installing it into the same environment makes pip
+      # backtrack to an older checkov with a different rule set — silently, since it
+      # resolves rather than erroring. pipx gives it its own virtualenv and puts the
+      # console script on PATH, which is where the test looks for it. The exact pin is
+      # because the accepted-findings baseline in
+      # backend/tests/test_cfn_export_contract.py is a property of one rule set;
+      # bumping this means re-validating that baseline.
+      - name: Install checkov in isolation
+        run: pipx install 'checkov==3.3.1'
+      # Fail loudly and early rather than letting the test-level guard report it, so a
+      # dependency-resolution problem is not mistaken for a template problem.
+      - name: Confirm the scanners are present
+        run: |
+          cfn-lint --version
+          checkov --version
+      - name: Contract, lint and policy gates over the emitted bundle
+        working-directory: Agentic-ai-self-service/backend
+        run: |
+          python3 -m pytest tests/test_cfn_export_contract.py -q \
+            --junit-xml=/tmp/export-gate.xml
+      # Uploaded on failure only: the JUnit XML names which component combination
+      # broke, which is the first thing anybody debugging this will want.
+      - name: Upload results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: export-gate-results
+          path: /tmp/export-gate.xml
+          if-no-files-found: warn
+
+  infra:
+    name: cdk assertions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: Agentic-ai-self-service/infra/requirements.txt
+      - name: Install infra requirements
+        working-directory: Agentic-ai-self-service/infra
+        run: pip install -r requirements.txt
+      - name: Run CDK assertion tests
+        working-directory: Agentic-ai-self-service/infra
+        run: python3 -m pytest tests/ -q
+
+  frontend:
+    name: frontend tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: Agentic-ai-self-service/frontend/package-lock.json
+      - name: Install
+        working-directory: Agentic-ai-self-service/frontend
+        run: npm ci
+      - name: Lint
+        working-directory: Agentic-ai-self-service/frontend
+        run: npx eslint .
+      - name: Test
+        working-directory: Agentic-ai-self-service/frontend
+        run: npx vitest --run
+      # Catches the failure mode the tests do not: a type error or a broken import
+      # that only surfaces when Vite actually builds.
+      - name: Build
+        working-directory: Agentic-ai-self-service/frontend
+        run: npm run build

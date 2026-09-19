@@ -85,7 +85,7 @@ def test_enforce_validation_failure_stays_enforce_by_default():
 
 
 def test_a_persistent_gateway_permission_failure_names_the_missing_grant():
-    """"Insufficient permissions to call gateway" has two causes, not one.
+    """ "Insufficient permissions to call gateway" has two causes, not one.
 
     One is the engine<->gateway race this module retries for. The other is a
     missing ``bedrock-agentcore:InvokeGateway`` on the calling role, proven live
@@ -101,8 +101,7 @@ def test_a_persistent_gateway_permission_failure_names_the_missing_grant():
     out, _ctrl = _run(_event())
     reason = out["policy_result"]["downgrade_reason"]
     assert "bedrock-agentcore:InvokeGateway" in reason, (
-        "a gateway-permission failure that survived every retry is an IAM gap, "
-        "and the reason does not say so"
+        "a gateway-permission failure that survived every retry is an IAM gap, and the reason does not say so"
     )
     assert "step_lambdas.py" in reason and "lambdas.py" in reason, (
         "the reason names no role to go and check — both the policy step role and "
