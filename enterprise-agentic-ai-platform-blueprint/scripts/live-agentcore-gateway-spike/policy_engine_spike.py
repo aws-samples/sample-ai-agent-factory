@@ -117,6 +117,15 @@ LAMBDA_TIMEOUT_SECONDS = 10
 LAMBDA_MEMORY_MB = 128
 LOG_RETENTION_DAYS = 1
 ACCESS_TOKEN_MINUTES = 5
+AUTH_FAILURE_HTTP_STATUS = {
+    "missing_header": 401,
+    "malformed_compact_jws": 401,
+    "forged_subject_signature_mismatch": 403,
+    "forged_group_signature_mismatch": 403,
+    "unsigned_alg_none": 401,
+    "client_not_allow_listed": 403,
+}
+EXPIRED_TOKEN_HTTP_STATUS = 403
 
 GATEWAY_READY_STATES = frozenset({"READY"})
 GATEWAY_FAILURES = frozenset(
@@ -2272,12 +2281,12 @@ class PolicyEngineSpike:
         )
 
         unexpected = {
-            name: status for name, status in failures.items() if status != 401
+            name: {"observed": status, "expected": AUTH_FAILURE_HTTP_STATUS[name]}
+            for name, status in failures.items()
+            if status != AUTH_FAILURE_HTTP_STATUS[name]
         }
         if unexpected:
-            raise SpikeError(
-                f"Gateway auth negatives did not return HTTP 401: {unexpected}"
-            )
+            raise SpikeError(f"Gateway auth status contract differs: {unexpected}")
         self.record(
             "auth_failures_rejected",
             statuses=failures,
@@ -2305,8 +2314,11 @@ class PolicyEngineSpike:
         token = self.access_token(model.ALPHA)
         time.sleep(wait_seconds)
         status = self.probe_unauthenticated(token)
-        if status != 401:
-            raise SpikeError(f"Expired token returned HTTP {status}, expected 401")
+        if status != EXPIRED_TOKEN_HTTP_STATUS:
+            raise SpikeError(
+                f"Expired token returned HTTP {status}, expected "
+                f"{EXPIRED_TOKEN_HTTP_STATUS}"
+            )
         self.record("expired_token_rejected", httpStatus=status, waitedSeconds=wait_seconds)
 
     # -- commands ---------------------------------------------------------

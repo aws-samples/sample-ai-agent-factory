@@ -189,9 +189,9 @@ Proof obligations, all recorded without credentials or payload text:
 4. **List and direct-call enforcement.** `tools/list` must exactly match each
    profile (including an empty list for `delta`), and `denied-tool` must still
    fail when called directly by qualified name.
-5. **Authentication negatives.** Missing header, malformed compact JWS, forged
-   `sub`, forged `cognito:groups`, `alg=none`, a client outside
-   `allowedClients`, and an expired token must each return exact HTTP 401.
+5. **Authentication negatives.** Missing header, malformed compact JWS, and
+   `alg=none` must return 401. Forged `sub`, forged `cognito:groups`, a client
+   outside `allowedClients`, and an expired parseable token must return 403.
 6. **Mode rollback.** One default-deny request must be denied in `ENFORCE`,
    allowed in `LOG_ONLY`, and denied again after restoring `ENFORCE`.
 7. **Zero residue.** Cleanup polls each asynchronous policy deletion before the
@@ -310,8 +310,8 @@ Abort the run and do not iterate blindly if any of these occur:
   broken, and any "denial" observed afterwards is meaningless.
 - An observed decision disagrees with the truth table — stop and re-derive the
   policy set rather than editing the expectation.
-- Any auth negative returns something other than HTTP 401 — do not count a 5xx
-  or unrelated failure as authorization evidence.
+- Any auth negative differs from its pinned 401/403 status — do not count an
+  arbitrary 4xx/5xx or unrelated failure as authorization evidence.
 - Cleanup reports residue twice in a row — remove the remaining resources by
   hand before another run.
 

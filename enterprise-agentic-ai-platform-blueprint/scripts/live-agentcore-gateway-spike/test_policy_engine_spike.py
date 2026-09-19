@@ -1238,3 +1238,15 @@ def test_gateway_propagation_does_not_retry_unrelated_validation(
     finally:
         spike.close()
     assert attempts == 1
+
+
+def test_auth_failure_status_contract_is_case_specific() -> None:
+    assert spike_module.AUTH_FAILURE_HTTP_STATUS == {
+        "missing_header": 401,
+        "malformed_compact_jws": 401,
+        "forged_subject_signature_mismatch": 403,
+        "forged_group_signature_mismatch": 403,
+        "unsigned_alg_none": 401,
+        "client_not_allow_listed": 403,
+    }
+    assert spike_module.EXPIRED_TOKEN_HTTP_STATUS == 403
