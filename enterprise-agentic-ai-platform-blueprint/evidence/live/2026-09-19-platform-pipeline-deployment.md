@@ -150,10 +150,12 @@ This deployment does **not** prove:
 - An exact HTTP 429 negative twin against the pipeline-owned production rate
   limit. The rate limit is `ACTIVE` and positive calls passed, while exact 429
   behavior remains proven by the isolated compatibility spike.
-- AgentCore Gateway PolicyEngine enforcement or Bedrock Guardrail attachment on
-  every inference call.
-- Per-developer `sub` authorization; the current interim Lambda evaluator is
-  group-based.
+- Pipeline-owned AgentCore Gateway PolicyEngine enforcement or Bedrock Guardrail
+  attachment on every inference call. The isolated PolicyEngine API contract is
+  proven separately in
+  [`2026-09-19-policyengine-compatibility-spike.md`](2026-09-19-policyengine-compatibility-spike.md).
+- Product-integrated per-developer `sub` authorization; the isolated
+  subject/group matrix passed, while the deployed wrapper remains group-based.
 - Workstream Tool Gateway, Runtime, Memory, generated-agent deployment, or
   pipeline-only Workstream delivery.
 - SCPs 01–12 through an organization sandbox soak.

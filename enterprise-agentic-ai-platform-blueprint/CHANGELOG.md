@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Native Gateway rate limits with explicit provider-qualified model RPM/TPM allocations and a zero-rate wildcard fallback.
 - Five-tag allocation contract on taggable Gateway resources and non-secret CloudFormation outputs for workload integration.
 - Conformance coverage for resource shape, IAM trust, Cognito M2M, model-ID validation, lifecycle ordering, and teardown context.
+- Cleanup-first AgentCore Gateway PolicyEngine compatibility runner with four-user `sub`/group semantics, strict Cedar validation, exact JWT negatives, mode rollback, ownership-checked teardown, and 158 focused tests.
 
 ### Changed
 
@@ -30,11 +31,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Nonproduction Log Archive buckets, stream, and CMK use destroy/auto-delete semantics; production retains the audit archive by default. Audit and Log Archive are emitted only once because Management/Governance is shared across environments.
 - Management bootstrap guidance now covers the stack-scoped IAM role, managed-policy attach/detach, Lambda lifecycle, and Lambda-only `iam:PassRole` required by CDK's nonproduction S3 auto-delete provider; this boundary was proven by the first live Log Archive rollback.
 - Teardown now includes `AgenticAI-Platform-InferenceGatewayStack` and requires the deployment's model-rate context.
+- `TODO-GW-POLICY-ENGINE` now reflects migration debt rather than API availability: the Lambda wrapper remains until the real Workload pipeline passes PolicyEngine behavior parity, rollback, and zero-residual teardown.
 
 ### Verification
 
 - The preceding compatibility spike passed live in `us-west-2` for IAM and Cognito M2M auth, model discovery, Strands `LiteLLMModel` streaming/non-streaming, exact HTTP 429, and zero-residue cleanup.
 - Platform pipeline executions passed on exact commits `f037b4e`, `2ca8272`, and `0ef7f50`: Source, Synth, SelfMutate, assets, all five nonproduction deployments, fresh explicit approvals, and all three production deployments. The production Guardrail, Gateway, and inference target are `READY`; the native rate limit is `ACTIVE`; the Management/Governance Log Archive is live; and the pipeline-owned Gateway passed Cognito M2M, 49-model discovery, and Strands `LiteLLMModel` streaming/non-streaming. Sanitized details are in `evidence/live/2026-09-19-platform-pipeline-deployment.md`.
+- The isolated Gateway PolicyEngine run passed on exact commit `46c3a62`: eight strict Cedar policies, 20 subject/group decisions, four filtered tool lists, direct-call denial, exact 401/403 JWT negatives, expired-token denial, `ENFORCE → LOG_ONLY → ENFORCE`, and independent zero-residual inventory. Sanitized details are in `evidence/live/2026-09-19-policyengine-compatibility-spike.md`.
 - OTEL rate-limit span correlation remains blocked: `aws/spans` stayed empty under an active CloudWatch Logs trace destination, 100% indexing, configured deliveries, propagation delay, and extended polling. It is not counted as passing evidence.
 
 ## [1.0.0] - 2026-08-18
