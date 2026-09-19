@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Cross-account pipeline bootstrap guidance requires exact `iam:PassRole` grants for target CDK deploy roles scoped to CodePipeline and target CloudFormation execution roles scoped to CloudFormation.
 - Log Archive now provisions its encrypted on-demand Kinesis target and `logs.amazonaws.com` delivery role with sender/recipient `aws:SourceArn` confused-deputy conditions instead of unresolved placeholder ARNs.
 - Nonproduction Log Archive buckets, stream, and CMK use destroy/auto-delete semantics; production retains the audit archive by default. Audit and Log Archive are emitted only once because Management/Governance is shared across environments.
+- Management bootstrap guidance now covers the stack-scoped IAM role, managed-policy attach/detach, Lambda lifecycle, and Lambda-only `iam:PassRole` required by CDK's nonproduction S3 auto-delete provider; this boundary was proven by the first live Log Archive rollback.
 - Teardown now includes `AgenticAI-Platform-InferenceGatewayStack` and requires the deployment's model-rate context.
 
 ### Verification

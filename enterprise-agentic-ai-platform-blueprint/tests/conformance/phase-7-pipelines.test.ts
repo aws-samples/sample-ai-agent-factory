@@ -219,6 +219,14 @@ describe('Phase 7 — cross-account bootstrap role contract', () => {
       'iam:PassedToService=cloudformation.amazonaws.com',
     );
     expect(bootstrapSource).toContain(
+      'Nonprod-LogArchive-CustomS3AutoDeleteObjects*',
+    );
+    expect(bootstrapSource).toContain('iam:AttachRolePolicy');
+    expect(bootstrapSource).toContain('iam:DetachRolePolicy');
+    expect(bootstrapSource).toContain(
+      'iam:PassedToService=lambda.amazonaws.com',
+    );
+    expect(bootstrapSource).toContain(
       'LOG_ARCHIVE="$(json agenticai/logArchiveAccountId)"',
     );
     expect(bootstrapSource).toContain(

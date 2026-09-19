@@ -43,7 +43,12 @@ QUALIFIER="hnb659fds"
 # The Management account execution policy additionally needs Kinesis lifecycle
 # actions, IAM lifecycle actions on the exact
 # AgenticAI-LogArchive-CWLDestinationRole, and iam:PassRole on that role with
-# iam:PassedToService=logs.amazonaws.com.
+# iam:PassedToService=logs.amazonaws.com. Nonproduction bucket cleanup also
+# synthesizes resources named Nonprod-LogArchive-CustomS3AutoDeleteObjects*:
+# allow iam:CreateRole, iam:DeleteRole, iam:AttachRolePolicy,
+# iam:DetachRolePolicy, and related role lifecycle actions on that role-name prefix, iam:PassRole only with
+# iam:PassedToService=lambda.amazonaws.com, and Lambda lifecycle actions only on
+# the matching function-name prefix.
 # The default below is intentionally NOT AdministratorAccess so a copy-paste
 # run fails safe and forces an explicit choice.
 CFN_EXECUTION_POLICY_ARN="${CFN_EXECUTION_POLICY_ARN:-}"
