@@ -211,6 +211,14 @@ switch (stage) {
           "Platform stage requires context 'agenticai/inferenceModelRateLimits'.",
         );
       }
+      if (platformEnvName !== 'nonprod' && platformEnvName !== 'prod') {
+        throw new Error("Platform stage context 'agenticai/envName' must be 'nonprod' or 'prod'.");
+      }
+      if (workloadAccountIds.length === 0) {
+        throw new Error(
+          "Platform stage requires non-empty context 'agenticai/workloadAccountIds' for the GA Registry reader trust.",
+        );
+      }
       new GuardrailStack(app, 'AgenticAI-Platform-GuardrailStack', {
         env: { account: platformAccount, region },
         pipelineRoleArn,
@@ -218,6 +226,11 @@ switch (stage) {
       new RegistryStack(app, 'AgenticAI-Platform-RegistryStack', {
         env: { account: platformAccount, region },
         envName: platformEnvName,
+        workloadAccountIds,
+        applicationId: String(applicationId),
+        agentId: String(agentId),
+        tenantId: String(tenantId),
+        costCentre: String(costCentre),
       });
       new InferenceGatewayStack(app, 'AgenticAI-Platform-InferenceGatewayStack', {
         env: { account: platformAccount, region },

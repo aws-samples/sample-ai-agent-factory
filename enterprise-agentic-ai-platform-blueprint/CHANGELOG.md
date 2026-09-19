@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Conformance coverage for resource shape, IAM trust, Cognito M2M, model-ID validation, lifecycle ordering, and teardown context.
 - Cleanup-first AgentCore Gateway PolicyEngine compatibility runner with four-user `sub`/group semantics, strict Cedar validation, exact JWT negatives, mode rollback, ownership-checked teardown, and 158 focused tests.
 - Cleanup-first GA Agent Registry compatibility runner with native CloudFormation types, custom governance-document round trip, explicit `DRAFT → submit → APPROVED`, data-plane discovery, deterministic update rollback, ownership-checked teardown, and 30 focused tests.
+- Pipeline-owned blue-green GA Registry producer: native Registry and tagged `CUSTOM` governance records, exact `agent-registry` read permissions, conditioned `RegistryReaderRole`, per-record/versioned SSM discovery parameters, and `RetainExceptOnCreate` state protection alongside the unchanged DynamoDB rollback path.
 
 ### Changed
 

@@ -124,6 +124,11 @@ export class PlatformDeploymentStage extends Stage {
     new RegistryStack(this, 'Registry', {
       env: props.env,
       envName: props.envName,
+      workloadAccountIds: props.workloadAccountIds,
+      applicationId: props.applicationId,
+      agentId: props.agentId,
+      tenantId: props.tenantId,
+      costCentre: props.costCentre,
     });
     new InferenceGatewayStack(this, 'InferenceGateway', {
       env: props.env,

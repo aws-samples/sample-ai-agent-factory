@@ -37,3 +37,11 @@ export {
   type RegistryRecordStatus,
   type RegistryInboundAuthType,
 } from './registry-record-spec';
+
+export {
+  GaPlatformRegistryConstruct,
+  buildGaToolGovernanceDocument,
+  type GaPlatformRegistryConstructProps,
+  type GaPlatformRegistryTags,
+  type GaToolGovernanceDocument,
+} from './ga-platform-registry-construct';
