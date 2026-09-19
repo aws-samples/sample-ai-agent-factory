@@ -94,6 +94,8 @@ See `assets/architecture-diagram.png` (editable `.drawio` source alongside). Con
 | Workload non-prod / prod | AgenticAI-Workloads | Per-application agent stacks |
 | SCP Sandbox | AgenticAI-Sandbox | Soaks new SCPs before promotion |
 
+CloudWatch Logs destination access policies are service-specific: `Principal.AWS` lists each sender's 12-digit account ID. IAM root ARNs are not equivalent here and are rejected by `PutDestinationPolicy`.
+
 ### 2.2 Network
 
 Per workload account (`packages/agentic-vpc/`): VPC with 3 AZs, **private-isolated subnets only** (no IGW/NAT); interface VPCEs for AgentCore (data/control/gateway), Bedrock (runtime/management), ECR, CloudWatch, STS, KMS + S3 gateway endpoint (11 interface + 1 gateway). Endpoint policies scoped to the local account root; the Bedrock Runtime endpoint restricts `InvokeModel`/`Converse` to the allow-listed model ARNs and denies when `GuardrailIdentifier` is Null. VPC Flow Logs → CMK-encrypted log group.

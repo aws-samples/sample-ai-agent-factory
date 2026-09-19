@@ -301,7 +301,10 @@ export class LogArchiveConstruct extends Construct {
             Sid: 'AllowWorkloadSubscribeFilterPut',
             Effect: 'Allow',
             Principal: {
-              AWS: props.workloadAccountIds.map((acct) => `arn:aws:iam::${acct}:root`),
+              // CloudWatch Logs destination policies require 12-digit account
+              // IDs here; unlike general IAM resource policies, root ARNs are
+              // rejected by PutDestinationPolicy.
+              AWS: props.workloadAccountIds,
             },
             Action: 'logs:PutSubscriptionFilter',
             Resource: `arn:aws:logs:${Stack.of(this).region}:${Stack.of(this).account}:destination:AgenticAI-CentralLogs`,

@@ -194,9 +194,11 @@ describe('Phase 2 — LogArchiveStack', () => {
     // Destination policies may serialise as either a string or an object.
     const parsed: { Statement: any[] } =
       typeof rawPolicy === 'string' ? JSON.parse(rawPolicy) : (rawPolicy as any);
-    const principalArns = parsed.Statement[0].Principal.AWS;
-    expect(principalArns).toContain('arn:aws:iam::444444444444:root');
-    expect(principalArns).toContain('arn:aws:iam::555555555555:root');
+    const principalAccountIds: string[] = parsed.Statement[0].Principal.AWS;
+    expect(principalAccountIds).toEqual(
+      expect.arrayContaining(['444444444444', '555555555555']),
+    );
+    expect(principalAccountIds.every((principal) => /^\d{12}$/.test(principal))).toBe(true);
   });
 });
 
