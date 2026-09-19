@@ -602,11 +602,20 @@ def _create_step_role(
             # at all — same class of mistake as GetLastKTurns/RetrieveMemories in
             # build_shared_runtime_role: IAM accepts a nonexistent action without
             # complaint and authorizes nothing, so they read as capability the role
-            # does not have. Both oracles agree: IAM Access Analyzer returns
-            # INVALID_ACTION ("does not exist") for each, and botocore's
-            # bedrock-agentcore-control model has no such operation (it has
-            # Get/Put/DeleteResourcePolicy, which are resource-BASED policies, a
-            # different feature). Nothing in this repo calls them.
+            # does not have.
+            #
+            # The oracle that decided it is IAM Access Analyzer: `validate-policy`
+            # returns INVALID_ACTION ("does not exist") for each of those two, while
+            # ManageResourceScopedPolicy, ManageAdminPolicy and InvokeGateway
+            # validate clean in the same document. botocore is NOT a second opinion
+            # here, and reading it as one is a trap: those three real actions are
+            # IAM-only and have no SDK operation either, so absence from the
+            # bedrock-agentcore-control model is equally true of the real and the
+            # fake. (It has Get/Put/DeleteResourcePolicy — resource-BASED policies,
+            # a different feature.) The export path lost a genuine grant exactly
+            # that way once: CreateTokenVault was pruned as "absent from the model"
+            # and the next fresh-account deploy failed on it. Use Access Analyzer,
+            # and check nothing in the repo calls the verb, as here.
             "bedrock-agentcore:ManageResourceScopedPolicy",
             # The policy step reads the gateway it's about to attach the
             # engine to (and updates it). Without GetGateway, the bind

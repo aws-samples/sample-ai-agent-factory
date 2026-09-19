@@ -250,14 +250,29 @@ def test_the_invoke_gateway_grant_is_scoped_to_gateway_arns(source_file, func_na
 # Actions that LOOK like AgentCore verbs and are not. IAM accepts a nonexistent
 # action silently and authorizes nothing, so each of these is a grant that reads
 # as capability the role does not have — the failure mode is a reviewer (or the
-# next engineer) believing a call is permitted when it can never be. Each entry
-# was confirmed by BOTH oracles the repo uses: IAM Access Analyzer
-# (`validate-policy` -> INVALID_ACTION "does not exist") and botocore's service
-# model for the relevant client. Add to this list when a new one is retired.
+# next engineer) believing a call is permitted when it can never be.
+#
+# THE ORACLE FOR ADDING TO THIS LIST IS IAM ACCESS ANALYZER, not botocore.
+# `aws accessanalyzer validate-policy --policy-type IDENTITY_POLICY` returns
+# INVALID_ACTION "The action ... does not exist" for a fake verb and says nothing
+# about a real one. Absence from botocore's service model is NOT corroboration:
+# AuthorizeAction, InvokeGateway, ManageAdminPolicy, ManageResourceScopedPolicy
+# and CreateTokenVault are all real IAM actions with no SDK operation behind them,
+# so the model is silent on the real and the fake alike. Pruning by botocore is
+# how the export path lost `bedrock-agentcore:CreateTokenVault` and failed the
+# next fresh-account deploy — see the note on it in
+# test_cfn_export_contract.py::TestEmittedActionsAreRealIamActions. Confirm with
+# Access Analyzer, and confirm nothing in the repo calls the verb.
+#
+# Scope: this test reads the platform stack sources only. The EXPORT path's
+# counterpart is
+# TestEmittedActionsAreRealIamActions::test_the_specific_inert_grants_are_gone,
+# which asserts over the actions the generator actually emits (stronger than a
+# text search, since it cannot be fooled by YAML quoting) and carries the same
+# names. Add a retired verb to BOTH lists, or the two paths drift.
 _NONEXISTENT_ACTIONS = [
     # Retired 2026-09-19 from the policy step role and the deployment Lambda role.
-    # `ManageResourceScopedPolicy` is real (an IAM-only action with no SDK
-    # operation, which Access Analyzer accepts); these two are not. The
+    # `ManageResourceScopedPolicy` is real and stays; these two are not. The
     # control-plane model has Get/Put/DeleteResourcePolicy — resource-BASED
     # policies, an unrelated feature.
     "bedrock-agentcore:GetResourceScopedPolicy",

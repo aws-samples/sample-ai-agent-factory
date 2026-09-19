@@ -2453,6 +2453,23 @@ class TestEmittedActionsAreRealIamActions:
             "bedrock-agentcore:RetrieveMemories",
             "bedrock-agentcore:InvokeAgent",
             "bedrock-agentcore:CheckAuthorizePermissions",
+            # Added 2026-09-19, when these two were retired from the PLATFORM's
+            # policy step role and deployment Lambda role. The export never granted
+            # them, so this is not a regression guard for something that happened
+            # here — it makes the two paths symmetric. The generator emits roles from
+            # the same AgentCore verb vocabulary as the platform stack, and until
+            # now a copy-paste of a fake verb into the generator would have been
+            # caught on the platform side only (its guard reads
+            # infra/stacks/platform/*.py and never this file).
+            #
+            # Established the way the CreateTokenVault note above says to: IAM
+            # Access Analyzer returns INVALID_ACTION "does not exist" for exactly
+            # these two, while ManageResourceScopedPolicy — the real verb they sat
+            # next to, and the one that actually authorizes gateway-scoped policy
+            # create/delete — validates clean in the same document. Not inferred
+            # from botocore's model, which is silent about real IAM-only actions too.
+            "bedrock-agentcore:GetResourceScopedPolicy",
+            "bedrock-agentcore:ListResourceScopedPolicies",
         ):
             assert action not in actions, f"{action} authorizes nothing and is back in the template"
 

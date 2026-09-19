@@ -560,10 +560,12 @@ def build_deployment_lambda(
                 # Bug 134: gateway-scoped policy create/delete is authorized as
                 # ManageResourceScopedPolicy on the gateway ARN (not CreatePolicy).
                 # Get/ListResourceScopedPolic* used to follow and were removed:
-                # neither is a real AgentCore IAM action (Access Analyzer
-                # INVALID_ACTION + absent from botocore's control-plane model), so
-                # they granted nothing and only implied capability. See the longer
-                # note in platform/step_lambdas.py.
+                # neither is a real AgentCore IAM action, so they granted nothing
+                # and only implied capability. IAM Access Analyzer is what
+                # established that (INVALID_ACTION); absence from botocore proves
+                # nothing on its own, because the real IAM-only actions next to
+                # them are absent too. See the longer note in
+                # platform/step_lambdas.py.
                 "bedrock-agentcore:ManageResourceScopedPolicy",
                 # AgentCore's DeleteAgentRuntime cascades into deleting
                 # the runtime's auto-created workload-identity record;
