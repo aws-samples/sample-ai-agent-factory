@@ -14,16 +14,22 @@ import { resolve } from 'node:path';
 import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 
-import { PlatformPipelineStack } from '../../pipelines/platform-pipeline-stack';
+import { GuardrailStack } from '../../apps/platform-account/lib/guardrail-stack';
+import {
+  PlatformDeploymentStage,
+  PlatformPipelineStack,
+} from '../../pipelines/platform-pipeline-stack';
 import { stageAwareSynthCommands } from '../../pipelines/synth-commands';
 import { WorkloadPipelineStack } from '../../pipelines/workload-pipeline-stack';
 
 const GITHUB_CONNECTION =
   'arn:aws:codestar-connections:us-west-2:111111111111:connection/abc-123';
 
-function synthPlatform() {
-  const app = new App();
-  const stack = new PlatformPipelineStack(app, 'PP', {
+function createPlatformPipeline(
+  app: App,
+  platformProdAccount = '222222222222',
+): PlatformPipelineStack {
+  return new PlatformPipelineStack(app, 'PP', {
     env: { account: '111111111111', region: 'us-west-2' },
     githubRepo: 'aws-samples/sample-ai-agent-factory',
     githubConnectionArn: GITHUB_CONNECTION,
@@ -31,7 +37,7 @@ function synthPlatform() {
     logArchive: { env: { account: '333333333333', region: 'us-west-2' }, envName: 'nonprod' },
     audit: { env: { account: '666666666666', region: 'us-west-2' }, envName: 'nonprod' },
     platformNonprod: { env: { account: '111111111111', region: 'us-west-2' }, envName: 'nonprod' },
-    platformProd: { env: { account: '222222222222', region: 'us-west-2' }, envName: 'prod' },
+    platformProd: { env: { account: platformProdAccount, region: 'us-west-2' }, envName: 'prod' },
     workloadAccountIds: ['444444444444', '555555555555'],
     pipelineRoleArn: 'arn:aws:iam::111111111111:role/AgenticAI-PlatformPipelineRole',
     applicationId: 'platform-inference',
@@ -46,7 +52,11 @@ function synthPlatform() {
       },
     ],
   });
-  return Template.fromStack(stack);
+}
+
+function synthPlatform() {
+  const app = new App();
+  return Template.fromStack(createPlatformPipeline(app));
 }
 
 function synthWorkload() {
@@ -154,6 +164,28 @@ describe('Phase 7 — Platform pipeline', () => {
       expect(nonprodActions).toContain(action);
       expect(prodActions).not.toContain(action);
     }
+  });
+
+  it('reuses the admin role and isolates guardrail names in one Platform account', () => {
+    const app = new App();
+    const root = createPlatformPipeline(app, '111111111111');
+    const nonprodStage = root.node.findChild('Nonprod') as PlatformDeploymentStage;
+    const prodStage = root.node.findChild('Prod') as PlatformDeploymentStage;
+    const nonprodGuardrail = nonprodStage.node.findChild('Guardrail') as GuardrailStack;
+    const prodGuardrail = prodStage.node.findChild('Guardrail') as GuardrailStack;
+    const nonprodTemplate = Template.fromStack(nonprodGuardrail);
+    const prodTemplate = Template.fromStack(prodGuardrail);
+
+    nonprodTemplate.hasResourceProperties('AWS::IAM::Role', {
+      RoleName: 'AgenticAI-GuardrailAdmin',
+    });
+    nonprodTemplate.hasResourceProperties('AWS::Bedrock::Guardrail', {
+      Name: 'agenticai-guardrail-baseline',
+    });
+    prodTemplate.resourceCountIs('AWS::IAM::Role', 0);
+    prodTemplate.hasResourceProperties('AWS::Bedrock::Guardrail', {
+      Name: 'agenticai-guardrail-baseline-prod',
+    });
   });
 
   it('configures cross-account keys (required for multi-account stages)', () => {
@@ -499,6 +531,14 @@ describe('Round 1 integration — CDK app self-synth contract', () => {
     expect(platformPipelineSource).toContain("if (props.envName === 'nonprod')");
     expect(platformPipelineSource).toContain(
       "retainGovernanceOnDelete: props.logArchive.envName === 'prod'",
+    );
+    expect(platformPipelineSource).toContain('platformAccountIsShared');
+    expect(platformPipelineSource).toContain('sharedGuardrailAdminRoleArn');
+    expect(platformPipelineSource).toContain(
+      "'agenticai-guardrail-baseline-prod'",
+    );
+    expect(platformPipelineSource).toContain(
+      'existingGuardrailAdminRoleArn: sharedGuardrailAdminRoleArn',
     );
   });
 

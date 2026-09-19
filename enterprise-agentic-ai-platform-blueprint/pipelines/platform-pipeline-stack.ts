@@ -87,6 +87,8 @@ export interface PlatformDeploymentStageProps extends StageProps {
   readonly auditEnv: Required<Environment>;
   readonly logArchiveEnv: Required<Environment>;
   readonly retainGovernanceOnDelete: boolean;
+  readonly existingGuardrailAdminRoleArn?: string;
+  readonly baselineGuardrailName?: string;
   readonly applicationId: string;
   readonly agentId: string;
   readonly tenantId: string;
@@ -116,6 +118,8 @@ export class PlatformDeploymentStage extends Stage {
     new GuardrailStack(this, 'Guardrail', {
       env: props.env,
       pipelineRoleArn: props.pipelineRoleArn,
+      existingAdminRoleArn: props.existingGuardrailAdminRoleArn,
+      baselineGuardrailName: props.baselineGuardrailName,
     });
     new RegistryStack(this, 'Registry', {
       env: props.env,
@@ -186,6 +190,13 @@ export class PlatformPipelineStack extends Stack {
       costCentre: props.costCentre,
       inferenceModelRateLimits: props.inferenceModelRateLimits,
     };
+    const platformAccountIsShared =
+      props.platformNonprod.env.account === props.platformProd.env.account;
+    const platformRegionIsShared =
+      props.platformNonprod.env.region === props.platformProd.env.region;
+    const sharedGuardrailAdminRoleArn = platformAccountIsShared
+      ? `arn:${this.partition}:iam::${props.platformNonprod.env.account}:role/AgenticAI-GuardrailAdmin`
+      : undefined;
 
     this.pipeline.addStage(
       new PlatformDeploymentStage(this, 'Nonprod', {
@@ -211,6 +222,11 @@ export class PlatformPipelineStack extends Stack {
         auditEnv: props.audit.env,
         logArchiveEnv: props.logArchive.env,
         retainGovernanceOnDelete: props.logArchive.envName === 'prod',
+        existingGuardrailAdminRoleArn: sharedGuardrailAdminRoleArn,
+        baselineGuardrailName:
+          platformAccountIsShared && platformRegionIsShared
+            ? 'agenticai-guardrail-baseline-prod'
+            : undefined,
         ...sharedGatewayProps,
       }),
       { pre: [new ManualApprovalStep('SecurityReview')] },
