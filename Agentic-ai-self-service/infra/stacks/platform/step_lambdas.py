@@ -604,18 +604,35 @@ def _create_step_role(
             # complaint and authorizes nothing, so they read as capability the role
             # does not have.
             #
-            # The oracle that decided it is IAM Access Analyzer: `validate-policy`
-            # returns INVALID_ACTION ("does not exist") for each of those two, while
-            # ManageResourceScopedPolicy, ManageAdminPolicy and InvokeGateway
-            # validate clean in the same document. botocore is NOT a second opinion
-            # here, and reading it as one is a trap: those three real actions are
-            # IAM-only and have no SDK operation either, so absence from the
-            # bedrock-agentcore-control model is equally true of the real and the
-            # fake. (It has Get/Put/DeleteResourcePolicy — resource-BASED policies,
-            # a different feature.) The export path lost a genuine grant exactly
-            # that way once: CreateTokenVault was pruned as "absent from the model"
-            # and the next fresh-account deploy failed on it. Use Access Analyzer,
-            # and check nothing in the repo calls the verb, as here.
+            # HOW TO DECIDE THIS. The oracles, in decreasing authority — and no
+            # single one of them is sufficient:
+            #   1. A live AccessDenied naming the action proves it exists AND is
+            #      enforced. Conclusive; nothing overrides it.
+            #   2. AWS's machine-readable Service Reference feed: the index at
+            #      https://servicereference.us-east-1.amazonaws.com/ then
+            #      /v1/<service>/<service>.json. Authoritative but it LAGS —
+            #      bedrock-agentcore lists 255 actions and omits CreateTokenVault,
+            #      which oracle 1 proves is real and enforced.
+            #   3. `aws accessanalyzer validate-policy --policy-type
+            #      IDENTITY_POLICY` -> INVALID_ACTION "does not exist". Agreed with
+            #      (2) on every action checked here, because it reads the SAME
+            #      dataset — so it inherits the same lag and is NOT an independent
+            #      second opinion.
+            #   4. botocore's service model: NOT an oracle at all.
+            #      ManageResourceScopedPolicy, ManageAdminPolicy, InvokeGateway and
+            #      CreateTokenVault are all real IAM actions with no SDK operation
+            #      behind them, so the model is silent on the real and the fake
+            #      alike. (It does carry Get/Put/DeleteResourcePolicy — resource-
+            #      BASED policies, an unrelated feature.)
+            #
+            # So absence from (2)/(3) is NOT grounds to delete a grant on its own.
+            # Removal is safe only when the action is absent from the reference AND
+            # nothing in the repo calls it AND no service-side implicit
+            # authorization needs it. The two Get/List verbs retired here clear all
+            # three. CreateTokenVault clears none of them: it is absent from the
+            # reference and from Access Analyzer, yet a fresh-account deploy fails
+            # with AccessDenied on it — which is exactly how the export path lost
+            # that grant once, by pruning on absence alone.
             "bedrock-agentcore:ManageResourceScopedPolicy",
             # The policy step reads the gateway it's about to attach the
             # engine to (and updates it). Without GetGateway, the bind

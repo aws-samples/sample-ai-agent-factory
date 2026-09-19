@@ -562,9 +562,12 @@ def build_deployment_lambda(
                 # Get/ListResourceScopedPolic* used to follow and were removed:
                 # neither is a real AgentCore IAM action, so they granted nothing
                 # and only implied capability. IAM Access Analyzer is what
-                # established that (INVALID_ACTION); absence from botocore proves
-                # nothing on its own, because the real IAM-only actions next to
-                # them are absent too. See the longer note in
+                # established that (INVALID_ACTION). Note that Access Analyzer
+                # alone is NOT sufficient to delete a grant — it also reports
+                # CreateTokenVault as nonexistent, and a live deploy fails with
+                # AccessDenied on exactly that action. Absence from the reference
+                # PLUS no caller in the repo PLUS no implicit service-side
+                # authorization is the bar. See the full oracle hierarchy in
                 # platform/step_lambdas.py.
                 "bedrock-agentcore:ManageResourceScopedPolicy",
                 # AgentCore's DeleteAgentRuntime cascades into deleting

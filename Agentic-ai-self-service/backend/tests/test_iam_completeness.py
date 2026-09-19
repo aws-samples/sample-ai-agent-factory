@@ -178,9 +178,7 @@ def _policy_statements_granting(action: str) -> list[tuple[str, str, str]]:
                 if not any(isinstance(e, ast.Constant) and e.value == action for e in actions.elts):
                     continue
                 resources = kwargs.get("resources")
-                found.append(
-                    (path.name, func.name, ast.get_source_segment(source, resources) if resources else "")
-                )
+                found.append((path.name, func.name, ast.get_source_segment(source, resources) if resources else ""))
     return found
 
 
@@ -233,11 +231,7 @@ def test_the_invoke_gateway_grant_is_scoped_to_gateway_arns(source_file, func_na
     prefix is knowable at synth time, so there is no reason for a wildcard
     resource. Per-deploy gateway ids are not knowable, so the id stays wildcarded.
     """
-    scoped = [
-        res
-        for f, fn, res in _policy_statements_granting(_INVOKE_GATEWAY)
-        if (f, fn) == (source_file, func_name)
-    ]
+    scoped = [res for f, fn, res in _policy_statements_granting(_INVOKE_GATEWAY) if (f, fn) == (source_file, func_name)]
     assert scoped, f"{_INVOKE_GATEWAY} is not granted in {source_file}::{func_name}"
     for res in scoped:
         assert ":gateway/" in res, (
@@ -252,17 +246,31 @@ def test_the_invoke_gateway_grant_is_scoped_to_gateway_arns(source_file, func_na
 # as capability the role does not have — the failure mode is a reviewer (or the
 # next engineer) believing a call is permitted when it can never be.
 #
-# THE ORACLE FOR ADDING TO THIS LIST IS IAM ACCESS ANALYZER, not botocore.
-# `aws accessanalyzer validate-policy --policy-type IDENTITY_POLICY` returns
-# INVALID_ACTION "The action ... does not exist" for a fake verb and says nothing
-# about a real one. Absence from botocore's service model is NOT corroboration:
-# AuthorizeAction, InvokeGateway, ManageAdminPolicy, ManageResourceScopedPolicy
-# and CreateTokenVault are all real IAM actions with no SDK operation behind them,
-# so the model is silent on the real and the fake alike. Pruning by botocore is
-# how the export path lost `bedrock-agentcore:CreateTokenVault` and failed the
-# next fresh-account deploy — see the note on it in
-# test_cfn_export_contract.py::TestEmittedActionsAreRealIamActions. Confirm with
-# Access Analyzer, and confirm nothing in the repo calls the verb.
+# ADDING TO THIS LIST TAKES THREE INDEPENDENT CHECKS, NOT ONE. In decreasing
+# authority, the oracles available and what each is worth:
+#   1. A live AccessDenied naming the action proves it exists and is enforced.
+#      Conclusive against everything below.
+#   2. AWS's machine-readable Service Reference feed — the index at
+#      https://servicereference.us-east-1.amazonaws.com/ then
+#      /v1/<service>/<service>.json. Authoritative but it LAGS.
+#   3. `aws accessanalyzer validate-policy --policy-type IDENTITY_POLICY` ->
+#      INVALID_ACTION "The action ... does not exist". Reads the SAME dataset as
+#      (2), so it inherits the same lag and is not an independent opinion.
+#   4. botocore's service model: NOT an oracle. AuthorizeAction, InvokeGateway,
+#      ManageAdminPolicy, ManageResourceScopedPolicy and CreateTokenVault are all
+#      real IAM actions with no SDK operation behind them, so the model is silent
+#      on the real and the fake alike.
+#
+# THE COUNTEREXAMPLE THAT SETS THE BAR: `bedrock-agentcore:CreateTokenVault` is
+# absent from BOTH the Service Reference feed and Access Analyzer, and a live
+# fresh-account deploy still fails "not authorized to perform:
+# bedrock-agentcore:CreateTokenVault on resource: .../token-vault/default". So
+# INVALID_ACTION is NECESSARY BUT NOT SUFFICIENT. A verb may only be retired when
+# it is absent from the reference AND nothing in the repo calls it AND no
+# service-side implicit authorization needs it. Pruning on absence alone is how the
+# export path lost that grant once — see the note in
+# test_cfn_export_contract.py::TestEmittedActionsAreRealIamActions, and the
+# inert-but-kept list in _ABSENT_BUT_KEPT below.
 #
 # Scope: this test reads the platform stack sources only. The EXPORT path's
 # counterpart is
@@ -297,6 +305,74 @@ def test_no_role_grants_an_action_that_does_not_exist(action):
             "authorizing, find the action that exists (Access Analyzer "
             "validate-policy names the invalid ones)."
         )
+
+
+# --------------------------------------------------------------------------- #
+# The other side of the same coin: actions Access Analyzer calls nonexistent     #
+# that we KEEP, and the real grant each one must never be mistaken for.         #
+# --------------------------------------------------------------------------- #
+#
+# A sweep of all 273 actions the platform stack synthesizes through
+# `aws accessanalyzer validate-policy` returned exactly nine INVALID_ACTION
+# findings. None of them is removed, for two different reasons:
+#
+#   * CreateTokenVault is PROVEN NEEDED LIVE (AccessDenied on a fresh account),
+#     so Access Analyzer is simply wrong about it — see _NONEXISTENT_ACTIONS above.
+#   * The other eight are inert but HARMLESS, and each sits next to the real
+#     capability-bearing verb for the same operation. Deleting the inert one is
+#     cosmetic; deleting the REAL one because it looked like the duplicate is a
+#     live AccessDenied. That is what this test guards.
+#
+# So the value asserted below is the COUNTERPART, not the inert action. If someone
+# tidies this area up, the inert names may go; the counterparts may not.
+_ABSENT_BUT_KEPT = {
+    # inert action: the real action(s) that actually authorize the capability
+    "agent-registry:BatchGetDiscoverableRegistryRecord": [
+        "agent-registry:ListDiscoverableRegistryRecords",
+        "agent-registry:SearchDiscoverableRegistryRecords",
+    ],
+    # Index metadata on an OpenSearch Serverless collection is a DATA-plane read,
+    # authorized by aoss:APIAccessAll, not by a control-plane Describe verb.
+    "aoss:DescribeIndex": ["aoss:APIAccessAll"],
+    "bedrock-agentcore:ListTokenVaults": ["bedrock-agentcore:GetTokenVault"],
+    # The browser tool is driven by session verbs, not a single Invoke.
+    "bedrock-agentcore:InvokeBrowser": [
+        "bedrock-agentcore:StartBrowserSession",
+        "bedrock-agentcore:ConnectBrowserAutomationStream",
+    ],
+    # The Converse / ConverseStream APIs are authorized by InvokeModel /
+    # InvokeModelWithResponseStream. There is no bedrock:Converse IAM action, so
+    # dropping InvokeModel "because Converse covers it" removes model access.
+    "bedrock:Converse": ["bedrock:InvokeModel"],
+    "bedrock:ConverseStream": ["bedrock:InvokeModelWithResponseStream"],
+    "s3vectors:DescribeIndex": ["s3vectors:GetIndex"],
+    "s3vectors:DescribeVectorBucket": ["s3vectors:GetVectorBucket"],
+}
+
+
+@pytest.mark.parametrize(
+    "inert,counterparts",
+    [(k, v) for k, v in _ABSENT_BUT_KEPT.items()],
+    ids=list(_ABSENT_BUT_KEPT),
+)
+def test_the_real_counterpart_of_an_inert_grant_is_still_granted(inert, counterparts):
+    """An inert grant must never be the thing holding a capability up.
+
+    Each key is an action IAM Access Analyzer reports as nonexistent, which the
+    stack still grants. The assertion is on the VALUE: the verb that really
+    authorizes that operation is present. If a cleanup pass removed the real one
+    and left the inert lookalike, the role would read as capable and authorize
+    nothing — the failure mode _NONEXISTENT_ACTIONS exists to describe, arrived at
+    from the opposite direction.
+    """
+    source = _platform_source()
+    missing = [c for c in counterparts if f'"{c}"' not in source]
+    assert not missing, (
+        f"{inert} is granted but authorizes nothing (Access Analyzer: does not "
+        f"exist), and its real counterpart(s) {missing} are no longer granted "
+        "anywhere in the platform stack sources. The capability is gone while the "
+        "policy still looks like it is there."
+    )
 
 
 def test_harness_block_holds_full_runtime_and_memory_lifecycle():
