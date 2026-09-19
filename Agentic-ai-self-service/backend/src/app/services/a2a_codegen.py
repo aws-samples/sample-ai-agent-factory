@@ -118,6 +118,7 @@ import json
 import ipaddress
 import socket
 import urllib.parse
+import uuid
 
 import httpx
 from starlette.responses import JSONResponse
@@ -306,6 +307,26 @@ def _a2a_check_peer_host(host):
     return None
 
 
+def _a2a_post(url, payload):
+    """POST ``payload`` to ``url`` and return the decoded body, or an error string.
+
+    Returns a dict on success and a str on failure, so a caller can tell the two apart
+    without exception handling of its own. Nothing here logs the payload or the body:
+    per ARCC cnt_Yq9sVcaZyQniIv those are customer content and do not belong in logs,
+    and the message being relayed to a peer is the user's.
+    """
+    try:
+        with httpx.Client(timeout=_A2A_HTTP_TIMEOUT, follow_redirects=False) as client:
+            resp = client.post(url, json=payload)
+            resp.raise_for_status()
+            try:
+                return resp.json()
+            except Exception:  # noqa: BLE001
+                return {{"text": resp.text}}
+    except Exception as e:  # noqa: BLE001
+        return "peer invocation failed: %s" % e
+
+
 @tool
 def call_a2a_peer(peer_url: str, message: str) -> str:
     """Call another A2A agent (peer). Discovers the peer's agent card at
@@ -343,10 +364,21 @@ def call_a2a_peer(peer_url: str, message: str) -> str:
         )
 
     invoke_url = (card or {{}}).get("url") or base + "/invocations"
-    # Re-validate the invoke endpoint (the card may point elsewhere). It MUST be
-    # https and pass the host denylist — a card pointing at http or an internal
-    # host is fail-closed BLOCKED, never silently followed.
+    # Resolve a relative url BEFORE validating the scheme, because the two orders are
+    # not equivalent and the other one is unreachable. A relative url has scheme "",
+    # so a `scheme != "https"` check ahead of the join refuses it -- and "/invocations"
+    # is exactly what a card advertises when nothing sets AGENTCORE_RUNTIME_URL, i.e.
+    # what every agent this generator emits advertises by default. An earlier version
+    # validated first and then had the join in an `elif not scheme` arm that the
+    # validation had already made unreachable, with a final `else` that returned
+    # "unsupported scheme" on the one path that was actually correct. Net effect,
+    # measured: no input existed for which this tool reached its POST. Relative first,
+    # then https, then the host denylist -- so a card pointing at http or at an
+    # internal host is still fail-closed BLOCKED and never silently followed.
     invoke_parsed = urllib.parse.urlparse(invoke_url)
+    if not invoke_parsed.scheme:
+        invoke_url = base + "/" + invoke_url.lstrip("/")
+        invoke_parsed = urllib.parse.urlparse(invoke_url)
     if invoke_parsed.scheme != "https":
         return json.dumps(
             {{"status": "BLOCKED", "error": "peer invoke url must use https scheme"}}
@@ -354,28 +386,54 @@ def call_a2a_peer(peer_url: str, message: str) -> str:
     invoke_block = _a2a_check_peer_host(invoke_parsed.hostname or "")
     if invoke_block is not None:
         return json.dumps({{"status": "BLOCKED", "error": invoke_block}})
-    elif not invoke_parsed.scheme:
-        # Relative URL from the card — resolve against the validated base.
-        invoke_url = base + "/" + invoke_url.lstrip("/")
-    else:
+
+    # A peer that publishes an A2A agent card is an A2A agent, and A2A over HTTP is
+    # JSON-RPC, so that is what goes on the wire. The previous shape -- a bare
+    # {{"prompt": ...}} -- is what THIS generator's own older exports understood and
+    # what a spec peer rejects, so it stays as a fallback rather than as the default.
+    rpc_id = str(uuid.uuid4())
+    payload = {{
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "method": "message/send",
+        "params": {{
+            "message": {{
+                "role": "user",
+                "messageId": str(uuid.uuid4()),
+                "parts": [{{"kind": "text", "text": message}}],
+            }}
+        }},
+    }}
+    body = _a2a_post(invoke_url, payload)
+    if not isinstance(body, dict):
+        return json.dumps({{"status": "ERROR", "error": str(body)}})
+    if "error" in body or "result" in body or "jsonrpc" in body:
+        # A real JSON-RPC response, whichever way it went. An error here is the peer's
+        # considered refusal and is returned as such -- retrying it as a plain prompt
+        # would turn a clear "method not found" into an answer to a different question.
+        if "error" in body:
+            return json.dumps({{"status": "ERROR", "peer_url": peer_url, "error": body["error"]}})
+        result = body.get("result")
+        text = _a2a_text_from_message(result) if isinstance(result, dict) else ""
         return json.dumps(
-            {{"status": "ERROR", "error": "peer card invoke url uses an unsupported scheme"}}
+            {{"status": "OK", "peer_url": peer_url, "response": text or result}}
         )
 
-    payload = {{"prompt": message, "message": message}}
-    try:
-        with httpx.Client(timeout=_A2A_HTTP_TIMEOUT, follow_redirects=False) as client:
-            resp = client.post(invoke_url, json=payload)
-            resp.raise_for_status()
-            try:
-                body = resp.json()
-            except Exception:  # noqa: BLE001
-                body = {{"text": resp.text}}
-    except Exception as e:  # noqa: BLE001
-        return json.dumps(
-            {{"status": "ERROR", "error": "peer invocation failed: %s" % e}}
-        )
-    return json.dumps({{"status": "OK", "peer_url": peer_url, "response": body}})
+    # No jsonrpc, no result, no error: the peer is not speaking JSON-RPC at all. That is
+    # an export of this generator from before it did, and it has just answered the
+    # literal default "Hello" rather than the message -- HTTP 200, nothing in the body
+    # to say so. Measured. One bounded retry in the shape that peer does understand.
+    legacy = _a2a_post(invoke_url, {{"prompt": message, "message": message}})
+    if not isinstance(legacy, dict):
+        return json.dumps({{"status": "ERROR", "error": str(legacy)}})
+    return json.dumps(
+        {{
+            "status": "OK",
+            "peer_url": peer_url,
+            "response": legacy,
+            "note": "peer does not speak A2A JSON-RPC; retried as a plain prompt",
+        }}
+    )
 
 
 _model = None
@@ -391,9 +449,116 @@ def _get_agent():
     return _agent
 
 
+_A2A_JSONRPC_VERSION = "2.0"
+
+
+def _a2a_is_jsonrpc(payload):
+    """True if the caller sent a JSON-RPC envelope rather than a plain prompt.
+
+    Keyed on the envelope's own markers, not on whether we can serve it: a request
+    recognisable as JSON-RPC that we cannot serve has to come back as a JSON-RPC
+    error, never be treated as a plain payload. Measured live before this existed --
+    a spec-compliant message/send returned HTTP 200 and the agent ran on the literal
+    default "Hello", because params.message.parts[].text was never read. A silent
+    wrong answer is worse for a peer than a refusal.
+
+    ``method`` alone counts only when there is no ``prompt``, so that an existing
+    plain caller that happens to send an unrelated ``method`` field keeps working
+    instead of being refused as malformed JSON-RPC. A real A2A peer always sends
+    ``jsonrpc``, so nothing in the spec path depends on the looser half.
+    """
+    if not isinstance(payload, dict):
+        return False
+    if "jsonrpc" in payload:
+        return True
+    return isinstance(payload.get("method"), str) and "prompt" not in payload
+
+
+def _a2a_text_from_message(message):
+    """Concatenate the text parts of an A2A Message.
+
+    A part counts as text when it carries a string ``text``, whatever its
+    ``kind``/``type`` field says, because both spellings are in circulation and
+    refusing one of them would look like a broken agent.
+    """
+    parts = message.get("parts") if isinstance(message, dict) else None
+    texts = [
+        part["text"]
+        for part in (parts if isinstance(parts, list) else [])
+        if isinstance(part, dict) and isinstance(part.get("text"), str)
+    ]
+    return "\\n".join(texts).strip()
+
+
+def _a2a_rpc_error(rpc_id, code, message):
+    return {{
+        "jsonrpc": _A2A_JSONRPC_VERSION,
+        "id": rpc_id,
+        "error": {{"code": code, "message": message}},
+    }}
+
+
+def _a2a_rpc_result(rpc_id, result):
+    return {{"jsonrpc": _A2A_JSONRPC_VERSION, "id": rpc_id, "result": result}}
+
+
+def _a2a_handle_jsonrpc(payload):
+    """Serve the JSON-RPC methods a peer needs over InvokeAgentRuntime.
+
+    Two of them, and the second exists because of a tension in the declaration that
+    cannot be resolved in the declaration. A peer holding only a runtime ARN cannot
+    reach the GET /.well-known/agent-card.json route this module registers. Measured,
+    with signed requests to the data plane: the path under /runtimes/<arn>/ is a 404
+    UnknownOperationException, and the real operation for it, GetAgentCard -- which
+    does exist in the service model, though the CLI exposes no subcommand for it --
+    returns 400 "GetAgentCard API is only supported for A2A agents". This runtime is
+    declared HTTP, so it is refused. Declaring A2A would unlock GetAgentCard and make
+    every InvokeAgentRuntime call return 424 instead, because the container serves an
+    HTTP entrypoint and not an A2A server (see cfn_template_generator._runtime_protocol).
+    One declaration cannot buy both, so the card is served through the entrypoint.
+
+    Nothing here logs the payload or the result. Per ARCC cnt_Yq9sVcaZyQniIv,
+    request bodies and response payloads are customer content and do not belong in
+    service logs; the method name is echoed back to the caller but truncated, since
+    it is caller-controlled.
+    """
+    rpc_id = payload.get("id")
+    method = payload.get("method")
+    if method == "agent/getAuthenticatedExtendedCard":
+        return _a2a_rpc_result(rpc_id, _build_agent_card())
+    if method != "message/send":
+        return _a2a_rpc_error(rpc_id, -32601, "Method not found: " + str(method)[:100])
+    params = payload.get("params")
+    text = _a2a_text_from_message(params.get("message") if isinstance(params, dict) else None)
+    if not text:
+        return _a2a_rpc_error(
+            rpc_id, -32602, "Invalid params: params.message.parts[].text is required"
+        )
+    result = str(_get_agent()(text))
+    return _a2a_rpc_result(
+        rpc_id,
+        {{
+            "kind": "message",
+            "role": "agent",
+            "messageId": str(uuid.uuid4()),
+            "parts": [{{"kind": "text", "text": result}}],
+        }},
+    )
+
+
 @app.entrypoint
 def invoke(payload):
-    """Process a user prompt; the agent may call A2A peers via call_a2a_peer."""
+    """Process a user prompt; the agent may call A2A peers via call_a2a_peer.
+
+    Two payload shapes, because there are two kinds of caller. ``{{"prompt": "..."}}``
+    is what the platform and a curl user send. A JSON-RPC envelope is what an A2A
+    peer sends, and it is answered with a JSON-RPC response object carrying the same
+    ``id`` -- see _a2a_handle_jsonrpc.
+    """
+    if not isinstance(payload, dict):
+        payload = {{}}
+    if _a2a_is_jsonrpc(payload):
+        return _a2a_handle_jsonrpc(payload)
     message = payload.get("prompt", "Hello")
     result = _get_agent()(message)
     return {{"response": str(result)}}

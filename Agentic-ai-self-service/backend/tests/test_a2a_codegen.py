@@ -23,6 +23,7 @@ Coverage:
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 
@@ -402,3 +403,395 @@ def test_injection_safe_peer_config_compiles():
     compile(code, "<a2a_inject.py>", "exec")
     g = _exec_module(code)
     assert callable(g.get("call_a2a_peer"))
+
+
+# ---------------------------------------------------------------------------
+# (g) JSON-RPC: a peer's message/send has to be read as A2A, not as a prompt
+# ---------------------------------------------------------------------------
+
+
+class _RecordingAgent:
+    """Stands in for the Strands agent and records what text it was asked."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, text):
+        self.calls.append(text)
+        return "agent-said: " + text
+
+
+def _agent_with_recorder():
+    """Exec the generated module and replace the lazily-built agent.
+
+    ``_get_agent`` only builds one when the module global ``_agent`` is None, so
+    assigning it is enough and no model is ever constructed.
+    """
+    g = _make_agent()
+    recorder = _RecordingAgent()
+    g["_agent"] = recorder
+    return g, recorder
+
+
+def _message_send(text, rpc_id="req-1"):
+    return {
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "method": "message/send",
+        "params": {
+            "message": {
+                "role": "user",
+                "messageId": "m-1",
+                "parts": [{"kind": "text", "text": text}],
+            }
+        },
+    }
+
+
+def test_message_send_reaches_the_agent_and_answers_as_jsonrpc():
+    """The defect this pins was measured live, and it failed silently.
+
+    A spec-compliant ``message/send`` used to return HTTP 200 while the agent ran
+    on the literal default ``"Hello"``: the entrypoint read ``payload["prompt"]``
+    and nothing else, so ``params.message.parts[].text`` was discarded. The reply
+    carried no ``jsonrpc`` and no ``result`` and did not echo ``id``, so a peer had
+    no way to tell a wrong answer from a right one.
+    """
+    g, recorder = _agent_with_recorder()
+
+    out = g["invoke"](_message_send("what is the balance"))
+
+    # The text the peer actually sent is what the agent saw.
+    assert recorder.calls == ["what is the balance"], recorder.calls
+    # And the reply is a JSON-RPC response object for the same request.
+    assert out["jsonrpc"] == "2.0"
+    assert out["id"] == "req-1"
+    assert "error" not in out
+    assert out["result"]["role"] == "agent"
+    assert out["result"]["parts"][0]["text"] == "agent-said: what is the balance"
+    assert out["result"]["messageId"], "a Message needs a messageId"
+
+
+def test_multiple_text_parts_are_all_passed_through():
+    g, recorder = _agent_with_recorder()
+    req = _message_send("first")
+    req["params"]["message"]["parts"].append({"type": "text", "text": "second"})
+    # A non-text part must not break the request, and must not be invented as text.
+    req["params"]["message"]["parts"].append({"kind": "file", "file": {"uri": "s3://x"}})
+
+    g["invoke"](req)
+
+    # Both spellings of the text part are accepted; both are in circulation.
+    assert recorder.calls == ["first\nsecond"], recorder.calls
+
+
+def test_a_plain_prompt_payload_still_works():
+    """The platform and a curl caller send ``{"prompt": ...}``; that path is unchanged."""
+    g, recorder = _agent_with_recorder()
+
+    out = g["invoke"]({"prompt": "direct"})
+
+    assert recorder.calls == ["direct"]
+    assert out == {"response": "agent-said: direct"}
+    assert "jsonrpc" not in out, "a plain caller must not be handed an RPC envelope"
+
+
+def test_an_unserviceable_jsonrpc_request_is_refused_not_guessed():
+    """Recognising the envelope is what matters, not being able to serve it.
+
+    If an unsupported method fell through to the prompt path it would run the agent
+    on the default and answer 200 — the exact silent-wrong-answer shape that was
+    measured. It has to come back as a JSON-RPC error with the caller's id.
+    """
+    g, recorder = _agent_with_recorder()
+
+    out = g["invoke"]({"jsonrpc": "2.0", "id": 7, "method": "tasks/cancel"})
+
+    assert recorder.calls == [], "the agent must not run for a method we do not serve"
+    assert out["id"] == 7
+    assert out["error"]["code"] == -32601
+    assert "tasks/cancel" in out["error"]["message"]
+
+
+def test_a_message_send_with_no_text_is_an_invalid_params_error():
+    g, recorder = _agent_with_recorder()
+
+    empty = _message_send("")
+    out = g["invoke"](empty)
+
+    assert recorder.calls == [], "an empty message must not run the agent on a default"
+    assert out["error"]["code"] == -32602
+    assert out["id"] == "req-1"
+
+    # Same for a malformed envelope: params of the wrong type must not raise.
+    broken = {"jsonrpc": "2.0", "id": 2, "method": "message/send", "params": ["nope"]}
+    out = g["invoke"](broken)
+    assert out["error"]["code"] == -32602
+    assert recorder.calls == []
+
+
+def test_the_method_name_echoed_back_is_bounded():
+    """It is caller-controlled, so it is truncated before it goes in a response."""
+    g, _ = _agent_with_recorder()
+
+    out = g["invoke"]({"jsonrpc": "2.0", "id": 1, "method": "x" * 5000})
+
+    assert len(out["error"]["message"]) < 200, out["error"]["message"][:80]
+
+
+def test_the_agent_card_is_reachable_without_a_url_path():
+    """A peer holding only a runtime ARN cannot reach the GET route.
+
+    Measured with signed data-plane requests, because the first explanation of this
+    was wrong. It is not that there is nowhere to put a path:
+    ``GET /runtimes/<arn>/.well-known/agent-card.json`` is a 404
+    ``UnknownOperationException``, and ``GetAgentCard`` — a real operation in the
+    service model, with no CLI subcommand — answers 400 ``"GetAgentCard API is only
+    supported for A2A agents"``. The runtime is declared ``HTTP``, so it is refused;
+    declaring ``A2A`` would unlock the card and make every invoke 424 (see
+    ``TestTheDeclaredProtocolIsTheOneTheContainerSpeaks``). One declaration cannot
+    buy both, so the JSON-RPC method is the only way such a peer reads the card, and
+    it has to return the same card the route serves.
+    """
+    g, recorder = _agent_with_recorder()
+
+    out = g["invoke"]({"jsonrpc": "2.0", "id": "c1", "method": "agent/getAuthenticatedExtendedCard"})
+
+    assert recorder.calls == [], "fetching a card must not invoke the model"
+    assert out["id"] == "c1"
+    assert out["result"] == g["_build_agent_card"]()
+    assert out["result"]["protocolVersion"]
+    assert out["result"]["skills"], "a card with no skills tells a peer nothing"
+
+
+def test_a_non_dict_payload_does_not_crash_the_entrypoint():
+    g, recorder = _agent_with_recorder()
+
+    out = g["invoke"]([1, 2, 3])
+
+    assert out == {"response": "agent-said: Hello"}
+    assert recorder.calls == ["Hello"]
+
+
+def test_the_generated_source_does_not_log_the_payload():
+    """ARCC cnt_Yq9sVcaZyQniIv: request bodies and response payloads are customer
+    content and do not belong in service logs."""
+    code = _generate_a2a_agent("sp", "us.anthropic.claude-sonnet-5", "us-east-1", {})
+    handler = code.split("def _a2a_handle_jsonrpc(payload):", 1)[1].split("\n@app.entrypoint", 1)[0]
+    # Sinks, not mentions: the parameter is named in the signature and in the reads
+    # that are the function's job, so an over-broad token like "payload)" matches the
+    # signature itself and the test passes or fails for the wrong reason.
+    for forbidden in ("print(", "logging", "logger", "json.dumps"):
+        assert forbidden not in handler, f"{forbidden!r} appears in the JSON-RPC handler"
+
+
+def test_a_plain_payload_carrying_a_method_field_is_not_hijacked():
+    """Dispatch must not break a caller who sends ``method`` for their own reasons.
+
+    ``jsonrpc`` is the marker a real peer always sends. A bare ``method`` is treated
+    as JSON-RPC only when there is no ``prompt``, so a plain payload that happens to
+    carry both keeps the prompt path rather than coming back as -32601.
+    """
+    g, recorder = _agent_with_recorder()
+
+    out = g["invoke"]({"prompt": "still a prompt", "method": "chat"})
+
+    assert recorder.calls == ["still a prompt"]
+    assert out == {"response": "agent-said: still a prompt"}
+
+    # But a bare method with no prompt is still JSON-RPC, and still refused.
+    out = g["invoke"]({"method": "tasks/get", "id": 9})
+    assert out["error"]["code"] == -32601
+
+
+# ---------------------------------------------------------------------------
+# (h) call_a2a_peer reaches the peer — it could not, for any input at all
+# ---------------------------------------------------------------------------
+#
+# There was no happy-path test for this tool, and that is how the following survived:
+# the invoke url was scheme-validated BEFORE the relative-url join, so a relative url
+# ("" scheme) was refused as non-https; the join then sat in an `elif not scheme` arm
+# the validation had already made unreachable; and its trailing `else` returned
+# "unsupported scheme" on the one remaining path -- an absolute https url on an
+# allowlisted host. Measured against the generated module: no input existed for which
+# call_a2a_peer reached its POST. The guard tests all passed throughout, because every
+# one of them asserts a refusal.
+#
+# "/invocations" is not an edge case either: it is what _a2a_self_url() returns when
+# nothing sets AGENTCORE_RUNTIME_URL, so it is what the card of every agent this
+# generator emits advertises by default. Two of these agents could not talk to each
+# other.
+
+
+class _PeerServer:
+    """httpx.Client stub standing in for a peer: serves a card, records POSTs.
+
+    ``post_bodies`` is consumed one per POST, so a test can give the first and second
+    call different answers and assert how many were made.
+    """
+
+    card_url = "/invocations"
+    post_bodies: list = []
+    posts: list = []
+
+    def __init__(self, *a, **k):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def get(self, url, *a, **k):
+        _PeerServer.posts.append(("GET", url, None))
+        card = {"name": "peer", "url": _PeerServer.card_url}
+        return _StubResponse(card)
+
+    def post(self, url, *a, **k):
+        _PeerServer.posts.append(("POST", url, k.get("json")))
+        return _StubResponse(_PeerServer.post_bodies.pop(0))
+
+
+class _StubResponse:
+    def __init__(self, body):
+        self._body = body
+        self.text = "<raw>"
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._body
+
+
+def _peer(card_url="/invocations", post_bodies=None):
+    """Point the generated module's httpx at a peer server. example.com is used as the
+    peer host because the denylist resolves it for real and it is public."""
+    _PeerServer.card_url = card_url
+    _PeerServer.post_bodies = list(post_bodies or [])
+    _PeerServer.posts = []
+    g = _make_agent(allowlist=["example.com"])
+    # After _make_agent, not before: _install_a2a_stubs builds a FRESH httpx module
+    # object each time, and the generated module's global `httpx` is that new one. A
+    # binding taken earlier points at the previous stub, so the patch lands nowhere and
+    # every test here fails on the recording client's "should not be reached".
+    sys.modules["httpx"].Client = _PeerServer
+    return g
+
+
+def _spec_reply(text):
+    return {
+        "jsonrpc": "2.0",
+        "id": "ignored",
+        "result": {
+            "kind": "message",
+            "role": "agent",
+            "parts": [{"kind": "text", "text": text}],
+        },
+    }
+
+
+def test_a_relative_card_url_is_resolved_and_the_peer_is_reached():
+    g = _peer("/invocations", [_spec_reply("peer answer")])
+
+    out = json.loads(g["call_a2a_peer"]("https://example.com", "delegate this"))
+
+    assert out["status"] == "OK", out
+    assert out["response"] == "peer answer"
+    posts = [(u, p) for m, u, p in _PeerServer.posts if m == "POST"]
+    assert len(posts) == 1
+    url, payload = posts[0]
+    assert url == "https://example.com/invocations"
+    # The message the caller passed, not a default: this is what the whole tool is for.
+    assert payload["params"]["message"]["parts"][0]["text"] == "delegate this"
+
+
+def test_an_absolute_card_url_is_reached_too():
+    g = _peer("https://example.com/invocations", [_spec_reply("abs answer")])
+
+    out = json.loads(g["call_a2a_peer"]("https://example.com", "hi"))
+
+    assert out["status"] == "OK", out
+    assert out["response"] == "abs answer"
+
+
+def test_the_peer_is_called_with_a_jsonrpc_message_send_envelope():
+    """A peer that publishes an A2A card is an A2A agent, and A2A over HTTP is
+    JSON-RPC. The old shape -- a bare {"prompt": ...} -- is what a spec peer rejects."""
+    g = _peer("/invocations", [_spec_reply("ok")])
+
+    g["call_a2a_peer"]("https://example.com", "hi")
+
+    payload = [p for m, _u, p in _PeerServer.posts if m == "POST"][0]
+    assert payload["jsonrpc"] == "2.0"
+    assert payload["method"] == "message/send"
+    assert payload["id"], "a JSON-RPC request needs an id to correlate the response"
+    message = payload["params"]["message"]
+    assert message["role"] == "user"
+    assert message["messageId"], "the A2A spec requires a messageId on a Message"
+
+
+def test_a_peer_that_does_not_speak_jsonrpc_gets_one_bounded_retry():
+    """An export of this generator from before it served JSON-RPC answers HTTP 200 and
+    runs on the literal default "Hello" -- nothing in the body says so. The retry in the
+    shape that peer understands is what makes the answer the caller's message."""
+    g = _peer("/invocations", [{"response": "agent-said: Hello"}, {"response": "agent-said: hi"}])
+
+    out = json.loads(g["call_a2a_peer"]("https://example.com", "hi"))
+
+    assert out["status"] == "OK", out
+    assert out["response"] == {"response": "agent-said: hi"}
+    assert "does not speak A2A JSON-RPC" in out["note"]
+    payloads = [p for m, _u, p in _PeerServer.posts if m == "POST"]
+    assert len(payloads) == 2, "exactly one retry, not a loop"
+    assert sorted(payloads[1]) == ["message", "prompt"]
+
+
+def test_a_jsonrpc_error_from_the_peer_is_surfaced_not_retried():
+    """The peer's considered refusal. Retrying it as a plain prompt would turn "method
+    not found" into an answer to a different question."""
+    g = _peer(
+        "/invocations",
+        [{"jsonrpc": "2.0", "id": "x", "error": {"code": -32601, "message": "Method not found"}}],
+    )
+
+    out = json.loads(g["call_a2a_peer"]("https://example.com", "hi"))
+
+    assert out["status"] == "ERROR"
+    assert out["error"]["code"] == -32601
+    assert len([p for m, _u, p in _PeerServer.posts if m == "POST"]) == 1
+
+
+@pytest.mark.parametrize(
+    "card_url",
+    [
+        "http://example.com/invocations",  # downgrade to plaintext
+        "https://169.254.169.254/latest/meta-data/",  # IMDS
+        "https://10.0.0.5/invocations",  # RFC1918
+    ],
+)
+def test_the_card_cannot_redirect_the_call_off_the_allowlist(card_url):
+    """The peer_url passed the guard; the card then names somewhere else. Re-validating
+    after the card is read is the half that matters, and it must survive the fix that
+    made the happy path reachable."""
+    g = _peer(card_url, [_spec_reply("should never be sent")])
+
+    out = json.loads(g["call_a2a_peer"]("https://example.com", "hi"))
+
+    assert out["status"] == "BLOCKED", out
+    assert [m for m, _u, _p in _PeerServer.posts] == ["GET"], "no POST on a blocked card url"
+
+
+def test_a_transport_failure_is_reported_not_raised():
+    class _Broken(_PeerServer):
+        def post(self, url, *a, **k):
+            raise RuntimeError("connection reset")
+
+    g = _peer("/invocations", [])
+    sys.modules["httpx"].Client = _Broken
+
+    out = json.loads(g["call_a2a_peer"]("https://example.com", "hi"))
+
+    assert out["status"] == "ERROR"
+    assert "connection reset" in out["error"]
