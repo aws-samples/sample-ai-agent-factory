@@ -11,7 +11,9 @@ import { createHash } from "node:crypto";
 import { Duration, RemovalPolicy, Stack, Tags } from "aws-cdk-lib";
 import {
   ArnPrincipal,
+  PolicyDocument,
   PolicyStatement,
+  Role,
   ServicePrincipal,
 } from "aws-cdk-lib/aws-iam";
 import { Key } from "aws-cdk-lib/aws-kms";
@@ -215,9 +217,15 @@ export class GaPlatformToolsConstruct extends Construct {
         );
       }
       const functionName = `agenticai-platform-${props.envName}-${tool.toolId}`;
+      const executionRoleName = `AgenticAI-Platform-${props.envName}-${tool.toolId}-exec`;
       if (functionName.length > 64) {
         throw new Error(
           `GaPlatformToolsConstruct: function name for ${tool.toolId} exceeds 64 characters.`,
+        );
+      }
+      if (executionRoleName.length > 64) {
+        throw new Error(
+          `GaPlatformToolsConstruct: execution role name for ${tool.toolId} exceeds 64 characters.`,
         );
       }
       const logGroup = new LogGroup(this, `LogGroup-${tool.toolId}`, {
@@ -229,6 +237,21 @@ export class GaPlatformToolsConstruct extends Construct {
             ? RemovalPolicy.RETAIN
             : RemovalPolicy.DESTROY,
       });
+      const executionRole = new Role(this, `ExecutionRole-${tool.toolId}`, {
+        roleName: executionRoleName,
+        assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
+        description: `Execution role for the ${props.envName} ${tool.toolId} Platform tool.`,
+        inlinePolicies: {
+          WriteFunctionLogs: new PolicyDocument({
+            statements: [
+              new PolicyStatement({
+                actions: ["logs:CreateLogStream", "logs:PutLogEvents"],
+                resources: [`${logGroup.logGroupArn}:*`],
+              }),
+            ],
+          }),
+        },
+      });
       const fn = new LambdaFunction(this, `Function-${tool.toolId}`, {
         functionName,
         description: tool.description,
@@ -238,6 +261,7 @@ export class GaPlatformToolsConstruct extends Construct {
         timeout: Duration.seconds(10),
         memorySize: 128,
         logGroup,
+        role: executionRole,
         environment: { AGENTICAI_TOOL_ID: tool.toolId },
       });
       const alias = new Alias(this, `Alias-${tool.toolId}`, {
@@ -263,8 +287,25 @@ export class GaPlatformToolsConstruct extends Construct {
         }
       }
       applyTags(logGroup);
+      applyTags(executionRole);
       applyTags(fn);
       applyTags(alias);
+      NagSuppressions.addResourceSuppressions(
+        executionRole,
+        [
+          {
+            id: "AwsSolutions-IAM5",
+            reason:
+              "SEC-005: CloudWatch Logs requires a wildcard log-stream suffix; access is bounded to this function's pre-created log group.",
+          },
+          {
+            id: "NIST.800.53.R5-IAMNoInlinePolicy",
+            reason:
+              "SEC-005: The role has one stack-owned inline policy scoped only to its function's log streams, avoiding a shared managed-policy blast radius.",
+          },
+        ],
+        true,
+      );
       NagSuppressions.addResourceSuppressions(
         fn,
         [
@@ -272,14 +313,6 @@ export class GaPlatformToolsConstruct extends Construct {
             id: "AwsSolutions-L1",
             reason:
               "SEC-006: NODEJS_20_X is the latest runtime supported by this pinned CDK version.",
-          },
-          {
-            id: "AwsSolutions-IAM4",
-            appliesTo: [
-              "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
-            ],
-            reason:
-              "SEC-010: AWSLambdaBasicExecutionRole is the documented logging policy for Lambda.",
           },
           {
             id: "NIST.800.53.R5-LambdaConcurrency",

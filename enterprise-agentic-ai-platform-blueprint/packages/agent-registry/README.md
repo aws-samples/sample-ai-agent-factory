@@ -21,7 +21,9 @@ negative authorization, rollback, and teardown gates.
 
 For each Platform environment, `RegistryStack` now creates:
 
-- one CMK-backed, environment-qualified Lambda + `PROD` alias per platform tool;
+- one CMK-backed, environment-qualified Lambda + `PROD` alias per platform tool,
+  using an explicit `AgenticAI-Platform-<environment>-<tool>-exec` role scoped
+  only to that function's pre-created log streams;
 - exact alias resource policies for the corresponding Workstream Gateway role;
 - one IAM-authorized `AWS::AgentRegistry::Registry`;
 - one tagged `CUSTOM` governance `RegistryRecord` per platform catalogue tool;

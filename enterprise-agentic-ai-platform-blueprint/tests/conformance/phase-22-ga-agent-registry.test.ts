@@ -230,6 +230,35 @@ describe("Phase 22 — GA Registry producer remains additive", () => {
     ).toBe(false);
   });
 
+  it("names Platform tool roles inside the deployment boundary", () => {
+    const roles = Object.values(
+      synth("nonprod", false).findResources("AWS::IAM::Role"),
+    ) as any[];
+    for (const toolId of Object.keys(PLATFORM_TOOL_CATALOGUE)) {
+      const role = roles.find(
+        (candidate) =>
+          candidate.Properties.RoleName ===
+          `AgenticAI-Platform-nonprod-${toolId}-exec`,
+      );
+      expect(role).toBeDefined();
+      expect(role.Properties.AssumeRolePolicyDocument.Statement).toContainEqual(
+        expect.objectContaining({
+          Action: "sts:AssumeRole",
+          Effect: "Allow",
+          Principal: { Service: "lambda.amazonaws.com" },
+        }),
+      );
+      expect(role.Properties.ManagedPolicyArns).toBeUndefined();
+      const statements = role.Properties.Policies[0].PolicyDocument.Statement;
+      expect(statements).toHaveLength(1);
+      expect(statements[0].Action).toEqual([
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+      ]);
+      expect(JSON.stringify(statements[0].Resource)).toContain("LogGroup");
+    }
+  });
+
   it("does not emit the deprecated preview Registry custom resources", () => {
     const rendered = JSON.stringify(synth().toJSON());
 
