@@ -16,6 +16,21 @@ import time
 from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
+# Matching handler.py, and not optional. The Lambda runtime leaves the root logger at
+# WARNING, so a module logger left at NOTSET inherits WARNING and every ``logger.info``
+# below is discarded before a handler ever sees it. Measured, not reasoned: on a real
+# stack create (``lhprobe0920a``, us-east-1) the CloudWatch stream carried both of
+# handler.py's INFO lines and *neither* of this module's, in the same invocation — the
+# only difference between the two loggers being this call.
+#
+# That silence is the exact failure the test suite was written to prevent. A pytest
+# ``caplog.set_level`` forces this level, so the unit tests pass while production logs
+# nothing: on the happy path this module was contributing no output at all, which is
+# indistinguishable from having deleted the statements. The failure paths were never
+# affected — they log at WARNING and ERROR — so only the two success-path lines were
+# lost, and losing them means a delivery that succeeded looks identical to one that was
+# never attempted.
+logger.setLevel(logging.INFO)
 
 SUCCESS = "SUCCESS"
 FAILED = "FAILED"

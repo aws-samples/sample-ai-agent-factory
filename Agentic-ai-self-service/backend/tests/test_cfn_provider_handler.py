@@ -1548,6 +1548,110 @@ class TestThePresignedUrlNeverReachesTheLog:
         assert "4 attempts" in text, text
 
 
+class TestTheSuccessLinesSurviveTheLambdaLoggerConfiguration:
+    """The two tests above force the level, and that is what hid this.
+
+    ``caplog.set_level(logging.DEBUG, logger=...)`` sets the level on the module's own
+    logger, so a logger left at ``NOTSET`` looks fine under test and is silent in
+    production. The Lambda runtime leaves the root logger at ``WARNING``; a ``NOTSET``
+    module logger inherits it, ``logger.info`` fails ``isEnabledFor`` and returns before
+    any handler is consulted. ``handler.py`` calls ``setLevel(INFO)`` and ``cfn_response``
+    did not, so on a real stack create the CloudWatch stream carried handler.py's INFO
+    lines and none of this module's.
+
+    That is not a cosmetic gap. The whole argument for removing the URL from the log
+    rather than stripping it was that the remaining line still says which status and
+    resource was sent; with the level unset there was no remaining line, so a successful
+    delivery and a delivery that never happened produced byte-identical output. The
+    failure paths log at WARNING and ERROR and were never affected, which is why nothing
+    red ever appeared.
+
+    So this asserts the property the other two cannot: with the level *not* forced, and
+    the root at WARNING exactly as Lambda leaves it, the record is still emitted.
+    """
+
+    def _capture_with_root_at_warning(self, monkeypatch):
+        """Run a successful send under Lambda's logger configuration, capturing records.
+
+        Deliberately does not use ``caplog``: pytest's fixture manipulates levels, which
+        is the very thing under test. A plain handler on the root logger is what Lambda
+        installs, so this is the faithful arrangement.
+        """
+        records = []
+
+        class _Collect(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        class _Resp:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+        monkeypatch.setattr(provider.cfn_response, "urlopen", lambda *_a, **_k: _Resp())
+
+        handler = _Collect()
+        root = logging.getLogger()
+        # Restored via monkeypatch rather than try/finally so a failure mid-test cannot
+        # leave the root logger reconfigured for every test that runs after this one.
+        monkeypatch.setattr(root, "level", logging.WARNING, raising=False)
+        root.addHandler(handler)
+        monkeypatch.setattr(
+            provider.cfn_response.logger,
+            "propagate",
+            True,
+            raising=False,
+        )
+        try:
+            ok = provider.cfn_response.send(
+                {
+                    "ResponseURL": "https://cloudformation-custom-resource-response-useast1.s3.us-east-1.amazonaws.com/x?X-Amz-Signature=deadbeefcafe",
+                    "StackId": "arn:aws:cloudformation:us-east-1:111122223333:stack/demo/abc123",
+                    "RequestId": "req-1",
+                    "LogicalResourceId": "AgentCodePackage",
+                },
+                _Context(),
+                provider.cfn_response.SUCCESS,
+                physical_resource_id="agent-code/abc123",
+            )
+        finally:
+            root.removeHandler(handler)
+        return ok, "\n".join(r.getMessage() for r in records)
+
+    def test_the_module_logger_is_not_left_inheriting_warning(self):
+        """The direct form of the defect, stated as the level itself.
+
+        Kept alongside the behavioural test below because it names the one-line cause,
+        and because it still fails if someone later removes ``setLevel`` while a stray
+        ``basicConfig`` elsewhere in the test session happens to make the behavioural
+        assertion pass.
+        """
+        assert provider.cfn_response.logger.level == logging.INFO, (
+            "cfn_response's logger is at "
+            f"{logging.getLevelName(provider.cfn_response.logger.level)}; under Lambda's "
+            "root-at-WARNING every logger.info in this module is discarded"
+        )
+
+    def test_a_successful_delivery_still_says_so_with_the_root_at_warning(self, monkeypatch):
+        ok, text = self._capture_with_root_at_warning(monkeypatch)
+
+        assert ok is True
+        # Both success-path lines: the one naming the send, and the response status.
+        assert provider.cfn_response.SUCCESS in text, (
+            f"the delivery logged nothing identifying it: {text!r}. A successful send is "
+            "then indistinguishable from one that never happened."
+        )
+        assert "agent-code/abc123" in text, text
+        assert "200" in text, text
+        # And the level fix must not have reintroduced the leak it sits next to.
+        assert "X-Amz-Signature" not in text, text
+        assert "deadbeefcafe" not in text, text
+
+
 # ---------------------------------------------------------------------------
 # Custom::RuntimeLogGroup — the runtime's own logs are the conversation
 # ---------------------------------------------------------------------------
