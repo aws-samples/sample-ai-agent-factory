@@ -75,11 +75,21 @@ def send(
         logger.error("ResponseURL is missing or not https — cannot signal CloudFormation")
         return False
 
-    # Log the URL without its query string. The query string of a pre-signed S3
-    # URL IS the credential — anyone holding it can PUT this resource's response
-    # and force the stack to see SUCCESS or FAILED — so it does not belong in
-    # CloudWatch. The host and path are enough to debug a delivery failure.
-    logger.info("Sending %s to %s (physical_id=%s)", status, url.split("?", 1)[0], physical_resource_id)
+    # No part of the ResponseURL is logged, not even with the query string stripped.
+    # That query string IS the credential — anyone holding it can PUT this resource's
+    # response and force the stack to see SUCCESS or FAILED — and an earlier version
+    # of this line logged ``url.split("?", 1)[0]``, which is correct today and one
+    # careless edit from not being: the redaction lives at the call site, so anyone
+    # adding ``url`` to this format string defeats it silently and no test notices.
+    # ARCC guidance on log hygiene is categorical — credentials and secrets must never
+    # reach application logs, and neither may exception messages carrying them — so the
+    # value is kept out of the sink entirely rather than sanitized on the way in.
+    #
+    # Nothing diagnostic is lost. The host is always a CloudFormation-owned regional S3
+    # endpoint, and the path is the stack ARN plus logical id plus request id, all of
+    # which the handler already logs by name. What a delivery failure actually needs is
+    # below: which status failed, how many attempts, and the exception type.
+    logger.info("Sending %s (physical_id=%s)", status, physical_resource_id)
 
     req = Request(url, data=body, method="PUT")
     req.add_header("Content-Type", "")

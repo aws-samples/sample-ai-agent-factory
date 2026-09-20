@@ -1462,6 +1462,93 @@ class TestResponseDelivery:
 
 
 # ---------------------------------------------------------------------------
+# The pre-signed ResponseURL is a credential, and CloudWatch keeps things
+# ---------------------------------------------------------------------------
+
+
+class TestThePresignedUrlNeverReachesTheLog:
+    """Nothing derived from the ResponseURL may be logged, not even a stripped copy.
+
+    The query string of that URL authorizes a PUT of this resource's response: whoever
+    holds it can force the stack to see SUCCESS or FAILED. ``send`` used to log
+    ``url.split("?", 1)[0]``, which is correct as written and defeated by one edit — the
+    redaction sat at the call site, so adding ``url`` to the same format string would
+    have leaked the credential with no test objecting. The property worth pinning is not
+    "the query string is stripped" but "no part of the URL is in the sink", which is
+    also what makes CodeQL's clear-text-logging flow disappear rather than be argued
+    with.
+
+    Both directions are asserted. The URL must be absent, *and* the line must still say
+    which status and resource it was sending — otherwise deleting the log statement
+    entirely would satisfy the test, and a delivery failure would then be undebuggable.
+    """
+
+    HOST = "cloudformation-custom-resource-response-useast1.s3.us-east-1.amazonaws.com"
+    PATH = "arn%3Aaws%3Acloudformation%3Aus-east-1%3A111122223333%3Astack%2Fdemo%2Fabc123"
+    URL = f"https://{HOST}/{PATH}?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAFAKE%2F20260920&X-Amz-Signature=deadbeefcafe"
+
+    SECRET_PARTS = ("X-Amz-Signature", "X-Amz-Credential", "deadbeefcafe", HOST, PATH)
+
+    def _run(self, monkeypatch, caplog, *, raises=None):
+        class _Resp:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+        def _urlopen(*_a, **_k):
+            if raises is not None:
+                raise raises
+            return _Resp()
+
+        monkeypatch.setattr(provider.cfn_response, "urlopen", _urlopen)
+        # The real backoff is 1+3+7 seconds; the retry path is what this test needs, not
+        # the waiting.
+        monkeypatch.setattr(provider.cfn_response, "_BACKOFF_SECONDS", (0, 0, 0))
+
+        caplog.set_level(logging.DEBUG, logger=provider.cfn_response.logger.name)
+        ok = provider.cfn_response.send(
+            {
+                "ResponseURL": self.URL,
+                "StackId": "arn:aws:cloudformation:us-east-1:111122223333:stack/demo/abc123",
+                "RequestId": "req-1",
+                "LogicalResourceId": "AgentCodePackage",
+            },
+            _Context(),
+            provider.cfn_response.SUCCESS,
+            physical_resource_id="agent-code/abc123",
+        )
+        return ok, "\n".join(r.getMessage() for r in caplog.records)
+
+    def test_a_successful_delivery_logs_the_resource_and_not_the_url(self, monkeypatch, caplog):
+        ok, text = self._run(monkeypatch, caplog)
+
+        assert ok is True
+        for part in self.SECRET_PARTS:
+            assert part not in text, f"{part!r} reached the log: {text}"
+        # The admitting half: the statement still exists and still identifies the send.
+        assert provider.cfn_response.SUCCESS in text, text
+        assert "agent-code/abc123" in text, text
+
+    def test_a_failed_delivery_logs_no_part_of_the_url_either(self, monkeypatch, caplog):
+        """The likelier leak of the two. A urllib error echoes the URL it was given, so
+        the retry and give-up lines log the exception *type* and never ``str(e)``.
+        """
+        ok, text = self._run(monkeypatch, caplog, raises=OSError(f"failed to open {self.URL}"))
+
+        assert ok is False
+        for part in self.SECRET_PARTS:
+            assert part not in text, f"{part!r} reached the log: {text}"
+        # Admitting half again: a give-up that says nothing is as bad as one that says
+        # too much, because CloudFormation then waits out the full hour in silence.
+        assert "OSError" in text, text
+        assert "4 attempts" in text, text
+
+
+# ---------------------------------------------------------------------------
 # Custom::RuntimeLogGroup — the runtime's own logs are the conversation
 # ---------------------------------------------------------------------------
 
@@ -1800,7 +1887,14 @@ class TestRuntimeLogGroupKeyPolicyFailure:
 
     def _assert_names_the_remedy(self, excinfo):
         message = str(excinfo.value)
-        assert "logs.us-east-1.amazonaws.com" in message
+        # The whole clause, not the bare hostname. A substring test for
+        # ``logs.us-east-1.amazonaws.com`` alone passes if the principal turns up
+        # anywhere at all — including inside the key ARN or the EncryptionContext
+        # condition, neither of which tells the operator what to add. It also reads to
+        # CodeQL as a URL-host allowlist check (`py/incomplete-url-substring-sanitization`),
+        # which is the wrong thing to have a suppression argument about in a test that
+        # is really asserting on prose.
+        assert "must allow the logs.us-east-1.amazonaws.com service principal" in message
         assert "kms:EncryptionContext:aws:logs:arn" in message
         assert "README.md > Encryption" in message
         assert KEY_ARN in message
@@ -1848,8 +1942,14 @@ class TestRuntimeLogGroupKeyPolicyFailure:
                 _log_group_event(names=(DEFAULT_GROUP,), KmsKeyArn=KEY_ARN)
             )
 
-        assert "logs.eu-central-1.amazonaws.com" in str(excinfo.value)
+        assert "must allow the logs.eu-central-1.amazonaws.com service principal" in str(excinfo.value)
         assert "arn:aws:logs:eu-central-1:<account>:log-group:*" in str(excinfo.value)
+        # And neither region-derived value fell back to the hardcoded default, which is
+        # the defect this test exists for. Scoped to those two: a bare "us-east-1" check
+        # would fail on the fixture's key ARN, which is legitimately a us-east-1 key
+        # being used from Frankfurt — the exact cross-region case worth supporting.
+        assert "must allow the logs.us-east-1.amazonaws.com" not in str(excinfo.value)
+        assert "arn:aws:logs:us-east-1:<account>" not in str(excinfo.value)
 
     def test_access_denied_without_a_key_is_not_reported_as_a_key_problem(self, monkeypatch):
         """Same code, entirely different cause: the role is missing logs:CreateLogGroup.

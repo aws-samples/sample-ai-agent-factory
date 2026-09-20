@@ -189,10 +189,13 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: Agentic-ai-self-service/infra/requirements.txt
+          cache-dependency-path: Agentic-ai-self-service/infra/requirements-dev.txt
+      # requirements-dev.txt includes requirements.txt and adds pytest. Installing
+      # only the latter is what made this job fail with `No module named pytest`
+      # rather than run the 118 assertions it exists to run.
       - name: Install infra requirements
         working-directory: Agentic-ai-self-service/infra
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
       - name: Run CDK assertion tests
         working-directory: Agentic-ai-self-service/infra
         run: python3 -m pytest tests/ -q
