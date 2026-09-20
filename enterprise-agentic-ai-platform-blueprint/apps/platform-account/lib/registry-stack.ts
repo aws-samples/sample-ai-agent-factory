@@ -23,6 +23,7 @@ export interface RegistryStackProps extends StackProps {
   readonly grantGatewayInvokePermissions?: boolean;
   readonly gatewayServiceRoleArns?: readonly string[];
   readonly gatewayWorkloadAccountId?: string;
+  readonly gaRegistryRecordGenerations?: Readonly<Record<string, number>>;
   readonly applicationId: string;
   readonly agentId: string;
   readonly tenantId: string;
@@ -66,6 +67,7 @@ export class RegistryStack extends Stack {
       workloadAccountIds: props.workloadAccountIds,
       registrySynthAccountId: props.registrySynthAccountId,
       toolTargetArns: this.gaTools.aliasArns,
+      recordGenerations: props.gaRegistryRecordGenerations,
       tags: {
         applicationId: props.applicationId,
         agentId: props.agentId,

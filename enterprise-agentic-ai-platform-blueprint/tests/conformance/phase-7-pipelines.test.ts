@@ -15,6 +15,7 @@ import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 
 import { GuardrailStack } from "../../apps/platform-account/lib/guardrail-stack";
+import { RegistryStack } from "../../apps/platform-account/lib/registry-stack";
 import {
   PlatformDeploymentStage,
   PlatformPipelineStack,
@@ -86,6 +87,9 @@ function gaConsumerContext(
 function createPlatformPipeline(
   app: App,
   platformProdAccount = "222222222222",
+  gaRegistryRecordGenerations?: Readonly<
+    Partial<Record<"nonprod" | "prod", Readonly<Record<string, number>>>>
+  >,
 ): PlatformPipelineStack {
   return new PlatformPipelineStack(app, "PP", {
     env: { account: "111111111111", region: "us-west-2" },
@@ -120,6 +124,7 @@ function createPlatformPipeline(
         tokensPerMinute: 10_000,
       },
     ],
+    gaRegistryRecordGenerations,
   });
 }
 
@@ -267,6 +272,32 @@ describe("Phase 7 — Platform pipeline", () => {
     expect(pipeline.Properties.RoleArn).toEqual({
       "Fn::GetAtt": [logicalId, "Arn"],
     });
+  });
+
+  it("forwards environment-scoped GA record replacement generations", () => {
+    const app = new App();
+    const root = createPlatformPipeline(app, "222222222222", {
+      nonprod: { "tool-echo": 2 },
+    });
+    const rendered = JSON.stringify(Template.fromStack(root).toJSON());
+    expect(rendered).toContain("agenticai/gaRegistryRecordGenerations");
+    expect(rendered.replaceAll("\\", "")).toContain('"tool-echo":2');
+
+    const nonprod = root.node.findChild("Nonprod") as PlatformDeploymentStage;
+    const prod = root.node.findChild("Prod") as PlatformDeploymentStage;
+    const nonprodRegistry = nonprod.node.findChild("Registry") as RegistryStack;
+    const prodRegistry = prod.node.findChild("Registry") as RegistryStack;
+    const recordId = (stack: RegistryStack, toolId: string): string =>
+      Object.entries(
+        Template.fromStack(stack).findResources(
+          "AWS::AgentRegistry::RegistryRecord",
+        ),
+      ).find(
+        ([, resource]: [string, any]) => resource.Properties.Name === toolId,
+      )![0];
+    expect(recordId(nonprodRegistry, "tool-echo")).toContain("generation2");
+    expect(recordId(nonprodRegistry, "tool-ping")).not.toContain("generation2");
+    expect(recordId(prodRegistry, "tool-echo")).not.toContain("generation2");
   });
 
   it("deploys shared Management/Governance stacks exactly once", () => {
@@ -1055,6 +1086,7 @@ describe("Round 1 integration — CDK app self-synth contract", () => {
       "agentId",
       "costCentre",
       "inferenceModelRateLimits",
+      "gaRegistryRecordGenerations",
     ]) {
       expect(appSource).toContain(`agenticai/${key}`);
     }

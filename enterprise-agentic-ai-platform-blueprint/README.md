@@ -14,7 +14,7 @@ This is one of the samples in [`aws-samples/sample-ai-agent-factory`](https://gi
 
 ![Architecture](assets/architecture-diagram.png)
 
-> *Drawio source: [`assets/architecture-diagram.drawio`](assets/architecture-diagram.drawio).*
+> _Drawio source: [`assets/architecture-diagram.drawio`](assets/architecture-diagram.drawio)._
 
 ---
 
@@ -69,13 +69,13 @@ Workstream accounts are the developer's primary surface; the platform account ho
 
 `sample-ai-agent-factory` collects complementary samples covering different layers of an AI Agent Factory. This one is the **platform foundation** — the multi-account landing zone, org guardrails, and governance surface. It is deliberately infrastructure-heavy and assumes a real AWS Organization.
 
-| Sample | Layer | Relationship to this blueprint |
-|---|---|---|
-| [`workshop-building-agentic-ai-platform/`](../workshop-building-agentic-ai-platform/) | Learn the foundation | Closest neighbour. A guided 300-level workshop over the same building blocks (LLM Gateway via LiteLLM, MCP Gateway + Registry, Strands agents) in a **single account**. **Start there** if you want to understand the pattern hands-on; come here when you need the multi-account, SCP-governed, CI/CD-gated production form of it. |
-| [`Agentic-ai-self-service/`](../Agentic-ai-self-service/) | Build agents | The builder experience that sits **on top of** a foundation like this one. It gives teams a visual canvas for authoring and deploying AgentCore agents; this blueprint provides the governed accounts, model allow-list, guardrails, and cost attribution those agents deploy into. |
-| [`enterprise-mcp-governance-gateway/`](../enterprise-mcp-governance-gateway/) | Govern tool calls | Overlapping but distinct depth on per-tool-call authorisation. That sample evaluates Cedar in the AgentCore Gateway's **PolicyEngine in `ENFORCE` mode** and is the better reference for the request-path interceptor and OAuth 3LO connector patterns. This blueprint currently evaluates Cedar **inside each tool Lambda** (§3.3, `TODO-GW-POLICY-ENGINE`) and adds the org-level layers around it — SCP-09/10/11, the Registry as tool SSOT, and synth-time subscription validation. |
+| Sample                                                                                | Layer                | Relationship to this blueprint                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------------------------------------------------------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`workshop-building-agentic-ai-platform/`](../workshop-building-agentic-ai-platform/) | Learn the foundation | Closest neighbour. A guided 300-level workshop over the same building blocks (LLM Gateway via LiteLLM, MCP Gateway + Registry, Strands agents) in a **single account**. **Start there** if you want to understand the pattern hands-on; come here when you need the multi-account, SCP-governed, CI/CD-gated production form of it.                                                                                                                                                     |
+| [`Agentic-ai-self-service/`](../Agentic-ai-self-service/)                             | Build agents         | The builder experience that sits **on top of** a foundation like this one. It gives teams a visual canvas for authoring and deploying AgentCore agents; this blueprint provides the governed accounts, model allow-list, guardrails, and cost attribution those agents deploy into.                                                                                                                                                                                                     |
+| [`enterprise-mcp-governance-gateway/`](../enterprise-mcp-governance-gateway/)         | Govern tool calls    | Overlapping but distinct depth on per-tool-call authorisation. That sample evaluates Cedar in the AgentCore Gateway's **PolicyEngine in `ENFORCE` mode** and is the better reference for the request-path interceptor and OAuth 3LO connector patterns. This blueprint currently evaluates Cedar **inside each tool Lambda** (§3.3, `TODO-GW-POLICY-ENGINE`) and adds the org-level layers around it — SCP-09/10/11, the Registry as tool SSOT, and synth-time subscription validation. |
 
-Pick this sample if your question is *"how do I govern agentic AI across many accounts and many teams?"*. Pick one of the others if your question is *"how do I learn this?"*, *"how do I ship an agent quickly?"*, or *"how do I authorise a single tool call?"*.
+Pick this sample if your question is _"how do I govern agentic AI across many accounts and many teams?"_. Pick one of the others if your question is _"how do I learn this?"_, _"how do I ship an agent quickly?"_, or _"how do I authorise a single tool call?"_.
 
 ---
 
@@ -85,14 +85,14 @@ See `assets/architecture-diagram.png` (editable `.drawio` source alongside). Con
 
 ### 2.1 Account topology
 
-| Role | OU | Purpose |
-|---|---|---|
-| Management | Root | AWS Organization, OUs, SCPs 01-12 (01-08 baseline; 09-10 D-03 Gateway; 11 Registry; 12 developer permission sets) |
-| Log Archive | Security | CloudTrail org trail + CUR + CWL cross-account destination |
-| Audit | Security | CloudWatch OAM sink, Security Hub master |
-| Platform non-prod / prod | AgenticAI-Platform | Guardrail Admin, Registry, CDK Pipelines, central AgentCore inference Gateway, Cognito M2M, native model rate limits |
-| Workload non-prod / prod | AgenticAI-Workloads | Per-application agent stacks |
-| SCP Sandbox | AgenticAI-Sandbox | Soaks new SCPs before promotion |
+| Role                     | OU                  | Purpose                                                                                                              |
+| ------------------------ | ------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Management               | Root                | AWS Organization, OUs, SCPs 01-12 (01-08 baseline; 09-10 D-03 Gateway; 11 Registry; 12 developer permission sets)    |
+| Log Archive              | Security            | CloudTrail org trail + CUR + CWL cross-account destination                                                           |
+| Audit                    | Security            | CloudWatch OAM sink, Security Hub master                                                                             |
+| Platform non-prod / prod | AgenticAI-Platform  | Guardrail Admin, Registry, CDK Pipelines, central AgentCore inference Gateway, Cognito M2M, native model rate limits |
+| Workload non-prod / prod | AgenticAI-Workloads | Per-application agent stacks                                                                                         |
+| SCP Sandbox              | AgenticAI-Sandbox   | Soaks new SCPs before promotion                                                                                      |
 
 CloudWatch Logs destination access policies are service-specific: `Principal.AWS` lists each sender's 12-digit account ID. IAM root ARNs are not equivalent here and are rejected by `PutDestinationPolicy`.
 
@@ -125,7 +125,7 @@ Per workload account (`packages/agentic-vpc/`): VPC with 3 AZs, **private-isolat
 - **Tenancy** (`packages/agentic-app/`) — per-app IAM role, per-app SG, memory namespace locked at synth, cost-allocation tags for per-app CUR.
 - **Observability** (`packages/observability/`) — OAM source link to the Audit account, per-app dashboard + guardrail/latency alarms.
 - **Cost** (`packages/cost-allocation/`) — per-app Budget filtered by `application-id`, alerts at 80 % ACTUAL + 100 % FORECASTED.
-- **CI/CD** (`pipelines/`) — self-mutating platform pipeline + per-app workload pipeline with the mandatory sequence *Source → Synth → Deploy(nonprod) → Evaluation Gate → Manual Approval → Deploy(prod)*.
+- **CI/CD** (`pipelines/`) — self-mutating platform pipeline + per-app workload pipeline with the mandatory sequence _Source → Synth → Deploy(nonprod) → Evaluation Gate → Manual Approval → Deploy(prod)_.
 
 Evaluation-gate thresholds (defaults, overridable via `cdk.context.json`): regression pass ≥ 95 %, guardrail violation ≤ 1 %, LLM-as-judge quality ≥ 85 %, tool success ≥ 98 %, first-token p99 ≤ 1500 ms.
 
@@ -285,6 +285,17 @@ just-in-time; developers commit stable tool IDs, never environment-specific
 RegistryRecord IDs. The legacy `allowedToolIds` path remains the rollback mode
 until R2 parity and teardown pass.
 
+`DEPRECATED` Registry records are terminal and cannot be updated or approved
+again. Recover one without replacing the Registry, its reader role, tools, or
+the retained DynamoDB rollback path by setting
+`agenticai/gaRegistryRecordGenerations` to an environment-scoped, monotonically
+increasing generation such as `{"nonprod":{"tool-echo":2}}`. First remove only
+the terminal record through the governed cleanup path, then update the Platform
+pipeline root with the generation and let the Platform pipeline create the new
+record plus update its SSM pointer. Explicitly approve the replacement `DRAFT`
+record before resuming Workload deployments. Never decrease or reuse a
+generation, and never apply a generation to production without its own review.
+
 The reference R2 Gateway stays in the pipeline Region (`us-west-2`) so no
 uncontrolled CDK cross-region artifact support stack appears. A region override
 requires its own secure replication-bucket design and independent live proof.
@@ -302,20 +313,21 @@ Repository hygiene gates, runnable locally and suitable for wiring into CI: `npm
 
 ### 6.5 Common issues
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| `cdk bootstrap` `sts:AssumeRole` denied | Target not set up for cross-account trust | Assume admin in the target first, re-run |
-| Bedrock `AccessDenied` | SCP-01/02 not matched | Confirm model on allow-list + `GuardrailIdentifier` supplied |
-| Cross-account KMS decrypt fails | Bootstrap `aws-cdk-lib` < 2.150 | Re-bootstrap ≥ 2.150 |
-| D-03 `CreateGateway` `not authorized` | Fresh CR role IAM not yet propagated to AgentCore | Use the pipeline-created `RegistryRoles` stage; legacy standalone mode must rely on the built-in propagation gate |
-| D-03 `CreateGatewayTarget` "role lacks permission to invoke Lambda" | `GatewayPermissionReady` was approved before the Platform permission phase completed | Keep the Workload pipeline paused; run the Platform pipeline with `agenticai/enableGaGatewayInvokePermissions=true`, verify exact alias permissions, then approve the handoff |
-| Platform R2 `Registry.Deploy` denies `iam:CreateRole` for a generated `ServiceRole-*` name | Tool Lambdas were relying on CDK auto-generated role names outside the scoped `AgenticAI*` deployment boundary | Use the explicit `AgenticAI-Platform-<environment>-<tool>-exec` roles emitted by the R2 tools construct; do not widen the execution policy to arbitrary role names |
-| Workload Synth denies `agent-registry:ListTagsForResource` | `RegistryReaderRole` can read records but cannot verify their five ownership tags | Deploy the R2 reader policy that scopes `ListTagsForResource` to the exact Registry and its `/record/*` family before retrying the Workload pipeline |
-| Registry validator reports `getaddrinfo ENOTFOUND agent-registry-control.<region>.amazonaws.com` | GA Agent Registry resolves on its `api.aws` hostname from Lambda | Use `agent-registry-control.<region>.api.aws` while retaining SigV4 service name `agent-registry` |
-| ToolGateway rollback cannot delete `GatewayResource` and CloudTrail shows a friendly `AgenticAI-D03-Gateway-*` identifier | The custom resource retained a synthetic physical ID instead of the service-minted Gateway ID | Persist `CreateGateway.gatewayId` with `PhysicalResourceId.fromResponse("gatewayId")` and use `PhysicalResourceIdReference` for update/delete |
-| ToolGateway stack reaches `DELETE_COMPLETE` but the Gateway remains and CloudTrail says targets are still associated | `DeleteGatewayTarget` is asynchronous even after its custom resource reports complete | Keep a dependency-ordered `TargetDeleteBarrier` between targets and Gateway; its waiter polls `ListGatewayTargets` to empty before `DeleteGateway` runs |
-| Pipeline M2M token endpoint cannot resolve | Hosted-domain URL was built with the AWS API suffix | Derive it from `UserPoolDomain.baseUrl()`; Cognito managed domains use the `amazoncognito.com` suffix |
-| `subnets in unsupported AZ` | AgentCore supports only `use1-az1/az2/az4` in `us-east-1` | Filter subnets by AZ ID (`AgentcoreCompatibleSubnetIdFirst` output) |
+| Symptom                                                                                                                   | Cause                                                                                                          | Fix                                                                                                                                                                                                                                                 |
+| ------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cdk bootstrap` `sts:AssumeRole` denied                                                                                   | Target not set up for cross-account trust                                                                      | Assume admin in the target first, re-run                                                                                                                                                                                                            |
+| Bedrock `AccessDenied`                                                                                                    | SCP-01/02 not matched                                                                                          | Confirm model on allow-list + `GuardrailIdentifier` supplied                                                                                                                                                                                        |
+| Cross-account KMS decrypt fails                                                                                           | Bootstrap `aws-cdk-lib` < 2.150                                                                                | Re-bootstrap ≥ 2.150                                                                                                                                                                                                                                |
+| D-03 `CreateGateway` `not authorized`                                                                                     | Fresh CR role IAM not yet propagated to AgentCore                                                              | Use the pipeline-created `RegistryRoles` stage; legacy standalone mode must rely on the built-in propagation gate                                                                                                                                   |
+| D-03 `CreateGatewayTarget` "role lacks permission to invoke Lambda"                                                       | `GatewayPermissionReady` was approved before the Platform permission phase completed                           | Keep the Workload pipeline paused; run the Platform pipeline with `agenticai/enableGaGatewayInvokePermissions=true`, verify exact alias permissions, then approve the handoff                                                                       |
+| Platform R2 `Registry.Deploy` denies `iam:CreateRole` for a generated `ServiceRole-*` name                                | Tool Lambdas were relying on CDK auto-generated role names outside the scoped `AgenticAI*` deployment boundary | Use the explicit `AgenticAI-Platform-<environment>-<tool>-exec` roles emitted by the R2 tools construct; do not widen the execution policy to arbitrary role names                                                                                  |
+| Workload Synth denies `agent-registry:ListTagsForResource`                                                                | `RegistryReaderRole` can read records but cannot verify their five ownership tags                              | Deploy the R2 reader policy that scopes `ListTagsForResource` to the exact Registry and its `/record/*` family before retrying the Workload pipeline                                                                                                |
+| Registry validator reports `getaddrinfo ENOTFOUND agent-registry-control.<region>.amazonaws.com`                          | GA Agent Registry resolves on its `api.aws` hostname from Lambda                                               | Use `agent-registry-control.<region>.api.aws` while retaining SigV4 service name `agent-registry`                                                                                                                                                   |
+| ToolGateway rollback cannot delete `GatewayResource` and CloudTrail shows a friendly `AgenticAI-D03-Gateway-*` identifier | The custom resource retained a synthetic physical ID instead of the service-minted Gateway ID                  | Persist `CreateGateway.gatewayId` with `PhysicalResourceId.fromResponse("gatewayId")` and use `PhysicalResourceIdReference` for update/delete                                                                                                       |
+| ToolGateway stack reaches `DELETE_COMPLETE` but the Gateway remains and CloudTrail says targets are still associated      | `DeleteGatewayTarget` is asynchronous even after its custom resource reports complete                          | Keep a dependency-ordered `TargetDeleteBarrier` between targets and Gateway; its waiter polls `ListGatewayTargets` to empty before `DeleteGateway` runs                                                                                             |
+| A GA Registry record is `DEPRECATED` and status/update calls report a terminal state                                      | `DEPRECATED` records cannot return to `DRAFT` or `APPROVED`                                                    | Remove only the terminal record through governed cleanup, increment its environment-specific `agenticai/gaRegistryRecordGenerations` value, and let the Platform pipeline recreate it and update the SSM pointer; explicitly approve the new record |
+| Pipeline M2M token endpoint cannot resolve                                                                                | Hosted-domain URL was built with the AWS API suffix                                                            | Derive it from `UserPoolDomain.baseUrl()`; Cognito managed domains use the `amazoncognito.com` suffix                                                                                                                                               |
+| `subnets in unsupported AZ`                                                                                               | AgentCore supports only `use1-az1/az2/az4` in `us-east-1`                                                      | Filter subnets by AZ ID (`AgentcoreCompatibleSubnetIdFirst` output)                                                                                                                                                                                 |
 
 Rollback: `npx cdk destroy <stack>` per-stack, or `bash scripts/teardown.sh` for the full sweep.
 
@@ -325,11 +337,11 @@ Rollback: `npx cdk destroy <stack>` per-stack, or `bash scripts/teardown.sh` for
 
 Three Strands blueprints ship at v1 under `blueprints/` (plus LangGraph + CrewAI reference agents):
 
-| Blueprint | Model mix | Pattern |
-|---|---|---|
-| `agenticai-task-agent` | Haiku 4.5 | Deterministic single-shot; max-iteration guard; streaming |
-| `agenticai-chatbot-agent` | Sonnet 4.5 / Haiku 4.5 | Multi-turn; HITL escalation; Customer-Facing guardrail |
-| `agenticai-multi-agent` | Sonnet supervisor + Haiku workers | Supervisor + N-worker dispatch |
+| Blueprint                 | Model mix                         | Pattern                                                   |
+| ------------------------- | --------------------------------- | --------------------------------------------------------- |
+| `agenticai-task-agent`    | Haiku 4.5                         | Deterministic single-shot; max-iteration guard; streaming |
+| `agenticai-chatbot-agent` | Sonnet 4.5 / Haiku 4.5            | Multi-turn; HITL escalation; Customer-Facing guardrail    |
+| `agenticai-multi-agent`   | Sonnet supervisor + Haiku workers | Supervisor + N-worker dispatch                            |
 
 Under D-01 you invoke via the per-workload LiteLLM endpoint fronted by API Gateway. Under D-03 agents run on AgentCore Runtime and reach tools through the workstream MCP Gateway and Bedrock via cross-account AssumeRole. Next steps: add a workload app (§13), swap the guardrail profile (§11), tune eval thresholds (§11), or add a region (§11).
 
@@ -339,11 +351,11 @@ Under D-01 you invoke via the per-workload LiteLLM endpoint fronted by API Gatew
 
 Rough estimates (no measured 24-hour baseline yet — see §15). `us-west-2` pricing, 2026.
 
-| Traffic profile | Monthly (USD, approx) |
-|---|---|
-| Dev / low (10K invocations/day, 500 tok) | ~$280 |
-| Moderate (100K/day, 1K tok) | ~$1,100 |
-| High (1M/day, 1.5K tok) | ~$9,000 |
+| Traffic profile                          | Monthly (USD, approx) |
+| ---------------------------------------- | --------------------- |
+| Dev / low (10K invocations/day, 500 tok) | ~$280                 |
+| Moderate (100K/day, 1K tok)              | ~$1,100               |
+| High (1M/day, 1.5K tok)                  | ~$9,000               |
 
 At moderate traffic the largest lines are Bedrock inference (~$600, Haiku ≈ 4× cheaper than Sonnet) and the 11 interface VPCEs across 3 AZs (~$240). Optimisation levers: route tolerant workloads to Haiku, Flex tier for dev/test, batch inference, Provisioned Throughput for sustained steady-state, and tuning CloudWatch retention. Per-app Budgets (filtered by `application-id`) alert at 80 % ACTUAL / 100 % FORECASTED; override via `agenticai/monthlyBudgetUsd` + `agenticai/notificationEmail`.
 
@@ -401,15 +413,15 @@ Report security issues privately via the [AWS vulnerability reporting page](http
 
 A customer should never have to fork the repo to make a supported variant. Every recognised override:
 
-| Decision | Default | Override |
-|---|---|---|
-| Identity provider | Cognito | `agenticai/customJwtIssuer` + `customJwtAudience` (corporate OIDC) |
-| Guardrail profile (per agent) | Baseline | per-agent `blueprints/<name>/bedrock.config.yaml` |
-| Model allow-list | Sonnet 4.5 + Haiku 4.5 | `PLATFORM_ALLOWED_MODELS` constant (forces platform review) |
-| Region | `us-west-2` | `packages/platform-baselines/src/approved-regions.ts` + SCP-06 sandbox-soak |
-| Eval thresholds | see §2.5 | `agenticai/eval*` context keys |
-| Gateway fronting | API Gateway (§08 Option A) | hard default |
-| Browser egress / Lattice endpoints | Off | `agenticai/enableBrowserInternetEgress` / `enableLatticePrivateEndpoints` (BETA) |
+| Decision                           | Default                    | Override                                                                         |
+| ---------------------------------- | -------------------------- | -------------------------------------------------------------------------------- |
+| Identity provider                  | Cognito                    | `agenticai/customJwtIssuer` + `customJwtAudience` (corporate OIDC)               |
+| Guardrail profile (per agent)      | Baseline                   | per-agent `blueprints/<name>/bedrock.config.yaml`                                |
+| Model allow-list                   | Sonnet 4.5 + Haiku 4.5     | `PLATFORM_ALLOWED_MODELS` constant (forces platform review)                      |
+| Region                             | `us-west-2`                | `packages/platform-baselines/src/approved-regions.ts` + SCP-06 sandbox-soak      |
+| Eval thresholds                    | see §2.5                   | `agenticai/eval*` context keys                                                   |
+| Gateway fronting                   | API Gateway (§08 Option A) | hard default                                                                     |
+| Browser egress / Lattice endpoints | Off                        | `agenticai/enableBrowserInternetEgress` / `enableLatticePrivateEndpoints` (BETA) |
 
 An override that breaks a spec MUST (e.g. adding a non-Claude model) becomes a new deviation in §3.
 

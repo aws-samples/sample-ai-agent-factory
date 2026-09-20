@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Pipeline-owned blue-green GA Registry producer: native Registry and tagged `CUSTOM` governance records, exact `agent-registry` read permissions, conditioned `RegistryReaderRole`, per-record/versioned SSM discovery parameters, and `RetainExceptOnCreate` state protection alongside the unchanged DynamoDB rollback path.
 - Template-bound pipeline Registry approval utility with all-`DRAFT` atomic preflight, exact processed-template descriptor comparison, bounded approval/discovery polling, credential-safe evidence, and 77 focused tests.
 - R2 GA Registry consumer: pipeline-owned environment-qualified Platform tool aliases, strict SSM/Registry resolver, stable tool-ID developer subscriptions, a three-role Workstream prerequisite stage, explicit Platform permission handoff, and deploy-time `APPROVED` plus descriptor-digest validation.
+- Environment-scoped `agenticai/gaRegistryRecordGenerations` recovery control for replacing one terminal GA Registry record while preserving the Registry, reader role, tools, SSM namespace, and DynamoDB rollback path.
 
 ### Changed
 
@@ -48,6 +49,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Gateway custom resources now retain the service-returned `gatewayId` as their physical ID and use `PhysicalResourceIdReference` for update/delete, so rollback never sends a friendly synthetic identifier to `DeleteGateway`.
 - Workstream Gateway teardown now inserts a Provider-backed `TargetDeleteBarrier` in the dependency chain; it polls `ListGatewayTargets` to empty after asynchronous target deletions before CloudFormation invokes `DeleteGateway`, and only `ResourceNotFoundException` is tolerated so association races fail loudly instead of orphaning a Gateway.
 - Workstream bootstrap guidance now requires `iam:PassRole` on the bounded Provider waiter roles only when `iam:PassedToService=states.amazonaws.com`; the first barrier deployment failed closed before resource creation when that service condition was absent.
+- Terminal GA Registry record recovery now rotates only the selected record's CloudFormation identity and SSM ID pointer; unchanged records and environments retain their existing logical IDs, and invalid, unknown, reused generation `1`, or out-of-range values fail synthesis.
 - Deploy-time Registry validation now explicitly compares the live governance target ARN with the synth-wired Gateway target in addition to requiring the exact descriptor SHA-256.
 - Developer subscriptions now store stable tool IDs in `agenticai/gaRegistryExpectedToolIds`; environment-specific RegistryRecord IDs never enter developer repositories.
 - SCP-09 now exempts only environment-qualified `AgenticAI-D03-*-GatewayAdmin` roles in configured Workstream accounts. The prior Platform-account exception could not create a resource in a Workstream account.
@@ -150,7 +152,7 @@ Replaces the v0.4.0 TS-constant tool catalogue with the **AWS Bedrock AgentCore 
 
 ### Z7 + audit-fix pass (2026-05-15) — close the misses surfaced by self-audit
 
-After the v0.4.0 ship I ran a rigorous self-audit (twice) and found I had been shipping module *definitions* without the *wirings*. Z7 closes those misses; a second self-audit found another batch which this entry also closes.
+After the v0.4.0 ship I ran a rigorous self-audit (twice) and found I had been shipping module _definitions_ without the _wirings_. Z7 closes those misses; a second self-audit found another batch which this entry also closes.
 
 **Z7 deliverables:**
 
@@ -369,20 +371,20 @@ Gateway `status: READY`, 2 targets `status: READY` (BMJZGIZRZE `target-tool-echo
 
 Two-account real deployment (us-east-1), 12/12 behavioural assertions PASS:
 
-| # | Assertion | Result |
-|---|---|---|
-| T1 | workload IAM user → runtime role AssumeRole (allowLocalRootAssume=true) | PASS |
-| T2 | runtime role → BedrockCallerRole with ExternalId + matching PrincipalArn + RoleSessionName glob | PASS |
-| T3 | Wrong ExternalId → AccessDenied | PASS |
-| T4 | Non-matching RoleSessionName → AccessDenied | PASS |
-| T5 | `Converse` via demo tenant app-profile + baseline guardrail → 200 | PASS |
-| T6 | `Converse` via retail tenant app-profile + baseline guardrail → 200 | PASS |
-| T7 | `Converse` without guardrail → AccessDenied (Null+StringNotEquals dual deny) | PASS |
-| T8 | `Converse` via non-allow-listed resource scope → AccessDenied | PASS |
-| T9 | Cross-account DynamoDB query for own tenant → 200 (kms:ViaService intact) | PASS |
-| T10 | Cross-account DynamoDB query for OTHER tenant → AccessDenied (dynamodb:LeadingKeys) | PASS |
-| T11 | CloudTrail carries per-tenant inference-profile ARN (CUR attribution path) | PASS |
-| T12 | CloudTrail carries stable RoleSessionName (audit attribution survives role chaining) | PASS |
+| #   | Assertion                                                                                       | Result |
+| --- | ----------------------------------------------------------------------------------------------- | ------ |
+| T1  | workload IAM user → runtime role AssumeRole (allowLocalRootAssume=true)                         | PASS   |
+| T2  | runtime role → BedrockCallerRole with ExternalId + matching PrincipalArn + RoleSessionName glob | PASS   |
+| T3  | Wrong ExternalId → AccessDenied                                                                 | PASS   |
+| T4  | Non-matching RoleSessionName → AccessDenied                                                     | PASS   |
+| T5  | `Converse` via demo tenant app-profile + baseline guardrail → 200                               | PASS   |
+| T6  | `Converse` via retail tenant app-profile + baseline guardrail → 200                             | PASS   |
+| T7  | `Converse` without guardrail → AccessDenied (Null+StringNotEquals dual deny)                    | PASS   |
+| T8  | `Converse` via non-allow-listed resource scope → AccessDenied                                   | PASS   |
+| T9  | Cross-account DynamoDB query for own tenant → 200 (kms:ViaService intact)                       | PASS   |
+| T10 | Cross-account DynamoDB query for OTHER tenant → AccessDenied (dynamodb:LeadingKeys)             | PASS   |
+| T11 | CloudTrail carries per-tenant inference-profile ARN (CUR attribution path)                      | PASS   |
+| T12 | CloudTrail carries stable RoleSessionName (audit attribution survives role chaining)            | PASS   |
 
 Teardown verified clean — zero residual CFN stacks / log groups / CMKs / guardrails / inference profiles.
 

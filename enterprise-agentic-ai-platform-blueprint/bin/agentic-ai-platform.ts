@@ -97,6 +97,73 @@ function stringArrayContext(key: string): readonly string[] {
   return parsed;
 }
 
+type GaRegistryRecordGenerationsByEnvironment = Readonly<
+  Partial<Record<"nonprod" | "prod", Readonly<Record<string, number>>>>
+>;
+
+function gaRegistryRecordGenerationsContext(
+  key: string,
+): GaRegistryRecordGenerationsByEnvironment {
+  const raw = app.node.tryGetContext(key);
+  if (raw === undefined) return {};
+
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(
+        `Context '${key}' must be a JSON object keyed by nonprod/prod.`,
+        { cause: error },
+      );
+    }
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(
+      `Context '${key}' must be a JSON object keyed by nonprod/prod.`,
+    );
+  }
+
+  const result: Partial<
+    Record<"nonprod" | "prod", Readonly<Record<string, number>>>
+  > = {};
+  for (const [environment, configured] of Object.entries(parsed)) {
+    if (environment !== "nonprod" && environment !== "prod") {
+      throw new Error(
+        `Context '${key}' has unsupported environment '${environment}'.`,
+      );
+    }
+    if (
+      typeof configured !== "object" ||
+      configured === null ||
+      Array.isArray(configured)
+    ) {
+      throw new Error(`Context '${key}.${environment}' must be an object.`);
+    }
+    const generations: Record<string, number> = {};
+    for (const [toolId, generation] of Object.entries(configured)) {
+      if (!/^[a-z][a-z0-9-]{1,62}[a-z0-9]$/.test(toolId)) {
+        throw new Error(
+          `Context '${key}.${environment}' has invalid tool id '${toolId}'.`,
+        );
+      }
+      if (
+        typeof generation !== "number" ||
+        !Number.isSafeInteger(generation) ||
+        generation < 2 ||
+        generation > 999
+      ) {
+        throw new Error(
+          `Context '${key}.${environment}.${toolId}' must be an integer from 2 through 999.`,
+        );
+      }
+      generations[toolId] = generation;
+    }
+    result[environment] = generations;
+  }
+  return result;
+}
+
 function gaRegistryContextFromFile(
   key: string,
   expectation: {
@@ -260,6 +327,9 @@ switch (stage) {
     const agentId = app.node.tryGetContext("agenticai/agentId") ?? "shared";
     const costCentre =
       app.node.tryGetContext("agenticai/costCentre") ?? "platform";
+    const gaRegistryRecordGenerations = gaRegistryRecordGenerationsContext(
+      "agenticai/gaRegistryRecordGenerations",
+    );
     if (platformAccount && typeof pipelineRoleArn === "string") {
       if (inferenceModelRateLimits.length === 0) {
         throw new Error(
@@ -302,6 +372,10 @@ switch (stage) {
               : "agenticai/workloadProdAccountId",
           ) ?? "",
         ),
+        gaRegistryRecordGenerations:
+          platformEnvName === "nonprod"
+            ? gaRegistryRecordGenerations.nonprod
+            : gaRegistryRecordGenerations.prod,
         applicationId: String(applicationId),
         agentId: String(agentId),
         tenantId: String(tenantId),
@@ -710,6 +784,9 @@ switch (stage) {
     const gaGatewayServiceRoleArns = stringArrayContext(
       "agenticai/gaGatewayServiceRoleArns",
     );
+    const gaRegistryRecordGenerations = gaRegistryRecordGenerationsContext(
+      "agenticai/gaRegistryRecordGenerations",
+    );
     const gaRegistryExpectedToolIds = stringArrayContext(
       "agenticai/gaRegistryExpectedToolIds",
     );
@@ -882,6 +959,10 @@ switch (stage) {
         gaGatewayServiceRoleArns,
       );
     }
+    if (Object.keys(gaRegistryRecordGenerations).length > 0) {
+      sharedSynthContext["agenticai/gaRegistryRecordGenerations"] =
+        JSON.stringify(gaRegistryRecordGenerations);
+    }
     if (typeof auditOamSinkArn === "string") {
       sharedSynthContext["agenticai/auditOamSinkArn"] = auditOamSinkArn;
     }
@@ -925,6 +1006,7 @@ switch (stage) {
           nonprod: String(workloadNonprodAccount),
           prod: String(workloadProdAccount),
         },
+        gaRegistryRecordGenerations,
         synthContext: sharedSynthContext,
       });
     }

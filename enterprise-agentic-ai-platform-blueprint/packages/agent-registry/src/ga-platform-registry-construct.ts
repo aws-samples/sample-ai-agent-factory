@@ -51,6 +51,11 @@ export interface GaPlatformRegistryConstructProps {
   readonly registrySynthAccountId: string;
   /** Pipeline-owned environment-specific tool alias ARNs keyed by stable tool ID. */
   readonly toolTargetArns?: Readonly<Record<string, string>>;
+  /**
+   * Optional monotonic replacement generation for terminal Registry records.
+   * Omitted records retain their original CloudFormation logical identity.
+   */
+  readonly recordGenerations?: Readonly<Record<string, number>>;
   readonly tags: GaPlatformRegistryTags;
 }
 
@@ -171,6 +176,23 @@ export class GaPlatformRegistryConstruct extends Construct {
         );
       }
     }
+    const recordGenerations = props.recordGenerations ?? {};
+    for (const [toolId, generation] of Object.entries(recordGenerations)) {
+      if (!(toolId in PLATFORM_TOOL_CATALOGUE)) {
+        throw new Error(
+          `GaPlatformRegistryConstruct: record generation names unknown tool '${toolId}'.`,
+        );
+      }
+      if (
+        !Number.isSafeInteger(generation) ||
+        generation < 2 ||
+        generation > 999
+      ) {
+        throw new Error(
+          `GaPlatformRegistryConstruct: record generation for '${toolId}' must be an integer from 2 through 999.`,
+        );
+      }
+    }
 
     const stack = Stack.of(this);
     const tags = {
@@ -232,7 +254,12 @@ export class GaPlatformRegistryConstruct extends Construct {
         stack.account,
         props.toolTargetArns?.[tool.toolId],
       );
-      const record = new CfnResource(this, `Record-${tool.toolId}`, {
+      const generation = recordGenerations[tool.toolId];
+      const recordConstructId =
+        generation === undefined
+          ? `Record-${tool.toolId}`
+          : `Record-${tool.toolId}-generation-${generation}`;
+      const record = new CfnResource(this, recordConstructId, {
         type: "AWS::AgentRegistry::RegistryRecord",
         properties: {
           RegistryId: this.registryId,

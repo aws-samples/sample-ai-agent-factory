@@ -44,6 +44,7 @@ function synth(
   envName: "nonprod" | "prod" = "nonprod",
   grantGatewayInvokePermissions = true,
   gatewayServiceRoleArns?: readonly string[],
+  gaRegistryRecordGenerations?: Readonly<Record<string, number>>,
 ): Template {
   const app = new App();
   const stack = new RegistryStack(app, `Registry-${envName}`, {
@@ -62,6 +63,7 @@ function synth(
         : undefined),
     gatewayWorkloadAccountId:
       WORKLOAD_ACCOUNT_IDS[envName === "nonprod" ? 0 : 1],
+    gaRegistryRecordGenerations,
     applicationId: "platform-registry",
     agentId: "shared",
     tenantId: "shared",
@@ -159,6 +161,83 @@ describe("Phase 22 — GA Registry producer remains additive", () => {
         },
       });
     }
+  });
+
+  it("rotates only an explicitly generated terminal record and its SSM pointer", () => {
+    const baselineTemplate = synth("nonprod", false);
+    const baselineResources = baselineTemplate.toJSON().Resources as Record<
+      string,
+      any
+    >;
+    const baseline = baselineTemplate.findResources(
+      "AWS::AgentRegistry::RegistryRecord",
+    );
+    const rotatedTemplate = synth("nonprod", false, undefined, {
+      "tool-echo": 2,
+    });
+    const rotatedResources = rotatedTemplate.toJSON().Resources as Record<
+      string,
+      any
+    >;
+    const rotated = rotatedTemplate.findResources(
+      "AWS::AgentRegistry::RegistryRecord",
+    );
+    const logicalIdFor = (
+      resources: Record<string, any>,
+      toolId: string,
+    ): string =>
+      Object.entries(resources).find(
+        ([, resource]: [string, any]) => resource.Properties.Name === toolId,
+      )![0];
+
+    const baselineEcho = logicalIdFor(baseline, "tool-echo");
+    const baselinePing = logicalIdFor(baseline, "tool-ping");
+    const rotatedEcho = logicalIdFor(rotated, "tool-echo");
+    expect(rotatedEcho).not.toBe(baselineEcho);
+    expect(logicalIdFor(rotated, "tool-ping")).toBe(baselinePing);
+    expect(rotated[rotatedEcho].Properties).toEqual(
+      baseline[baselineEcho].Properties,
+    );
+
+    const parameters = rotatedTemplate.findResources("AWS::SSM::Parameter");
+    const [echoPointerId, echoPointer] = Object.entries(parameters).find(
+      ([, parameter]: [string, any]) =>
+        parameter.Properties.Name ===
+        "/agenticai/registry/v1/nonprod/records/tool-echo/id",
+    )!;
+    expect((echoPointer as any).Properties.Value).toEqual({
+      "Fn::GetAtt": [rotatedEcho, "RecordId"],
+    });
+
+    expect(
+      Object.keys(baselineResources)
+        .filter((logicalId) => !(logicalId in rotatedResources))
+        .sort(),
+    ).toEqual([baselineEcho]);
+    expect(
+      Object.keys(rotatedResources)
+        .filter((logicalId) => !(logicalId in baselineResources))
+        .sort(),
+    ).toEqual([rotatedEcho]);
+    expect(
+      Object.keys(baselineResources)
+        .filter(
+          (logicalId) =>
+            logicalId in rotatedResources &&
+            JSON.stringify(baselineResources[logicalId]) !==
+              JSON.stringify(rotatedResources[logicalId]),
+        )
+        .sort(),
+    ).toEqual([echoPointerId]);
+  });
+
+  it("rejects invalid or unknown record generations", () => {
+    expect(() =>
+      synth("nonprod", false, undefined, { "tool-echo": 1 }),
+    ).toThrow(/integer from 2 through 999/);
+    expect(() =>
+      synth("nonprod", false, undefined, { "tool-missing": 2 }),
+    ).toThrow(/unknown tool 'tool-missing'/);
   });
 
   it("creates tools without invoke permissions before Workstream roles exist", () => {

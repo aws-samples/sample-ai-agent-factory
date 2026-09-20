@@ -41,6 +41,10 @@ export interface PipelineStageEnv {
   readonly envName: "nonprod" | "prod";
 }
 
+export type GaRegistryRecordGenerationsByEnvironment = Readonly<
+  Partial<Record<"nonprod" | "prod", Readonly<Record<string, number>>>>
+>;
+
 export interface PlatformPipelineStackProps extends StackProps {
   readonly githubRepo: string;
   readonly githubBranch?: string;
@@ -61,6 +65,7 @@ export interface PlatformPipelineStackProps extends StackProps {
   readonly gatewayWorkloadAccountIds?: Readonly<
     Record<"nonprod" | "prod", string>
   >;
+  readonly gaRegistryRecordGenerations?: GaRegistryRecordGenerationsByEnvironment;
 
   /** Explicit stage passed to the pipeline's own synth command. */
   readonly synthStage?: string;
@@ -103,6 +108,7 @@ export interface PlatformDeploymentStageProps extends StageProps {
   readonly grantGatewayInvokePermissions?: boolean;
   readonly gatewayServiceRoleArns?: readonly string[];
   readonly gatewayWorkloadAccountId?: string;
+  readonly gaRegistryRecordGenerations?: Readonly<Record<string, number>>;
 }
 
 export class PlatformDeploymentStage extends Stage {
@@ -142,6 +148,7 @@ export class PlatformDeploymentStage extends Stage {
       grantGatewayInvokePermissions: props.grantGatewayInvokePermissions,
       gatewayServiceRoleArns: props.gatewayServiceRoleArns,
       gatewayWorkloadAccountId: props.gatewayWorkloadAccountId,
+      gaRegistryRecordGenerations: props.gaRegistryRecordGenerations,
       applicationId: props.applicationId,
       agentId: props.agentId,
       tenantId: props.tenantId,
@@ -239,6 +246,7 @@ export class PlatformPipelineStack extends Stack {
         organizationId: props.organizationId,
         workloadAccountIds: props.workloadAccountIds,
         gatewayWorkloadAccountId: props.gatewayWorkloadAccountIds?.nonprod,
+        gaRegistryRecordGenerations: props.gaRegistryRecordGenerations?.nonprod,
         pipelineRoleArn: pipelineServiceRoleArn,
         auditEnv: props.audit.env,
         logArchiveEnv: props.logArchive.env,
@@ -254,6 +262,7 @@ export class PlatformPipelineStack extends Stack {
         organizationId: props.organizationId,
         workloadAccountIds: props.workloadAccountIds,
         gatewayWorkloadAccountId: props.gatewayWorkloadAccountIds?.prod,
+        gaRegistryRecordGenerations: props.gaRegistryRecordGenerations?.prod,
         pipelineRoleArn: pipelineServiceRoleArn,
         auditEnv: props.audit.env,
         logArchiveEnv: props.logArchive.env,
@@ -395,6 +404,14 @@ export class PlatformPipelineStack extends Stack {
       derived["agenticai/enableGaGatewayInvokePermissions"] = "true";
       derived["agenticai/gaGatewayServiceRoleArns"] = JSON.stringify(
         props.gatewayServiceRoleArns ?? [],
+      );
+    }
+    if (
+      props.gaRegistryRecordGenerations &&
+      Object.keys(props.gaRegistryRecordGenerations).length > 0
+    ) {
+      derived["agenticai/gaRegistryRecordGenerations"] = JSON.stringify(
+        props.gaRegistryRecordGenerations,
       );
     }
     return {
