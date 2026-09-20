@@ -75,6 +75,12 @@ python_files = ["test_*.py"]
 python_functions = ["test_*"]
 markers = [
     "integration: marks tests that perform real AWS API calls (deselect with '-m \"not integration\"')",
+    # checkov cannot be installed alongside this backend — it pins an older boto3 and pip
+    # resolves the conflict by silently swapping in a checkov with a different rule set —
+    # so it lives in its own isolated tool install and only the export-gate CI job has it.
+    # Every other runner must deselect these or they fail for want of a binary they were
+    # never meant to have.
+    "policy_scan: needs checkov on PATH from an isolated install (deselect with '-m \"not policy_scan\"')",
 ]
 
 [tool.hatch.build.targets.wheel]

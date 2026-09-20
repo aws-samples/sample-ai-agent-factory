@@ -131,11 +131,17 @@ jobs:
           cache-dependency-path: Agentic-ai-self-service/backend/pyproject.toml
       - name: Install backend with dev extras
         run: pip install -e './backend[dev]'
-      # -m "not integration" matches `make test-backend`: the integration marker is
-      # for tests that make real AWS calls, which have no credentials here.
+      # "not integration" matches `make test-backend`: the integration marker is for
+      # tests that make real AWS calls, which have no credentials here.
+      #
+      # "not policy_scan" because this job installs ./backend[dev] and checkov is
+      # deliberately not in it — it pins an older boto3 and co-installing it silently
+      # swaps the rule set the accepted-findings baseline was recorded against. Those
+      # tests hard-fail rather than skip when CI is set, which is correct for the job
+      # that owns the gate (export-gate, below) and guaranteed failure here.
       - name: Run backend suite
         working-directory: Agentic-ai-self-service/backend
-        run: python3 -m pytest -m "not integration" -q
+        run: python3 -m pytest -m "not integration and not policy_scan" -q
 
   export-gate:
     name: exported template (cfn-lint + checkov)

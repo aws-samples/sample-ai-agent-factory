@@ -3235,8 +3235,19 @@ class TestPolicyValidationModeIsTheRecipientsChoice:
         assert "PolicyValidationMode" not in readme
 
 
+@pytest.mark.policy_scan
 class TestPolicyScanner:
     """A policy scan over the artifact we ship, gated on a reasoned baseline.
+
+    Marked so exactly one CI job owns it. ``_require_scanner`` turns a missing scanner
+    into a hard failure whenever ``CI`` is set, which is the right rule for the job that
+    installs checkov and the wrong one everywhere else: the general backend job installs
+    ``./backend[dev]`` and *deliberately* has no checkov — see ``_require_scanner`` for
+    the boto3 standoff that makes co-installation silently swap the rule set — so it
+    could only ever fail these five. It did, on every run, and five red errors attached
+    to the export gate's test file said "the template has a policy problem" when the
+    truth was "this job was never able to check". The export-gate job drops the marker
+    filter and runs them for real.
 
     No scanner has ever run against this template. The first run found two things
     worth fixing — an unencrypted Lambda environment (CKV_AWS_173, fixed by the
