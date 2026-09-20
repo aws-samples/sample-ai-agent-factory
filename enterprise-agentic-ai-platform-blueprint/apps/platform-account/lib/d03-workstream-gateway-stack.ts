@@ -529,7 +529,6 @@ export class D03WorkstreamGatewayStack extends Stack {
         0,
         100,
       );
-    const gatewayPhysicalId = `AgenticAI-D03-Gateway-${props.envName}-${props.tenantId}-${props.agentId}`;
 
     const createGatewayParams: Record<string, unknown> = {
       name: gatewayName,
@@ -714,33 +713,23 @@ export class D03WorkstreamGatewayStack extends Stack {
         service: "bedrock-agentcore-control",
         action: "createGateway",
         parameters: createGatewayParams,
-        physicalResourceId: PhysicalResourceId.of(gatewayPhysicalId),
+        physicalResourceId: PhysicalResourceId.fromResponse("gatewayId"),
       },
       onUpdate: {
-        // Update-on-change delegated to the service — AgentCore `UpdateGateway`
-        // is a separate API; for v1 we no-op updates and rely on replace if
-        // the gateway name (physicalResourceId) ever changes. We MUST NOT set
-        // `ignoreErrorCodesMatching` on onCreate/onUpdate here: CDK disallows
-        // it alongside `getResponseField()` / `getDataString()` (the
-        // IgnoreErrorCodesMatchingNotAllowed check). Idempotency is instead
-        // enforced by the stable physicalResourceId — CloudFormation will
-        // skip the Create call on subsequent deploys.
+        // Update-on-change remains a read validation for v1, but uses the
+        // actual service-minted Gateway ID retained by CloudFormation.
         service: "bedrock-agentcore-control",
         action: "getGateway",
         parameters: {
-          gatewayIdentifier: new PhysicalResourceIdReferenceShim(
-            gatewayPhysicalId,
-          ).value,
+          gatewayIdentifier: new PhysicalResourceIdReference(),
         },
-        physicalResourceId: PhysicalResourceId.of(gatewayPhysicalId),
+        physicalResourceId: PhysicalResourceId.fromResponse("gatewayId"),
       },
       onDelete: {
         service: "bedrock-agentcore-control",
         action: "deleteGateway",
         parameters: {
-          gatewayIdentifier: new PhysicalResourceIdReferenceShim(
-            gatewayPhysicalId,
-          ).value,
+          gatewayIdentifier: new PhysicalResourceIdReference(),
         },
         // Tolerate the common rollback cases where the Gateway was never
         // created (CFN invokes Delete after a Create-failure) or was
@@ -1015,17 +1004,6 @@ export class D03WorkstreamGatewayStack extends Stack {
 }
 
 /**
- * Internal shim — builds the physical-resource-id reference the AWS SDK custom
- * resource expects for `onDelete.parameters.*Identifier` lookups. We just pass
- * the stable physical id string (same value used in `PhysicalResourceId.of`)
- * because the onCreate call uses a stable id; AgentCore's gateway-identifier
- * is itself the returned gatewayId, which is retained as the physical id.
- *
- * Kept as a class (not an inline string) so future refactors can swap in
- * `PhysicalResourceIdReference.fromAttribute(...)` without churn across
- * three call sites.
- */
-/**
  * Inline handler for the AgentCore CR IAM-propagation gate. `onEvent` stamps a
  * completion deadline (now + ~30s) into the physical id; `isComplete` reports
  * done once that deadline passes. This deterministically delays the first
@@ -1054,13 +1032,6 @@ exports.isComplete = async (event) => {
 };
 `;
 
-class PhysicalResourceIdReferenceShim {
-  readonly value: string;
-  constructor(id: string) {
-    this.value = id;
-  }
-}
-
 /**
  * Inline Lambda handler — deploy-time GA Agent Registry record validator.
  *
@@ -1075,7 +1046,7 @@ class PhysicalResourceIdReferenceShim {
  */
 const REGISTRY_RECORD_VALIDATOR_HANDLER = `
 // GA Agent Registry control-plane REST shape:
-//   GET https://agent-registry-control.<region>.amazonaws.com/registries/<rid>/records/<recId>
+//   GET https://agent-registry-control.<region>.api.aws/registries/<rid>/records/<recId>
 // Signing service: agent-registry. Built-in SigV4 below avoids any @aws-sdk
 // dependency because the inline Lambda must not depend on the runtime's SDK
 // version for this newly released service.
@@ -1241,7 +1212,7 @@ exports.handler = async (event) => {
     throw new Error('RegistryRecordValidator: validationRevision must be a full Git SHA');
   }
   const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
-  const host = 'agent-registry-control.' + region + '.amazonaws.com';
+  const host = 'agent-registry-control.' + region + '.api.aws';
   const path = '/registries/' + encodeURIComponent(registryId) + '/records/' + encodeURIComponent(recordId);
   // When the platform Registry lives in a different account, assume the
   // cross-account RegistryReader role and use its temporary creds.

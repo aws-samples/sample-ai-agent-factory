@@ -79,6 +79,19 @@ describe("Phase 10 — D03WorkstreamGatewayStack shape", () => {
     expect(Object.keys(gws)).toHaveLength(1);
   });
 
+  it("retains the service-minted Gateway ID for update and rollback", () => {
+    const { template } = synth();
+    const resource = Object.values(
+      template.findResources("Custom::BedrockAgentCoreGateway"),
+    )[0] as any;
+    const rendered = JSON.stringify(resource);
+    expect(rendered).toContain(
+      '\\"physicalResourceId\\":{\\"responsePath\\":\\"gatewayId\\"}',
+    );
+    expect(rendered.match(/PHYSICAL:RESOURCEID:/g)).toHaveLength(2);
+    expect(rendered).not.toContain("AgenticAI-D03-Gateway-");
+  });
+
   it("emits exactly N gateway-target resources where N = allowedToolIds.length", () => {
     const ids: ToolId[] = ["tool-echo", "tool-ping"];
     const { template } = synth({ allowedToolIds: ids });
@@ -507,9 +520,7 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
     });
     expect(requests).toHaveLength(2);
     expect(requests[0].host).toBe("sts.amazonaws.com");
-    expect(requests[1].host).toBe(
-      "agent-registry-control.us-west-2.amazonaws.com",
-    );
+    expect(requests[1].host).toBe("agent-registry-control.us-west-2.api.aws");
     expect(requests[1].headers.Authorization).toContain(
       "/agent-registry/aws4_request",
     );

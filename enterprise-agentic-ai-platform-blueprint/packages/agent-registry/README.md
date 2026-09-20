@@ -74,7 +74,8 @@ The Workload pipeline synth:
 The Workstream stack builds exact target ARNs, MCP schemas, and Cedar from that
 context. A pipeline-created
 `AgenticAI-D03-<environment>-<tenant>-<agent>-RegistryValidator` role then
-re-fetches each record through `agent-registry-control` at deployment and
+re-fetches each record through `agent-registry-control.<region>.api.aws` at
+deployment (SigV4 service `agent-registry`) and
 requires `APPROVED` status, the exact synth-time descriptor SHA-256, and an
 explicit match between the live governance target ARN and the Gateway target.
 This closes status, descriptor, and target drift between synth and deploy.
