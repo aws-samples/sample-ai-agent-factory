@@ -499,9 +499,9 @@ def _resolve_client_secret():
     this runtime's own configuration, where GetAgentRuntime returns it in plaintext.
     Both were confirmed on a live stack: the secret was recovered from the events of
     AgentCoreRuntime, which is a NATIVE resource, so this is not a custom-resource
-    quirk. ARCC guidance (cnt_n8LpZcqYi2t3I2) is explicit that secrets should be
-    retrieved at runtime rather than held in environment variables, and names
-    accidental logging and same-user process inspection as the reasons.
+    quirk. A secret should be retrieved at runtime rather than held in an
+    environment variable: accidental logging and same-user process inspection both
+    expose it, and ``GetAgentRuntime`` returns runtime env vars in plaintext.
 
     So the export hands over COGNITO_USER_POOL_ID instead and the secret is read
     here, with the runtime role granted DescribeUserPoolClient on that one pool.
@@ -1402,9 +1402,9 @@ def _resolve_client_secret():
     this runtime's own configuration, where GetAgentRuntime returns it in plaintext.
     Both were confirmed on a live stack: the secret was recovered from the events of
     AgentCoreRuntime, which is a NATIVE resource, so this is not a custom-resource
-    quirk. ARCC guidance (cnt_n8LpZcqYi2t3I2) is explicit that secrets should be
-    retrieved at runtime rather than held in environment variables, and names
-    accidental logging and same-user process inspection as the reasons.
+    quirk. A secret should be retrieved at runtime rather than held in an
+    environment variable: accidental logging and same-user process inspection both
+    expose it, and ``GetAgentRuntime`` returns runtime env vars in plaintext.
 
     So the export hands over COGNITO_USER_POOL_ID instead and the secret is read
     here, with the runtime role granted DescribeUserPoolClient on that one pool.

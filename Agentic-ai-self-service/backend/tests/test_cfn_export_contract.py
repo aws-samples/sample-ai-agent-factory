@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import types
+import urllib.parse
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -3886,6 +3887,335 @@ class TestTheDeclaredProtocolIsTheOneTheContainerSpeaks:
         assert "A2A_PEER_ALLOWLIST" in readme
 
 
+_PEER_ARN = "arn:aws:bedrock-agentcore:us-east-1:166827918465:runtime/peerB-AbC123"
+# What the parameter's Default must contain for ONE peer. Two ARNs, not one, and the reason
+# is measured rather than defensive: see TestAnA2AAgentCanActuallyReachAnAgentCorePeer.
+_PEER_GRANT = f"{_PEER_ARN},{_PEER_ARN}/runtime-endpoint/DEFAULT"
+
+
+def _a2a_export(peer_allowlist=None, protocol="A2A"):
+    return CfnTemplateGenerator().generate(
+        DeployRequest(
+            config=RuntimeConfig(name="exporttest", model={"modelId": MODEL_ID}, protocol=protocol),
+            nodeId="node-1",
+            a2aConfig=(
+                {"capabilities": ["chat"], "peer_allowlist": peer_allowlist} if peer_allowlist is not None else None
+            ),
+        )
+    )
+
+
+def _runtime_statements(template):
+    return template["Resources"]["RuntimeExecutionRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
+
+
+def _peer_invoke_statement(template):
+    """The conditionally-present ``A2APeerInvoke`` statement, or None.
+
+    Reached through the ``Fn::If`` rather than by Sid, because the Sid lives *inside* the
+    conditional: a search by Sid alone would return None both when the grant is absent and
+    when it is present but ungated, and those are opposite outcomes.
+    """
+    for statement in _runtime_statements(template):
+        if "Fn::If" in statement and statement["Fn::If"][0] == "HasA2APeerRuntimeArns":
+            return statement
+    return None
+
+
+class TestAnA2AAgentCanActuallyReachAnAgentCorePeer:
+    """The IAM half of the A2A fix.
+
+    An exported A2A agent could not reach another AgentCore runtime at all, which is the
+    commonest peer a recipient has. Two independent walls, both measured against a deployed
+    runtime: ``GET <data-plane>/runtimes/<arn>/.well-known/agent-card.json`` answers **404**
+    (the well-known path is not routed on the data plane), and an unsigned POST to
+    ``/invocations`` answers **403 "Missing Authentication Token"** — and the control that
+    makes the 403 an auth failure rather than another unrouted path is that the identical
+    envelope delivered by *signed* ``invoke-agent-runtime`` returned 200.
+
+    So the generated tool skips discovery and signs an ``InvokeAgentRuntime`` call, and that
+    call needs a grant the emitted role did not have. These tests pin the grant's shape; the
+    generated tool's side is pinned in ``test_a2a_codegen.py``.
+    """
+
+    def test_the_grant_names_the_canvas_peer_and_nothing_else(self):
+        template = yaml.safe_load(_a2a_export([_PEER_ARN, "peer.example.com"]).template_yaml)
+
+        statement = _peer_invoke_statement(template)
+        assert statement is not None, "an A2A export with an ARN peer has no InvokeAgentRuntime grant"
+        granted = statement["Fn::If"][1]
+        assert granted["Action"] == ["bedrock-agentcore:InvokeAgentRuntime"]
+        # Fn::Split of the parameter, so the resource list is whatever the recipient
+        # deployed with — not whatever the canvas happened to contain at export time.
+        assert granted["Resource"] == {"Fn::Split": [",", {"Ref": "A2APeerRuntimeArns"}]}
+
+        # Only the ARN-shaped entry becomes a default. `peer.example.com` is an ordinary
+        # A2A peer reached over plain HTTPS and needs no AWS permission at all, so a
+        # default that included it would both be an invalid ARN and misdescribe the design.
+        assert template["Parameters"]["A2APeerRuntimeArns"]["Default"] == _PEER_GRANT
+
+    def test_the_grant_is_not_a_wildcard_and_cannot_be_turned_into_one(self):
+        """The whole point of naming peers.
+
+        ``Resource`` is parameterised, so "no wildcard in the template" is only half the
+        property: the other half is that the parameter cannot be *given* a wildcard at
+        deploy time. Without the AllowedPattern, ``A2APeerRuntimeArns=*`` would turn this
+        into "may invoke any agent in the account" with no template change and nothing in
+        the stack events to notice — which is exactly the privilege-escalation path ARCC
+        cnt_AGx9pUNpmdOVZB says an IAM policy must not open.
+        """
+        param = yaml.safe_load(_a2a_export([_PEER_ARN]).template_yaml)["Parameters"]["A2APeerRuntimeArns"]
+        pattern = re.compile(param["AllowedPattern"])
+
+        # ``fullmatch`` throughout, deliberately. ``match`` is the wrong oracle for an
+        # AllowedPattern: CloudFormation full-matches the value, and Python's trailing
+        # dollar additionally matches just before a newline at the end of the string, so
+        # ``match`` would call a bare "\n" a valid value here and CloudFormation would not.
+        # An oracle looser than the thing it models can only ever pass tests that should
+        # fail. See ARCC cnt_QQz2pERJ9yvemV on regex validation of multiline input.
+        assert pattern.fullmatch(_PEER_ARN)
+        assert pattern.fullmatch(f"{_PEER_ARN},{_PEER_ARN}")
+        assert pattern.fullmatch(f"{_PEER_ARN}/runtime-endpoint/DEFAULT")
+        assert pattern.fullmatch(""), "empty must be allowed — it is how the grant is switched off"
+
+        for rejected in [
+            "*",
+            f"{_PEER_ARN}*",
+            "arn:aws:bedrock-agentcore:us-east-1:166827918465:runtime/*",
+            "arn:aws:iam::166827918465:role/Admin",
+            # A space after the comma would otherwise put " arn:..." in the Resource list,
+            # which is a malformed policy document and a rollback on role creation.
+            f"{_PEER_ARN}, {_PEER_ARN}",
+            # A trailing newline is the one that reads as accepted under ``match``. Rejected
+            # here because this pattern is also the oracle the generated agent's copy is
+            # held to, and nothing trims there. At the CloudFormation layer it is benign:
+            # measured, CFN trims trailing whitespace *before* evaluating AllowedPattern, so
+            # such a value is accepted and stored clean. That normalization is exactly what
+            # hid the defect, and it is why this list is asserted against the pattern rather
+            # than against a deploy outcome.
+            _PEER_ARN + "\n",
+            "\n",
+            f"{_PEER_ARN}\nEVIL",
+            f"\n{_PEER_ARN}",
+        ]:
+            assert not pattern.fullmatch(rejected), rejected
+
+        # And the constraint message has to say what to do, because CloudFormation's own
+        # message for a failed AllowedPattern is the raw regex.
+        assert "Wildcards are not accepted" in param["ConstraintDescription"]
+
+    def test_an_a2a_export_with_no_arn_peers_still_gets_the_parameter_but_no_grant(self):
+        """The recipient who has to add a peer at deploy time.
+
+        Empty is not "nothing to do here" — it is the case where the customer's peer was
+        not known at export time, and the fix must not be "come back for a re-export".
+        The parameter is present and the grant resolves to nothing until it is set.
+        """
+        template = yaml.safe_load(_a2a_export(["peer.example.com"]).template_yaml)
+
+        assert template["Parameters"]["A2APeerRuntimeArns"]["Default"] == ""
+        # Present but gated: an empty Resource list is not valid IAM, so the statement has
+        # to be genuinely absent rather than present-and-empty. That is what the Fn::If
+        # returning AWS::NoValue buys, and it is why this is a Condition and not a `if`.
+        assert _peer_invoke_statement(template) is not None
+        assert template["Conditions"]["HasA2APeerRuntimeArns"] == {
+            "Fn::Not": [{"Fn::Equals": [{"Ref": "A2APeerRuntimeArns"}, ""]}]
+        }
+
+    def test_the_data_plane_url_spelling_of_a_peer_is_recognised(self):
+        """Because that is the spelling the peer's own agent card advertises.
+
+        A deployed runtime's card comes back with an absolute URL on
+        ``bedrock-agentcore.<region>.amazonaws.com`` carrying the url-encoded ARN, so a
+        recipient copying the peer's card into their allowlist writes it that way. Reading
+        only the bare ARN would leave that customer with an allowlisted peer and no grant.
+        """
+        url = (
+            "https://bedrock-agentcore.us-east-1.amazonaws.com/runtimes/"
+            + urllib.parse.quote(_PEER_ARN, safe="")
+            + "/invocations"
+        )
+        template = yaml.safe_load(_a2a_export([url]).template_yaml)
+        assert template["Parameters"]["A2APeerRuntimeArns"]["Default"] == _PEER_GRANT
+
+    def test_a_lookalike_host_does_not_become_a_grant(self):
+        """``bedrock-agentcore.us-east-1.amazonaws.com.evil.net`` is not an AWS endpoint.
+
+        Here it would only ever mean a narrower grant, so the finding is not this template
+        — it is that the same prefix check guards a *signed* request in the generated
+        agent, and the two implementations are held together by a cross-check test. This
+        pins the generator's half so that test cannot be satisfied by both being wrong.
+        """
+        template = yaml.safe_load(
+            _a2a_export(
+                ["https://bedrock-agentcore.us-east-1.amazonaws.com.evil.net/runtimes/" + _PEER_ARN]
+            ).template_yaml
+        )
+        assert template["Parameters"]["A2APeerRuntimeArns"]["Default"] == ""
+
+    def test_a_url_encoded_newline_in_the_peer_url_does_not_reach_the_policy(self):
+        """The url branch url-decodes, so it decides what the pattern then sees.
+
+        Found by probe, not by reading. ``%0A`` at the end of the encoded ARN decoded to a
+        real newline, and Python's trailing dollar matches just before a newline at the end
+        of a string, so ``re.match`` accepted it and the newline-bearing ARN went into the
+        parameter's Default.
+
+        What that then did is worth stating precisely, because the first version of this
+        docstring got it wrong. CloudFormation does *not* refuse such a value: measured
+        against a change set on this template, it trims leading and trailing whitespace
+        before evaluating ``AllowedPattern`` and stores the trimmed value, so the deploy
+        succeeded and the grant was correct. The defect was invisible at this layer — which
+        is the reason it survived. It is not invisible in the generated agent, where the same
+        recognition runs and nothing trims, so the newline-bearing string would be what is
+        handed to ``invoke_agent_runtime``. ARCC cnt_QQz2pERJ9yvemV is this exact shape: an
+        ARN pattern anchored with a dollar, remedy "validate the entire input".
+
+        Asserted on the Default rather than on the regex, because the regex was the thing
+        that looked right — and because the Default is what the two copies share.
+        """
+        encoded = urllib.parse.quote(_PEER_ARN + "\n", safe="")
+        url = f"https://bedrock-agentcore.us-east-1.amazonaws.com/runtimes/{encoded}/invocations"
+        assert "%0A" in url, "the probe has to actually carry the encoded newline"
+
+        template = yaml.safe_load(_a2a_export([url]).template_yaml)
+        assert template["Parameters"]["A2APeerRuntimeArns"]["Default"] == ""
+
+        # And the admitting control: the same url without the newline IS recognised, so this
+        # is not passing because the whole url form stopped working.
+        clean = urllib.parse.quote(_PEER_ARN, safe="")
+        ok = yaml.safe_load(
+            _a2a_export(
+                [f"https://bedrock-agentcore.us-east-1.amazonaws.com/runtimes/{clean}/invocations"]
+            ).template_yaml
+        )
+        assert ok["Parameters"]["A2APeerRuntimeArns"]["Default"] == _PEER_GRANT
+
+    def test_one_peer_written_both_ways_is_granted_once(self):
+        url = "https://bedrock-agentcore.us-east-1.amazonaws.com/runtimes/" + urllib.parse.quote(_PEER_ARN, safe="")
+        template = yaml.safe_load(_a2a_export([_PEER_ARN, url]).template_yaml)
+        # Duplicated it would still be a correct policy, but an operator reading the
+        # Resource list has to be able to count the peers in it.
+        assert template["Parameters"]["A2APeerRuntimeArns"]["Default"] == _PEER_GRANT
+
+    def test_the_grant_names_both_the_runtime_and_its_default_endpoint(self):
+        """The defect that made the whole grant useless, pinned as its own test.
+
+        Found live, and only live: every unit test above passed while the export could not
+        invoke a peer at all. ``InvokeAgentRuntime`` is authorized against the runtime ARN
+        *and* the endpoint ARN the qualifier resolves to, and the first version of this
+        parameter named only the runtime ARN.
+
+        Measured with four roles differing in nothing but ``Resource``, each assumed and each
+        making the call the generated tool makes: the runtime ARN alone is denied `on
+        resource: <arn>/runtime-endpoint/DEFAULT`, the endpoint ARN alone is denied `on
+        resource: <arn>`, and both together return 200. Each single grant is refused naming
+        the resource the *other* grant had, which is the control distinguishing "the service
+        authorizes the endpoint instead" from "the service authorizes both".
+
+        ``DEFAULT`` and not ``/runtime-endpoint/*``: the tool sends no qualifier, an omitted
+        qualifier resolves to DEFAULT, so a wildcard would grant endpoints it cannot reach
+        and would need an AllowedPattern that no longer rejects a bare ``*``.
+        """
+        template = yaml.safe_load(_a2a_export([_PEER_ARN]).template_yaml)
+        param = template["Parameters"]["A2APeerRuntimeArns"]
+
+        assert param["Default"].split(",") == [
+            _PEER_ARN,
+            f"{_PEER_ARN}/runtime-endpoint/DEFAULT",
+        ]
+        # The default has to survive the template's own validation, which is a separate
+        # failure mode: a Default CloudFormation rejects is a stack that cannot be created
+        # with no argument at all, which is the commonest way this export is deployed.
+        assert re.fullmatch(param["AllowedPattern"], param["Default"])
+        assert "/runtime-endpoint/*" not in param["Default"], "a wildcard endpoint grants what it cannot use"
+
+        # And the Description must say so, because a recipient adding a *second* peer edits
+        # this parameter by hand and gets no second chance to learn the rule.
+        assert "BOTH" in param["Description"]
+        assert "/runtime-endpoint/DEFAULT" in param["Description"]
+
+    def test_an_entry_that_already_names_an_endpoint_keeps_it_and_gains_the_runtime_arn(self):
+        """The near-miss that would have re-created the bug for anyone who read the docs.
+
+        A recipient who has seen ``<arn>/runtime-endpoint/DEFAULT`` in an AWS example may put
+        exactly that on the canvas. The first draft of the fix passed such an entry through
+        untouched — yielding the endpoint ARN *alone*, which is the denial `on resource:
+        <arn>`, the very failure being fixed. A non-DEFAULT endpoint name is preserved rather
+        than rewritten: the grant is wider than the tool can use, but silently retargeting a
+        customer's explicit endpoint would be worse.
+        """
+        for endpoint in ["DEFAULT", "prod"]:
+            qualified = f"{_PEER_ARN}/runtime-endpoint/{endpoint}"
+            default = yaml.safe_load(_a2a_export([qualified]).template_yaml)["Parameters"]["A2APeerRuntimeArns"][
+                "Default"
+            ]
+            assert default.split(",") == [_PEER_ARN, qualified], endpoint
+
+    def test_two_peers_are_four_resources_and_neither_is_dropped(self):
+        other = "arn:aws:bedrock-agentcore:us-east-1:166827918465:runtime/peerC-XyZ789"
+        default = yaml.safe_load(_a2a_export([_PEER_ARN, other]).template_yaml)["Parameters"]["A2APeerRuntimeArns"][
+            "Default"
+        ]
+        assert default.split(",") == [
+            _PEER_ARN,
+            f"{_PEER_ARN}/runtime-endpoint/DEFAULT",
+            other,
+            f"{other}/runtime-endpoint/DEFAULT",
+        ]
+
+    @pytest.mark.parametrize("protocol", ["HTTP", "MCP"])
+    def test_a_non_a2a_export_gains_no_peer_parameter_at_all(self, protocol):
+        """A parameter that does nothing is worse than no parameter.
+
+        It appears in the README's table and in deploy.sh's pass-through, so a recipient
+        of an ordinary HTTP export would be shown a knob for a feature their agent does
+        not have. Nothing conditional about it — this export simply has no A2A peers.
+        """
+        template = yaml.safe_load(_a2a_export(protocol=protocol).template_yaml)
+
+        assert "A2APeerRuntimeArns" not in template["Parameters"]
+        assert "HasA2APeerRuntimeArns" not in template.get("Conditions", {})
+        assert _peer_invoke_statement(template) is None
+        assert not [s for s in _runtime_statements(template) if s.get("Sid") == "A2APeerInvoke"]
+
+    def test_the_readme_states_both_walls_and_both_prerequisites(self):
+        """The README is where a recipient learns why their peer call fails.
+
+        Its previous outbound paragraph described a plain POST to any peer, which is
+        measurably impossible against an AgentCore runtime — so a recipient whose peer was
+        another AgentCore agent was told the opposite of what happens. Both the 404 and the
+        403 have to be stated, because "signing would fix it" is the wrong conclusion to
+        leave available, and both prerequisites have to be separated because each one alone
+        fails differently: the allowlist refuses locally, the missing grant AccessDenies.
+        """
+        readme = _a2a_export([_PEER_ARN]).readme
+
+        assert "404" in readme, "the well-known path is not routed on the data plane"
+        assert "Missing Authentication Token" in readme
+        assert "A2APeerRuntimeArns" in readme
+        assert "AccessDenied" in readme
+        assert "InvokeAgentRuntime" in readme
+        # And that a non-AgentCore peer needs none of it, so nobody adds an IAM grant
+        # trying to fix an ordinary HTTPS peer.
+        assert "No AWS permission is involved" in readme
+
+    def test_the_readme_tells_the_recipient_a_peer_needs_two_arns(self):
+        """Separately, because this is the item the README got actively wrong.
+
+        It said the parameter grants ``InvokeAgentRuntime`` "on that ARN and nothing else" —
+        a shipped document instructing a configuration that cannot work. A recipient adding a
+        second peer follows the README, not the parameter description, so both have to say
+        it, and the README has to give the ``on resource:`` reading rule because that clause
+        in the denial is what tells them which of the two ARNs they are missing.
+        """
+        readme = _a2a_export([_PEER_ARN]).readme
+
+        assert "/runtime-endpoint/DEFAULT" in readme
+        assert "on resource:" in readme, "the recipient needs to know the denial names the missing ARN"
+        assert "on that ARN and nothing else" not in readme, "the claim that was wrong"
+
+
 class TestLambdaLogsAreOwnedAndBounded:
     """Every Lambda's log group belongs to the stack and expires.
 
@@ -5584,6 +5914,36 @@ class TestGeneratedDocumentation:
             "McpServerCodeDigest",
         }, f"declared as deploy.sh-owned but not in this template: {sorted(stale)}"
 
+    def test_no_parameters_variable_name_cuts_an_acronym_in_half(self):
+        """Consistency between deploy.sh and the README is not the same as usability.
+
+        The split-on-capital rule cannot see an acronym, so ``A2APeerRuntimeArns`` became
+        ``A2_A_PEER_RUNTIME_ARNS`` -- and the test above passes on that, because deploy.sh and
+        the README derive from the same function and therefore agree on the unusable name.
+        The recipient exports ``A2A_PEER_RUNTIME_ARNS``, deploy.sh reads the other one, finds
+        it empty, passes no override, and the stack silently keeps the export-time default.
+        Nothing fails. The peer they came to add is just not granted.
+
+        Two checks. Underscores must be the only difference from the parameter name, which
+        catches an override that renames rather than re-splits; and no segment may be a single
+        letter, which is what a cut inside an acronym looks like. The ``LiteLLM*`` entries are
+        the same class, already special-cased -- this is the assertion that was missing when
+        they were, so the next one is caught here rather than in the field.
+        """
+        parameters = set(yaml.safe_load(_a2a_export([_PEER_ARN]).template_yaml)["Parameters"])
+        for combo in COMPONENT_COMBINATIONS.values():
+            parameters |= set(_template(**combo)["Parameters"])
+        assert "A2APeerRuntimeArns" in parameters, "the parameter that found this is not in the corpus"
+
+        for name in sorted(parameters):
+            variable = cfn_template_generator.parameter_env_var(name)
+            assert variable.replace("_", "") == name.upper(), (
+                f"{name} -> {variable} is not {name} with underscores inserted"
+            )
+            assert not [s for s in variable.split("_") if len(s) == 1], (
+                f"{name} -> {variable} splits inside an acronym; nobody will type that"
+            )
+
     def test_the_virtual_key_arn_is_owned_by_the_script_not_the_passthrough(self):
         """The virtual key's ARN is a positional argument, and must stay one.
 
@@ -6223,6 +6583,75 @@ class TestTemplateValidity:
             elif key == "Fn::GetAtt":
                 target = value[0] if isinstance(value, list) else str(value).split(".")[0]
                 assert target in known, f"dangling Fn::GetAtt to {target!r}"
+
+
+# ---------------------------------------------------------------------------
+# Nothing internal may ride along in the customer download
+# ---------------------------------------------------------------------------
+
+
+def _bundle_text_artifacts(bundle):
+    """Every string the recipient can read, by field name.
+
+    Walks one level into dict fields because the generated tool and connector modules
+    arrive as a name-to-source mapping rather than as attributes.
+    """
+    artifacts = {}
+    for name, value in vars(bundle).items():
+        if isinstance(value, str):
+            artifacts[name] = value
+        elif isinstance(value, dict):
+            for key, inner in value.items():
+                if isinstance(inner, str):
+                    artifacts[f"{name}[{key}]"] = inner
+    return artifacts
+
+
+@ALL_COMBINATIONS
+def test_no_internal_reference_ships_in_the_bundle(combo):
+    """The bundle is a customer download, and our review citations are not for them.
+
+    Found by probe while adding one more of these. Nine distinct internal
+    security-guidance content ids were already reaching the recipient — in ``agent.py``,
+    ``deploy.sh`` and ``teardown.sh`` — because the comment explaining a security decision
+    sat *inside* the emitted template string rather than beside the code that emits it.
+    Two different kinds of comment look identical in this module and only one of them is
+    private, which is why this is a gate and not a one-time cleanup: the substance of the
+    guidance belongs in the customer's file, the opaque identifier does not. It resolves to
+    nothing they can read and advertises an internal knowledge base.
+
+    Not a vulnerability. It is the kind of detail that gets a bundle pulled from a
+    customer-facing review, and it would have gone out with this branch.
+    """
+    for name, text in _bundle_text_artifacts(_generate(**combo)).items():
+        leaked = sorted(set(re.findall(r"\bcnt_[A-Za-z0-9]{10,}\b", text)))
+        assert leaked == [], f"{name} ships internal reference(s) {leaked}"
+
+
+def test_no_internal_reference_ships_in_an_a2a_bundle():
+    """The A2A arm separately, because it emits a different ``agent.py`` entirely.
+
+    ``COMPONENT_COMBINATIONS`` is all non-A2A, so the parametrized gate above never sees
+    the A2A generator's output — and that is the module where four of the nine leaked ids
+    were.
+    """
+    for name, text in _bundle_text_artifacts(_a2a_export([_PEER_ARN])).items():
+        leaked = sorted(set(re.findall(r"\bcnt_[A-Za-z0-9]{10,}\b", text)))
+        assert leaked == [], f"{name} ships internal reference(s) {leaked}"
+
+
+def test_the_guidance_itself_still_reaches_the_customer():
+    """The admitting half: stripping the ids must not have stripped the reasons.
+
+    Without this, the gate above is satisfied by deleting every security comment from the
+    emitted files, which is strictly worse than leaking an identifier. These are the
+    decisions a recipient most needs the reason for, each asserted on the substance rather
+    than on a citation.
+    """
+    bundle = _a2a_export([_PEER_ARN])
+    assert "redirect" in bundle.agent_code.lower(), "the never-follow-redirects reason must survive"
+    for phrase in ["SHA-256", "BlockPublicAcls"]:
+        assert phrase in bundle.deploy_sh, phrase
 
 
 # ---------------------------------------------------------------------------

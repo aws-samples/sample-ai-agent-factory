@@ -46,6 +46,7 @@ import io
 import logging
 import os
 import re
+import urllib.parse
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -260,6 +261,41 @@ def _split_retained(template: dict, retained: list[str]) -> tuple[list[str], lis
 
 PERMISSIONS_BOUNDARY_CONDITION = "HasPermissionsBoundary"
 EXPLICIT_ROLE_NAMES_CONDITION = "HasExplicitRoleNames"
+
+# Whether the runtime may invoke any AgentCore peer at all. Off unless the export names
+# peers or the recipient passes some, because the permission to invoke another agent is
+# not something an export should acquire by default.
+A2A_PEERS_CONDITION = "HasA2APeerRuntimeArns"
+
+# One AgentCore runtime ARN, optionally qualified by an endpoint. Both shapes are
+# resource types of bedrock-agentcore:InvokeAgentRuntime.
+#
+# Character-for-character the same body as ``_A2A_PEER_ARN_RE`` in the generated agent, and
+# that matters more than it looks: `[0-9]` rather than `\d` because `\d` matches Arabic-Indic
+# digits in Python and ASCII only in the Java engine CloudFormation validates
+# ``AllowedPattern`` with, so the shorthand would make the deploy-time check and the runtime
+# check disagree on inputs neither author would think to try.
+_A2A_PEER_ARN = (
+    r"arn:aws[a-z-]*:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:runtime/[A-Za-z0-9_-]+"
+    r"(/runtime-endpoint/[A-Za-z0-9_-]+)?"
+)
+
+# A comma-separated list of them, or empty. Shaped, not merely non-empty, because the value
+# goes straight into an IAM policy's Resource, and the two things that buys are different
+# sizes. The small one: a typo CloudFormation would otherwise accept fails at role creation
+# instead, and the rollback names the bad value and the role's logical id but NOT the
+# parameter that supplied it — measured, with `Resource: ["\n"]` hardcoded into a mirror role:
+# `Resource ... must be in ARN format or "*"`, IAM `InvalidRequest`. So the recipient is told
+# what is malformed and left to find where it came from. The large one: a deliberately loose
+# entry — a trailing `*`, say — is how "one named peer" quietly becomes every agent in the
+# account, and no later layer catches that at all, because it is a perfectly valid policy.
+#
+# The whole pattern is optional rather than an `^$|...` alternation so it means the same thing
+# under CloudFormation's full-match semantics as it does to `re.fullmatch` in our own tests.
+# ConstraintDescription is not decoration either: measured both ways on the real template, a
+# failed value quotes the ConstraintDescription when one is set and the raw regex when it is
+# not. Neither form names the offending peer, so the description has to.
+A2A_PEER_ARNS_PATTERN = rf"^({_A2A_PEER_ARN}(,{_A2A_PEER_ARN})*)?$"
 
 
 # Confused-deputy protection for the service-principal trust policies.
@@ -1394,6 +1430,111 @@ def _s3_vectors_is_stack_managed(kb_config: dict) -> bool:
     return not kb_config.get("s3VectorsIndexArn") and not kb_config.get("s3VectorsBucketArn")
 
 
+# The same recognition the generated agent's ``_a2a_agentcore_peer_arn`` performs, over
+# again. It has to be: the emitted agent.py is standalone customer code and cannot import
+# this package, so the logic exists twice by construction. What keeps the two from drifting
+# is not this comment but a test that feeds one corpus of allowlist entries to BOTH — the
+# real function here and the function inside a generated module — and asserts they agree.
+# Drift here is not cosmetic: the grant would cover a different set of peers than the code
+# actually signs for, which surfaces as an AccessDenied on the one peer the customer
+# configured, on a stack with nothing wrong in it.
+_A2A_RUNTIME_ARN_RE = re.compile(rf"^{_A2A_PEER_ARN}$")
+
+
+def _a2a_peer_runtime_arns(a2a_config: dict | None) -> list[str]:
+    """The AgentCore runtime ARNs on the canvas's A2A peer allowlist, in order.
+
+    These are the only allowlist entries that need an IAM grant at all: a non-AgentCore
+    A2A peer is reached over plain HTTPS and needs no AWS permission. Both spellings are
+    recognised — the bare ARN, and the data-plane URL a peer runtime's own agent card
+    advertises — under the same truncation ``a2a_codegen`` applies when it bakes the
+    allowlist into agent.py, so the parameter default cannot name a peer the baked
+    allowlist dropped.
+
+    Deduplicated, because an allowlist naming one runtime both ways would otherwise put it
+    in the policy's Resource list twice.
+    """
+    peer_config = a2a_config or {}
+    raw = peer_config.get("peer_allowlist") or peer_config.get("peerAllowlist") or []
+    arns: list[str] = []
+    for entry in [str(u)[:512] for u in raw][:64]:
+        arn = _a2a_agentcore_runtime_arn(entry)
+        if arn is not None and arn not in arns:
+            arns.append(arn)
+    return arns
+
+
+def _a2a_grant_resources(peer_arns: list[str]) -> list[str]:
+    """Every ARN the IAM grant must name so that ``InvokeAgentRuntime`` on a peer succeeds.
+
+    Two per peer, and that is a measured fact rather than a belt-and-braces choice.
+    ``InvokeAgentRuntime`` authorizes against the runtime ARN *and* the endpoint ARN the
+    qualifier resolves to, so a grant naming only the runtime ARN — which is what this
+    export emitted first — is denied ``on resource: <arn>/runtime-endpoint/DEFAULT``, and a
+    grant naming only the endpoint ARN is denied ``on resource: <arn>``. Each is refused
+    naming the resource the other had. The export could not call a peer at all.
+
+    ``DEFAULT`` and not ``/runtime-endpoint/*``: the generated tool sends no qualifier, an
+    omitted qualifier resolves to DEFAULT, so DEFAULT is the only endpoint it can reach and
+    a wildcard would grant endpoints it cannot use. Keeping the wildcard out is also what
+    lets ``A2A_PEER_ARNS_PATTERN`` go on rejecting a ``*``.
+
+    An entry that already names an endpoint still yields two resources, the runtime ARN and
+    that endpoint: keeping only the endpoint would reproduce exactly the failure above, and
+    appending a second ``/runtime-endpoint/`` would produce an ARN matching nothing. So the
+    endpoint is preserved and the runtime ARN it belongs to is added beside it.
+    """
+    resources: list[str] = []
+    for arn in peer_arns:
+        runtime, _, endpoint = arn.partition("/runtime-endpoint/")
+        for resource in (runtime, f"{runtime}/runtime-endpoint/{endpoint or 'DEFAULT'}"):
+            if resource not in resources:
+                resources.append(resource)
+    return resources
+
+
+def _a2a_agentcore_runtime_arn(entry: str) -> str | None:
+    """The runtime ARN ``entry`` names, whether written as an ARN or a data-plane URL."""
+    candidate = (entry or "").strip()
+    if candidate.startswith("arn:"):
+        return candidate if _A2A_RUNTIME_ARN_RE.fullmatch(candidate) else None
+    parsed = urllib.parse.urlparse(candidate)
+    host = (parsed.hostname or "").lower()
+    # Prefix AND suffix, so `bedrock-agentcore.us-east-1.amazonaws.com.evil.net` is not an
+    # AgentCore endpoint. It would only ever mean a *narrower* grant here, but the same
+    # check guards an unsigned POST in the generated agent and the two must agree.
+    if not host.startswith("bedrock-agentcore.") or not host.endswith(".amazonaws.com"):
+        return None
+    segments = [s for s in parsed.path.split("/") if s]
+    if len(segments) < 2 or segments[0] != "runtimes":
+        return None
+    # ``fullmatch`` rather than ``match``: Python's trailing dollar also matches just before
+    # a newline at the end of the string, so ``match`` accepts an ARN with a trailing
+    # newline, and this branch url-decodes a path segment — a peer url whose segment ends in
+    # the percent-encoded form of a newline reached it, and the newline-bearing ARN went into
+    # ``A2APeerRuntimeArns``'s Default.
+    #
+    # What that did NOT do, measured rather than assumed, and an earlier version of this
+    # comment had it wrong: CloudFormation does not refuse such a value. It *trims* leading
+    # and trailing whitespace before evaluating ``AllowedPattern``, so the change set was
+    # accepted and the stored value came back without the newline — uniformly for ``\n``,
+    # ``\r\n``, ``\n\n``, a space and a tab, and for a leading newline too. A whitespace-only
+    # value is trimmed to empty, which makes the condition false and leaves the statement
+    # absent. So on this side the defect was invisible, which is precisely why ``match``
+    # survived here: normalization downstream hid it. An *embedded* newline is not trimmed and
+    # is rejected, so no wildcard or second entry could be smuggled past the pattern either.
+    #
+    # The reason to full-match is therefore not a deploy-time failure. It is that the same
+    # recognition runs a second time in the generated agent, where nothing trims: there the
+    # newline-bearing string is what gets passed to ``invoke_agent_runtime``, and the two
+    # copies must agree on what an ARN is. ARCC guidance on regex validation of multiline
+    # input (cnt_QQz2pERJ9yvemV) is this exact shape — an ARN pattern anchored with a dollar,
+    # where the remedy is to validate the entire input — and it holds on its own terms
+    # regardless of what CloudFormation happens to normalize.
+    arn = urllib.parse.unquote(segments[1])
+    return arn if _A2A_RUNTIME_ARN_RE.fullmatch(arn) else None
+
+
 # ---------------------------------------------------------------------------
 # LiteLLM gateway provider
 # ---------------------------------------------------------------------------
@@ -1590,12 +1731,16 @@ _OTEL_PACKAGES = [
 # problem and sends you looking in the wrong place.
 _MCP_PIN = "mcp<2"
 
-# The README section an A2A export gets, and only an A2A export. Three things in it are
+# The README section an A2A export gets, and only an A2A export. Four things in it are
 # invisible to a recipient reading the template: why the runtime is declared HTTP when the
 # canvas said A2A, how a peer reaches the agent card given that the data plane refuses
-# GetAgentCard for an HTTP-declared runtime, and -- the one that silently stops the agent
-# doing its job -- that call_a2a_peer's allowlist is fail-closed, so an export with no
-# configured peers refuses every one of them on a stack with nothing wrong in it.
+# GetAgentCard for an HTTP-declared runtime, that call_a2a_peer's allowlist is fail-closed
+# so an export with no configured peers refuses every one of them on a stack with nothing
+# wrong in it, and that reaching another AgentCore runtime needs an IAM grant as WELL as an
+# allowlist entry. That last one is the commonest peer a recipient has and it is the one
+# with two independent prerequisites, so it gets the two failure modes spelled out
+# separately -- the earlier draft of this section described a plain POST to any peer, which
+# is measurably impossible against an AgentCore runtime.
 #
 # A plain string with __TOKEN__ substitution rather than an f-string: the examples are JSON
 # and a heredoc, and doubling every brace in them is how a generated document acquires
@@ -1648,18 +1793,73 @@ and the Lambda credentials endpoint), and RFC1918 addresses, whatever the allowl
 including when it is the peer's *own card* that names one, since the invoke URL the card
 returns is re-validated before anything is sent to it.
 
-Outbound, the tool fetches `<peer>/.well-known/agent-card.json`, resolves the `url` it
-finds (relative or absolute) and POSTs the same `message/send` envelope shown above. If
-the peer answers with something that is not a JSON-RPC response it retries once as
-`{"prompt": ...}`, which is what an export of this generator from before it spoke
-JSON-RPC understands, and says so in the `note` field of its result.
+### Calling a peer
+
+`call_a2a_peer` takes two kinds of peer and they travel completely different roads.
+
+**An ordinary A2A peer, given an `https://` URL.** The tool fetches
+`<peer>/.well-known/agent-card.json`, resolves the `url` it finds (relative or absolute)
+and POSTs the same `message/send` envelope shown above. No AWS permission is involved.
+Redirects are never followed on either hop — a peer that answers `3xx` comes back as
+`status: BLOCKED` naming the status and the `Location`, because a validated host that then
+redirects to the metadata endpoint is the standard way around a host allowlist.
+
+**Another AgentCore runtime, given its runtime ARN** (or the `bedrock-agentcore.<region>.
+amazonaws.com/runtimes/<arn>` URL its own card advertises, which the tool recognises as the
+same thing). There is no discovery hop and no plain POST, because neither works. Both
+measured against a deployed runtime:
+
+| Request | Result |
+| --- | --- |
+| `GET <data-plane>/runtimes/<arn>/.well-known/agent-card.json` | **404** — the well-known path is not routed on the data plane at all |
+| `POST <data-plane>/runtimes/<arn>/invocations`, unsigned | **403** `{"message": "Missing Authentication Token"}` |
+
+So SigV4-signing the POST would not have been enough on its own: discovery has no
+unauthenticated route to sign for. The tool skips discovery entirely and calls
+`InvokeAgentRuntime` with the same envelope, signed with this runtime's execution role.
+The identical envelope delivered that way returns **200**.
+
+An AgentCore peer therefore needs **two** things, and each one alone fails differently:
+
+1. **The peer's ARN on this agent's allowlist** (`A2A_PEER_ALLOWLIST`, or baked in from the
+   canvas). Missing, the call is refused locally as `status: BLOCKED` and nothing is sent.
+2. **The peer in the `A2APeerRuntimeArns` stack parameter**, which is what grants
+   `bedrock-agentcore:InvokeAgentRuntime` on the ARNs named and nothing else. Missing, the
+   call is attempted and comes back `AccessDenied`; the tool's error names this parameter.
+
+Item 2 needs **two ARNs per peer**, and this is the one detail most likely to cost you an
+afternoon:
+
+```
+arn:aws:bedrock-agentcore:<region>:<account>:runtime/<id>,arn:aws:bedrock-agentcore:<region>:<account>:runtime/<id>/runtime-endpoint/DEFAULT
+```
+
+`InvokeAgentRuntime` is authorized against the runtime ARN **and** the endpoint ARN the
+qualifier resolves to. Verified live on two runtimes: a grant naming only the runtime ARN is
+denied `on resource: <arn>/runtime-endpoint/DEFAULT`, and a grant naming only the endpoint
+ARN is denied `on resource: <arn>` — each one is refused naming the resource the other had.
+So when a denial arrives, the ARN in its `on resource:` clause is the spelling you are
+missing. `DEFAULT` specifically: this agent sends no qualifier and an omitted qualifier
+resolves to `DEFAULT`, so a different endpoint name has no effect.
+
+The peers named on the canvas are already listed both ways in the parameter's default, so
+the common case needs no argument. Add a peer later without re-exporting by passing the
+parameter, comma-separated — with both forms of each new peer. Empty means no peer runtime
+can be invoked, and the policy statement is absent from the role entirely rather than
+present-but-empty. Wildcards are rejected at deploy time: name each peer.
+
+If a peer answers with something that is not a JSON-RPC response the tool retries once as
+`{"prompt": ...}`, which is what an export of this generator from before it spoke JSON-RPC
+understands, and says so in the `note` field of its result. This applies to both roads.
 
 - Capabilities this export advertises on its card: __CAPS__
 - Peers this export is allowed to call: __ALLOW__
 
 Both are baked into `agent.py` from the canvas. Override either without re-exporting by
 setting `A2A_CAPABILITIES` or `A2A_PEER_ALLOWLIST` (comma-separated) in the runtime
-resource's `EnvironmentVariables`; the environment wins over the baked-in defaults.
+resource's `EnvironmentVariables`; the environment wins over the baked-in defaults. Note
+that `A2A_PEER_ALLOWLIST` alone cannot add an AgentCore peer — item 2 above is a stack
+parameter, so adding one that way needs a stack update, not just an environment change.
 """
 
 # The two JSON documents deploy.sh applies to a staging bucket it creates. Held here as
@@ -1723,8 +1923,7 @@ _TEARDOWN_PURGE_HELPER_SH = """
 # An earlier version of this script swept only the first prefix and printed "the whole
 # list" of what it left. That list was wrong: after a clean teardown the merged zip was
 # still downloadable by VersionId and the system prompt was recovered from it. Both
-# prefixes are swept now. Per ARCC cnt_NfWe8fYjVfR6Gs, orphaning data behind a removed
-# pointer does not meet the deletion bar.
+# prefixes are swept now. Orphaning data behind a removed pointer is not a deletion.
 #
 # The shared dependency bundle is under neither prefix, which is why it survives: it is
 # keyed by content for the whole bucket and another stack may still be using it.
@@ -2192,6 +2391,14 @@ _PARAMETER_ENV_VAR_OVERRIDES = {
     "LiteLLMGatewayUrl": "LITELLM_GATEWAY_URL",
     "LiteLLMMcpServers": "LITELLM_MCP_SERVERS",
     "LiteLLMApiKeySecretArn": "LITELLM_API_KEY_SECRET_ARN",
+    # ``A2APeerRuntimeArns`` -> ``A2_A_PEER_RUNTIME_ARNS`` without this: the split-on-capital
+    # rule cuts inside the acronym, between the ``2`` and the second ``A``. deploy.sh and the
+    # README table both derive from this function so they agree with each other -- and both
+    # name a variable nobody will type. The recipient exports ``A2A_PEER_RUNTIME_ARNS``,
+    # deploy.sh reads the other one, finds it empty, passes no override, and the stack keeps
+    # the export-time default. Nothing fails; the peer they came to add is simply not granted.
+    # Same class as the LiteLLM entries above: an acronym the rule cannot see.
+    "A2APeerRuntimeArns": "A2A_PEER_RUNTIME_ARNS",
 }
 
 
@@ -2604,6 +2811,14 @@ class CfnTemplateGenerator:
             has_evaluation,
             otel_secret_arn=_otel_secret_arn,
             litellm_secret=is_litellm,
+            # None, not [], for a non-A2A export: the parameter and the Condition are only
+            # declared when the value is a list, so a non-A2A stack gains no parameter that
+            # does nothing. An A2A export always gets the parameter even when the canvas
+            # named no ARN peers, because that is precisely the recipient who needs to add
+            # one at deploy time without a re-export.
+            a2a_peer_arns=(
+                _a2a_peer_runtime_arns(a2a_config) if (getattr(config, "protocol", "") or "").upper() == "A2A" else None
+            ),
         )
 
         # Conditional components
@@ -3226,9 +3441,8 @@ class CfnTemplateGenerator:
                             # code.zip -- the recipient's agent source and system prompt
                             # -- fully readable by VersionId while `aws s3 ls` reports
                             # the prefix empty. Verified live by downloading it after a
-                            # teardown that reported success. Per ARCC
-                            # cnt_NfWe8fYjVfR6Gs, orphaning data behind a removed
-                            # pointer does not meet the deletion bar.
+                            # teardown that reported success. Orphaning data behind
+                            # a removed pointer is not a deletion.
                             "Action": [
                                 "s3:GetObject",
                                 "s3:PutObject",
@@ -3687,6 +3901,7 @@ class CfnTemplateGenerator:
         has_evaluation: bool,
         otel_secret_arn: str | None = None,
         litellm_secret: bool = False,
+        a2a_peer_arns: list[str] | None = None,
     ) -> None:
         statements = [
             {
@@ -3944,6 +4159,99 @@ class CfnTemplateGenerator:
                             "kms:EncryptionContext:SecretARN": {"Ref": "LiteLLMApiKeySecretArn"},
                         }
                     },
+                }
+            )
+
+        if a2a_peer_arns is not None:
+            # Outbound agent-to-agent invocation, and it is opt-in on purpose.
+            #
+            # An exported A2A agent cannot reach an AgentCore peer without this: measured
+            # live, the peer's data plane answers 403 "Missing Authentication Token" to an
+            # unsigned POST, so call_a2a_peer signs an InvokeAgentRuntime call instead —
+            # and that call needs the permission below or it fails AccessDenied.
+            #
+            # Resource names each peer TWICE: the runtime ARN and that runtime's DEFAULT
+            # endpoint ARN. Both are required, which is not what this code said first and is
+            # not what the docs imply. An earlier version of this comment asserted that
+            # because the generated tool invokes without a qualifier, "the runtime ARN is
+            # the resource the call authorizes against" — and that a per-endpoint grant was
+            # therefore deliberately excluded. Both halves were wrong, and the export could
+            # not call a peer at all.
+            #
+            # Measured, with the control run in both directions: four roles differing only
+            # in Resource, each assumed and each making the exact call the generated tool
+            # makes. Granting the runtime ARN alone is denied `on resource:
+            # <arn>/runtime-endpoint/DEFAULT`; granting the endpoint ARN alone is denied `on
+            # resource: <arn>`. Each single grant is refused naming the resource the *other*
+            # grant had, which is what distinguishes "the service authorizes the endpoint
+            # instead" from "the service authorizes both" — it authorizes both. With both
+            # present the call returns 200. Confirmed end to end on two live runtimes: the
+            # peer's reply carried a nonce that existed only in the peer's system prompt.
+            #
+            # DEFAULT specifically, not "/runtime-endpoint/*": an omitted qualifier resolves
+            # to DEFAULT, so DEFAULT is the only endpoint this tool can ever reach, and the
+            # wildcard would grant endpoints it cannot use. That also keeps the AllowedPattern
+            # able to reject a `*`, which is the thing standing between "one named peer" and
+            # every agent in the account. Per ARCC cnt_AGx9pUNpmdOVZB an IAM policy grants
+            # specific actions on specific resources and must not open a path to privilege
+            # escalation. Both ARN shapes are resource types of this action, confirmed
+            # against the AWS Service Reference feed rather than the docs (per
+            # iam-action-existence-oracles).
+            #
+            # Gated on a Condition rather than on what the canvas happened to contain, so
+            # the whole statement resolves to AWS::NoValue and disappears when the
+            # parameter is empty. Two reasons it is a Condition and not a Python `if`:
+            # an empty Resource list is not valid IAM, so the statement genuinely must not
+            # exist; and a recipient must be able to add a peer at deploy time by passing
+            # the parameter, without coming back to us for a re-export. The canvas's own
+            # ARN peers are the parameter's default, so the common case needs no argument.
+            #
+            # The parameter and the Condition are declared here, beside the one statement
+            # that reads them, rather than in the general parameter block. Declaring them
+            # unconditionally would put a parameter on every non-A2A export that does
+            # nothing, and splitting them from their consumer is how this half-landed once
+            # already: the statement referenced A2A_PEERS_CONDITION before the Condition
+            # existed, which cfn-lint catches but Python does not.
+            template["Parameters"]["A2APeerRuntimeArns"] = {
+                "Type": "String",
+                "Default": ",".join(_a2a_grant_resources(a2a_peer_arns)),
+                "AllowedPattern": A2A_PEER_ARNS_PATTERN,
+                "ConstraintDescription": (
+                    "must be empty, or a comma-separated list of AgentCore runtime ARNs "
+                    "(arn:aws:bedrock-agentcore:<region>:<account>:runtime/<id>, optionally "
+                    "with /runtime-endpoint/<name>). Wildcards are not accepted."
+                ),
+                "Description": (
+                    "Comma-separated AgentCore runtime ARNs this agent may invoke as A2A "
+                    "peers. Grants bedrock-agentcore:InvokeAgentRuntime on exactly these "
+                    "ARNs. Empty means no peer runtime can be invoked. IMPORTANT: each peer "
+                    "needs BOTH its runtime ARN and that runtime's DEFAULT endpoint ARN "
+                    "(<runtime-arn>,<runtime-arn>/runtime-endpoint/DEFAULT) — verified live, "
+                    "the call is authorized against both, and either one alone is denied "
+                    "naming the other. The peers named on the canvas are already listed both "
+                    "ways; add both forms for any peer you add here. A specific non-DEFAULT "
+                    "endpoint ARN has no effect, because the agent sends no qualifier and an "
+                    "omitted qualifier resolves to DEFAULT. A peer must ALSO be on the "
+                    "agent's own A2A peer allowlist, which is baked into the code: this "
+                    "parameter grants the permission, the allowlist decides whether the "
+                    "agent will use it."
+                ),
+            }
+            template.setdefault("Conditions", {})[A2A_PEERS_CONDITION] = {
+                "Fn::Not": [{"Fn::Equals": [{"Ref": "A2APeerRuntimeArns"}, ""]}]
+            }
+            statements.append(
+                {
+                    "Fn::If": [
+                        A2A_PEERS_CONDITION,
+                        {
+                            "Sid": "A2APeerInvoke",
+                            "Effect": "Allow",
+                            "Action": ["bedrock-agentcore:InvokeAgentRuntime"],
+                            "Resource": {"Fn::Split": [",", {"Ref": "A2APeerRuntimeArns"}]},
+                        },
+                        {"Ref": "AWS::NoValue"},
+                    ]
                 }
             )
 
@@ -6927,7 +7235,8 @@ content_digest() {{
 # who followed the documented lifecycle kept their own agent source in S3 forever.
 # The bucket itself is still not removed — it may be one you already had — and
 # teardown.sh now names exactly what it leaves and how to remove it.
-# Per ARCC cnt_NBPcOqwR3163yt, SHA-256.
+# SHA-256, because a shorter digest is not collision-resistant enough to key an
+# artifact the runtime will execute.
 staged_key() {{
     printf 'cfn-assets/%s/%s-%s.zip\\n' \\
         "$STACK_NAME" "$2" "$(sha256_stdin <"$1" | cut -c1-16)"
@@ -6964,7 +7273,7 @@ else
     echo "Creating S3 bucket: $BUCKET"
     aws s3 mb "s3://$BUCKET" --region "$REGION"
 
-    # All four flags, per ARCC cnt_QbO3G5Nzv7jmP7: BlockPublicAcls and BlockPublicPolicy
+    # All four flags, deliberately: BlockPublicAcls and BlockPublicPolicy
     # reject a public ACL or policy, and the Ignore/Restrict pair neutralises one that is
     # already there. Nothing here is ever served publicly.
     echo "  Blocking public access..."
@@ -6982,9 +7291,8 @@ else
         --server-side-encryption-configuration \\
         '{{"Rules":[{{"ApplyServerSideEncryptionByDefault":{{"SSEAlgorithm":"AES256"}},"BucketKeyEnabled":true}}]}}'
 
-    # Versioning is what makes an overwritten code.zip recoverable, and per ARCC
-    # cnt_XL9e2sbGgxAvce it MUST come with an expiry — otherwise every re-export leaves a
-    # version behind forever.
+    # Versioning is what makes an overwritten code.zip recoverable, and it MUST come
+    # with an expiry — otherwise every re-export leaves a version behind forever.
     echo "  Enabling versioning with an expiry..."
     aws s3api put-bucket-versioning --bucket "$BUCKET" --region "$REGION" \\
         --versioning-configuration Status=Enabled
@@ -6994,7 +7302,7 @@ else
 LIFECYCLE_JSON
 )"
 
-    # Per ARCC cnt_TFTC9MGIxuXhqa. S3 does not require TLS by itself; this Deny is what
+    # S3 does not require TLS by itself; this Deny is what
     # refuses a plaintext PUT of the code the runtime will execute.
     echo "  Requiring TLS..."
     aws s3api put-bucket-policy --bucket "$BUCKET" --region "$REGION" \\

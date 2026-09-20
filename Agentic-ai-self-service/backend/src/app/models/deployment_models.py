@@ -499,9 +499,52 @@ class ImportRuntimeRequest(BaseModel):
 
 
 class DeployRequest(BaseModel):
-    """Request body for POST /api/deploy."""
+    """Request body for POST /api/deploy, /api/generate-cfn-template and /api/export-python.
 
-    model_config = ConfigDict(populate_by_name=True)
+    ``extra="forbid"`` because the default silently discarded the key. Found live: an export
+    requested with ``deletionPolicy: "Delete"`` — the wrong spelling of
+    ``dataRetentionPolicy`` — returned HTTP 200 and a bundle whose data-bearing resources
+    were all ``Retain``, with nothing anywhere saying the request had been ignored. The
+    caller's next move is to delete the stack and discover the Knowledge Base, the Cognito
+    pool and the conversation Memory are still billing; there is no recovery step that
+    tells them why. A 422 naming the key they got wrong is the whole remedy.
+
+    Both callers send only declared aliases, with one exception the ``mode="before"``
+    validator below absorbs: the deploy panel sends ``deployment_mode`` *and*
+    ``deploymentMode``. ``populate_by_name`` accepts either, but not both at once under
+    ``forbid`` — the second one is "extra" — so without that shim this change would have
+    422'd every deploy from the UI. Verified against the payload the panel actually builds
+    rather than assumed.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _collapse_duplicate_alias_spellings(cls, data):
+        """Drop a snake_case key that duplicates its own camelCase alias, if they agree.
+
+        ``populate_by_name`` invites a caller to send either spelling, and a caller hedging
+        by sending both was harmless until ``extra="forbid"``. Dropping the redundant one
+        keeps every existing client working; the point of ``forbid`` is to catch a key that
+        means nothing to this model, and a second spelling of a field it has is not that.
+
+        If the two DISAGREE the request is not hedging, it is contradictory, and guessing
+        which one the caller meant is how a deploy lands in the wrong mode. That raises.
+        """
+        if not isinstance(data, dict):
+            return data
+        for name, field in cls.model_fields.items():
+            alias = field.alias
+            if not alias or alias == name or name not in data or alias not in data:
+                continue
+            if data[name] != data[alias]:
+                raise ValueError(
+                    f"'{name}' and '{alias}' are two spellings of the same field and were sent "
+                    f"with different values ({data[name]!r} vs {data[alias]!r}). Send one."
+                )
+            data = {k: v for k, v in data.items() if k != name}
+        return data
 
     node_id: str = Field(alias="nodeId", max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
     config: RuntimeConfig
