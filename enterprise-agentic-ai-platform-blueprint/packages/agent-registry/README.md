@@ -57,7 +57,16 @@ The isolated API contract passed in `us-west-2` on exact product commit
 `8e66dc3`; see
 [`../../evidence/live/2026-09-19-agent-registry-compatibility-spike.md`](../../evidence/live/2026-09-19-agent-registry-compatibility-spike.md).
 
-The pipeline-owned R1 producer is locally synthesized and tested but is not
-live-verified until its reviewed Platform pipeline deployment completes. The R2
-Workstream consumer, EMEA regions, load/chaos behavior, and final placeholder
-retirement remain release gates.
+The pipeline-owned R1 producer passed reviewed Platform pipeline deployment in
+both environments on exact producer commit `f3ec7d6`. The template-bound
+approval utility on exact commit `39a13ab` observed every record in `DRAFT`,
+submitted each explicitly, and independently verified both records as
+`APPROVED` and exactly discoverable. Live trust negatives denied the existing
+Workstream Admin principal and an external account. See
+[`../../evidence/live/2026-09-20-pipeline-ga-agent-registry-r1.md`](../../evidence/live/2026-09-20-pipeline-ga-agent-registry-r1.md).
+
+The positive cross-account reader path must wait for R2 to create the matching
+`AgenticAI-D03-*-RegistryValidator` role through the Workload pipeline; an
+out-of-band role would violate the deployment contract. The R2 Workstream
+consumer, EMEA regions, load/chaos behavior, consumer rollback, and final
+placeholder retirement remain release gates.

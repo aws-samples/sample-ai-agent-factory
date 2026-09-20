@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Cleanup-first AgentCore Gateway PolicyEngine compatibility runner with four-user `sub`/group semantics, strict Cedar validation, exact JWT negatives, mode rollback, ownership-checked teardown, and 158 focused tests.
 - Cleanup-first GA Agent Registry compatibility runner with native CloudFormation types, custom governance-document round trip, explicit `DRAFT → submit → APPROVED`, data-plane discovery, deterministic update rollback, ownership-checked teardown, and 30 focused tests.
 - Pipeline-owned blue-green GA Registry producer: native Registry and tagged `CUSTOM` governance records, exact `agent-registry` read permissions, conditioned `RegistryReaderRole`, per-record/versioned SSM discovery parameters, and `RetainExceptOnCreate` state protection alongside the unchanged DynamoDB rollback path.
+- Template-bound pipeline Registry approval utility with all-`DRAFT` atomic preflight, exact processed-template descriptor comparison, bounded approval/discovery polling, credential-safe evidence, and 77 focused tests.
 
 ### Changed
 
@@ -34,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Management bootstrap guidance now covers the stack-scoped IAM role, managed-policy attach/detach, Lambda lifecycle, and Lambda-only `iam:PassRole` required by CDK's nonproduction S3 auto-delete provider; this boundary was proven by the first live Log Archive rollback.
 - Teardown now includes `AgenticAI-Platform-InferenceGatewayStack` and requires the deployment's model-rate context.
 - `TODO-GW-POLICY-ENGINE` now reflects migration debt rather than API availability: the Lambda wrapper remains until the real Workload pipeline passes PolicyEngine behavior parity, rollback, and zero-residual teardown.
+- Pipeline Registry approval reads `GetRegistry.discoveryConfiguration.authorizerType`, matching the GA Boto3/Botocore response model; the initial top-level assumption failed closed before any submission.
 
 ### Verification
 
@@ -41,6 +43,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Platform pipeline executions passed on exact commits `f037b4e`, `2ca8272`, and `0ef7f50`: Source, Synth, SelfMutate, assets, all five nonproduction deployments, fresh explicit approvals, and all three production deployments. The production Guardrail, Gateway, and inference target are `READY`; the native rate limit is `ACTIVE`; the Management/Governance Log Archive is live; and the pipeline-owned Gateway passed Cognito M2M, 49-model discovery, and Strands `LiteLLMModel` streaming/non-streaming. Sanitized details are in `evidence/live/2026-09-19-platform-pipeline-deployment.md`.
 - The isolated Gateway PolicyEngine run passed on exact commit `46c3a62`: eight strict Cedar policies, 20 subject/group decisions, four filtered tool lists, direct-call denial, exact 401/403 JWT negatives, expired-token denial, `ENFORCE → LOG_ONLY → ENFORCE`, and independent zero-residual inventory. Sanitized details are in `evidence/live/2026-09-19-policyengine-compatibility-spike.md`.
 - The isolated GA Agent Registry run passed on exact commit `8e66dc3`: both native CloudFormation types were live; a custom governance document round-tripped; explicit `DRAFT → submit → APPROVED` and data-plane discovery passed; a pre-verified nonexistent parent produced deterministic `UPDATE_ROLLBACK_COMPLETE`; the approved record survived; and direct CloudFormation plus Cloud Control inventory confirmed zero residual resources. Sanitized details are in `evidence/live/2026-09-19-agent-registry-compatibility-spike.md`.
+- Pipeline-owned GA Registry R1 passed on exact producer commit `f3ec7d6` and approval utility commit `39a13ab`: both Platform environments deployed through the reviewed pipeline, all four records were observed in `DRAFT`, explicitly submitted, independently read back as descriptor-identical `APPROVED` records, and exactly discovered. Wrong-principal and wrong-account trust twins were denied; the legacy DynamoDB path stayed active. Sanitized details are in `evidence/live/2026-09-20-pipeline-ga-agent-registry-r1.md`.
 - OTEL rate-limit span correlation remains blocked: `aws/spans` stayed empty under an active CloudWatch Logs trace destination, 100% indexing, configured deliveries, propagation delay, and extended polling. It is not counted as passing evidence.
 
 ## [1.0.0] - 2026-08-18
