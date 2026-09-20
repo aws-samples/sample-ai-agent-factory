@@ -731,11 +731,10 @@ export class D03WorkstreamGatewayStack extends Stack {
         parameters: {
           gatewayIdentifier: new PhysicalResourceIdReference(),
         },
-        // Tolerate the common rollback cases where the Gateway was never
-        // created (CFN invokes Delete after a Create-failure) or was
-        // deleted out-of-band.
-        ignoreErrorCodesMatching:
-          "(ResourceNotFoundException|ValidationException)",
+        // Tolerate only an already-absent Gateway. ValidationException must
+        // fail loudly because it can mean asynchronously deleting targets are
+        // still associated; swallowing that response orphaned a live Gateway.
+        ignoreErrorCodesMatching: "ResourceNotFoundException",
       },
       // Uses the shared crRole (policy attached above) — no per-CR policy, so
       // the IAM-propagation race is gated by CrPropGate below.
@@ -750,6 +749,55 @@ export class D03WorkstreamGatewayStack extends Stack {
     // We can read back those attributes for downstream CfnOutputs + per-target wiring.
     const gatewayIdToken = this.gatewayResource.getResponseField("gatewayId");
     const gatewayArnToken = this.gatewayResource.getResponseField("gatewayArn");
+
+    // DeleteGateway rejects a Gateway while asynchronously deleting targets
+    // still appear in ListGatewayTargets. Insert a polling barrier in the
+    // dependency chain: create Gateway -> barrier -> targets, which reverses
+    // to delete targets -> wait until none remain -> delete Gateway.
+    const targetDeleteBarrierOnEvent = new LambdaFunction(
+      this,
+      "TargetDeleteBarrierOnEvent",
+      {
+        runtime: Runtime.NODEJS_20_X,
+        handler: "index.onEvent",
+        timeout: Duration.seconds(30),
+        code: Code.fromInline(TARGET_DELETION_BARRIER_HANDLER),
+        role: crRole,
+        description: "Records the Gateway target-deletion barrier lifecycle.",
+      },
+    );
+    const targetDeleteBarrierIsComplete = new LambdaFunction(
+      this,
+      "TargetDeleteBarrierIsComplete",
+      {
+        runtime: Runtime.NODEJS_20_X,
+        handler: "index.isComplete",
+        timeout: Duration.seconds(30),
+        code: Code.fromInline(TARGET_DELETION_BARRIER_HANDLER),
+        role: crRole,
+        description:
+          "Waits until AgentCore reports no targets before Gateway deletion.",
+      },
+    );
+    const targetDeleteBarrierProvider = new Provider(
+      this,
+      "TargetDeleteBarrierProvider",
+      {
+        onEventHandler: targetDeleteBarrierOnEvent,
+        isCompleteHandler: targetDeleteBarrierIsComplete,
+        queryInterval: Duration.seconds(10),
+        totalTimeout: Duration.minutes(10),
+      },
+    );
+    const targetDeleteBarrier = new CustomResource(
+      this,
+      "TargetDeleteBarrier",
+      {
+        serviceToken: targetDeleteBarrierProvider.serviceToken,
+        properties: { GatewayIdentifier: gatewayIdToken },
+      },
+    );
+    targetDeleteBarrier.node.addDependency(this.gatewayResource);
 
     // ---- N GatewayTargets, one per subscribed tool ----
     // Naming: `target-<toolId>` (kebab-case). Both the legacy catalogue and
@@ -842,6 +890,7 @@ export class D03WorkstreamGatewayStack extends Stack {
       );
       // Explicit dependency so the Gateway exists before its targets.
       targetResource.node.addDependency(this.gatewayResource);
+      targetResource.node.addDependency(targetDeleteBarrier);
       // When using the Registry, also depend on the per-record fetcher so the
       // CFN graph orders the live-record validation before target creation.
       const fetcher = registryFetchers[subId];
@@ -954,9 +1003,9 @@ export class D03WorkstreamGatewayStack extends Stack {
             "SEC-005: GatewayServiceRole uses an inline policy to keep the exact N target-ARN allow-list visible on the role itself (layer-3 enforcement of the three-layer model).",
         },
         // SEC-029: CDK custom-resources Provider framework internals for the
-        // IAM-propagation gate (CrPropGate). The waiter Step Function and the
-        // framework onEvent/isComplete/onTimeout Lambda roles are
-        // framework-generated and reference each other with function-arn
+        // IAM-propagation and target-deletion gates. Their waiter Step
+        // Functions and framework onEvent/isComplete/onTimeout Lambda roles
+        // are framework-generated and reference each other with function-arn
         // version wildcards (<arn>:*), without ALL-events logging or X-Ray.
         // Not authorable without forking the framework; provisioning-only.
         {
@@ -997,6 +1046,36 @@ export class D03WorkstreamGatewayStack extends Stack {
           reason:
             "SEC-029: Provider framework waiter → onTimeout invoke version wildcard.",
         },
+        {
+          id: "AwsSolutions-IAM5",
+          appliesTo: [
+            "Resource::<TargetDeleteBarrierIsCompleteFE1AD9CE.Arn>:*",
+          ],
+          reason:
+            "SEC-029: Target deletion Provider framework invokes the versioned isComplete handler.",
+        },
+        {
+          id: "AwsSolutions-IAM5",
+          appliesTo: ["Resource::<TargetDeleteBarrierOnEvent9DDC866B.Arn>:*"],
+          reason:
+            "SEC-029: Target deletion Provider framework invokes the versioned onEvent handler.",
+        },
+        {
+          id: "AwsSolutions-IAM5",
+          appliesTo: [
+            "Resource::<TargetDeleteBarrierProviderframeworkisCompleteCC8BC692.Arn>:*",
+          ],
+          reason:
+            "SEC-029: Target deletion waiter invokes the Provider framework isComplete version.",
+        },
+        {
+          id: "AwsSolutions-IAM5",
+          appliesTo: [
+            "Resource::<TargetDeleteBarrierProviderframeworkonTimeout94122D57.Arn>:*",
+          ],
+          reason:
+            "SEC-029: Target deletion waiter invokes the Provider framework timeout version.",
+        },
       ],
       true,
     );
@@ -1004,12 +1083,79 @@ export class D03WorkstreamGatewayStack extends Stack {
 }
 
 /**
+ * Provider handler for the deletion-order barrier between Gateway targets and
+ * the Gateway itself. Target delete APIs are asynchronous: CloudFormation can
+ * mark their custom resources deleted before ListGatewayTargets is empty.
+ */
+const TARGET_DELETION_BARRIER_HANDLER = `
+const https = require('https');
+const crypto = require('crypto');
+function hmac(key, value) { return crypto.createHmac('sha256', key).update(value, 'utf8').digest(); }
+function hash(value) { return crypto.createHash('sha256').update(value, 'utf8').digest('hex'); }
+async function listTargets(gatewayIdentifier) {
+  const region = process.env.AWS_REGION;
+  const host = 'bedrock-agentcore-control.' + region + '.amazonaws.com';
+  const path = '/gateways/' + encodeURIComponent(gatewayIdentifier) + '/targets/';
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\\.\\d{3}/g, '');
+  const dateStamp = amzDate.substring(0, 8);
+  const headers = {
+    host,
+    'x-amz-date': amzDate,
+    'x-amz-security-token': process.env.AWS_SESSION_TOKEN,
+  };
+  const keys = Object.keys(headers).sort();
+  const canonicalHeaders = keys.map(k => k + ':' + headers[k] + '\\n').join('');
+  const signedHeaders = keys.join(';');
+  const canonicalRequest =
+    'GET\\n' + path + '\\n\\n' + canonicalHeaders + '\\n' + signedHeaders + '\\n' + hash('');
+  const scope = dateStamp + '/' + region + '/bedrock-agentcore/aws4_request';
+  const stringToSign =
+    'AWS4-HMAC-SHA256\\n' + amzDate + '\\n' + scope + '\\n' + hash(canonicalRequest);
+  const kDate = hmac('AWS4' + process.env.AWS_SECRET_ACCESS_KEY, dateStamp);
+  const kRegion = hmac(kDate, region);
+  const kService = hmac(kRegion, 'bedrock-agentcore');
+  const kSigning = hmac(kService, 'aws4_request');
+  const signature = crypto.createHmac('sha256', kSigning).update(stringToSign, 'utf8').digest('hex');
+  headers.authorization =
+    'AWS4-HMAC-SHA256 Credential=' + process.env.AWS_ACCESS_KEY_ID + '/' + scope +
+    ', SignedHeaders=' + signedHeaders + ', Signature=' + signature;
+  return new Promise((resolve, reject) => {
+    const req = https.request({ host, path, method: 'GET', headers }, res => {
+      let body = '';
+      res.on('data', chunk => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode || 0, body }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+exports.onEvent = async (event) => {
+  const gatewayIdentifier = String(event.ResourceProperties.GatewayIdentifier || '');
+  if (!gatewayIdentifier) throw new Error('TargetDeleteBarrier requires GatewayIdentifier');
+  return { PhysicalResourceId: 'target-delete-barrier-' + gatewayIdentifier };
+};
+exports.isComplete = async (event) => {
+  if (event.RequestType !== 'Delete') return { IsComplete: true };
+  const gatewayIdentifier = String(event.ResourceProperties.GatewayIdentifier || '');
+  const response = await listTargets(gatewayIdentifier);
+  if (response.status === 404) return { IsComplete: true };
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error('ListGatewayTargets HTTP ' + response.status + ': ' + response.body);
+  }
+  let parsed;
+  try { parsed = JSON.parse(response.body); }
+  catch (error) { throw new Error('ListGatewayTargets returned invalid JSON'); }
+  const items = Array.isArray(parsed.items) ? parsed.items : [];
+  return { IsComplete: items.length === 0 && !parsed.nextToken };
+};
+`;
+
+/**
  * Inline handler for the AgentCore CR IAM-propagation gate. `onEvent` stamps a
- * completion deadline (now + ~30s) into the physical id; `isComplete` reports
- * done once that deadline passes. This deterministically delays the first
- * AgentCore mutate call until the shared CR role's inline policy has
- * propagated (live-verified: the same policy authorizes CreateGateway after a
- * short propagation window but is denied if called immediately).
+ * completion deadline into the physical id; `isComplete` reports done once
+ * that deadline passes. This deterministically delays the first AgentCore
+ * mutate call until the shared CR role's inline policy has propagated.
  */
 const IAM_PROP_GATE_HANDLER = `
 // Fresh IAM role → AgentCore control-plane authorization propagation was

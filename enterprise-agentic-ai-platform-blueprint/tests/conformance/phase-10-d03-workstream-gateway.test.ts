@@ -89,7 +89,105 @@ describe("Phase 10 — D03WorkstreamGatewayStack shape", () => {
       '\\"physicalResourceId\\":{\\"responsePath\\":\\"gatewayId\\"}',
     );
     expect(rendered.match(/PHYSICAL:RESOURCEID:/g)).toHaveLength(2);
+    expect(rendered).toContain(
+      '\\"ignoreErrorCodesMatching\\":\\"ResourceNotFoundException\\"',
+    );
+    expect(rendered).not.toContain("ValidationException");
     expect(rendered).not.toContain("AgenticAI-D03-Gateway-");
+  });
+
+  it("waits for target deletion convergence before deleting the Gateway", () => {
+    const { template } = synth({ allowedToolIds: ["tool-echo", "tool-ping"] });
+    const resources = template.toJSON().Resources as Record<string, any>;
+    const [gatewayId] = Object.entries(resources).find(
+      ([, resource]) => resource.Type === "Custom::BedrockAgentCoreGateway",
+    )!;
+    const [barrierId, barrier] = Object.entries(resources).find(
+      ([, resource]) =>
+        resource.Type === "AWS::CloudFormation::CustomResource" &&
+        resource.Properties?.GatewayIdentifier,
+    )!;
+    expect(barrier.DependsOn).toContain(gatewayId);
+    const targets = Object.values(resources).filter(
+      (resource) => resource.Type === "Custom::BedrockAgentCoreGatewayTarget",
+    ) as any[];
+    expect(targets).toHaveLength(2);
+    for (const target of targets) {
+      expect(target.DependsOn).toContain(barrierId);
+    }
+    const waiter = Object.values(resources).find(
+      (resource: any) =>
+        resource.Type === "AWS::Lambda::Function" &&
+        resource.Properties?.Description ===
+          "Waits until AgentCore reports no targets before Gateway deletion.",
+    ) as any;
+    expect(waiter.Properties.Code.ZipFile).toContain(
+      "/gateways/' + encodeURIComponent(gatewayIdentifier) + '/targets/",
+    );
+    expect(waiter.Properties.Code.ZipFile).toContain(
+      "IsComplete: items.length === 0 && !parsed.nextToken",
+    );
+  });
+
+  it("polls target inventory until the Gateway is safe to delete", async () => {
+    const { template } = synth({ allowedToolIds: ["tool-echo"] });
+    const waiter = Object.values(
+      template.findResources("AWS::Lambda::Function"),
+    ).find(
+      (resource: any) =>
+        resource.Properties?.Description ===
+        "Waits until AgentCore reports no targets before Gateway deletion.",
+    ) as any;
+    const responses = [
+      JSON.stringify({ items: [{ targetId: "TARGET1234" }] }),
+      JSON.stringify({ items: [] }),
+    ];
+    const fakeHttps = {
+      request: (_options: any, callback: (response: any) => void) => {
+        const request = new EventEmitter() as any;
+        request.end = () => {
+          const response = new EventEmitter() as any;
+          response.statusCode = 200;
+          callback(response);
+          response.emit("data", Buffer.from(responses.shift()!, "utf8"));
+          response.emit("end");
+        };
+        return request;
+      },
+    };
+    const exported: Record<string, any> = {};
+    runInNewContext(waiter.Properties.Code.ZipFile, {
+      exports: exported,
+      module: { exports: exported },
+      require: (name: string) => {
+        if (name === "https") return fakeHttps;
+        if (name === "crypto") return { createHash, createHmac };
+        throw new Error(`unexpected require: ${name}`);
+      },
+      process: {
+        env: {
+          AWS_REGION: "us-west-2",
+          AWS_ACCESS_KEY_ID: "test-access",
+          AWS_SECRET_ACCESS_KEY: "test-secret",
+          AWS_SESSION_TOKEN: "test-session",
+        },
+      },
+      Buffer,
+      Date,
+      JSON,
+      Promise,
+      encodeURIComponent,
+    });
+    const event = {
+      RequestType: "Delete",
+      ResourceProperties: { GatewayIdentifier: "gateway-123" },
+    };
+    await expect(exported.isComplete(event)).resolves.toEqual({
+      IsComplete: false,
+    });
+    await expect(exported.isComplete(event)).resolves.toEqual({
+      IsComplete: true,
+    });
   });
 
   it("emits exactly N gateway-target resources where N = allowedToolIds.length", () => {
