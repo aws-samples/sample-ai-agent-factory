@@ -239,8 +239,13 @@ def handler(event: dict, context) -> dict:
                                     "Action": [
                                         "bedrock:InvokeModel",
                                         "bedrock:InvokeModelWithResponseStream",
+                                        # One namespace covers both planes: there is no
+                                        # `bedrock-agentcore-control:` IAM prefix, so the entry that
+                                        # used to sit here authorized nothing. An IAM service prefix is
+                                        # the SigV4 signing name, and both the data-plane and
+                                        # control-plane clients sign as `bedrock-agentcore`. See the
+                                        # prefix note in services/per_agent_identity.py.
                                         "bedrock-agentcore:*",
-                                        "bedrock-agentcore-control:*",
                                     ],
                                     "Resource": "*",
                                 }

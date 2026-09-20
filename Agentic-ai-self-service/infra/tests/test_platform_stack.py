@@ -583,3 +583,93 @@ class TestStepLambdaCognitoGrants:
         assert not offenders, (
             f"these policies grant cognito-idp:CreateUserPool without cognito-idp:TagResource: {offenders}"
         )
+
+
+class TestPolicyPathCanCallTheGateway:
+    """Creating a gateway-scoped Cedar policy requires calling the gateway.
+
+    AgentCore resolves the gateway named in a Cedar statement AS THE CALLER, so a
+    principal that creates such a policy needs bedrock-agentcore:InvokeGateway on
+    the gateway ARN. Without it create_policy ends CREATE_FAILED "Insufficient
+    permissions to call gateway with ID <id>" in BOTH validation modes — proven
+    live on the customer-export path, which had the identical gap.
+
+    Worse here than there: policy_step classifies that message as transient, so a
+    missing grant is retried six times and then attached in ENFORCE fail-closed,
+    i.e. every tool denied, and handed to a promoter running as a principal that
+    also lacked the action. A permanent deny-all logged as a race.
+
+    Asserted on the SYNTHESIZED template, so it holds for what CloudFormation
+    actually receives rather than for how the CDK source happens to be written.
+
+    Grouped BY ROLE across both AWS::IAM::Policy and AWS::IAM::ManagedPolicy,
+    which is not incidental: the deployment Lambda role has so many grants that
+    the CDK spills them out of its inline document into a generated
+    `...OverflowPolicy...` MANAGED policy. A check that walks AWS::IAM::Policy
+    only reports that role as clean no matter what it holds — the first version of
+    this test did exactly that and passed while the grant was deliberately broken.
+    """
+
+    @staticmethod
+    def _roles_to_statements(template_json):
+        """Map role logical id -> every Allow statement attached to it.
+
+        Both document types, unioned per role, because an action and the action it
+        must be paired with can land in different documents for the same role.
+        """
+        by_role = {}
+        for resource in template_json.get("Resources", {}).values():
+            if resource.get("Type") not in ("AWS::IAM::Policy", "AWS::IAM::ManagedPolicy"):
+                continue
+            props = resource["Properties"]
+            for role in props.get("Roles", []) or []:
+                logical_id = role.get("Ref") if isinstance(role, dict) else role
+                for statement in props["PolicyDocument"]["Statement"]:
+                    if statement.get("Effect") != "Allow":
+                        continue
+                    action = statement.get("Action", [])
+                    actions = set([action] if isinstance(action, str) else action)
+                    by_role.setdefault(logical_id, []).append((statement, actions))
+        return by_role
+
+    def test_every_policy_creating_role_can_invoke_the_gateway(self, template_json):
+        offenders = []
+        for role, statements in self._roles_to_statements(template_json).items():
+            granted = set().union(*(actions for _s, actions in statements)) if statements else set()
+            if "bedrock-agentcore:CreatePolicy" in granted and "bedrock-agentcore:InvokeGateway" not in granted:
+                offenders.append(role)
+
+        assert not offenders, (
+            "these roles are granted bedrock-agentcore:CreatePolicy without "
+            f"bedrock-agentcore:InvokeGateway: {offenders} — every gateway-scoped "
+            "Cedar policy they try to create will end CREATE_FAILED, and the "
+            "fail-closed engine will deny every tool until someone reads the IAM"
+        )
+
+    def test_that_grant_is_scoped_to_gateway_arns(self, template_json):
+        """It is a DATA-plane verb: `*` would let a deploy-time Lambda call the
+        tools of every gateway in the account.
+
+        Only checked on roles that create policies. The shared agent runtime role
+        also holds InvokeGateway on `*` — that is the agent calling its own
+        gateway at request time, a different principal with a different
+        justification, and it creates no policies.
+        """
+        unscoped = []
+        for role, statements in self._roles_to_statements(template_json).items():
+            granted = set().union(*(actions for _s, actions in statements)) if statements else set()
+            if "bedrock-agentcore:CreatePolicy" not in granted:
+                continue
+            for statement, actions in statements:
+                if "bedrock-agentcore:InvokeGateway" not in actions:
+                    continue
+                resources = statement.get("Resource", [])
+                resources = [resources] if isinstance(resources, str) else resources
+                if not all(isinstance(r, str) and ":gateway/" in r for r in resources):
+                    unscoped.append((role, resources))
+
+        assert not unscoped, (
+            f"InvokeGateway is granted on non-gateway resources in {unscoped} — "
+            "the ARN prefix is knowable at synth time, so a data-plane invoke verb "
+            'must not ride along on the control-plane resources=["*"] statement'
+        )

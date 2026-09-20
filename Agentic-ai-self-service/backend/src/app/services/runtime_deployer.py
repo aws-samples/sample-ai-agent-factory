@@ -265,13 +265,16 @@ def create_runtime_iam_role(
                     "Action": [
                         "bedrock-agentcore:*Memory*",
                         "bedrock-agentcore:CreateEvent",
-                        "bedrock-agentcore:GetLastKTurns",
-                        "bedrock-agentcore:RetrieveMemories",
+                        # RetrieveMemoryRecords, not RetrieveMemories, and there is no
+                        # GetLastKTurns action at all -- turn history is read through
+                        # ListEvents. Both were inert. See the AgentCore IAM prefix
+                        # note in services/per_agent_identity.py.
+                        "bedrock-agentcore:RetrieveMemoryRecords",
                         "bedrock-agentcore:ListSessions",
                         "bedrock-agentcore:ListActors",
                         "bedrock-agentcore:ListEvents",
-                        "bedrock-agentcore-control:GetMemory",
-                        "bedrock-agentcore-control:ListMemories",
+                        "bedrock-agentcore:GetMemory",
+                        "bedrock-agentcore:ListMemories",
                     ],
                     "Resource": "*",
                 }
@@ -283,11 +286,11 @@ def create_runtime_iam_role(
                     "Effect": "Allow",
                     "Action": [
                         "bedrock-agentcore:Evaluate",
-                        "bedrock-agentcore-control:CreateOnlineEvaluationConfig",
-                        "bedrock-agentcore-control:GetOnlineEvaluationConfig",
-                        "bedrock-agentcore-control:ListOnlineEvaluationConfigs",
-                        "bedrock-agentcore-control:ListEvaluators",
-                        "bedrock-agentcore-control:GetEvaluator",
+                        "bedrock-agentcore:CreateOnlineEvaluationConfig",
+                        "bedrock-agentcore:GetOnlineEvaluationConfig",
+                        "bedrock-agentcore:ListOnlineEvaluationConfigs",
+                        "bedrock-agentcore:ListEvaluators",
+                        "bedrock-agentcore:GetEvaluator",
                         "logs:StartQuery",
                         "logs:GetQueryResults",
                     ],
@@ -300,13 +303,13 @@ def create_runtime_iam_role(
                     "Sid": "PolicyAccess",
                     "Effect": "Allow",
                     "Action": [
-                        "bedrock-agentcore-control:CreatePolicyEngine",
-                        "bedrock-agentcore-control:GetPolicyEngine",
-                        "bedrock-agentcore-control:ListPolicyEngines",
-                        "bedrock-agentcore-control:CreatePolicy",
-                        "bedrock-agentcore-control:GetPolicy",
-                        "bedrock-agentcore-control:ListPolicies",
-                        "bedrock-agentcore-control:UpdateGateway",
+                        "bedrock-agentcore:CreatePolicyEngine",
+                        "bedrock-agentcore:GetPolicyEngine",
+                        "bedrock-agentcore:ListPolicyEngines",
+                        "bedrock-agentcore:CreatePolicy",
+                        "bedrock-agentcore:GetPolicy",
+                        "bedrock-agentcore:ListPolicies",
+                        "bedrock-agentcore:UpdateGateway",
                     ],
                     "Resource": "*",
                 }

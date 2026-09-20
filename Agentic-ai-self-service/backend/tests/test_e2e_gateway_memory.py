@@ -268,8 +268,12 @@ def main():
                                     "Action": [
                                         "bedrock:InvokeModel",
                                         "bedrock:InvokeModelWithResponseStream",
+                                        # There is no `bedrock-agentcore-control:`
+                                        # IAM prefix -- one namespace covers both
+                                        # planes -- so the entry that used to follow
+                                        # this one authorized nothing. Mirrors
+                                        # step_handlers/memory_step.py.
                                         "bedrock-agentcore:*",
-                                        "bedrock-agentcore-control:*",
                                     ],
                                     "Resource": "*",
                                 }

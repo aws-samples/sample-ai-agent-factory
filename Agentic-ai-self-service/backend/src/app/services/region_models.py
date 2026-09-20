@@ -97,6 +97,41 @@ def region_inference_prefix(region: str | None = None) -> str:
     return "us"
 
 
+def is_inference_profile_id(model_id: str) -> bool:
+    """True when *model_id* is a cross-region inference profile, not a model.
+
+    The distinction is not cosmetic: the two take different ARNs.
+    ``arn:aws:bedrock:<region>::foundation-model/<id>`` carries no account and is what
+    a plain on-demand id needs, while a geography-prefixed id is a profile and needs
+    ``arn:aws:bedrock:<region>:<account>:inference-profile/<id>``. Getting it wrong
+    produces an ARN that names nothing — ``GetFoundationModel`` on a ``us.``-prefixed
+    id answers ResourceNotFoundException — and callers of Bedrock report that in ways
+    that point nowhere near the model ARN.
+
+    This tests ``CROSS_REGION_PREFIXES`` and NOT ``_GEO_PREFIXES``, and the difference
+    is load-bearing. The geography set deliberately excludes ``global.`` because a
+    ``global.`` id must never be *repointed* at a region — but it is still a profile.
+    Reusing the repoint set here would have given every ``global.`` model a
+    ``foundation-model`` ARN that names nothing.
+
+    Every quadrant of that claim was checked against ``bedrock-runtime converse`` in
+    us-east-1, passing the ARN itself as the model id:
+
+        us.anthropic.claude-sonnet-4-5-…      inference-profile/  ok
+                                             foundation-model/   ValidationException:
+                                                                 provided model
+                                                                 identifier is invalid
+        global.anthropic.claude-sonnet-4-5-…  inference-profile/  ok
+                                             foundation-model/   same ValidationException
+        amazon.titan-embed-text-v2:0         foundation-model/   its own modelArn
+                                             inference-profile/  ResourceNotFoundException
+
+    So the two ARN forms are mutually exclusive, and the prefix is what decides
+    which one a given id takes.
+    """
+    return model_id.startswith(CROSS_REGION_PREFIXES)
+
+
 def has_date_suffix(model_id: str) -> bool:
     """True for legacy dated IDs like ``…claude-haiku-4-5-20251001``.
 

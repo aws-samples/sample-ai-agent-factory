@@ -387,12 +387,12 @@ class TestSystemPromptEscapingPreservation:
     **Validates: Requirements 3.8**
     """
 
-    def test_escape_triple_quotes_function(self):
+    def test_as_triple_quoted_body_function(self):
         """**Validates: Requirements 3.8**
 
-        _escape_triple_quotes MUST replace triple double-quotes.
+        _as_triple_quoted_body MUST replace triple double-quotes.
         """
-        result = code_generator._escape_triple_quotes('Hello """world"""')
+        result = code_generator._as_triple_quoted_body('Hello """world"""')
         assert '"""' not in result
         assert '\\"\\"\\"' in result
 
@@ -403,7 +403,7 @@ class TestSystemPromptEscapingPreservation:
         """
         special_prompt = "You are an agent. Handle 'quotes' and \\backslashes\\ carefully."
         code = code_generator._generate_default_agent(
-            code_generator._escape_triple_quotes(special_prompt),
+            code_generator._as_triple_quoted_body(special_prompt),
             "us.anthropic.claude-sonnet-5",
             "us-east-1",
         )
@@ -435,7 +435,7 @@ class TestSystemPromptEscapingPreservation:
         For ANY safe system prompt, _generate_default_agent MUST produce
         syntactically valid Python code.
         """
-        escaped = code_generator._escape_triple_quotes(system_prompt)
+        escaped = code_generator._as_triple_quoted_body(system_prompt)
         code = code_generator._generate_default_agent(escaped, "us.anthropic.claude-sonnet-5", "us-east-1")
         try:
             compile(code, "<test>", "exec")

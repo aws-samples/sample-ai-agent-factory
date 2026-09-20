@@ -58,7 +58,7 @@ def lambda_handler(event, context):
                         "citations": [],
                         "still_ingesting": True,
                         "retryable": True,
-                        "message": "Knowledge base returned no matches yet — it may still be ingesting. Retry shortly.",
+                        "message": "Knowledge base returned no matches yet; it may still be ingesting. Retry shortly.",
                     }
                 ),
             }

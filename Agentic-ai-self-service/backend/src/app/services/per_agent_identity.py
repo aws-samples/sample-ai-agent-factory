@@ -130,19 +130,49 @@ def _gateway_statement(gateway_arn: str | None) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# The AgentCore IAM prefix
+# ---------------------------------------------------------------------------
+#
+# Every AgentCore action below is prefixed ``bedrock-agentcore:``. There is no
+# ``bedrock-agentcore-control:`` IAM prefix, and no ``agent-credential-provider:``
+# service at all. Both mistakes were in this file.
+#
+# ``bedrock-agentcore`` and ``bedrock-agentcore-control`` are both real API
+# endpoints with their own botocore client, so a control-plane prefix reads as
+# correct -- but an IAM service prefix is the SigV4 *signing name*, not the endpoint
+# prefix, and both clients sign as ``bedrock-agentcore``. One namespace, both planes.
+#
+# This fails silently, which is why it survived. IAM accepts a policy naming a
+# service that does not exist: no error on PutRolePolicy, no error at deploy, and
+# the statement authorizes nothing. The first symptom is an AccessDeniedException at
+# runtime on a call whose permission is visibly granted. The policy-engine statement
+# here was void in its entirety.
+#
+# Verified with two oracles: botocore's service models settle the prefix
+# (``signingName``), and IAM Access Analyzer settles individual actions, because IAM
+# actions do not map 1:1 to API operations -- AuthorizeAction,
+# PartiallyAuthorizeActions and InvokeGateway are real IAM actions with no SDK
+# operation. Access Analyzer reports the prefix error as INVALID_SERVICE_IN_ACTION.
+# The same rule is enforced over the exported CloudFormation template by
+# tests/test_cfn_export_contract.py::TestEmittedActionsAreRealIamActions.
+
+
 def _memory_statement(memory_arn: str | None) -> dict:
     return {
         "Sid": "MemoryAccess",
         "Effect": "Allow",
         "Action": [
             "bedrock-agentcore:CreateEvent",
-            "bedrock-agentcore:GetLastKTurns",
-            "bedrock-agentcore:RetrieveMemories",
+            # RetrieveMemoryRecords, not RetrieveMemories, and there is no
+            # GetLastKTurns action at all -- turn history is read through
+            # ListEvents. Both were inert. See the prefix note below.
+            "bedrock-agentcore:RetrieveMemoryRecords",
             "bedrock-agentcore:ListSessions",
             "bedrock-agentcore:ListActors",
             "bedrock-agentcore:ListEvents",
-            "bedrock-agentcore-control:GetMemory",
-            "bedrock-agentcore-control:ListMemories",
+            "bedrock-agentcore:GetMemory",
+            "bedrock-agentcore:ListMemories",
         ],
         "Resource": _scoped_resource(memory_arn),
     }
@@ -195,11 +225,11 @@ def _evaluation_statement() -> dict:
         "Effect": "Allow",
         "Action": [
             "bedrock-agentcore:Evaluate",
-            "bedrock-agentcore-control:CreateOnlineEvaluationConfig",
-            "bedrock-agentcore-control:GetOnlineEvaluationConfig",
-            "bedrock-agentcore-control:ListOnlineEvaluationConfigs",
-            "bedrock-agentcore-control:ListEvaluators",
-            "bedrock-agentcore-control:GetEvaluator",
+            "bedrock-agentcore:CreateOnlineEvaluationConfig",
+            "bedrock-agentcore:GetOnlineEvaluationConfig",
+            "bedrock-agentcore:ListOnlineEvaluationConfigs",
+            "bedrock-agentcore:ListEvaluators",
+            "bedrock-agentcore:GetEvaluator",
             "logs:StartQuery",
             "logs:GetQueryResults",
         ],
@@ -212,13 +242,13 @@ def _policy_statement() -> dict:
         "Sid": "PolicyAccess",
         "Effect": "Allow",
         "Action": [
-            "bedrock-agentcore-control:CreatePolicyEngine",
-            "bedrock-agentcore-control:GetPolicyEngine",
-            "bedrock-agentcore-control:ListPolicyEngines",
-            "bedrock-agentcore-control:CreatePolicy",
-            "bedrock-agentcore-control:GetPolicy",
-            "bedrock-agentcore-control:ListPolicies",
-            "bedrock-agentcore-control:UpdateGateway",
+            "bedrock-agentcore:CreatePolicyEngine",
+            "bedrock-agentcore:GetPolicyEngine",
+            "bedrock-agentcore:ListPolicyEngines",
+            "bedrock-agentcore:CreatePolicy",
+            "bedrock-agentcore:GetPolicy",
+            "bedrock-agentcore:ListPolicies",
+            "bedrock-agentcore:UpdateGateway",
         ],
         "Resource": "*",
     }

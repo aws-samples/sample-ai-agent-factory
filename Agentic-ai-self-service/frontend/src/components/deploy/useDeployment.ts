@@ -95,7 +95,11 @@ export function useDeployment(params: UseDeploymentParams) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          deployment_mode: deploymentMode,
+          // camelCase only. Sending `deployment_mode` as well was a hedge against the
+          // backend's alias handling, and DeployRequest now rejects unknown keys so that a
+          // misspelled field cannot be silently ignored. The duplicate is still tolerated
+          // server-side for older clients, but every other field here is camelCase and
+          // this one being both was the only reason that tolerance was needed.
           deploymentMode,
           nodeId,
           config: fullConfig,
