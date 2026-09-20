@@ -40,6 +40,11 @@ QUALIFIER="hnb659fds"
 # cdk-hnb659fds-cfn-exec-role-<account>-<region> with
 # iam:PassedToService=cloudformation.amazonaws.com. The pipeline-creation API
 # validates both role classes before accepting a cross-account pipeline.
+# The Workstream account execution policy must allow iam:PassRole on its exact
+# `AgenticAI*`/CDK-generated Provider waiter roles with
+# iam:PassedToService=states.amazonaws.com. This is required for the bounded
+# Step Functions waiters used by deletion and IAM-propagation barriers; do not
+# widen the role resource pattern or omit the passed-to-service condition.
 # The Management account execution policy additionally needs Kinesis lifecycle
 # actions, IAM lifecycle actions on the exact
 # AgenticAI-LogArchive-CWLDestinationRole, and iam:PassRole on that role with

@@ -413,6 +413,9 @@ describe("Phase 7 — cross-account bootstrap role contract", () => {
       "iam:PassedToService=lambda.amazonaws.com",
     );
     expect(bootstrapSource).toContain(
+      "iam:PassedToService=states.amazonaws.com",
+    );
+    expect(bootstrapSource).toContain(
       'LOG_ARCHIVE="$(json agenticai/logArchiveAccountId)"',
     );
     expect(bootstrapSource).toContain(
