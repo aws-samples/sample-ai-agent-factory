@@ -14,7 +14,7 @@ import {
   RemovalPolicy,
   Stack,
   Tags,
-} from 'aws-cdk-lib';
+} from "aws-cdk-lib";
 import {
   AccountPrincipal,
   CfnRole,
@@ -23,10 +23,10 @@ import {
   ManagedPolicy,
   PolicyStatement,
   Role,
-} from 'aws-cdk-lib/aws-iam';
-import { StringParameter } from 'aws-cdk-lib/aws-ssm';
-import { NagSuppressions } from 'cdk-nag';
-import { Construct } from 'constructs';
+} from "aws-cdk-lib/aws-iam";
+import { StringParameter } from "aws-cdk-lib/aws-ssm";
+import { NagSuppressions } from "cdk-nag";
+import { Construct } from "constructs";
 
 import {
   PLATFORM_TOOL_CATALOGUE,
@@ -34,7 +34,7 @@ import {
   resolveTargetArn,
   validateToolSpec,
   type ToolSpec,
-} from '@agenticai/platform-tool-catalogue';
+} from "@agenticai/platform-tool-catalogue";
 
 export interface GaPlatformRegistryTags {
   readonly applicationId: string;
@@ -45,19 +45,23 @@ export interface GaPlatformRegistryTags {
 }
 
 export interface GaPlatformRegistryConstructProps {
-  readonly envName: 'nonprod' | 'prod';
+  readonly envName: "nonprod" | "prod";
   readonly workloadAccountIds: readonly string[];
+  /** Account that owns the Workload pipeline's explicitly named synth role. */
+  readonly registrySynthAccountId: string;
+  /** Pipeline-owned environment-specific tool alias ARNs keyed by stable tool ID. */
+  readonly toolTargetArns?: Readonly<Record<string, string>>;
   readonly tags: GaPlatformRegistryTags;
 }
 
 export interface GaToolGovernanceDocument {
-  readonly schemaVersion: 'agenticai.tool-governance/1.0';
+  readonly schemaVersion: "agenticai.tool-governance/1.0";
   readonly catalogueVersion: string;
   readonly toolId: string;
   readonly description: string;
-  readonly desiredApprovalStatus: ToolSpec['approvalStatus'];
+  readonly desiredApprovalStatus: ToolSpec["approvalStatus"];
   readonly target: {
-    readonly type: NonNullable<ToolSpec['toolType']>;
+    readonly type: NonNullable<ToolSpec["toolType"]>;
     readonly arn: string;
   };
   readonly mcp: {
@@ -66,11 +70,11 @@ export interface GaToolGovernanceDocument {
     readonly inputSchema: Record<string, unknown>;
   };
   readonly authorization: {
-    readonly defaultDecision: 'DENY';
+    readonly defaultDecision: "DENY";
     readonly cedarPolicy: string;
     readonly allowedSubjects: readonly string[];
     readonly allowedGroups: readonly string[];
-    readonly combination: 'AUTHENTICATED' | 'GROUP_ONLY';
+    readonly combination: "AUTHENTICATED" | "GROUP_ONLY";
   };
   readonly ownership: {
     readonly ownerTeam: string;
@@ -82,30 +86,31 @@ export interface GaToolGovernanceDocument {
 export function buildGaToolGovernanceDocument(
   tool: ToolSpec,
   platformAccountId: string,
+  targetArnOverride?: string,
 ): GaToolGovernanceDocument {
   validateToolSpec(tool);
   const allowedGroups = [...(tool.allowedGroups ?? [])];
   return {
-    schemaVersion: 'agenticai.tool-governance/1.0',
+    schemaVersion: "agenticai.tool-governance/1.0",
     catalogueVersion: PLATFORM_TOOL_CATALOGUE_VERSION,
     toolId: tool.toolId,
     description: tool.description,
     desiredApprovalStatus: tool.approvalStatus,
     target: {
-      type: tool.toolType ?? 'lambda',
-      arn: resolveTargetArn(tool, platformAccountId),
+      type: tool.toolType ?? "lambda",
+      arn: targetArnOverride ?? resolveTargetArn(tool, platformAccountId),
     },
     mcp: {
       toolName: tool.toolId,
       description: tool.description,
-      inputSchema: tool.inputSchema ?? { type: 'object' },
+      inputSchema: tool.inputSchema ?? { type: "object" },
     },
     authorization: {
-      defaultDecision: 'DENY',
+      defaultDecision: "DENY",
       cedarPolicy: tool.cedarPolicy.trim(),
       allowedSubjects: [],
       allowedGroups,
-      combination: allowedGroups.length > 0 ? 'GROUP_ONLY' : 'AUTHENTICATED',
+      combination: allowedGroups.length > 0 ? "GROUP_ONLY" : "AUTHENTICATED",
     },
     ownership: {
       ownerTeam: tool.ownerTeam,
@@ -132,11 +137,17 @@ export class GaPlatformRegistryConstruct extends Construct {
   readonly readerExternalId: string;
   readonly parameterPrefix: string;
 
-  constructor(scope: Construct, id: string, props: GaPlatformRegistryConstructProps) {
+  constructor(
+    scope: Construct,
+    id: string,
+    props: GaPlatformRegistryConstructProps,
+  ) {
     super(scope, id);
 
     if (props.workloadAccountIds.length === 0) {
-      throw new Error('GaPlatformRegistryConstruct: workloadAccountIds must not be empty.');
+      throw new Error(
+        "GaPlatformRegistryConstruct: workloadAccountIds must not be empty.",
+      );
     }
     const workloadAccountIds = [...new Set(props.workloadAccountIds)].sort();
     for (const accountId of workloadAccountIds) {
@@ -146,13 +157,27 @@ export class GaPlatformRegistryConstruct extends Construct {
         );
       }
     }
+    if (!/^\d{12}$/.test(props.registrySynthAccountId)) {
+      throw new Error(
+        "GaPlatformRegistryConstruct: registrySynthAccountId must be 12 digits.",
+      );
+    }
+    if (props.toolTargetArns) {
+      const expected = Object.keys(PLATFORM_TOOL_CATALOGUE).sort();
+      const actual = Object.keys(props.toolTargetArns).sort();
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+        throw new Error(
+          "GaPlatformRegistryConstruct: toolTargetArns must exactly match the platform catalogue.",
+        );
+      }
+    }
 
     const stack = Stack.of(this);
     const tags = {
-      'application-id': props.tags.applicationId,
-      'agent-id': props.tags.agentId,
-      'tenant-id': props.tags.tenantId,
-      'cost-centre': props.tags.costCentre,
+      "application-id": props.tags.applicationId,
+      "agent-id": props.tags.agentId,
+      "tenant-id": props.tags.tenantId,
+      "cost-centre": props.tags.costCentre,
       environment: props.tags.environment,
     };
     const cfnTags = Object.entries(tags)
@@ -165,19 +190,19 @@ export class GaPlatformRegistryConstruct extends Construct {
     };
 
     const registryName = `agenticai-platform-${props.envName}-v1`;
-    this.registry = new CfnResource(this, 'Registry', {
-      type: 'AWS::AgentRegistry::Registry',
+    this.registry = new CfnResource(this, "Registry", {
+      type: "AWS::AgentRegistry::Registry",
       properties: {
         Name: registryName,
         Description: `Platform-owned GA Agent Registry (${props.envName}).`,
-        AuthorizerType: 'AWS_IAM',
-        ApprovalConfiguration: { AutoApprovalRules: ['APPROVE_ALL'] },
+        AuthorizerType: "AWS_IAM",
+        ApprovalConfiguration: { AutoApprovalRules: ["APPROVE_ALL"] },
         Tags: cfnTags,
       },
     });
     this.registry.applyRemovalPolicy(RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE);
-    this.registryId = this.registry.getAtt('RegistryId').toString();
-    this.registryArn = this.registry.getAtt('RegistryArn').toString();
+    this.registryId = this.registry.getAtt("RegistryId").toString();
+    this.registryArn = this.registry.getAtt("RegistryArn").toString();
 
     const records: Record<string, CfnResource> = {};
     const recordIdParameters: Record<string, StringParameter> = {};
@@ -199,19 +224,23 @@ export class GaPlatformRegistryConstruct extends Construct {
       return result;
     };
 
-    for (const tool of Object.values(PLATFORM_TOOL_CATALOGUE).sort((left, right) =>
-      left.toolId.localeCompare(right.toolId),
+    for (const tool of Object.values(PLATFORM_TOOL_CATALOGUE).sort(
+      (left, right) => left.toolId.localeCompare(right.toolId),
     )) {
-      const governance = buildGaToolGovernanceDocument(tool, stack.account);
+      const governance = buildGaToolGovernanceDocument(
+        tool,
+        stack.account,
+        props.toolTargetArns?.[tool.toolId],
+      );
       const record = new CfnResource(this, `Record-${tool.toolId}`, {
-        type: 'AWS::AgentRegistry::RegistryRecord',
+        type: "AWS::AgentRegistry::RegistryRecord",
         properties: {
           RegistryId: this.registryId,
           Name: tool.toolId,
           DisplayName: tool.toolId,
           Description: tool.description,
-          RecordType: 'CUSTOM',
-          RecordVersion: '1.0.0',
+          RecordType: "CUSTOM",
+          RecordVersion: "2.0.0",
           Descriptors: {
             Custom: {
               Data: JSON.stringify(governance),
@@ -226,7 +255,7 @@ export class GaPlatformRegistryConstruct extends Construct {
       recordIdParameters[tool.toolId] = parameter(
         `RecordIdParameter-${tool.toolId}`,
         `records/${tool.toolId}/id`,
-        record.getAtt('RecordId').toString(),
+        record.getAtt("RecordId").toString(),
         `GA Agent Registry record id for ${tool.toolId}.`,
       );
     }
@@ -237,7 +266,7 @@ export class GaPlatformRegistryConstruct extends Construct {
     const workloadPrincipals = workloadAccountIds.map(
       (accountId) => new AccountPrincipal(accountId),
     );
-    this.readerRole = new Role(this, 'RegistryReaderRole', {
+    this.readerRole = new Role(this, "RegistryReaderRole", {
       roleName: `AgenticAI-RegistryReader-${props.envName}`,
       assumedBy: new CompositePrincipal(...workloadPrincipals),
       description: `Read-only GA Agent Registry role for ${props.envName} Workstreams.`,
@@ -247,63 +276,90 @@ export class GaPlatformRegistryConstruct extends Construct {
 
     const cfnReaderRole = this.readerRole.node.defaultChild as CfnRole;
     cfnReaderRole.assumeRolePolicyDocument = {
-      Version: '2012-10-17',
+      Version: "2012-10-17",
       Statement: [
         {
-          Sid: 'AllowWorkstreamRegistryValidators',
-          Effect: 'Allow',
+          Sid: "AllowWorkstreamRegistryValidators",
+          Effect: "Allow",
           Principal: {
             AWS: workloadAccountIds.map(
               (accountId) => `arn:${stack.partition}:iam::${accountId}:root`,
             ),
           },
-          Action: 'sts:AssumeRole',
+          Action: "sts:AssumeRole",
           Condition: {
             StringEquals: {
-              'sts:ExternalId': this.readerExternalId,
+              "sts:ExternalId": this.readerExternalId,
             },
             StringLike: {
-              'aws:PrincipalArn': workloadAccountIds.map(
+              "aws:PrincipalArn": workloadAccountIds.map(
                 (accountId) =>
                   `arn:${stack.partition}:iam::${accountId}:role/AgenticAI-D03-*-RegistryValidator`,
               ),
-              'sts:RoleSessionName': 'registry-*',
+              "sts:RoleSessionName": "registry-*",
+            },
+          },
+        },
+        {
+          Sid: "AllowWorkloadPipelineRegistryResolution",
+          Effect: "Allow",
+          Principal: {
+            AWS: `arn:${stack.partition}:iam::${props.registrySynthAccountId}:root`,
+          },
+          Action: "sts:AssumeRole",
+          Condition: {
+            StringEquals: {
+              "sts:ExternalId": `agenticai-registry-synth-v1-${props.envName}-${stack.account}`,
+            },
+            ArnEquals: {
+              "aws:PrincipalArn": `arn:${stack.partition}:iam::${props.registrySynthAccountId}:role/AgenticAI-WLP-${props.tags.tenantId}-${props.tags.agentId}-RegistrySynth`,
+            },
+            StringLike: {
+              "sts:RoleSessionName": "registry-synth-*",
             },
           },
         },
       ],
     };
 
-    const readerPolicy = new ManagedPolicy(this, 'RegistryReaderPolicy', {
+    const readerPolicy = new ManagedPolicy(this, "RegistryReaderPolicy", {
       managedPolicyName: `AgenticAI-RegistryReader-${props.envName}`,
       description: `Read-only access to the ${props.envName} GA Agent Registry.`,
       statements: [
         new PolicyStatement({
-          sid: 'ReadRegistryMetadata',
+          sid: "ReadRegistryMetadata",
           effect: Effect.ALLOW,
           actions: [
-            'agent-registry:GetRegistry',
-            'agent-registry:ListRegistryRecords',
+            "agent-registry:GetRegistry",
+            "agent-registry:ListRegistryRecords",
           ],
           resources: [this.registryArn],
         }),
         new PolicyStatement({
-          sid: 'ReadRegistryRecords',
+          sid: "ReadRegistryRecords",
           effect: Effect.ALLOW,
           actions: [
-            'agent-registry:GetRegistryRecord',
-            'agent-registry:GetDiscoverableRegistryRecord',
+            "agent-registry:GetRegistryRecord",
+            "agent-registry:GetDiscoverableRegistryRecord",
           ],
           resources: [`${this.registryArn}/record/*`],
         }),
         new PolicyStatement({
-          sid: 'DiscoverApprovedRegistryRecords',
+          sid: "DiscoverApprovedRegistryRecords",
           effect: Effect.ALLOW,
           actions: [
-            'agent-registry:ListDiscoverableRegistryRecords',
-            'agent-registry:SearchDiscoverableRegistryRecords',
+            "agent-registry:ListDiscoverableRegistryRecords",
+            "agent-registry:SearchDiscoverableRegistryRecords",
           ],
           resources: [this.registryArn],
+        }),
+        new PolicyStatement({
+          sid: "ReadRegistryDiscoveryParameters",
+          effect: Effect.ALLOW,
+          actions: ["ssm:GetParameters"],
+          resources: [
+            `arn:${stack.partition}:ssm:${stack.region}:${stack.account}:parameter${this.parameterPrefix}/*`,
+          ],
         }),
       ],
     });
@@ -312,52 +368,54 @@ export class GaPlatformRegistryConstruct extends Construct {
       readerPolicy,
       [
         {
-          id: 'AwsSolutions-IAM5',
+          id: "AwsSolutions-IAM5",
           reason:
-            'SEC-030: RegistryRecord IDs are service-generated after deployment; the only wildcard is constrained to records under this one GA Registry ARN, and conformance tests pin the exact action/resource pair.',
+            "SEC-030: RegistryRecord IDs are service-generated and SSM discovery uses a versioned environment prefix; both wildcards are constrained under one Registry ARN or one exact parameter path, and conformance tests pin every action/resource pair.",
         },
       ],
       true,
     );
 
     const registryIdParameter = parameter(
-      'RegistryIdParameter',
-      'id',
+      "RegistryIdParameter",
+      "id",
       this.registryId,
       `GA Agent Registry id for ${props.envName}.`,
     );
     const registryArnParameter = parameter(
-      'RegistryArnParameter',
-      'arn',
+      "RegistryArnParameter",
+      "arn",
       this.registryArn,
       `GA Agent Registry ARN for ${props.envName}.`,
     );
     const readerRoleArnParameter = parameter(
-      'ReaderRoleArnParameter',
-      'reader-role-arn',
+      "ReaderRoleArnParameter",
+      "reader-role-arn",
       this.readerRole.roleArn,
       `GA Agent Registry reader role ARN for ${props.envName}.`,
     );
     const readerExternalIdParameter = parameter(
-      'ReaderExternalIdParameter',
-      'reader-external-id',
+      "ReaderExternalIdParameter",
+      "reader-external-id",
       this.readerExternalId,
       `GA Agent Registry reader ExternalId for ${props.envName}.`,
     );
 
-    new CfnOutput(this, 'RegistryId', { value: this.registryId });
-    new CfnOutput(this, 'RegistryArn', { value: this.registryArn });
-    new CfnOutput(this, 'RegistryReaderRoleArn', { value: this.readerRole.roleArn });
-    new CfnOutput(this, 'RegistryIdParameterName', {
+    new CfnOutput(this, "RegistryId", { value: this.registryId });
+    new CfnOutput(this, "RegistryArn", { value: this.registryArn });
+    new CfnOutput(this, "RegistryReaderRoleArn", {
+      value: this.readerRole.roleArn,
+    });
+    new CfnOutput(this, "RegistryIdParameterName", {
       value: registryIdParameter.parameterName,
     });
-    new CfnOutput(this, 'RegistryArnParameterName', {
+    new CfnOutput(this, "RegistryArnParameterName", {
       value: registryArnParameter.parameterName,
     });
-    new CfnOutput(this, 'RegistryReaderRoleArnParameterName', {
+    new CfnOutput(this, "RegistryReaderRoleArnParameterName", {
       value: readerRoleArnParameter.parameterName,
     });
-    new CfnOutput(this, 'RegistryReaderExternalIdParameterName', {
+    new CfnOutput(this, "RegistryReaderExternalIdParameterName", {
       value: readerExternalIdParameter.parameterName,
     });
   }

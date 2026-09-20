@@ -244,10 +244,9 @@ with no AWS SDK present; and end-to-end CLI behaviour.
 
 ## What it does NOT prove
 
-Passing offline tests and a green `approve` run are **not** live release
-evidence for the complete migration. The additive R1 producer is deployed only
-in nonproduction; production deployment, the R2 Workstream consumer switch,
-the cross-account `RegistryReaderRole` read path, rollback, teardown, and the
-EMEA AgentCore region matrix remain outstanding. This utility approves records
-in **one** Platform account and Region; it says nothing about any other Region
-or account.
+Passing offline tests or one green `approve` run is **not** evidence for the
+complete migration. R1 producer deployment and explicit approvals passed in
+both reference Platform environments, but the R2 Workstream consumer,
+matching-validator reader path, wrong-ExternalId/session twins, consumer
+rollback, teardown, and EMEA AgentCore region matrix remain outstanding. Each
+utility run proves one Platform account, Region, and environment only.

@@ -630,10 +630,6 @@ def template_governance_documents(
             raise ApprovalError(f"Refusing template record {name}: DisplayName must equal Name")
         if properties.get("RecordType") != "CUSTOM":
             raise ApprovalError(f"Refusing template record {name}: RecordType is not CUSTOM")
-        if properties.get("RecordVersion") != "1.0.0":
-            raise ApprovalError(
-                f"Refusing template record {name}: RecordVersion is not '1.0.0'"
-            )
         descriptors = require_mapping(
             properties.get("Descriptors"), f"template record {name} Descriptors"
         )
@@ -654,6 +650,19 @@ def template_governance_documents(
                 f"Refusing template record {name}: descriptor Data is not a JSON object"
             )
         assert_governance_contract(document, name)
+        catalogue_version = document.get("catalogueVersion")
+        if not isinstance(catalogue_version, str) or not re.fullmatch(
+            r"[1-9][0-9]*", catalogue_version
+        ):
+            raise ApprovalError(
+                f"Refusing template record {name}: catalogueVersion is invalid"
+            )
+        expected_record_version = f"{catalogue_version}.0.0"
+        if properties.get("RecordVersion") != expected_record_version:
+            raise ApprovalError(
+                f"Refusing template record {name}: RecordVersion is not "
+                f"{expected_record_version!r}"
+            )
         if properties.get("Description") != document.get("description"):
             raise ApprovalError(
                 f"Refusing template record {name}: Description differs from governance document"
@@ -744,6 +753,12 @@ def preflight_records(
             raise ApprovalError(
                 f"Refusing record {name}: governance descriptor differs from processed template"
             )
+        expected_record_version = f"{document['catalogueVersion']}.0.0"
+        if record.get("recordVersion") != expected_record_version:
+            raise ApprovalError(
+                f"Refusing record {name}: live recordVersion is not "
+                f"{expected_record_version!r}"
+            )
         arn = require_field(record, "recordArn", f"record {name}")
         assert_exact_tags(aws.tags(arn), config, f"registry record {name}")
         seen[name] = (record_id, document)
@@ -823,6 +838,9 @@ def assert_descriptor_unchanged(
     actual = parse_governance_document(record, f"record {tool_id}")
     if actual != dict(expected):
         raise ApprovalError(f"Governance descriptor for {tool_id} changed during approval")
+    expected_record_version = f"{expected['catalogueVersion']}.0.0"
+    if record.get("recordVersion") != expected_record_version:
+        raise ApprovalError(f"Registry recordVersion for {tool_id} changed during approval")
     assert_governance_contract(actual, tool_id)
 
 

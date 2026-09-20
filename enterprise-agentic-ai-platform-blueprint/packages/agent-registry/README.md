@@ -19,8 +19,10 @@ negative authorization, rollback, and teardown gates.
 
 ## Native GA producer
 
-For each Platform environment, `GaPlatformRegistryConstruct` creates:
+For each Platform environment, `RegistryStack` now creates:
 
+- one CMK-backed, environment-qualified Lambda + `PROD` alias per platform tool;
+- exact alias resource policies for the corresponding Workstream Gateway role;
 - one IAM-authorized `AWS::AgentRegistry::Registry`;
 - one tagged `CUSTOM` governance `RegistryRecord` per platform catalogue tool;
 - one read-only `AgenticAI-RegistryReader-<environment>` role;
@@ -51,6 +53,43 @@ with target, MCP schema, Cedar metadata, desired approval state, and ownership.
 Records remain `DRAFT` after CloudFormation creation; a curator must explicitly
 submit them. `APPROVE_ALL` then transitions a valid submission to `APPROVED`.
 
+## R2 Workstream consumer
+
+R2 is opt-in through `agenticai/enableGaRegistryConsumer=true`. Developer repos
+store stable tool IDs in `agenticai/gaRegistryExpectedToolIds`; opaque record IDs
+remain environment-specific and are never committed by developers.
+
+The Workload pipeline synth:
+
+1. uses the exact named `AgenticAI-WLP-<tenant>-<agent>-RegistrySynth` role;
+2. assumes each environment's `RegistryReaderRole` with a distinct synth
+   ExternalId and `registry-synth-*` session name;
+3. reads only the six versioned SSM parameters and expected approved records;
+4. validates complete `agenticai.tool-governance/1.0` documents; and
+5. writes strict non-secret context files consumed by CDK.
+
+The Workstream stack builds exact target ARNs, MCP schemas, and Cedar from that
+context. A pipeline-created
+`AgenticAI-D03-<environment>-<tenant>-<agent>-RegistryValidator` role then
+re-fetches each record through `agent-registry-control` at deployment and
+requires `APPROVED` status, the exact synth-time descriptor SHA-256, and an
+explicit match between the live governance target ARN and the Gateway target.
+This closes status, descriptor, and target drift between synth and deploy.
+
+Before Gateway deployment, the Workload `RegistryRoles` stage emits one exact
+`GatewayServiceRoleArn` per environment and pauses. The Platform permission
+phase accepts exactly those two ARNs through
+`agenticai/gaGatewayServiceRoleArns`, validates account/name/environment
+cardinality, and grants each environment's aliases only to its matching role.
+It never derives a principal from independent Platform tenant/agent settings.
+After nonproduction MCP proof, GA mode uses `ProdGatewayApproval`; app-only
+evaluation/canary gates remain exclusive to legacy/full-agent mode.
+
+Catalogue revision 2 emits RegistryRecord version `2.0.0` and environment-
+qualified Platform tool Lambdas and Gateway roles. The old `allowedToolIds`
+catalogue path remains available only as the explicit rollback mode until R2
+live parity and teardown pass.
+
 ## Current proof boundary
 
 The isolated API contract passed in `us-west-2` on exact product commit
@@ -65,8 +104,11 @@ submitted each explicitly, and independently verified both records as
 Workstream Admin principal and an external account. See
 [`../../evidence/live/2026-09-20-pipeline-ga-agent-registry-r1.md`](../../evidence/live/2026-09-20-pipeline-ga-agent-registry-r1.md).
 
-The positive cross-account reader path must wait for R2 to create the matching
-`AgenticAI-D03-*-RegistryValidator` role through the Workload pipeline; an
-out-of-band role would violate the deployment contract. The R2 Workstream
-consumer, EMEA regions, load/chaos behavior, consumer rollback, and final
-placeholder retirement remain release gates.
+The R2 implementation is locally validated with strict Platform-only and
+Workload-only pipeline assemblies, cdk-nag, offline resolver/parser tests, and
+sandbox execution of the synthesized GA SigV4 validator. It is **not** live
+proof. The Platform pipeline must first deploy versioned tool aliases and the
+updated reader trust, then the Workload pipeline must prove positive
+cross-account resolution, negative ExternalId/session/status/digest twins,
+Gateway target creation, rollback, and zero residuals. EMEA regions,
+load/chaos behavior, and final placeholder retirement remain release gates.

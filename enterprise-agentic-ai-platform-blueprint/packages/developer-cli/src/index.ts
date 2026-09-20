@@ -13,13 +13,12 @@ export {
   scaffoldAgentRepo,
   type ScaffoldKind,
   type ScaffoldOptions,
-} from './init';
+} from "./init";
 
 export {
   CTX_TENANT_ID,
   CTX_AGENT_ID,
   CTX_SUBSCRIBED_RECORDS,
-  CTX_REGISTRY_ID,
   CTX_PLATFORM_REGISTRY_ARN,
   readAgenticContext,
   appendSubscription,
@@ -27,7 +26,7 @@ export {
   listSubscriptions,
   validateForSynth,
   type AgenticAiContext,
-} from './cdk-context';
+} from "./cdk-context";
 
 export {
   runLocalEval,
@@ -35,12 +34,12 @@ export {
   type EvalRunRow,
   type CategoryResult,
   type EvalReport,
-} from './dev-eval';
+} from "./dev-eval";
 
 export {
   formatSearchResults,
   filterApproved,
   type RegistrySearchResult,
-} from './registry';
+} from "./registry";
 
-export { renderPullRequestBody, type SubmitContext } from './submit';
+export { renderPullRequestBody, type SubmitContext } from "./submit";

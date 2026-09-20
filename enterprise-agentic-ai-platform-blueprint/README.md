@@ -51,7 +51,7 @@ This blueprint delivers all of the above as a deployable AWS CDK app spanning a 
 **Centralised-platform alternative (D-03 v3)** — `apps/platform-account/` + `apps/workload-account/lib/d03-workload-agent-stack.ts`. A platform-governed, per-workstream AgentCore Gateway is deployed **into** the workstream account, removing the cross-account Runtime→Gateway hop while keeping platform governance via three layers:
 
 1. **Synth** — the target SSOT is the GA AWS Agent Registry (`packages/agent-registry/`). Revision R1 adds native `AWS::AgentRegistry::Registry` and `RegistryRecord` resources, custom governance documents, a conditioned `RegistryReaderRole`, and versioned SSM discovery parameters alongside the unchanged DynamoDB rollback path. The R1 producer and explicit approvals are now pipeline/live-verified in both Platform environments; the Workstream consumer switch, matching-validator positive read, and consumer rollback remain deferred to R2.
-2. **Deploy** — SCP-09 denies `bedrock-agentcore:Create/Update/Delete*` on Gateway resources from every principal except the platform `AgenticAI-D03-GatewayAdmin` role.
+2. **Deploy** — SCP-09 denies `bedrock-agentcore:Create/Update/Delete*` on Gateway resources from every principal except environment-qualified, pipeline-created `AgenticAI-D03-*-GatewayAdmin` roles in the configured Workstream accounts.
 3. **Runtime** — the Gateway service role's identity policy lists the exact N subscribed tool ARNs (no wildcards); SCP-10 denies `lambda:InvokeFunction` to any non-catalogued ARN.
 
 Cross-account Bedrock calls go through a `BedrockCallerRole` (`sts:ExternalId` + `aws:PrincipalArn` + `RoleSessionName` trust conditions); per-tenant Application Inference Profiles carry CUR attribution tags in place of `sts:TagSession` (which does not propagate across role chains — `BUG-005`).
@@ -61,7 +61,7 @@ Cross-account Bedrock calls go through a `BedrockCallerRole` (`sts:ExternalId` +
 Workstream accounts are the developer's primary surface; the platform account holds governance + the central Registry and developers do not log into it.
 
 1. **Onboarding (platform team, one-time).** `D03PlatformCoreStack` provisions three Identity Center permission sets per workstream — `AgenticAI-WS-Dev-<ws>` (deploy + observability + Registry consumer), `-Ro-` (read-only), `-Apv-` (pipeline approve).
-2. **Discover + subscribe.** `agenticai registry search` / `subscribe` appends record ids to `cdk.context.json`; synth resolves each via `GetRegistryRecord` and emits the resolved cross-account Lambda ARNs into the service role (no wildcards).
+2. **Discover + subscribe.** `agenticai registry search` / `subscribe` appends stable tool ids to `cdk.context.json`; the Workload synth resolves each environment's generated RegistryRecord ID through versioned SSM parameters, requires `APPROVED`, and emits exact cross-account Lambda alias ARNs into the service role (no wildcards).
 3. **Build + eval + submit.** `agenticai dev eval` runs the same 7-category scoring the CI gate runs; `agenticai submit` renders the PR body. The pipeline runs Source → Synth → Deploy(nonprod) → Evaluation Gate → Manual Approval → 5 % canary + soak → Prod.
 4. **Per-developer entitlement.** A Curator can pin `metadata.allowedGroups` on a record; the Gateway then runs in `CUSTOM_JWT` mode and the per-tool Lambda's Cedar wrapper (`@agenticai/tool-cedar-wrapper`) denies on `cognito:groups` mismatch before user code runs. AgentCore Gateway PolicyEngine is now available and its bounded `sub`/group contract is live-proven, but this legacy wrapper remains until the Workload pipeline migration passes parity, rollback, and teardown (TODO-GW-POLICY-ENGINE in §3.3).
 
@@ -115,7 +115,7 @@ Per workload account (`packages/agentic-vpc/`): VPC with 3 AZs, **private-isolat
 - **Workstream tool Gateway — legacy placeholder** (`packages/agentcore-gateway/`) — API Gateway HTTP v2 + Cognito JWT authorizer + WAFv2 + VPC Link and an internal ALB. It remains architectural debt until replaced by a real per-workstream AgentCore Gateway in the next vertical-slice stage.
 - **Identity** (`packages/agentcore-identity/`) — Cognito User Pool + Token Vault CMK; 12-char password minimum, email verification, deletion protection, 1h access-token TTL.
 - **Memory** (`packages/agentcore-memory/`) — per-tenant CMK; namespace template static at synth (only `{actorId}`/`{memoryStrategyId}`/`{sessionId}` vary at runtime); confused-deputy grant closed with `aws:SourceAccount` + `aws:SourceArn`.
-- **Registry — tool SSOT migration** (`packages/agent-registry/`) — the Platform pipeline now synthesizes one environment-isolated GA `AWS::AgentRegistry::Registry` plus tagged `CUSTOM` governance records, a conditioned `RegistryReaderRole`, and versioned SSM discovery parameters alongside the unchanged DynamoDB rollback path. Records require explicit submission before `APPROVED`; the Workstream consumer remains on the legacy path until R2 passes live parity, rollback, and teardown.
+- **Registry — tool SSOT migration** (`packages/agent-registry/`) — the Platform pipeline now synthesizes environment-isolated GA Registries, versioned `CUSTOM` governance records, pipeline-owned tool aliases, a conditioned `RegistryReaderRole`, and versioned SSM discovery parameters alongside the unchanged DynamoDB rollback path. R2 adds stable tool-ID subscriptions, Platform-side context resolution, a stable Workstream role stage, an explicit Lambda-permission handoff, and deploy-time `APPROVED` + descriptor-digest validation. The live Workstream remains on the legacy path until R2 passes pipeline parity, rollback, and teardown.
 - **Per-developer entitlement** (`packages/tool-cedar-wrapper/`) — a record may carry `metadata.allowedGroups`; when set the Gateway is forced into `CUSTOM_JWT` and the per-tool Cedar bundle binds each permit to a `CognitoGroup`. AgentCore Gateway PolicyEngine is available and its isolated compatibility contract is live-proven; enforcement remains inside the tool Lambda only until the pipeline-owned migration passes parity, rollback, and teardown.
 
 ### 2.5 Other constructs
@@ -212,33 +212,82 @@ Both root pipelines use explicit CMK-encrypted artifact buckets with key rotatio
 
 ### 6.3 Path B — Centralised platform (D-03)
 
+All Platform and Workstream mutations flow through their pipelines. Do **not**
+run `cdk deploy` against a Workstream Gateway stack directly.
+
+1. Deploy the Platform pipeline with R2 code and
+   `agenticai/enableGaGatewayInvokePermissions=false` (the default). This
+   creates environment-qualified tool Lambdas/aliases, updates Registry records
+   to version `2.0.0`, and extends `RegistryReaderRole`; it deliberately does
+   not reference Workstream role principals that do not exist yet.
+2. Explicitly approve the updated Registry records after the template-bound
+   preflight passes.
+3. Resolve one non-secret context file per Platform environment. For separate
+   Platform accounts, run each command with credentials for that environment:
+
 ```bash
-# Platform account
-npx cdk deploy AgenticAI-D03-PlatformCoreStack \
-  -c stage=d03-platform \
-  -c 'agenticai/d03WorkloadAccountIds=["<workload-acct>"]' \
-  -c 'agenticai/d03ExternalId=<rotated-secret>' \
-  -c agenticai/d03EnableAgentRegistry=true \
-  -c agenticai/d03RegistryName=agenticai-platform-registry
+python3 -m venv "$KIROCREW_SCRATCH/ga-registry-resolver"
+"$KIROCREW_SCRATCH/ga-registry-resolver/bin/pip" install \
+  --disable-pip-version-check \
+  -r pipelines/requirements-ga-registry-resolver.txt
 
-# Workload account
-npx cdk deploy AgenticAI-D03-WorkloadAgentStack \
-  -c stage=d03-workload \
-  -c agenticai/d03PlatformAccountId=<platform-acct> \
-  -c agenticai/d03ExternalId=<rotated-secret> \
-  -c agenticai/tenantId=demo -c agenticai/agentId=primary
+HEAD="$(git rev-parse HEAD)"
+"$KIROCREW_SCRATCH/ga-registry-resolver/bin/python" \
+  pipelines/resolve_ga_registry_context.py \
+  --account-id '<PLATFORM_NONPROD_ACCOUNT>' --region us-west-2 \
+  --environment nonprod --application-id demo --agent-id primary \
+  --tenant-id demo --cost-centre engineering \
+  --expected-tool-id tool-echo --expected-tool-id tool-ping \
+  --source-revision "$HEAD" \
+  --output "$KIROCREW_SCRATCH/ga-registry-nonprod.json"
 
-# Workstream Gateway (deployed INTO the workload account)
-npx cdk deploy AgenticAI-D03-WorkstreamGateway-demo-primary \
-  -c stage=d03-workstream-gateway \
-  -c agenticai/tenantId=demo -c agenticai/agentId=primary \
-  -c agenticai/d03PlatformAccountId=<platform-acct> \
-  -c agenticai/d03WorkloadAccountId=<workload-acct> \
-  -c 'agenticai/d03AllowedToolIds=["tool-echo","tool-ping"]' \
-  -c agenticai/d03GatewayRoleArnOverride=<pre-created-gw-svc-role-arn>
+"$KIROCREW_SCRATCH/ga-registry-resolver/bin/python" \
+  pipelines/resolve_ga_registry_context.py \
+  --account-id '<PLATFORM_PROD_ACCOUNT>' --region us-west-2 \
+  --environment prod --application-id demo --agent-id primary \
+  --tenant-id demo --cost-centre engineering \
+  --expected-tool-id tool-echo --expected-tool-id tool-ping \
+  --source-revision "$HEAD" \
+  --output "$KIROCREW_SCRATCH/ga-registry-prod.json"
 ```
 
-> **Gateway service role.** Pre-create it out-of-band and import it via `agenticai/d03GatewayRoleArnOverride` so its IAM `RoleId` stays stable across rollbacks (tool Lambda resource policies capture the stable ARN). A freshly-created custom-resource role's authorization also takes minutes to propagate to the AgentCore control plane — either pre-create it (`agenticai/d03CrExecRoleArnOverride`) or let the built-in propagation gate wait it out.
+4. Create/update the Workload pipeline root with
+   `agenticai/pipelineSelection=workload`,
+   `agenticai/enableGaRegistryConsumer=true`, stable tool IDs, both context-file
+   paths, both Workstream account/AZ tuples, and the Platform account IDs. This
+   root-stack operation creates the pipeline only; the pipeline owns every
+   Workstream mutation.
+5. The Workload pipeline deploys three stable roles per environment in its
+   `RegistryRoles` stage, exposes each exact `GatewayServiceRoleArn` stack
+   output, then stops at `GatewayPermissionReady`.
+6. Read the two `GatewayServiceRoleArn` outputs from the deployed nonproduction
+   and production role stacks. Re-run the Platform pipeline with
+   `agenticai/enableGaGatewayInvokePermissions=true` and
+   `agenticai/gaGatewayServiceRoleArns` set to a JSON array containing exactly
+   those two ARNs (one `AgenticAI-D03-nonprod-*-gw-svc` and one
+   `AgenticAI-D03-prod-*-gw-svc`). The Platform synth validates their accounts,
+   role-name shapes, uniqueness, and environment cardinality, then adds each
+   permission only to its matching environment aliases; it never reconstructs
+   a principal from Platform-side tenant or agent settings.
+7. Approve `GatewayPermissionReady`. The Workload pipeline then deploys the
+   nonproduction Gateway. Its validator assumes `RegistryReaderRole`, requires
+   `APPROVED`, and compares both the live descriptor SHA-256 and the live target
+   ARN to the exact synth-wired values before any target is created. After live
+   nonproduction `tools/list` and `tools/call` proof, approve the dedicated
+   `ProdGatewayApproval` action. GA mode deliberately omits the app evaluation,
+   canary, and soak actions that require stacks it does not deploy; legacy/full
+   agent mode retains those gates unchanged.
+
+The Workload synth project uses the named
+`AgenticAI-WLP-<tenant>-<agent>-RegistrySynth` role and assumes only the two
+Registry reader roles. Its future executions resolve SSM/Registry context
+just-in-time; developers commit stable tool IDs, never environment-specific
+RegistryRecord IDs. The legacy `allowedToolIds` path remains the rollback mode
+until R2 parity and teardown pass.
+
+The reference R2 Gateway stays in the pipeline Region (`us-west-2`) so no
+uncontrolled CDK cross-region artifact support stack appears. A region override
+requires its own secure replication-bucket design and independent live proof.
 
 ### 6.4 Validation
 
@@ -258,8 +307,8 @@ Repository hygiene gates, runnable locally and suitable for wiring into CI: `npm
 | `cdk bootstrap` `sts:AssumeRole` denied | Target not set up for cross-account trust | Assume admin in the target first, re-run |
 | Bedrock `AccessDenied` | SCP-01/02 not matched | Confirm model on allow-list + `GuardrailIdentifier` supplied |
 | Cross-account KMS decrypt fails | Bootstrap `aws-cdk-lib` < 2.150 | Re-bootstrap ≥ 2.150 |
-| D-03 `CreateGateway` `not authorized` | Fresh CR role IAM not yet propagated to AgentCore | Pre-create the CR role or rely on the propagation gate |
-| D-03 `CreateGatewayTarget` "role lacks permission to invoke Lambda" | Imported gateway role missing the invoke policy | Attach `lambda:InvokeFunction` on the tool alias ARNs to the pre-created role |
+| D-03 `CreateGateway` `not authorized` | Fresh CR role IAM not yet propagated to AgentCore | Use the pipeline-created `RegistryRoles` stage; legacy standalone mode must rely on the built-in propagation gate |
+| D-03 `CreateGatewayTarget` "role lacks permission to invoke Lambda" | `GatewayPermissionReady` was approved before the Platform permission phase completed | Keep the Workload pipeline paused; run the Platform pipeline with `agenticai/enableGaGatewayInvokePermissions=true`, verify exact alias permissions, then approve the handoff |
 | Pipeline M2M token endpoint cannot resolve | Hosted-domain URL was built with the AWS API suffix | Derive it from `UserPoolDomain.baseUrl()`; Cognito managed domains use the `amazoncognito.com` suffix |
 | `subnets in unsupported AZ` | AgentCore supports only `use1-az1/az2/az4` in `us-east-1` | Filter subnets by AZ ID (`AgentcoreCompatibleSubnetIdFirst` output) |
 
@@ -438,7 +487,7 @@ Know what **has** been live-verified and what **has not** before adopting.
 - **Regions** — `us-east-1` remains the live-verified D-03 tool-Gateway region; `us-west-2` is live-verified for the central inference Gateway, Platform pipeline, and isolated PolicyEngine compatibility contract, but remains blocked for OTEL span correlation. No EMEA PolicyEngine region has yet passed this matrix. APAC remains outside `PLATFORM_APPROVED_REGIONS`.
 - **VPC Lattice** private endpoints (AWS BETA, opt-in); **Entra Agent Identity** deferred to v2.
 
-**Operational findings baked into the blueprint** (full detail in `CHANGELOG.md`): AgentCore supports only specific AZ IDs (`use1-az1/az2/az4` in `us-east-1`; AZ-ID filter output provided); the `MCP-Protocol-Version: 2025-06-18` header is required after `initialize`; the Gateway service role must be pre-created for stable `RoleId`; fresh custom-resource IAM roles take minutes to propagate to the AgentCore control plane (propagation gate + role-import override provided); Lambda cross-account resource policies for Gateway targets must name the exact service-role ARN; `CreateRegistry`/`CreateRegistryRecord` return only ARNs (ids derived from them) and require descriptor `inlineContent` valid against the MCP/A2A schema.
+**Operational findings baked into the blueprint** (full detail in `CHANGELOG.md`): AgentCore supports only specific AZ IDs (`use1-az1/az2/az4` in `us-east-1`; AZ-ID filter output provided); the `MCP-Protocol-Version: 2025-06-18` header is required after `initialize`; the Gateway service role must exist before its ARN is added to tool Lambda resource policies (R2 creates it in `RegistryRoles`, pauses, then lets the Platform pipeline grant it); fresh custom-resource IAM roles take minutes to propagate to the AgentCore control plane (propagation gate + stable role stage provided); Lambda cross-account resource policies for Gateway targets must name the exact service-role ARN; `CreateRegistry`/`CreateRegistryRecord` return only ARNs (ids derived from them) and require descriptor `inlineContent` valid against the MCP/A2A schema.
 
 The 35 packages under `packages/` are enumerated in [`CHANGELOG.md`](CHANGELOG.md) under the development phase that introduced each one (19 in the initial build-out, 8 gap-closure + 4 self-audit, 3 developer-experience, 1 entitlement).
 
@@ -452,7 +501,7 @@ bash scripts/teardown.sh     # reverse-dependency stack sweep
 pytest tests/teardown/       # verify zero residuals
 ```
 
-The teardown refuses to synthesize a present Platform Gateway or pipeline stack without the model-rate allocation and its account/role context. Then `cdk destroy` runs dependency-ordered. The EU AI Act Object-Lock COMPLIANCE 7-year bucket cannot be deleted before its retention expires — this is intentional and documented.
+The teardown refuses to synthesize a present Platform Gateway or pipeline stack without the model-rate allocation and its account/role context. For an R2 Workload deployment, also provide both resolved GA context files, stable tool IDs, Workstream account/AZ tuples, and the Gateway Region; the script destroys production/nonproduction ToolGateway stacks before their RegistryRoles stacks and then removes the Workload pipeline root. `cdk destroy` runs dependency-ordered. The EU AI Act Object-Lock COMPLIANCE 7-year bucket cannot be deleted before its retention expires — this is intentional and documented.
 
 ---
 

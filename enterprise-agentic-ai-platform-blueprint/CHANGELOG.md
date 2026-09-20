@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Cleanup-first GA Agent Registry compatibility runner with native CloudFormation types, custom governance-document round trip, explicit `DRAFT → submit → APPROVED`, data-plane discovery, deterministic update rollback, ownership-checked teardown, and 30 focused tests.
 - Pipeline-owned blue-green GA Registry producer: native Registry and tagged `CUSTOM` governance records, exact `agent-registry` read permissions, conditioned `RegistryReaderRole`, per-record/versioned SSM discovery parameters, and `RetainExceptOnCreate` state protection alongside the unchanged DynamoDB rollback path.
 - Template-bound pipeline Registry approval utility with all-`DRAFT` atomic preflight, exact processed-template descriptor comparison, bounded approval/discovery polling, credential-safe evidence, and 77 focused tests.
+- R2 GA Registry consumer: pipeline-owned environment-qualified Platform tool aliases, strict SSM/Registry resolver, stable tool-ID developer subscriptions, a three-role Workstream prerequisite stage, explicit Platform permission handoff, and deploy-time `APPROVED` plus descriptor-digest validation.
 
 ### Changed
 
@@ -36,6 +37,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Teardown now includes `AgenticAI-Platform-InferenceGatewayStack` and requires the deployment's model-rate context.
 - `TODO-GW-POLICY-ENGINE` now reflects migration debt rather than API availability: the Lambda wrapper remains until the real Workload pipeline passes PolicyEngine behavior parity, rollback, and zero-residual teardown.
 - Pipeline Registry approval reads `GetRegistry.discoveryConfiguration.authorizerType`, matching the GA Boto3/Botocore response model; the initial top-level assumption failed closed before any submission.
+- Tool governance moves to catalogue revision `2` / RegistryRecord `2.0.0`; target ARNs now point to environment-qualified, pipeline-owned aliases in the Platform pipeline Region.
+- Platform and Workload root pipelines self-synthesize independently; Workload R2 resolves both Registry contexts just-in-time and validates the `RegistryRoles` assembly before publishing `cdk.out`.
+- GA-only production promotion now uses `ProdGatewayApproval` after live nonproduction MCP proof; app evaluation/canary/soak actions remain only in legacy/full-agent mode, where their prerequisite stacks exist.
+- Platform alias permissions now consume exactly one pipeline-output Gateway service-role ARN per environment through `agenticai/gaGatewayServiceRoleArns`; account, role-name, uniqueness, and environment cardinality are validated, with no principal reconstruction from Platform tenant/agent settings.
+- Deploy-time Registry validation now explicitly compares the live governance target ARN with the synth-wired Gateway target in addition to requiring the exact descriptor SHA-256.
+- Developer subscriptions now store stable tool IDs in `agenticai/gaRegistryExpectedToolIds`; environment-specific RegistryRecord IDs never enter developer repositories.
+- SCP-09 now exempts only environment-qualified `AgenticAI-D03-*-GatewayAdmin` roles in configured Workstream accounts. The prior Platform-account exception could not create a resource in a Workstream account.
 
 ### Verification
 

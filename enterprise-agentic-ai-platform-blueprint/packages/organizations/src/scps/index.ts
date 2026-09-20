@@ -20,18 +20,18 @@
  * SPDX-License-Identifier: MIT-0
  */
 
-import { scp01ModelAllowlist } from './scp-01-model-allowlist';
-import { scp02EnforceGuardrail } from './scp-02-enforce-guardrail';
-import { scp03EnforceAgentCoreVpce } from './scp-03-enforce-agentcore-vpce';
-import { scp04EnforceBedrockVpce } from './scp-04-enforce-bedrock-vpce';
-import { scp05DenyGuardrailModification } from './scp-05-deny-guardrail-modification';
-import { scp06RestrictRegions } from './scp-06-restrict-regions';
-import { scp07DenyPublicAgentCore } from './scp-07-deny-public-agentcore';
-import { scp08DenyEcrPublic } from './scp-08-deny-ecr-public';
-import { scp09GatewayMutationLockdown } from './scp-09-gateway-mutation-lockdown';
-import { scp10ToolInvokeAllowlist } from './scp-10-tool-invoke-allowlist';
-import { scp11RegistryMutationLockdown } from './scp-11-registry-mutation-lockdown';
-import { scp12DeveloperPlatformTagDeny } from './scp-12-developer-platform-tag-deny';
+import { scp01ModelAllowlist } from "./scp-01-model-allowlist";
+import { scp02EnforceGuardrail } from "./scp-02-enforce-guardrail";
+import { scp03EnforceAgentCoreVpce } from "./scp-03-enforce-agentcore-vpce";
+import { scp04EnforceBedrockVpce } from "./scp-04-enforce-bedrock-vpce";
+import { scp05DenyGuardrailModification } from "./scp-05-deny-guardrail-modification";
+import { scp06RestrictRegions } from "./scp-06-restrict-regions";
+import { scp07DenyPublicAgentCore } from "./scp-07-deny-public-agentcore";
+import { scp08DenyEcrPublic } from "./scp-08-deny-ecr-public";
+import { scp09GatewayMutationLockdown } from "./scp-09-gateway-mutation-lockdown";
+import { scp10ToolInvokeAllowlist } from "./scp-10-tool-invoke-allowlist";
+import { scp11RegistryMutationLockdown } from "./scp-11-registry-mutation-lockdown";
+import { scp12DeveloperPlatformTagDeny } from "./scp-12-developer-platform-tag-deny";
 
 /**
  * A single SCP definition: stable id, display name, rendered JSON body.
@@ -91,9 +91,12 @@ export interface BuildScpSetOptions {
    */
   readonly approvedGuardrailIds?: readonly string[];
   /**
-   * Platform account id hosting `AgenticAI-D03-GatewayAdmin` — required by
-   * SCP-09. When omitted, SCP-09 is skipped and a synth-time warning is
-   * emitted (same pattern as SCP-02's approvedGuardrailIds fallback).
+   * Workstream accounts that host pipeline-created
+   * `AgenticAI-D03-*-GatewayAdmin` roles. Required to emit SCP-09.
+   */
+  readonly gatewayAdminWorkloadAccountIds?: readonly string[];
+  /**
+   * Platform account id used by Registry SCP-11.
    */
   readonly platformAccountId?: string;
   /**
@@ -127,7 +130,9 @@ export interface BuildScpSetOptions {
   readonly developerPermissionSetPrefix?: string;
 }
 
-export function buildScpSet(opts: BuildScpSetOptions): readonly ScpDefinition[] {
+export function buildScpSet(
+  opts: BuildScpSetOptions,
+): readonly ScpDefinition[] {
   const set: ScpDefinition[] = [
     scp01ModelAllowlist(opts.allowedModelArns),
     scp02EnforceGuardrail({ approvedGuardrailIds: opts.approvedGuardrailIds }),
@@ -139,27 +144,38 @@ export function buildScpSet(opts: BuildScpSetOptions): readonly ScpDefinition[] 
     scp08DenyEcrPublic(),
   ];
 
-  if (opts.platformAccountId) {
-    set.push(scp09GatewayMutationLockdown({ platformAccountId: opts.platformAccountId }));
+  if (
+    opts.gatewayAdminWorkloadAccountIds &&
+    opts.gatewayAdminWorkloadAccountIds.length > 0
+  ) {
+    set.push(
+      scp09GatewayMutationLockdown({
+        workloadAccountIds: opts.gatewayAdminWorkloadAccountIds,
+      }),
+    );
   } else {
     // eslint-disable-next-line no-console
     console.warn(
-      'SCP-09: platformAccountId was not supplied. Skipping Gateway-mutation lockdown — ' +
-        'workstream principals will not be blocked from mutating AgentCore Gateways. ' +
-        'Wire the platform account id from OrgStack before promoting to AgenticAI-Workloads. ' +
-        '[TODO-PLATFORM-ACCOUNT-ID]',
+      "SCP-09: gatewayAdminWorkloadAccountIds was not supplied. Skipping Gateway-mutation lockdown — " +
+        "workstream principals will not be blocked from mutating AgentCore Gateways. " +
+        "Wire the exact Workstream account IDs before promotion. " +
+        "[TODO-WORKSTREAM-GATEWAY-ADMIN-ACCOUNTS]",
     );
   }
 
   if (opts.allowedToolTargetArns && opts.allowedToolTargetArns.length > 0) {
-    set.push(scp10ToolInvokeAllowlist({ allowedToolTargetArns: opts.allowedToolTargetArns }));
+    set.push(
+      scp10ToolInvokeAllowlist({
+        allowedToolTargetArns: opts.allowedToolTargetArns,
+      }),
+    );
   } else {
     // eslint-disable-next-line no-console
     console.warn(
-      'SCP-10: allowedToolTargetArns was empty. Skipping tool-invoke allow-list — ' +
-        'D-03 runtime roles will not be restricted to catalogued Lambdas at the SCP layer. ' +
-        'Wire the resolved ARNs from PLATFORM_TOOL_CATALOGUE.resolveSubscribedTools() ' +
-        'before promoting to AgenticAI-Workloads. [TODO-TOOL-CATALOGUE]',
+      "SCP-10: allowedToolTargetArns was empty. Skipping tool-invoke allow-list — " +
+        "D-03 runtime roles will not be restricted to catalogued Lambdas at the SCP layer. " +
+        "Wire the resolved ARNs from PLATFORM_TOOL_CATALOGUE.resolveSubscribedTools() " +
+        "before promoting to AgenticAI-Workloads. [TODO-TOOL-CATALOGUE]",
     );
   }
 
@@ -173,9 +189,9 @@ export function buildScpSet(opts: BuildScpSetOptions): readonly ScpDefinition[] 
   } else if (opts.enableRegistryLockdown && !opts.platformAccountId) {
     // eslint-disable-next-line no-console
     console.warn(
-      'SCP-11: enableRegistryLockdown=true but platformAccountId is missing. ' +
-        'Skipping Registry-mutation lockdown — workstream principals will not be ' +
-        'blocked from mutating the AgentCore Registry. [TODO-PLATFORM-ACCOUNT-ID]',
+      "SCP-11: enableRegistryLockdown=true but platformAccountId is missing. " +
+        "Skipping Registry-mutation lockdown — workstream principals will not be " +
+        "blocked from mutating the AgentCore Registry. [TODO-PLATFORM-ACCOUNT-ID]",
     );
   }
 

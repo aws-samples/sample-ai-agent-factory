@@ -278,14 +278,20 @@ prevent.
 | Why per-workstream | — | Tool calls are workstream data-plane traffic. Keeping the Gateway local avoids a cross-account hop on the hot path, keeps tool latency and failure domains inside the workstream, and lets the workstream own its tool targets. Governance is retained at synth via the Registry, at deploy via SCP, and at runtime via a service role scoped to exactly the subscribed target ARNs. |
 | Blast radius if unavailable | All agents in all workstreams lose inference. Mitigated by multi-AZ, per-environment isolation, and a pipeline gate on Gateway changes. This is a real and accepted single point of failure. | One workstream loses tools. |
 
-**Governance of the per-workstream Tool Gateway (Planned, inherited from D-03 v3 which is
-Verified in its current form).** Three layers:
+**Governance of the per-workstream Tool Gateway (R2 implemented locally; live proof pending).** Three layers:
 
-1. **Synth.** Each subscribed tool id is resolved against the Registry in the Platform account.
-   Synth fails on any record that is not `APPROVED`. Resolved target ARNs are written into the
-   Gateway service role with no wildcards.
-2. **Deploy.** A service control policy denies AgentCore Gateway create, update, and delete actions
-   from every principal except the platform Gateway admin role.
+1. **Synth.** Developers commit stable tool IDs. The named Workload synth role assumes each
+   environment's `RegistryReaderRole`, resolves versioned SSM pointers, requires complete
+   `APPROVED` GA governance records, and writes exact target ARNs, MCP schemas, and Cedar into the
+   assembly. A deploy-time validator re-reads each record and requires both the same descriptor
+   SHA-256 and an explicit match between the live governance target ARN and the Gateway target.
+2. **Deploy.** Stable Gateway, validator, and GatewayAdmin roles are created in a prerequisite
+   pipeline stage, which outputs the two exact environment-qualified Gateway role ARNs. The
+   pipeline pauses while the Platform pipeline validates those ARNs from
+   `agenticai/gaGatewayServiceRoleArns` and grants each tool alias only to its matching environment
+   principal. No Platform-side tenant/agent configuration is used to infer a principal. SCP-09
+   denies Gateway mutation from every principal except environment-qualified, pipeline-created
+   GatewayAdmin roles in configured Workstream accounts.
 3. **Runtime.** The Gateway service role lists exactly the N subscribed target ARNs, and a service
    control policy denies invocation of any non-catalogued target.
 
@@ -432,12 +438,12 @@ production.
 Developer branch
   -> GitHub pull request           : review, contract tests, manifest parity check
   -> Workload pipeline: Source
-  -> Synth                          : stage-aware, fails loudly on unknown stage
+  -> Synth                          : stage-aware; resolves approved GA records
+  -> RegistryRoles                  : outputs exact roles in both Workstream environments
+  -> GatewayPermissionReady         : waits for exact Platform alias permissions
   -> Deploy non-production
-  -> Evaluation gate                : fails on missing corpus, zero samples, zero tool calls
-  -> Manual approval
-  -> Canary with soak
-  -> Deploy production
+  -> GA path: live MCP proof -> ProdGatewayApproval -> Deploy production Gateway
+  -> Legacy/full-agent path: Evaluation gate -> Manual approval -> Canary + soak -> Deploy production
 ```
 
 **Enforcement (Planned), four layers:**
@@ -468,7 +474,7 @@ anything else. Any fourth write path is a contract violation and must fail a con
 |---|---|---|---|
 | **`AgentRegistrationApi`** | Workstream and builder to Platform | Register or update an agent's declared identity, models, tool subscriptions, throughput, and budget. The single intake point for agent metadata. | Create and update the caller's own agent records only. No cross-tenant read, no Registry-wide mutation. |
 | **`AgentBuilderInspectRole`** | Builder to Platform and Workstream | Read-only inspection so a builder experience can show a customer the real state of their agents. | Describe and list only. No mutation of any kind. |
-| **`RegistryReaderRole`** | Workstream to Platform | Resolve tool records at synth and at runtime so the Tool Gateway can validate subscriptions. | `GetRegistryRecord` and equivalent reads, scoped to `APPROVED` records. |
+| **`RegistryReaderRole`** | Workload pipeline synth and Workstream validator to Platform | Resolve versioned Registry pointers at synth and revalidate record status/digest at deploy. | Exact SSM parameter reads plus `GetRegistry`/`GetRegistryRecord`/discovery reads; no mutation. |
 
 **Invariants (Planned).** One of the three is a write path and it is narrow and validated. The other
 two are read-only. None of them can deploy infrastructure — deployment is §8's pipeline, and no

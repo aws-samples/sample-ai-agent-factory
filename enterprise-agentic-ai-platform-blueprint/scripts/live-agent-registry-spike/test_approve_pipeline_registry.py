@@ -140,6 +140,7 @@ def make_record(
     document: Mapping[str, Any] | None = None,
     descriptor_data: str | None = None,
     record_type: str = "CUSTOM",
+    record_version: str = "1.0.0",
 ) -> dict[str, Any]:
     record_id = RECORD_IDS[tool_id]
     data = (
@@ -153,6 +154,7 @@ def make_record(
         "name": name if name is not None else tool_id,
         "status": status,
         "recordType": record_type,
+        "recordVersion": record_version,
         "descriptors": {"custom": {"data": data}},
     }
 
@@ -835,6 +837,20 @@ def test_processed_template_requires_exact_expected_records(
     assert aws.submissions == []
 
 
+def test_processed_template_version_matches_catalogue_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = config(tmp_path, monkeypatch)
+    template = processed_stack_template(cfg)
+    template["Resources"]["GaRegistryRecordtoolecho"]["Properties"][
+        "RecordVersion"
+    ] = "2.0.0"
+    aws = FakeAws(cfg, template=template)
+    with pytest.raises(ApprovalError, match="RecordVersion is not '1.0.0'"):
+        approve(aws, cfg, evidence_for(cfg))
+    assert aws.submissions == []
+
+
 def test_processed_template_tag_drift_blocks_every_submission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -845,6 +861,20 @@ def test_processed_template_tag_drift_blocks_every_submission(
     )
     aws = FakeAws(cfg, template=template)
     with pytest.raises(ApprovalError, match="user tags must be exactly"):
+        approve(aws, cfg, evidence_for(cfg))
+    assert aws.submissions == []
+
+
+def test_live_record_version_must_match_catalogue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = config(tmp_path, monkeypatch)
+    records = {
+        "tool-echo": make_record("tool-echo", record_version="2.0.0"),
+        "tool-ping": make_record("tool-ping"),
+    }
+    aws = FakeAws(cfg, records=records)
+    with pytest.raises(ApprovalError, match="live recordVersion is not '1.0.0'"):
         approve(aws, cfg, evidence_for(cfg))
     assert aws.submissions == []
 

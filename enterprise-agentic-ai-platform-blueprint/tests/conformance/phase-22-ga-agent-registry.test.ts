@@ -4,25 +4,25 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { App } from 'aws-cdk-lib';
-import { Template } from 'aws-cdk-lib/assertions';
+import { App } from "aws-cdk-lib";
+import { Template } from "aws-cdk-lib/assertions";
 
 import {
   PLATFORM_TOOL_CATALOGUE,
   type ToolSpec,
-} from '@agenticai/platform-tool-catalogue';
+} from "@agenticai/platform-tool-catalogue";
 
-import { RegistryStack } from '../../apps/platform-account/lib/registry-stack';
-import { buildGaToolGovernanceDocument } from '../../packages/agent-registry/src';
+import { RegistryStack } from "../../apps/platform-account/lib/registry-stack";
+import { buildGaToolGovernanceDocument } from "../../packages/agent-registry/src";
 
-const PLATFORM_ACCOUNT_ID = '222222222222';
-const WORKLOAD_ACCOUNT_IDS = ['333333333333', '444444444444'];
+const PLATFORM_ACCOUNT_ID = "222222222222";
+const WORKLOAD_ACCOUNT_IDS = ["333333333333", "444444444444"];
 const REQUIRED_TAGS = {
-  'application-id': 'platform-registry',
-  'agent-id': 'shared',
-  'tenant-id': 'shared',
-  'cost-centre': 'platform',
-  environment: 'nonprod',
+  "application-id": "platform-registry",
+  "agent-id": "shared",
+  "tenant-id": "shared",
+  "cost-centre": "platform",
+  environment: "nonprod",
 };
 
 type SynthTags = Array<{ Key: string; Value: string }> | Record<string, string>;
@@ -36,20 +36,36 @@ function tagsToRecord(tags: SynthTags = []): Record<string, string> {
 
 function partitionArn(suffix: string): Record<string, unknown> {
   return {
-    'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, suffix]],
+    "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, suffix]],
   };
 }
 
-function synth(envName: 'nonprod' | 'prod' = 'nonprod'): Template {
+function synth(
+  envName: "nonprod" | "prod" = "nonprod",
+  grantGatewayInvokePermissions = true,
+  gatewayServiceRoleArns?: readonly string[],
+): Template {
   const app = new App();
   const stack = new RegistryStack(app, `Registry-${envName}`, {
-    env: { account: PLATFORM_ACCOUNT_ID, region: 'us-west-2' },
+    env: { account: PLATFORM_ACCOUNT_ID, region: "us-west-2" },
     envName,
     workloadAccountIds: WORKLOAD_ACCOUNT_IDS,
-    applicationId: 'platform-registry',
-    agentId: 'shared',
-    tenantId: 'shared',
-    costCentre: 'platform',
+    registrySynthAccountId: PLATFORM_ACCOUNT_ID,
+    grantGatewayInvokePermissions,
+    gatewayServiceRoleArns:
+      gatewayServiceRoleArns ??
+      (grantGatewayInvokePermissions
+        ? WORKLOAD_ACCOUNT_IDS.map(
+            (accountId, index) =>
+              `arn:aws:iam::${accountId}:role/AgenticAI-D03-${index === 0 ? "nonprod" : "prod"}-shared-shared-gw-svc`,
+          )
+        : undefined),
+    gatewayWorkloadAccountId:
+      WORKLOAD_ACCOUNT_IDS[envName === "nonprod" ? 0 : 1],
+    applicationId: "platform-registry",
+    agentId: "shared",
+    tenantId: "shared",
+    costCentre: "platform",
   });
   return Template.fromStack(stack);
 }
@@ -60,69 +76,82 @@ function singleResource(template: Template, type: string): Record<string, any> {
   return Object.values(resources)[0] as Record<string, any>;
 }
 
-describe('Phase 22 — GA Registry producer remains additive', () => {
-  it('preserves the existing DynamoDB rollback-path logical IDs and table names', () => {
+describe("Phase 22 — GA Registry producer remains additive", () => {
+  it("preserves the existing DynamoDB rollback-path logical IDs and table names", () => {
     const template = synth();
-    const tables = template.findResources('AWS::DynamoDB::Table');
+    const tables = template.findResources("AWS::DynamoDB::Table");
 
     expect(Object.keys(tables).sort()).toEqual([
-      'RegistryAgentTable7EE2A0ED',
-      'RegistryToolTable849A77D3',
+      "RegistryAgentTable7EE2A0ED",
+      "RegistryToolTable849A77D3",
     ]);
     expect(
-      Object.values(tables).map((table: any) => table.Properties.TableName).sort(),
+      Object.values(tables)
+        .map((table: any) => table.Properties.TableName)
+        .sort(),
     ).toEqual([
-      'agenticai-registry-agents-nonprod',
-      'agenticai-registry-tools-nonprod',
+      "agenticai-registry-agents-nonprod",
+      "agenticai-registry-tools-nonprod",
     ]);
   });
 
-  it('adds one native IAM-authorized Registry with RetainExceptOnCreate semantics', () => {
-    const registry = singleResource(synth(), 'AWS::AgentRegistry::Registry');
+  it("adds one native IAM-authorized Registry with RetainExceptOnCreate semantics", () => {
+    const registry = singleResource(synth(), "AWS::AgentRegistry::Registry");
 
     expect(registry.Properties).toMatchObject({
-      Name: 'agenticai-platform-nonprod-v1',
-      AuthorizerType: 'AWS_IAM',
-      ApprovalConfiguration: { AutoApprovalRules: ['APPROVE_ALL'] },
+      Name: "agenticai-platform-nonprod-v1",
+      AuthorizerType: "AWS_IAM",
+      ApprovalConfiguration: { AutoApprovalRules: ["APPROVE_ALL"] },
       Tags: expect.any(Array),
     });
     expect(tagsToRecord(registry.Properties.Tags)).toEqual(REQUIRED_TAGS);
-    expect(registry.DeletionPolicy).toBe('RetainExceptOnCreate');
-    expect(registry.UpdateReplacePolicy).toBe('Retain');
+    expect(registry.DeletionPolicy).toBe("RetainExceptOnCreate");
+    expect(registry.UpdateReplacePolicy).toBe("Retain");
   });
 
-  it('creates one tagged CUSTOM governance record per catalogue tool', () => {
-    const records = synth().findResources('AWS::AgentRegistry::RegistryRecord');
+  it("creates one tagged CUSTOM governance record per catalogue tool", () => {
+    const records = synth().findResources("AWS::AgentRegistry::RegistryRecord");
 
-    expect(Object.keys(records)).toHaveLength(Object.keys(PLATFORM_TOOL_CATALOGUE).length);
+    expect(Object.keys(records)).toHaveLength(
+      Object.keys(PLATFORM_TOOL_CATALOGUE).length,
+    );
     for (const record of Object.values(records) as Array<Record<string, any>>) {
-      expect(record.Properties.RecordType).toBe('CUSTOM');
-      expect(record.Properties.RecordVersion).toBe('1.0.0');
+      expect(record.Properties.RecordType).toBe("CUSTOM");
+      expect(record.Properties.RecordVersion).toBe("2.0.0");
       expect(record.Properties.RegistryId).toEqual(
-        expect.objectContaining({ 'Fn::GetAtt': expect.any(Array) }),
+        expect.objectContaining({ "Fn::GetAtt": expect.any(Array) }),
       );
       expect(tagsToRecord(record.Properties.Tags)).toEqual(REQUIRED_TAGS);
-      expect(record.DeletionPolicy).toBe('RetainExceptOnCreate');
-      expect(record.UpdateReplacePolicy).toBe('Retain');
+      expect(record.DeletionPolicy).toBe("RetainExceptOnCreate");
+      expect(record.UpdateReplacePolicy).toBe("Retain");
+      expect(JSON.stringify(record.DependsOn)).toContain("GaToolsAlias");
 
-      const governance = JSON.parse(record.Properties.Descriptors.Custom.Data);
-      const source = PLATFORM_TOOL_CATALOGUE[governance.toolId];
+      const toolId = record.Properties.Name as string;
+      const source = PLATFORM_TOOL_CATALOGUE[toolId];
       expect(source).toBeDefined();
+      const governance = JSON.parse(record.Properties.Descriptors.Custom.Data);
       expect(governance).toMatchObject({
-        schemaVersion: 'agenticai.tool-governance/1.0',
-        catalogueVersion: '1',
-        toolId: source.toolId,
-        desiredApprovalStatus: source.approvalStatus,
+        schemaVersion: "agenticai.tool-governance/1.0",
+        catalogueVersion: "2",
+        toolId,
+        description: source.description,
+        desiredApprovalStatus: "approved",
         target: {
-          type: source.toolType ?? 'lambda',
-          arn: source.targetArn.replace('${PLATFORM_ACCOUNT_ID}', PLATFORM_ACCOUNT_ID),
+          type: "lambda",
+          arn:
+            `arn:aws:lambda:us-west-2:${PLATFORM_ACCOUNT_ID}:function:` +
+            `agenticai-platform-nonprod-${toolId}:PROD`,
+        },
+        mcp: {
+          toolName: toolId,
+          description: source.description,
+          inputSchema: source.inputSchema,
         },
         authorization: {
-          defaultDecision: 'DENY',
+          defaultDecision: "DENY",
           cedarPolicy: source.cedarPolicy,
           allowedSubjects: [],
           allowedGroups: source.allowedGroups ?? [],
-          combination: source.allowedGroups ? 'GROUP_ONLY' : 'AUTHENTICATED',
         },
         ownership: {
           ownerTeam: source.ownerTeam,
@@ -132,48 +161,145 @@ describe('Phase 22 — GA Registry producer remains additive', () => {
     }
   });
 
-  it('does not emit the deprecated preview Registry custom resources', () => {
+  it("creates tools without invoke permissions before Workstream roles exist", () => {
+    const template = synth("nonprod", false);
+    template.resourceCountIs("AWS::Lambda::Function", 2);
+    template.resourceCountIs("AWS::Lambda::Alias", 2);
+    template.resourceCountIs("AWS::Lambda::Permission", 0);
+  });
+
+  it("fails closed when exact two-environment Gateway role ARNs are absent", () => {
+    expect(() => synth("nonprod", true, [])).toThrow(
+      /gatewayServiceRoleArns is required/,
+    );
+    expect(() =>
+      synth("nonprod", true, [
+        `arn:aws:iam::${WORKLOAD_ACCOUNT_IDS[0]}:role/AgenticAI-D03-nonprod-shared-shared-gw-svc`,
+        `arn:aws:iam::${WORKLOAD_ACCOUNT_IDS[0]}:role/AgenticAI-D03-nonprod-other-agent-gw-svc`,
+      ]),
+    ).toThrow(/exactly one (?:nonprod|prod) Gateway role ARN is required/);
+    expect(() =>
+      synth("nonprod", true, [
+        `arn:aws:iam::${WORKLOAD_ACCOUNT_IDS[1]}:role/AgenticAI-D03-nonprod-shared-shared-gw-svc`,
+        `arn:aws:iam::${WORKLOAD_ACCOUNT_IDS[0]}:role/AgenticAI-D03-prod-shared-shared-gw-svc`,
+      ]),
+    ).toThrow(/nonprod Gateway role must be owned by Workload account/);
+  });
+
+  it("creates environment-isolated pipeline-owned tools and exact permissions", () => {
+    const template = synth();
+    const functions = Object.values(
+      template.findResources("AWS::Lambda::Function"),
+    ) as any[];
+    const functionNames = functions
+      .map((fn) => fn.Properties.FunctionName)
+      .filter((name): name is string => typeof name === "string")
+      .sort();
+    expect(functionNames).toEqual([
+      "agenticai-platform-nonprod-tool-echo",
+      "agenticai-platform-nonprod-tool-ping",
+    ]);
+    template.resourceCountIs("AWS::Lambda::Alias", 2);
+    template.resourceCountIs("AWS::Logs::LogGroup", 2);
+    template.resourceCountIs("AWS::KMS::Key", 2);
+    const keys = Object.values(
+      template.findResources("AWS::KMS::Key"),
+    ) as any[];
+    expect(keys.every((key) => key.Properties.EnableKeyRotation === true)).toBe(
+      true,
+    );
+    const permissions = Object.values(
+      template.findResources("AWS::Lambda::Permission"),
+    ) as any[];
+    expect(permissions).toHaveLength(
+      Object.keys(PLATFORM_TOOL_CATALOGUE).length,
+    );
+    const principals = permissions.map((permission) =>
+      JSON.stringify(permission.Properties.Principal),
+    );
+    const expected =
+      `:iam::${WORKLOAD_ACCOUNT_IDS[0]}:role/` +
+      "AgenticAI-D03-nonprod-shared-shared-gw-svc";
+    expect(
+      principals.filter((principal) => principal.includes(expected)),
+    ).toHaveLength(2);
+    expect(
+      principals.some((principal) =>
+        principal.includes("AgenticAI-D03-prod-shared-shared-gw-svc"),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not emit the deprecated preview Registry custom resources", () => {
     const rendered = JSON.stringify(synth().toJSON());
 
-    expect(rendered).not.toContain('Custom::BedrockAgentCoreRegistry');
-    expect(rendered).not.toContain('Custom::BedrockAgentCoreRegistryRecord');
+    expect(rendered).not.toContain("Custom::BedrockAgentCoreRegistry");
+    expect(rendered).not.toContain("Custom::BedrockAgentCoreRegistryRecord");
   });
 });
 
-describe('Phase 22 — Registry reader trust and permissions', () => {
-  it('trusts only configured Workstream validator roles with exact ExternalId', () => {
-    const role = singleResource(synth(), 'AWS::IAM::Role');
-    const statement = role.Properties.AssumeRolePolicyDocument.Statement[0];
+describe("Phase 22 — Registry reader trust and permissions", () => {
+  it("trusts only Workstream validators and the named Workload synth role", () => {
+    const roles = synth().findResources("AWS::IAM::Role");
+    const role = Object.values(roles).find(
+      (candidate: any) =>
+        candidate.Properties?.RoleName === "AgenticAI-RegistryReader-nonprod",
+    ) as any;
+    expect(role).toBeDefined();
+    const statements = role.Properties.AssumeRolePolicyDocument.Statement;
 
-    expect(role.Properties.RoleName).toBe('AgenticAI-RegistryReader-nonprod');
-    expect(statement).toEqual({
-      Sid: 'AllowWorkstreamRegistryValidators',
-      Effect: 'Allow',
-      Principal: {
-        AWS: WORKLOAD_ACCOUNT_IDS.map((accountId) =>
-          partitionArn(`:iam::${accountId}:root`),
-        ),
-      },
-      Action: 'sts:AssumeRole',
-      Condition: {
-        StringEquals: {
-          'sts:ExternalId': `agenticai-registry-v1-nonprod-${PLATFORM_ACCOUNT_ID}`,
-        },
-        StringLike: {
-          'aws:PrincipalArn': WORKLOAD_ACCOUNT_IDS.map((accountId) =>
-            partitionArn(
-              `:iam::${accountId}:role/AgenticAI-D03-*-RegistryValidator`,
-            ),
+    expect(role.Properties.RoleName).toBe("AgenticAI-RegistryReader-nonprod");
+    expect(statements).toEqual([
+      {
+        Sid: "AllowWorkstreamRegistryValidators",
+        Effect: "Allow",
+        Principal: {
+          AWS: WORKLOAD_ACCOUNT_IDS.map((accountId) =>
+            partitionArn(`:iam::${accountId}:root`),
           ),
-          'sts:RoleSessionName': 'registry-*',
+        },
+        Action: "sts:AssumeRole",
+        Condition: {
+          StringEquals: {
+            "sts:ExternalId": `agenticai-registry-v1-nonprod-${PLATFORM_ACCOUNT_ID}`,
+          },
+          StringLike: {
+            "aws:PrincipalArn": WORKLOAD_ACCOUNT_IDS.map((accountId) =>
+              partitionArn(
+                `:iam::${accountId}:role/AgenticAI-D03-*-RegistryValidator`,
+              ),
+            ),
+            "sts:RoleSessionName": "registry-*",
+          },
         },
       },
-    });
+      {
+        Sid: "AllowWorkloadPipelineRegistryResolution",
+        Effect: "Allow",
+        Principal: {
+          AWS: partitionArn(`:iam::${PLATFORM_ACCOUNT_ID}:root`),
+        },
+        Action: "sts:AssumeRole",
+        Condition: {
+          StringEquals: {
+            "sts:ExternalId": `agenticai-registry-synth-v1-nonprod-${PLATFORM_ACCOUNT_ID}`,
+          },
+          ArnEquals: {
+            "aws:PrincipalArn": partitionArn(
+              `:iam::${PLATFORM_ACCOUNT_ID}:role/AgenticAI-WLP-shared-shared-RegistrySynth`,
+            ),
+          },
+          StringLike: {
+            "sts:RoleSessionName": "registry-synth-*",
+          },
+        },
+      },
+    ]);
     expect(tagsToRecord(role.Properties.Tags)).toEqual(REQUIRED_TAGS);
   });
 
-  it('pins every GA read action to its required registry resource type', () => {
-    const policy = singleResource(synth(), 'AWS::IAM::ManagedPolicy');
+  it("pins every GA read action to its required registry resource type", () => {
+    const policy = singleResource(synth(), "AWS::IAM::ManagedPolicy");
     const statements = Object.fromEntries(
       policy.Properties.PolicyDocument.Statement.map((statement: any) => [
         statement.Sid,
@@ -181,43 +307,52 @@ describe('Phase 22 — Registry reader trust and permissions', () => {
       ]),
     );
     const registryArn = {
-      'Fn::GetAtt': ['GaRegistry07EC8B10', 'RegistryArn'],
+      "Fn::GetAtt": ["GaRegistry07EC8B10", "RegistryArn"],
     };
     const recordArn = {
-      'Fn::Join': ['', [registryArn, '/record/*']],
+      "Fn::Join": ["", [registryArn, "/record/*"]],
     };
 
     expect(Object.keys(statements).sort()).toEqual([
-      'DiscoverApprovedRegistryRecords',
-      'ReadRegistryMetadata',
-      'ReadRegistryRecords',
+      "DiscoverApprovedRegistryRecords",
+      "ReadRegistryDiscoveryParameters",
+      "ReadRegistryMetadata",
+      "ReadRegistryRecords",
     ]);
     expect(statements.ReadRegistryMetadata).toEqual({
-      Sid: 'ReadRegistryMetadata',
-      Effect: 'Allow',
+      Sid: "ReadRegistryMetadata",
+      Effect: "Allow",
       Action: [
-        'agent-registry:GetRegistry',
-        'agent-registry:ListRegistryRecords',
+        "agent-registry:GetRegistry",
+        "agent-registry:ListRegistryRecords",
       ],
       Resource: registryArn,
     });
     expect(statements.ReadRegistryRecords).toEqual({
-      Sid: 'ReadRegistryRecords',
-      Effect: 'Allow',
+      Sid: "ReadRegistryRecords",
+      Effect: "Allow",
       Action: [
-        'agent-registry:GetRegistryRecord',
-        'agent-registry:GetDiscoverableRegistryRecord',
+        "agent-registry:GetRegistryRecord",
+        "agent-registry:GetDiscoverableRegistryRecord",
       ],
       Resource: recordArn,
     });
     expect(statements.DiscoverApprovedRegistryRecords).toEqual({
-      Sid: 'DiscoverApprovedRegistryRecords',
-      Effect: 'Allow',
+      Sid: "DiscoverApprovedRegistryRecords",
+      Effect: "Allow",
       Action: [
-        'agent-registry:ListDiscoverableRegistryRecords',
-        'agent-registry:SearchDiscoverableRegistryRecords',
+        "agent-registry:ListDiscoverableRegistryRecords",
+        "agent-registry:SearchDiscoverableRegistryRecords",
       ],
       Resource: registryArn,
+    });
+    expect(statements.ReadRegistryDiscoveryParameters).toEqual({
+      Sid: "ReadRegistryDiscoveryParameters",
+      Effect: "Allow",
+      Action: "ssm:GetParameters",
+      Resource: partitionArn(
+        `:ssm:us-west-2:${PLATFORM_ACCOUNT_ID}:parameter/agenticai/registry/v1/nonprod/*`,
+      ),
     });
 
     const actions = policy.Properties.PolicyDocument.Statement.flatMap(
@@ -225,12 +360,13 @@ describe('Phase 22 — Registry reader trust and permissions', () => {
     ).sort();
     expect(actions).toEqual(
       [
-        'agent-registry:GetDiscoverableRegistryRecord',
-        'agent-registry:GetRegistry',
-        'agent-registry:GetRegistryRecord',
-        'agent-registry:ListDiscoverableRegistryRecords',
-        'agent-registry:ListRegistryRecords',
-        'agent-registry:SearchDiscoverableRegistryRecords',
+        "agent-registry:GetDiscoverableRegistryRecord",
+        "agent-registry:GetRegistry",
+        "agent-registry:GetRegistryRecord",
+        "agent-registry:ListDiscoverableRegistryRecords",
+        "agent-registry:ListRegistryRecords",
+        "agent-registry:SearchDiscoverableRegistryRecords",
+        "ssm:GetParameters",
       ].sort(),
     );
     const renderedResources = JSON.stringify(
@@ -238,26 +374,30 @@ describe('Phase 22 — Registry reader trust and permissions', () => {
         (statement: any) => statement.Resource,
       ),
     );
-    expect(renderedResources.match(/\*/g)).toHaveLength(1);
-    expect(JSON.stringify(policy)).not.toContain('bedrock-agentcore:');
-    expect(JSON.stringify(policy)).not.toContain('BatchGetDiscoverableRegistryRecord');
+    expect(renderedResources.match(/\*/g)).toHaveLength(2);
+    expect(JSON.stringify(policy)).not.toContain("bedrock-agentcore:");
+    expect(JSON.stringify(policy)).not.toContain(
+      "BatchGetDiscoverableRegistryRecord",
+    );
   });
 
-  it('records a policy-level SEC-030 suppression for the sole record-id wildcard', () => {
-    const policy = singleResource(synth(), 'AWS::IAM::ManagedPolicy');
+  it("records SEC-030 for the constrained record and parameter wildcards", () => {
+    const policy = singleResource(synth(), "AWS::IAM::ManagedPolicy");
 
     expect(policy.Metadata.cdk_nag.rules_to_suppress).toEqual([
       {
-        id: 'AwsSolutions-IAM5',
-        reason: expect.stringMatching(/^SEC-030:.*exact action\/resource pair\.$/),
+        id: "AwsSolutions-IAM5",
+        reason: expect.stringMatching(
+          /^SEC-030:.*both wildcards.*every action\/resource pair\.$/,
+        ),
       },
     ]);
   });
 });
 
-describe('Phase 22 — versioned late-binding contract', () => {
-  it('publishes Registry, reader, ExternalId, and every record ID through SSM', () => {
-    const parameters = synth().findResources('AWS::SSM::Parameter');
+describe("Phase 22 — versioned late-binding contract", () => {
+  it("publishes Registry, reader, ExternalId, and every record ID through SSM", () => {
+    const parameters = synth().findResources("AWS::SSM::Parameter");
     const names = Object.values(parameters)
       .map((parameter: any) => parameter.Properties.Name)
       .sort();
@@ -267,52 +407,80 @@ describe('Phase 22 — versioned late-binding contract', () => {
 
     expect(names).toEqual(
       [
-        '/agenticai/registry/v1/nonprod/arn',
-        '/agenticai/registry/v1/nonprod/id',
-        '/agenticai/registry/v1/nonprod/reader-external-id',
-        '/agenticai/registry/v1/nonprod/reader-role-arn',
+        "/agenticai/registry/v1/nonprod/arn",
+        "/agenticai/registry/v1/nonprod/id",
+        "/agenticai/registry/v1/nonprod/reader-external-id",
+        "/agenticai/registry/v1/nonprod/reader-role-arn",
         ...expectedRecordNames,
       ].sort(),
     );
-    for (const parameter of Object.values(parameters) as Array<Record<string, any>>) {
+    for (const parameter of Object.values(parameters) as Array<
+      Record<string, any>
+    >) {
       expect(tagsToRecord(parameter.Properties.Tags)).toEqual(REQUIRED_TAGS);
-      expect(parameter.DeletionPolicy).toBe('RetainExceptOnCreate');
-      expect(parameter.UpdateReplacePolicy).toBe('Retain');
+      expect(parameter.DeletionPolicy).toBe("RetainExceptOnCreate");
+      expect(parameter.UpdateReplacePolicy).toBe("Retain");
     }
   });
 
-  it('keeps nonprod and prod names distinct in a shared Platform account', () => {
-    const nonprod = synth('nonprod');
-    const prod = synth('prod');
-    const nonprodRegistry = singleResource(nonprod, 'AWS::AgentRegistry::Registry');
-    const prodRegistry = singleResource(prod, 'AWS::AgentRegistry::Registry');
-    const nonprodRole = singleResource(nonprod, 'AWS::IAM::Role');
-    const prodRole = singleResource(prod, 'AWS::IAM::Role');
+  it("keeps nonprod and prod names distinct in a shared Platform account", () => {
+    const nonprod = synth("nonprod");
+    const prod = synth("prod");
+    const nonprodRegistry = singleResource(
+      nonprod,
+      "AWS::AgentRegistry::Registry",
+    );
+    const prodRegistry = singleResource(prod, "AWS::AgentRegistry::Registry");
+    const nonprodRole = Object.values(
+      nonprod.findResources("AWS::IAM::Role"),
+    ).find(
+      (role: any) =>
+        role.Properties?.RoleName === "AgenticAI-RegistryReader-nonprod",
+    ) as any;
+    const prodRole = Object.values(prod.findResources("AWS::IAM::Role")).find(
+      (role: any) =>
+        role.Properties?.RoleName === "AgenticAI-RegistryReader-prod",
+    ) as any;
+    expect(nonprodRole).toBeDefined();
+    expect(prodRole).toBeDefined();
     const nonprodParameters = Object.values(
-      nonprod.findResources('AWS::SSM::Parameter'),
+      nonprod.findResources("AWS::SSM::Parameter"),
     ).map((parameter: any) => parameter.Properties.Name);
     const prodParameters = Object.values(
-      prod.findResources('AWS::SSM::Parameter'),
+      prod.findResources("AWS::SSM::Parameter"),
     ).map((parameter: any) => parameter.Properties.Name);
 
-    expect(nonprodRegistry.Properties.Name).not.toBe(prodRegistry.Properties.Name);
-    expect(nonprodRole.Properties.RoleName).not.toBe(prodRole.Properties.RoleName);
+    expect(nonprodRegistry.Properties.Name).not.toBe(
+      prodRegistry.Properties.Name,
+    );
+    expect(nonprodRole.Properties.RoleName).not.toBe(
+      prodRole.Properties.RoleName,
+    );
     expect(new Set([...nonprodParameters, ...prodParameters]).size).toBe(
       nonprodParameters.length + prodParameters.length,
     );
   });
 });
 
-describe('buildGaToolGovernanceDocument', () => {
-  it('fails on invalid tools and resolves platform-owned target ARNs', () => {
-    const source = PLATFORM_TOOL_CATALOGUE['tool-echo'];
-    const governance = buildGaToolGovernanceDocument(source, PLATFORM_ACCOUNT_ID);
+describe("buildGaToolGovernanceDocument", () => {
+  it("fails on invalid tools and resolves platform-owned target ARNs", () => {
+    const source = PLATFORM_TOOL_CATALOGUE["tool-echo"];
+    const governance = buildGaToolGovernanceDocument(
+      source,
+      PLATFORM_ACCOUNT_ID,
+    );
 
+    expect(governance.catalogueVersion).toBe("2");
     expect(governance.target.arn).toContain(`:${PLATFORM_ACCOUNT_ID}:`);
-    expect(governance.target.arn).not.toContain('${PLATFORM_ACCOUNT_ID}');
+    expect(governance.target.arn).not.toContain("${PLATFORM_ACCOUNT_ID}");
+    const override = `arn:aws:lambda:us-west-2:${PLATFORM_ACCOUNT_ID}:function:agenticai-platform-nonprod-tool-echo:PROD`;
+    expect(
+      buildGaToolGovernanceDocument(source, PLATFORM_ACCOUNT_ID, override)
+        .target.arn,
+    ).toBe(override);
     expect(() =>
       buildGaToolGovernanceDocument(
-        { ...source, approvalStatus: 'invalid' } as unknown as ToolSpec,
+        { ...source, approvalStatus: "invalid" } as unknown as ToolSpec,
         PLATFORM_ACCOUNT_ID,
       ),
     ).toThrow(/approvalStatus/);

@@ -41,19 +41,19 @@ export type ToolId = string; // branded string; keep simple for v1
  * workstream's Gateway policy document is built by union-ing the cedarPolicy
  * strings of every tool the workstream subscribed to.
  */
-export type ToolType = 'lambda' | 'agent-a2a';
+export type ToolType = "lambda" | "agent-a2a";
 
 export interface ToolSpec {
-  readonly toolId: ToolId;                     // unique within catalogue; kebab-case pattern
+  readonly toolId: ToolId; // unique within catalogue; kebab-case pattern
   /** Z7-K: kind of tool. Defaults to 'lambda'. 'agent-a2a' targets a peer-agent A2A endpoint. */
   readonly toolType?: ToolType;
-  readonly targetArn: string;                  // Lambda ARN, MUST end with :<alias> — validate at synth
-  readonly targetAccountId?: string;           // optional; when present the tool lives cross-account (platform-workload or workload-workload)
-  readonly cedarPolicy: string;                // per-tool Cedar snippet, union-ed into Gateway policy at synth
-  readonly ownerTeam: string;                  // e.g. 'platform-ai', 'retail', 'hr'
-  readonly costCentre: string;                 // CUR attribution passthrough
-  readonly description: string;                // human-readable; appears in Registry DDB
-  readonly approvalStatus: 'approved' | 'experimental' | 'deprecated';
+  readonly targetArn: string; // Lambda ARN, MUST end with :<alias> — validate at synth
+  readonly targetAccountId?: string; // optional; when present the tool lives cross-account (platform-workload or workload-workload)
+  readonly cedarPolicy: string; // per-tool Cedar snippet, union-ed into Gateway policy at synth
+  readonly ownerTeam: string; // e.g. 'platform-ai', 'retail', 'hr'
+  readonly costCentre: string; // CUR attribution passthrough
+  readonly description: string; // human-readable; appears in Registry DDB
+  readonly approvalStatus: "approved" | "experimental" | "deprecated";
   readonly inputSchema?: Record<string, unknown>; // JSONSchema draft-07; passed into CreateGatewayTarget.targetConfiguration.mcp.lambda.toolSchema.inlinePayload
   /**
    * Z7-K: when toolType === 'agent-a2a' this is the peer agent's A2A
@@ -80,51 +80,65 @@ const COGNITO_GROUP_REGEX = /^[A-Za-z0-9_+=,.@-]{1,128}$/;
 /** The authoritative catalogue. Append-only in v1; version bumps via PR. */
 export const PLATFORM_TOOL_CATALOGUE: Readonly<Record<ToolId, ToolSpec>> = {
   // Two demo tools to start — platform-owned, approved.
-  'tool-echo': {
-    toolId: 'tool-echo',
-    targetArn: 'arn:aws:lambda:us-east-1:${PLATFORM_ACCOUNT_ID}:function:agenticai-d03-tool-echo:PROD',
-    cedarPolicy: 'permit(principal, action == Action::"InvokeTool", resource == Tool::"tool-echo");',
-    ownerTeam: 'platform-ai',
-    costCentre: 'platform',
-    description: 'Echoes the input string. Canonical health-check tool.',
-    approvalStatus: 'approved',
-    inputSchema: { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] },
+  "tool-echo": {
+    toolId: "tool-echo",
+    targetArn:
+      "arn:aws:lambda:us-east-1:${PLATFORM_ACCOUNT_ID}:function:agenticai-d03-tool-echo:PROD",
+    cedarPolicy:
+      'permit(principal, action == Action::"InvokeTool", resource == Tool::"tool-echo");',
+    ownerTeam: "platform-ai",
+    costCentre: "platform",
+    description: "Echoes the input string. Canonical health-check tool.",
+    approvalStatus: "approved",
+    inputSchema: {
+      type: "object",
+      properties: { message: { type: "string" } },
+      required: ["message"],
+    },
   },
-  'tool-ping': {
-    toolId: 'tool-ping',
-    targetArn: 'arn:aws:lambda:us-east-1:${PLATFORM_ACCOUNT_ID}:function:agenticai-d03-tool-ping:PROD',
-    cedarPolicy: 'permit(principal, action == Action::"InvokeTool", resource == Tool::"tool-ping");',
-    ownerTeam: 'platform-ai',
-    costCentre: 'platform',
-    description: 'Returns pong + timestamp + caller principal. Observability probe.',
-    approvalStatus: 'approved',
-    inputSchema: { type: 'object', properties: {} },
+  "tool-ping": {
+    toolId: "tool-ping",
+    targetArn:
+      "arn:aws:lambda:us-east-1:${PLATFORM_ACCOUNT_ID}:function:agenticai-d03-tool-ping:PROD",
+    cedarPolicy:
+      'permit(principal, action == Action::"InvokeTool", resource == Tool::"tool-ping");',
+    ownerTeam: "platform-ai",
+    costCentre: "platform",
+    description:
+      "Returns pong + timestamp + caller principal. Observability probe.",
+    approvalStatus: "approved",
+    inputSchema: { type: "object", properties: {} },
   },
 };
 
-export const PLATFORM_TOOL_CATALOGUE_VERSION = '1';
+export const PLATFORM_TOOL_CATALOGUE_VERSION = "2";
 
 // Pattern matchers:
-const LAMBDA_ARN_WITH_ALIAS = /^arn:aws:lambda:[a-z0-9-]+:(?:\$\{PLATFORM_ACCOUNT_ID\}|\d{12}):function:[a-zA-Z0-9-_]+:[a-zA-Z0-9-_$]+$/;
+const LAMBDA_ARN_WITH_ALIAS =
+  /^arn:aws:lambda:[a-z0-9-]+:(?:\$\{PLATFORM_ACCOUNT_ID\}|\d{12}):function:[a-zA-Z0-9-_]+:[a-zA-Z0-9-_$]+$/;
 
 /** Validate a ToolSpec at synth; throws with actionable message. */
 export function validateToolSpec(spec: ToolSpec): void {
   if (!/^[a-z0-9-]{3,50}$/.test(spec.toolId)) {
     throw new Error(`ToolId must be kebab-case 3-50 chars: ${spec.toolId}`);
   }
-  const toolType: ToolType = spec.toolType ?? 'lambda';
-  if (toolType === 'lambda') {
+  const toolType: ToolType = spec.toolType ?? "lambda";
+  if (toolType === "lambda") {
     if (!LAMBDA_ARN_WITH_ALIAS.test(spec.targetArn)) {
       throw new Error(
         `Tool ${spec.toolId}: targetArn MUST end with a Lambda alias (Q5 pin-via-alias). Got: ${spec.targetArn}`,
       );
     }
     if (spec.a2aEndpointUrl) {
-      throw new Error(`Tool ${spec.toolId}: a2aEndpointUrl is only valid when toolType='agent-a2a'`);
+      throw new Error(
+        `Tool ${spec.toolId}: a2aEndpointUrl is only valid when toolType='agent-a2a'`,
+      );
     }
-  } else if (toolType === 'agent-a2a') {
+  } else if (toolType === "agent-a2a") {
     if (!spec.a2aEndpointUrl || !/^https:\/\//.test(spec.a2aEndpointUrl)) {
-      throw new Error(`Tool ${spec.toolId}: agent-a2a tools require a2aEndpointUrl starting with https://`);
+      throw new Error(
+        `Tool ${spec.toolId}: agent-a2a tools require a2aEndpointUrl starting with https://`,
+      );
     }
   } else {
     throw new Error(`Tool ${spec.toolId}: unsupported toolType ${toolType}`);
@@ -132,10 +146,12 @@ export function validateToolSpec(spec: ToolSpec): void {
   if (spec.targetAccountId && !/^\d{12}$/.test(spec.targetAccountId)) {
     throw new Error(`Tool ${spec.toolId}: targetAccountId must be 12 digits`);
   }
-  if (!spec.cedarPolicy.includes('permit')) {
+  if (!spec.cedarPolicy.includes("permit")) {
     throw new Error(`Tool ${spec.toolId}: cedarPolicy must contain permit()`);
   }
-  if (!['approved', 'experimental', 'deprecated'].includes(spec.approvalStatus)) {
+  if (
+    !["approved", "experimental", "deprecated"].includes(spec.approvalStatus)
+  ) {
     throw new Error(`Tool ${spec.toolId}: approvalStatus invalid`);
   }
   if (spec.allowedGroups !== undefined) {
@@ -145,7 +161,7 @@ export function validateToolSpec(spec: ToolSpec): void {
       );
     }
     for (const g of spec.allowedGroups) {
-      if (typeof g !== 'string' || !COGNITO_GROUP_REGEX.test(g)) {
+      if (typeof g !== "string" || !COGNITO_GROUP_REGEX.test(g)) {
         throw new Error(
           `Tool ${spec.toolId}: allowedGroups entry '${g}' is not a valid Cognito group name`,
         );
@@ -159,20 +175,24 @@ export function validateToolSpec(spec: ToolSpec): void {
  * on any unknown id OR any deprecated tool being subscribed to fresh.
  * This is the synth-time gate from the three-layer governance model.
  */
-export function resolveSubscribedTools(allowedToolIds: readonly ToolId[]): ToolSpec[] {
-  const unknown = allowedToolIds.filter((id) => !(id in PLATFORM_TOOL_CATALOGUE));
+export function resolveSubscribedTools(
+  allowedToolIds: readonly ToolId[],
+): ToolSpec[] {
+  const unknown = allowedToolIds.filter(
+    (id) => !(id in PLATFORM_TOOL_CATALOGUE),
+  );
   if (unknown.length > 0) {
     throw new Error(
-      `Unknown tool id(s) in allowedToolIds: ${unknown.join(', ')}. ` +
-        `Known: ${Object.keys(PLATFORM_TOOL_CATALOGUE).join(', ')}. ` +
+      `Unknown tool id(s) in allowedToolIds: ${unknown.join(", ")}. ` +
+        `Known: ${Object.keys(PLATFORM_TOOL_CATALOGUE).join(", ")}. ` +
         `Add the tool to PLATFORM_TOOL_CATALOGUE first.`,
     );
   }
   const subset = allowedToolIds.map((id) => PLATFORM_TOOL_CATALOGUE[id]);
-  const deprecated = subset.filter((s) => s.approvalStatus === 'deprecated');
+  const deprecated = subset.filter((s) => s.approvalStatus === "deprecated");
   if (deprecated.length > 0) {
     throw new Error(
-      `Cannot subscribe to deprecated tool(s): ${deprecated.map((t) => t.toolId).join(', ')}. ` +
+      `Cannot subscribe to deprecated tool(s): ${deprecated.map((t) => t.toolId).join(", ")}. ` +
         `Remove from allowedToolIds or unmark as deprecated in PLATFORM_TOOL_CATALOGUE.`,
     );
   }
@@ -185,9 +205,12 @@ export function resolveSubscribedTools(allowedToolIds: readonly ToolId[]): ToolS
  * (targetAccountId is undefined). Cross-account tools use their explicit
  * account id literally.
  */
-export function resolveTargetArn(spec: ToolSpec, platformAccountId: string): string {
+export function resolveTargetArn(
+  spec: ToolSpec,
+  platformAccountId: string,
+): string {
   const acct = spec.targetAccountId ?? platformAccountId;
-  return spec.targetArn.replace('${PLATFORM_ACCOUNT_ID}', acct);
+  return spec.targetArn.replace("${PLATFORM_ACCOUNT_ID}", acct);
 }
 
 /**
@@ -202,7 +225,9 @@ export function resolveTargetArn(spec: ToolSpec, platformAccountId: string): str
  * preserves the v0.5.0 default of "any authenticated principal" for
  * back-compat.
  */
-export function composeCedarPolicyDocument(subset: readonly ToolSpec[]): string {
+export function composeCedarPolicyDocument(
+  subset: readonly ToolSpec[],
+): string {
   const parts = subset.map((s) => {
     if (s.allowedGroups && s.allowedGroups.length > 0) {
       const permits = s.allowedGroups
@@ -210,10 +235,10 @@ export function composeCedarPolicyDocument(subset: readonly ToolSpec[]): string 
           (g) =>
             `permit(principal in CognitoGroup::"${g}", action == Action::"InvokeTool", resource == Tool::"${s.toolId}");`,
         )
-        .join('\n');
+        .join("\n");
       return (
         `// Tool: ${s.toolId} (owner: ${s.ownerTeam})\n` +
-        `// Q-entitlement: principal-bound; only members of [${s.allowedGroups.join(', ')}] may invoke.\n` +
+        `// Q-entitlement: principal-bound; only members of [${s.allowedGroups.join(", ")}] may invoke.\n` +
         permits
       );
     }
@@ -221,7 +246,7 @@ export function composeCedarPolicyDocument(subset: readonly ToolSpec[]): string 
   });
   // Default forbid — belt-and-braces; Gateway's authorizer is permit-only in practice
   parts.push(
-    '// Default forbid — everything not explicitly permitted above\nforbid(principal, action, resource) unless { principal has allowed && resource has allowed };',
+    "// Default forbid — everything not explicitly permitted above\nforbid(principal, action, resource) unless { principal has allowed && resource has allowed };",
   );
-  return parts.join('\n\n');
+  return parts.join("\n\n");
 }

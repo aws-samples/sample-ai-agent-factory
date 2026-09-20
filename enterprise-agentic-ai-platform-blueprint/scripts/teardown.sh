@@ -37,6 +37,7 @@
 #   AGENTICAI_LOG_ARCHIVE_ACCOUNT_ID     AGENTICAI_WORKLOAD_ACCOUNT_ID
 #   AGENTICAI_PLATFORM_NONPROD_ACCOUNT_ID AGENTICAI_PLATFORM_PROD_ACCOUNT_ID
 #   AGENTICAI_WORKLOAD_NONPROD_ACCOUNT_ID AGENTICAI_WORKLOAD_PROD_ACCOUNT_ID
+#   AGENTICAI_WORKLOAD_NONPROD_AVAILABILITY_ZONES AGENTICAI_WORKLOAD_PROD_AVAILABILITY_ZONES
 #   AGENTICAI_GITHUB_REPO                AGENTICAI_GITHUB_CONNECTION_ARN
 #   AGENTICAI_D03_PLATFORM_ACCOUNT_ID    AGENTICAI_D03_WORKLOAD_ACCOUNT_IDS
 #   AGENTICAI_D03_EXTERNAL_ID            AGENTICAI_D03_ALLOWED_TOOL_IDS
@@ -44,6 +45,8 @@
 #   AGENTICAI_AGENT_ID (default primary) AGENTICAI_ENV_NAME (default nonprod)
 #   AGENTICAI_APPLICATION_ID            AGENTICAI_COST_CENTRE
 #   AGENTICAI_INFERENCE_MODEL_RATE_LIMITS (required JSON array for Platform)
+#   AGENTICAI_GA_REGISTRY_NONPROD_CONTEXT_FILE AGENTICAI_GA_REGISTRY_PROD_CONTEXT_FILE
+#   AGENTICAI_GA_REGISTRY_EXPECTED_TOOL_IDS     AGENTICAI_WORKSTREAM_GATEWAY_REGION
 #
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
@@ -59,6 +62,10 @@ ENV_NAME="${AGENTICAI_ENV_NAME:-nonprod}"
 
 # Reverse dependency order: consumers before producers.
 BASE_STACKS=(
+  "AgenticAI-${TENANT_ID}-${AGENT_ID}-prod-ToolGateway"
+  "AgenticAI-${TENANT_ID}-${AGENT_ID}-nonprod-ToolGateway"
+  "AgenticAI-${TENANT_ID}-${AGENT_ID}-prod-RegistryRoles"
+  "AgenticAI-${TENANT_ID}-${AGENT_ID}-nonprod-RegistryRoles"
   "AgenticAI-WorkloadPipelineStack"
   "AgenticAI-PlatformPipelineStack"
   "AgenticAI-GapClosureStack"
@@ -114,6 +121,7 @@ require_tools() {
 # ---------------------------------------------------------------------------
 stage_for_stack() {
   case "$1" in
+    AgenticAI-*-ToolGateway|AgenticAI-*-RegistryRoles) printf 'pipeline\n' ;;
     AgenticAI-WorkloadPipelineStack|AgenticAI-PlatformPipelineStack) printf 'pipeline\n' ;;
     AgenticAI-GapClosureStack) printf 'gap-closure\n' ;;
     AgenticAI-D03-WorkstreamGateway-*) printf 'd03-workstream-gateway\n' ;;
@@ -131,7 +139,9 @@ stage_for_stack() {
 # synthesise the app. Empty means "no required context".
 required_env_for_stack() {
   case "$1" in
-    AgenticAI-WorkloadPipelineStack|AgenticAI-PlatformPipelineStack)
+    AgenticAI-WorkloadPipelineStack|AgenticAI-*-ToolGateway|AgenticAI-*-RegistryRoles)
+      printf '%s\n' "AGENTICAI_GITHUB_REPO AGENTICAI_GITHUB_CONNECTION_ARN AGENTICAI_PLATFORM_NONPROD_ACCOUNT_ID AGENTICAI_PLATFORM_PROD_ACCOUNT_ID AGENTICAI_WORKLOAD_NONPROD_ACCOUNT_ID AGENTICAI_WORKLOAD_PROD_ACCOUNT_ID AGENTICAI_WORKLOAD_NONPROD_AVAILABILITY_ZONES AGENTICAI_WORKLOAD_PROD_AVAILABILITY_ZONES AGENTICAI_GA_REGISTRY_NONPROD_CONTEXT_FILE AGENTICAI_GA_REGISTRY_PROD_CONTEXT_FILE AGENTICAI_GA_REGISTRY_EXPECTED_TOOL_IDS" ;;
+    AgenticAI-PlatformPipelineStack)
       printf '%s\n' "AGENTICAI_GITHUB_REPO AGENTICAI_GITHUB_CONNECTION_ARN AGENTICAI_ORGANIZATION_ID AGENTICAI_PLATFORM_NONPROD_ACCOUNT_ID AGENTICAI_PLATFORM_PROD_ACCOUNT_ID AGENTICAI_AUDIT_ACCOUNT_ID AGENTICAI_LOG_ARCHIVE_ACCOUNT_ID AGENTICAI_WORKLOAD_NONPROD_ACCOUNT_ID AGENTICAI_WORKLOAD_PROD_ACCOUNT_ID AGENTICAI_PIPELINE_ROLE_ARN AGENTICAI_INFERENCE_MODEL_RATE_LIMITS" ;;
     AgenticAI-GapClosureStack)
       printf '%s\n' "AGENTICAI_APPROVER_ROLE_ARN" ;;
@@ -170,7 +180,27 @@ set_context_args_for_stack() {
   CDK_CONTEXT_ARGS=(--context "stage=$stage")
 
   case "$stack" in
-    AgenticAI-WorkloadPipelineStack|AgenticAI-PlatformPipelineStack)
+    AgenticAI-WorkloadPipelineStack|AgenticAI-*-ToolGateway|AgenticAI-*-RegistryRoles)
+      add_context "agenticai/pipelineSelection=workload"
+      add_context "agenticai/githubRepo=${AGENTICAI_GITHUB_REPO:-}"
+      add_context "agenticai/githubConnectionArn=${AGENTICAI_GITHUB_CONNECTION_ARN:-}"
+      add_context "agenticai/platformNonprodAccountId=${AGENTICAI_PLATFORM_NONPROD_ACCOUNT_ID:-}"
+      add_context "agenticai/platformProdAccountId=${AGENTICAI_PLATFORM_PROD_ACCOUNT_ID:-}"
+      add_context "agenticai/workloadNonprodAccountId=${AGENTICAI_WORKLOAD_NONPROD_ACCOUNT_ID:-}"
+      add_context "agenticai/workloadProdAccountId=${AGENTICAI_WORKLOAD_PROD_ACCOUNT_ID:-}"
+      add_context "agenticai/workloadNonprodAvailabilityZones=${AGENTICAI_WORKLOAD_NONPROD_AVAILABILITY_ZONES:-}"
+      add_context "agenticai/workloadProdAvailabilityZones=${AGENTICAI_WORKLOAD_PROD_AVAILABILITY_ZONES:-}"
+      add_context "agenticai/enableGaRegistryConsumer=true"
+      add_context "agenticai/gaRegistryExpectedToolIds=${AGENTICAI_GA_REGISTRY_EXPECTED_TOOL_IDS:-}"
+      add_context "agenticai/gaRegistryNonprodContextFile=${AGENTICAI_GA_REGISTRY_NONPROD_CONTEXT_FILE:-}"
+      add_context "agenticai/gaRegistryProdContextFile=${AGENTICAI_GA_REGISTRY_PROD_CONTEXT_FILE:-}"
+      add_context "agenticai/workstreamGatewayRegion=${AGENTICAI_WORKSTREAM_GATEWAY_REGION:-us-west-2}"
+      add_context "agenticai/applicationId=${AGENTICAI_APPLICATION_ID:-$TENANT_ID}"
+      add_context "agenticai/costCentre=${AGENTICAI_COST_CENTRE:-engineering}"
+      add_tenant_context
+      ;;
+    AgenticAI-PlatformPipelineStack)
+      add_context "agenticai/pipelineSelection=platform"
       add_context "agenticai/githubRepo=${AGENTICAI_GITHUB_REPO:-}"
       add_context "agenticai/githubConnectionArn=${AGENTICAI_GITHUB_CONNECTION_ARN:-}"
       add_context "agenticai/organizationId=${AGENTICAI_ORGANIZATION_ID:-}"

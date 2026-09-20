@@ -19,7 +19,32 @@ function renderContextArgs(context: Readonly<Record<string, string>>): string {
   return Object.keys(context)
     .sort()
     .map((key) => `--context ${key}=${shellQuote(context[key])}`)
-    .join(' ');
+    .join(" ");
+}
+
+/**
+ * Render context whose values are produced by earlier commands in the same
+ * CodeBuild v0.2 shell. Only validated variable names are accepted; values are
+ * expanded inside double quotes and are never re-evaluated as shell syntax.
+ */
+function renderEnvironmentContextArgs(
+  context: Readonly<Record<string, string>>,
+): string {
+  return Object.keys(context)
+    .sort()
+    .map((key) => {
+      if (!/^[A-Za-z0-9/_-]+$/.test(key)) {
+        throw new Error(`Invalid CDK context key '${key}'.`);
+      }
+      const variable = context[key];
+      if (!/^[A-Z_][A-Z0-9_]*$/.test(variable)) {
+        throw new Error(
+          `Invalid environment variable '${variable}' for context '${key}'.`,
+        );
+      }
+      return `--context ${key}="\${${variable}}"`;
+    })
+    .join(" ");
 }
 
 export interface StageAwareSynthOptions {
@@ -27,6 +52,10 @@ export interface StageAwareSynthOptions {
   readonly stage: string;
   /** Additional `agenticai/*` context the stage requires. */
   readonly context: Readonly<Record<string, string>>;
+  /** Commands that resolve non-secret context values before `cdk synth`. */
+  readonly preSynthCommands?: readonly string[];
+  /** CDK context key -> validated shell variable produced by preSynthCommands. */
+  readonly contextFromEnvironment?: Readonly<Record<string, string>>;
   /** Cloud Assembly artifact ID of the pipeline's own stack. */
   readonly expectedStackArtifactId: string;
   /**
@@ -36,7 +65,7 @@ export interface StageAwareSynthOptions {
   readonly expectedStageAssemblyGlobs: readonly string[];
 }
 
-const BLUEPRINT_SOURCE_DIRECTORY = 'enterprise-agentic-ai-platform-blueprint';
+const BLUEPRINT_SOURCE_DIRECTORY = "enterprise-agentic-ai-platform-blueprint";
 
 /**
  * Enter the blueprint package after CodeConnections checks out the repository.
@@ -56,11 +85,11 @@ function enterBlueprintSourceDirectory(): string {
 /** Render one complete shell command; CodeBuild validates each list item alone. */
 function validateStageAssembliesCommand(globs: readonly string[]): string {
   return [
-    `for asm in ${globs.join(' ')}; do`,
+    `for asm in ${globs.join(" ")}; do`,
     'if [ ! -f "$asm/manifest.json" ]; then echo "ERROR: cdk synth produced no stage assembly at $asm"; exit 1; fi;',
     'if ! grep -q "aws:cloudformation:stack" "$asm/manifest.json"; then echo "ERROR: stage assembly $asm declares no stacks"; exit 1; fi;',
-    'done',
-  ].join(' ');
+    "done",
+  ].join(" ");
 }
 
 /**
@@ -79,16 +108,25 @@ function publishCloudAssemblyFromCheckoutRootCommand(): string {
  * Build a stage-aware synth command sequence that rejects unknown source
  * layouts and empty assemblies.
  */
-export function stageAwareSynthCommands(options: StageAwareSynthOptions): string[] {
+export function stageAwareSynthCommands(
+  options: StageAwareSynthOptions,
+): string[] {
   const contextArgs = renderContextArgs(options.context);
+  const environmentContextArgs = renderEnvironmentContextArgs(
+    options.contextFromEnvironment ?? {},
+  );
+  const allContextArgs = [contextArgs, environmentContextArgs]
+    .filter((value) => value.length > 0)
+    .join(" ");
   return [
-    'set -eu',
+    "set -eu",
     enterBlueprintSourceDirectory(),
-    'npm ci',
-    'npm run build',
-    'npm test',
-    `npx cdk synth --context stage=${shellQuote(options.stage)} ${contextArgs} --strict`,
-    'test -f cdk.out/manifest.json',
+    "npm ci",
+    "npm run build",
+    "npm test",
+    ...(options.preSynthCommands ?? []),
+    `npx cdk synth --context stage=${shellQuote(options.stage)} ${allContextArgs} --strict`,
+    "test -f cdk.out/manifest.json",
     `test -f cdk.out/${shellQuote(options.expectedStackArtifactId)}.template.json`,
     'grep -q "aws:cloudformation:stack" cdk.out/manifest.json',
     validateStageAssembliesCommand(options.expectedStageAssemblyGlobs),

@@ -13,14 +13,17 @@
 export {
   PlatformRegistryConstruct,
   type PlatformRegistryConstructProps,
-} from './platform-registry-construct';
+} from "./platform-registry-construct";
 
 export {
   RegistryRecordConstruct,
   type RegistryRecordConstructProps,
-} from './registry-record-construct';
+} from "./registry-record-construct";
 
-export { grantRegistryConsumer, type RegistryConsumerGrantOptions } from './registry-consumer-grant';
+export {
+  grantRegistryConsumer,
+  type RegistryConsumerGrantOptions,
+} from "./registry-consumer-grant";
 
 export {
   validateRegistryRecordSpec,
@@ -36,7 +39,7 @@ export {
   type RegistryRecordId,
   type RegistryRecordStatus,
   type RegistryInboundAuthType,
-} from './registry-record-spec';
+} from "./registry-record-spec";
 
 export {
   GaPlatformRegistryConstruct,
@@ -44,4 +47,17 @@ export {
   type GaPlatformRegistryConstructProps,
   type GaPlatformRegistryTags,
   type GaToolGovernanceDocument,
-} from './ga-platform-registry-construct';
+} from "./ga-platform-registry-construct";
+
+export {
+  GA_REGISTRY_CONSUMER_CONTEXT_SCHEMA,
+  parseGaRegistryConsumerContext,
+  type GaResolvedRegistryRecord,
+  type GaRegistryConsumerContext,
+  type GaRegistryConsumerExpectation,
+} from "./ga-registry-consumer-context";
+
+export {
+  GaPlatformToolsConstruct,
+  type GaPlatformToolsConstructProps,
+} from "./ga-platform-tools-construct";
