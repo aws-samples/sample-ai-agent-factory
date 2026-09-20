@@ -10,14 +10,21 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { ArnPrincipal, PolicyDocument, PolicyStatement, Effect, Role } from 'aws-cdk-lib/aws-iam';
-import { NagSuppressions } from 'cdk-nag';
-import { Construct } from 'constructs';
+import { Token } from "aws-cdk-lib";
+import {
+  ArnPrincipal,
+  PolicyDocument,
+  PolicyStatement,
+  Effect,
+  Role,
+} from "aws-cdk-lib/aws-iam";
+import { NagSuppressions } from "cdk-nag";
+import { Construct } from "constructs";
 
 export interface GuardrailAdminRoleProps {
   /**
    * ARN of the CI/CD pipeline role that may assume this admin role.
-   * Typically the CodeBuild role inside `agenticai-platform-nonprod`.
+   * Typically the pipeline-owned `AgenticAI-PlatformPipelineRole`.
    */
   readonly trustedPipelineRoleArn: string;
 
@@ -34,7 +41,12 @@ export class GuardrailAdminRole extends Construct {
   constructor(scope: Construct, id: string, props: GuardrailAdminRoleProps) {
     super(scope, id);
 
-    if (!props.trustedPipelineRoleArn.startsWith('arn:aws:iam::')) {
+    if (
+      !Token.isUnresolved(props.trustedPipelineRoleArn) &&
+      !/^arn:(?:aws|aws-us-gov|aws-cn):iam::\d{12}:role\/[A-Za-z0-9+=,.@_/-]+$/.test(
+        props.trustedPipelineRoleArn,
+      )
+    ) {
       throw new Error(
         `GuardrailAdminRole: trustedPipelineRoleArn must be an IAM role ARN (got '${props.trustedPipelineRoleArn}').`,
       );
@@ -43,25 +55,26 @@ export class GuardrailAdminRole extends Construct {
     const inline = new PolicyDocument({
       statements: [
         new PolicyStatement({
-          sid: 'GuardrailAdminActions',
+          sid: "GuardrailAdminActions",
           effect: Effect.ALLOW,
           actions: [
-            'bedrock:CreateGuardrail',
-            'bedrock:UpdateGuardrail',
-            'bedrock:DeleteGuardrail',
-            'bedrock:CreateGuardrailVersion',
-            'bedrock:GetGuardrail',
-            'bedrock:ListGuardrails',
+            "bedrock:CreateGuardrail",
+            "bedrock:UpdateGuardrail",
+            "bedrock:DeleteGuardrail",
+            "bedrock:CreateGuardrailVersion",
+            "bedrock:GetGuardrail",
+            "bedrock:ListGuardrails",
           ],
-          resources: ['*'],
+          resources: ["*"],
         }),
       ],
     });
 
-    this.role = new Role(this, 'Role', {
-      roleName: props.roleName ?? 'AgenticAI-GuardrailAdmin',
+    this.role = new Role(this, "Role", {
+      roleName: props.roleName ?? "AgenticAI-GuardrailAdmin",
       assumedBy: new ArnPrincipal(props.trustedPipelineRoleArn),
-      description: 'Platform-only role for Bedrock Guardrail administration. Assumable only by the CI/CD pipeline role. Enforced by SCP-05.',
+      description:
+        "Platform-only role for Bedrock Guardrail administration. Assumable only by the CI/CD pipeline role. Enforced by SCP-05.",
       inlinePolicies: { guardrail: inline },
     });
 
@@ -69,15 +82,15 @@ export class GuardrailAdminRole extends Construct {
       this.role,
       [
         {
-          id: 'AwsSolutions-IAM5',
-          appliesTo: ['Resource::*'],
+          id: "AwsSolutions-IAM5",
+          appliesTo: ["Resource::*"],
           reason:
-            'SEC-004: Guardrail admin actions (Create/Update/Delete/Get/ListGuardrail) do not support resource-level scoping today — AWS returns AccessDenied if a non-* resource is specified. Role is gated by SCP-05 and a narrow trust policy (pipeline role only). Will be tightened when Bedrock adds guardrail-ARN-scoped IAM conditions.',
+            "SEC-004: Guardrail admin actions (Create/Update/Delete/Get/ListGuardrail) do not support resource-level scoping today — AWS returns AccessDenied if a non-* resource is specified. Role is gated by SCP-05 and a narrow trust policy (pipeline role only). Will be tightened when Bedrock adds guardrail-ARN-scoped IAM conditions.",
         },
         {
-          id: 'NIST.800.53.R5-IAMNoInlinePolicy',
+          id: "NIST.800.53.R5-IAMNoInlinePolicy",
           reason:
-            'SEC-005: Single-purpose admin role; inline policy keeps guardrail permissions co-located with the role definition for reviewability. Managed-policy indirection adds no security and hinders audit (SCP-05 references the role ARN, not the managed policy ARN).',
+            "SEC-005: Single-purpose admin role; inline policy keeps guardrail permissions co-located with the role definition for reviewability. Managed-policy indirection adds no security and hinders audit (SCP-05 references the role ARN, not the managed policy ARN).",
         },
       ],
       true,

@@ -109,8 +109,6 @@ function createPlatformPipeline(
       envName: "prod",
     },
     workloadAccountIds: ["444444444444", "555555555555"],
-    pipelineRoleArn:
-      "arn:aws:iam::111111111111:role/AgenticAI-PlatformPipelineRole",
     applicationId: "platform-inference",
     tenantId: "shared",
     agentId: "shared",
@@ -249,6 +247,28 @@ describe("Phase 7 — Platform pipeline", () => {
     });
   });
 
+  it("owns a stable service role used by CodePipeline", () => {
+    const template = synthPlatform();
+    const roles = template.findResources("AWS::IAM::Role");
+    const [logicalId, role] = Object.entries(roles).find(
+      ([, candidate]: [string, any]) =>
+        candidate.Properties?.RoleName === "AgenticAI-PlatformPipelineRole",
+    ) as [string, any];
+    expect(role.Properties.AssumeRolePolicyDocument.Statement).toContainEqual(
+      expect.objectContaining({
+        Action: "sts:AssumeRole",
+        Effect: "Allow",
+        Principal: { Service: "codepipeline.amazonaws.com" },
+      }),
+    );
+    const pipeline = Object.values(
+      template.findResources("AWS::CodePipeline::Pipeline"),
+    )[0] as any;
+    expect(pipeline.Properties.RoleArn).toEqual({
+      "Fn::GetAtt": [logicalId, "Arn"],
+    });
+  });
+
   it("deploys shared Management/Governance stacks exactly once", () => {
     const pipeline = Object.values(
       synthPlatform().findResources("AWS::CodePipeline::Pipeline"),
@@ -290,6 +310,23 @@ describe("Phase 7 — Platform pipeline", () => {
 
     nonprodTemplate.hasResourceProperties("AWS::IAM::Role", {
       RoleName: "AgenticAI-GuardrailAdmin",
+    });
+    const adminRole = Object.values(
+      nonprodTemplate.findResources("AWS::IAM::Role"),
+    ).find(
+      (role: any) => role.Properties.RoleName === "AgenticAI-GuardrailAdmin",
+    ) as any;
+    expect(
+      adminRole.Properties.AssumeRolePolicyDocument.Statement[0].Principal.AWS,
+    ).toEqual({
+      "Fn::Join": [
+        "",
+        [
+          "arn:",
+          { Ref: "AWS::Partition" },
+          ":iam::111111111111:role/AgenticAI-PlatformPipelineRole",
+        ],
+      ],
     });
     nonprodTemplate.hasResourceProperties("AWS::Bedrock::Guardrail", {
       Name: "agenticai-guardrail-baseline",
@@ -1009,7 +1046,6 @@ describe("Round 1 integration — CDK app self-synth contract", () => {
       "workloadProdAccountId",
       "workloadNonprodAvailabilityZones",
       "workloadProdAvailabilityZones",
-      "pipelineRoleArn",
       "workloadAccountIds",
       "applicationId",
       "tenantId",

@@ -33,7 +33,7 @@ Populate [`cdk.context.json`](./cdk.context.json) with:
 
 - `agenticai/organizationId` — `o-xxxxxxxxxx`.
 - Six account IDs (management, log archive, audit, sandbox, platform-nonprod, platform-prod, workload-nonprod, workload-prod).
-- `agenticai/pipelineRoleArn` — the ARN of the pipeline execution role in platform-nonprod (created automatically by CDK Pipelines bootstrap).
+- The Platform pipeline stack creates and uses the stable `AgenticAI-PlatformPipelineRole`; do not pre-create it or supply `agenticai/pipelineRoleArn` in pipeline mode. Standalone `stage=platform` synthesis still accepts an explicit deployment principal.
 - `agenticai/githubRepo` + `agenticai/githubConnectionArn` + `agenticai/notificationEmail`.
 
 Example baseline is checked in; overwrite with real values before deploy.

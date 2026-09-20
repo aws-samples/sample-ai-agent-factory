@@ -245,12 +245,11 @@ export interface WorkloadPipelineStackProps extends StackProps {
    * Extra `agenticai/*` context keys for the synth step, merged over the keys
    * derived from this stack's own props (explicit wins).
    *
-   * The `pipeline` stage also requires context this stack does not carry —
-   * `agenticai/organizationId`, `agenticai/platformNonprodAccountId`,
-   * `agenticai/platformProdAccountId`, `agenticai/auditAccountId`,
-   * `agenticai/logArchiveAccountId`, `agenticai/pipelineRoleArn`. Supply those
-   * here. If they are missing the app throws inside the synth step, which fails
-   * the pipeline loudly; it never degrades to an empty assembly.
+   * When the same root also synthesizes Platform stages, pass their organization,
+   * account, audit, and Log Archive context here. The Platform pipeline derives
+   * its owned service-role ARN itself. If required context is missing the app
+   * throws inside the synth step, which fails the pipeline loudly; it never
+   * degrades to an empty assembly.
    */
   readonly synthContext?: Record<string, string>;
 

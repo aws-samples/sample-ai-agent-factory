@@ -677,7 +677,6 @@ switch (stage) {
     const workloadProdAccount = app.node.tryGetContext(
       "agenticai/workloadProdAccountId",
     );
-    const pipelineRoleArn = app.node.tryGetContext("agenticai/pipelineRoleArn");
     const configuredWorkloadAccountIds = stringArrayContext(
       "agenticai/workloadAccountIds",
     );
@@ -732,9 +731,6 @@ switch (stage) {
       if (!platformProdAccount) missing.push("agenticai/platformProdAccountId");
       if (!auditAccount) missing.push("agenticai/auditAccountId");
       if (!logArchiveAccount) missing.push("agenticai/logArchiveAccountId");
-      if (typeof pipelineRoleArn !== "string") {
-        missing.push("agenticai/pipelineRoleArn");
-      }
       if (inferenceModelRateLimits.length === 0) {
         missing.push("agenticai/inferenceModelRateLimits");
       }
@@ -860,8 +856,6 @@ switch (stage) {
       sharedSynthContext["agenticai/auditAccountId"] = String(auditAccount);
       sharedSynthContext["agenticai/logArchiveAccountId"] =
         String(logArchiveAccount);
-      sharedSynthContext["agenticai/pipelineRoleArn"] =
-        pipelineRoleArn as string;
       sharedSynthContext["agenticai/workloadAccountIds"] =
         JSON.stringify(workloadAccountIds);
       sharedSynthContext["agenticai/inferenceModelRateLimits"] = JSON.stringify(
@@ -920,7 +914,6 @@ switch (stage) {
           envName: "prod",
         },
         workloadAccountIds,
-        pipelineRoleArn: pipelineRoleArn as string,
         applicationId: String(applicationId),
         tenantId: String(tenantId),
         agentId: String(agentId),

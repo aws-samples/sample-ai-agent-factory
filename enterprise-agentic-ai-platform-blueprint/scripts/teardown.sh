@@ -210,7 +210,6 @@ set_context_args_for_stack() {
       add_context "agenticai/logArchiveAccountId=${AGENTICAI_LOG_ARCHIVE_ACCOUNT_ID:-}"
       add_context "agenticai/workloadNonprodAccountId=${AGENTICAI_WORKLOAD_NONPROD_ACCOUNT_ID:-}"
       add_context "agenticai/workloadProdAccountId=${AGENTICAI_WORKLOAD_PROD_ACCOUNT_ID:-}"
-      add_context "agenticai/pipelineRoleArn=${AGENTICAI_PIPELINE_ROLE_ARN:-}"
       add_context "agenticai/inferenceModelRateLimits=${AGENTICAI_INFERENCE_MODEL_RATE_LIMITS:-}"
       add_context "agenticai/applicationId=${AGENTICAI_APPLICATION_ID:-$TENANT_ID}"
       add_context "agenticai/costCentre=${AGENTICAI_COST_CENTRE:-platform}"

@@ -10,6 +10,7 @@
  */
 import { Stack, StackProps, Environment, Stage, StageProps } from "aws-cdk-lib";
 import { PipelineType } from "aws-cdk-lib/aws-codepipeline";
+import { Role, ServicePrincipal } from "aws-cdk-lib/aws-iam";
 import {
   CodePipeline,
   CodePipelineSource,
@@ -50,7 +51,6 @@ export interface PlatformPipelineStackProps extends StackProps {
   readonly platformNonprod: PipelineStageEnv;
   readonly platformProd: PipelineStageEnv;
   readonly workloadAccountIds: readonly string[];
-  readonly pipelineRoleArn: string;
   readonly applicationId: string;
   readonly agentId: string;
   readonly tenantId: string;
@@ -178,6 +178,14 @@ export class PlatformPipelineStack extends Stack {
       "PlatformPipelineArtifacts",
       resourceTags,
     );
+    const pipelineServiceRoleName = "AgenticAI-PlatformPipelineRole";
+    const pipelineServiceRole = new Role(this, "PlatformPipelineServiceRole", {
+      roleName: pipelineServiceRoleName,
+      assumedBy: new ServicePrincipal("codepipeline.amazonaws.com"),
+      description:
+        "Stable service role for the platform pipeline and Guardrail administration trust.",
+    });
+    const pipelineServiceRoleArn = `arn:${this.partition}:iam::${this.account}:role/${pipelineServiceRoleName}`;
 
     const source = CodePipelineSource.connection(
       props.githubRepo,
@@ -187,6 +195,7 @@ export class PlatformPipelineStack extends Stack {
 
     this.pipeline = new CodePipeline(this, "PlatformPipeline", {
       artifactBucket,
+      role: pipelineServiceRole,
       pipelineName: "agenticai-platform-pipeline",
       pipelineType: PipelineType.V2,
       crossAccountKeys: true,
@@ -194,7 +203,7 @@ export class PlatformPipelineStack extends Stack {
         input: source,
         commands: stageAwareSynthCommands({
           stage: props.synthStage ?? "pipeline",
-          context: this.synthContext(props),
+          context: this.synthContext(props, pipelineServiceRoleArn),
           expectedStackArtifactId: this.stackName,
           expectedStageAssemblyGlobs: [
             "cdk.out/assembly-*Nonprod",
@@ -230,7 +239,7 @@ export class PlatformPipelineStack extends Stack {
         organizationId: props.organizationId,
         workloadAccountIds: props.workloadAccountIds,
         gatewayWorkloadAccountId: props.gatewayWorkloadAccountIds?.nonprod,
-        pipelineRoleArn: props.pipelineRoleArn,
+        pipelineRoleArn: pipelineServiceRoleArn,
         auditEnv: props.audit.env,
         logArchiveEnv: props.logArchive.env,
         retainGovernanceOnDelete: props.logArchive.envName === "prod",
@@ -245,7 +254,7 @@ export class PlatformPipelineStack extends Stack {
         organizationId: props.organizationId,
         workloadAccountIds: props.workloadAccountIds,
         gatewayWorkloadAccountId: props.gatewayWorkloadAccountIds?.prod,
-        pipelineRoleArn: props.pipelineRoleArn,
+        pipelineRoleArn: pipelineServiceRoleArn,
         auditEnv: props.audit.env,
         logArchiveEnv: props.logArchive.env,
         retainGovernanceOnDelete: props.logArchive.envName === "prod",
@@ -352,6 +361,7 @@ export class PlatformPipelineStack extends Stack {
 
   private synthContext(
     props: PlatformPipelineStackProps,
+    pipelineServiceRoleArn: string,
   ): Record<string, string> {
     const derived: Record<string, string> = {
       "agenticai/githubRepo": props.githubRepo,
@@ -362,7 +372,7 @@ export class PlatformPipelineStack extends Stack {
       "agenticai/platformProdAccountId": props.platformProd.env.account,
       "agenticai/auditAccountId": props.audit.env.account,
       "agenticai/logArchiveAccountId": props.logArchive.env.account,
-      "agenticai/pipelineRoleArn": props.pipelineRoleArn,
+      "agenticai/pipelineRoleArn": pipelineServiceRoleArn,
       "agenticai/workloadAccountIds": JSON.stringify(props.workloadAccountIds),
       "agenticai/applicationId": props.applicationId,
       "agenticai/agentId": props.agentId,
@@ -391,6 +401,7 @@ export class PlatformPipelineStack extends Stack {
       ...derived,
       ...(props.synthContext ?? {}),
       "agenticai/pipelineSelection": "platform",
+      "agenticai/pipelineRoleArn": pipelineServiceRoleArn,
     };
   }
 }
