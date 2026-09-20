@@ -38,9 +38,10 @@ The reader trust requires all of:
 3. an `AgenticAI-D03-*-RegistryValidator` principal ARN; and
 4. a `registry-*` role-session name.
 
-Its identity policy uses the GA `agent-registry` namespace and contains read and
-discovery actions only. It has no create, update, submit, approve, or delete
-action.
+Its identity policy uses the GA `agent-registry` namespace and contains record,
+discovery, and ownership-tag read actions only. `ListTagsForResource` is scoped
+to the exact Registry ARN plus its generated `/record/*` family. It has no
+create, update, submit, approve, or delete action.
 
 Native Registry resources and late-binding parameters use
 `RetainExceptOnCreate`: failed first creation cleans itself up, while a later

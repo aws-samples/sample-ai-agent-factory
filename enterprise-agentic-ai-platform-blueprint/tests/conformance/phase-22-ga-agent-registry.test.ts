@@ -347,6 +347,7 @@ describe("Phase 22 — Registry reader trust and permissions", () => {
       "ReadRegistryDiscoveryParameters",
       "ReadRegistryMetadata",
       "ReadRegistryRecords",
+      "ReadRegistryTags",
     ]);
     expect(statements.ReadRegistryMetadata).toEqual({
       Sid: "ReadRegistryMetadata",
@@ -365,6 +366,12 @@ describe("Phase 22 — Registry reader trust and permissions", () => {
         "agent-registry:GetDiscoverableRegistryRecord",
       ],
       Resource: recordArn,
+    });
+    expect(statements.ReadRegistryTags).toEqual({
+      Sid: "ReadRegistryTags",
+      Effect: "Allow",
+      Action: "agent-registry:ListTagsForResource",
+      Resource: [registryArn, recordArn],
     });
     expect(statements.DiscoverApprovedRegistryRecords).toEqual({
       Sid: "DiscoverApprovedRegistryRecords",
@@ -394,16 +401,29 @@ describe("Phase 22 — Registry reader trust and permissions", () => {
         "agent-registry:GetRegistryRecord",
         "agent-registry:ListDiscoverableRegistryRecords",
         "agent-registry:ListRegistryRecords",
+        "agent-registry:ListTagsForResource",
         "agent-registry:SearchDiscoverableRegistryRecords",
         "ssm:GetParameters",
       ].sort(),
     );
-    const renderedResources = JSON.stringify(
-      policy.Properties.PolicyDocument.Statement.map(
-        (statement: any) => statement.Resource,
-      ),
+    const wildcardResources =
+      policy.Properties.PolicyDocument.Statement.flatMap((statement: any) =>
+        Array.isArray(statement.Resource)
+          ? statement.Resource
+          : [statement.Resource],
+      )
+        .filter((resource: any) => JSON.stringify(resource).includes("*"))
+        .map((resource: any) => JSON.stringify(resource));
+    expect(new Set(wildcardResources)).toEqual(
+      new Set([
+        JSON.stringify(recordArn),
+        JSON.stringify(
+          partitionArn(
+            `:ssm:us-west-2:${PLATFORM_ACCOUNT_ID}:parameter/agenticai/registry/v1/nonprod/*`,
+          ),
+        ),
+      ]),
     );
-    expect(renderedResources.match(/\*/g)).toHaveLength(2);
     expect(JSON.stringify(policy)).not.toContain("bedrock-agentcore:");
     expect(JSON.stringify(policy)).not.toContain(
       "BatchGetDiscoverableRegistryRecord",

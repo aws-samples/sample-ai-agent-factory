@@ -345,6 +345,12 @@ export class GaPlatformRegistryConstruct extends Construct {
           resources: [`${this.registryArn}/record/*`],
         }),
         new PolicyStatement({
+          sid: "ReadRegistryTags",
+          effect: Effect.ALLOW,
+          actions: ["agent-registry:ListTagsForResource"],
+          resources: [this.registryArn, `${this.registryArn}/record/*`],
+        }),
+        new PolicyStatement({
           sid: "DiscoverApprovedRegistryRecords",
           effect: Effect.ALLOW,
           actions: [
