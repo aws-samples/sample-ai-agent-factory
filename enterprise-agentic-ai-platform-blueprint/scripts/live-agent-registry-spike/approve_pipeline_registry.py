@@ -510,7 +510,10 @@ def assert_registry_contract(
     status = require_field(registry, "status", "GetRegistry")
     if status != REQUIRED_REGISTRY_STATUS:
         raise ApprovalError(f"Registry {name} is {status}, not {REQUIRED_REGISTRY_STATUS}")
-    authorizer = require_field(registry, "authorizerType", "GetRegistry")
+    discovery = require_mapping(
+        registry.get("discoveryConfiguration"), "discoveryConfiguration"
+    )
+    authorizer = require_field(discovery, "authorizerType", "discoveryConfiguration")
     if authorizer != REQUIRED_AUTHORIZER_TYPE:
         raise ApprovalError(
             f"Registry {name} authorizer is {authorizer}, not {REQUIRED_AUTHORIZER_TYPE}"

@@ -186,7 +186,7 @@ class FakeAws:
             else {
                 "name": cfg.registry_name,
                 "status": "READY",
-                "authorizerType": "AWS_IAM",
+                "discoveryConfiguration": {"authorizerType": "AWS_IAM"},
                 "approvalConfiguration": {"AutoApprovalRules": ["APPROVE_ALL"]},
                 "registryArn": REGISTRY_ARN,
             }
@@ -661,7 +661,10 @@ def test_wrong_account_blocks_every_submission(
     [
         ({"name": "agenticai-platform-prod-v1"}, "Expected registry"),
         ({"status": "CREATING"}, "not READY"),
-        ({"authorizerType": "CUSTOM_JWT"}, "not AWS_IAM"),
+        (
+            {"discoveryConfiguration": {"authorizerType": "CUSTOM_JWT"}},
+            "not AWS_IAM",
+        ),
         (
             {"approvalConfiguration": {"autoApprovalRules": ["MANUAL"]}},
             "auto-approval rules",
@@ -678,7 +681,7 @@ def test_registry_contract_violations_block_every_submission(
     registry = {
         "name": cfg.registry_name,
         "status": "READY",
-        "authorizerType": "AWS_IAM",
+        "discoveryConfiguration": {"authorizerType": "AWS_IAM"},
         "approvalConfiguration": {"autoApprovalRules": ["APPROVE_ALL"]},
         "registryArn": REGISTRY_ARN,
     }
