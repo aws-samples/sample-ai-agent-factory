@@ -959,20 +959,16 @@ export class D03WorkstreamGatewayStack extends Stack {
                 ],
                 Resource: [policyEngineArn, gatewayArnToken],
               },
+              // GetPolicyEngine decrypts through the assumed Gateway role. The
+              // combined FAS-oriented condition block did not produce an
+              // identity-based allow for that runtime KMS request, as proved
+              // by CloudTrail. Keep decrypt access on the exact CMK; the key
+              // policy and service-created grants retain their constraints.
               {
                 Sid: "UsePolicyEngineKey",
                 Effect: "Allow",
                 Action: "kms:Decrypt",
                 Resource: policyEngineKey.keyArn,
-                Condition: {
-                  StringEquals: {
-                    "kms:ViaService": `bedrock-agentcore.${this.region}.${this.urlSuffix}`,
-                  },
-                  StringLike: {
-                    "kms:EncryptionContext:aws:bedrock-agentcore-policy:policy-engine-arn":
-                      policyEngineArnPattern,
-                  },
-                },
               },
               {
                 Sid: "ValidatePolicyEngineKey",

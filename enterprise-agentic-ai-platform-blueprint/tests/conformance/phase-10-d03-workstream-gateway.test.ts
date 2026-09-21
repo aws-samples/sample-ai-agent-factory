@@ -802,6 +802,27 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
     expect(JSON.stringify(keyPolicy)).not.toContain(
       '"Service":"bedrock-agentcore.amazonaws.com"',
     );
+    // Exact-key identity access relies on this statement for the runtime
+    // service/source/context boundary; keep the compensating controls coupled.
+    const keyCryptography = keyPolicy.find(
+      (statement: any) => statement.Sid === "AllowPolicyEngineCryptography",
+    );
+    expect(keyCryptography).toBeDefined();
+    expect(keyCryptography.Condition).toEqual(
+      expect.objectContaining({
+        StringEquals: expect.objectContaining({
+          "kms:ViaService": expect.anything(),
+          "aws:SourceAccount": expect.anything(),
+        }),
+        ArnLike: expect.objectContaining({
+          "aws:SourceArn": expect.anything(),
+        }),
+        StringLike: expect.objectContaining({
+          "kms:EncryptionContext:aws:bedrock-agentcore-policy:policy-engine-arn":
+            expect.anything(),
+        }),
+      }),
+    );
     const resources = template.toJSON().Resources as Record<string, any>;
     const propagation = Object.values(resources).find(
       (resource) =>
@@ -856,6 +877,37 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
         }),
       ]),
     );
+    const decrypt = accessStatements.find(
+      (statement: any) => statement.Sid === "UsePolicyEngineKey",
+    );
+    expect(decrypt).toEqual(
+      expect.objectContaining({
+        Effect: "Allow",
+        Action: "kms:Decrypt",
+        Resource: expect.anything(),
+      }),
+    );
+    expect(decrypt.Condition).toBeUndefined();
+    const describeKey = accessStatements.find(
+      (statement: any) => statement.Sid === "ValidatePolicyEngineKey",
+    );
+    expect(describeKey).toEqual(
+      expect.objectContaining({
+        Effect: "Allow",
+        Action: "kms:DescribeKey",
+        Resource: expect.anything(),
+      }),
+    );
+    expect(describeKey.Condition).toEqual({
+      StringEquals: {
+        "kms:ViaService": {
+          "Fn::Join": [
+            "",
+            ["bedrock-agentcore.us-west-2.", { Ref: "AWS::URLSuffix" }],
+          ],
+        },
+      },
+    });
     expect(JSON.stringify(accessStatements)).not.toContain('"Resource":"*"');
 
     template.hasOutput("PolicyEngineMode", { Value: "LOG_ONLY" });

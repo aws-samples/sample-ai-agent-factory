@@ -304,7 +304,15 @@ orders exact Gateway-role permissions → six-minute propagation gate →
 `LOG_ONLY` association → policies → requested mode → targets. Association uses
 a signed, idempotent convergence loop that retries only the live-proven transient
 `Access denied while calling GetPolicyEngine` validation response; unrelated
-validation errors fail immediately. Deletion reverses through target convergence
+validation errors fail immediately. The Gateway role scopes both KMS actions to
+the exact PolicyEngine CMK. `kms:Decrypt` omits the FAS-oriented condition block
+because live `GenesisPolicyEngineCheck` calls proved it did not authorize the
+runtime decrypt; metadata-only `kms:DescribeKey` retains `kms:ViaService`. The
+CMK key policy retains service conditions on grant creation, cryptography, and
+validation, source and encryption-context conditions on cryptography, and an
+operation/context-constrained grant-creation boundary. AgentCore's two
+service-created grants are independently operation- and context-constrained.
+Deletion reverses through target convergence
 → `LOG_ONLY` → policy deletion → detach → Gateway and engine deletion. `CUSTOM_JWT` group policies use the separately live-proven
 quoted-element candidate when a discovery URL is supplied directly to the
 Gateway stack; pipeline JWT-authorizer wiring remains a later gate.
