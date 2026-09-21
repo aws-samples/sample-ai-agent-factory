@@ -52,7 +52,10 @@ import { Construct } from "constructs";
 
 import { WorkloadNetworkStack } from "../apps/workload-account/lib/workload-network-stack";
 import { WorkloadAppStack } from "../apps/workload-account/lib/workload-app-stack";
-import { D03WorkstreamGatewayStack } from "../apps/platform-account/lib/d03-workstream-gateway-stack";
+import {
+  D03WorkstreamGatewayStack,
+  type GatewayPolicyEngineMode,
+} from "../apps/platform-account/lib/d03-workstream-gateway-stack";
 import { D03WorkstreamRegistryRolesStack } from "../apps/workload-account/lib/d03-workstream-registry-roles-stack";
 import type { GaRegistryConsumerContext } from "@agenticai/agent-registry";
 import {
@@ -69,6 +72,12 @@ export interface WorkloadGaRegistryConfig {
   readonly gatewayRegion: string;
 }
 
+export interface WorkloadPolicyEngineConfig {
+  readonly mode: Exclude<GatewayPolicyEngineMode, "OFF">;
+  readonly nonprodIamRoleArns: readonly string[];
+  readonly prodIamRoleArns: readonly string[];
+}
+
 export interface WorkloadStageProps extends StageProps {
   readonly envName: "nonprod" | "prod";
   readonly tenantId: string;
@@ -78,6 +87,8 @@ export interface WorkloadStageProps extends StageProps {
   readonly availabilityZones: readonly string[];
   readonly gaRegistryContext?: GaRegistryConsumerContext;
   readonly gatewayRegion?: string;
+  readonly policyEngineMode?: GatewayPolicyEngineMode;
+  readonly policyEngineIamRoleArns?: readonly string[];
   readonly auditOamSinkArn?: string;
   readonly notificationEmail?: string;
 }
@@ -109,6 +120,8 @@ export class WorkloadDeploymentStage extends Stage {
         workloadAccountId,
         platformAccountId: props.gaRegistryContext.platformAccountId,
         gaRegistryContext: props.gaRegistryContext,
+        policyEngineMode: props.policyEngineMode,
+        policyEngineIamRoleArns: props.policyEngineIamRoleArns,
         gatewayServiceRoleArnOverride: `${rolePrefix}/AgenticAI-D03-${props.envName}-${props.tenantId}-${props.agentId}-gw-svc`,
         registryValidatorRoleArnOverride: `${rolePrefix}/AgenticAI-D03-${props.envName}-${props.tenantId}-${props.agentId}-RegistryValidator`,
         crExecRoleArnOverride: `${rolePrefix}/AgenticAI-D03-${props.envName}-GatewayAdmin`,
@@ -205,6 +218,8 @@ export interface WorkloadPipelineStackProps extends StackProps {
   readonly applicationId?: string;
   readonly costCentre: string;
   readonly gaRegistry?: WorkloadGaRegistryConfig;
+  /** Opt-in Gateway PolicyEngine migration; omitted preserves the R2 rollback template. */
+  readonly policyEngine?: WorkloadPolicyEngineConfig;
   readonly workloadNonprodEnv: Required<Environment>;
   readonly workloadProdEnv: Required<Environment>;
   /** Account-specific AZ names produced by read-only preflight. */
@@ -382,6 +397,29 @@ export class WorkloadPipelineStack extends Stack {
       }
     }
 
+    if (props.policyEngine) {
+      if (!props.gaRegistry) {
+        throw new Error(
+          "WorkloadPipelineStack: PolicyEngine requires GA Registry mode.",
+        );
+      }
+      if (
+        !(["LOG_ONLY", "ENFORCE"] as const).includes(props.policyEngine.mode)
+      ) {
+        throw new Error(
+          "WorkloadPipelineStack: PolicyEngine mode must be LOG_ONLY or ENFORCE.",
+        );
+      }
+      if (
+        props.policyEngine.nonprodIamRoleArns.length === 0 ||
+        props.policyEngine.prodIamRoleArns.length === 0
+      ) {
+        throw new Error(
+          "WorkloadPipelineStack: PolicyEngine requires exact IAM role ARNs for both environments.",
+        );
+      }
+    }
+
     const resourceTags: PipelineResourceTags = {
       applicationId,
       agentId: props.agentId,
@@ -503,6 +541,8 @@ export class WorkloadPipelineStack extends Stack {
       availabilityZones: props.workloadNonprodAvailabilityZones,
       gaRegistryContext: props.gaRegistry?.nonprod,
       gatewayRegion: props.gaRegistry?.gatewayRegion,
+      policyEngineMode: props.policyEngine?.mode,
+      policyEngineIamRoleArns: props.policyEngine?.nonprodIamRoleArns,
       auditOamSinkArn: props.auditOamSinkArn,
       notificationEmail: props.notificationEmail,
     });
@@ -624,6 +664,8 @@ export class WorkloadPipelineStack extends Stack {
       availabilityZones: props.workloadProdAvailabilityZones,
       gaRegistryContext: props.gaRegistry?.prod,
       gatewayRegion: props.gaRegistry?.gatewayRegion,
+      policyEngineMode: props.policyEngine?.mode,
+      policyEngineIamRoleArns: props.policyEngine?.prodIamRoleArns,
       auditOamSinkArn: props.auditOamSinkArn,
       notificationEmail: props.notificationEmail,
     });
@@ -632,8 +674,9 @@ export class WorkloadPipelineStack extends Stack {
       this.pipeline.addStage(prodStage, {
         pre: [
           new ManualApprovalStep("ProdGatewayApproval", {
-            comment:
-              "Approve only after nonproduction Gateway targets pass live Registry, tools/list, tools/call, and denial twins. No agent runtime/canary exists in the R2 Gateway-only slice.",
+            comment: props.policyEngine
+              ? `Approve only after nonproduction Registry/MCP denial twins and PolicyEngine ${props.policyEngine.mode} behavior match the retained Lambda wrapper. Production must not lead nonproduction mode evidence.`
+              : "Approve only after nonproduction Gateway targets pass live Registry, tools/list, tools/call, and denial twins. No agent runtime/canary exists in the R2 Gateway-only slice.",
           }),
         ],
       });
@@ -787,6 +830,14 @@ export class WorkloadPipelineStack extends Stack {
       );
       derived["agenticai/workstreamGatewayRegion"] =
         props.gaRegistry.gatewayRegion;
+    }
+    if (props.policyEngine) {
+      derived["agenticai/gatewayPolicyEngineMode"] = props.policyEngine.mode;
+      derived["agenticai/gatewayPolicyEngineNonprodIamRoleArns"] =
+        JSON.stringify(props.policyEngine.nonprodIamRoleArns);
+      derived["agenticai/gatewayPolicyEngineProdIamRoleArns"] = JSON.stringify(
+        props.policyEngine.prodIamRoleArns,
+      );
     }
     return {
       ...derived,

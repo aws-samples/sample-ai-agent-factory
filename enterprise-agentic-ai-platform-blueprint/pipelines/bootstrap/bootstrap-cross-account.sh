@@ -45,6 +45,12 @@ QUALIFIER="hnb659fds"
 # iam:PassedToService=states.amazonaws.com. This is required for the bounded
 # Step Functions waiters used by deletion and IAM-propagation barriers; do not
 # widen the role resource pattern or omit the passed-to-service condition.
+# The optional Gateway PolicyEngine path also requires kms:CreateGrant,
+# kms:Decrypt, kms:GenerateDataKey, and kms:DescribeKey on its exact
+# AgenticAI PolicyEngine CMK. Scope them with
+# kms:ViaService=bedrock-agentcore.<region>.amazonaws.com and the
+# aws:bedrock-agentcore-policy:policy-engine-arn encryption context documented
+# by Policy in AgentCore; do not grant unconstrained KMS administration.
 # The Management account execution policy additionally needs Kinesis lifecycle
 # actions, IAM lifecycle actions on the exact
 # AgenticAI-LogArchive-CWLDestinationRole, and iam:PassRole on that role with

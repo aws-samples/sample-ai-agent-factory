@@ -23,6 +23,8 @@
  * SPDX-License-Identifier: MIT-0
  */
 
+import { createHash } from "node:crypto";
+
 export type ToolId = string; // branded string; keep simple for v1
 
 /**
@@ -249,4 +251,198 @@ export function composeCedarPolicyDocument(
     "// Default forbid — everything not explicitly permitted above\nforbid(principal, action, resource) unless { principal has allowed && resource has allowed };",
   );
   return parts.join("\n\n");
+}
+
+export type AgentCoreGatewayAuthorizerType = "AWS_IAM" | "CUSTOM_JWT";
+
+export interface AgentCorePolicyEngineOptions {
+  readonly authorizerType: AgentCoreGatewayAuthorizerType;
+  readonly gatewayArn: string;
+  readonly policyNamePrefix: string;
+  readonly targetNames: Readonly<Record<string, string>>;
+  /** Exact IAM role ARNs permitted to call an AWS_IAM Gateway. */
+  readonly iamRoleArns?: readonly string[];
+}
+
+export interface AgentCorePolicyDefinition {
+  readonly policyName: string;
+  readonly toolId: string;
+  readonly statement: string;
+}
+
+const AGENTCORE_POLICY_NAME = /^[A-Za-z][A-Za-z0-9_]{0,47}$/;
+const AGENTCORE_TARGET_NAME = /^[0-9A-Za-z][0-9A-Za-z-]{0,99}$/;
+const IAM_ROLE_ARN =
+  /^arn:(aws|aws-us-gov|aws-cn):iam::(\d{12}):role\/([A-Za-z0-9+=,.@_-]{1,64})$/;
+
+function agentCorePolicyName(raw: string): string {
+  let normalized = raw.replace(/[^A-Za-z0-9_]/g, "_");
+  if (!/^[A-Za-z]/.test(normalized)) normalized = `P_${normalized}`;
+  if (normalized.length > 48) {
+    const digest = createHash("sha256")
+      .update(raw, "utf8")
+      .digest("hex")
+      .slice(0, 8);
+    normalized = `${normalized.slice(0, 39)}_${digest}`;
+  }
+  if (!AGENTCORE_POLICY_NAME.test(normalized)) {
+    throw new Error(
+      `AgentCore Policy name '${normalized}' must match ${AGENTCORE_POLICY_NAME.source}.`,
+    );
+  }
+  return normalized;
+}
+
+function cedarString(value: string, label: string): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    /["\\\r\n]/.test(value)
+  ) {
+    throw new Error(`${label} contains a character that is unsafe in Cedar.`);
+  }
+  return value;
+}
+
+function assumedRolePrincipal(roleArn: string): string {
+  const match = IAM_ROLE_ARN.exec(roleArn);
+  if (!match) {
+    throw new Error(
+      `PolicyEngine IAM principal '${roleArn}' must be an exact pathless IAM role ARN.`,
+    );
+  }
+  const [, partition, accountId, roleName] = match;
+  return `arn:${partition}:sts::${accountId}:assumed-role/${roleName}`;
+}
+
+function agentCorePermit(
+  principal: string,
+  action: string,
+  gatewayArn: string,
+  condition?: string,
+): string {
+  const statement = [
+    "permit(",
+    `  ${principal},`,
+    `  action == AgentCore::Action::"${action}",`,
+    `  resource == AgentCore::Gateway::"${gatewayArn}"`,
+    ")",
+  ];
+  if (condition) {
+    statement.push(`when { ${condition} };`);
+  } else {
+    statement[statement.length - 1] += ";";
+  }
+  return statement.join("\n");
+}
+
+/**
+ * Compile one strict AgentCore Policy definition per subscribed tool.
+ *
+ * Policy in AgentCore uses a service schema that is intentionally different
+ * from the legacy Lambda-wrapper grammar: principals are `IamEntity` or
+ * `OAuthUser`, actions are `<TargetName>___<ToolName>`, and resources are an
+ * exact Gateway ARN. Default deny is provided by the PolicyEngine itself, so
+ * this compiler emits permits only and never a catch-all forbid that would
+ * override them.
+ */
+export function composeAgentCorePolicyDefinitions(
+  subset: readonly ToolSpec[],
+  options: AgentCorePolicyEngineOptions,
+): readonly AgentCorePolicyDefinition[] {
+  if (subset.length === 0) {
+    throw new Error("PolicyEngine requires at least one subscribed tool.");
+  }
+  const gatewayArn = cedarString(options.gatewayArn, "Gateway ARN");
+  if (gatewayArn.includes("*")) {
+    throw new Error("PolicyEngine Gateway ARN must not contain a wildcard.");
+  }
+
+  const configuredRoleArns = options.iamRoleArns ?? [];
+  if (new Set(configuredRoleArns).size !== configuredRoleArns.length) {
+    throw new Error("PolicyEngine IAM role ARNs must not contain duplicates.");
+  }
+  const roleArns = [...configuredRoleArns].sort();
+  if (options.authorizerType === "AWS_IAM" && roleArns.length === 0) {
+    throw new Error(
+      "AWS_IAM PolicyEngine mode requires at least one exact IAM role ARN.",
+    );
+  }
+  if (options.authorizerType === "CUSTOM_JWT" && roleArns.length > 0) {
+    throw new Error(
+      "CUSTOM_JWT PolicyEngine mode must not carry IAM role principals.",
+    );
+  }
+  const iamPrincipals = roleArns.map(assumedRolePrincipal);
+
+  return [...subset]
+    .sort((left, right) => left.toolId.localeCompare(right.toolId))
+    .map((tool) => {
+      validateToolSpec(tool);
+      const targetName = options.targetNames[tool.toolId];
+      if (!targetName || !AGENTCORE_TARGET_NAME.test(targetName)) {
+        throw new Error(
+          `PolicyEngine target name for '${tool.toolId}' is absent or invalid.`,
+        );
+      }
+      const action = cedarString(
+        `${targetName}___${tool.toolId}`,
+        `PolicyEngine action for '${tool.toolId}'`,
+      );
+      let statements: string[];
+
+      if (options.authorizerType === "AWS_IAM") {
+        if (tool.allowedGroups && tool.allowedGroups.length > 0) {
+          throw new Error(
+            `Tool '${tool.toolId}' has allowedGroups and therefore requires CUSTOM_JWT PolicyEngine mode.`,
+          );
+        }
+        statements = iamPrincipals.map((principal) =>
+          agentCorePermit(
+            `principal == AgentCore::IamEntity::"${principal}"`,
+            action,
+            gatewayArn,
+          ),
+        );
+      } else if (tool.allowedGroups && tool.allowedGroups.length > 0) {
+        const groupConditions = tool.allowedGroups.map((group) => {
+          cedarString(group, `Cognito group for '${tool.toolId}'`);
+          // AgentCore exposes this list-valued claim as JSON array text. The
+          // isolated PolicyEngine campaign live-proved quote-delimited element
+          // matching; do not weaken this to a bare substring, which lets one
+          // group name collide with another. See evidence/live/2026-09-19-
+          // policyengine-compatibility-spike.md.
+          const slash = String.fromCharCode(92);
+          const quotedGroup = `${slash}"${group}${slash}"`;
+          return (
+            `(principal.hasTag("cognito:groups") && ` +
+            `principal.getTag("cognito:groups") like "*${quotedGroup}*")`
+          );
+        });
+        statements = [
+          agentCorePermit(
+            "principal is AgentCore::OAuthUser",
+            action,
+            gatewayArn,
+            groupConditions.join(" || "),
+          ),
+        ];
+      } else {
+        statements = [
+          agentCorePermit(
+            "principal is AgentCore::OAuthUser",
+            action,
+            gatewayArn,
+          ),
+        ];
+      }
+
+      return {
+        policyName: agentCorePolicyName(
+          `${options.policyNamePrefix}_${tool.toolId}`,
+        ),
+        toolId: tool.toolId,
+        statement: statements.join("\n\n"),
+      };
+    });
 }

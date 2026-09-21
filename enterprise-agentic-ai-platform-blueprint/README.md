@@ -153,7 +153,7 @@ Infrastructure is authored in AWS CDK (TypeScript + Python), synthesising CloudF
 LiteLLM, API Gateway, WAF, Cognito, AgentCore Gateway, Registry, shared base-image ECR, and experiment-tracking DynamoDB live in the platform account and are consumed cross-account by agents on AgentCore Runtime in workload accounts. Memory stays in the workload account.
 
 - **Rationale.** Central AI Platform team owns LiteLLM/Gateway/guardrails; product teams own agents. One deployment to upgrade; faster workload onboarding; consolidated guardrail enforcement.
-- **Residual risks + compensating controls.** Platform SPOF → multi-AZ + per-env isolation + evaluation-gate-gated pipeline; per-workload quota → LiteLLM virtual-key budgets; **per-workload CUR** → platform-owned per-tenant Application Inference Profiles (the real fix for `BUG-005`: `sts:TagSession` does not survive role chaining); cross-account AssumeRole → `ExternalId` + `PrincipalArn`/`RoleSessionName` conditions; JWT replay → `tenantId` claim asserted against `sts:SourceAccount`; shared Registry/ECR tampering → per-tenant scoping + platform-pipeline-only writes; **per-developer scoping** → Cedar entitlement (`allowedGroups` + `CUSTOM_JWT` + `@agenticai/tool-cedar-wrapper`, fail-closed). **TODO-GW-POLICY-ENGINE**: the API is now available and the bounded compatibility contract passed; the wrapper retires only after the pipeline-owned Gateway migration passes behavior parity, rollback, and zero-residual teardown.
+- **Residual risks + compensating controls.** Platform SPOF → multi-AZ + per-env isolation + evaluation-gate-gated pipeline; per-workload quota → LiteLLM virtual-key budgets; **per-workload CUR** → platform-owned per-tenant Application Inference Profiles (the real fix for `BUG-005`: `sts:TagSession` does not survive role chaining); cross-account AssumeRole → `ExternalId` + `PrincipalArn`/`RoleSessionName` conditions; JWT replay → `tenantId` claim asserted against `sts:SourceAccount`; shared Registry/ECR tampering → per-tenant scoping + platform-pipeline-only writes; **per-developer scoping** → Cedar entitlement (`allowedGroups` + `CUSTOM_JWT` + `@agenticai/tool-cedar-wrapper`, fail-closed). **TODO-GW-POLICY-ENGINE**: the API is available, the isolated compatibility contract passed, and the Workload pipeline now has an opt-in `LOG_ONLY`/`ENFORCE` path; the wrapper retires only after that path passes behavior parity, rollback, and zero-residual teardown.
 - **Equivalence obligations.** Guardrail-on-every-call, per-workload cost attribution, per-workload audit trail, model allow-list SSOT, tenancy isolation, and network isolation are all preserved and CI-asserted. Two-account live verification (2026-05-01): 12/12 behavioural assertions PASS; re-verified end-to-end 2026-07-02.
 
 New deviations require product-owner sign-off documenting: affected spec clauses, rationale, residual risks, compensating controls, equivalence obligations, and the CI conformance tests that assert them.
@@ -194,7 +194,7 @@ export CDK_DEFAULT_REGION=us-west-2
 npx cdk bootstrap "aws://$CDK_DEFAULT_ACCOUNT/$CDK_DEFAULT_REGION" --qualifier hnb659fds
 ```
 
-> **Least privilege.** Set the CDK CloudFormation execution policy to a customer-managed policy scoped to the services these stacks provision — do **not** use `AdministratorAccess`. See `pipelines/bootstrap/bootstrap-cross-account.sh` (requires `CFN_EXECUTION_POLICY_ARN`); the required scope is documented inline there. The Platform-account execution policy must additionally allow `iam:PassRole` on each target account's exact `cdk-hnb659fds-deploy-role-<account>-<region>` ARN with `iam:PassedToService=codepipeline.amazonaws.com`, and its exact `cdk-hnb659fds-cfn-exec-role-<account>-<region>` ARN with `iam:PassedToService=cloudformation.amazonaws.com`; CodePipeline validates both role classes when the cross-account pipeline is created. The Workstream execution policy must allow `iam:PassRole` on its exact pipeline-created/CDK Provider waiter roles with `iam:PassedToService=states.amazonaws.com`; this enables bounded Step Functions waiters without granting arbitrary service pass-through. The Management execution policy must allow Kinesis stream provisioning, lifecycle management of the exact `AgenticAI-LogArchive-CWLDestinationRole`, and `iam:PassRole` on that role only with `iam:PassedToService=logs.amazonaws.com`. For reversible nonproduction buckets, scope IAM role lifecycle plus managed-policy attach/detach to `Nonprod-LogArchive-CustomS3AutoDeleteObjects*`, pass that generated role only to `lambda.amazonaws.com`, and scope Lambda lifecycle actions to the matching function prefix.
+> **Least privilege.** Set the CDK CloudFormation execution policy to a customer-managed policy scoped to the services these stacks provision — do **not** use `AdministratorAccess`. See `pipelines/bootstrap/bootstrap-cross-account.sh` (requires `CFN_EXECUTION_POLICY_ARN`); the required scope is documented inline there. The Platform-account execution policy must additionally allow `iam:PassRole` on each target account's exact `cdk-hnb659fds-deploy-role-<account>-<region>` ARN with `iam:PassedToService=codepipeline.amazonaws.com`, and its exact `cdk-hnb659fds-cfn-exec-role-<account>-<region>` ARN with `iam:PassedToService=cloudformation.amazonaws.com`; CodePipeline validates both role classes when the cross-account pipeline is created. The Workstream execution policy must allow `iam:PassRole` on its exact pipeline-created/CDK Provider waiter roles with `iam:PassedToService=states.amazonaws.com`; this enables bounded Step Functions waiters without granting arbitrary service pass-through. When Gateway PolicyEngine is enabled, the same execution role also needs `kms:CreateGrant`, `kms:Decrypt`, `kms:GenerateDataKey`, and `kms:DescribeKey` on the exact PolicyEngine CMK, constrained by `kms:ViaService=bedrock-agentcore.<region>.amazonaws.com` and the `aws:bedrock-agentcore-policy:policy-engine-arn` encryption context. The Management execution policy must allow Kinesis stream provisioning, lifecycle management of the exact `AgenticAI-LogArchive-CWLDestinationRole`, and `iam:PassRole` on that role only with `iam:PassedToService=logs.amazonaws.com`. For reversible nonproduction buckets, scope IAM role lifecycle plus managed-policy attach/detach to `Nonprod-LogArchive-CustomS3AutoDeleteObjects*`, pass that generated role only to `lambda.amazonaws.com`, and scope Lambda lifecycle actions to the matching function prefix.
 
 > **Worked example.** [`examples/reference-deployment-us-west-2/`](examples/reference-deployment-us-west-2/) is a complete 7-account `us-west-2` walkthrough with a fully populated `cdk.context.json` template (placeholder account ids), the Phase 1 → 8 deploy sequence, and the matching teardown. Use it as the concrete reference for the abstract steps below.
 
@@ -277,6 +277,39 @@ HEAD="$(git rev-parse HEAD)"
    `ProdGatewayApproval` action. GA mode deliberately omits the app evaluation,
    canary, and soak actions that require stacks it does not deploy; legacy/full
    agent mode retains those gates unchanged.
+
+Gateway PolicyEngine migration is opt-in and defaults to `OFF`, which emits the
+exact R2 rollback template. For the current `AWS_IAM` Workload pipeline path,
+configure exact pathless caller-role ARNs separately for each environment and
+start in `LOG_ONLY`:
+
+```json
+{
+  "agenticai/gatewayPolicyEngineMode": "LOG_ONLY",
+  "agenticai/gatewayPolicyEngineNonprodIamRoleArns": [
+    "arn:aws:iam::<WORKLOAD_NONPROD_ACCOUNT>:role/<EXACT_RUNTIME_ROLE>"
+  ],
+  "agenticai/gatewayPolicyEngineProdIamRoleArns": [
+    "arn:aws:iam::<WORKLOAD_PROD_ACCOUNT>:role/<EXACT_RUNTIME_ROLE>"
+  ]
+}
+```
+
+The stack converts each IAM role to the stable
+`AgentCore::IamEntity::"arn:aws:sts::<account>:assumed-role/<role>"` principal,
+compiles one strict `FAIL_ON_ANY_FINDINGS` / `ACTIVE` policy per tool against
+its exact `<TargetName>___<ToolName>` action and Gateway ARN, and encrypts the
+engine and child policies with a rotating customer-managed KMS key. Creation
+orders exact Gateway-role permissions → six-minute propagation gate →
+`LOG_ONLY` association → policies → requested mode → targets. Deletion reverses
+through target convergence → `LOG_ONLY` → policy deletion → detach → Gateway
+and engine deletion. `CUSTOM_JWT` group policies use the separately live-proven
+quoted-element candidate when a discovery URL is supplied directly to the
+Gateway stack; pipeline JWT-authorizer wiring remains a later gate.
+
+Do not switch to `ENFORCE` until live decisions match the Lambda wrapper. The
+wrapper remains active in both modes and `OFF` remains the rollback until the
+pipeline-owned parity, mode rollback, and zero-residual campaign passes.
 
 The Workload synth project uses the named
 `AgenticAI-WLP-<tenant>-<agent>-RegistrySynth` role and assumes only the two
@@ -422,6 +455,7 @@ A customer should never have to fork the repo to make a supported variant. Every
 | Region                             | `us-west-2`                | `packages/platform-baselines/src/approved-regions.ts` + SCP-06 sandbox-soak      |
 | Eval thresholds                    | see §2.5                   | `agenticai/eval*` context keys                                                   |
 | Gateway fronting                   | API Gateway (§08 Option A) | hard default                                                                     |
+| Gateway PolicyEngine migration     | `OFF`                      | `agenticai/gatewayPolicyEngineMode` (`LOG_ONLY` before `ENFORCE`)                 |
 | Browser egress / Lattice endpoints | Off                        | `agenticai/enableBrowserInternetEgress` / `enableLatticePrivateEndpoints` (BETA) |
 
 An override that breaks a spec MUST (e.g. adding a non-Claude model) becomes a new deviation in §3.
@@ -495,7 +529,7 @@ Know what **has** been live-verified and what **has not** before adopting.
 
 **Not live-verified.**
 
-- **Workload pipeline PolicyEngine integration and Lambda-wrapper retirement** — the isolated API contract passed, but the Workstream migration still requires pipeline deployment, parity, rollback, and teardown proof before `@agenticai/tool-cedar-wrapper` is removed.
+- **Workload pipeline PolicyEngine integration and Lambda-wrapper retirement** — the isolated API contract passed and the opt-in `OFF`/`LOG_ONLY`/`ENFORCE` pipeline path is locally implemented, but it still requires reviewed pipeline deployment, decision parity, mode rollback, and teardown proof before `@agenticai/tool-cedar-wrapper` is removed.
 - **Exact 429 twin against the pipeline-owned production rate limit** — the rate limit is `ACTIVE` and positive discovery/inference passed, but its configuration was not mutated for a destructive-limit test. Exact HTTP 429 behavior is live-proven by the isolated compatibility spike.
 - **Gateway OTEL rate-limit span correlation in `us-west-2`** — reproduced blocker: real HTTP 200/429 twins produced no `aws/spans` records after CloudWatch Logs trace destination was `ACTIVE`, Transaction Search indexing was 100%, delivery propagation was allowed, and six minutes of polling elapsed. X-Ray and indexing were restored and all run-owned resources were removed.
 - **SCPs 01–12 org soak** — unit + regression tests only (`scp-bypass-regression.test.ts`, 13 cases); the primary IAM identity policies these SCPs defend-in-depth were verified least-privilege on the live roles.
@@ -518,7 +552,7 @@ bash scripts/teardown.sh     # reverse-dependency stack sweep
 pytest tests/teardown/       # verify zero residuals
 ```
 
-The teardown refuses to synthesize a present Platform Gateway or pipeline stack without the model-rate allocation and its account/role context. For an R2 Workload deployment, also provide both resolved GA context files, stable tool IDs, Workstream account/AZ tuples, and the Gateway Region; the script destroys production/nonproduction ToolGateway stacks before their RegistryRoles stacks and then removes the Workload pipeline root. Before each stack deletion, the script snapshots the exact physical IDs of its CodeBuild projects and Lambda functions; after a successful `cdk destroy`, it verifies those resources are absent and deletes only their exact service-created default CloudWatch log groups. A rerun against an already-absent stack recovers exact IDs from CloudFormation's deleted-stack event history, so failed cleanup and prior deployment generations remain recoverable without prefix-wide deletion. Missing groups are idempotent, while discovery, resource-absence, or deletion errors fail the teardown. A direct `cdk destroy` bypasses this cleanup and can leave empty `/aws/codebuild/*` or `/aws/lambda/*` groups. `cdk destroy` runs dependency-ordered. The EU AI Act Object-Lock COMPLIANCE 7-year bucket cannot be deleted before its retention expires — this is intentional and documented.
+The teardown refuses to synthesize a present Platform Gateway or pipeline stack without the model-rate allocation and its account/role context. For an R2 Workload deployment, also provide both resolved GA context files, stable tool IDs, Workstream account/AZ tuples, and the Gateway Region. If PolicyEngine is enabled, export `AGENTICAI_GATEWAY_POLICY_ENGINE_MODE` plus both environment-specific IAM-role JSON arrays so destroy synthesizes the deployed graph rather than the default `OFF` graph. The script destroys production/nonproduction ToolGateway stacks before their RegistryRoles stacks and then removes the Workload pipeline root. A PolicyEngine CMK enters its configured seven-day pending-deletion window after the service retires both grants; this is intentional. Before each stack deletion, the script snapshots the exact physical IDs of its CodeBuild projects and Lambda functions; after a successful `cdk destroy`, it verifies those resources are absent and deletes only their exact service-created default CloudWatch log groups. A rerun against an already-absent stack recovers exact IDs from CloudFormation's deleted-stack event history, so failed cleanup and prior deployment generations remain recoverable without prefix-wide deletion. Missing groups are idempotent, while discovery, resource-absence, or deletion errors fail the teardown. A direct `cdk destroy` bypasses this cleanup and can leave empty `/aws/codebuild/*` or `/aws/lambda/*` groups. `cdk destroy` runs dependency-ordered. The EU AI Act Object-Lock COMPLIANCE 7-year bucket cannot be deleted before its retention expires — this is intentional and documented.
 
 ---
 

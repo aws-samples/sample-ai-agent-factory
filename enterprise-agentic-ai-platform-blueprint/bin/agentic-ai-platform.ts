@@ -43,7 +43,10 @@ import { WorkloadPipelineStack } from "../pipelines/workload-pipeline-stack";
 import { D03PlatformCoreStack } from "../apps/platform-account/lib/d03-platform-core-stack";
 import { parseGaRegistryConsumerContext } from "@agenticai/agent-registry";
 import { D03WorkloadAgentStack } from "../apps/workload-account/lib/d03-workload-agent-stack";
-import { D03WorkstreamGatewayStack } from "../apps/platform-account/lib/d03-workstream-gateway-stack";
+import {
+  D03WorkstreamGatewayStack,
+  type GatewayPolicyEngineMode,
+} from "../apps/platform-account/lib/d03-workstream-gateway-stack";
 import { GapClosureStack } from "../apps/workload-account/lib/gap-closure-stack";
 import type { InferenceModelRateLimit } from "@agenticai/platform-inference-gateway";
 
@@ -95,6 +98,15 @@ function stringArrayContext(key: string): readonly string[] {
     );
   }
   return parsed;
+}
+
+function gatewayPolicyEngineModeContext(key: string): GatewayPolicyEngineMode {
+  const raw = app.node.tryGetContext(key);
+  if (raw === undefined) return "OFF";
+  if (raw !== "OFF" && raw !== "LOG_ONLY" && raw !== "ENFORCE") {
+    throw new Error(`Context '${key}' must be OFF, LOG_ONLY, or ENFORCE.`);
+  }
+  return raw;
 }
 
 type GaRegistryRecordGenerationsByEnvironment = Readonly<
@@ -659,6 +671,12 @@ switch (stage) {
       "agenticai/cognitoDiscoveryUrl",
     );
     const cognitoAudience = app.node.tryGetContext("agenticai/cognitoAudience");
+    const gatewayPolicyEngineMode = gatewayPolicyEngineModeContext(
+      "agenticai/gatewayPolicyEngineMode",
+    );
+    const gatewayPolicyEngineIamRoleArns = stringArrayContext(
+      "agenticai/gatewayPolicyEngineIamRoleArns",
+    );
 
     const missing: string[] = [];
     if (!tenantId) missing.push("agenticai/tenantId");
@@ -706,6 +724,8 @@ switch (stage) {
           : typeof cognitoAudience === "string"
             ? (JSON.parse(cognitoAudience) as string[])
             : undefined,
+        policyEngineMode: gatewayPolicyEngineMode,
+        policyEngineIamRoleArns: gatewayPolicyEngineIamRoleArns,
       },
     );
     break;
@@ -781,6 +801,15 @@ switch (stage) {
         true ||
       app.node.tryGetContext("agenticai/enableGaGatewayInvokePermissions") ===
         "true";
+    const gatewayPolicyEngineMode = gatewayPolicyEngineModeContext(
+      "agenticai/gatewayPolicyEngineMode",
+    );
+    const gatewayPolicyEngineNonprodIamRoleArns = stringArrayContext(
+      "agenticai/gatewayPolicyEngineNonprodIamRoleArns",
+    );
+    const gatewayPolicyEngineProdIamRoleArns = stringArrayContext(
+      "agenticai/gatewayPolicyEngineProdIamRoleArns",
+    );
     const gaGatewayServiceRoleArns = stringArrayContext(
       "agenticai/gaGatewayServiceRoleArns",
     );
@@ -855,6 +884,17 @@ switch (stage) {
           missing.push("agenticai/gaRegistryProdContextFile");
         }
       }
+      if (gatewayPolicyEngineMode !== "OFF") {
+        if (!enableGaRegistryConsumer) {
+          missing.push("agenticai/enableGaRegistryConsumer=true");
+        }
+        if (gatewayPolicyEngineNonprodIamRoleArns.length === 0) {
+          missing.push("agenticai/gatewayPolicyEngineNonprodIamRoleArns");
+        }
+        if (gatewayPolicyEngineProdIamRoleArns.length === 0) {
+          missing.push("agenticai/gatewayPolicyEngineProdIamRoleArns");
+        }
+      }
     }
     if (missing.length > 0) {
       throw new Error(
@@ -909,6 +949,15 @@ switch (stage) {
           }
         : undefined;
 
+    const policyEngine =
+      includeWorkload && gatewayPolicyEngineMode !== "OFF"
+        ? {
+            mode: gatewayPolicyEngineMode,
+            nonprodIamRoleArns: gatewayPolicyEngineNonprodIamRoleArns,
+            prodIamRoleArns: gatewayPolicyEngineProdIamRoleArns,
+          }
+        : undefined;
+
     const sharedSynthContext: Record<string, string> = {
       "agenticai/githubRepo": githubRepo as string,
       "agenticai/githubConnectionArn": githubConnectionArn as string,
@@ -952,6 +1001,14 @@ switch (stage) {
       sharedSynthContext["agenticai/workstreamGatewayRegion"] = String(
         workstreamGatewayRegion,
       );
+    }
+    if (policyEngine) {
+      sharedSynthContext["agenticai/gatewayPolicyEngineMode"] =
+        policyEngine.mode;
+      sharedSynthContext["agenticai/gatewayPolicyEngineNonprodIamRoleArns"] =
+        JSON.stringify(policyEngine.nonprodIamRoleArns);
+      sharedSynthContext["agenticai/gatewayPolicyEngineProdIamRoleArns"] =
+        JSON.stringify(policyEngine.prodIamRoleArns);
     }
     if (enableGaGatewayInvokePermissions) {
       sharedSynthContext["agenticai/enableGaGatewayInvokePermissions"] = "true";
@@ -1037,6 +1094,7 @@ switch (stage) {
         notificationEmail:
           typeof notificationEmail === "string" ? notificationEmail : undefined,
         gaRegistry,
+        policyEngine,
         synthContext: sharedSynthContext,
       });
     }

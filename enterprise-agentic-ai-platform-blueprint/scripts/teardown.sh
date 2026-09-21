@@ -170,6 +170,20 @@ missing_env_for_stack() {
       missing="$missing $var"
     fi
   done
+  case "$stack" in
+    AgenticAI-WorkloadPipelineStack|AgenticAI-*-ToolGateway|AgenticAI-*-RegistryRoles)
+      if [ -n "${AGENTICAI_GATEWAY_POLICY_ENGINE_MODE:-}" ] &&
+         [ "${AGENTICAI_GATEWAY_POLICY_ENGINE_MODE}" != "OFF" ]; then
+        for var in \
+          AGENTICAI_GATEWAY_POLICY_ENGINE_NONPROD_IAM_ROLE_ARNS \
+          AGENTICAI_GATEWAY_POLICY_ENGINE_PROD_IAM_ROLE_ARNS; do
+          if [ -z "${!var:-}" ]; then
+            missing="$missing $var"
+          fi
+        done
+      fi
+      ;;
+  esac
   printf '%s\n' "${missing# }"
 }
 
@@ -195,6 +209,11 @@ set_context_args_for_stack() {
       add_context "agenticai/gaRegistryNonprodContextFile=${AGENTICAI_GA_REGISTRY_NONPROD_CONTEXT_FILE:-}"
       add_context "agenticai/gaRegistryProdContextFile=${AGENTICAI_GA_REGISTRY_PROD_CONTEXT_FILE:-}"
       add_context "agenticai/workstreamGatewayRegion=${AGENTICAI_WORKSTREAM_GATEWAY_REGION:-us-west-2}"
+      if [ -n "${AGENTICAI_GATEWAY_POLICY_ENGINE_MODE:-}" ]; then
+        add_context "agenticai/gatewayPolicyEngineMode=${AGENTICAI_GATEWAY_POLICY_ENGINE_MODE}"
+        add_context "agenticai/gatewayPolicyEngineNonprodIamRoleArns=${AGENTICAI_GATEWAY_POLICY_ENGINE_NONPROD_IAM_ROLE_ARNS:-}"
+        add_context "agenticai/gatewayPolicyEngineProdIamRoleArns=${AGENTICAI_GATEWAY_POLICY_ENGINE_PROD_IAM_ROLE_ARNS:-}"
+      fi
       add_context "agenticai/applicationId=${AGENTICAI_APPLICATION_ID:-$TENANT_ID}"
       add_context "agenticai/costCentre=${AGENTICAI_COST_CENTRE:-engineering}"
       add_tenant_context

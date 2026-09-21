@@ -3,9 +3,10 @@
  *
  * Per-tool Lambda Cedar enforcement wrapper. Acts as the second-layer
  * entitlement check that runs INSIDE the tool Lambda, before the user's
- * tool body. This is the deviation we accept until AgentCore PolicyEngine
- * API is GA and Cedar evaluation can move to the Gateway proper
- * (TODO-GW-POLICY-ENGINE in README §3).
+ * tool body. This remains the rollback and parity gate while pipeline-owned
+ * Gateway PolicyEngine support moves through LOG_ONLY and ENFORCE validation.
+ * It is removed only after live parity, rollback, and zero-residual teardown
+ * pass (TODO-GW-POLICY-ENGINE in README §3).
  *
  * Threat model the wrapper closes:
  *   - A developer's Cognito JWT is accepted by the AgentCore Gateway
@@ -25,9 +26,9 @@
  *   permit(principal in CognitoGroup::"<g>", action == Action::"InvokeTool", resource == Tool::"<id>");
  *   forbid(principal, action, resource) unless { principal has allowed && resource has allowed };
  * A 60-line regex evaluator handles that grammar deterministically and ships
- * with zero runtime dependencies (Lambda inline-handler-friendly). When the
- * platform later adopts the Gateway PolicyEngine API, this evaluator goes
- * away and Cedar evaluation moves to the Gateway.
+ * with zero runtime dependencies (Lambda inline-handler-friendly). The opt-in
+ * Gateway PolicyEngine path now compiles the native AgentCore schema separately;
+ * this evaluator stays active until that path passes live parity and rollback.
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0

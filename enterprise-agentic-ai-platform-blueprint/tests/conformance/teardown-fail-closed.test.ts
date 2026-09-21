@@ -237,6 +237,58 @@ describe("Round 1B — teardown stage mapping", () => {
     expect(run.npxCalls[0]).toContain(stack);
   });
 
+  it("requires and forwards PolicyEngine context for an enabled R2 teardown", () => {
+    const stack = "AgenticAI-demo-primary-nonprod-ToolGateway";
+    const base = {
+      AGENTICAI_GITHUB_REPO: "aws-samples/sample-ai-agent-factory",
+      AGENTICAI_GITHUB_CONNECTION_ARN:
+        "arn:aws:codeconnections:us-west-2:111111111111:connection/example",
+      AGENTICAI_PLATFORM_NONPROD_ACCOUNT_ID: "111111111111",
+      AGENTICAI_PLATFORM_PROD_ACCOUNT_ID: "222222222222",
+      AGENTICAI_WORKLOAD_NONPROD_ACCOUNT_ID: "333333333333",
+      AGENTICAI_WORKLOAD_PROD_ACCOUNT_ID: "444444444444",
+      AGENTICAI_WORKLOAD_NONPROD_AVAILABILITY_ZONES:
+        '["us-west-2a","us-west-2b"]',
+      AGENTICAI_WORKLOAD_PROD_AVAILABILITY_ZONES: '["us-west-2a","us-west-2b"]',
+      AGENTICAI_GA_REGISTRY_NONPROD_CONTEXT_FILE: "/scratch/nonprod.json",
+      AGENTICAI_GA_REGISTRY_PROD_CONTEXT_FILE: "/scratch/prod.json",
+      AGENTICAI_GA_REGISTRY_EXPECTED_TOOL_IDS: '["tool-echo","tool-ping"]',
+      AGENTICAI_GATEWAY_POLICY_ENGINE_MODE: "LOG_ONLY",
+      AGENTICAI_GATEWAY_POLICY_ENGINE_NONPROD_IAM_ROLE_ARNS:
+        '["arn:aws:iam::333333333333:role/RuntimeRole"]',
+      STUB_DESCRIBE_MODE: "exists",
+      STUB_DESTROY_EXIT: "0",
+    };
+    const missing = runTeardown(["--stack", stack], {
+      env: base,
+      input: "y\n",
+    });
+    expect(missing.status).toBe(EXIT.configError);
+    expect(missing.stderr).toContain(
+      "AGENTICAI_GATEWAY_POLICY_ENGINE_PROD_IAM_ROLE_ARNS",
+    );
+    expect(missing.npxCalls).toEqual([]);
+
+    const configured = runTeardown(["--stack", stack], {
+      env: {
+        ...base,
+        AGENTICAI_GATEWAY_POLICY_ENGINE_PROD_IAM_ROLE_ARNS:
+          '["arn:aws:iam::444444444444:role/RuntimeRole"]',
+      },
+      input: "y\n",
+    });
+    expect(configured.status).toBe(EXIT.ok);
+    expect(configured.npxCalls[0]).toContain(
+      "--context agenticai/gatewayPolicyEngineMode=LOG_ONLY",
+    );
+    expect(configured.npxCalls[0]).toContain(
+      "--context agenticai/gatewayPolicyEngineNonprodIamRoleArns=",
+    );
+    expect(configured.npxCalls[0]).toContain(
+      "--context agenticai/gatewayPolicyEngineProdIamRoleArns=",
+    );
+  });
+
   it("requires and forwards the Platform inference Gateway model-rate context", () => {
     const stack = "AgenticAI-Platform-InferenceGatewayStack";
     const required = {

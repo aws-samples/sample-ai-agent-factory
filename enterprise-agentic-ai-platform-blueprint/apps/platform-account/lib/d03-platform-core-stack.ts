@@ -842,9 +842,9 @@ export class D03PlatformCoreStack extends Stack {
     //     authenticated principal) so existing back-compat tests/live runs
     //     are unchanged. The live tester rotates the env var via
     //     `aws lambda update-function-configuration` to drive entitlement
-    //     scenarios. This is the TODO-GW-POLICY-ENGINE deviation
-    //     (README §3) — Cedar evaluation moves to the Gateway when the
-    //     AgentCore PolicyEngine API is GA.
+    //     scenarios. This is the TODO-GW-POLICY-ENGINE rollback/parity
+    //     path; the opt-in Gateway PolicyEngine runs beside it until live
+    //     parity, rollback, and zero-residual teardown pass.
     //
     // Handlers are inline because these are pure-demo Lambdas whose
     // behaviour is deterministic (echo / ping). Using `Code.fromInline` +

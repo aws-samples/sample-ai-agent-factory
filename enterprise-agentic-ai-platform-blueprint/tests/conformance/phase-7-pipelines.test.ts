@@ -154,7 +154,11 @@ function synthWorkload() {
   return Template.fromStack(stack);
 }
 
-function synthWorkloadGa(): {
+function synthWorkloadGa(policyEngine?: {
+  readonly mode: "LOG_ONLY" | "ENFORCE";
+  readonly nonprodIamRoleArns: readonly string[];
+  readonly prodIamRoleArns: readonly string[];
+}): {
   readonly stack: WorkloadPipelineStack;
   readonly template: Template;
 } {
@@ -180,6 +184,7 @@ function synthWorkloadGa(): {
       prod: gaConsumerContext("prod"),
       gatewayRegion: "us-west-2",
     },
+    policyEngine,
   });
   return { stack, template: Template.fromStack(stack) };
 }
@@ -679,6 +684,94 @@ describe("Phase 7 — R2 GA Registry Workload pipeline", () => {
     expect(allActions).not.toContain("CanaryDeploy");
     expect(allActions).not.toContain("CanarySoak");
     expect(actions.some((name: string) => name.includes("Deploy"))).toBe(true);
+  });
+
+  it("routes opt-in PolicyEngine mode and exact principals to both Gateway stages", () => {
+    const policyEngine = {
+      mode: "LOG_ONLY" as const,
+      nonprodIamRoleArns: [
+        "arn:aws:iam::444444444444:role/AgenticAI-D03-demo-primary-runtime",
+      ],
+      prodIamRoleArns: [
+        "arn:aws:iam::555555555555:role/AgenticAI-D03-demo-primary-runtime",
+      ],
+    };
+    const { stack, template } = synthWorkloadGa(policyEngine);
+    const blob = codeBuildBlob(template);
+    expect(blob).toContain("agenticai/gatewayPolicyEngineMode");
+    expect(blob).toContain("LOG_ONLY");
+    expect(blob).toContain("agenticai/gatewayPolicyEngineNonprodIamRoleArns");
+    expect(blob).toContain("agenticai/gatewayPolicyEngineProdIamRoleArns");
+
+    for (const [stageName, accountId] of [
+      ["Nonprod", "444444444444"],
+      ["Prod", "555555555555"],
+    ] as const) {
+      const stage = stack.node.findChild(stageName) as WorkloadDeploymentStage;
+      const gateway = Template.fromStack(stage.gatewayStack!);
+      gateway.resourceCountIs("AWS::BedrockAgentCore::PolicyEngine", 1);
+      gateway.resourceCountIs("AWS::BedrockAgentCore::Policy", 2);
+      expect(
+        JSON.stringify(gateway.findResources("AWS::BedrockAgentCore::Policy")),
+      ).toContain(
+        `arn:aws:sts::${accountId}:assumed-role/AgenticAI-D03-demo-primary-runtime`,
+      );
+      gateway.hasOutput("PolicyEngineMode", { Value: "LOG_ONLY" });
+    }
+    const pipeline = Object.values(
+      template.findResources("AWS::CodePipeline::Pipeline"),
+    )[0] as any;
+    const prodApproval = pipeline.Properties.Stages.find(
+      (stage: any) => stage.Name === "Prod",
+    ).Actions.find((action: any) => action.Name === "ProdGatewayApproval");
+    expect(prodApproval.Configuration.CustomData).toContain(
+      "PolicyEngine LOG_ONLY behavior",
+    );
+    expect(prodApproval.Configuration.CustomData).toContain("Lambda wrapper");
+  });
+
+  it("keeps PolicyEngine absent by default in both R2 Gateway stages", () => {
+    const { stack } = synthWorkloadGa();
+    for (const stageName of ["Nonprod", "Prod"]) {
+      const stage = stack.node.findChild(stageName) as WorkloadDeploymentStage;
+      const gateway = Template.fromStack(stage.gatewayStack!);
+      gateway.resourceCountIs("AWS::BedrockAgentCore::PolicyEngine", 0);
+      gateway.resourceCountIs("AWS::BedrockAgentCore::Policy", 0);
+    }
+  });
+
+  it("rejects pipeline PolicyEngine configuration without GA mode or both principal sets", () => {
+    const common = {
+      env: { account: "111111111111", region: "us-west-2" },
+      githubRepo: "aws-samples/sample-ai-agent-factory",
+      githubConnectionArn: GITHUB_CONNECTION,
+      tenantId: "demo",
+      agentId: "primary",
+      costCentre: "engineering",
+      workloadNonprodEnv: { account: "444444444444", region: "us-west-2" },
+      workloadProdEnv: { account: "555555555555", region: "us-west-2" },
+      workloadNonprodAvailabilityZones: ["us-west-2a", "us-west-2b"],
+      workloadProdAvailabilityZones: ["us-west-2a", "us-west-2b"],
+    };
+    expect(
+      () =>
+        new WorkloadPipelineStack(new App(), "PolicyWithoutGa", {
+          ...common,
+          policyEngine: {
+            mode: "LOG_ONLY",
+            nonprodIamRoleArns: ["arn:aws:iam::444444444444:role/RuntimeRole"],
+            prodIamRoleArns: ["arn:aws:iam::555555555555:role/RuntimeRole"],
+          },
+        }),
+    ).toThrow(/requires GA Registry mode/);
+
+    expect(() =>
+      synthWorkloadGa({
+        mode: "ENFORCE",
+        nonprodIamRoleArns: [],
+        prodIamRoleArns: ["arn:aws:iam::555555555555:role/RuntimeRole"],
+      }),
+    ).toThrow(/requires exact IAM role ARNs for both environments/);
   });
 
   it("keeps the legacy Network/App composition when GA mode is disabled", () => {
