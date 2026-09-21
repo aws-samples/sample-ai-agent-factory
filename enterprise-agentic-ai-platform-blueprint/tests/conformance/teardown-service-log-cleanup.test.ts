@@ -19,11 +19,17 @@ const AWS_STUB = `#!/usr/bin/env bash
 printf '%s\\n' "aws $*" >> "\${STUB_SEQUENCE_LOG:?}"
 case "\${1:-}:\${2:-}" in
   cloudformation:list-stacks)
+    printf '%s' "\${STUB_DELETED_STACK_IDS:-}"
     exit 0
     ;;
   cloudformation:describe-stacks)
-    printf 'CREATE_COMPLETE\\n'
-    exit 0
+    case "\${STUB_STACK_MODE:-exists}" in
+      exists) printf 'CREATE_COMPLETE\\n'; exit 0 ;;
+      absent)
+        printf 'Stack with id test does not exist\\n' >&2
+        exit 254
+        ;;
+    esac
     ;;
   cloudformation:list-stack-resources)
     case "\${STUB_RESOURCE_MODE:-success}" in
@@ -33,6 +39,24 @@ case "\${1:-}:\${2:-}" in
         exit 254
         ;;
     esac
+    ;;
+  cloudformation:describe-stack-events)
+    printf '%b' "\${STUB_DELETED_RESOURCES:-}"
+    exit 0
+    ;;
+  lambda:get-function)
+    if [ "\${STUB_LAMBDA_EXISTS:-false}" = true ]; then
+      printf 'arn:aws:lambda:us-west-2:111111111111:function:existing\\n'
+      exit 0
+    fi
+    printf 'An error occurred (ResourceNotFoundException): function absent\\n' >&2
+    exit 254
+    ;;
+  codebuild:batch-get-projects)
+    if [ "\${STUB_CODEBUILD_EXISTS:-false}" = true ]; then
+      printf 'AgenticAI-TestCleanupProject\\n'
+    fi
+    exit 0
     ;;
   logs:delete-log-group)
     case "\${STUB_DELETE_LOG_MODE:-success}" in
@@ -202,6 +226,43 @@ describe("teardown service-created log cleanup", () => {
     expect(run.status).toBe(1);
     expect(run.stderr).toContain("list-stack-resources failed");
     expect(run.sequence.some((line) => line.startsWith("npx "))).toBe(false);
+    expect(deleteCalls(run)).toEqual([]);
+  });
+
+  it("recovers and deduplicates exact log ids from an absent stack's deleted generations", () => {
+    const run = runTeardown({
+      STUB_STACK_MODE: "absent",
+      STUB_DELETED_STACK_IDS:
+        "arn:aws:cloudformation:us-west-2:111111111111:stack/deleted/example\n",
+      STUB_DELETED_RESOURCES: [
+        "AWS::Lambda::Function\tAgenticAI-HistoricFunction",
+        "AWS::Lambda::Function\tAgenticAI-HistoricFunction",
+        "AWS::CodeBuild::Project\tAgenticAI-HistoricProject",
+        "AWS::CodeBuild::Project\tAgenticAI-HistoricProject",
+        "",
+      ].join("\n"),
+    });
+
+    expect(run.status).toBe(0);
+    expect(run.sequence.some((line) => line.startsWith("npx "))).toBe(false);
+    expect(deleteCalls(run)).toEqual([
+      "aws logs delete-log-group --log-group-name /aws/lambda/AgenticAI-HistoricFunction",
+      "aws logs delete-log-group --log-group-name /aws/codebuild/AgenticAI-HistoricProject",
+    ]);
+    expect(run.stdout).toContain("exact historical service logs clean");
+  });
+
+  it("refuses to delete a log group while its Lambda function still exists", () => {
+    const run = runTeardown({
+      STUB_STACK_RESOURCES:
+        "AWS::Lambda::Function\tAgenticAI-TestCleanupFunction\n",
+      STUB_LAMBDA_EXISTS: "true",
+    });
+
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain(
+      "refusing to delete logs while Lambda function still exists",
+    );
     expect(deleteCalls(run)).toEqual([]);
   });
 });

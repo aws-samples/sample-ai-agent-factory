@@ -425,39 +425,129 @@ confirm() {
 # ---------------------------------------------------------------------------
 
 # CodeBuild and Lambda create their default CloudWatch log groups outside
-# CloudFormation. Capture exact physical ids before deleting the stack so those
-# service-created groups can be removed without broad name-prefix matching.
-capture_service_log_groups() {
-  local stack="$1" out resource_type physical_id
-  GENERATED_SERVICE_LOG_GROUPS=()
+# CloudFormation. Capture exact physical ids before deleting the active stack,
+# plus ids from prior deleted generations, so teardown retries can remove stale
+# groups without broad name-prefix matching.
+append_service_log_resource() {
+  local resource_type="$1" physical_id="$2" group entry existing_group
+  if [ -z "$physical_id" ] || [ "$physical_id" = "None" ]; then
+    return 0
+  fi
+  case "$resource_type" in
+    AWS::CodeBuild::Project) group="/aws/codebuild/$physical_id" ;;
+    AWS::Lambda::Function) group="/aws/lambda/$physical_id" ;;
+    *) return 0 ;;
+  esac
 
-  if ! out=$(aws cloudformation list-stack-resources \
-      --stack-name "$stack" \
-      --query "StackResourceSummaries[?ResourceType=='AWS::CodeBuild::Project' || ResourceType=='AWS::Lambda::Function'].[ResourceType,PhysicalResourceId]" \
+  for entry in "${GENERATED_SERVICE_LOG_RESOURCES[@]}"; do
+    IFS=$'\t' read -r _ _ existing_group <<<"$entry"
+    [ "$existing_group" = "$group" ] && return 0
+  done
+  GENERATED_SERVICE_LOG_RESOURCES+=(
+    "$resource_type"$'\t'"$physical_id"$'\t'"$group"
+  )
+}
+
+append_service_log_rows() {
+  local rows="$1" resource_type physical_id
+  while IFS=$'\t' read -r resource_type physical_id; do
+    if [ -z "$resource_type" ] || [ "$resource_type" = "None" ]; then
+      continue
+    fi
+    append_service_log_resource "$resource_type" "$physical_id"
+  done <<<"$rows"
+}
+
+capture_deleted_stack_service_logs() {
+  local stack="$1" stack_ids stack_id events
+  if ! stack_ids=$(aws cloudformation list-stacks \
+      --stack-status-filter DELETE_COMPLETE \
+      --query "StackSummaries[?StackName=='$stack'].StackId" \
       --output text 2>&1); then
-    printf 'ERROR: list-stack-resources failed for %s: %s\n' "$stack" "$out" >&2
+    printf 'ERROR: list-stacks failed while recovering service logs for %s: %s\n' \
+      "$stack" "$stack_ids" >&2
     return 1
   fi
 
-  while IFS=$'\t' read -r resource_type physical_id; do
-    if [ -z "$resource_type" ] || [ "$resource_type" = "None" ] || \
-       [ -z "$physical_id" ] || [ "$physical_id" = "None" ]; then
-      continue
+  for stack_id in $stack_ids; do
+    [ "$stack_id" = "None" ] && continue
+    if ! events=$(aws cloudformation describe-stack-events \
+        --stack-name "$stack_id" \
+        --query "StackEvents[?ResourceType=='AWS::CodeBuild::Project' || ResourceType=='AWS::Lambda::Function'].[ResourceType,PhysicalResourceId]" \
+        --output text 2>&1); then
+      printf 'ERROR: describe-stack-events failed for %s: %s\n' \
+        "$stack_id" "$events" >&2
+      return 1
     fi
-    case "$resource_type" in
-      AWS::CodeBuild::Project)
-        GENERATED_SERVICE_LOG_GROUPS+=("/aws/codebuild/$physical_id")
-        ;;
-      AWS::Lambda::Function)
-        GENERATED_SERVICE_LOG_GROUPS+=("/aws/lambda/$physical_id")
-        ;;
-    esac
-  done <<<"$out"
+    append_service_log_rows "$events"
+  done
+}
+
+capture_active_stack_service_logs() {
+  local stack="$1" resources
+  if ! resources=$(aws cloudformation list-stack-resources \
+      --stack-name "$stack" \
+      --query "StackResourceSummaries[?ResourceType=='AWS::CodeBuild::Project' || ResourceType=='AWS::Lambda::Function'].[ResourceType,PhysicalResourceId]" \
+      --output text 2>&1); then
+    printf 'ERROR: list-stack-resources failed for %s: %s\n' \
+      "$stack" "$resources" >&2
+    return 1
+  fi
+  append_service_log_rows "$resources"
+}
+
+capture_service_log_resources() {
+  local stack="$1" include_active="$2"
+  GENERATED_SERVICE_LOG_RESOURCES=()
+  capture_deleted_stack_service_logs "$stack" || return 1
+  if [ "$include_active" = true ]; then
+    capture_active_stack_service_logs "$stack" || return 1
+  fi
+}
+
+ensure_service_resource_absent() {
+  local resource_type="$1" physical_id="$2" out
+  case "$resource_type" in
+    AWS::Lambda::Function)
+      if out=$(aws lambda get-function \
+          --function-name "$physical_id" \
+          --query 'Configuration.FunctionArn' \
+          --output text 2>&1); then
+        printf 'ERROR: refusing to delete logs while Lambda function still exists: %s\n' \
+          "$physical_id" >&2
+        return 1
+      fi
+      if ! printf '%s' "$out" | grep -q 'ResourceNotFoundException'; then
+        printf 'ERROR: get-function failed for %s: %s\n' "$physical_id" "$out" >&2
+        return 1
+      fi
+      ;;
+    AWS::CodeBuild::Project)
+      if ! out=$(aws codebuild batch-get-projects \
+          --names "$physical_id" \
+          --query 'projects[].name' \
+          --output text 2>&1); then
+        printf 'ERROR: batch-get-projects failed for %s: %s\n' \
+          "$physical_id" "$out" >&2
+        return 1
+      fi
+      if [ -n "$out" ] && [ "$out" != "None" ]; then
+        printf 'ERROR: refusing to delete logs while CodeBuild project still exists: %s\n' \
+          "$physical_id" >&2
+        return 1
+      fi
+      ;;
+  esac
 }
 
 cleanup_service_log_groups() {
-  local group out failures=0
-  for group in "${GENERATED_SERVICE_LOG_GROUPS[@]}"; do
+  local entry resource_type physical_id group out failures=0
+  for entry in "${GENERATED_SERVICE_LOG_RESOURCES[@]}"; do
+    IFS=$'\t' read -r resource_type physical_id group <<<"$entry"
+    if ! ensure_service_resource_absent "$resource_type" "$physical_id"; then
+      failures=$((failures + 1))
+      continue
+    fi
     if out=$(aws logs delete-log-group --log-group-name "$group" 2>&1); then
       printf '   DELETED service log group %s\n' "$group"
     elif printf '%s' "$out" | grep -q 'ResourceNotFoundException'; then
@@ -470,10 +560,20 @@ cleanup_service_log_groups() {
   return "$failures"
 }
 
+cleanup_absent_stack_service_logs() {
+  local stack="$1"
+  capture_service_log_resources "$stack" false || return 1
+  if [ "${#GENERATED_SERVICE_LOG_RESOURCES[@]}" -eq 0 ]; then
+    return 0
+  fi
+  printf '\n-> Cleaning exact service logs from deleted generations of %s\n' "$stack"
+  cleanup_service_log_groups
+}
+
 destroy_stack() {
   local stack="$1"
   set_context_args_for_stack "$stack"
-  capture_service_log_groups "$stack" || return 1
+  capture_service_log_resources "$stack" true || return 1
   printf '\n-> Destroying %s (stage=%s)\n' "$stack" "$(stage_for_stack "$stack")"
   npx cdk destroy --force "${CDK_CONTEXT_ARGS[@]}" "$stack" || return 1
   cleanup_service_log_groups
@@ -486,8 +586,16 @@ destroy_planned_stacks() {
     stack="${PLANNED_STACKS[$i]}"
     status="${STACK_STATUS[$i]}"
     if [ "$status" = "ABSENT" ]; then
-      printf '\n-> Skipping %s (ABSENT — nothing deployed)\n' "$stack"
-      RESULTS+=("ABSENT   $stack")
+      if cleanup_absent_stack_service_logs "$stack"; then
+        printf '\n-> Skipping %s (ABSENT — exact historical service logs clean)\n' \
+          "$stack"
+        RESULTS+=("ABSENT   $stack")
+      else
+        printf 'ERROR: exact historical log cleanup failed for absent stack %s\n' \
+          "$stack" >&2
+        RESULTS+=("FAILED    $stack")
+        failures=$((failures + 1))
+      fi
       continue
     fi
     if destroy_stack "$stack"; then
