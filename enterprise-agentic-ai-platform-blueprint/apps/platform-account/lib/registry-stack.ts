@@ -35,7 +35,7 @@ export class RegistryStack extends Stack {
   readonly registry: AgentCoreRegistryConstruct;
   /** Pipeline-owned, environment-isolated Lambda tool aliases. */
   readonly gaTools: GaPlatformToolsConstruct;
-  /** Native GA producer; Workstreams do not consume it until revision R2. */
+  /** Native GA producer consumed by opt-in R2 Workstream pipelines. */
   readonly gaRegistry: GaPlatformRegistryConstruct;
 
   constructor(scope: Construct, id: string, props: RegistryStackProps) {

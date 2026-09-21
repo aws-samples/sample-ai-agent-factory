@@ -129,8 +129,8 @@ export function buildGaToolGovernanceDocument(
  *
  * Resources use RetainExceptOnCreate semantics: a failed first deployment
  * cleans itself up, while a later stack rollback cannot destroy approved
- * governance state. The old DynamoDB registry remains the active rollback path
- * until the Workstream consumer migration passes independently.
+ * governance state. The old DynamoDB registry remains the rollback path until
+ * a live rollback deployment from the R2 revision passes independently.
  */
 export class GaPlatformRegistryConstruct extends Construct {
   readonly registry: CfnResource;

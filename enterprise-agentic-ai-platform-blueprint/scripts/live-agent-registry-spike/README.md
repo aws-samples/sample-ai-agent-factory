@@ -146,9 +146,9 @@ against the pipeline-owned producer:
 `approve` additionally, only after the whole preflight passes:
 
 10. Submits each record exactly once, in tool-id sorted order, via
-   `agent-registry-control SubmitRegistryRecordForApproval`.
+    `agent-registry-control SubmitRegistryRecordForApproval`.
 11. Polls each record to `APPROVED` under a bounded timeout, then re-verifies the
-   governance descriptor is JSON-semantically identical to what preflight read.
+    governance descriptor is JSON-semantically identical to what preflight read.
 12. Polls the `agent-registry` data plane until
     `ListDiscoverableRegistryRecords` returns exactly the expected approved ids.
 13. Writes raw but credential-free evidence under `$KIROCREW_SCRATCH`.
@@ -245,8 +245,9 @@ with no AWS SDK present; and end-to-end CLI behaviour.
 ## What it does NOT prove
 
 Passing offline tests or one green `approve` run is **not** evidence for the
-complete migration. R1 producer deployment and explicit approvals passed in
-both reference Platform environments, but the R2 Workstream consumer,
-matching-validator reader path, wrong-ExternalId/session twins, consumer
-rollback, teardown, and EMEA AgentCore region matrix remain outstanding. Each
-utility run proves one Platform account, Region, and environment only.
+complete migration. The separate pipeline-owned R2 run has now passed the
+bounded Workstream Registry and Tool Gateway envelope in `us-west-2`; see
+[`../../evidence/live/2026-09-21-pipeline-ga-agent-registry-r2.md`](../../evidence/live/2026-09-21-pipeline-ga-agent-registry-r2.md).
+This utility still proves one Platform account, Region, and environment per run;
+it does not by itself prove the Workstream consumer, authorization twins,
+rollback, teardown, or any EMEA AgentCore region.

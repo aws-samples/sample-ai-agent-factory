@@ -1,6 +1,6 @@
 # ADR-0016 — AgentCore Gateway inference targets supersede the self-managed LiteLLM proxy
 
-- **Status:** Accepted target-state decision; implementation in progress; not yet live-verified
+- **Status:** Accepted target-state decision; basic inference endpoint/client and allow/throttle contracts live-verified in `us-west-2`; extended verification remains open
 - **Date:** 2026-09-18
 - **Supersedes:** ADR-0001 — LiteLLM in the inference path (deviation D-01)
 - **Related:** [RFC-0001](../architecture/target-state-architecture.md),
@@ -45,8 +45,10 @@ Official documentation supports both halves of the endpoint-plus-client contract
 ([Sources](#sources)). The AgentCore Gateway documentation confirms an OpenAI-compatible
 `/inference/v1` `chat/completions` endpoint, a JWT presented as the `api_key`, model discovery, and
 connectors/providers. The Strands API confirms `LiteLLMModel` extends `OpenAIModel`, forwards
-`client_args` to `litellm.acompletion`, and streams by default. The contracts line up on paper; a
-live round-trip spike remains a release gate (U-1).
+`client_args` to `litellm.acompletion`, and streams by default. The contracts line up and the basic
+live path now passes Cognito M2M, 49-model discovery, and `LiteLLMModel` streaming and non-streaming
+completion in `us-west-2`. Model-mediated tool calls, JWT refresh under expiry, and usage-token
+reconciliation remain open portions of U-1.
 
 ---
 
@@ -70,21 +72,21 @@ live round-trip spike remains a release gate (U-1).
 6. **Per-tenant Application Inference Profiles remain the cost-attribution mechanism**, unchanged
    from D-03. They are outside the Gateway's failure domain and so also serve as compensating control
    C-7.
-7. **This ADR settles the design; it does not close the live-AWS claims.** The endpoint, client, and
-   rate-limit contracts are documentation-verified, so design and local scaffolding may proceed. The
-   *claim that the inference boundary works on live AWS* is closed only by the U-1 and U-2 release
-   gates below.
+7. **This ADR settles the design; live evidence bounds each operational claim.** The basic endpoint,
+   client, and ordinary allow/throttle contracts are live-verified in `us-west-2`. The extended U-1
+   and U-2 obligations below remain required before broader compatibility, enforcement,
+   observability, or fail-open claims are made.
 
 ### What replaces each property ADR-0001 bought
 
 | ADR-0001 property | Replacement in the target state | Status |
 |---|---|---|
-| Virtual-key per-team budgets, throttle on exceed | Native rate-limit profiles keyed on trusted JWT claims (`tenant_id`, `azp`, `sub`, `tier`) or IAM principal/source identity, combined with `targetName`, `qualifiedModelId`, and `toolName`; wildcard entries cover unmatched values | **Documentation-verified (U-2)**; live enforcement and observability tests are release gates |
+| Virtual-key per-team budgets, throttle on exceed | Native rate-limit profiles keyed on trusted JWT claims (`tenant_id`, `azp`, `sub`, `tier`) or IAM principal/source identity, combined with `targetName`, `qualifiedModelId`, and `toolName`; wildcard entries cover unmatched values | **Partially verified (U-2):** authorized HTTP 200 and exact zero-rate HTTP 429 passed; precedence, fail-open, and telemetry obligations remain |
 | Per-team cost attribution | Per-tenant Application Inference Profiles plus the five-tag contract | **Verified** in the current design; carried forward unchanged |
 | Unified observability | Gateway metrics and logs, invocation-log archive in Management/Governance, OAM sink | **Planned** |
 | Guardrail `default_on` in the proxy | Guardrail mandatory at the inference target, plus the existing SCP and IAM deny-on-null enforcement | **Planned**, built on a **Verified** triple-gate |
 | Model allow-list in the router config | Inference targets are bound only to allow-listed models; the allow-list source of truth and its drift test are unchanged | **Planned** |
-| Reuse of mature existing code | `LiteLLMModel` as the client adapter — the reuse that mattered is in the agent, not in the infrastructure | **Documentation-verified (U-1)**; live compatibility spike is a release gate |
+| Reuse of mature existing code | `LiteLLMModel` as the client adapter — the reuse that mattered is in the agent, not in the infrastructure | **Partially verified (U-1):** streaming and non-streaming completion passed live; tool-call, refresh, and reconciliation checks remain |
 
 ---
 
@@ -128,13 +130,13 @@ live round-trip spike remains a release gate (U-1).
 
 ## Verification obligations
 
-The design is documentation-verified ([Sources](#sources)). Nothing may be described as **working on
-live AWS** until these pass. They are release gates, not design blockers.
+The basic endpoint/client and ordinary allow/throttle contracts now have exact-commit live evidence.
+The remaining rows bound every broader claim and stay release gates, not design blockers.
 
 | # | Obligation | Kind |
 |---|---|---|
-| V-1 | **Close U-1 on live AWS.** A real `LiteLLMModel` client against a real Gateway inference target: streaming completion, non-streaming completion, a tool call, JWT refresh under expiry, and usage-token reconciliation | Release gate |
-| V-2 | **Close U-2's live enforcement claims.** Prove allow/throttle behavior, precedence, catch-all and zero-rate entries, Policy denial when customer rate-limit configuration is absent, and alarming when decision telemetry disappears. Inject an internal limiter outage only if AWS exposes a supported hook; otherwise retain fail-open as documentation-backed evidence | Release gate |
+| V-1 | **Complete U-1's extended live checks.** Streaming and non-streaming `LiteLLMModel` completion against a real Gateway inference target passed; still prove a model-mediated tool call, JWT refresh under expiry, and usage-token reconciliation | Partial pass; remaining release gate |
+| V-2 | **Complete U-2's extended live enforcement checks.** Authorized HTTP 200 and exact zero-rate HTTP 429 passed; still prove multi-dimension precedence, catch-all coverage, Policy behavior without customer limits, token reconciliation, and missing-decision alarming. Inject an internal limiter outage only if AWS exposes a supported hook; otherwise retain fail-open as documentation-backed evidence | Partial pass; remaining release gate |
 | V-3 | Adversarial case A-3 — non-allow-listed model and cross-tenant inference profile denied by **policy forbid**, not by a throttle and not by a 5xx, with an authorized positive twin | Blocking |
 | V-4 | Adversarial case A-4 — an inference call with no guardrail identifier denied at every enforcement point | Blocking |
 | V-5 | Adversarial cases A-10 and A-11 — throttle behavior, `blocked` combinations denied by Policy, missing-decision telemetry alarmed, and C-1 through C-3 still denying when customer rate-limit configuration is absent; use managed-outage injection only if AWS supports it | Blocking |
@@ -166,4 +168,11 @@ change, not a design change.
 - [Strands LiteLLM model-provider guide](https://strandsagents.com/docs/user-guide/concepts/model-providers/litellm/index.md)
 - [`strands.models.litellm` API reference](https://strandsagents.com/docs/api/python/strands.models.litellm/index.md)
 
-These sources establish protocol and documented service behavior. They do not replace V-1 or V-2 live verification. No AgentCore-specific managed rate-limiter outage-injection hook was found in the official material reviewed; the test plan must not fabricate one.
+These sources establish protocol and documented service behavior. The basic live endpoint/client and
+allow/throttle results are recorded in
+[`../../evidence/live/2026-09-18-agentcore-gateway-spike.md`](../../evidence/live/2026-09-18-agentcore-gateway-spike.md)
+and
+[`../../evidence/live/2026-09-19-platform-pipeline-deployment.md`](../../evidence/live/2026-09-19-platform-pipeline-deployment.md);
+they do not close the remaining V-1 or V-2 checks. No AgentCore-specific managed rate-limiter
+outage-injection hook was found in the official material reviewed; the test plan must not fabricate
+one.

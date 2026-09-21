@@ -1,7 +1,9 @@
 # RFC-0001 — Target-state architecture: consolidated governance and environment-isolated AgentCore execution
 
-- **Status:** Accepted target state; implementation in progress; not yet live-verified. Round-1 local
-  hardening and scaffolding are underway, and no AWS deployment has occurred.
+- **Status:** Accepted target state; implementation in progress. The central inference boundary and
+  pipeline-owned R2 Registry/Tool Gateway slice are live-verified in `us-west-2`; Runtime, Memory,
+  pipeline-owned PolicyEngine, organization-SCP, EMEA, load/chaos/upgrade, and OTEL correlation
+  gates remain open.
 - **Date:** 2026-09-18
 - **Supersedes (conceptually):** the two mutually-exclusive deployment patterns described in
   [`README.md`](../../README.md) §1 and §3 — the distributed pattern (D-01) and the
@@ -45,7 +47,7 @@ The target state changes four things:
 
 | Tag | Meaning |
 |---|---|
-| **Verified** | Exercised against live AWS, with evidence recorded in the repository. The evidence predates this RFC and belongs to the current architecture, not the target one. |
+| **Verified** | Exercised against live AWS with exact-commit evidence recorded in the repository; applies only to the bounded envelope named by that evidence. |
 | **Documentation-verified** | Confirmed against official AWS or library documentation, but not yet exercised against live AWS in this blueprint. A live spike or fault-injection remains a release gate. |
 | **Planned** | A design intent in this RFC. Design is settled; implementation may be scaffolded but is not deployed. |
 | **Unverified** | An assumption this RFC makes that has not been confirmed against documentation, live AWS, or a spike. |
@@ -53,32 +55,32 @@ The target state changes four things:
 Sources are linked inline where a claim is **Documentation-verified**; the full list is in
 [§17](#17-sources).
 
-Two dependencies are load-bearing for the whole RFC. Both are now **Documentation-verified** and
-both retain a live spike as a release gate:
+Two dependencies are load-bearing for the whole RFC. U-1 is now live-verified for the basic
+endpoint/client contract; U-2 is live-verified for ordinary allow/throttle behavior but remains open
+for the full precedence, telemetry, and fail-open matrix:
 
-- **U-1 (Documentation-verified; live spike is a release gate).** AgentCore Gateway exposes an
-  OpenAI-compatible inference endpoint — `/inference/v1` with `chat/completions`, a JWT presented as
-  the `api_key`, model discovery, and connectors/providers — and Strands `LiteLLMModel` extends
-  `OpenAIModel`, forwards `client_args` to `litellm.acompletion`, and streams by default. The
-  endpoint contract and the client contract therefore line up on paper. What is **not** yet proven in
-  this blueprint is a real round-trip: streaming and non-streaming completion, a tool call, JWT
-  refresh under expiry, and usage-token reconciliation. That compatibility spike is a release gate.
-  See [§17](#17-sources).
-- **U-2 (Documentation-verified; live enforcement tests are release gates).** AWS's 2026-08-06
-  AgentCore Gateway rate-limiting article confirms the dimensions in
-  [§7.2](#72-rate-limit-dimensions-documentation-verified), independent **AND** semantics across
-  rate-limit configurations, customer limits evaluated before service quotas, rate limits evaluated
-  **before** Policy, zero-rate blocked entries, the necessity of a catch-all, **fail-open** behaviour,
-  tokens-per-minute reconciliation, connections-per-second, and OpenTelemetry logging of decisions.
-  Live tests must prove ordinary allow/throttle behavior, precedence, wildcard coverage, Policy
-  independence when customer limits are absent, and alarming when rate-limit decision telemetry
-  disappears. No AgentCore-specific managed-outage injection hook is currently documented. If AWS
-  exposes one during preflight, use it; otherwise the internal-outage fail-open behavior remains a
-  clearly labelled documentation-backed service property rather than a fabricated live result. See
-  [§17](#17-sources).
+- **U-1 (Verified for the basic live contract; extended checks remain).** A real pipeline-owned
+  AgentCore Gateway inference target passed Cognito M2M, 49-model discovery, and Strands
+  `LiteLLMModel` streaming and non-streaming completion in `us-west-2`. This closes the endpoint,
+  authentication, discovery, and client-adapter compatibility claims. A model-mediated tool call,
+  JWT refresh under expiry, and usage-token reconciliation were not part of that run and remain
+  release gates. See
+  [`../../evidence/live/2026-09-19-platform-pipeline-deployment.md`](../../evidence/live/2026-09-19-platform-pipeline-deployment.md).
+- **U-2 (Verified for ordinary allow/throttle; extended checks remain).** AWS's 2026-08-06
+  AgentCore Gateway rate-limiting article documents the dimensions and ordering in
+  [§7.2](#72-rate-limit-dimensions-documentation-verified). An isolated `us-west-2` run proved an
+  authorized HTTP 200 twin and exact HTTP 429 under a zero-rate provider-qualified model rule; the
+  pipeline-owned production limit separately reached `ACTIVE` without being destructively mutated.
+  Precedence across multiple dimensions, Policy behavior when customer limits are absent,
+  fail-open behavior, token reconciliation, and missing-decision alarming remain release gates.
+  OTEL rate-limit span correlation is a reproduced blocker. No AgentCore-specific managed-outage
+  injection hook is currently documented; the test plan must not fabricate one. See
+  [`../../evidence/live/2026-09-18-agentcore-gateway-spike.md`](../../evidence/live/2026-09-18-agentcore-gateway-spike.md)
+  and [§17](#17-sources).
 
-**Neither U-1 nor U-2 now blocks design or local scaffolding.** Each blocks the *claim that the
-control works on live AWS*, which is closed only by its release gate.
+**The bounded U-1 and U-2 claims above are now closed by live evidence.** The named extended
+checks still block their broader claims; neither partial result is a whole-platform readiness
+attestation.
 
 ---
 
@@ -278,7 +280,9 @@ prevent.
 | Why per-workstream | — | Tool calls are workstream data-plane traffic. Keeping the Gateway local avoids a cross-account hop on the hot path, keeps tool latency and failure domains inside the workstream, and lets the workstream own its tool targets. Governance is retained at synth via the Registry, at deploy via SCP, and at runtime via a service role scoped to exactly the subscribed target ARNs. |
 | Blast radius if unavailable | All agents in all workstreams lose inference. Mitigated by multi-AZ, per-environment isolation, and a pipeline gate on Gateway changes. This is a real and accepted single point of failure. | One workstream loses tools. |
 
-**Governance of the per-workstream Tool Gateway (R2 implemented locally; live proof pending).** Three layers:
+**Governance of the per-workstream Tool Gateway (R2 pipeline/live-verified in `us-west-2`).** The
+three layers below passed the bounded Registry and Gateway-only envelope recorded in
+[`../../evidence/live/2026-09-21-pipeline-ga-agent-registry-r2.md`](../../evidence/live/2026-09-21-pipeline-ga-agent-registry-r2.md):
 
 1. **Synth.** Developers commit stable tool IDs. The named Workload synth role assumes each
    environment's `RegistryReaderRole`, resolves versioned SSM pointers, requires complete
@@ -301,8 +305,9 @@ prevent.
 client. Direct `bedrock-runtime` calls and direct `lambda:Invoke` calls from agent code are contract
 violations. What changes is the *endpoint* `LiteLLMModel` points at: an AgentCore Gateway inference
 target, not a self-managed LiteLLM proxy. Agent source code should be unchanged by this migration
-apart from the base URL and the credential source — **Documentation-verified (U-1)**; a live
-compatibility spike remains a release gate. See [§17](#17-sources).
+apart from the base URL and the credential source. The basic endpoint/client compatibility is
+**Verified (U-1)** for streaming and non-streaming completion; model-mediated tool calls, JWT refresh
+under expiry, and usage-token reconciliation remain release gates. See [§17](#17-sources).
 
 ---
 
@@ -629,15 +634,15 @@ and per-environment account isolation is the production baseline in
 
 | # | Decision or risk | Status | Blocks |
 |---|---|---|---|
-| **U-1** | AgentCore Gateway inference targets expose an OpenAI-compatible endpoint that `LiteLLMModel` can drive | **Documentation-verified** (§1.2, §17). Endpoint and client contracts line up on paper. **Open:** a live streaming / non-streaming / tool-call / JWT-refresh / usage-reconciliation spike — a release gate, not a design blocker | The live-AWS *claim* for [ADR-0016](../adr/ADR-0016-agentcore-gateway-inference-supersedes-litellm-proxy.md) and cases A-3, A-4 |
-| **U-2** | Native rate limiting has the §7.2 dimensions, evaluates before Policy, and fails open | **Documentation-verified** against AWS's 2026-08-06 article (§1.2, §17). **Open live gates:** allow/throttle behavior, precedence, catch-all, zero-rate entries, Policy independence with customer limits absent, and missing-telemetry alarming. A managed-outage injection runs only if AWS exposes a supported hook; none is currently documented | The live-AWS enforcement and observability claims for §7, and cases A-10, A-11 |
+| **U-1** | AgentCore Gateway inference targets expose an OpenAI-compatible endpoint that `LiteLLMModel` can drive | **Partially verified** (§1.2, §17): Cognito M2M, discovery, streaming, and non-streaming completion passed in `us-west-2`. **Open:** model-mediated tool call, JWT refresh, and usage reconciliation | The extended live-AWS claim for [ADR-0016](../adr/ADR-0016-agentcore-gateway-inference-supersedes-litellm-proxy.md) and cases A-3, A-4 |
+| **U-2** | Native rate limiting has the §7.2 dimensions, evaluates before Policy, and fails open | **Partially verified** against documentation and live AWS: authorized HTTP 200 and exact zero-rate HTTP 429 passed. **Open:** precedence, catch-all, Policy independence with customer limits absent, token reconciliation, fail-open behavior, and missing-telemetry alarming. No managed-outage injection hook is documented | The extended enforcement and observability claims for §7, and cases A-10, A-11 |
 | **D-C** | Migration path from the current multi-account, two-pattern repository to the consolidated-governance, environment-isolated baseline | **Open — migration work.** Not yet designed. Stateful resource identities — Memory, Registry, buckets, keys — cannot be moved casually. See [§15](#15-cdk-migration-and-replacement-hazards) | All implementation rounds after local scaffolding |
-| **D-D** | Whether Cedar evaluation moves from inside each tool Lambda to the policy engine now, or stays until the engine is confirmed available | **Open.** The current design's wrapper is Verified; the engine path is not yet exercised here | §6 policy-engine claims, case A-5 |
+| **D-D** | Whether Cedar evaluation moves from inside each tool Lambda to the policy engine now, or stays until pipeline parity is proven | **Open migration.** The current wrapper is Verified, and the isolated Gateway PolicyEngine contract passed in `us-west-2`; Workload pipeline integration, parity, rollback, and teardown remain open | §6 policy-engine claims, case A-5 |
 | **D-E** | Whether the central Inference Gateway is one per environment or one per organization | **Open.** §5 says per environment, which contradicts nothing but has not been costed or load-reasoned | §5 cardinality, §7.3 `baseline-nonprod` sizing |
 | **D-F** | Exact rate-limit numbers for each profile | **Open.** Cannot be chosen without measured throughput. No 24-hour cost or throughput baseline exists | §7.3 values, budget thresholds |
 | **D-G** | Whether `AgentRegistrationApi` accepts throughput and budget declarations, or only identity and subscriptions | **Open.** §7.3 `baseline-prod` assumes declared throughput is available at registration | §9 surface scope, §7.3 sizing |
 | **D-H** | Whether the self-managed LiteLLM proxy is deleted, moved to experimental, or retained as a documented alternative | **Open.** ADR-0016 supersedes it as the golden path but does not decide its fate in the repository | Package layout in a later round |
-| **D-I** | Which single region is the verified target | **Open.** `us-east-1` is the only live-verified region today; `us-west-2` is the synth-clean default. AgentCore feature availability varies by region | L-1 preflight, all live verification |
+| **D-I** | Which single region is the verified target | **Open for the full matrix.** `us-west-2` is live-verified for central inference, Platform pipeline, isolated PolicyEngine, and R2 Registry/Tool Gateway; `us-east-1` retains earlier D-03 tool-Gateway proof. Neither has passed every release gate, and no EMEA region is complete | L-1 preflight, all remaining regional verification |
 
 ---
 

@@ -12,10 +12,10 @@ blue-green:
 - `GaPlatformRegistryConstruct` is the native GA producer used by the
   pipeline-owned `RegistryStack` in revision R1.
 
-R1 is additive: the existing DynamoDB registry tables and their logical IDs stay
-unchanged as the rollback path. Workstreams continue to use the old consumer
-until R2 passes Platform deployment, record approval, cross-account read,
-negative authorization, rollback, and teardown gates.
+R1 remains additive: the existing DynamoDB registry tables and their logical
+IDs stay unchanged as the rollback path. R2 now consumes the GA records through
+the reviewed Workload pipeline; the old consumer remains available until a live
+rollback deployment passes and maintainers explicitly retire it.
 
 ## Native GA producer
 
@@ -91,8 +91,8 @@ evaluation/canary gates remain exclusive to legacy/full-agent mode.
 
 Catalogue revision 2 emits RegistryRecord version `2.0.0` and environment-
 qualified Platform tool Lambdas and Gateway roles. The old `allowedToolIds`
-catalogue path remains available only as the explicit rollback mode until R2
-live parity and teardown pass.
+catalogue path remains available only as the explicit rollback mode until its
+own live rollback deployment passes.
 
 ## Current proof boundary
 
@@ -108,11 +108,17 @@ submitted each explicitly, and independently verified both records as
 Workstream Admin principal and an external account. See
 [`../../evidence/live/2026-09-20-pipeline-ga-agent-registry-r1.md`](../../evidence/live/2026-09-20-pipeline-ga-agent-registry-r1.md).
 
-The R2 implementation is locally validated with strict Platform-only and
-Workload-only pipeline assemblies, cdk-nag, offline resolver/parser tests, and
-sandbox execution of the synthesized GA SigV4 validator. It is **not** live
-proof. The Platform pipeline must first deploy versioned tool aliases and the
-updated reader trust, then the Workload pipeline must prove positive
-cross-account resolution, negative ExternalId/session/status/digest twins,
-Gateway target creation, rollback, and zero residuals. EMEA regions,
-load/chaos behavior, and final placeholder retirement remain release gates.
+The pipeline-owned R2 consumer passed in `us-west-2` on exact deployed commit
+`3870e0e`. The reviewed Platform and Workload pipelines proved stable-ID
+cross-account resolution, exact role and alias-permission handoff, approved
+record/version/descriptor/target validation, nonproduction and production
+Gateway deployment, MCP positives and denial twins, no-op redeployment,
+fail-closed status drift, and terminal-record generation recovery. Both
+Gateway stacks then deleted in target → barrier → Gateway order. Teardown-
+hardening commit `7774299` removed every exact service-created log group, and
+independent inventory found zero unintended residue. See
+[`../../evidence/live/2026-09-21-pipeline-ga-agent-registry-r2.md`](../../evidence/live/2026-09-21-pipeline-ga-agent-registry-r2.md).
+
+A live redeployment to the legacy consumer, matching-principal wrong-ExternalId
+and wrong-session-name twins, EMEA regions, load/chaos behavior, and final
+placeholder retirement remain release gates.
