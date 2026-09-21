@@ -1,9 +1,10 @@
 # RFC-0001 — Target-state architecture: consolidated governance and environment-isolated AgentCore execution
 
-- **Status:** Accepted target state; implementation in progress. The central inference boundary and
-  pipeline-owned R2 Registry/Tool Gateway slice are live-verified in `us-west-2`; Runtime, Memory,
-  pipeline-owned PolicyEngine, organization-SCP, EMEA, load/chaos/upgrade, and OTEL correlation
-  gates remain open.
+- **Status:** Accepted target state; implementation in progress. The central inference boundary,
+  pipeline-owned R2 Registry/Tool Gateway, and pipeline-owned PolicyEngine slices are live-verified
+  in `us-west-2`; isolated Runtime/Memory API compatibility is also live-verified, while
+  pipeline-owned Workstream Runtime/Memory and generated-agent integration, organization-SCP,
+  EMEA, load/chaos/upgrade, and OTEL correlation gates remain open.
 - **Date:** 2026-09-18
 - **Supersedes (conceptually):** the two mutually-exclusive deployment patterns described in
   [`README.md`](../../README.md) §1 and §3 — the distributed pattern (D-01) and the

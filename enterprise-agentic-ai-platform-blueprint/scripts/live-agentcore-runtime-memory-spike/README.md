@@ -212,6 +212,19 @@ for the service-model contract tests (never touching IMDS), every consumed input
 and output field is pinned, Runtime/Memory/event/invocation requests serialize
 through botocore, and every orchestration test drives a fake API recorder.
 
+## Reference live campaign
+
+Exact product commit `88d5381d371944a4dfdc31d424917bf767a92c17`
+passed the bounded `us-west-2` compatibility campaign: zero-finding digest-pinned
+ARM64 image, Memory `ACTIVE`, Runtime `READY`, exact invocation handshake, exact
+short-term event round trip, Runtime-before-Memory cleanup, grant retirement,
+and independent zero-active-residue inventory. See
+[`../../evidence/live/2026-09-21-agentcore-runtime-memory-compatibility-spike.md`](../../evidence/live/2026-09-21-agentcore-runtime-memory-compatibility-spike.md).
+
+This remains an isolated Platform-account API-contract proof. Pipeline-owned
+Workstream Runtime/Memory and generated-agent `LiteLLMModel`/`MCPClient`
+integration are not yet proven.
+
 ## Honest limitations
 
 - **No live evidence is produced by this code.** The probe records only what a
