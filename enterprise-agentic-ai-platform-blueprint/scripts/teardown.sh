@@ -407,7 +407,8 @@ confirm() {
   local yn
   printf '\n'
   printf 'This destroys the stacks listed above, empties non-versioned buckets,\n'
-  printf 'and reports resources needing manual deletion (KMS pending-delete,\n'
+  printf 'deletes their exact service-created CodeBuild/Lambda log groups, and\n'
+  printf 'reports resources needing manual deletion (KMS pending-delete,\n'
   printf 'retained-on-delete S3).\n\n'
   printf 'Control-Tower closed accounts enter a 90-day SUSPENDED state; that is\n'
   printf "NOT automated here — use the Organizations console or\n"
@@ -422,11 +423,60 @@ confirm() {
 # ---------------------------------------------------------------------------
 # Destroy
 # ---------------------------------------------------------------------------
+
+# CodeBuild and Lambda create their default CloudWatch log groups outside
+# CloudFormation. Capture exact physical ids before deleting the stack so those
+# service-created groups can be removed without broad name-prefix matching.
+capture_service_log_groups() {
+  local stack="$1" out resource_type physical_id
+  GENERATED_SERVICE_LOG_GROUPS=()
+
+  if ! out=$(aws cloudformation list-stack-resources \
+      --stack-name "$stack" \
+      --query "StackResourceSummaries[?ResourceType=='AWS::CodeBuild::Project' || ResourceType=='AWS::Lambda::Function'].[ResourceType,PhysicalResourceId]" \
+      --output text 2>&1); then
+    printf 'ERROR: list-stack-resources failed for %s: %s\n' "$stack" "$out" >&2
+    return 1
+  fi
+
+  while IFS=$'\t' read -r resource_type physical_id; do
+    if [ -z "$resource_type" ] || [ "$resource_type" = "None" ] || \
+       [ -z "$physical_id" ] || [ "$physical_id" = "None" ]; then
+      continue
+    fi
+    case "$resource_type" in
+      AWS::CodeBuild::Project)
+        GENERATED_SERVICE_LOG_GROUPS+=("/aws/codebuild/$physical_id")
+        ;;
+      AWS::Lambda::Function)
+        GENERATED_SERVICE_LOG_GROUPS+=("/aws/lambda/$physical_id")
+        ;;
+    esac
+  done <<<"$out"
+}
+
+cleanup_service_log_groups() {
+  local group out failures=0
+  for group in "${GENERATED_SERVICE_LOG_GROUPS[@]}"; do
+    if out=$(aws logs delete-log-group --log-group-name "$group" 2>&1); then
+      printf '   DELETED service log group %s\n' "$group"
+    elif printf '%s' "$out" | grep -q 'ResourceNotFoundException'; then
+      printf '   ABSENT  service log group %s\n' "$group"
+    else
+      printf 'ERROR: delete-log-group failed for %s: %s\n' "$group" "$out" >&2
+      failures=$((failures + 1))
+    fi
+  done
+  return "$failures"
+}
+
 destroy_stack() {
   local stack="$1"
   set_context_args_for_stack "$stack"
+  capture_service_log_groups "$stack" || return 1
   printf '\n-> Destroying %s (stage=%s)\n' "$stack" "$(stage_for_stack "$stack")"
-  npx cdk destroy --force "${CDK_CONTEXT_ARGS[@]}" "$stack"
+  npx cdk destroy --force "${CDK_CONTEXT_ARGS[@]}" "$stack" || return 1
+  cleanup_service_log_groups
 }
 
 destroy_planned_stacks() {
@@ -443,7 +493,7 @@ destroy_planned_stacks() {
     if destroy_stack "$stack"; then
       RESULTS+=("DESTROYED $stack")
     else
-      printf 'ERROR: cdk destroy failed for %s (was %s); continuing so remaining stacks are attempted\n' \
+      printf 'ERROR: cdk destroy failed or exact post-destroy log cleanup failed for %s (was %s); continuing so remaining stacks are attempted\n' \
         "$stack" "$status" >&2
       RESULTS+=("FAILED    $stack")
       failures=$((failures + 1))
@@ -489,7 +539,7 @@ main() {
   destroy_planned_stacks || failures=$?
   print_summary
   if [ "$failures" -gt 0 ]; then
-    printf '\n%s stack(s) failed to destroy. Teardown is INCOMPLETE.\n' "$failures" >&2
+    printf '\n%s stack(s) failed to destroy cleanly. Teardown is INCOMPLETE.\n' "$failures" >&2
     exit 1
   fi
   printf '\nTeardown complete.\n'
