@@ -1117,42 +1117,28 @@ export class D03WorkstreamGatewayStack extends Stack {
         },
       };
 
+      // The managed association performs the idempotent detach on delete;
+      // this state check remains a verify-only backstop before dependencies
+      // that own the role, engine, and key are removed.
       const detachReady = stateCheck(
         "PolicyEngineDetachReady",
         "DETACHED",
         "DELETE",
       );
       detachReady.node.addDependency(rolePropagation);
-      const association = new AwsCustomResource(
-        this,
-        "PolicyEngineAssociation",
-        {
-          resourceType: "Custom::AgenticAIPolicyEngineAssociation",
-          role: crRole,
-          onCreate: {
-            service: "bedrock-agentcore-control",
-            action: "updateGateway",
-            parameters: logOnlyParameters,
-            physicalResourceId: PhysicalResourceId.of(
-              `policy-engine-association-${props.envName}-${props.tenantId}-${props.agentId}`,
-            ),
-          },
-          onUpdate: {
-            service: "bedrock-agentcore-control",
-            action: "updateGateway",
-            parameters: logOnlyParameters,
-            physicalResourceId: PhysicalResourceId.of(
-              `policy-engine-association-${props.envName}-${props.tenantId}-${props.agentId}`,
-            ),
-          },
-          onDelete: {
-            service: "bedrock-agentcore-control",
-            action: "updateGateway",
-            parameters: gatewayUpdateParameters,
-            ignoreErrorCodesMatching: "ResourceNotFoundException",
-          },
+      const association = new CustomResource(this, "PolicyEngineAssociation", {
+        resourceType: "Custom::AgenticAIPolicyEngineAssociation",
+        serviceToken: stateProvider.serviceToken,
+        properties: {
+          GatewayIdentifier: gatewayIdToken,
+          PolicyEngineArn: policyEngineArn,
+          ExpectedMode: "LOG_ONLY",
+          CheckOn: "CREATE_UPDATE",
+          ManageAssociation: true,
+          PhysicalResourceId: `policy-engine-association-${props.envName}-${props.tenantId}-${props.agentId}`,
+          GatewayUpdateParameters: gatewayUpdateParameters,
         },
-      );
+      });
       association.node.addDependency(detachReady);
       association.node.addDependency(rolePropagation);
 
@@ -1618,8 +1604,10 @@ export class D03WorkstreamGatewayStack extends Stack {
 }
 
 /**
- * Provider handler for Gateway PolicyEngine mode and detach convergence.
- * Mutations remain in AwsCustomResource; this waiter only signs GetGateway.
+ * Provider handler for Gateway PolicyEngine association, mode, and detach
+ * convergence. Managed association resources retry only the live-proven
+ * transient GetPolicyEngine propagation denial; pure state checks remain
+ * read-only.
  */
 const POLICY_ENGINE_GATEWAY_STATE_HANDLER = `
 const https = require('https');
@@ -1664,36 +1652,98 @@ async function getGateway(gatewayIdentifier) {
     req.end();
   });
 }
+async function updateGateway(gatewayIdentifier, payload) {
+  const region = process.env.AWS_REGION;
+  const host = 'bedrock-agentcore-control.' + region + '.amazonaws.com';
+  const path = '/gateways/' + encodeURIComponent(gatewayIdentifier) + '/';
+  const body = JSON.stringify(payload);
+  const payloadHash = hash(body);
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\\.\\d{3}/g, '');
+  const dateStamp = amzDate.substring(0, 8);
+  const headers = {
+    'content-length': String(Buffer.byteLength(body, 'utf8')),
+    'content-type': 'application/json',
+    host,
+    'x-amz-content-sha256': payloadHash,
+    'x-amz-date': amzDate,
+    'x-amz-security-token': process.env.AWS_SESSION_TOKEN,
+  };
+  const keys = Object.keys(headers).sort();
+  const canonicalHeaders = keys.map(k => k + ':' + headers[k] + '\\n').join('');
+  const signedHeaders = keys.join(';');
+  const canonicalRequest =
+    'PUT\\n' + path + '\\n\\n' + canonicalHeaders + '\\n' + signedHeaders + '\\n' + payloadHash;
+  const scope = dateStamp + '/' + region + '/bedrock-agentcore/aws4_request';
+  const stringToSign =
+    'AWS4-HMAC-SHA256\\n' + amzDate + '\\n' + scope + '\\n' + hash(canonicalRequest);
+  const kDate = hmac('AWS4' + process.env.AWS_SECRET_ACCESS_KEY, dateStamp);
+  const kRegion = hmac(kDate, region);
+  const kService = hmac(kRegion, 'bedrock-agentcore');
+  const kSigning = hmac(kService, 'aws4_request');
+  const signature = crypto.createHmac('sha256', kSigning).update(stringToSign, 'utf8').digest('hex');
+  headers.authorization =
+    'AWS4-HMAC-SHA256 Credential=' + process.env.AWS_ACCESS_KEY_ID + '/' + scope +
+    ', SignedHeaders=' + signedHeaders + ', Signature=' + signature;
+  return new Promise((resolve, reject) => {
+    const req = https.request({ host, path, method: 'PUT', headers }, res => {
+      let responseBody = '';
+      res.on('data', chunk => { responseBody += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode || 0, body: responseBody }));
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+function isRetryablePolicyEnginePropagation(response) {
+  if (response.status !== 400) return false;
+  const message = String(response.body || '').toLowerCase();
+  return message.includes('access denied while calling getpolicyengine') &&
+    message.includes('gateway role');
+}
+// onEvent only validates and preserves resource identity. Association and
+// detach mutations intentionally run in isComplete so each attempt first reads
+// live state and the Provider can retry the one proven propagation response.
 exports.onEvent = async (event) => {
   const props = event.ResourceProperties || {};
   const gatewayIdentifier = String(props.GatewayIdentifier || '');
   const expectedMode = String(props.ExpectedMode || '');
   const checkOn = String(props.CheckOn || '');
+  const manageAssociation = String(props.ManageAssociation || 'false') === 'true';
   if (!gatewayIdentifier || !['DETACHED', 'LOG_ONLY', 'ENFORCE'].includes(expectedMode)) {
     throw new Error('PolicyEngine Gateway state check has invalid properties');
   }
   if (!['CREATE_UPDATE', 'DELETE'].includes(checkOn)) {
     throw new Error('PolicyEngine Gateway state check has invalid CheckOn');
   }
+  if (manageAssociation && (!props.GatewayUpdateParameters || typeof props.GatewayUpdateParameters !== 'object')) {
+    throw new Error('Managed PolicyEngine association requires GatewayUpdateParameters');
+  }
   return {
     PhysicalResourceId:
       event.PhysicalResourceId ||
+      String(props.PhysicalResourceId || '') ||
       'policy-engine-state-' + String(event.LogicalResourceId || gatewayIdentifier),
   };
 };
 exports.isComplete = async (event) => {
   const props = event.ResourceProperties || {};
   const checkOn = String(props.CheckOn || '');
-  const shouldCheck = checkOn === 'DELETE'
+  const manageAssociation = String(props.ManageAssociation || 'false') === 'true';
+  const shouldCheck = manageAssociation || (checkOn === 'DELETE'
     ? event.RequestType === 'Delete'
-    : event.RequestType !== 'Delete';
+    : event.RequestType !== 'Delete');
   if (!shouldCheck) return { IsComplete: true };
   const gatewayIdentifier = String(props.GatewayIdentifier || '');
-  const expectedMode = String(props.ExpectedMode || '');
+  const configuredMode = String(props.ExpectedMode || '');
+  const desiredMode = manageAssociation && event.RequestType === 'Delete'
+    ? 'DETACHED'
+    : configuredMode;
   const expectedArn = String(props.PolicyEngineArn || '');
   const response = await getGateway(gatewayIdentifier);
   if (response.status === 404) {
-    if (expectedMode === 'DETACHED') return { IsComplete: true };
+    if (desiredMode === 'DETACHED') return { IsComplete: true };
     throw new Error('Gateway disappeared before PolicyEngine mode converged');
   }
   if (response.status < 200 || response.status >= 300) {
@@ -1708,14 +1758,31 @@ exports.isComplete = async (event) => {
   }
   if (status !== 'READY') return { IsComplete: false };
   const configuration = gateway.policyEngineConfiguration || {};
-  if (expectedMode === 'DETACHED') {
-    return { IsComplete: !configuration.arn };
+  const converged = desiredMode === 'DETACHED'
+    ? !configuration.arn
+    : String(configuration.arn || '') === expectedArn &&
+      String(configuration.mode || '') === desiredMode;
+  if (converged) return { IsComplete: true };
+  if (!manageAssociation) return { IsComplete: false };
+
+  const payload = JSON.parse(JSON.stringify(props.GatewayUpdateParameters));
+  delete payload.gatewayIdentifier;
+  if (desiredMode === 'DETACHED') {
+    delete payload.policyEngineConfiguration;
+  } else {
+    payload.policyEngineConfiguration = { arn: expectedArn, mode: desiredMode };
   }
-  return {
-    IsComplete:
-      String(configuration.arn || '') === expectedArn &&
-      String(configuration.mode || '') === expectedMode,
-  };
+  const update = await updateGateway(gatewayIdentifier, payload);
+  if (update.status >= 200 && update.status < 300) {
+    return { IsComplete: false };
+  }
+  if (desiredMode !== 'DETACHED' && isRetryablePolicyEnginePropagation(update)) {
+    return { IsComplete: false };
+  }
+  if (desiredMode === 'DETACHED' && update.status === 404) {
+    return { IsComplete: true };
+  }
+  throw new Error('UpdateGateway HTTP ' + update.status + ': ' + update.body);
 };
 `;
 

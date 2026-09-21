@@ -893,7 +893,8 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
         resource.Type === "Custom::AgenticAIPolicyEngineAssociation",
     )!;
     expect(association.DependsOn).toContain(detachId);
-    expect(JSON.stringify(association)).toContain("updateGateway");
+    expect(association.Properties.ManageAssociation).toBe(true);
+    expect(association.Properties.GatewayUpdateParameters).toBeDefined();
 
     const policyIds = Object.entries(resources)
       .filter(
@@ -934,7 +935,10 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
           "Waits for Gateway PolicyEngine association and mode convergence.",
     ) as any;
     expect(stateWaiter.Properties.Code.ZipFile).toContain(
-      "expectedMode === 'DETACHED'",
+      "desiredMode === 'DETACHED'",
+    );
+    expect(stateWaiter.Properties.Code.ZipFile).toContain(
+      "isRetryablePolicyEnginePropagation",
     );
     expect(stateWaiter.Properties.Code.ZipFile).toContain(
       "event.RequestType === 'Delete'",
@@ -1045,6 +1049,165 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
     });
   });
 
+  it("retries only the live-proven association propagation denial", async () => {
+    const { template } = synthRegistry({
+      policyEngineMode: "LOG_ONLY",
+      policyEngineIamRoleArns: [
+        `arn:aws:iam::${WORKLOAD_ACCOUNT_ID}:role/AgenticAI-D03-acme-primary-runtime`,
+      ],
+    });
+    const waiter = Object.values(
+      template.findResources("AWS::Lambda::Function"),
+    ).find(
+      (resource: any) =>
+        resource.Properties?.Description ===
+        "Waits for Gateway PolicyEngine association and mode convergence.",
+    ) as any;
+    const engineArn =
+      "arn:aws:bedrock-agentcore:us-west-2:333333333333:policy-engine/AgenticAI_nonprod_acme_primary_pe-abcdefghij";
+    const gatewayUpdateParameters = {
+      gatewayIdentifier: "gateway-123",
+      name: "agenticai-d03-nonprod-acme-primary-gw",
+      roleArn:
+        "arn:aws:iam::333333333333:role/AgenticAI-D03-nonprod-acme-primary-gw-svc",
+      protocolType: "MCP",
+      protocolConfiguration: {
+        mcp: { supportedVersions: ["2025-06-18"], searchType: "SEMANTIC" },
+      },
+      authorizerType: "AWS_IAM",
+    };
+    const responses = [
+      { status: 200, body: JSON.stringify({ status: "READY" }) },
+      {
+        status: 400,
+        body: JSON.stringify({
+          message:
+            "Access denied while calling GetPolicyEngine on Policy Engine with Gateway role",
+        }),
+      },
+      { status: 200, body: JSON.stringify({ status: "READY" }) },
+      { status: 202, body: "{}" },
+      {
+        status: 200,
+        body: JSON.stringify({
+          status: "READY",
+          policyEngineConfiguration: { arn: engineArn, mode: "LOG_ONLY" },
+        }),
+      },
+      {
+        status: 200,
+        body: JSON.stringify({
+          status: "READY",
+          policyEngineConfiguration: { arn: engineArn, mode: "LOG_ONLY" },
+        }),
+      },
+      { status: 202, body: "{}" },
+      { status: 200, body: JSON.stringify({ status: "READY" }) },
+      { status: 200, body: JSON.stringify({ status: "READY" }) },
+      { status: 400, body: JSON.stringify({ message: "invalid protocol" }) },
+    ];
+    const requests: Array<{ options: any; body: string }> = [];
+    const fakeHttps = {
+      request: (options: any, callback: (response: any) => void) => {
+        let body = "";
+        const request = new EventEmitter() as any;
+        request.write = (chunk: unknown) => {
+          body += Buffer.isBuffer(chunk)
+            ? chunk.toString("utf8")
+            : String(chunk);
+        };
+        request.end = () => {
+          const next = responses.shift();
+          if (!next) throw new Error("unexpected HTTPS request");
+          requests.push({ options, body });
+          const response = new EventEmitter() as any;
+          response.statusCode = next.status;
+          callback(response);
+          response.emit("data", Buffer.from(next.body, "utf8"));
+          response.emit("end");
+        };
+        return request;
+      },
+    };
+    const exported: Record<string, any> = {};
+    runInNewContext(waiter.Properties.Code.ZipFile, {
+      exports: exported,
+      module: { exports: exported },
+      require: (name: string) => {
+        if (name === "https") return fakeHttps;
+        if (name === "crypto") return { createHash, createHmac };
+        throw new Error(`unexpected require: ${name}`);
+      },
+      process: {
+        env: {
+          AWS_REGION: "us-west-2",
+          AWS_ACCESS_KEY_ID: "test-access",
+          AWS_SECRET_ACCESS_KEY: "test-secret",
+          AWS_SESSION_TOKEN: "test-session",
+        },
+      },
+      Buffer,
+      Date,
+      JSON,
+      Promise,
+      encodeURIComponent,
+    });
+    const createEvent = {
+      RequestType: "Create",
+      LogicalResourceId: "PolicyEngineAssociation",
+      ResourceProperties: {
+        GatewayIdentifier: "gateway-123",
+        PolicyEngineArn: engineArn,
+        ExpectedMode: "LOG_ONLY",
+        CheckOn: "CREATE_UPDATE",
+        ManageAssociation: true,
+        PhysicalResourceId: "policy-engine-association-nonprod-acme-primary",
+        GatewayUpdateParameters: gatewayUpdateParameters,
+      },
+    };
+    await expect(exported.onEvent(createEvent)).resolves.toEqual({
+      PhysicalResourceId: "policy-engine-association-nonprod-acme-primary",
+    });
+    await expect(exported.isComplete(createEvent)).resolves.toEqual({
+      IsComplete: false,
+    });
+    await expect(exported.isComplete(createEvent)).resolves.toEqual({
+      IsComplete: false,
+    });
+    await expect(exported.isComplete(createEvent)).resolves.toEqual({
+      IsComplete: true,
+    });
+
+    const deleteEvent = { ...createEvent, RequestType: "Delete" };
+    await expect(exported.isComplete(deleteEvent)).resolves.toEqual({
+      IsComplete: false,
+    });
+    await expect(exported.isComplete(deleteEvent)).resolves.toEqual({
+      IsComplete: true,
+    });
+    await expect(exported.isComplete(createEvent)).rejects.toThrow(
+      /UpdateGateway HTTP 400.*invalid protocol/,
+    );
+
+    const puts = requests.filter(({ options }) => options.method === "PUT");
+    expect(puts).toHaveLength(4);
+    expect(puts[0].options.path).toBe("/gateways/gateway-123/");
+    expect(puts[0].options.headers["x-amz-content-sha256"]).toHaveLength(64);
+    expect(puts[0].options.headers["x-amz-date"]).toMatch(/^\d{8}T\d{6}Z$/);
+    const associationPayload = JSON.parse(puts[1].body);
+    expect(associationPayload).not.toHaveProperty("gatewayIdentifier");
+    expect(associationPayload).toEqual({
+      name: gatewayUpdateParameters.name,
+      roleArn: gatewayUpdateParameters.roleArn,
+      protocolType: gatewayUpdateParameters.protocolType,
+      protocolConfiguration: gatewayUpdateParameters.protocolConfiguration,
+      authorizerType: gatewayUpdateParameters.authorizerType,
+      policyEngineConfiguration: { arn: engineArn, mode: "LOG_ONLY" },
+    });
+    expect(JSON.parse(puts[2].body)).not.toHaveProperty(
+      "policyEngineConfiguration",
+    );
+  });
   it("renders the live-proven quoted group candidate for CUSTOM_JWT", () => {
     const context = gaRegistryContext(["tool-echo"]);
     (context.records[0].document.authorization as any).allowedGroups = [

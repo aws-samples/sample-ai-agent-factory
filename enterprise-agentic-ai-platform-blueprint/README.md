@@ -301,9 +301,11 @@ compiles one strict `FAIL_ON_ANY_FINDINGS` / `ACTIVE` policy per tool against
 its exact `<TargetName>___<ToolName>` action and Gateway ARN, and encrypts the
 engine and child policies with a rotating customer-managed KMS key. Creation
 orders exact Gateway-role permissions → six-minute propagation gate →
-`LOG_ONLY` association → policies → requested mode → targets. Deletion reverses
-through target convergence → `LOG_ONLY` → policy deletion → detach → Gateway
-and engine deletion. `CUSTOM_JWT` group policies use the separately live-proven
+`LOG_ONLY` association → policies → requested mode → targets. Association uses
+a signed, idempotent convergence loop that retries only the live-proven transient
+`Access denied while calling GetPolicyEngine` validation response; unrelated
+validation errors fail immediately. Deletion reverses through target convergence
+→ `LOG_ONLY` → policy deletion → detach → Gateway and engine deletion. `CUSTOM_JWT` group policies use the separately live-proven
 quoted-element candidate when a discovery URL is supplied directly to the
 Gateway stack; pipeline JWT-authorizer wiring remains a later gate.
 
@@ -455,7 +457,7 @@ A customer should never have to fork the repo to make a supported variant. Every
 | Region                             | `us-west-2`                | `packages/platform-baselines/src/approved-regions.ts` + SCP-06 sandbox-soak      |
 | Eval thresholds                    | see §2.5                   | `agenticai/eval*` context keys                                                   |
 | Gateway fronting                   | API Gateway (§08 Option A) | hard default                                                                     |
-| Gateway PolicyEngine migration     | `OFF`                      | `agenticai/gatewayPolicyEngineMode` (`LOG_ONLY` before `ENFORCE`)                 |
+| Gateway PolicyEngine migration     | `OFF`                      | `agenticai/gatewayPolicyEngineMode` (`LOG_ONLY` before `ENFORCE`)                |
 | Browser egress / Lattice endpoints | Off                        | `agenticai/enableBrowserInternetEgress` / `enableLatticePrivateEndpoints` (BETA) |
 
 An override that breaks a spec MUST (e.g. adding a non-Claude model) becomes a new deviation in §3.
