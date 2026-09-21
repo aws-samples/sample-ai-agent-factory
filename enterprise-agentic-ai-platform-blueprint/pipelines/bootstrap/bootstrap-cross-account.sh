@@ -45,6 +45,17 @@ QUALIFIER="hnb659fds"
 # iam:PassedToService=states.amazonaws.com. This is required for the bounded
 # Step Functions waiters used by deletion and IAM-propagation barriers; do not
 # widen the role resource pattern or omit the passed-to-service condition.
+# The optional pipeline-owned Runtime/Memory path additionally requires
+# `bedrock-agentcore:Create/Get/DeleteAgentRuntime`,
+# `bedrock-agentcore:Create/Get/DeleteMemory`, and resource-tag reads/writes on
+# the exact environment-qualified Runtime/Memory families. Allow
+# `iam:PassRole` only on the exact
+# `AgenticAI-D03-<environment>-<tenant>-<agent>-runtime` role with
+# `iam:PassedToService=bedrock-agentcore.amazonaws.com`. Memory CMK use needs
+# `kms:CreateGrant`, `kms:Decrypt`, `kms:GenerateDataKey*`, `kms:ReEncrypt*`, and
+# `kms:DescribeKey` on the exact Memory key with
+# `kms:ViaService=bedrock-agentcore.<region>.amazonaws.com`; do not grant
+# unconstrained KMS administration.
 # The optional Gateway PolicyEngine path also requires kms:CreateGrant,
 # kms:Decrypt, kms:GenerateDataKey, and kms:DescribeKey on its exact
 # AgenticAI PolicyEngine CMK. Scope them with

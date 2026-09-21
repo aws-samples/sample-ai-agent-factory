@@ -38,7 +38,11 @@ import {
   StageProps,
 } from "aws-cdk-lib";
 import { PipelineType } from "aws-cdk-lib/aws-codepipeline";
-import { BuildSpec, LinuxBuildImage } from "aws-cdk-lib/aws-codebuild";
+import {
+  BuildSpec,
+  LinuxArmBuildImage,
+  LinuxBuildImage,
+} from "aws-cdk-lib/aws-codebuild";
 import { PolicyStatement, Role, ServicePrincipal } from "aws-cdk-lib/aws-iam";
 import {
   CodeBuildStep,
@@ -46,6 +50,7 @@ import {
   CodePipelineSource,
   ManualApprovalStep,
   ShellStep,
+  Step,
 } from "aws-cdk-lib/pipelines";
 import { NagSuppressions } from "cdk-nag";
 import { Construct } from "constructs";
@@ -57,6 +62,7 @@ import {
   type GatewayPolicyEngineMode,
 } from "../apps/platform-account/lib/d03-workstream-gateway-stack";
 import { D03WorkstreamRegistryRolesStack } from "../apps/workload-account/lib/d03-workstream-registry-roles-stack";
+import { D03WorkstreamRuntimeMemoryStack } from "../apps/workload-account/lib/d03-workstream-runtime-memory-stack";
 import type { GaRegistryConsumerContext } from "@agenticai/agent-registry";
 import {
   applyPipelineResourceTags,
@@ -89,6 +95,8 @@ export interface WorkloadStageProps extends StageProps {
   readonly gatewayRegion?: string;
   readonly policyEngineMode?: GatewayPolicyEngineMode;
   readonly policyEngineIamRoleArns?: readonly string[];
+  /** Opt-in: also deploy the native Runtime+Memory foundation (default false). */
+  readonly enablePipelineRuntimeMemory?: boolean;
   readonly auditOamSinkArn?: string;
   readonly notificationEmail?: string;
 }
@@ -97,6 +105,7 @@ export class WorkloadDeploymentStage extends Stage {
   readonly networkStack?: WorkloadNetworkStack;
   readonly appStack?: WorkloadAppStack;
   readonly gatewayStack?: D03WorkstreamGatewayStack;
+  readonly runtimeMemoryStack?: D03WorkstreamRuntimeMemoryStack;
 
   constructor(scope: Construct, id: string, props: WorkloadStageProps) {
     super(scope, id, props);
@@ -126,6 +135,27 @@ export class WorkloadDeploymentStage extends Stage {
         registryValidatorRoleArnOverride: `${rolePrefix}/AgenticAI-D03-${props.envName}-${props.tenantId}-${props.agentId}-RegistryValidator`,
         crExecRoleArnOverride: `${rolePrefix}/AgenticAI-D03-${props.envName}-GatewayAdmin`,
       });
+
+      // Opt-in native Runtime+Memory foundation. The default keeps the exact R2
+      // Gateway-only rollback shape (this stack is simply not created). When
+      // enabled it depends on the ToolGateway so a stage is a coherent unit.
+      if (props.enablePipelineRuntimeMemory) {
+        this.runtimeMemoryStack = new D03WorkstreamRuntimeMemoryStack(
+          this,
+          "RuntimeMemory",
+          {
+            stackName: `AgenticAI-${props.tenantId}-${props.agentId}-${props.envName}-RuntimeMemory`,
+            env: { account: workloadAccountId, region: props.gatewayRegion },
+            envName: props.envName,
+            applicationId: props.applicationId,
+            agentId: props.agentId,
+            tenantId: props.tenantId,
+            costCentre: props.costCentre,
+            runtimeExecutionRoleArnOverride: `${rolePrefix}/AgenticAI-D03-${props.envName}-${props.tenantId}-${props.agentId}-runtime`,
+          },
+        );
+        this.runtimeMemoryStack.addDependency(this.gatewayStack);
+      }
       return;
     }
 
@@ -168,6 +198,7 @@ export interface WorkstreamRegistryRolesStageProps extends StageProps {
   readonly workloadProdAccountId: string;
   readonly nonprodContext: GaRegistryConsumerContext;
   readonly prodContext: GaRegistryConsumerContext;
+  readonly enablePipelineRuntimeMemory?: boolean;
 }
 
 export class WorkstreamRegistryRolesStage extends Stage {
@@ -192,6 +223,7 @@ export class WorkstreamRegistryRolesStage extends Stage {
       applicationId: props.applicationId,
       costCentre: props.costCentre,
       registryContext: props.nonprodContext,
+      enablePipelineRuntimeMemory: props.enablePipelineRuntimeMemory,
     });
     this.prod = new D03WorkstreamRegistryRolesStack(this, "ProdRoles", {
       stackName: `AgenticAI-${props.tenantId}-${props.agentId}-prod-RegistryRoles`,
@@ -205,6 +237,7 @@ export class WorkstreamRegistryRolesStage extends Stage {
       applicationId: props.applicationId,
       costCentre: props.costCentre,
       registryContext: props.prodContext,
+      enablePipelineRuntimeMemory: props.enablePipelineRuntimeMemory,
     });
   }
 }
@@ -220,6 +253,11 @@ export interface WorkloadPipelineStackProps extends StackProps {
   readonly gaRegistry?: WorkloadGaRegistryConfig;
   /** Opt-in Gateway PolicyEngine migration; omitted preserves the R2 rollback template. */
   readonly policyEngine?: WorkloadPolicyEngineConfig;
+  /**
+   * Opt-in native Runtime+Memory foundation. Default false preserves the exact
+   * R2 Gateway-only rollback graph. Requires GA Registry mode.
+   */
+  readonly enablePipelineRuntimeMemory?: boolean;
   readonly workloadNonprodEnv: Required<Environment>;
   readonly workloadProdEnv: Required<Environment>;
   /** Account-specific AZ names produced by read-only preflight. */
@@ -420,6 +458,12 @@ export class WorkloadPipelineStack extends Stack {
       }
     }
 
+    if (props.enablePipelineRuntimeMemory && !props.gaRegistry) {
+      throw new Error(
+        "WorkloadPipelineStack: Runtime+Memory foundation requires GA Registry mode.",
+      );
+    }
+
     const resourceTags: PipelineResourceTags = {
       applicationId,
       agentId: props.agentId,
@@ -502,6 +546,21 @@ export class WorkloadPipelineStack extends Stack {
       enableKeyRotation: true,
       synth: synthStep,
       publishAssetsInParallel: false,
+      // Native ARM64 Docker image publishing needs an ARM build image. CDK
+      // enables privileged mode only on the DockerAssets project; FileAssets
+      // stays non-privileged. Only configure the image here so the R2
+      // Gateway-only graph remains unchanged when disabled.
+      ...(props.enablePipelineRuntimeMemory
+        ? {
+            assetPublishingCodeBuildDefaults: {
+              buildEnvironment: {
+                buildImage: LinuxArmBuildImage.fromCodeBuildImageId(
+                  "aws/codebuild/amazonlinux-aarch64-standard:4.0",
+                ),
+              },
+            },
+          }
+        : {}),
     });
 
     if (props.gaRegistry) {
@@ -518,16 +577,34 @@ export class WorkloadPipelineStack extends Stack {
           workloadProdAccountId: props.workloadProdEnv.account,
           nonprodContext: props.gaRegistry.nonprod,
           prodContext: props.gaRegistry.prod,
+          enablePipelineRuntimeMemory: props.enablePipelineRuntimeMemory,
         },
       );
-      this.pipeline.addStage(rolesStage, {
-        post: [
-          new ManualApprovalStep("GatewayPermissionReady", {
-            comment:
-              "Stable Workstream roles exist. Continue only after the Platform pipeline grants both exact Gateway service-role ARNs on every tool alias.",
-          }),
-        ],
-      });
+      const gatewayPermissionReady = new ManualApprovalStep(
+        "GatewayPermissionReady",
+        {
+          comment: props.enablePipelineRuntimeMemory
+            ? "Stable Gateway and Runtime roles exist. Continue only after Platform tool permissions are exact; the pipeline then enforces the AgentCore propagation window."
+            : "Stable Workstream roles exist. Continue only after the Platform pipeline grants both exact Gateway service-role ARNs on every tool alias.",
+        },
+      );
+      const postSteps: Step[] = [gatewayPermissionReady];
+      if (props.enablePipelineRuntimeMemory) {
+        const runtimeRolePropagation = new CodeBuildStep(
+          "RuntimeRolePropagation",
+          {
+            commands: [
+              'echo "Waiting six minutes for the stable Runtime role to propagate to AgentCore"',
+              "sleep 360",
+            ],
+            buildEnvironment: { buildImage: LinuxBuildImage.STANDARD_7_0 },
+            timeout: Duration.minutes(10),
+          },
+        );
+        runtimeRolePropagation.addStepDependency(gatewayPermissionReady);
+        postSteps.push(runtimeRolePropagation);
+      }
+      this.pipeline.addStage(rolesStage, { post: postSteps });
     }
 
     // Non-prod stage.
@@ -543,6 +620,7 @@ export class WorkloadPipelineStack extends Stack {
       gatewayRegion: props.gaRegistry?.gatewayRegion,
       policyEngineMode: props.policyEngine?.mode,
       policyEngineIamRoleArns: props.policyEngine?.nonprodIamRoleArns,
+      enablePipelineRuntimeMemory: props.enablePipelineRuntimeMemory,
       auditOamSinkArn: props.auditOamSinkArn,
       notificationEmail: props.notificationEmail,
     });
@@ -666,6 +744,7 @@ export class WorkloadPipelineStack extends Stack {
       gatewayRegion: props.gaRegistry?.gatewayRegion,
       policyEngineMode: props.policyEngine?.mode,
       policyEngineIamRoleArns: props.policyEngine?.prodIamRoleArns,
+      enablePipelineRuntimeMemory: props.enablePipelineRuntimeMemory,
       auditOamSinkArn: props.auditOamSinkArn,
       notificationEmail: props.notificationEmail,
     });
@@ -676,7 +755,9 @@ export class WorkloadPipelineStack extends Stack {
           new ManualApprovalStep("ProdGatewayApproval", {
             comment: props.policyEngine
               ? `Approve only after nonproduction Registry/MCP denial twins and PolicyEngine ${props.policyEngine.mode} behavior match the retained Lambda wrapper. Production must not lead nonproduction mode evidence.`
-              : "Approve only after nonproduction Gateway targets pass live Registry, tools/list, tools/call, and denial twins. No agent runtime/canary exists in the R2 Gateway-only slice.",
+              : props.enablePipelineRuntimeMemory
+                ? "Approve only after nonproduction Gateway targets pass live Registry, tools/list, tools/call, and denial twins, and the native Runtime+Memory foundation reached Runtime READY / Memory ACTIVE. The Runtime runs the inert proven agent; generated-agent LiteLLMModel/MCPClient integration is NOT yet wired."
+                : "Approve only after nonproduction Gateway targets pass live Registry, tools/list, tools/call, and denial twins. No agent runtime/canary exists in the R2 Gateway-only slice.",
           }),
         ],
       });
@@ -838,6 +919,9 @@ export class WorkloadPipelineStack extends Stack {
       derived["agenticai/gatewayPolicyEngineProdIamRoleArns"] = JSON.stringify(
         props.policyEngine.prodIamRoleArns,
       );
+    }
+    if (props.enablePipelineRuntimeMemory) {
+      derived["agenticai/enablePipelineRuntimeMemory"] = "true";
     }
     return {
       ...derived,

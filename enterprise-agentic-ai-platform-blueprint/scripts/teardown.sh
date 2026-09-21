@@ -62,6 +62,8 @@ ENV_NAME="${AGENTICAI_ENV_NAME:-nonprod}"
 
 # Reverse dependency order: consumers before producers.
 BASE_STACKS=(
+  "AgenticAI-${TENANT_ID}-${AGENT_ID}-prod-RuntimeMemory"
+  "AgenticAI-${TENANT_ID}-${AGENT_ID}-nonprod-RuntimeMemory"
   "AgenticAI-${TENANT_ID}-${AGENT_ID}-prod-ToolGateway"
   "AgenticAI-${TENANT_ID}-${AGENT_ID}-nonprod-ToolGateway"
   "AgenticAI-${TENANT_ID}-${AGENT_ID}-prod-RegistryRoles"
@@ -121,7 +123,7 @@ require_tools() {
 # ---------------------------------------------------------------------------
 stage_for_stack() {
   case "$1" in
-    AgenticAI-*-ToolGateway|AgenticAI-*-RegistryRoles) printf 'pipeline\n' ;;
+    AgenticAI-*-RuntimeMemory|AgenticAI-*-ToolGateway|AgenticAI-*-RegistryRoles) printf 'pipeline\n' ;;
     AgenticAI-WorkloadPipelineStack|AgenticAI-PlatformPipelineStack) printf 'pipeline\n' ;;
     AgenticAI-GapClosureStack) printf 'gap-closure\n' ;;
     AgenticAI-D03-WorkstreamGateway-*) printf 'd03-workstream-gateway\n' ;;
@@ -139,7 +141,7 @@ stage_for_stack() {
 # synthesise the app. Empty means "no required context".
 required_env_for_stack() {
   case "$1" in
-    AgenticAI-WorkloadPipelineStack|AgenticAI-*-ToolGateway|AgenticAI-*-RegistryRoles)
+    AgenticAI-WorkloadPipelineStack|AgenticAI-*-RuntimeMemory|AgenticAI-*-ToolGateway|AgenticAI-*-RegistryRoles)
       printf '%s\n' "AGENTICAI_GITHUB_REPO AGENTICAI_GITHUB_CONNECTION_ARN AGENTICAI_PLATFORM_NONPROD_ACCOUNT_ID AGENTICAI_PLATFORM_PROD_ACCOUNT_ID AGENTICAI_WORKLOAD_NONPROD_ACCOUNT_ID AGENTICAI_WORKLOAD_PROD_ACCOUNT_ID AGENTICAI_WORKLOAD_NONPROD_AVAILABILITY_ZONES AGENTICAI_WORKLOAD_PROD_AVAILABILITY_ZONES AGENTICAI_GA_REGISTRY_NONPROD_CONTEXT_FILE AGENTICAI_GA_REGISTRY_PROD_CONTEXT_FILE AGENTICAI_GA_REGISTRY_EXPECTED_TOOL_IDS" ;;
     AgenticAI-PlatformPipelineStack)
       printf '%s\n' "AGENTICAI_GITHUB_REPO AGENTICAI_GITHUB_CONNECTION_ARN AGENTICAI_ORGANIZATION_ID AGENTICAI_PLATFORM_NONPROD_ACCOUNT_ID AGENTICAI_PLATFORM_PROD_ACCOUNT_ID AGENTICAI_AUDIT_ACCOUNT_ID AGENTICAI_LOG_ARCHIVE_ACCOUNT_ID AGENTICAI_WORKLOAD_NONPROD_ACCOUNT_ID AGENTICAI_WORKLOAD_PROD_ACCOUNT_ID AGENTICAI_PIPELINE_ROLE_ARN AGENTICAI_INFERENCE_MODEL_RATE_LIMITS" ;;
@@ -171,7 +173,7 @@ missing_env_for_stack() {
     fi
   done
   case "$stack" in
-    AgenticAI-WorkloadPipelineStack|AgenticAI-*-ToolGateway|AgenticAI-*-RegistryRoles)
+    AgenticAI-WorkloadPipelineStack|AgenticAI-*-RuntimeMemory|AgenticAI-*-ToolGateway|AgenticAI-*-RegistryRoles)
       if [ -n "${AGENTICAI_GATEWAY_POLICY_ENGINE_MODE:-}" ] &&
          [ "${AGENTICAI_GATEWAY_POLICY_ENGINE_MODE}" != "OFF" ]; then
         for var in \
@@ -194,7 +196,7 @@ set_context_args_for_stack() {
   CDK_CONTEXT_ARGS=(--context "stage=$stage")
 
   case "$stack" in
-    AgenticAI-WorkloadPipelineStack|AgenticAI-*-ToolGateway|AgenticAI-*-RegistryRoles)
+    AgenticAI-WorkloadPipelineStack|AgenticAI-*-RuntimeMemory|AgenticAI-*-ToolGateway|AgenticAI-*-RegistryRoles)
       add_context "agenticai/pipelineSelection=workload"
       add_context "agenticai/githubRepo=${AGENTICAI_GITHUB_REPO:-}"
       add_context "agenticai/githubConnectionArn=${AGENTICAI_GITHUB_CONNECTION_ARN:-}"
@@ -205,6 +207,16 @@ set_context_args_for_stack() {
       add_context "agenticai/workloadNonprodAvailabilityZones=${AGENTICAI_WORKLOAD_NONPROD_AVAILABILITY_ZONES:-}"
       add_context "agenticai/workloadProdAvailabilityZones=${AGENTICAI_WORKLOAD_PROD_AVAILABILITY_ZONES:-}"
       add_context "agenticai/enableGaRegistryConsumer=true"
+      case "$stack" in
+        AgenticAI-*-RuntimeMemory)
+          add_context "agenticai/enablePipelineRuntimeMemory=true"
+          ;;
+        *)
+          if [ "${AGENTICAI_ENABLE_PIPELINE_RUNTIME_MEMORY:-false}" = "true" ]; then
+            add_context "agenticai/enablePipelineRuntimeMemory=true"
+          fi
+          ;;
+      esac
       add_context "agenticai/gaRegistryExpectedToolIds=${AGENTICAI_GA_REGISTRY_EXPECTED_TOOL_IDS:-}"
       add_context "agenticai/gaRegistryNonprodContextFile=${AGENTICAI_GA_REGISTRY_NONPROD_CONTEXT_FILE:-}"
       add_context "agenticai/gaRegistryProdContextFile=${AGENTICAI_GA_REGISTRY_PROD_CONTEXT_FILE:-}"
@@ -426,7 +438,7 @@ confirm() {
   local yn
   printf '\n'
   printf 'This destroys the stacks listed above, empties non-versioned buckets,\n'
-  printf 'deletes their exact service-created CodeBuild/Lambda log groups, and\n'
+  printf 'deletes their exact service-created CodeBuild/Lambda/Runtime log groups, and\n'
   printf 'reports resources needing manual deletion (KMS pending-delete,\n'
   printf 'retained-on-delete S3).\n\n'
   printf 'Control-Tower closed accounts enter a 90-day SUSPENDED state; that is\n'
@@ -443,7 +455,7 @@ confirm() {
 # Destroy
 # ---------------------------------------------------------------------------
 
-# CodeBuild and Lambda create their default CloudWatch log groups outside
+# CodeBuild, Lambda, and AgentCore Runtime create service log groups outside
 # CloudFormation. Capture exact physical ids before deleting the active stack,
 # plus ids from prior deleted generations, so teardown retries can remove stale
 # groups without broad name-prefix matching.
@@ -455,6 +467,14 @@ append_service_log_resource() {
   case "$resource_type" in
     AWS::CodeBuild::Project) group="/aws/codebuild/$physical_id" ;;
     AWS::Lambda::Function) group="/aws/lambda/$physical_id" ;;
+    AWS::BedrockAgentCore::Runtime)
+      case "$physical_id" in
+        arn:*:bedrock-agentcore:*:*:runtime/*)
+          physical_id="${physical_id##*/}"
+          ;;
+      esac
+      group="/aws/bedrock-agentcore/runtimes/${physical_id}-DEFAULT"
+      ;;
     *) return 0 ;;
   esac
 
@@ -492,7 +512,7 @@ capture_deleted_stack_service_logs() {
     [ "$stack_id" = "None" ] && continue
     if ! events=$(aws cloudformation describe-stack-events \
         --stack-name "$stack_id" \
-        --query "StackEvents[?ResourceType=='AWS::CodeBuild::Project' || ResourceType=='AWS::Lambda::Function'].[ResourceType,PhysicalResourceId]" \
+        --query "StackEvents[?ResourceType=='AWS::CodeBuild::Project' || ResourceType=='AWS::Lambda::Function' || ResourceType=='AWS::BedrockAgentCore::Runtime'].[ResourceType,PhysicalResourceId]" \
         --output text 2>&1); then
       printf 'ERROR: describe-stack-events failed for %s: %s\n' \
         "$stack_id" "$events" >&2
@@ -506,7 +526,7 @@ capture_active_stack_service_logs() {
   local stack="$1" resources
   if ! resources=$(aws cloudformation list-stack-resources \
       --stack-name "$stack" \
-      --query "StackResourceSummaries[?ResourceType=='AWS::CodeBuild::Project' || ResourceType=='AWS::Lambda::Function'].[ResourceType,PhysicalResourceId]" \
+      --query "StackResourceSummaries[?ResourceType=='AWS::CodeBuild::Project' || ResourceType=='AWS::Lambda::Function' || ResourceType=='AWS::BedrockAgentCore::Runtime'].[ResourceType,PhysicalResourceId]" \
       --output text 2>&1); then
     printf 'ERROR: list-stack-resources failed for %s: %s\n' \
       "$stack" "$resources" >&2
@@ -553,6 +573,21 @@ ensure_service_resource_absent() {
       if [ -n "$out" ] && [ "$out" != "None" ]; then
         printf 'ERROR: refusing to delete logs while CodeBuild project still exists: %s\n' \
           "$physical_id" >&2
+        return 1
+      fi
+      ;;
+    AWS::BedrockAgentCore::Runtime)
+      if out=$(aws bedrock-agentcore-control get-agent-runtime \
+          --agent-runtime-id "$physical_id" \
+          --query 'agentRuntimeId' \
+          --output text 2>&1); then
+        printf 'ERROR: refusing to delete logs while AgentCore Runtime still exists: %s\n' \
+          "$physical_id" >&2
+        return 1
+      fi
+      if ! printf '%s' "$out" | grep -q 'ResourceNotFoundException'; then
+        printf 'ERROR: get-agent-runtime failed for %s: %s\n' \
+          "$physical_id" "$out" >&2
         return 1
       fi
       ;;

@@ -146,6 +146,8 @@ describe("Round 1B — teardown stage mapping", () => {
     expect(run.npxCalls).toEqual([]);
 
     const expectedPairs: ReadonlyArray<readonly [string, string]> = [
+      ["AgenticAI-demo-primary-prod-RuntimeMemory", "pipeline"],
+      ["AgenticAI-demo-primary-nonprod-RuntimeMemory", "pipeline"],
       ["AgenticAI-demo-primary-prod-ToolGateway", "pipeline"],
       ["AgenticAI-demo-primary-nonprod-ToolGateway", "pipeline"],
       ["AgenticAI-demo-primary-prod-RegistryRoles", "pipeline"],
@@ -178,6 +180,25 @@ describe("Round 1B — teardown stage mapping", () => {
         );
       }
       expect(row).toContain(stage);
+    }
+  });
+
+  it("orders RuntimeMemory before ToolGateway and RegistryRoles", () => {
+    const run = runTeardown(["--dry-run"]);
+    const rows = run.stdout.split("\n");
+    for (const environment of ["prod", "nonprod"]) {
+      const runtimeMemory = rows.findIndex((row) =>
+        row.startsWith(`AgenticAI-demo-primary-${environment}-RuntimeMemory`),
+      );
+      const gateway = rows.findIndex((row) =>
+        row.startsWith(`AgenticAI-demo-primary-${environment}-ToolGateway`),
+      );
+      const roles = rows.findIndex((row) =>
+        row.startsWith(`AgenticAI-demo-primary-${environment}-RegistryRoles`),
+      );
+      expect(runtimeMemory).toBeGreaterThanOrEqual(0);
+      expect(runtimeMemory).toBeLessThan(gateway);
+      expect(gateway).toBeLessThan(roles);
     }
   });
 
@@ -233,6 +254,35 @@ describe("Round 1B — teardown stage mapping", () => {
     );
     expect(run.npxCalls[0]).toContain(
       "--context agenticai/gaRegistryNonprodContextFile=/scratch/nonprod.json",
+    );
+    expect(run.npxCalls[0]).toContain(stack);
+  });
+
+  it("requires and forwards RuntimeMemory pipeline context", () => {
+    const stack = "AgenticAI-demo-primary-nonprod-RuntimeMemory";
+    const env = {
+      AGENTICAI_GITHUB_REPO: "aws-samples/sample-ai-agent-factory",
+      AGENTICAI_GITHUB_CONNECTION_ARN:
+        "arn:aws:codeconnections:us-west-2:111111111111:connection/example",
+      AGENTICAI_PLATFORM_NONPROD_ACCOUNT_ID: "111111111111",
+      AGENTICAI_PLATFORM_PROD_ACCOUNT_ID: "222222222222",
+      AGENTICAI_WORKLOAD_NONPROD_ACCOUNT_ID: "333333333333",
+      AGENTICAI_WORKLOAD_PROD_ACCOUNT_ID: "444444444444",
+      AGENTICAI_WORKLOAD_NONPROD_AVAILABILITY_ZONES:
+        '["us-west-2a","us-west-2b"]',
+      AGENTICAI_WORKLOAD_PROD_AVAILABILITY_ZONES: '["us-west-2a","us-west-2b"]',
+      AGENTICAI_GA_REGISTRY_NONPROD_CONTEXT_FILE: "/scratch/nonprod.json",
+      AGENTICAI_GA_REGISTRY_PROD_CONTEXT_FILE: "/scratch/prod.json",
+      AGENTICAI_GA_REGISTRY_EXPECTED_TOOL_IDS: '["tool-echo","tool-ping"]',
+      STUB_DESCRIBE_MODE: "exists",
+      STUB_DESTROY_EXIT: "0",
+    };
+    const run = runTeardown(["--stack", stack], { env, input: "y\n" });
+    expect(run.status).toBe(EXIT.ok);
+    expect(run.npxCalls).toHaveLength(1);
+    expect(run.npxCalls[0]).toContain("--context stage=pipeline");
+    expect(run.npxCalls[0]).toContain(
+      "--context agenticai/enablePipelineRuntimeMemory=true",
     );
     expect(run.npxCalls[0]).toContain(stack);
   });

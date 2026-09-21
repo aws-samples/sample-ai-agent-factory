@@ -1,7 +1,7 @@
 /*
  * Service-created CloudWatch log groups are not CloudFormation resources.
- * The teardown script must capture exact CodeBuild/Lambda physical ids before
- * stack deletion, then remove only those exact default log groups afterward.
+ * The teardown script must capture exact CodeBuild/Lambda/Runtime physical ids
+ * before stack deletion, then remove only those exact service log groups.
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
@@ -57,6 +57,14 @@ case "\${1:-}:\${2:-}" in
       printf 'AgenticAI-TestCleanupProject\\n'
     fi
     exit 0
+    ;;
+  bedrock-agentcore-control:get-agent-runtime)
+    if [ "\${STUB_RUNTIME_EXISTS:-false}" = true ]; then
+      printf 'AgenticAI_Test_Runtime-example123\n'
+      exit 0
+    fi
+    printf 'An error occurred (ResourceNotFoundException): runtime absent\n' >&2
+    exit 254
     ;;
   logs:delete-log-group)
     case "\${STUB_DELETE_LOG_MODE:-success}" in
@@ -149,6 +157,7 @@ function runTeardown(extraEnv: Record<string, string> = {}): RunResult {
 const GENERATED_RESOURCES = [
   "AWS::Lambda::Function\tAgenticAI-TestCleanupFunction",
   "AWS::CodeBuild::Project\tAgenticAI-TestCleanupProject",
+  "AWS::BedrockAgentCore::Runtime\tarn:aws:bedrock-agentcore:us-west-2:111111111111:runtime/AgenticAI_Test_Runtime-example123",
   "AWS::S3::Bucket\tAgenticAI-IgnoredBucket",
   "",
 ].join("\n");
@@ -167,6 +176,7 @@ describe("teardown service-created log cleanup", () => {
     expect(deleteCalls(run)).toEqual([
       "aws logs delete-log-group --log-group-name /aws/lambda/AgenticAI-TestCleanupFunction",
       "aws logs delete-log-group --log-group-name /aws/codebuild/AgenticAI-TestCleanupProject",
+      "aws logs delete-log-group --log-group-name /aws/bedrock-agentcore/runtimes/AgenticAI_Test_Runtime-example123-DEFAULT",
     ]);
     expect(run.sequence.join("\n")).not.toContain("AgenticAI-IgnoredBucket");
 
@@ -239,6 +249,8 @@ describe("teardown service-created log cleanup", () => {
         "AWS::Lambda::Function\tAgenticAI-HistoricFunction",
         "AWS::CodeBuild::Project\tAgenticAI-HistoricProject",
         "AWS::CodeBuild::Project\tAgenticAI-HistoricProject",
+        "AWS::BedrockAgentCore::Runtime\tarn:aws:bedrock-agentcore:us-west-2:111111111111:runtime/AgenticAI_Historic_Runtime-example123",
+        "AWS::BedrockAgentCore::Runtime\tarn:aws:bedrock-agentcore:us-west-2:111111111111:runtime/AgenticAI_Historic_Runtime-example123",
         "",
       ].join("\n"),
     });
@@ -248,6 +260,7 @@ describe("teardown service-created log cleanup", () => {
     expect(deleteCalls(run)).toEqual([
       "aws logs delete-log-group --log-group-name /aws/lambda/AgenticAI-HistoricFunction",
       "aws logs delete-log-group --log-group-name /aws/codebuild/AgenticAI-HistoricProject",
+      "aws logs delete-log-group --log-group-name /aws/bedrock-agentcore/runtimes/AgenticAI_Historic_Runtime-example123-DEFAULT",
     ]);
     expect(run.stdout).toContain("exact historical service logs clean");
   });
@@ -262,6 +275,20 @@ describe("teardown service-created log cleanup", () => {
     expect(run.status).toBe(1);
     expect(run.stderr).toContain(
       "refusing to delete logs while Lambda function still exists",
+    );
+    expect(deleteCalls(run)).toEqual([]);
+  });
+
+  it("refuses to delete a Runtime log group while its Runtime still exists", () => {
+    const run = runTeardown({
+      STUB_STACK_RESOURCES:
+        "AWS::BedrockAgentCore::Runtime\tarn:aws:bedrock-agentcore:us-west-2:111111111111:runtime/AgenticAI_Test_Runtime-example123\n",
+      STUB_RUNTIME_EXISTS: "true",
+    });
+
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain(
+      "refusing to delete logs while AgentCore Runtime still exists",
     );
     expect(deleteCalls(run)).toEqual([]);
   });

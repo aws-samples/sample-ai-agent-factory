@@ -801,6 +801,11 @@ switch (stage) {
         true ||
       app.node.tryGetContext("agenticai/enableGaGatewayInvokePermissions") ===
         "true";
+    const enablePipelineRuntimeMemory =
+      app.node.tryGetContext("agenticai/enablePipelineRuntimeMemory") ===
+        true ||
+      app.node.tryGetContext("agenticai/enablePipelineRuntimeMemory") ===
+        "true";
     const gatewayPolicyEngineMode = gatewayPolicyEngineModeContext(
       "agenticai/gatewayPolicyEngineMode",
     );
@@ -894,6 +899,11 @@ switch (stage) {
         if (gatewayPolicyEngineProdIamRoleArns.length === 0) {
           missing.push("agenticai/gatewayPolicyEngineProdIamRoleArns");
         }
+      }
+      if (enablePipelineRuntimeMemory && !enableGaRegistryConsumer) {
+        missing.push(
+          "agenticai/enableGaRegistryConsumer=true (required by agenticai/enablePipelineRuntimeMemory)",
+        );
       }
     }
     if (missing.length > 0) {
@@ -1016,6 +1026,9 @@ switch (stage) {
         gaGatewayServiceRoleArns,
       );
     }
+    if (includeWorkload && enablePipelineRuntimeMemory) {
+      sharedSynthContext["agenticai/enablePipelineRuntimeMemory"] = "true";
+    }
     if (Object.keys(gaRegistryRecordGenerations).length > 0) {
       sharedSynthContext["agenticai/gaRegistryRecordGenerations"] =
         JSON.stringify(gaRegistryRecordGenerations);
@@ -1095,6 +1108,7 @@ switch (stage) {
           typeof notificationEmail === "string" ? notificationEmail : undefined,
         gaRegistry,
         policyEngine,
+        enablePipelineRuntimeMemory,
         synthContext: sharedSynthContext,
       });
     }

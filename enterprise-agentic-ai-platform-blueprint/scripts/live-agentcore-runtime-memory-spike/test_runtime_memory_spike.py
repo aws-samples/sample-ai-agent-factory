@@ -392,6 +392,11 @@ def test_agent_dockerfile_uses_valid_install_and_minimal_direct_dependencies() -
         if line.strip() and not line.lstrip().startswith("#")
     ]
     assert dependencies == ["bedrock-agentcore==1.23.1"]
+    assert (agent_dir / ".dockerignore").read_text(encoding="utf-8").splitlines() == [
+        "__pycache__/",
+        "*.py[cod]",
+        ".pytest_cache/",
+    ]
 
 
 # --------------------------------------------------------------------------
