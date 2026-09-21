@@ -832,6 +832,8 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
     expect(propagation.Properties.WaitMs).toBe(360000);
     template.resourceCountIs("Custom::AgenticAIPolicyEngineAssociation", 1);
     template.resourceCountIs("Custom::AgenticAIPolicyEngineMode", 1);
+    template.resourceCountIs("Custom::AgenticAIPolicyEngineModeRollback", 1);
+    template.resourceCountIs("Custom::AgenticAIPolicyEngineTargetReady", 1);
 
     const policies = Object.values(
       template.findResources("AWS::BedrockAgentCore::Policy"),
@@ -914,7 +916,7 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
     template.hasOutput("PolicyEnginePolicyCount", { Value: "2" });
   });
 
-  it("orders mode rollback and detach checks before policy, Gateway, and engine deletion", () => {
+  it("orders target discovery and fail-closed mode rollback around policy lifecycle", () => {
     const { template } = synthRegistry({
       policyEngineMode: "ENFORCE",
       policyEngineIamRoleArns: [
@@ -922,19 +924,6 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
       ],
     });
     const resources = template.toJSON().Resources as Record<string, any>;
-    const [modeId, mode] = Object.entries(resources).find(
-      ([, resource]) => resource.Type === "Custom::AgenticAIPolicyEngineMode",
-    )!;
-    const [modeRollbackId] = Object.entries(resources).find(
-      ([, resource]) =>
-        resource.Type === "AWS::CloudFormation::CustomResource" &&
-        resource.Properties?.ExpectedMode === "LOG_ONLY" &&
-        resource.Properties?.CheckOn === "DELETE",
-    )!;
-    expect(mode.DependsOn).toContain(modeRollbackId);
-    expect(JSON.stringify(mode)).toContain('\\"mode\\":\\"ENFORCE\\"');
-    expect(JSON.stringify(mode)).toContain('\\"mode\\":\\"LOG_ONLY\\"');
-
     const [detachId, detach] = Object.entries(resources).find(
       ([, resource]) =>
         resource.Type === "AWS::CloudFormation::CustomResource" &&
@@ -944,47 +933,82 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
       ([, resource]) =>
         resource.Type === "Custom::AgenticAIPolicyEngineAssociation",
     )!;
-    expect(association.DependsOn).toContain(detachId);
-    expect(association.Properties.ManageAssociation).toBe(true);
-    expect(association.Properties.GatewayUpdateParameters).toBeDefined();
-
-    const policyIds = Object.entries(resources)
-      .filter(
-        ([, resource]) => resource.Type === "AWS::BedrockAgentCore::Policy",
-      )
-      .map(([id]) => id);
     const [associationReadyId] = Object.entries(resources).find(
       ([, resource]) =>
         resource.Type === "AWS::CloudFormation::CustomResource" &&
         resource.Properties?.ExpectedMode === "LOG_ONLY" &&
         resource.Properties?.CheckOn === "CREATE_UPDATE",
     )!;
-    for (const policyId of policyIds) {
-      expect(resources[policyId].DependsOn).toContain(associationReadyId);
-    }
-    expect(resources[modeRollbackId].DependsOn).toEqual(
-      expect.arrayContaining(policyIds),
-    );
-
+    const [modeRollbackReadyId] = Object.entries(resources).find(
+      ([, resource]) =>
+        resource.Type === "AWS::CloudFormation::CustomResource" &&
+        resource.Properties?.ExpectedMode === "LOG_ONLY" &&
+        resource.Properties?.CheckOn === "DELETE",
+    )!;
+    const [modeRollbackId, modeRollback] = Object.entries(resources).find(
+      ([, resource]) =>
+        resource.Type === "Custom::AgenticAIPolicyEngineModeRollback",
+    )!;
+    const [targetBarrierId, targetBarrier] = Object.entries(resources).find(
+      ([id, resource]) =>
+        id.startsWith("TargetDeleteBarrier") &&
+        resource.Type === "AWS::CloudFormation::CustomResource",
+    )!;
+    const [targetReadyId, targetReady] = Object.entries(resources).find(
+      ([, resource]) =>
+        resource.Type === "Custom::AgenticAIPolicyEngineTargetReady",
+    )!;
+    const targetIds = Object.entries(resources)
+      .filter(
+        ([, resource]) =>
+          resource.Type === "Custom::BedrockAgentCoreGatewayTarget",
+      )
+      .map(([id]) => id);
+    const policyIds = Object.entries(resources)
+      .filter(
+        ([, resource]) => resource.Type === "AWS::BedrockAgentCore::Policy",
+      )
+      .map(([id]) => id);
+    const [modeId, mode] = Object.entries(resources).find(
+      ([, resource]) => resource.Type === "Custom::AgenticAIPolicyEngineMode",
+    )!;
     const [modeReadyId] = Object.entries(resources).find(
       ([, resource]) =>
         resource.Type === "AWS::CloudFormation::CustomResource" &&
         resource.Properties?.ExpectedMode === "ENFORCE",
     )!;
+
+    expect(association.DependsOn).toContain(detachId);
+    expect(association.Properties.ManageAssociation).toBe(true);
+    expect(association.Properties.GatewayUpdateParameters).toBeDefined();
+    expect(resources[associationReadyId].DependsOn).toContain(associationId);
+    expect(resources[modeRollbackReadyId].DependsOn).toContain(
+      associationReadyId,
+    );
+    expect(modeRollback.DependsOn).toContain(modeRollbackReadyId);
+    expect(JSON.stringify(modeRollback)).toContain('\\"mode\\":\\"LOG_ONLY\\"');
+    expect(targetBarrier.DependsOn).toContain(modeRollbackId);
+    for (const targetId of targetIds) {
+      expect(resources[targetId].DependsOn).toContain(targetBarrierId);
+      expect(targetReady.DependsOn).toContain(targetId);
+    }
+    expect(targetReady.Properties.Targets).toHaveLength(targetIds.length);
+    for (const policyId of policyIds) {
+      expect(resources[policyId].DependsOn).toEqual(
+        expect.arrayContaining([associationReadyId, targetReadyId]),
+      );
+      expect(mode.DependsOn).toContain(policyId);
+    }
+    expect(mode.DependsOn).toContain(modeRollbackId);
+    expect(JSON.stringify(mode)).toContain('\\"mode\\":\\"ENFORCE\\"');
+    expect(JSON.stringify(mode)).not.toContain('\\"mode\\":\\"LOG_ONLY\\"');
     expect(resources[modeReadyId].DependsOn).toContain(modeId);
-    const targetBarrier = Object.values(resources).find(
-      (resource) =>
-        resource.Type === "AWS::CloudFormation::CustomResource" &&
-        resource.Properties?.GatewayIdentifier &&
-        !resource.Properties?.ExpectedMode,
-    ) as any;
-    expect(targetBarrier.DependsOn).toContain(modeReadyId);
 
     const stateWaiter = Object.values(resources).find(
       (resource) =>
         resource.Type === "AWS::Lambda::Function" &&
         resource.Properties?.Description ===
-          "Waits for Gateway PolicyEngine association and mode convergence.",
+          "Waits for Gateway PolicyEngine and target readiness convergence.",
     ) as any;
     expect(stateWaiter.Properties.Code.ZipFile).toContain(
       "desiredMode === 'DETACHED'",
@@ -992,11 +1016,185 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
     expect(stateWaiter.Properties.Code.ZipFile).toContain(
       "isRetryablePolicyEnginePropagation",
     );
-    expect(stateWaiter.Properties.Code.ZipFile).toContain(
-      "event.RequestType === 'Delete'",
-    );
+    expect(stateWaiter.Properties.Code.ZipFile).toContain("getGatewayTarget");
     expect(detach).toBeDefined();
-    expect(associationId).toBeDefined();
+  });
+
+  it("waits for exact READY targets before native policy validation", async () => {
+    const { template } = synthRegistry({
+      policyEngineMode: "LOG_ONLY",
+      policyEngineIamRoleArns: [
+        `arn:aws:iam::${WORKLOAD_ACCOUNT_ID}:role/AgenticAI-D03-acme-primary-runtime`,
+      ],
+    });
+    const waiter = Object.values(
+      template.findResources("AWS::Lambda::Function"),
+    ).find(
+      (resource: any) =>
+        resource.Properties?.Description ===
+        "Waits for Gateway PolicyEngine and target readiness convergence.",
+    ) as any;
+    const responses = [
+      {
+        status: 200,
+        body: JSON.stringify({
+          targetId: "TARGET0001",
+          name: "target-tool-echo",
+          status: "CREATING",
+        }),
+      },
+      {
+        status: 200,
+        body: JSON.stringify({
+          targetId: "TARGET0001",
+          name: "target-tool-echo",
+          status: "READY",
+        }),
+      },
+      {
+        status: 200,
+        body: JSON.stringify({
+          targetId: "TARGET0002",
+          name: "target-tool-ping",
+          status: "READY",
+        }),
+      },
+      {
+        status: 200,
+        body: JSON.stringify({
+          targetId: "TARGET0001",
+          name: "wrong-target",
+          status: "READY",
+        }),
+      },
+      {
+        status: 200,
+        body: JSON.stringify({
+          targetId: "TARGET0002",
+          name: "target-tool-ping",
+          status: "SYNCHRONIZE_UNSUCCESSFUL",
+        }),
+      },
+      {
+        status: 200,
+        body: JSON.stringify({
+          targetId: "TARGET0001",
+          name: "target-tool-echo",
+          status: "CREATE_PENDING_AUTH",
+        }),
+      },
+    ];
+    const requests: any[] = [];
+    const fakeHttps = {
+      request: (options: any, callback: (response: any) => void) => {
+        const request = new EventEmitter() as any;
+        request.end = () => {
+          const next = responses.shift();
+          if (!next) throw new Error("unexpected HTTPS request");
+          requests.push(options);
+          const response = new EventEmitter() as any;
+          response.statusCode = next.status;
+          callback(response);
+          response.emit("data", Buffer.from(next.body, "utf8"));
+          response.emit("end");
+        };
+        return request;
+      },
+    };
+    const exported: Record<string, any> = {};
+    runInNewContext(waiter.Properties.Code.ZipFile, {
+      exports: exported,
+      module: { exports: exported },
+      require: (name: string) => {
+        if (name === "https") return fakeHttps;
+        if (name === "crypto") return { createHash, createHmac };
+        throw new Error(`unexpected require: ${name}`);
+      },
+      process: {
+        env: {
+          AWS_REGION: "us-west-2",
+          AWS_ACCESS_KEY_ID: "test-access",
+          AWS_SECRET_ACCESS_KEY: "test-secret",
+          AWS_SESSION_TOKEN: "test-session",
+        },
+      },
+      Buffer,
+      Date,
+      JSON,
+      Promise,
+      encodeURIComponent,
+    });
+    const event = {
+      RequestType: "Create",
+      LogicalResourceId: "PolicyEngineTargetActionsReady",
+      ResourceProperties: {
+        GatewayIdentifier: "gateway-123",
+        Targets: [
+          {
+            TargetIdentifier: "TARGET0001",
+            ExpectedName: "target-tool-echo",
+          },
+          {
+            TargetIdentifier: "TARGET0002",
+            ExpectedName: "target-tool-ping",
+          },
+        ],
+      },
+    };
+    await expect(exported.onEvent(event)).resolves.toEqual({
+      PhysicalResourceId:
+        "policy-engine-targets-ready-PolicyEngineTargetActionsReady",
+    });
+    await expect(exported.isComplete(event)).resolves.toEqual({
+      IsComplete: false,
+    });
+    await expect(exported.isComplete(event)).resolves.toEqual({
+      IsComplete: true,
+    });
+    expect(requests.map((request) => request.path)).toEqual([
+      "/gateways/gateway-123/targets/TARGET0001/",
+      "/gateways/gateway-123/targets/TARGET0001/",
+      "/gateways/gateway-123/targets/TARGET0002/",
+    ]);
+    for (const request of requests) {
+      expect(request.method).toBe("GET");
+      expect(request.headers.authorization).toContain("SignedHeaders=");
+      expect(request.headers["x-amz-date"]).toMatch(/^\d{8}T\d{6}Z$/);
+    }
+    const oneTargetEvent = {
+      ...event,
+      ResourceProperties: {
+        GatewayIdentifier: "gateway-123",
+        Targets: [event.ResourceProperties.Targets[0]],
+      },
+    };
+    await expect(exported.isComplete(oneTargetEvent)).rejects.toThrow(
+      "Gateway target identity changed",
+    );
+    const terminalEvent = {
+      ...event,
+      ResourceProperties: {
+        GatewayIdentifier: "gateway-123",
+        Targets: [event.ResourceProperties.Targets[1]],
+      },
+    };
+    await expect(exported.isComplete(terminalEvent)).rejects.toThrow(
+      "entered terminal state SYNCHRONIZE_UNSUCCESSFUL",
+    );
+    const pendingAuthEvent = {
+      ...event,
+      ResourceProperties: {
+        GatewayIdentifier: "gateway-123",
+        Targets: [event.ResourceProperties.Targets[0]],
+      },
+    };
+    await expect(exported.isComplete(pendingAuthEvent)).rejects.toThrow(
+      "entered unsupported authorization state CREATE_PENDING_AUTH",
+    );
+    await expect(
+      exported.isComplete({ ...event, RequestType: "Delete" }),
+    ).resolves.toEqual({ IsComplete: true });
+    expect(responses).toHaveLength(0);
   });
 
   it("polls PolicyEngine mode and detach convergence through the synthesized waiter", async () => {
@@ -1011,7 +1209,7 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
     ).find(
       (resource: any) =>
         resource.Properties?.Description ===
-        "Waits for Gateway PolicyEngine association and mode convergence.",
+        "Waits for Gateway PolicyEngine and target readiness convergence.",
     ) as any;
     const engineArn =
       "arn:aws:bedrock-agentcore:us-west-2:333333333333:policy-engine/AgenticAI_nonprod_acme_primary_pe-abcdefghij";
@@ -1113,7 +1311,7 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
     ).find(
       (resource: any) =>
         resource.Properties?.Description ===
-        "Waits for Gateway PolicyEngine association and mode convergence.",
+        "Waits for Gateway PolicyEngine and target readiness convergence.",
     ) as any;
     const engineArn =
       "arn:aws:bedrock-agentcore:us-west-2:333333333333:policy-engine/AgenticAI_nonprod_acme_primary_pe-abcdefghij";

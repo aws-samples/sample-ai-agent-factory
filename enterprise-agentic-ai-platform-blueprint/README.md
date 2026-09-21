@@ -301,8 +301,13 @@ compiles one strict `FAIL_ON_ANY_FINDINGS` / `ACTIVE` policy per tool against
 its exact `<TargetName>___<ToolName>` action and Gateway ARN, and encrypts the
 engine and child policies with a rotating customer-managed KMS key. Creation
 orders exact Gateway-role permissions → six-minute propagation gate →
-`LOG_ONLY` association → policies → requested mode → targets. Association uses
-a signed, idempotent convergence loop that retries only the live-proven transient
+`LOG_ONLY` association → targets → exact target readiness → policies → requested
+mode. AgentCore validates Cedar actions against the Gateway's live target schema,
+so policies cannot precede their targets. The readiness waiter signs the modeled
+trailing-slash `GetGatewayTarget` URI for each service-minted ID, requires its
+exact expected name and `READY` status, and fails immediately on identity drift,
+terminal status, or any `*_PENDING_AUTH` state. Association uses a signed,
+idempotent convergence loop that retries only the live-proven transient
 `Access denied while calling GetPolicyEngine` validation response; unrelated
 validation errors fail immediately. The Gateway role scopes both KMS actions to
 the exact PolicyEngine CMK. `kms:Decrypt` omits the FAS-oriented condition block
@@ -312,8 +317,11 @@ CMK key policy retains service conditions on grant creation, cryptography, and
 validation, source and encryption-context conditions on cryptography, and an
 operation/context-constrained grant-creation boundary. AgentCore's two
 service-created grants are independently operation- and context-constrained.
-Deletion reverses through target convergence
-→ `LOG_ONLY` → policy deletion → detach → Gateway and engine deletion. `CUSTOM_JWT` group policies use the separately live-proven
+Deletion holds the requested mode while policies delete, then reverses through
+target deletion → zero-target barrier → `LOG_ONLY` → detach → Gateway and engine
+deletion. In `ENFORCE`, removing permits before targets is default-deny; in
+`LOG_ONLY`, the retained Lambda wrapper remains the enforcement backstop.
+`CUSTOM_JWT` group policies use the separately live-proven
 quoted-element candidate when a discovery URL is supplied directly to the
 Gateway stack; pipeline JWT-authorizer wiring remains a later gate.
 

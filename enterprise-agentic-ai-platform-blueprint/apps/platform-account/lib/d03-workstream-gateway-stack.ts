@@ -18,11 +18,13 @@
  * Gateway lifecycle remains wrapped in `AwsCustomResource` because that path is
  * already live-proven for service-minted IDs and asynchronous target deletion.
  * PolicyEngine is opt-in: CloudFormation owns the engine and strict per-tool
- * policies, while bounded custom resources associate in LOG_ONLY, promote to
- * the requested mode, and reverse through LOG_ONLY + detach during deletion.
- * The Lambda Cedar wrapper remains active in both modes until pipeline/live
- * parity, rollback, and zero-residual teardown pass. This is the active
- * TODO-GW-POLICY-ENGINE migration boundary tracked in README §3.
+ * policies, while bounded custom resources associate in LOG_ONLY, wait for
+ * targets to expose their actions, validate policies, and promote to the
+ * requested mode. Deletion keeps the requested mode while policies and targets
+ * are removed, then rolls back to LOG_ONLY and detaches. The Lambda Cedar
+ * wrapper remains active in both modes until pipeline/live parity, rollback,
+ * and zero-residual teardown pass. This is the active TODO-GW-POLICY-ENGINE
+ * migration boundary tracked in README §3.
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
@@ -818,7 +820,9 @@ export class D03WorkstreamGatewayStack extends Stack {
     const gatewayIdToken = this.gatewayResource.getResponseField("gatewayId");
     const gatewayArnToken = this.gatewayResource.getResponseField("gatewayArn");
 
-    let policyEngineModeReady: CustomResource | undefined;
+    let policyEngineStateProvider: Provider | undefined;
+    let policyEngineModeRollbackMutation: AwsCustomResource | undefined;
+    const policyEnginePoliciesByToolId = new Map<string, CfnResource>();
     if (policyEngineMode !== "OFF") {
       const iamRoleArns = [...(props.policyEngineIamRoleArns ?? [])].sort();
       for (const roleArn of iamRoleArns) {
@@ -1061,7 +1065,7 @@ export class D03WorkstreamGatewayStack extends Stack {
           code: Code.fromInline(POLICY_ENGINE_GATEWAY_STATE_HANDLER),
           role: crRole,
           description:
-            "Waits for Gateway PolicyEngine association and mode convergence.",
+            "Waits for Gateway PolicyEngine and target readiness convergence.",
         },
       );
       const stateProvider = new Provider(
@@ -1074,6 +1078,7 @@ export class D03WorkstreamGatewayStack extends Stack {
           totalTimeout: Duration.minutes(10),
         },
       );
+      policyEngineStateProvider = stateProvider;
       const stateCheck = (
         id: string,
         expectedMode: "DETACHED" | "LOG_ONLY" | "ENFORCE",
@@ -1164,6 +1169,7 @@ export class D03WorkstreamGatewayStack extends Stack {
           },
         );
         policy.node.addDependency(associationReady);
+        policyEnginePoliciesByToolId.set(definition.toolId, policy);
         return policy;
       });
 
@@ -1172,9 +1178,48 @@ export class D03WorkstreamGatewayStack extends Stack {
         "LOG_ONLY",
         "DELETE",
       );
-      for (const policy of policyResources) {
-        modeRollbackReady.node.addDependency(policy);
-      }
+      modeRollbackReady.node.addDependency(associationReady);
+
+      // CloudFormation reverses dependencies during deletion, but AgentCore
+      // requires targets to exist before strict policies can validate their
+      // actions. This read-only create/update resource becomes the delete-time
+      // LOG_ONLY mutation after policies and targets have been removed.
+      const modeRollbackMutation = new AwsCustomResource(
+        this,
+        "PolicyEngineModeRollbackMutation",
+        {
+          resourceType: "Custom::AgenticAIPolicyEngineModeRollback",
+          role: crRole,
+          onCreate: {
+            service: "bedrock-agentcore-control",
+            action: "getGateway",
+            parameters: { gatewayIdentifier: gatewayIdToken },
+            physicalResourceId: PhysicalResourceId.of(
+              `policy-engine-mode-rollback-${props.envName}-${props.tenantId}-${props.agentId}`,
+            ),
+          },
+          onUpdate: {
+            service: "bedrock-agentcore-control",
+            action: "getGateway",
+            parameters: { gatewayIdentifier: gatewayIdToken },
+            physicalResourceId: PhysicalResourceId.of(
+              `policy-engine-mode-rollback-${props.envName}-${props.tenantId}-${props.agentId}`,
+            ),
+          },
+          onDelete: {
+            service: "bedrock-agentcore-control",
+            action: "updateGateway",
+            parameters: logOnlyParameters,
+            ignoreErrorCodesMatching: "ResourceNotFoundException",
+          },
+        },
+      );
+      modeRollbackMutation.node.addDependency(modeRollbackReady);
+      policyEngineModeRollbackMutation = modeRollbackMutation;
+
+      // Requested-mode deletion is deliberately a no-op. ENFORCE therefore
+      // remains fail-closed while policies and targets delete; the separate
+      // rollback mutator switches to LOG_ONLY only after target convergence.
       const modeMutation = new AwsCustomResource(
         this,
         "PolicyEngineModeMutation",
@@ -1197,22 +1242,18 @@ export class D03WorkstreamGatewayStack extends Stack {
               `policy-engine-mode-${props.envName}-${props.tenantId}-${props.agentId}`,
             ),
           },
-          onDelete: {
-            service: "bedrock-agentcore-control",
-            action: "updateGateway",
-            parameters: logOnlyParameters,
-            ignoreErrorCodesMatching: "ResourceNotFoundException",
-          },
         },
       );
-      modeMutation.node.addDependency(modeRollbackReady);
+      modeMutation.node.addDependency(modeRollbackMutation);
+      for (const policy of policyResources) {
+        modeMutation.node.addDependency(policy);
+      }
       const modeReady = stateCheck(
         "PolicyEngineModeReady",
         policyEngineMode,
         "CREATE_UPDATE",
       );
       modeReady.node.addDependency(modeMutation);
-      policyEngineModeReady = modeReady;
 
       for (const provider of [rolePropagationProvider, stateProvider]) {
         NagSuppressions.addResourceSuppressions(
@@ -1313,14 +1354,19 @@ export class D03WorkstreamGatewayStack extends Stack {
       },
     );
     targetDeleteBarrier.node.addDependency(this.gatewayResource);
-    if (policyEngineModeReady) {
-      targetDeleteBarrier.node.addDependency(policyEngineModeReady);
+    if (policyEngineModeRollbackMutation) {
+      targetDeleteBarrier.node.addDependency(policyEngineModeRollbackMutation);
     }
 
     // ---- N GatewayTargets, one per subscribed tool ----
     // Naming: `target-<toolId>` (kebab-case). Both the legacy catalogue and
     // strict GA context expose a validated stable toolId; opaque Registry
     // record IDs never become MCP tool names.
+    const targetResources: Array<{
+      toolId: string;
+      targetName: string;
+      resource: AwsCustomResource;
+    }> = [];
     for (const subId of subscribedIds) {
       const resolvedArn = resolvedToolArns[subId];
       const targetName = targetNames[subId];
@@ -1415,6 +1461,11 @@ export class D03WorkstreamGatewayStack extends Stack {
       if (fetcher) {
         targetResource.node.addDependency(fetcher);
       }
+      targetResources.push({
+        toolId: subId,
+        targetName,
+        resource: targetResource,
+      });
 
       // Per-tool CfnOutput so auditors / downstream stacks can consume the
       // resolved tool ARN without re-deriving from catalogue + platform-acct.
@@ -1424,6 +1475,38 @@ export class D03WorkstreamGatewayStack extends Stack {
           ? `Resolved Lambda ARN for tool ${subId} (owner: ${legacySpec.ownerTeam}).`
           : `Resolved Lambda ARN for subscribed registry record ${subId}.`,
       });
+    }
+
+    if (policyEngineStateProvider) {
+      const sortedTargets = [...targetResources].sort((left, right) =>
+        left.toolId.localeCompare(right.toolId),
+      );
+      if (sortedTargets.length !== policyEnginePoliciesByToolId.size) {
+        throw new Error(
+          "D03WorkstreamGatewayStack: every PolicyEngine policy must have one Gateway target.",
+        );
+      }
+      const targetReady = new CustomResource(
+        this,
+        "PolicyEngineTargetActionsReady",
+        {
+          resourceType: "Custom::AgenticAIPolicyEngineTargetReady",
+          serviceToken: policyEngineStateProvider.serviceToken,
+          properties: {
+            GatewayIdentifier: gatewayIdToken,
+            Targets: sortedTargets.map(({ targetName, resource }) => ({
+              TargetIdentifier: resource.getResponseField("targetId"),
+              ExpectedName: targetName,
+            })),
+          },
+        },
+      );
+      for (const { resource } of sortedTargets) {
+        targetReady.node.addDependency(resource);
+      }
+      for (const policy of policyEnginePoliciesByToolId.values()) {
+        policy.node.addDependency(targetReady);
+      }
     }
 
     // ---- Stack-level tags (flow to every taggable resource) ----
@@ -1600,20 +1683,19 @@ export class D03WorkstreamGatewayStack extends Stack {
 }
 
 /**
- * Provider handler for Gateway PolicyEngine association, mode, and detach
- * convergence. Managed association resources retry only the live-proven
- * transient GetPolicyEngine propagation denial; pure state checks remain
- * read-only.
+ * Provider handler for Gateway PolicyEngine association, mode, detach, and
+ * target-readiness convergence. Managed association resources retry only the
+ * live-proven transient GetPolicyEngine propagation denial; all verification
+ * paths remain read-only.
  */
 const POLICY_ENGINE_GATEWAY_STATE_HANDLER = `
 const https = require('https');
 const crypto = require('crypto');
 function hmac(key, value) { return crypto.createHmac('sha256', key).update(value, 'utf8').digest(); }
 function hash(value) { return crypto.createHash('sha256').update(value, 'utf8').digest('hex'); }
-async function getGateway(gatewayIdentifier) {
+async function signedGet(path) {
   const region = process.env.AWS_REGION;
   const host = 'bedrock-agentcore-control.' + region + '.amazonaws.com';
-  const path = '/gateways/' + encodeURIComponent(gatewayIdentifier);
   const now = new Date();
   const amzDate = now.toISOString().replace(/[:-]|\\.\\d{3}/g, '');
   const dateStamp = amzDate.substring(0, 8);
@@ -1647,6 +1729,18 @@ async function getGateway(gatewayIdentifier) {
     req.on('error', reject);
     req.end();
   });
+}
+async function getGateway(gatewayIdentifier) {
+  return signedGet('/gateways/' + encodeURIComponent(gatewayIdentifier));
+}
+async function getGatewayTarget(gatewayIdentifier, targetIdentifier) {
+  // The API constrains Gateway/target IDs to opaque path-safe patterns. Encode
+  // each segment once and preserve the modeled trailing slash in both the
+  // canonical request and the transmitted URI.
+  return signedGet(
+    '/gateways/' + encodeURIComponent(gatewayIdentifier) +
+    '/targets/' + encodeURIComponent(targetIdentifier) + '/',
+  );
 }
 async function updateGateway(gatewayIdentifier, payload) {
   const region = process.env.AWS_REGION;
@@ -1704,6 +1798,24 @@ function isRetryablePolicyEnginePropagation(response) {
 exports.onEvent = async (event) => {
   const props = event.ResourceProperties || {};
   const gatewayIdentifier = String(props.GatewayIdentifier || '');
+  const targets = props.Targets;
+  if (Array.isArray(targets)) {
+    const normalized = targets.map(target => ({
+      id: String((target || {}).TargetIdentifier || ''),
+      name: String((target || {}).ExpectedName || ''),
+    }));
+    if (!gatewayIdentifier || normalized.length === 0 ||
+        normalized.some(target => !target.id || !target.name) ||
+        new Set(normalized.map(target => target.id)).size !== normalized.length ||
+        new Set(normalized.map(target => target.name)).size !== normalized.length) {
+      throw new Error('PolicyEngine target readiness check has invalid properties');
+    }
+    return {
+      PhysicalResourceId:
+        event.PhysicalResourceId ||
+        'policy-engine-targets-ready-' + String(event.LogicalResourceId || gatewayIdentifier),
+    };
+  }
   const expectedMode = String(props.ExpectedMode || '');
   const checkOn = String(props.CheckOn || '');
   const manageAssociation = String(props.ManageAssociation || 'false') === 'true';
@@ -1725,6 +1837,38 @@ exports.onEvent = async (event) => {
 };
 exports.isComplete = async (event) => {
   const props = event.ResourceProperties || {};
+  const targets = props.Targets;
+  if (Array.isArray(targets)) {
+    if (event.RequestType === 'Delete') return { IsComplete: true };
+    const gatewayIdentifier = String(props.GatewayIdentifier || '');
+    for (const target of targets) {
+      const targetIdentifier = String((target || {}).TargetIdentifier || '');
+      const expectedName = String((target || {}).ExpectedName || '');
+      const response = await getGatewayTarget(gatewayIdentifier, targetIdentifier);
+      if (response.status === 404) return { IsComplete: false };
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error('GetGatewayTarget HTTP ' + response.status + ': ' + response.body);
+      }
+      let current;
+      try { current = JSON.parse(response.body); }
+      catch (error) { throw new Error('GetGatewayTarget returned invalid JSON'); }
+      if (String(current.targetId || '') !== targetIdentifier ||
+          String(current.name || '') !== expectedName) {
+        throw new Error('Gateway target identity changed before PolicyEngine policy creation');
+      }
+      const status = String(current.status || '');
+      if (['CREATE_PENDING_AUTH', 'UPDATE_PENDING_AUTH', 'SYNCHRONIZE_PENDING_AUTH'].includes(status)) {
+        throw new Error(
+          'Gateway target ' + expectedName + ' entered unsupported authorization state ' + status,
+        );
+      }
+      if (['FAILED', 'UPDATE_UNSUCCESSFUL', 'SYNCHRONIZE_UNSUCCESSFUL'].includes(status)) {
+        throw new Error('Gateway target ' + expectedName + ' entered terminal state ' + status);
+      }
+      if (status !== 'READY') return { IsComplete: false };
+    }
+    return { IsComplete: true };
+  }
   const checkOn = String(props.CheckOn || '');
   const manageAssociation = String(props.ManageAssociation || 'false') === 'true';
   const shouldCheck = manageAssociation || (checkOn === 'DELETE'
