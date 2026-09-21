@@ -372,6 +372,16 @@ def test_agent_dockerfile_uses_valid_install_and_minimal_direct_dependencies() -
     agent_dir = Path(spike_module.__file__).resolve().parent / "agent"
     dockerfile = (agent_dir / "Dockerfile").read_text(encoding="utf-8")
     normalized = " ".join(dockerfile.replace("\\", " ").split())
+    expected_base = (
+        "FROM public.ecr.aws/lambda/python:3.13@sha256:"
+        "c78a03b745f2c27b349377ae979d88b96bc68b457668705cd24a32b5f433c9cf"
+    )
+    assert dockerfile.count("\nFROM ") == 1
+    assert expected_base in dockerfile
+    assert "FROM --platform" not in dockerfile
+    assert "useradd" not in dockerfile and "adduser" not in dockerfile
+    assert "\nUSER 10001\n" in dockerfile
+    assert dockerfile.rstrip().endswith('ENTRYPOINT ["python", "-u", "agent.py"]\nCMD []')
     assert "--require-hashes=false" not in dockerfile
     assert "pip install --no-cache-dir --requirement /app/requirements.txt" in normalized
     assert "&& pip check" in normalized

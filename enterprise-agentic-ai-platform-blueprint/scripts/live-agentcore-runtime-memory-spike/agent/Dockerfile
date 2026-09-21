@@ -15,7 +15,8 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-FROM --platform=linux/arm64 public.ecr.aws/docker/library/python:3.13-slim
+# AWS-maintained AL2023 Python base, pinned to the live-scanned ARM64 digest.
+FROM public.ecr.aws/lambda/python:3.13@sha256:c78a03b745f2c27b349377ae979d88b96bc68b457668705cd24a32b5f433c9cf
 
 # Fail fast, no bytecode churn, unbuffered logs.
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -35,12 +36,12 @@ RUN pip install --no-cache-dir --requirement /app/requirements.txt \
 # Copy only the agent entrypoint.
 COPY agent.py /app/agent.py
 
-# Create and drop to an unprivileged, non-root user (no shell, no home writes).
-RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin agent \
-    && chown -R agent:agent /app
+# Drop to a numeric, unprivileged user. The image needs no passwd entry or home;
+# /app and its copied files are world-readable and runtime writes go to /tmp.
 USER 10001
 
 # AgentCore Runtime speaks HTTP to the container on 8080.
 EXPOSE 8080
 
 ENTRYPOINT ["python", "-u", "agent.py"]
+CMD []
