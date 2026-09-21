@@ -611,7 +611,11 @@ export class D03WorkstreamGatewayStack extends Stack {
           // 2025-11-25, 2025-03-26, 2025-06-18. We pin the earliest that
           // satisfies the currently-documented MCP feature set we rely on.
           supportedVersions: ["2025-06-18"],
-          searchType: "SEMANTIC",
+          // Semantic search is optional. Live ENFORCE adversarial testing proved
+          // it returned unauthorized tool schemas even when tools/list was
+          // empty and direct tools/call was policy-denied. Preserve the exact
+          // R2 OFF template, but remove this discovery surface during migration.
+          ...(policyEngineMode === "OFF" ? { searchType: "SEMANTIC" } : {}),
         },
       },
       authorizerType,

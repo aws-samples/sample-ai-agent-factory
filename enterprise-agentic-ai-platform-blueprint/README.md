@@ -306,8 +306,14 @@ mode. AgentCore validates Cedar actions against the Gateway's live target schema
 so policies cannot precede their targets. The readiness waiter signs the modeled
 trailing-slash `GetGatewayTarget` URI for each service-minted ID, requires its
 exact expected name and `READY` status, and fails immediately on identity drift,
-terminal status, or any `*_PENDING_AUTH` state. Association uses a signed,
-idempotent convergence loop that retries only the live-proven transient
+terminal status, or any `*_PENDING_AUTH` state. Optional semantic search is
+kept only in the exact `OFF` rollback template: live `ENFORCE` testing showed
+`tools/list` empty and direct calls policy-denied for an unpermitted principal,
+while the search tool still returned both unauthorized schemas. Before
+production promotion, the pipeline campaign must prove that an in-place
+`UpdateGateway` removes the existing search configuration and built-in search
+action. Association uses a signed, idempotent convergence loop that retries only
+the live-proven transient
 `Access denied while calling GetPolicyEngine` validation response; unrelated
 validation errors fail immediately. The Gateway role scopes both KMS actions to
 the exact PolicyEngine CMK. `kms:Decrypt` omits the FAS-oriented condition block

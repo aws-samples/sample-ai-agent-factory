@@ -736,6 +736,8 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
     template.resourceCountIs("AWS::BedrockAgentCore::Policy", 0);
     template.resourceCountIs("Custom::AgenticAIPolicyEngineAssociation", 0);
     template.resourceCountIs("Custom::AgenticAIPolicyEngineMode", 0);
+    expect(JSON.stringify(explicit)).toContain("searchType");
+    expect(JSON.stringify(explicit)).toContain("SEMANTIC");
     expect(JSON.stringify(explicit)).not.toContain(
       "bedrock-agentcore:AuthorizeAction",
     );
@@ -753,6 +755,33 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
       policyEngineMode: "ENFORCE",
       policyEngineIamRoleArns: iamRoleArns,
     }).template.toJSON();
+    const expectSearchDisabled = (renderedTemplate: any): void => {
+      const resources = Object.values(renderedTemplate.Resources) as any[];
+      const gateway = resources.find(
+        (resource) => resource.Type === "Custom::BedrockAgentCoreGateway",
+      );
+      expect(gateway).toBeDefined();
+      const createGateway = JSON.stringify(gateway.Properties.Create);
+      expect(createGateway).toContain(
+        '\\"protocolConfiguration\\":{\\"mcp\\":{\\"supportedVersions\\":[\\"2025-06-18\\"]}}',
+      );
+      expect(createGateway).not.toContain("searchType");
+      const association = resources.find(
+        (resource) =>
+          resource.Type === "Custom::AgenticAIPolicyEngineAssociation",
+      );
+      expect(association).toBeDefined();
+      expect(
+        association.Properties.GatewayUpdateParameters.protocolConfiguration,
+      ).toEqual({
+        mcp: { supportedVersions: ["2025-06-18"] },
+      });
+      expect(JSON.stringify(renderedTemplate)).not.toContain("searchType");
+      expect(JSON.stringify(renderedTemplate)).not.toContain("SEMANTIC");
+    };
+    expectSearchDisabled(logOnly);
+    expectSearchDisabled(enforce);
+
     const changedResources = Object.keys(logOnly.Resources).filter(
       (logicalId) =>
         JSON.stringify(logOnly.Resources[logicalId]) !==
@@ -780,6 +809,11 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
       policyEngineMode: "LOG_ONLY",
       policyEngineIamRoleArns: [callerRole],
     });
+    const enabledTemplate = JSON.stringify(template.toJSON());
+    expect(enabledTemplate).toContain("supportedVersions");
+    expect(enabledTemplate).toContain("2025-06-18");
+    expect(enabledTemplate).not.toContain("searchType");
+    expect(enabledTemplate).not.toContain("SEMANTIC");
     template.resourceCountIs("AWS::BedrockAgentCore::PolicyEngine", 1);
     template.resourceCountIs("AWS::BedrockAgentCore::Policy", 2);
     template.resourceCountIs("AWS::KMS::Key", 1);
@@ -1322,7 +1356,7 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
         "arn:aws:iam::333333333333:role/AgenticAI-D03-nonprod-acme-primary-gw-svc",
       protocolType: "MCP",
       protocolConfiguration: {
-        mcp: { supportedVersions: ["2025-06-18"], searchType: "SEMANTIC" },
+        mcp: { supportedVersions: ["2025-06-18"] },
       },
       authorizerType: "AWS_IAM",
     };
