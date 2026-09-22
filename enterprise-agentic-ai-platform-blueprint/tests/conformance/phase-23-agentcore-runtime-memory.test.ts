@@ -6,6 +6,8 @@
  */
 import { App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 import type { GaRegistryConsumerContext } from "@agenticai/agent-registry";
 import { D03WorkstreamRegistryRolesStack } from "../../apps/workload-account/lib/d03-workstream-registry-roles-stack";
@@ -188,7 +190,10 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
         .ContainerUri,
     );
     expect(uri).toContain("@");
-    expect(uri).toContain("imageDetails.0.imageDigest");
+    // The digest now arrives from the fail-closed scan gate, not from a bare
+    // DescribeImages response field.
+    expect(uri).toContain('"ImageDigest"');
+    expect(uri).not.toContain("imageDetails.0.imageDigest");
     expect(uri).not.toContain('"imageTag"');
     template.resourceCountIs("AWS::BedrockAgentCore::RuntimeEndpoint", 0);
 
@@ -284,6 +289,352 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
           eventExpiryDays: 2,
         }),
     ).toThrow(/integer from 3 through 365/);
+  });
+});
+
+describe("Phase 23 — fail-closed image scan preflight gate", () => {
+  const GATE_TYPE = "Custom::AgenticAIAgentImageScanGate";
+  const BOOTSTRAP_REPO = `cdk-hnb659fds-container-assets-${NONPROD_ACCOUNT}-${REGION}`;
+
+  function gateHandlerSource(template: Template): string {
+    const functions = Object.values(
+      template.findResources("AWS::Lambda::Function"),
+    ) as any[];
+    const sources = functions
+      .filter((fn) =>
+        ["index.on_event", "index.is_complete"].includes(fn.Properties.Handler),
+      )
+      .map((fn) => fn.Properties.Code.ZipFile as string);
+    // Both waiter halves are the SAME module; a divergence is itself a defect.
+    expect(sources).toHaveLength(2);
+    expect(sources[0]).toBe(sources[1]);
+    return sources[0];
+  }
+
+  it("synthesizes valid Python and hashes the full handler policy into the gate", () => {
+    const template = runtimeMemoryTemplate();
+    const handler = gateHandlerSource(template);
+    const parsed = spawnSync(
+      "python3",
+      ["-c", "import ast,sys; ast.parse(sys.stdin.read())"],
+      { input: handler, encoding: "utf8" },
+    );
+    expect(parsed.stderr).toBe("");
+    expect(parsed.status).toBe(0);
+
+    const onEvent = Object.values(
+      template.findResources("AWS::Lambda::Function"),
+    ).find((fn: any) => fn.Properties.Handler === "index.on_event") as any;
+    const expectedContractHash = createHash("sha256")
+      .update(handler)
+      .update("\0")
+      .update(JSON.stringify(onEvent.Properties.Environment.Variables))
+      .digest("hex");
+    const gate = singleResource(template, GATE_TYPE);
+    expect(gate.Properties.GateContractSha256).toBe(expectedContractHash);
+  });
+
+  it("applies all five allocation tags to every taggable support resource", () => {
+    const template = runtimeMemoryTemplate();
+    for (const type of [
+      "AWS::IAM::Role",
+      "AWS::Lambda::Function",
+      "AWS::StepFunctions::StateMachine",
+    ]) {
+      const resources = Object.values(template.findResources(type)) as any[];
+      expect(resources.length).toBeGreaterThan(0);
+      for (const resource of resources) {
+        expect(tagsToRecord(resource.Properties.Tags)).toEqual(REQUIRED_TAGS);
+      }
+    }
+  });
+
+  it("feeds the Runtime only a digest resolved through the completed gate", () => {
+    const template = runtimeMemoryTemplate();
+    template.resourceCountIs(GATE_TYPE, 1);
+    const gate = singleResource(template, GATE_TYPE);
+    const gateLogicalId = Object.keys(template.findResources(GATE_TYPE))[0];
+    const runtime = singleResource(template, "AWS::BedrockAgentCore::Runtime");
+
+    // The gate resolves the exact immutable asset tag, not a floating one.
+    expect(gate.Properties).toMatchObject({
+      RegistryId: NONPROD_ACCOUNT,
+      RepositoryName: BOOTSTRAP_REPO,
+      ImageTag: expect.stringMatching(/^[0-9a-f]{64}$/),
+      AssetHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+      GateContractSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(gate.Properties.ImageTag).toBe(gate.Properties.AssetHash);
+
+    // Only `<repositoryUri>@<digest>` reaches CfnRuntime — never a tag.
+    const containerUri =
+      runtime.Properties.AgentRuntimeArtifact.ContainerConfiguration
+        .ContainerUri;
+    expect(containerUri["Fn::Join"][1]).toEqual([
+      `${NONPROD_ACCOUNT}.dkr.ecr.${REGION}.`,
+      { Ref: "AWS::URLSuffix" },
+      `/${BOOTSTRAP_REPO}@`,
+      { "Fn::GetAtt": [gateLogicalId, "ImageDigest"] },
+    ]);
+    const rendered = JSON.stringify(containerUri);
+    expect(rendered).not.toContain("imageTag");
+    expect(rendered).not.toContain(gate.Properties.ImageTag);
+
+    // Runtime creation is explicitly ordered after the completed gate.
+    expect(runtime.DependsOn).toContain(gateLogicalId);
+  });
+
+  it("scopes the gate role to exactly three ECR actions on the exact bootstrap repository", () => {
+    const template = runtimeMemoryTemplate();
+    const role = Object.values(template.findResources("AWS::IAM::Role")).find(
+      (candidate: any) =>
+        candidate.Properties.RoleName ===
+        "AgenticAI-D03-nonprod-demo-primary-imgscan",
+    ) as any;
+    expect(role).toBeDefined();
+    expect(tagsToRecord(role.Properties.Tags)).toEqual(REQUIRED_TAGS);
+    expect(role.Properties.AssumeRolePolicyDocument.Statement[0]).toMatchObject(
+      { Principal: { Service: "lambda.amazonaws.com" } },
+    );
+    expect(role.Properties.Policies).toEqual([
+      {
+        PolicyName: "ReadBootstrapImageScan",
+        PolicyDocument: {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Sid: "PreflightAgentImageScan",
+              Effect: "Allow",
+              // Exact set — DescribeImages resolves the tag, StartImageScan
+              // starts the basic scan, DescribeImageScanFindings polls it.
+              Action: [
+                "ecr:DescribeImageScanFindings",
+                "ecr:DescribeImages",
+                "ecr:StartImageScan",
+              ],
+              Resource: {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    { Ref: "AWS::Partition" },
+                    `:ecr:${REGION}:${NONPROD_ACCOUNT}:repository/${BOOTSTRAP_REPO}`,
+                  ],
+                ],
+              },
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
+  it("never grants or performs destruction of the shared bootstrap assets", () => {
+    const template = runtimeMemoryTemplate();
+    // The bootstrap repository is imported, never templated — so stack delete
+    // cannot take it or its images with it.
+    template.resourceCountIs("AWS::ECR::Repository", 0);
+
+    const rendered = JSON.stringify(template.toJSON());
+    for (const forbidden of [
+      "ecr:BatchDeleteImage",
+      "ecr:DeleteRepository",
+      "ecr:DeleteRepositoryPolicy",
+      "ecr:PutImage",
+      "ecr:PutImageScanningConfiguration",
+      "ecr:BatchDeleteImageScanFindings",
+    ]) {
+      expect(rendered).not.toContain(forbidden);
+    }
+
+    // Delete is a pure no-op: it returns the inbound physical id and makes no
+    // ECR call at all (no client is even constructed on that branch).
+    const handler = gateHandlerSource(template);
+    expect(handler).toContain(
+      'if request_type == "Delete":\n        # Shared bootstrap repository and images are NEVER deleted here.\n        return {"PhysicalResourceId": event.get("PhysicalResourceId")}',
+    );
+    expect(handler).toContain(
+      'if event.get("RequestType") == "Delete":\n        return {"IsComplete": True}',
+    );
+  });
+
+  it("bounds the waiter to a fixed interval and a hard attempt ceiling", () => {
+    const template = runtimeMemoryTemplate();
+    const machine = singleResource(
+      template,
+      "AWS::StepFunctions::StateMachine",
+    );
+    const definition = JSON.stringify(machine.Properties.DefinitionString);
+    // 15 s polls x 120 attempts == the declared 30 min ceiling, then the
+    // framework's onTimeout catch reports FAILED to CloudFormation.
+    expect(definition).toContain('\\"IntervalSeconds\\":15');
+    expect(definition).toContain('\\"MaxAttempts\\":120');
+    expect(definition).toContain('\\"BackoffRate\\":1');
+    expect(definition).toContain("framework-onTimeout-task");
+
+    // Each invocation is also individually bounded on the SDK side. The
+    // onEvent handler can make two sequential ECR calls, while isComplete
+    // makes one; both Lambda timeouts enclose those budgets.
+    const gateFunctions = Object.values(
+      template.findResources("AWS::Lambda::Function"),
+    ) as any[];
+    const onEvent = gateFunctions.find(
+      (fn) => fn.Properties.Handler === "index.on_event",
+    ) as any;
+    const isComplete = gateFunctions.find(
+      (fn) => fn.Properties.Handler === "index.is_complete",
+    ) as any;
+    expect(onEvent.Properties.Runtime).toBe("python3.13");
+    expect(onEvent.Properties.Timeout).toBe(120);
+    expect(isComplete.Properties.Timeout).toBe(60);
+    expect(onEvent.Properties.Environment.Variables).toMatchObject({
+      SDK_TOTAL_MAX_ATTEMPTS: "2",
+      SDK_CONNECT_TIMEOUT_SECONDS: "3",
+      SDK_READ_TIMEOUT_SECONDS: "10",
+    });
+    const handler = gateHandlerSource(template);
+    expect(handler).toContain('"total_max_attempts": int(');
+    expect(handler).not.toContain('"max_attempts": int(');
+    expect(handler).toContain('"mode": "standard"');
+    // No unbounded loop lives inside the handler; the waiter owns iteration.
+    expect(handler).not.toMatch(/\bwhile\b/);
+    expect(handler).not.toContain("time.sleep");
+  });
+
+  it("pins the exact ECR scan-status and severity vocabulary into both halves", () => {
+    const template = runtimeMemoryTemplate();
+    const gateFunctions = Object.values(
+      template.findResources("AWS::Lambda::Function"),
+    ).filter((fn: any) =>
+      ["index.on_event", "index.is_complete"].includes(fn.Properties.Handler),
+    ) as any[];
+    expect(gateFunctions).toHaveLength(2);
+    for (const fn of gateFunctions) {
+      // Verbatim from the pinned botocore ecr/2015-09-21 `ScanStatus` and
+      // `FindingSeverity` shapes.
+      expect(fn.Properties.Environment.Variables).toMatchObject({
+        USABLE_SCAN_STATUSES: "COMPLETE,ACTIVE",
+        PENDING_SCAN_STATUSES: "IN_PROGRESS,PENDING",
+        TERMINAL_SCAN_STATUSES:
+          "FAILED,UNSUPPORTED_IMAGE,SCAN_ELIGIBILITY_EXPIRED,FINDINGS_UNAVAILABLE,LIMIT_EXCEEDED,IMAGE_ARCHIVED",
+        BLOCKING_SCAN_SEVERITIES: "CRITICAL,HIGH",
+      });
+    }
+  });
+
+  it("refuses Runtime creation when CRITICAL or HIGH counts are nonzero", () => {
+    const handler = gateHandlerSource(runtimeMemoryTemplate());
+    // The count is read from the exact modeled response path.
+    expect(handler).toContain(
+      'counts = (response.get("imageScanFindings") or {}).get("findingSeverityCounts") or {}',
+    );
+    expect(handler).toContain(
+      'for severity in sorted(_status_set("BLOCKING_SCAN_SEVERITIES")):',
+    );
+    expect(handler).toContain("observed = int(counts.get(severity) or 0)");
+    expect(handler).toContain("if observed > 0:");
+    // ...and any nonzero count raises BEFORE IsComplete can ever be returned.
+    expect(handler).toContain(
+      "    blocking = blocking_findings(response)\n    if blocking:\n        _deny(",
+    );
+    expect(handler).toContain('"refusing Runtime creation for digest "');
+    const successIndex = handler.indexOf(
+      'return {\n        "IsComplete": True',
+    );
+    expect(successIndex).toBeGreaterThan(handler.indexOf("if blocking:"));
+  });
+
+  it("fails closed on terminal, unknown, and non-usable scan statuses", () => {
+    const handler = gateHandlerSource(runtimeMemoryTemplate());
+    // Anything outside the three declared vocabularies is UNKNOWN, never
+    // silently treated as pending or usable.
+    expect(handler).toContain('    return "UNKNOWN"');
+    expect(handler).toContain(
+      '    if state == "TERMINAL":\n        _deny("refusing image with terminal scan status \'" + status + "\'.")',
+    );
+    expect(handler).toContain(
+      '    if state == "UNKNOWN":\n        _deny("refusing image with unknown scan status \'" + status + "\'.")',
+    );
+    expect(handler).toContain(
+      '    if state != "USABLE":\n        _deny("refusing non-usable scan status \'" + status + "\'.")',
+    );
+    // Only the two converging statuses keep the waiter running.
+    expect(handler).toContain(
+      '    if state == "PENDING":\n        return {"IsComplete": False}',
+    );
+  });
+
+  it("starts at most one basic scan and then polls only that digest", () => {
+    const handler = gateHandlerSource(runtimeMemoryTemplate());
+    // A scan is started ONLY when the image carries no scan status at all.
+    expect(handler).toContain(
+      '    if state == "ABSENT":\n        status = start_basic_scan(client, registry_id, repository_name, digest)',
+    );
+    expect(handler).toContain(
+      '        response = client.start_image_scan(\n            registryId=registry_id,\n            repositoryName=repository_name,\n            imageId={"imageDigest": digest},\n        )',
+    );
+    // An already-existing scan (24 h basic-scan limit) is polled, not retried.
+    expect(handler).toContain('if code == "LimitExceededException":');
+    // Polling is digest-addressed only; the mutable tag is never re-used.
+    expect(handler).toContain(
+      '    response = client.describe_image_scan_findings(\n        registryId=registry_id,\n        repositoryName=repository_name,\n        imageId={"imageDigest": digest},\n        maxResults=1,\n    )',
+    );
+    expect(handler).not.toContain(
+      'describe_image_scan_findings(\n        repositoryName=repository_name,\n        imageId={"imageTag"',
+    );
+  });
+
+  it("fails closed on repository, tag, or digest identity drift", () => {
+    const handler = gateHandlerSource(runtimeMemoryTemplate());
+    for (const denial of [
+      '_deny("registry identity drift in DescribeImages.")',
+      '_deny("repository identity drift in DescribeImages.")',
+      '_deny("image tag identity drift in DescribeImages.")',
+      '_deny("registry identity drift in StartImageScan.")',
+      '_deny("repository identity drift in StartImageScan.")',
+      '_deny("digest identity drift in StartImageScan.")',
+      '_deny("registry identity drift in DescribeImageScanFindings.")',
+      '_deny("repository identity drift in DescribeImageScanFindings.")',
+      '_deny("digest identity drift in DescribeImageScanFindings.")',
+      '_deny("registry identity drift between waiter phases.")',
+      '_deny("repository identity drift between waiter phases.")',
+      '_deny("image tag does not equal the content-addressed asset hash.")',
+    ]) {
+      expect(handler).toContain(denial);
+    }
+    // Exactly one image may match the immutable asset tag.
+    expect(handler).toContain("if len(details) != 1:");
+    // Every digest that crosses a boundary is shape-checked.
+    expect(handler).toContain(
+      'DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")',
+    );
+    expect(handler).toContain(
+      '    digest = _checked_digest(data.get("ImageDigest"))',
+    );
+  });
+
+  it("keeps the identical gate in production and absent when the feature is off", () => {
+    const prod = runtimeMemoryTemplate("prod");
+    prod.resourceCountIs(GATE_TYPE, 1);
+    const prodGate = singleResource(prod, GATE_TYPE);
+    expect(prodGate.Properties.RepositoryName).toBe(
+      `cdk-hnb659fds-container-assets-${PROD_ACCOUNT}-${REGION}`,
+    );
+    expect(
+      Object.values(prod.findResources("AWS::IAM::Role")).some(
+        (role: any) =>
+          role.Properties.RoleName ===
+          "AgenticAI-D03-prod-demo-primary-imgscan",
+      ),
+    ).toBe(true);
+
+    // Default-off parity: no gate anywhere in the disabled pipeline graph.
+    const { stack, template } = pipeline(false);
+    expect(JSON.stringify(template.toJSON())).not.toContain(
+      "AgenticAIAgentImageScanGate",
+    );
+    const stage = stack.node.findChild("Nonprod") as WorkloadDeploymentStage;
+    expect(stage.runtimeMemoryStack).toBeUndefined();
   });
 });
 

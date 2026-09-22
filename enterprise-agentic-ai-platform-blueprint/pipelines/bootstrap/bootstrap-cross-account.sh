@@ -51,7 +51,13 @@ QUALIFIER="hnb659fds"
 # the exact environment-qualified Runtime/Memory families. Allow
 # `iam:PassRole` only on the exact
 # `AgenticAI-D03-<environment>-<tenant>-<agent>-runtime` role with
-# `iam:PassedToService=bedrock-agentcore.amazonaws.com`. Memory CMK use needs
+# `iam:PassedToService=bedrock-agentcore.amazonaws.com`. The same path creates
+# an exact `AgenticAI-D03-<environment>-<tenant>-<agent>-imgscan` role; allow
+# `iam:PassRole` on only that role with
+# `iam:PassedToService=lambda.amazonaws.com`. Its identity policy is limited to
+# `ecr:DescribeImages`, `ecr:StartImageScan`, and
+# `ecr:DescribeImageScanFindings` on the exact bootstrap container-assets
+# repository and deliberately grants no image or repository deletion. Memory CMK use needs
 # `kms:CreateGrant`, `kms:Decrypt`, `kms:GenerateDataKey*`, `kms:ReEncrypt*`, and
 # `kms:DescribeKey` on the exact Memory key with
 # `kms:ViaService=bedrock-agentcore.<region>.amazonaws.com`; do not grant

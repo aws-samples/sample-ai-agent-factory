@@ -32,6 +32,7 @@
 import {
   CfnDeletionPolicy,
   CfnOutput,
+  CustomResource,
   Duration,
   RemovalPolicy,
   Stack,
@@ -41,15 +42,24 @@ import {
 import { CfnMemory, CfnRuntime } from "aws-cdk-lib/aws-bedrockagentcore";
 import { Platform } from "aws-cdk-lib/aws-ecr-assets";
 import { DockerImageAsset } from "aws-cdk-lib/aws-ecr-assets";
-import { Effect, PolicyStatement, ServicePrincipal } from "aws-cdk-lib/aws-iam";
+import {
+  Effect,
+  ManagedPolicy,
+  PolicyDocument,
+  PolicyStatement,
+  Role,
+  ServicePrincipal,
+} from "aws-cdk-lib/aws-iam";
 import { Key } from "aws-cdk-lib/aws-kms";
 import {
-  AwsCustomResource,
-  AwsCustomResourcePolicy,
-  PhysicalResourceId,
-} from "aws-cdk-lib/custom-resources";
+  Code,
+  Function as LambdaFunction,
+  Runtime as LambdaRuntime,
+} from "aws-cdk-lib/aws-lambda";
+import { Provider } from "aws-cdk-lib/custom-resources";
 import { NagSuppressions } from "cdk-nag";
 import { Construct } from "constructs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 /** Environment-qualified allocation tags, applied to every emitted resource. */
@@ -86,11 +96,329 @@ export interface D03WorkstreamRuntimeMemoryStackProps
 /** Native AgentCore network modes modeled by CfnRuntime. */
 const NETWORK_MODE_PUBLIC = "PUBLIC";
 
+/*
+ * ---------------------------------------------------------------------------
+ * Live-preflight image scan gate
+ * ---------------------------------------------------------------------------
+ * LANDMINE (live-observed 2026-09-21, Workstream account/us-west-2): the CDK
+ * bootstrap container-assets repository had `scanOnPush=false`, no registry
+ * scanning configuration, and zero scanned images. A `DescribeImages`-only
+ * digest lookup therefore resolved a digest for an image whose vulnerability
+ * posture had never been assessed, and handed it straight to `CreateRuntime`.
+ *
+ * This gate closes that hole at deploy time. It never mutates or deletes the
+ * shared bootstrap repository: it reads the exact immutable asset tag, starts
+ * at most one ECR basic scan for exactly that digest when no scan exists,
+ * polls only that digest, and refuses to yield a container URI unless the scan
+ * reached a usable status with zero CRITICAL and zero HIGH findings.
+ *
+ * Every status string below is taken verbatim from the pinned ECR service
+ * model (`botocore` `ecr/2015-09-21`, shape `ScanStatus`): IN_PROGRESS,
+ * COMPLETE, FAILED, UNSUPPORTED_IMAGE, ACTIVE, PENDING,
+ * SCAN_ELIGIBILITY_EXPIRED, FINDINGS_UNAVAILABLE, LIMIT_EXCEEDED, and
+ * IMAGE_ARCHIVED. Severity names come from shape `FindingSeverity`.
+ */
+
+/**
+ * Statuses that carry trustworthy `findingSeverityCounts`. `COMPLETE` is the
+ * ECR basic-scanning terminal success this gate drives towards; `ACTIVE` is the
+ * equivalent Inspector enhanced-scanning status, accepted so that an account
+ * which later enables enhanced scanning still converges instead of timing out.
+ * Both are gated by the identical zero-CRITICAL/zero-HIGH check below.
+ */
+const USABLE_SCAN_STATUSES = ["COMPLETE", "ACTIVE"] as const;
+/** Statuses that are still converging — keep polling, bounded by the waiter. */
+const PENDING_SCAN_STATUSES = ["IN_PROGRESS", "PENDING"] as const;
+/** Statuses that can never become usable — fail closed immediately. */
+const TERMINAL_SCAN_STATUSES = [
+  "FAILED",
+  "UNSUPPORTED_IMAGE",
+  "SCAN_ELIGIBILITY_EXPIRED",
+  "FINDINGS_UNAVAILABLE",
+  "LIMIT_EXCEEDED",
+  "IMAGE_ARCHIVED",
+] as const;
+/** Any nonzero count in these severities blocks Runtime creation outright. */
+const BLOCKING_SCAN_SEVERITIES = ["CRITICAL", "HIGH"] as const;
+/** Bounded waiter: fixed 15 s polls inside a hard 30 min ceiling. */
+const SCAN_POLL_INTERVAL = Duration.seconds(15);
+const SCAN_TOTAL_TIMEOUT = Duration.minutes(30);
+/**
+ * Bounded per-call SDK budget. `total_max_attempts` includes the initial call,
+ * unlike Config's `max_attempts`; two total attempts fit the Lambda timeout
+ * even after the standard retry mode's maximum backoff.
+ */
+const SCAN_SDK_TOTAL_MAX_ATTEMPTS = 2;
+const SCAN_SDK_CONNECT_TIMEOUT_SECONDS = 3;
+const SCAN_SDK_READ_TIMEOUT_SECONDS = 10;
+
+/**
+ * Inline `onEvent`/`isComplete` handler for the image scan gate. Deliberately
+ * composed of small single-purpose wrappers so a failure names the exact step
+ * that refused. Every ECR call is read-only apart from one `StartImageScan`,
+ * and `Delete` performs no API call at all — the bootstrap repository and its
+ * images are shared infrastructure that outlive this stack.
+ */
+const AGENT_IMAGE_SCAN_GATE_HANDLER = `
+import json
+import os
+import re
+
+import boto3
+from botocore.config import Config
+from botocore.exceptions import ClientError
+
+ACCOUNT_ID_PATTERN = re.compile(r"^[0-9]{12}$")
+CONTENT_HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _bounded_client():
+    """One ECR client with an explicitly bounded retry/timeout budget."""
+    return boto3.client(
+        "ecr",
+        config=Config(
+            retries={
+                "total_max_attempts": int(os.environ["SDK_TOTAL_MAX_ATTEMPTS"]),
+                "mode": "standard",
+            },
+            connect_timeout=int(os.environ["SDK_CONNECT_TIMEOUT_SECONDS"]),
+            read_timeout=int(os.environ["SDK_READ_TIMEOUT_SECONDS"]),
+        ),
+    )
+
+
+def _status_set(name):
+    """Parse one comma-separated status/severity allow-list from the template."""
+    return {item.strip() for item in (os.environ.get(name) or "").split(",") if item.strip()}
+
+
+def _deny(message):
+    raise RuntimeError("AgentImageScanGate: " + message)
+
+
+def _required_property(properties, key):
+    value = properties.get(key)
+    if not isinstance(value, str) or not value:
+        _deny("missing required resource property '" + key + "'.")
+    return value
+
+
+def _checked_registry_id(registry_id):
+    if not isinstance(registry_id, str) or not ACCOUNT_ID_PATTERN.match(registry_id):
+        _deny("refusing a malformed registry id.")
+    return registry_id
+
+
+def _checked_content_hash(value, label):
+    if not isinstance(value, str) or not CONTENT_HASH_PATTERN.match(value):
+        _deny("refusing a malformed " + label + ".")
+    return value
+
+
+def _checked_digest(digest):
+    """Refuse anything that is not an exact sha256 content address."""
+    if not isinstance(digest, str) or not DIGEST_PATTERN.match(digest):
+        _deny("refusing a malformed image digest.")
+    return digest
+
+
+def _scan_status(payload):
+    return str(((payload.get("imageScanStatus") or {}).get("status") or "")).upper()
+
+
+def _classify(status):
+    """USABLE -> evaluate findings, PENDING -> poll, else fail closed."""
+    if not status:
+        return "ABSENT"
+    if status in _status_set("USABLE_SCAN_STATUSES"):
+        return "USABLE"
+    if status in _status_set("PENDING_SCAN_STATUSES"):
+        return "PENDING"
+    if status in _status_set("TERMINAL_SCAN_STATUSES"):
+        return "TERMINAL"
+    return "UNKNOWN"
+
+
+def _assert_image_identity(detail, registry_id, repository_name, image_tag):
+    """Fail closed on any drift between what was asked for and what returned."""
+    if detail.get("registryId") != registry_id:
+        _deny("registry identity drift in DescribeImages.")
+    if detail.get("repositoryName") != repository_name:
+        _deny("repository identity drift in DescribeImages.")
+    if image_tag not in (detail.get("imageTags") or []):
+        _deny("image tag identity drift in DescribeImages.")
+    return _checked_digest(detail.get("imageDigest"))
+
+
+def resolve_tag_to_digest(client, registry_id, repository_name, image_tag):
+    """Resolve the exact immutable asset tag to exactly one image detail."""
+    response = client.describe_images(
+        registryId=registry_id,
+        repositoryName=repository_name,
+        imageIds=[{"imageTag": image_tag}],
+    )
+    details = response.get("imageDetails") or []
+    if len(details) != 1:
+        _deny("expected exactly one image for the asset tag, observed " + str(len(details)) + ".")
+    detail = details[0]
+    return _assert_image_identity(detail, registry_id, repository_name, image_tag), detail
+
+
+def start_basic_scan(client, registry_id, repository_name, digest):
+    """Start at most one basic scan for exactly this digest."""
+    try:
+        response = client.start_image_scan(
+            registryId=registry_id,
+            repositoryName=repository_name,
+            imageId={"imageDigest": digest},
+        )
+    except ClientError as error:
+        code = error.response.get("Error", {}).get("Code", "")
+        if code == "LimitExceededException":
+            # ECR permits one basic scan per image per 24 h. If this limit is
+            # account-wide instead, the bounded findings poll still fails
+            # closed because no scan can materialize for this exact digest.
+            return "IN_PROGRESS"
+        raise
+    if response.get("registryId") != registry_id:
+        _deny("registry identity drift in StartImageScan.")
+    if response.get("repositoryName") != repository_name:
+        _deny("repository identity drift in StartImageScan.")
+    if ((response.get("imageId") or {}).get("imageDigest")) != digest:
+        _deny("digest identity drift in StartImageScan.")
+    return _scan_status(response) or "IN_PROGRESS"
+
+
+def describe_digest_findings(client, registry_id, repository_name, digest):
+    """Read scan state for ONLY this digest — never by mutable tag."""
+    response = client.describe_image_scan_findings(
+        registryId=registry_id,
+        repositoryName=repository_name,
+        imageId={"imageDigest": digest},
+        maxResults=1,
+    )
+    if response.get("registryId") != registry_id:
+        _deny("registry identity drift in DescribeImageScanFindings.")
+    if response.get("repositoryName") != repository_name:
+        _deny("repository identity drift in DescribeImageScanFindings.")
+    if ((response.get("imageId") or {}).get("imageDigest")) != digest:
+        _deny("digest identity drift in DescribeImageScanFindings.")
+    return response
+
+
+def blocking_findings(response):
+    """Nonzero counts in the blocking severities, as an ordered dict."""
+    counts = (response.get("imageScanFindings") or {}).get("findingSeverityCounts") or {}
+    blocking = {}
+    for severity in sorted(_status_set("BLOCKING_SCAN_SEVERITIES")):
+        observed = int(counts.get(severity) or 0)
+        if observed > 0:
+            blocking[severity] = observed
+    return blocking
+
+
+def on_event(event, _context):
+    """Resolve the digest and ensure a scan is running. No Delete-time calls."""
+    request_type = event.get("RequestType")
+    properties = event.get("ResourceProperties") or {}
+    if request_type == "Delete":
+        # Shared bootstrap repository and images are NEVER deleted here.
+        return {"PhysicalResourceId": event.get("PhysicalResourceId")}
+    if request_type not in ("Create", "Update"):
+        _deny("unsupported request type '" + str(request_type) + "'.")
+    registry_id = _checked_registry_id(_required_property(properties, "RegistryId"))
+    repository_name = _required_property(properties, "RepositoryName")
+    image_tag = _checked_content_hash(_required_property(properties, "ImageTag"), "image tag")
+    asset_hash = _checked_content_hash(_required_property(properties, "AssetHash"), "asset hash")
+    contract_hash = _checked_content_hash(
+        _required_property(properties, "GateContractSha256"), "gate contract hash"
+    )
+    if image_tag != asset_hash:
+        _deny("image tag does not equal the content-addressed asset hash.")
+    client = _bounded_client()
+    digest, detail = resolve_tag_to_digest(client, registry_id, repository_name, image_tag)
+    status = _scan_status(detail)
+    state = _classify(status)
+    if state == "TERMINAL":
+        _deny("refusing image with terminal scan status '" + status + "'.")
+    if state == "UNKNOWN":
+        _deny("refusing image with unknown scan status '" + status + "'.")
+    if state == "ABSENT":
+        status = start_basic_scan(client, registry_id, repository_name, digest)
+        started_state = _classify(status)
+        if started_state in ("ABSENT", "TERMINAL", "UNKNOWN"):
+            _deny("refusing non-converging StartImageScan status '" + status + "'.")
+    return {
+        "PhysicalResourceId": "agent-image-scan-" + asset_hash + "-" + contract_hash[:12],
+        "Data": {
+            "ImageDigest": digest,
+            "RegistryId": registry_id,
+            "RepositoryName": repository_name,
+            "ScanStatus": status,
+        },
+    }
+
+
+def is_complete(event, _context):
+    """Poll only the resolved digest; refuse on findings, terminal or unknown."""
+    if event.get("RequestType") == "Delete":
+        return {"IsComplete": True}
+    properties = event.get("ResourceProperties") or {}
+    registry_id = _checked_registry_id(_required_property(properties, "RegistryId"))
+    repository_name = _required_property(properties, "RepositoryName")
+    data = event.get("Data") or {}
+    if data.get("RegistryId") != registry_id:
+        _deny("registry identity drift between waiter phases.")
+    if data.get("RepositoryName") != repository_name:
+        _deny("repository identity drift between waiter phases.")
+    digest = _checked_digest(data.get("ImageDigest"))
+    try:
+        response = describe_digest_findings(
+            _bounded_client(), registry_id, repository_name, digest
+        )
+    except ClientError as error:
+        code = error.response.get("Error", {}).get("Code", "")
+        if code == "ScanNotFoundException":
+            # The started scan is not yet registered. Bounded by the waiter.
+            return {"IsComplete": False}
+        raise
+    status = _scan_status(response)
+    state = _classify(status)
+    if state == "PENDING":
+        return {"IsComplete": False}
+    if state != "USABLE":
+        _deny("refusing non-usable scan status '" + status + "'.")
+    blocking = blocking_findings(response)
+    if blocking:
+        _deny(
+            "refusing Runtime creation for digest "
+            + digest
+            + " with blocking findings "
+            + json.dumps(blocking, sort_keys=True)
+            + "."
+        )
+    return {
+        "IsComplete": True,
+        "Data": {
+            "ImageDigest": digest,
+            "RegistryId": registry_id,
+            "RepositoryName": repository_name,
+            "ScanStatus": status,
+        },
+    }
+`;
+
 /** Runtime is usable at this status; Memory at ACTIVE. */
 export class D03WorkstreamRuntimeMemoryStack extends Stack {
   readonly memory: CfnMemory;
   readonly runtime: CfnRuntime;
   readonly memoryKey: Key;
+  /**
+   * Deploy-time preflight gate. Completes only when the exact asset digest has
+   * a usable ECR scan with zero CRITICAL and zero HIGH findings.
+   */
+  readonly imageScanGate: CustomResource;
   /** Exact digest-pinned image URI (`<repositoryUri>@sha256:<digest>`). */
   readonly containerDigestUri: string;
 
@@ -100,6 +428,15 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     props: D03WorkstreamRuntimeMemoryStackProps,
   ) {
     super(scope, id, props);
+
+    // The scan gate adds Lambda, IAM, and Step Functions support resources.
+    // Apply the mandatory five-tag contract at stack scope so every taggable
+    // descendant receives the same allocation identity as Runtime and Memory.
+    for (const [key, value] of Object.entries(
+      this.allocationTagRecord(props),
+    )) {
+      Tags.of(this).add(key, value);
+    }
 
     const eventExpiryDays = props.eventExpiryDays ?? 30;
     if (
@@ -163,8 +500,10 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
       this.memory.cfnOptions.updateReplacePolicy = CfnDeletionPolicy.RETAIN;
     }
 
-    // ---- Container image (ARM64) resolved to an exact digest ----
-    this.containerDigestUri = this.resolveContainerDigestUri();
+    // ---- Container image (ARM64) resolved to an exact SCANNED digest ----
+    const scanned = this.resolveScannedContainerDigestUri(props);
+    this.imageScanGate = scanned.gate;
+    this.containerDigestUri = scanned.uri;
 
     // ---- Runtime ----
     const runtimeRoleArn = this.runtimeExecutionRoleArn(props);
@@ -192,6 +531,10 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     this.runtime.applyRemovalPolicy(RemovalPolicy.DESTROY);
     // Runtime depends on Memory: the memory id is injected into its env.
     this.runtime.addDependency(this.memory);
+    // Runtime depends on the COMPLETED scan gate. The container URI already
+    // references the gate's digest attribute, but the dependency is made
+    // explicit so the ordering survives any future URI refactor.
+    this.runtime.node.addDependency(this.imageScanGate);
 
     this.emitOutputs(runtimeRoleArn);
   }
@@ -272,12 +615,15 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
   }
 
   /**
-   * Build the ARM64 image from the spike agent and resolve its content-
-   * addressed ECR tag to an exact `@sha256` digest via an ECR `DescribeImages`
-   * custom resource. Only `<repositoryUri>@sha256:<digest>` is passed into the
-   * Runtime — never a mutable tag. Asset publishing is pipeline-owned.
+   * Build the ARM64 image from the spike agent, resolve its content-addressed
+   * ECR tag to an exact `@sha256` digest, and refuse to emit that digest unless
+   * a scan for that exact digest reached a usable status with zero CRITICAL and
+   * zero HIGH findings. Only `<repositoryUri>@sha256:<digest>` is passed into
+   * the Runtime — never a mutable tag. Asset publishing is pipeline-owned.
    */
-  private resolveContainerDigestUri(): string {
+  private resolveScannedContainerDigestUri(
+    props: D03WorkstreamRuntimeMemoryStackProps,
+  ): { readonly uri: string; readonly gate: CustomResource } {
     const asset = new DockerImageAsset(this, "AgentImage", {
       directory: join(
         __dirname,
@@ -291,78 +637,228 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
       platform: Platform.LINUX_ARM64,
     });
 
-    // The asset's content hash is its stable physical identity; a content
-    // change produces a new tag and forces a fresh digest lookup.
-    const digestLookup = new AwsCustomResource(this, "AgentImageDigest", {
-      resourceType: "Custom::EcrImageDigest",
-      onCreate: {
-        service: "ECR",
-        action: "describeImages",
-        parameters: {
-          repositoryName: asset.repository.repositoryName,
-          imageIds: [{ imageTag: asset.imageTag }],
-        },
-        physicalResourceId: PhysicalResourceId.of(
-          `EcrImageDigest-${asset.assetHash}`,
-        ),
-      },
-      onUpdate: {
-        service: "ECR",
-        action: "describeImages",
-        parameters: {
-          repositoryName: asset.repository.repositoryName,
-          imageIds: [{ imageTag: asset.imageTag }],
-        },
-        physicalResourceId: PhysicalResourceId.of(
-          `EcrImageDigest-${asset.assetHash}`,
-        ),
-      },
-      policy: AwsCustomResourcePolicy.fromStatements([
-        new PolicyStatement({
-          effect: Effect.ALLOW,
-          actions: ["ecr:DescribeImages"],
-          resources: [asset.repository.repositoryArn],
+    const role = this.buildImageScanGateRole(props, asset);
+    const gate = this.buildImageScanGate(props, asset, role);
+    // repositoryUri has no tag/digest; append the gated digest by reference.
+    return {
+      uri: `${asset.repository.repositoryUri}@${gate.getAttString("ImageDigest")}`,
+      gate,
+    };
+  }
+
+  /**
+   * Least-privilege role for the scan gate: the three exact ECR actions, scoped
+   * to the exact bootstrap container-assets repository ARN. No image, tag, or
+   * repository deletion action is granted — the shared bootstrap assets must
+   * survive this stack's deletion.
+   */
+  private buildImageScanGateRole(
+    props: D03WorkstreamRuntimeMemoryStackProps,
+    asset: DockerImageAsset,
+  ): Role {
+    const roleName = `AgenticAI-D03-${props.envName}-${props.tenantId}-${props.agentId}-imgscan`;
+    if (roleName.length > 64) {
+      throw new Error(
+        `D03WorkstreamRuntimeMemoryStack: generated image scan gate role name '${roleName}' exceeds 64 characters.`,
+      );
+    }
+    const role = new Role(this, "AgentImageScanGateRole", {
+      roleName,
+      assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
+      description:
+        "Pipeline-owned Workstream role that preflights the agent image scan before Runtime creation.",
+      inlinePolicies: {
+        ReadBootstrapImageScan: new PolicyDocument({
+          statements: [
+            new PolicyStatement({
+              sid: "PreflightAgentImageScan",
+              effect: Effect.ALLOW,
+              actions: [
+                "ecr:DescribeImageScanFindings",
+                "ecr:DescribeImages",
+                "ecr:StartImageScan",
+              ],
+              resources: [asset.repository.repositoryArn],
+            }),
+          ],
         }),
-      ]),
+      },
+      managedPolicies: [
+        ManagedPolicy.fromAwsManagedPolicyName(
+          "service-role/AWSLambdaBasicExecutionRole",
+        ),
+      ],
     });
-    const digest = digestLookup.getResponseField("imageDetails.0.imageDigest");
     NagSuppressions.addResourceSuppressions(
-      digestLookup,
+      role,
       [
-        {
-          id: "AwsSolutions-L1",
-          reason: "SEC-006: CDK-managed AwsCustomResource Lambda runtime.",
-        },
-        {
-          id: "NIST.800.53.R5-LambdaConcurrency",
-          reason: "SEC-007: CFN-only invocation.",
-        },
-        {
-          id: "NIST.800.53.R5-LambdaDLQ",
-          reason: "SEC-008: CFN surfaces failures via stack events.",
-        },
-        {
-          id: "NIST.800.53.R5-LambdaInsideVPC",
-          reason: "SEC-009: ECR control-plane public IAM-auth endpoint.",
-        },
         {
           id: "AwsSolutions-IAM4",
           appliesTo: [
             "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
           ],
-          reason: "SEC-010: CDK custom-resource default managed role.",
-        },
-        {
-          id: "AwsSolutions-IAM5",
           reason:
-            "SEC-011: The digest-lookup role is scoped to the exact container-assets repository ARN.",
+            "SEC-010: AWSLambdaBasicExecutionRole is the documented logging policy for the pipeline-owned image scan gate Lambda.",
         },
       ],
       true,
     );
+    return role;
+  }
 
-    // repositoryUri has no tag/digest; append the resolved digest by reference.
-    return `${asset.repository.repositoryUri}@${digest}`;
+  /** The bounded `onEvent` + `isComplete` waiter that gates Runtime creation. */
+  private buildImageScanGate(
+    props: D03WorkstreamRuntimeMemoryStackProps,
+    asset: DockerImageAsset,
+    role: Role,
+  ): CustomResource {
+    const fullNamePrefix = `agenticai-d03-${props.envName}-${props.tenantId}-${props.agentId}-imgscan`;
+    const namePrefix =
+      fullNamePrefix.length <= 61
+        ? fullNamePrefix
+        : `${fullNamePrefix.slice(0, 52)}-${createHash("sha256")
+            .update(fullNamePrefix)
+            .digest("hex")
+            .slice(0, 8)}`;
+    const environment: Record<string, string> = {
+      USABLE_SCAN_STATUSES: USABLE_SCAN_STATUSES.join(","),
+      PENDING_SCAN_STATUSES: PENDING_SCAN_STATUSES.join(","),
+      TERMINAL_SCAN_STATUSES: TERMINAL_SCAN_STATUSES.join(","),
+      BLOCKING_SCAN_SEVERITIES: BLOCKING_SCAN_SEVERITIES.join(","),
+      SDK_TOTAL_MAX_ATTEMPTS: String(SCAN_SDK_TOTAL_MAX_ATTEMPTS),
+      SDK_CONNECT_TIMEOUT_SECONDS: String(SCAN_SDK_CONNECT_TIMEOUT_SECONDS),
+      SDK_READ_TIMEOUT_SECONDS: String(SCAN_SDK_READ_TIMEOUT_SECONDS),
+    };
+    // ServiceToken does not change when inline handler code or environment
+    // changes. Carry their digest as a resource property so every scan-policy
+    // revision forces CloudFormation to invoke and re-evaluate this gate.
+    const gateContractSha256 = createHash("sha256")
+      .update(AGENT_IMAGE_SCAN_GATE_HANDLER)
+      .update("\0")
+      .update(JSON.stringify(environment))
+      .digest("hex");
+    const onEvent = new LambdaFunction(this, "AgentImageScanGateOnEvent", {
+      functionName: `${namePrefix}-oe`,
+      runtime: LambdaRuntime.PYTHON_3_13,
+      handler: "index.on_event",
+      timeout: Duration.minutes(2),
+      memorySize: 256,
+      description:
+        "Resolves the exact agent image digest and ensures an ECR scan exists — onEvent.",
+      code: Code.fromInline(AGENT_IMAGE_SCAN_GATE_HANDLER),
+      environment,
+      role,
+    });
+    const isComplete = new LambdaFunction(
+      this,
+      "AgentImageScanGateIsComplete",
+      {
+        functionName: `${namePrefix}-ic`,
+        runtime: LambdaRuntime.PYTHON_3_13,
+        handler: "index.is_complete",
+        timeout: Duration.minutes(1),
+        memorySize: 256,
+        description:
+          "Polls only the resolved digest and refuses CRITICAL/HIGH findings — isComplete.",
+        code: Code.fromInline(AGENT_IMAGE_SCAN_GATE_HANDLER),
+        environment,
+        role,
+      },
+    );
+    const provider = new Provider(this, "AgentImageScanGateProvider", {
+      onEventHandler: onEvent,
+      isCompleteHandler: isComplete,
+      queryInterval: SCAN_POLL_INTERVAL,
+      totalTimeout: SCAN_TOTAL_TIMEOUT,
+    });
+    const gate = new CustomResource(this, "AgentImageScanGate", {
+      resourceType: "Custom::AgenticAIAgentImageScanGate",
+      serviceToken: provider.serviceToken,
+      properties: {
+        RegistryId: this.account,
+        RepositoryName: asset.repository.repositoryName,
+        ImageTag: asset.imageTag,
+        AssetHash: asset.assetHash,
+        GateContractSha256: gateContractSha256,
+      },
+    });
+    this.suppressImageScanGateNag(onEvent, isComplete, provider);
+    return gate;
+  }
+
+  private suppressImageScanGateNag(
+    onEvent: LambdaFunction,
+    isComplete: LambdaFunction,
+    provider: Provider,
+  ): void {
+    for (const fn of [onEvent, isComplete]) {
+      NagSuppressions.addResourceSuppressions(
+        fn,
+        [
+          {
+            id: "AwsSolutions-L1",
+            reason:
+              "SEC-006: pinned to the latest Lambda Python runtime carrying the bundled boto3 whose ECR scan contracts this handler targets.",
+          },
+          {
+            id: "NIST.800.53.R5-LambdaConcurrency",
+            reason: "SEC-007: CloudFormation-only invocation.",
+          },
+          {
+            id: "NIST.800.53.R5-LambdaDLQ",
+            reason: "SEC-008: CFN surfaces failures via stack events.",
+          },
+          {
+            id: "NIST.800.53.R5-LambdaInsideVPC",
+            reason: "SEC-009: ECR control-plane public IAM-auth endpoint.",
+          },
+        ],
+        true,
+      );
+    }
+    NagSuppressions.addResourceSuppressions(
+      provider,
+      [
+        {
+          id: "AwsSolutions-IAM4",
+          reason:
+            "SEC-010: AWSLambdaBasicExecutionRole is the documented logging policy for CDK provider framework Lambdas.",
+        },
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "SEC-029: the Provider framework invokes versions/aliases of the two scan gate Lambdas created in this stack.",
+        },
+        {
+          id: "AwsSolutions-L1",
+          reason:
+            "SEC-006: Provider framework Lambda runtime is managed by aws-cdk-lib.",
+        },
+        {
+          id: "AwsSolutions-SF1",
+          reason:
+            "SEC-029: CDK Provider framework waiter Step Function; logging config is framework-owned.",
+        },
+        {
+          id: "AwsSolutions-SF2",
+          reason:
+            "SEC-029: CDK Provider framework waiter Step Function; X-Ray config is framework-owned.",
+        },
+        {
+          id: "NIST.800.53.R5-LambdaConcurrency",
+          reason: "SEC-007: provisioning-time only.",
+        },
+        {
+          id: "NIST.800.53.R5-LambdaDLQ",
+          reason: "SEC-008: CloudFormation surfaces failures.",
+        },
+        {
+          id: "NIST.800.53.R5-LambdaInsideVPC",
+          reason: "SEC-009: control-plane only.",
+        },
+      ],
+      true,
+    );
   }
 
   /**
