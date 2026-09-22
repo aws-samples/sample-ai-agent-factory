@@ -345,21 +345,49 @@ class _LiteLlmAdapter:
 
 
 class _McpToolAdapter:
-    """Adapts a Strands ``MCPClient`` to the :class:`ToolClient` Protocol."""
+    """Adapts a Strands ``MCPClient`` to the :class:`ToolClient` Protocol.
 
-    def __init__(self, *, gateway_url: str, bearer_token: str) -> None:
+    Supports two Gateway auth models:
+
+    * ``auth_mode="sigv4"`` — the workstream tool Gateway is ``AWS_IAM``; every
+      MCP request is SigV4-signed with the container's ambient AWS credentials
+      for service ``bedrock-agentcore``. No bearer token is used.
+    * ``auth_mode="bearer"`` — the single-Gateway ``CUSTOM_JWT`` compatibility
+      shape; a static ``Authorization: Bearer`` header is sent.
+    """
+
+    def __init__(
+        self,
+        *,
+        gateway_url: str,
+        auth_mode: str = "sigv4",
+        bearer_token: str | None = None,
+        region: str = "us-west-2",
+    ) -> None:
         # Lazy: only needed on the live path.
         from mcp.client.streamable_http import streamablehttp_client  # noqa: E402
         from strands.tools.mcp import MCPClient  # noqa: E402
 
         self._gateway_url = gateway_url
-        self._headers = {
-            "Authorization": f"Bearer {bearer_token}",
-            "MCP-Protocol-Version": "2025-06-18",
-        }
-        self._client = MCPClient(
-            lambda: streamablehttp_client(gateway_url, headers=self._headers)
-        )
+        self._auth_mode = auth_mode
+        base_headers = {"MCP-Protocol-Version": "2025-06-18"}
+
+        if auth_mode == "bearer":
+            if not bearer_token:
+                raise AgentError("bearer auth_mode requires a bearer token")
+            headers = {**base_headers, "Authorization": f"Bearer {bearer_token}"}
+            self._client = MCPClient(
+                lambda: streamablehttp_client(gateway_url, headers=headers)
+            )
+        elif auth_mode == "sigv4":
+            auth = _SigV4HttpxAuth(service="bedrock-agentcore", region=region)
+            self._client = MCPClient(
+                lambda: streamablehttp_client(
+                    gateway_url, headers=base_headers, auth=auth
+                )
+            )
+        else:
+            raise AgentError(f"unsupported MCP auth_mode: {auth_mode!r}")
 
     def list_tools(self) -> list[str]:
         with self._client:
@@ -371,6 +399,46 @@ class _McpToolAdapter:
                 tool_use_id=qualified_name, name=qualified_name, arguments=dict(arguments)
             )
         return {"status": getattr(result, "status", "unknown")}
+
+
+class _SigV4HttpxAuth:
+    """httpx auth flow that SigV4-signs each request with ambient AWS creds.
+
+    Kept minimal and dependency-light: reuses botocore's SigV4Auth over the
+    default credential chain (the AgentCore-vended Runtime execution role in the
+    container). Never logs credentials or signed headers.
+    """
+
+    def __init__(self, *, service: str, region: str) -> None:
+        import boto3  # noqa: E402 lazy
+
+        self._service = service
+        self._region = region
+        self._session = boto3.Session()
+
+    def auth_flow(self, request):  # httpx.Auth protocol
+        from botocore.auth import SigV4Auth  # noqa: E402 lazy
+        from botocore.awsrequest import AWSRequest  # noqa: E402 lazy
+
+        credentials = self._session.get_credentials()
+        if credentials is None:
+            raise AgentError("no AWS credentials available for SigV4 MCP signing")
+        frozen = credentials.get_frozen_credentials()
+        aws_request = AWSRequest(
+            method=request.method,
+            url=str(request.url),
+            data=request.content,
+            headers={
+                k: v
+                for k, v in request.headers.items()
+                # botocore recomputes these; passing them in breaks the signature.
+                if k.lower() not in ("authorization", "x-amz-date", "x-amz-security-token")
+            },
+        )
+        SigV4Auth(frozen, self._service, self._region).add_auth(aws_request)
+        for key, value in aws_request.headers.items():
+            request.headers[key] = value
+        yield request
 
 
 class _AgentCoreMemoryAdapter:
@@ -426,23 +494,37 @@ def build_production_core(
     *,
     mcp_gateway_url: str,
     inference_gateway_url: str,
-    bearer_token: str,
+    inference_bearer_token: str,
     memory_id: str | None,
     region: str,
+    mcp_auth: str = "sigv4",
+    mcp_bearer_token: str | None = None,
 ) -> ReferenceAgentCore:
     """Wire the real Strands/AgentCore adapters and hand them to the pure core.
 
-    In the D-03 topology the tools MCP endpoint (workstream tool Gateway) and
-    the OpenAI-compatible inference endpoint (Platform inference Gateway) are
-    two distinct Gateways, so they are wired from two separate URLs. Passing the
-    same value for both preserves the single-Gateway compatibility-spike shape.
+    D-03 uses two distinct Gateways with two auth models:
+
+    * Inference (Platform inference Gateway, ``CUSTOM_JWT``): the LiteLLM adapter
+      calls ``<inference_gateway_url>/inference/v1`` with a Cognito M2M bearer
+      token (``inference_bearer_token``).
+    * Tools (workstream tool Gateway, ``AWS_IAM``): the MCP adapter SigV4-signs
+      each request with the container's ambient AWS credentials
+      (``mcp_auth="sigv4"``).
+
+    Passing ``mcp_auth="bearer"`` with ``mcp_bearer_token`` and the same URL for
+    both preserves the single-Gateway ``CUSTOM_JWT`` compatibility-spike shape.
     """
     llm = _LiteLlmAdapter(
         gateway_url=inference_gateway_url,
-        bearer_token=bearer_token,
+        bearer_token=inference_bearer_token,
         model_id=config.model_id,
     )
-    tools = _McpToolAdapter(gateway_url=mcp_gateway_url, bearer_token=bearer_token)
+    tools = _McpToolAdapter(
+        gateway_url=mcp_gateway_url,
+        auth_mode=mcp_auth,
+        bearer_token=mcp_bearer_token,
+        region=region,
+    )
     memory = (
         _AgentCoreMemoryAdapter(memory_id=memory_id, region=region) if memory_id else None
     )
@@ -473,11 +555,10 @@ def _load_entrypoint():  # pragma: no cover - exercised only in the live contain
                 t for t in os.environ.get("AGENTCORE_SUBSCRIBED_TOOLS", "").split(",") if t
             ),
         )
-        # The bearer token is acquired by the runtime via AgentCore Identity M2M
-        # (workload identity -> OAuth2 credential provider -> resource token).
-        # The credential-provider recipe is the one live-proven by the Identity
-        # M2M spike; here it is supplied through the environment/secure fetch.
-        bearer_token = _fetch_gateway_token()
+        # Two auth models (D-03): the inference bearer is a Cognito M2M token
+        # for the Platform inference Gateway; MCP tool calls SigV4-sign against
+        # the AWS_IAM workstream tool Gateway with the container's ambient creds.
+        inference_bearer = _fetch_inference_bearer()
         mcp_gateway_url = os.environ["AGENTCORE_GATEWAY_URL"]
         # Inference (LiteLLM) endpoint. In D-03 this is the Platform inference
         # Gateway, distinct from the workstream MCP tool Gateway above. Falls
@@ -485,13 +566,18 @@ def _load_entrypoint():  # pragma: no cover - exercised only in the live contain
         inference_gateway_url = (
             os.environ.get("AGENTCORE_INFERENCE_GATEWAY_URL") or mcp_gateway_url
         )
+        # MCP auth mode: default SigV4 (AWS_IAM Gateway). Set "bearer" only for
+        # the single-Gateway CUSTOM_JWT compatibility shape.
+        mcp_auth = os.environ.get("AGENTCORE_MCP_AUTH", "sigv4")
         core = build_production_core(
             cfg,
             mcp_gateway_url=mcp_gateway_url,
             inference_gateway_url=inference_gateway_url,
-            bearer_token=bearer_token,
+            inference_bearer_token=inference_bearer,
             memory_id=os.environ.get("AGENTCORE_MEMORY_ID"),
             region=os.environ.get("AWS_REGION", "us-west-2"),
+            mcp_auth=mcp_auth,
+            mcp_bearer_token=os.environ.get("AGENTCORE_GATEWAY_BEARER"),
         )
         payload_map = payload if isinstance(payload, Mapping) else {}
         prompt = payload_map.get(PROMPT_FIELD)
@@ -513,21 +599,43 @@ def _load_entrypoint():  # pragma: no cover - exercised only in the live contain
     return app
 
 
-def _fetch_gateway_token() -> str:  # pragma: no cover - live path only
-    """Acquire a Gateway-authorized bearer token via AgentCore Identity M2M.
+def _fetch_inference_bearer() -> str:  # pragma: no cover - live path only
+    """Acquire a Cognito M2M bearer for the Platform inference Gateway.
 
-    The concrete acquisition (workload identity -> OAuth2 credential provider ->
-    GetResourceOauth2Token) is the recipe proven live by the Identity M2M spike.
-    In the deployed Runtime this is provided by the platform Identity wiring; a
-    token supplied through the environment is used as the injection seam.
+    Sanctioned path (live-proven by the Identity M2M spike): AgentCore Identity.
+    The Runtime carries a workload-identity token; a pre-created ``CognitoOauth2``
+    credential provider (seeded once with the inference Gateway's Cognito client
+    id + secret) exchanges it for a resource token at the Gateway scope via
+    ``GetResourceOauth2Token``. No cross-account Cognito describe and no raw
+    Secrets Manager read is required — the provider holds the secret.
+
+    ``AGENTCORE_INFERENCE_BEARER`` is an explicit injection seam (tests /
+    pre-fetched token) that short-circuits the fetch. Never logs the token.
     """
-    token = os.environ.get("AGENTCORE_GATEWAY_BEARER")
+    seam = os.environ.get("AGENTCORE_INFERENCE_BEARER")
+    if seam:
+        return seam
+
+    provider_name = os.environ["AGENTCORE_INFERENCE_CREDENTIAL_PROVIDER"]
+    scope = os.environ["AGENTCORE_INFERENCE_SCOPE"]
+    region = os.environ.get("AWS_REGION", "us-west-2")
+
+    import boto3  # noqa: E402 lazy
+
+    identity = boto3.client("bedrock-agentcore", region_name=region)
+    # The workload-identity token is provided to the container by the Runtime;
+    # the injection seam covers environments where it is supplied directly.
+    workload_token = os.environ["AGENTCORE_WORKLOAD_IDENTITY_TOKEN"]
+    resp = identity.get_resource_oauth2_token(
+        workloadIdentityToken=workload_token,
+        resourceCredentialProviderName=provider_name,
+        scopes=[scope],
+        oauth2Flow="M2M",
+    )
+    token = resp.get("accessToken") or resp.get("access_token")
     if not token:
-        raise AgentError(
-            "no Gateway bearer token available; AgentCore Identity M2M wiring must "
-            "supply AGENTCORE_GATEWAY_BEARER or an equivalent secure fetch"
-        )
-    return token
+        raise AgentError("GetResourceOauth2Token did not return an access token")
+    return str(token)
 
 
 if __name__ == "__main__":  # pragma: no cover
