@@ -59,6 +59,63 @@ bypass twins — then tear down to zero residue.
 **Success = DoD Round 2.B closed.** Record sanitized evidence at
 `evidence/live/<date>-pipeline-generated-agent.md`.
 
+### Run 1 — live progress (2026-09-22, in flight)
+
+Infra deployed and healthy in nonprod (verified from stack outputs):
+Runtime `READY` (`AgenticAI_D03_nonprod_demo_primary_runtime-4FWnYiEydR`, real
+generated-agent image by digest `sha256:5805c2fc…`), Memory `ACTIVE`, ToolGateway
+`CREATE_COMPLETE` with both cross-account tool targets and the Gateway
+service-role InvokeFunction grant applied (Platform pipeline permission phase +
+`gaRegistryRecordGenerations={"nonprod":{"tool-echo":2}}` fix). Workload pipeline
+paused at `ProdGatewayApproval`.
+
+First live `InvokeAgentRuntime` surfaced defect #5: the container 500'd with
+`KeyError: 'AGENTCORE_TENANT_ID'` — the RuntimeMemory stack set only
+`AGENTCORE_MEMORY_ID` (built for the inert handler). Root-cause analysis then
+found a deeper truth: the deployed D-03 topology is **two Gateways, two auth
+models**:
+
+- Tools: workstream tool Gateway `…gw-sknzeminsq`, **AWS_IAM** (SigV4).
+- Inference: Platform inference Gateway `agenticai-inference-nonprod-pcneftx12g`,
+  **CUSTOM_JWT** (Cognito M2M bearer), target `agenticai-inference-nonprod-bedrock`.
+
+**Inference leg proven live:** Cognito M2M token → `…/inference/v1/chat/completions`
+→ **HTTP 200** real completion on the rated `openai.gpt-oss-120b` (unrated models
+429 by the designed zero-rate `*` fallback — expected governance). Model ids from
+`/models` are already target-qualified; do not re-prepend the target name.
+
+**Landed (agent + stack + tests, commits `4bfc8e7`, `153bd81`):**
+- `agent.py`: split into `mcp_gateway_url` + `inference_gateway_url`; SigV4
+  `auth_mode` for the AWS_IAM MCP Gateway (`_SigV4HttpxAuth`); Identity-based
+  `_fetch_inference_bearer` (`GetResourceOauth2Token` against a `CognitoOauth2`
+  provider). Env seams for tests.
+- `d03-workstream-runtime-memory-stack.ts`: `generatedAgentRuntimeConfig` prop +
+  variant-aware, fail-closed `buildRuntimeEnvironment`. 27/27 conformance green.
+
+**Remaining infra (open) — the cross-account credential-provider decision:**
+`GetResourceOauth2Token` needs a `CognitoOauth2` credential provider in the
+**Workstream** account seeded with the **Platform** inference Gateway's Cognito
+client id + secret. The client secret lives only in Platform Cognito (the stack
+intentionally does not output it). Options to resolve before wiring:
+1. Platform pipeline mints a dedicated client secret and publishes it to a
+   Secrets Manager secret with a cross-account resource policy readable by the
+   Workstream runtime/deploy role; the Workload pipeline reads it at deploy time
+   to seed the provider. (Explicit, auditable; a secret crosses accounts once.)
+2. Workstream deploy role assumes a narrow Platform role that returns a
+   short-lived client secret via `AddUserPoolClientSecret` at deploy time.
+3. Keep inference in the workstream tool Gateway (add a Bedrock inference target
+   there) so one AWS_IAM Gateway serves both — removes cross-account M2M
+   entirely but changes the inference-governance boundary.
+
+Plus runtime role IAM grants: `bedrock-agentcore:InvokeGateway` on the workstream
+Gateway ARN (currently absent — role only pulls image/logs/traces and *denies*
+direct Bedrock), and `GetResourceOauth2Token`/`GetWorkloadAccessToken` for the
+inference bearer. Then thread the env (`AGENTCORE_INFERENCE_CREDENTIAL_PROVIDER`,
+`AGENTCORE_INFERENCE_SCOPE`, `AGENTCORE_INFERENCE_GATEWAY_URL`,
+`AGENTCORE_MODEL_ID=agenticai-inference-nonprod-bedrock/openai.gpt-oss-120b`,
+`AGENTCORE_GUARDRAIL_ID`, `AGENTCORE_GATEWAY_URL`, `AGENTCORE_SUBSCRIBED_TOOLS`)
+through the pipeline, redeploy nonprod, and re-invoke for the green contract.
+
 ---
 
 ## Run 2 — R2 Workload live deploy + adversarial matrix
