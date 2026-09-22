@@ -126,10 +126,106 @@ export interface GeneratedAgentRuntimeConfig {
   readonly guardrailId: string;
   /** Exact subscribed qualified tool names (`<TargetName>___<ToolName>`). */
   readonly subscribedTools: readonly string[];
+  /** OAuth scope required by the inference Gateway JWT authorizer. */
+  readonly inferenceScope: string;
+  /**
+   * Platform M2M secret ARN (Stage A) holding the inference Gateway's Cognito
+   * client id + secret + issuer/token endpoints. Read once at deploy time by
+   * the credential-provider custom resource to seed CognitoOauth2.
+   */
+  readonly m2mSecretArn: string;
 }
 
 /** Native AgentCore network modes modeled by CfnRuntime. */
 const NETWORK_MODE_PUBLIC = "PUBLIC";
+
+/**
+ * Inline handler for the credential-provider custom resource. Reads the
+ * Platform M2M secret, then creates (Create/Update) or deletes (Delete) the
+ * WorkloadIdentity + CognitoOauth2 credential provider. The client secret is
+ * read in-process only and never logged or returned.
+ */
+const CREDENTIAL_PROVIDER_HANDLER = `
+import json
+import boto3
+from botocore.exceptions import ClientError
+
+_NOT_FOUND = ("ResourceNotFoundException", "ResourceNotFound")
+
+
+def _derive_endpoints(token_endpoint):
+    # Cognito token endpoint: https://<domain>/oauth2/token
+    base = token_endpoint.rsplit("/oauth2/token", 1)[0]
+    return {
+        "issuer": base,
+        "authorizationEndpoint": base + "/oauth2/authorize",
+        "tokenEndpoint": token_endpoint,
+    }
+
+
+def on_event(event, context):
+    rt = event["RequestType"]
+    props = event["ResourceProperties"]
+    region = props["Region"]
+    provider_name = props["ProviderName"]
+    workload_name = props["WorkloadName"]
+    client = boto3.client("bedrock-agentcore-control", region_name=region)
+
+    if rt == "Delete":
+        for call in (
+            lambda: client.delete_oauth2_credential_provider(name=provider_name),
+            lambda: client.delete_workload_identity(name=workload_name),
+        ):
+            try:
+                call()
+            except ClientError as e:
+                if e.response["Error"]["Code"] not in _NOT_FOUND:
+                    raise
+        return {"PhysicalResourceId": provider_name}
+
+    # Create/Update: read the secret in-process only.
+    secrets = boto3.client("secretsmanager", region_name=region)
+    raw = secrets.get_secret_value(SecretId=props["SecretArn"])["SecretString"]
+    data = json.loads(raw)
+    client_id = data["clientId"]
+    client_secret = data["clientSecret"]
+    endpoints = _derive_endpoints(data["tokenEndpoint"])
+
+    # WorkloadIdentity (idempotent).
+    try:
+        client.create_workload_identity(name=workload_name)
+    except ClientError as e:
+        if "AlreadyExists" not in e.response["Error"]["Code"] and "Conflict" not in e.response["Error"]["Code"]:
+            raise
+
+    provider_config = {
+        "includedOauth2ProviderConfig": {
+            "clientId": client_id,
+            "clientSecret": client_secret,
+            "issuer": endpoints["issuer"],
+            "authorizationEndpoint": endpoints["authorizationEndpoint"],
+            "tokenEndpoint": endpoints["tokenEndpoint"],
+        }
+    }
+    try:
+        client.create_oauth2_credential_provider(
+            name=provider_name,
+            credentialProviderVendor="CognitoOauth2",
+            oauth2ProviderConfigInput=provider_config,
+        )
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        if "AlreadyExists" in code or "Conflict" in code:
+            client.update_oauth2_credential_provider(
+                name=provider_name,
+                credentialProviderVendor="CognitoOauth2",
+                oauth2ProviderConfigInput=provider_config,
+            )
+        else:
+            raise
+    del client_secret, provider_config, data, raw
+    return {"PhysicalResourceId": provider_name}
+`;
 
 /*
  * ---------------------------------------------------------------------------
@@ -540,6 +636,15 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     this.imageScanGate = scanned.gate;
     this.containerDigestUri = scanned.uri;
 
+    // ---- AgentCore Identity (generated-agent only) ----
+    // WorkloadIdentity + CognitoOauth2 credential provider seeded from the
+    // Platform M2M secret, so the Runtime can exchange its workload-identity
+    // token for an inference-Gateway bearer via GetResourceOauth2Token.
+    const identityProvider =
+      props.agentImageVariant === "generated-agent"
+        ? this.buildInferenceCredentialProvider(props)
+        : undefined;
+
     // ---- Runtime ----
     const runtimeRoleArn = this.runtimeExecutionRoleArn(props);
     this.runtime = new CfnRuntime(this, "Runtime", {
@@ -573,6 +678,11 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     // references the gate's digest attribute, but the dependency is made
     // explicit so the ordering survives any future URI refactor.
     this.runtime.node.addDependency(this.imageScanGate);
+    // Runtime depends on the credential provider so the inference bearer is
+    // available on first invocation.
+    if (identityProvider) {
+      this.runtime.node.addDependency(identityProvider);
+    }
 
     this.emitOutputs(runtimeRoleArn);
   }
@@ -606,6 +716,8 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
         ["inferenceGatewayUrl", cfg.inferenceGatewayUrl],
         ["modelId", cfg.modelId],
         ["guardrailId", cfg.guardrailId],
+        ["inferenceScope", cfg.inferenceScope],
+        ["m2mSecretArn", cfg.m2mSecretArn],
       ] as const
     )
       .filter(([, v]) => !v || v.trim().length === 0)
@@ -630,7 +742,150 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
       AGENTCORE_GATEWAY_URL: cfg.mcpGatewayUrl,
       AGENTCORE_INFERENCE_GATEWAY_URL: cfg.inferenceGatewayUrl,
       AGENTCORE_SUBSCRIBED_TOOLS: cfg.subscribedTools.join(","),
+      AGENTCORE_INFERENCE_SCOPE: cfg.inferenceScope,
+      AGENTCORE_INFERENCE_CREDENTIAL_PROVIDER: this.credentialProviderName(props),
     };
+  }
+
+  /**
+   * WorkloadIdentity + CognitoOauth2 credential provider, created by a
+   * Lambda-backed custom resource. On create/update it reads the Platform M2M
+   * secret (cross-account, scoped) and calls CreateWorkloadIdentity +
+   * CreateOauth2CredentialProvider (vendor CognitoOauth2). On delete it removes
+   * both. The client secret is read in-process only and never logged or output.
+   */
+  private buildInferenceCredentialProvider(
+    props: D03WorkstreamRuntimeMemoryStackProps,
+  ): CustomResource {
+    if (!props.generatedAgentRuntimeConfig) {
+      throw new Error(
+        "D03WorkstreamRuntimeMemoryStack: generatedAgentRuntimeConfig is required when agentImageVariant is 'generated-agent'.",
+      );
+    }
+    const cfg = props.generatedAgentRuntimeConfig!;
+    const providerName = this.credentialProviderName(props);
+    const workloadName = this.workloadIdentityName(props);
+
+    const roleName = `AgenticAI-D03-${props.envName}-${props.tenantId}-${props.agentId}-idprov`;
+    if (roleName.length > 64) {
+      throw new Error(
+        `D03WorkstreamRuntimeMemoryStack: credential-provider role name '${roleName}' exceeds 64 characters.`,
+      );
+    }
+    const role = new Role(this, "InferenceCredProviderRole", {
+      roleName,
+      assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
+      description:
+        "Pipeline-owned Workstream role that seeds the CognitoOauth2 credential provider from the Platform M2M secret.",
+      inlinePolicies: {
+        SeedCredentialProvider: new PolicyDocument({
+          statements: [
+            new PolicyStatement({
+              sid: "ReadPlatformM2mSecret",
+              effect: Effect.ALLOW,
+              actions: [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret",
+              ],
+              resources: [cfg.m2mSecretArn],
+            }),
+            new PolicyStatement({
+              sid: "DecryptPlatformM2mSecret",
+              effect: Effect.ALLOW,
+              actions: ["kms:Decrypt"],
+              resources: ["*"],
+              conditions: {
+                StringEquals: {
+                  "kms:ViaService": `secretsmanager.${this.region}.amazonaws.com`,
+                  "kms:EncryptionContext:SecretARN": cfg.m2mSecretArn,
+                },
+              },
+            }),
+            new PolicyStatement({
+              sid: "ManageIdentityAndProvider",
+              effect: Effect.ALLOW,
+              actions: [
+                "bedrock-agentcore:CreateWorkloadIdentity",
+                "bedrock-agentcore:GetWorkloadIdentity",
+                "bedrock-agentcore:DeleteWorkloadIdentity",
+                "bedrock-agentcore:CreateOauth2CredentialProvider",
+                "bedrock-agentcore:GetOauth2CredentialProvider",
+                "bedrock-agentcore:UpdateOauth2CredentialProvider",
+                "bedrock-agentcore:DeleteOauth2CredentialProvider",
+              ],
+              // These control-plane actions take no resource-level ARN in the
+              // current service model (SEC-011 family); scoped by account trust.
+              resources: ["*"],
+            }),
+          ],
+        }),
+      },
+      managedPolicies: [
+        ManagedPolicy.fromAwsManagedPolicyName(
+          "service-role/AWSLambdaBasicExecutionRole",
+        ),
+      ],
+    });
+
+    const handler = new LambdaFunction(this, "InferenceCredProviderFn", {
+      runtime: LambdaRuntime.PYTHON_3_13,
+      handler: "index.on_event",
+      timeout: Duration.minutes(5),
+      role,
+      code: Code.fromInline(CREDENTIAL_PROVIDER_HANDLER),
+    });
+    const provider = new Provider(this, "InferenceCredProviderProvider", {
+      onEventHandler: handler,
+    });
+    const resource = new CustomResource(this, "InferenceCredProvider", {
+      serviceToken: provider.serviceToken,
+      properties: {
+        // A change to any of these re-runs the custom resource.
+        Region: this.region,
+        SecretArn: cfg.m2mSecretArn,
+        ProviderName: providerName,
+        WorkloadName: workloadName,
+        Scope: cfg.inferenceScope,
+      },
+    });
+    NagSuppressions.addResourceSuppressions(
+      role,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "SEC-011: bedrock-agentcore WorkloadIdentity/Oauth2CredentialProvider control-plane actions take no resource-level ARN in the current service model; kms:Decrypt is constrained by ViaService + the exact secret's encryption context.",
+        },
+        {
+          id: "AwsSolutions-IAM4",
+          reason:
+            "SEC-005: the AWS-managed AWSLambdaBasicExecutionRole is the standard least-privilege log-write policy for a custom-resource Lambda.",
+        },
+      ],
+      true,
+    );
+    return resource;
+  }
+
+  /** Deterministic CognitoOauth2 credential-provider name for this workstream. */
+  private credentialProviderName(
+    props: D03WorkstreamRuntimeMemoryStackProps,
+  ): string {
+    // Underscore charset + bounded length, matching AgentCore name rules.
+    return `AgenticAI_D03_${props.envName}_${props.tenantId}_${props.agentId}_inference`.replace(
+      /-/g,
+      "_",
+    );
+  }
+
+  /** Deterministic workload-identity name for this workstream. */
+  private workloadIdentityName(
+    props: D03WorkstreamRuntimeMemoryStackProps,
+  ): string {
+    return `AgenticAI_D03_${props.envName}_${props.tenantId}_${props.agentId}`.replace(
+      /-/g,
+      "_",
+    );
   }
 
   /** The five allocation tags, as a plain record for the native tags prop. */

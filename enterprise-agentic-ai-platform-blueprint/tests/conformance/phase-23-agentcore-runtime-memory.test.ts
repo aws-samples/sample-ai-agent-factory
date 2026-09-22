@@ -117,6 +117,8 @@ function runtimeMemoryTemplate(
               modelId: `agenticai-inference-${envName}-bedrock/openai.gpt-oss-120b`,
               guardrailId: `arn:aws:bedrock:${REGION}:${PLATFORM_ACCOUNT}:guardrail/example`,
               subscribedTools: ["target-tool-echo___echo", "target-tool-ping___ping"],
+              inferenceScope: `agenticai-inference-${envName}-api/invoke`,
+              m2mSecretArn: `arn:aws:secretsmanager:${REGION}:${PLATFORM_ACCOUNT}:secret:agenticai/inference-m2m/agenticai-inference-${envName}-abc`,
             }
           : undefined,
     }),
@@ -329,6 +331,8 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
             modelId: "agenticai-inference-nonprod-bedrock/openai.gpt-oss-120b",
             guardrailId: `arn:aws:bedrock:${REGION}:${PLATFORM_ACCOUNT}:guardrail/example`,
             subscribedTools: [],
+            inferenceScope: "agenticai-inference-nonprod-api/invoke",
+            m2mSecretArn: `arn:aws:secretsmanager:${REGION}:${PLATFORM_ACCOUNT}:secret:agenticai/inference-m2m/x`,
           },
         }),
     ).toThrow(/subscribedTools must list at least one/);
