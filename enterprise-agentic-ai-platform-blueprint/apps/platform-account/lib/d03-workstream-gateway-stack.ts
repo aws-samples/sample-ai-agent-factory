@@ -164,6 +164,10 @@ function policyEngineResourceName(raw: string): string {
 export class D03WorkstreamGatewayStack extends Stack {
   /** Resolved ToolSpec subset — exposed for test assertion convenience. */
   readonly subscribedTools: readonly ToolSpec[];
+  /** MCP endpoint URL of this Gateway (deploy-time token), ends with `/mcp`. */
+  readonly mcpGatewayUrl: string;
+  /** Subscribed qualified MCP tool names (`<targetName>___<toolName>`). */
+  readonly subscribedToolQualifiedNames: readonly string[];
   /** Service role the AgentCore Gateway assumes to invoke tool Lambdas. */
   readonly gatewayServiceRole: Role;
   /** AwsCustomResource for CreateGateway — physical id stable across deploys. */
@@ -517,6 +521,11 @@ export class D03WorkstreamGatewayStack extends Stack {
     const targetNames = Object.fromEntries(
       subscribedIds.map((toolId) => [toolId, `target-${toolId}`.slice(0, 100)]),
     );
+    // MCP qualified names: `<targetName>___<toolName>`. The governance contract
+    // pins mcp.toolName === toolId, so the qualified name is deterministic.
+    this.subscribedToolQualifiedNames = subscribedIds.map(
+      (toolId) => `${targetNames[toolId]}___${toolId}`,
+    );
 
     // ---- GatewayServiceRole (D-03 v3, layer 3 enforcement) ----
     // Trusted by bedrock-agentcore.amazonaws.com — the AgentCore Gateway
@@ -823,6 +832,8 @@ export class D03WorkstreamGatewayStack extends Stack {
     // We can read back those attributes for downstream CfnOutputs + per-target wiring.
     const gatewayIdToken = this.gatewayResource.getResponseField("gatewayId");
     const gatewayArnToken = this.gatewayResource.getResponseField("gatewayArn");
+    // Deterministic MCP endpoint URL for the service-minted Gateway id.
+    this.mcpGatewayUrl = `https://${gatewayIdToken}.gateway.bedrock-agentcore.${this.region}.amazonaws.com/mcp`;
 
     let policyEngineStateProvider: Provider | undefined;
     let policyEngineModeRollbackMutation: AwsCustomResource | undefined;

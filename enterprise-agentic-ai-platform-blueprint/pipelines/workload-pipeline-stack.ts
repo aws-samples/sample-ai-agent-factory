@@ -99,8 +99,24 @@ export interface WorkloadStageProps extends StageProps {
   readonly enablePipelineRuntimeMemory?: boolean;
   /** Which agent image the pipeline Runtime runs (default 'compatibility'). */
   readonly agentImageVariant?: "compatibility" | "generated-agent";
+  /**
+   * Platform inference inputs for the generated-agent variant. Required when
+   * agentImageVariant is 'generated-agent'. Sourced from the deployed Platform
+   * inference Gateway (URL, scope, secret ARN) plus the allow-listed model id
+   * and mandatory Guardrail id.
+   */
+  readonly generatedAgentInference?: GeneratedAgentInferenceInputs;
   readonly auditOamSinkArn?: string;
   readonly notificationEmail?: string;
+}
+
+/** Platform inference inputs threaded into the generated-agent Runtime. */
+export interface GeneratedAgentInferenceInputs {
+  readonly inferenceGatewayUrl: string;
+  readonly inferenceScope: string;
+  readonly modelId: string;
+  readonly guardrailId: string;
+  readonly m2mSecretArn: string;
 }
 
 export class WorkloadDeploymentStage extends Stage {
@@ -155,6 +171,10 @@ export class WorkloadDeploymentStage extends Stage {
             costCentre: props.costCentre,
             runtimeExecutionRoleArnOverride: `${rolePrefix}/AgenticAI-D03-${props.envName}-${props.tenantId}-${props.agentId}-runtime`,
             agentImageVariant: props.agentImageVariant,
+            generatedAgentRuntimeConfig:
+              props.agentImageVariant === "generated-agent"
+                ? this.buildGeneratedAgentRuntimeConfig(props)
+                : undefined,
           },
         );
         this.runtimeMemoryStack.addDependency(this.gatewayStack);
@@ -189,6 +209,44 @@ export class WorkloadDeploymentStage extends Stage {
     });
     this.appStack.addDependency(this.networkStack);
   }
+
+  /**
+   * Assemble the generated-agent Runtime config from the just-built ToolGateway
+   * (MCP URL + subscribed qualified tool names, cross-stack tokens) and the
+   * Platform inference inputs. Fails closed if the inference inputs are absent.
+   */
+  private buildGeneratedAgentRuntimeConfig(
+    props: WorkloadStageProps,
+  ): {
+    mcpGatewayUrl: string;
+    inferenceGatewayUrl: string;
+    modelId: string;
+    guardrailId: string;
+    subscribedTools: readonly string[];
+    inferenceScope: string;
+    m2mSecretArn: string;
+  } {
+    const inf = props.generatedAgentInference;
+    if (!inf) {
+      throw new Error(
+        "WorkloadDeploymentStage: generatedAgentInference is required when agentImageVariant is 'generated-agent'.",
+      );
+    }
+    if (!this.gatewayStack) {
+      throw new Error(
+        "WorkloadDeploymentStage: ToolGateway must exist before the generated-agent Runtime config.",
+      );
+    }
+    return {
+      mcpGatewayUrl: this.gatewayStack.mcpGatewayUrl,
+      inferenceGatewayUrl: inf.inferenceGatewayUrl,
+      modelId: inf.modelId,
+      guardrailId: inf.guardrailId,
+      subscribedTools: this.gatewayStack.subscribedToolQualifiedNames,
+      inferenceScope: inf.inferenceScope,
+      m2mSecretArn: inf.m2mSecretArn,
+    };
+  }
 }
 
 export interface WorkstreamRegistryRolesStageProps extends StageProps {
@@ -202,6 +260,16 @@ export interface WorkstreamRegistryRolesStageProps extends StageProps {
   readonly nonprodContext: GaRegistryConsumerContext;
   readonly prodContext: GaRegistryConsumerContext;
   readonly enablePipelineRuntimeMemory?: boolean;
+  /**
+   * Per-env Platform M2M secret ARNs for the generated-agent grants. When set,
+   * the Runtime role in each environment gains the InvokeGateway + Identity
+   * token + cross-account secret grants. The credential-provider and
+   * workload-identity names are deterministic from env/tenant/agent.
+   */
+  readonly generatedAgentM2mSecretArns?: {
+    readonly nonprod: string;
+    readonly prod: string;
+  };
 }
 
 export class WorkstreamRegistryRolesStage extends Stage {
@@ -227,6 +295,19 @@ export class WorkstreamRegistryRolesStage extends Stage {
       costCentre: props.costCentre,
       registryContext: props.nonprodContext,
       enablePipelineRuntimeMemory: props.enablePipelineRuntimeMemory,
+      generatedAgentGrants: props.generatedAgentM2mSecretArns
+        ? {
+            m2mSecretArn: props.generatedAgentM2mSecretArns.nonprod,
+            credentialProviderName: `AgenticAI_D03_nonprod_${props.tenantId}_${props.agentId}_inference`.replace(
+              /-/g,
+              "_",
+            ),
+            workloadIdentityName: `AgenticAI_D03_nonprod_${props.tenantId}_${props.agentId}`.replace(
+              /-/g,
+              "_",
+            ),
+          }
+        : undefined,
     });
     this.prod = new D03WorkstreamRegistryRolesStack(this, "ProdRoles", {
       stackName: `AgenticAI-${props.tenantId}-${props.agentId}-prod-RegistryRoles`,
@@ -241,6 +322,19 @@ export class WorkstreamRegistryRolesStage extends Stage {
       costCentre: props.costCentre,
       registryContext: props.prodContext,
       enablePipelineRuntimeMemory: props.enablePipelineRuntimeMemory,
+      generatedAgentGrants: props.generatedAgentM2mSecretArns
+        ? {
+            m2mSecretArn: props.generatedAgentM2mSecretArns.prod,
+            credentialProviderName: `AgenticAI_D03_prod_${props.tenantId}_${props.agentId}_inference`.replace(
+              /-/g,
+              "_",
+            ),
+            workloadIdentityName: `AgenticAI_D03_prod_${props.tenantId}_${props.agentId}`.replace(
+              /-/g,
+              "_",
+            ),
+          }
+        : undefined,
     });
   }
 }
@@ -263,6 +357,14 @@ export interface WorkloadPipelineStackProps extends StackProps {
   readonly enablePipelineRuntimeMemory?: boolean;
   /** Which agent image the pipeline Runtime runs (default 'compatibility'). */
   readonly agentImageVariant?: "compatibility" | "generated-agent";
+  /**
+   * Per-env Platform inference inputs for the generated-agent variant. Required
+   * when agentImageVariant is 'generated-agent'.
+   */
+  readonly generatedAgentInference?: {
+    readonly nonprod: GeneratedAgentInferenceInputs;
+    readonly prod: GeneratedAgentInferenceInputs;
+  };
   readonly workloadNonprodEnv: Required<Environment>;
   readonly workloadProdEnv: Required<Environment>;
   /** Account-specific AZ names produced by read-only preflight. */
@@ -595,6 +697,12 @@ export class WorkloadPipelineStack extends Stack {
           nonprodContext: props.gaRegistry.nonprod,
           prodContext: props.gaRegistry.prod,
           enablePipelineRuntimeMemory: props.enablePipelineRuntimeMemory,
+          generatedAgentM2mSecretArns: props.generatedAgentInference
+            ? {
+                nonprod: props.generatedAgentInference.nonprod.m2mSecretArn,
+                prod: props.generatedAgentInference.prod.m2mSecretArn,
+              }
+            : undefined,
         },
       );
       const gatewayPermissionReady = new ManualApprovalStep(
@@ -639,6 +747,7 @@ export class WorkloadPipelineStack extends Stack {
       policyEngineIamRoleArns: props.policyEngine?.nonprodIamRoleArns,
       enablePipelineRuntimeMemory: props.enablePipelineRuntimeMemory,
       agentImageVariant: props.agentImageVariant,
+      generatedAgentInference: props.generatedAgentInference?.nonprod,
       auditOamSinkArn: props.auditOamSinkArn,
       notificationEmail: props.notificationEmail,
     });
@@ -764,6 +873,7 @@ export class WorkloadPipelineStack extends Stack {
       policyEngineIamRoleArns: props.policyEngine?.prodIamRoleArns,
       enablePipelineRuntimeMemory: props.enablePipelineRuntimeMemory,
       agentImageVariant: props.agentImageVariant,
+      generatedAgentInference: props.generatedAgentInference?.prod,
       auditOamSinkArn: props.auditOamSinkArn,
       notificationEmail: props.notificationEmail,
     });

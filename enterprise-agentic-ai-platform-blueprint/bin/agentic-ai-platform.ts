@@ -40,6 +40,7 @@ import { WorkloadNetworkStack } from "../apps/workload-account/lib/workload-netw
 import { WorkloadAppStack } from "../apps/workload-account/lib/workload-app-stack";
 import { PlatformPipelineStack } from "../pipelines/platform-pipeline-stack";
 import { WorkloadPipelineStack } from "../pipelines/workload-pipeline-stack";
+import type { GeneratedAgentInferenceInputs } from "../pipelines/workload-pipeline-stack";
 import { D03PlatformCoreStack } from "../apps/platform-account/lib/d03-platform-core-stack";
 import { parseGaRegistryConsumerContext } from "@agenticai/agent-registry";
 import { D03WorkloadAgentStack } from "../apps/workload-account/lib/d03-workload-agent-stack";
@@ -98,6 +99,69 @@ function stringArrayContext(key: string): readonly string[] {
     );
   }
   return parsed;
+}
+
+/**
+ * Parse `agenticai/generatedAgentInference` — per-env Platform inference inputs
+ * for the generated-agent Runtime. Required (and validated) only when the
+ * variant is 'generated-agent'; ignored otherwise.
+ */
+function parseGeneratedAgentInferenceContext(
+  app: App,
+  variant: "compatibility" | "generated-agent",
+):
+  | {
+      readonly nonprod: GeneratedAgentInferenceInputs;
+      readonly prod: GeneratedAgentInferenceInputs;
+    }
+  | undefined {
+  const raw = app.node.tryGetContext("agenticai/generatedAgentInference");
+  if (raw === undefined) {
+    if (variant === "generated-agent") {
+      throw new Error(
+        "agenticai/generatedAgentInference is required when agenticai/agentImageVariant=generated-agent.",
+      );
+    }
+    return undefined;
+  }
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(
+        "Context 'agenticai/generatedAgentInference' must be JSON.",
+        { cause: error },
+      );
+    }
+  }
+  const requireEnv = (envName: "nonprod" | "prod"): GeneratedAgentInferenceInputs => {
+    const obj = (parsed as Record<string, unknown>)?.[envName] as
+      | Record<string, unknown>
+      | undefined;
+    if (!obj) {
+      throw new Error(
+        `agenticai/generatedAgentInference.${envName} is required.`,
+      );
+    }
+    const field = (name: string): string => {
+      const v = obj[name];
+      if (typeof v !== "string" || v.length === 0) {
+        throw new Error(
+          `agenticai/generatedAgentInference.${envName}.${name} must be a non-empty string.`,
+        );
+      }
+      return v;
+    };
+    return {
+      inferenceGatewayUrl: field("inferenceGatewayUrl"),
+      inferenceScope: field("inferenceScope"),
+      modelId: field("modelId"),
+      guardrailId: field("guardrailId"),
+      m2mSecretArn: field("m2mSecretArn"),
+    };
+  };
+  return { nonprod: requireEnv("nonprod"), prod: requireEnv("prod") };
 }
 
 function gatewayPolicyEngineModeContext(key: string): GatewayPolicyEngineMode {
@@ -822,6 +886,9 @@ switch (stage) {
       agentImageVariantRaw === "generated-agent"
         ? "generated-agent"
         : "compatibility";
+    // Per-env Platform inference inputs for the generated-agent variant.
+    const generatedAgentInference =
+      parseGeneratedAgentInferenceContext(app, agentImageVariant);
     const gatewayPolicyEngineMode = gatewayPolicyEngineModeContext(
       "agenticai/gatewayPolicyEngineMode",
     );
@@ -1129,6 +1196,7 @@ switch (stage) {
         policyEngine,
         enablePipelineRuntimeMemory,
         agentImageVariant,
+        generatedAgentInference,
         synthContext: sharedSynthContext,
       });
     }
