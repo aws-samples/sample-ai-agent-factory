@@ -35,6 +35,26 @@ export interface D03WorkstreamRegistryRolesStackProps extends StackProps {
   readonly registryContext: GaRegistryConsumerContext;
   /** Emit the prior-stage Runtime execution role only for the opt-in slice. */
   readonly enablePipelineRuntimeMemory?: boolean;
+  /**
+   * Opt-in generated-agent grants added to the Runtime execution role. Required
+   * only when the RuntimeMemory stack runs the `"generated-agent"` variant.
+   * When set, the role also gains: `bedrock-agentcore:InvokeGateway` on the
+   * workstream tool Gateway ARN family; `GetWorkloadAccessToken` +
+   * `GetResourceOauth2Token` on the deterministic workload-identity and
+   * CognitoOauth2 credential-provider names; and cross-account
+   * `secretsmanager:GetSecretValue` + KMS decrypt on the Platform M2M secret.
+   */
+  readonly generatedAgentGrants?: GeneratedAgentRuntimeGrants;
+}
+
+/** Inputs for the opt-in generated-agent grants on the Runtime role. */
+export interface GeneratedAgentRuntimeGrants {
+  /** Platform M2M secret ARN published by the inference Gateway (Stage A). */
+  readonly m2mSecretArn: string;
+  /** Deterministic CognitoOauth2 credential-provider name (this account). */
+  readonly credentialProviderName: string;
+  /** Deterministic workload-identity name (this account). */
+  readonly workloadIdentityName: string;
 }
 
 export class D03WorkstreamRegistryRolesStack extends Stack {
@@ -232,7 +252,7 @@ export class D03WorkstreamRegistryRolesStack extends Stack {
           {
             id: "AwsSolutions-IAM5",
             reason:
-              "SEC-011: ecr:GetAuthorizationToken is registry-wide and takes no resource ARN; Runtime logs/tracing/metric actions have no resource-level ARN and are scoped by log-group prefix and cloudwatch:namespace instead.",
+              "SEC-011: ecr:GetAuthorizationToken is registry-wide and takes no resource ARN; Runtime logs/tracing/metric actions have no resource-level ARN and are scoped by log-group prefix and cloudwatch:namespace instead. The opt-in generated-agent InvokeGateway grant is scoped to this account's bedrock-agentcore gateway/* family (the service-minted Gateway id suffix is not known at synth); Identity token and secret/KMS grants are scoped to exact ARNs.",
           },
           {
             id: "NIST.800.53.R5-IAMNoInlinePolicy",
@@ -366,6 +386,63 @@ export class D03WorkstreamRegistryRolesStack extends Stack {
         resources: ["*"],
       }),
     );
+
+    // Opt-in generated-agent grants: MCP tool Gateway invoke (SigV4), the
+    // AgentCore Identity data-plane for the inference bearer, and cross-account
+    // read of the Platform M2M secret used to seed the credential provider.
+    const grants = props.generatedAgentGrants;
+    if (grants) {
+      const gatewayArnLike = `arn:aws:bedrock-agentcore:${this.region}:${this.account}:gateway/*`;
+      role.addToPolicy(
+        new PolicyStatement({
+          sid: "InvokeToolGateway",
+          effect: Effect.ALLOW,
+          actions: ["bedrock-agentcore:InvokeGateway"],
+          resources: [gatewayArnLike],
+        }),
+      );
+      const providerArn = `arn:aws:bedrock-agentcore:${this.region}:${this.account}:token-vault/default/oauth2credentialprovider/${grants.credentialProviderName}`;
+      const workloadIdentityArn = `arn:aws:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default/workload-identity/${grants.workloadIdentityName}`;
+      role.addToPolicy(
+        new PolicyStatement({
+          sid: "AgentCoreIdentityInferenceToken",
+          effect: Effect.ALLOW,
+          actions: [
+            "bedrock-agentcore:GetWorkloadAccessToken",
+            "bedrock-agentcore:GetResourceOauth2Token",
+          ],
+          resources: [providerArn, workloadIdentityArn],
+        }),
+      );
+      role.addToPolicy(
+        new PolicyStatement({
+          sid: "ReadPlatformM2mSecret",
+          effect: Effect.ALLOW,
+          actions: [
+            "secretsmanager:GetSecretValue",
+            "secretsmanager:DescribeSecret",
+          ],
+          resources: [grants.m2mSecretArn],
+        }),
+      );
+      role.addToPolicy(
+        new PolicyStatement({
+          sid: "DecryptPlatformM2mSecret",
+          effect: Effect.ALLOW,
+          actions: ["kms:Decrypt"],
+          // The Platform CMK id is not known at synth (cross-account, random).
+          // Constrain instead by ViaService + the exact secret's encryption
+          // context, which Secrets Manager sets to the secret ARN on decrypt.
+          resources: ["*"],
+          conditions: {
+            StringEquals: {
+              "kms:ViaService": `secretsmanager.${this.region}.amazonaws.com`,
+              "kms:EncryptionContext:SecretARN": grants.m2mSecretArn,
+            },
+          },
+        }),
+      );
+    }
     return role;
   }
 }

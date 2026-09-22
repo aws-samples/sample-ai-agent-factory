@@ -139,6 +139,27 @@ function roleTemplate(enabled: boolean): Template {
   );
 }
 
+function roleTemplateWithGrants(): Template {
+  const app = new App();
+  return Template.fromStack(
+    new D03WorkstreamRegistryRolesStack(app, "Roles-grants", {
+      env: { account: NONPROD_ACCOUNT, region: REGION },
+      envName: "nonprod",
+      tenantId: "demo",
+      agentId: "primary",
+      applicationId: "demo",
+      costCentre: "engineering",
+      registryContext: gaContext("nonprod"),
+      enablePipelineRuntimeMemory: true,
+      generatedAgentGrants: {
+        m2mSecretArn: `arn:aws:secretsmanager:${REGION}:${PLATFORM_ACCOUNT}:secret:agenticai/inference-m2m/agenticai-inference-nonprod-abc`,
+        credentialProviderName: "AgenticAI-D03-nonprod-demo-primary-inference",
+        workloadIdentityName: "AgenticAI-D03-nonprod-demo-primary",
+      },
+    }),
+  );
+}
+
 function pipeline(enabled: boolean): {
   readonly stack: WorkloadPipelineStack;
   readonly template: Template;
@@ -824,6 +845,67 @@ describe("Phase 23 — prior-stage Runtime role", () => {
     ).toBe(false);
     expect(JSON.stringify(statements)).not.toContain("bedrock:Converse");
     template.hasOutput("RuntimeExecutionRoleArn", {});
+  });
+
+  it("omits generated-agent grants when generatedAgentGrants is absent", () => {
+    const template = roleTemplate(true);
+    const json = JSON.stringify(template.toJSON());
+    expect(json).not.toContain("bedrock-agentcore:InvokeGateway");
+    expect(json).not.toContain("GetResourceOauth2Token");
+    expect(json).not.toContain("ReadPlatformM2mSecret");
+  });
+
+  it("adds scoped generated-agent grants when generatedAgentGrants is set", () => {
+    const template = roleTemplateWithGrants();
+    const roleEntries = Object.entries(
+      template.findResources("AWS::IAM::Role"),
+    ) as Array<[string, any]>;
+    const [runtimeRoleLogicalId] = roleEntries.find(
+      ([, c]) =>
+        c.Properties.RoleName === "AgenticAI-D03-nonprod-demo-primary-runtime",
+    )!;
+    const statements = Object.values(template.findResources("AWS::IAM::Policy"))
+      .filter((policy: any) =>
+        JSON.stringify(policy.Properties.Roles).includes(runtimeRoleLogicalId),
+      )
+      .flatMap((policy: any) => policy.Properties.PolicyDocument.Statement);
+    expect(statements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          Sid: "InvokeToolGateway",
+          Effect: "Allow",
+          Action: "bedrock-agentcore:InvokeGateway",
+          Resource: expect.stringContaining(
+            `:${NONPROD_ACCOUNT}:gateway/*`,
+          ),
+        }),
+        expect.objectContaining({
+          Sid: "AgentCoreIdentityInferenceToken",
+          Effect: "Allow",
+          Action: [
+            "bedrock-agentcore:GetWorkloadAccessToken",
+            "bedrock-agentcore:GetResourceOauth2Token",
+          ],
+        }),
+        expect.objectContaining({
+          Sid: "ReadPlatformM2mSecret",
+          Effect: "Allow",
+          Resource: expect.stringContaining(
+            "secret:agenticai/inference-m2m/",
+          ),
+        }),
+        expect.objectContaining({
+          Sid: "DecryptPlatformM2mSecret",
+          Effect: "Allow",
+          Action: "kms:Decrypt",
+          Condition: expect.objectContaining({
+            StringEquals: expect.objectContaining({
+              "kms:ViaService": `secretsmanager.${REGION}.amazonaws.com`,
+            }),
+          }),
+        }),
+      ]),
+    );
   });
 });
 
