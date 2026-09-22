@@ -320,6 +320,25 @@ def test_gateway_url_refuses_non_agentcore_token_destination():
         model.validate_gateway_url("https://example.invalid/mcp", region="us-west-2")
 
 
+def test_inference_base_url_strips_mcp_and_does_not_nest():
+    # Regression: the OpenAI-compatible API is a SIBLING of /mcp, not nested
+    # under it. Concatenating /inference/v1 onto the /mcp URL yields
+    # .../mcp/inference/v1 which the Gateway rejects with HTTP 400.
+    gw = "https://example.gateway.bedrock-agentcore.us-west-2.amazonaws.com/mcp"
+    assert (
+        model.inference_base_url(gw)
+        == "https://example.gateway.bedrock-agentcore.us-west-2.amazonaws.com/inference/v1"
+    )
+    # Trailing slash tolerated.
+    assert model.inference_base_url(gw + "/") == model.inference_base_url(gw)
+    # Must never contain the erroneous /mcp/inference nesting.
+    assert "/mcp/inference" not in model.inference_base_url(gw)
+    with pytest.raises(model.ValidationError):
+        model.inference_base_url(
+            "https://example.gateway.bedrock-agentcore.us-west-2.amazonaws.com/other"
+        )
+
+
 def test_target_qualified_model_and_source_revision_validation():
     assert model.validate_target_qualified_model_id(
         "target-name/openai.gpt-oss-120b"

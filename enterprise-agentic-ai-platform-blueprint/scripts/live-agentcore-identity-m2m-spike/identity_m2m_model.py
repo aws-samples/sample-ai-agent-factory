@@ -366,6 +366,23 @@ def validate_gateway_url(url: str, *, region: str) -> str:
     return url.rstrip("/")
 
 
+def inference_base_url(gateway_url: str) -> str:
+    """Derive the OpenAI-compatible inference base from the Gateway /mcp URL.
+
+    The Gateway exposes the MCP tool endpoint at ``<base>/mcp`` and the
+    OpenAI-compatible inference API at the sibling ``<base>/inference/v1`` --
+    NOT nested under ``/mcp``. Concatenating ``/inference/v1`` onto the ``/mcp``
+    URL yields ``.../mcp/inference/v1``, which the Gateway rejects with HTTP 400.
+    This strips the trailing ``/mcp`` segment before appending the inference
+    path. ``gateway_url`` must already have passed :func:`validate_gateway_url`.
+    """
+    trimmed = gateway_url.rstrip("/")
+    if not trimmed.endswith("/mcp"):
+        raise ValidationError("Gateway URL must end with the /mcp base path")
+    base = trimmed[: -len("/mcp")].rstrip("/")
+    return f"{base}/inference/v1"
+
+
 def validate_scope(scope: str) -> str:
     return _require(SCOPE_PATTERN, scope, "OAuth2 scope")
 

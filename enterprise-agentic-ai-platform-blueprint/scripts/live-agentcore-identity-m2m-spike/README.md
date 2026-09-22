@@ -264,7 +264,7 @@ no AWS calls at import or collection time.
 
 ## Known limitations (live-discovered)
 
-Three findings surfaced during live bring-up. All are recorded here rather than
+Four findings surfaced during live bring-up. All are recorded here rather than
 silently worked around.
 
 1. **`maxResults` cap on the list operations — FIXED.** `ListWorkloadIdentities`
@@ -319,6 +319,19 @@ silently worked around.
    that the operation models no `MaxResults`/`maxResults` member, and the test
    fake now rejects `MaxResults` like the real API so this class of defect
    cannot be masked again.
+
+4. **Inference endpoint is a sibling of `/mcp`, not nested under it — FIXED.**
+   The Gateway exposes the MCP tool endpoint at `<base>/mcp` and the
+   OpenAI-compatible inference API at the sibling `<base>/inference/v1`. Model
+   discovery and `LiteLLMModel` built their URL by concatenating
+   `/inference/v1` onto the validated `/mcp` Gateway URL, yielding
+   `.../mcp/inference/v1(/models)`, which the Gateway rejects with
+   `HTTP 400 Bad Request`. A new `inference_base_url()` helper strips the
+   trailing `/mcp` before appending `/inference/v1`, both the discovery GET and
+   the `LiteLLMModel` `api_base` now derive through it, and the HTTP error path
+   captures the response body so a future 4xx surfaces the Gateway's reason
+   instead of a bare status. Regression:
+   `test_inference_base_url_strips_mcp_and_does_not_nest`.
 
 ---
 

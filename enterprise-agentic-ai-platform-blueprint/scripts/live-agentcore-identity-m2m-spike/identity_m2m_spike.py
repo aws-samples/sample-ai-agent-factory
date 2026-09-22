@@ -657,11 +657,12 @@ class InferenceProbe:
         self._http_get = http_get
 
     def discover_models(self, bearer_token: str) -> list[str]:
-        import urllib.request  # local import: only needed on the live path
+        import urllib.error  # local import: only needed on the live path
+        import urllib.request
 
         if self._http_get is not None:
             return list(self._http_get(bearer_token))
-        url = f"{self.config.gateway_url}/inference/v1/models"
+        url = f"{model.inference_base_url(self.config.gateway_url)}/models"
         request = urllib.request.Request(
             url,
             headers={
@@ -670,10 +671,21 @@ class InferenceProbe:
             },
             method="GET",
         )
-        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
-            if response.status != 200:
-                raise SpikeError(f"Model discovery returned HTTP {response.status}")
-            payload = json.loads(response.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+                if response.status != 200:
+                    raise SpikeError(f"Model discovery returned HTTP {response.status}")
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:  # surface the Gateway's reason
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", "replace")[:1000]
+            except Exception:  # pragma: no cover - best-effort body capture
+                body = "<unreadable>"
+            raise SpikeError(
+                f"Model discovery GET {url} failed: HTTP {exc.code} {exc.reason}; "
+                f"body={body}"
+            ) from exc
         return [str(item["id"]) for item in payload.get("data", []) if item.get("id")]
 
     def run_litellm(self, bearer_token: str, *, stream: bool) -> int:
@@ -688,7 +700,7 @@ class InferenceProbe:
         llm = LiteLLMModel(
             model_id=f"openai/{self.config.model_id}",
             client_args={
-                "api_base": f"{self.config.gateway_url}/inference/v1",
+                "api_base": model.inference_base_url(self.config.gateway_url),
                 "api_key": bearer_token,
             },
             params={"max_tokens": INFERENCE_MAX_TOKENS, "temperature": 0, "stream": stream},
