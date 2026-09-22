@@ -202,8 +202,9 @@ class FakeCognito:
             }
         }
 
-    def list_user_pool_client_secrets(self, *, UserPoolId, ClientId, MaxResults=20):
-        assert MaxResults <= 20
+    def list_user_pool_client_secrets(self, *, UserPoolId, ClientId, NextToken=None):
+        # Faithful to the real API: NO MaxResults param (only UserPoolId,
+        # ClientId, NextToken). Passing MaxResults must fail, as it does live.
         return {
             "ClientSecrets": [{"ClientSecretId": sid} for sid in self.secret_ids]
         }
@@ -490,6 +491,16 @@ def test_cognito_client_secret_ops_are_pinned(scratch):
     descriptor = add_out.members[model.CLIENT_SECRET_DESCRIPTOR_MEMBER]
     assert model.CLIENT_SECRET_ID_MEMBER in descriptor.members
     assert model.CLIENT_SECRET_VALUE_MEMBER in descriptor.members
+    # ListUserPoolClientSecrets does NOT accept MaxResults (only UserPoolId,
+    # ClientId, NextToken); passing it fails closed live with a
+    # parameter-validation error, so the wrapper must never send it.
+    list_shape = service.operation_model("ListUserPoolClientSecrets").input_shape
+    assert "MaxResults" not in list_shape.members
+    assert "maxResults" not in list_shape.members
+    assert set(model.COGNITO_OPERATIONS["ListUserPoolClientSecrets"]) == {
+        "UserPoolId",
+        "ClientId",
+    }
 
 
 def test_list_page_size_respects_sdk_max_results_cap(scratch):

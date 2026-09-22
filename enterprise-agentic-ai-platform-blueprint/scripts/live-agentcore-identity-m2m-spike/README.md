@@ -264,7 +264,7 @@ no AWS calls at import or collection time.
 
 ## Known limitations (live-discovered)
 
-Two findings surfaced during live bring-up. Both are recorded here rather than
+Three findings surfaced during live bring-up. All are recorded here rather than
 silently worked around.
 
 1. **`maxResults` cap on the list operations — FIXED.** `ListWorkloadIdentities`
@@ -307,6 +307,18 @@ silently worked around.
    (`evidence/live/2026-09-18-agentcore-gateway-spike.md`); this spike adds the
    credential-provider-specific proof. Live `deploy`/`verify` for this spike
    remains pending a clean live run.
+
+3. **`ListUserPoolClientSecrets` does not accept `MaxResults` — FIXED.** Unlike
+   the AgentCore Control list ops (which take a capped `maxResults`), the
+   Cognito `ListUserPoolClientSecrets` operation accepts only `UserPoolId`,
+   `ClientId` and `NextToken`. The mint-and-delete redesign wrongly reused the
+   paginated-list assumption and passed `MaxResults=20`, which fails closed with
+   `Unknown parameter in input: "MaxResults"`. The wrapper now sends no page-size
+   argument and drains `NextToken` instead; a regression in
+   `test_cognito_client_secret_ops_are_pinned` asserts against the pinned SDK
+   that the operation models no `MaxResults`/`maxResults` member, and the test
+   fake now rejects `MaxResults` like the real API so this class of defect
+   cannot be masked again.
 
 ---
 

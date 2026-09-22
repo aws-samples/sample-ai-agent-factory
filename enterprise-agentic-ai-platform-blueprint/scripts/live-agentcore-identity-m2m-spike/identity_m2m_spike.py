@@ -369,16 +369,38 @@ class CognitoSecretReader:
     def list_client_secret_ids(
         self, *, user_pool_id: str, client_id: str
     ) -> list[str]:
-        """List existing client-secret ids (identifiers only, never values)."""
-        response = self._cognito.list_user_pool_client_secrets(
-            UserPoolId=user_pool_id, ClientId=client_id, MaxResults=20
-        )
-        secrets = response.get("ClientSecrets", []) if isinstance(response, Mapping) else []
-        return [
-            str(item[model.CLIENT_SECRET_ID_MEMBER])
-            for item in secrets
-            if isinstance(item, Mapping) and item.get(model.CLIENT_SECRET_ID_MEMBER)
-        ]
+        """List existing client-secret ids (identifiers only, never values).
+
+        ListUserPoolClientSecrets accepts only UserPoolId, ClientId and
+        NextToken -- it does NOT take a MaxResults page-size argument (unlike
+        the AgentCore Control list ops). Passing MaxResults fails closed with a
+        parameter-validation error. A client holds at most two secrets, so this
+        loop drains NextToken defensively without a page-size cap.
+        """
+        ids: list[str] = []
+        next_token: str | None = None
+        for _ in range(MAX_LIST_PAGES):
+            kwargs: dict[str, Any] = {
+                "UserPoolId": user_pool_id,
+                "ClientId": client_id,
+            }
+            if next_token:
+                kwargs["NextToken"] = next_token
+            response = self._cognito.list_user_pool_client_secrets(**kwargs)
+            secrets = (
+                response.get("ClientSecrets", []) if isinstance(response, Mapping) else []
+            )
+            ids.extend(
+                str(item[model.CLIENT_SECRET_ID_MEMBER])
+                for item in secrets
+                if isinstance(item, Mapping) and item.get(model.CLIENT_SECRET_ID_MEMBER)
+            )
+            next_token = (
+                response.get("NextToken") if isinstance(response, Mapping) else None
+            )
+            if not next_token:
+                break
+        return ids
 
 
 # --------------------------------------------------------------------------
