@@ -510,7 +510,10 @@ export class PlatformInferenceGatewayConstruct extends Construct {
               new PolicyStatement({
                 sid: 'WriteM2mSecret',
                 effect: Effect.ALLOW,
-                actions: ['secretsmanager:PutSecretValue'],
+                actions: [
+                  'secretsmanager:GetSecretValue',
+                  'secretsmanager:PutSecretValue',
+                ],
                 resources: [this.m2mSecret.secretArn],
               }),
               new PolicyStatement({
