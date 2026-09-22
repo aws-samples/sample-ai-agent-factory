@@ -23,7 +23,9 @@ import {
 const REGISTRY_ARN =
   'arn:aws:agent-registry:us-west-2:333333333333:registry/agenticai-nonprod';
 
-function synth(props?: Partial<Parameters<typeof makeRole>[0]>) {
+type InspectProps = ConstructorParameters<typeof AgentBuilderInspectRole>[2];
+
+function synth(props?: Partial<InspectProps>) {
   const app = new App();
   const stack = new Stack(app, 'TestStack', {
     env: { account: '333333333333', region: 'us-west-2' },
@@ -37,10 +39,7 @@ function synth(props?: Partial<Parameters<typeof makeRole>[0]>) {
   return Template.fromStack(stack);
 }
 
-function makeRole(
-  stack: Stack,
-  props: ConstructorParameters<typeof AgentBuilderInspectRole>[2],
-) {
+function makeRole(stack: Stack, props: InspectProps) {
   return new AgentBuilderInspectRole(stack, 'Inspect', props);
 }
 

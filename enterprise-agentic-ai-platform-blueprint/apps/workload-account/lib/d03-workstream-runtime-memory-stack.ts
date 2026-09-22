@@ -91,6 +91,17 @@ export interface D03WorkstreamRuntimeMemoryStackProps
    * state-retention test.
    */
   readonly retainMemoryKey?: boolean;
+  /**
+   * Which agent container image the Runtime runs. Defaults to
+   * `"compatibility"` — the intentionally-inert handshake handler proven live
+   * at commit `442de00`. Set to `"generated-agent"` to build the real Strands
+   * reference agent (`scripts/live-agentcore-generated-agent-spike/agent`) that
+   * wires `LiteLLMModel` + `MCPClient` + Memory. The image is still built,
+   * scanned to zero HIGH findings, and consumed by digest exactly as before;
+   * only the source directory changes. This is the offline bridge for the
+   * generated-agent live `InvokeAgentRuntime` gate (roadmap Round 2.B).
+   */
+  readonly agentImageVariant?: "compatibility" | "generated-agent";
 }
 
 /** Native AgentCore network modes modeled by CfnRuntime. */
@@ -624,6 +635,10 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
   private resolveScannedContainerDigestUri(
     props: D03WorkstreamRuntimeMemoryStackProps,
   ): { readonly uri: string; readonly gate: CustomResource } {
+    const imageSpikeDir =
+      props.agentImageVariant === "generated-agent"
+        ? "live-agentcore-generated-agent-spike"
+        : "live-agentcore-runtime-memory-spike";
     const asset = new DockerImageAsset(this, "AgentImage", {
       directory: join(
         __dirname,
@@ -631,7 +646,7 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
         "..",
         "..",
         "scripts",
-        "live-agentcore-runtime-memory-spike",
+        imageSpikeDir,
         "agent",
       ),
       platform: Platform.LINUX_ARM64,
