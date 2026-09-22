@@ -102,6 +102,30 @@ export interface D03WorkstreamRuntimeMemoryStackProps
    * generated-agent live `InvokeAgentRuntime` gate (roadmap Round 2.B).
    */
   readonly agentImageVariant?: "compatibility" | "generated-agent";
+  /**
+   * Container environment for the `"generated-agent"` variant. REQUIRED when
+   * `agentImageVariant === "generated-agent"` and ignored otherwise — the inert
+   * compatibility handler reads only `AGENTCORE_MEMORY_ID`. These values wire
+   * the real agent's `LiteLLMModel` + `MCPClient`: the workstream tool Gateway
+   * MCP URL, the (cross-account) Platform inference Gateway URL, the allow-listed
+   * model id, the mandatory Guardrail id, and the exact subscribed qualified
+   * tool names. `tenantId`/`agentId`/`envName` come from the props above.
+   */
+  readonly generatedAgentRuntimeConfig?: GeneratedAgentRuntimeConfig;
+}
+
+/** Runtime container environment for the generated-agent image variant. */
+export interface GeneratedAgentRuntimeConfig {
+  /** Workstream tool Gateway MCP endpoint URL (ends with `/mcp`). */
+  readonly mcpGatewayUrl: string;
+  /** Platform inference Gateway URL (OpenAI-compatible base derived from it). */
+  readonly inferenceGatewayUrl: string;
+  /** Allow-listed provider-qualified model id for inference. */
+  readonly modelId: string;
+  /** Mandatory Bedrock Guardrail identifier applied on every inference call. */
+  readonly guardrailId: string;
+  /** Exact subscribed qualified tool names (`<TargetName>___<ToolName>`). */
+  readonly subscribedTools: readonly string[];
 }
 
 /** Native AgentCore network modes modeled by CfnRuntime. */
@@ -520,7 +544,11 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     const runtimeRoleArn = this.runtimeExecutionRoleArn(props);
     this.runtime = new CfnRuntime(this, "Runtime", {
       agentRuntimeName: runtimeName,
-      description: `AgentCore Runtime for ${props.tenantId}/${props.agentId} (${props.envName}). Inert proven agent; LLM/MCP unwired.`,
+      description: `AgentCore Runtime for ${props.tenantId}/${props.agentId} (${props.envName}). ${
+        props.agentImageVariant === "generated-agent"
+          ? "Generated Strands agent; LiteLLMModel + MCPClient + Memory wired."
+          : "Inert compatibility handler; LLM/MCP unwired."
+      }`,
       agentRuntimeArtifact: {
         containerConfiguration: {
           containerUri: this.containerDigestUri,
@@ -533,10 +561,9 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
         networkMode: NETWORK_MODE_PUBLIC,
       },
       roleArn: runtimeRoleArn,
-      // The inert proven agent reads ONLY this. No LLM Gateway / MCP wiring.
-      environmentVariables: {
-        AGENTCORE_MEMORY_ID: this.memory.attrMemoryId,
-      },
+      // Compatibility variant reads ONLY AGENTCORE_MEMORY_ID. The generated
+      // agent additionally needs its LLM/MCP/tenant wiring (validated below).
+      environmentVariables: this.buildRuntimeEnvironment(props),
       tags: this.allocationTagRecord(props),
     });
     this.runtime.applyRemovalPolicy(RemovalPolicy.DESTROY);
@@ -548,6 +575,62 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     this.runtime.node.addDependency(this.imageScanGate);
 
     this.emitOutputs(runtimeRoleArn);
+  }
+
+  /**
+   * Runtime container environment, variant-aware. The compatibility handler
+   * reads only `AGENTCORE_MEMORY_ID`. The generated agent also needs its
+   * tenant/agent/env identity, the mandatory Guardrail id, the allow-listed
+   * model id, the workstream MCP tool Gateway URL, the Platform inference
+   * Gateway URL, and the exact subscribed qualified tool names. Missing config
+   * for the generated-agent variant fails closed at synth.
+   */
+  private buildRuntimeEnvironment(
+    props: D03WorkstreamRuntimeMemoryStackProps,
+  ): Record<string, string> {
+    const env: Record<string, string> = {
+      AGENTCORE_MEMORY_ID: this.memory.attrMemoryId,
+    };
+    if (props.agentImageVariant !== "generated-agent") {
+      return env;
+    }
+    const cfg = props.generatedAgentRuntimeConfig;
+    if (!cfg) {
+      throw new Error(
+        "D03WorkstreamRuntimeMemoryStack: generatedAgentRuntimeConfig is required when agentImageVariant is 'generated-agent'.",
+      );
+    }
+    const missing = (
+      [
+        ["mcpGatewayUrl", cfg.mcpGatewayUrl],
+        ["inferenceGatewayUrl", cfg.inferenceGatewayUrl],
+        ["modelId", cfg.modelId],
+        ["guardrailId", cfg.guardrailId],
+      ] as const
+    )
+      .filter(([, v]) => !v || v.trim().length === 0)
+      .map(([k]) => k);
+    if (missing.length > 0) {
+      throw new Error(
+        `D03WorkstreamRuntimeMemoryStack: generatedAgentRuntimeConfig is missing required value(s): ${missing.join(", ")}.`,
+      );
+    }
+    if (cfg.subscribedTools.length === 0) {
+      throw new Error(
+        "D03WorkstreamRuntimeMemoryStack: generatedAgentRuntimeConfig.subscribedTools must list at least one qualified tool name.",
+      );
+    }
+    return {
+      ...env,
+      AGENTCORE_TENANT_ID: props.tenantId,
+      AGENTCORE_AGENT_ID: props.agentId,
+      AGENTCORE_ENV_NAME: props.envName,
+      AGENTCORE_GUARDRAIL_ID: cfg.guardrailId,
+      AGENTCORE_MODEL_ID: cfg.modelId,
+      AGENTCORE_GATEWAY_URL: cfg.mcpGatewayUrl,
+      AGENTCORE_INFERENCE_GATEWAY_URL: cfg.inferenceGatewayUrl,
+      AGENTCORE_SUBSCRIBED_TOOLS: cfg.subscribedTools.join(","),
+    };
   }
 
   /** The five allocation tags, as a plain record for the native tags prop. */

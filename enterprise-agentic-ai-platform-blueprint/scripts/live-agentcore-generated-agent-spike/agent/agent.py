@@ -424,16 +424,25 @@ class _AgentCoreMemoryAdapter:
 def build_production_core(
     config: ReferenceAgentConfig,
     *,
-    gateway_url: str,
+    mcp_gateway_url: str,
+    inference_gateway_url: str,
     bearer_token: str,
     memory_id: str | None,
     region: str,
 ) -> ReferenceAgentCore:
-    """Wire the real Strands/AgentCore adapters and hand them to the pure core."""
+    """Wire the real Strands/AgentCore adapters and hand them to the pure core.
+
+    In the D-03 topology the tools MCP endpoint (workstream tool Gateway) and
+    the OpenAI-compatible inference endpoint (Platform inference Gateway) are
+    two distinct Gateways, so they are wired from two separate URLs. Passing the
+    same value for both preserves the single-Gateway compatibility-spike shape.
+    """
     llm = _LiteLlmAdapter(
-        gateway_url=gateway_url, bearer_token=bearer_token, model_id=config.model_id
+        gateway_url=inference_gateway_url,
+        bearer_token=bearer_token,
+        model_id=config.model_id,
     )
-    tools = _McpToolAdapter(gateway_url=gateway_url, bearer_token=bearer_token)
+    tools = _McpToolAdapter(gateway_url=mcp_gateway_url, bearer_token=bearer_token)
     memory = (
         _AgentCoreMemoryAdapter(memory_id=memory_id, region=region) if memory_id else None
     )
@@ -469,9 +478,17 @@ def _load_entrypoint():  # pragma: no cover - exercised only in the live contain
         # The credential-provider recipe is the one live-proven by the Identity
         # M2M spike; here it is supplied through the environment/secure fetch.
         bearer_token = _fetch_gateway_token()
+        mcp_gateway_url = os.environ["AGENTCORE_GATEWAY_URL"]
+        # Inference (LiteLLM) endpoint. In D-03 this is the Platform inference
+        # Gateway, distinct from the workstream MCP tool Gateway above. Falls
+        # back to the MCP Gateway URL for the single-Gateway compatibility shape.
+        inference_gateway_url = (
+            os.environ.get("AGENTCORE_INFERENCE_GATEWAY_URL") or mcp_gateway_url
+        )
         core = build_production_core(
             cfg,
-            gateway_url=os.environ["AGENTCORE_GATEWAY_URL"],
+            mcp_gateway_url=mcp_gateway_url,
+            inference_gateway_url=inference_gateway_url,
             bearer_token=bearer_token,
             memory_id=os.environ.get("AGENTCORE_MEMORY_ID"),
             region=os.environ.get("AWS_REGION", "us-west-2"),

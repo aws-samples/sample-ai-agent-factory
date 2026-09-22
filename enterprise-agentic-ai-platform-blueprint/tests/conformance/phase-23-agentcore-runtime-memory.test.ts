@@ -109,6 +109,16 @@ function runtimeMemoryTemplate(
       costCentre: "engineering",
       runtimeExecutionRoleArnOverride: `arn:aws:iam::${account}:role/AgenticAI-D03-${envName}-demo-primary-runtime`,
       agentImageVariant,
+      generatedAgentRuntimeConfig:
+        agentImageVariant === "generated-agent"
+          ? {
+              mcpGatewayUrl: `https://gw-${envName}.gateway.bedrock-agentcore.${REGION}.amazonaws.com/mcp`,
+              inferenceGatewayUrl: `https://inf-${envName}.gateway.bedrock-agentcore.${REGION}.amazonaws.com/mcp`,
+              modelId: `agenticai-inference-${envName}-bedrock/openai.gpt-oss-120b`,
+              guardrailId: `arn:aws:bedrock:${REGION}:${PLATFORM_ACCOUNT}:guardrail/example`,
+              subscribedTools: ["target-tool-echo___echo", "target-tool-ping___ping"],
+            }
+          : undefined,
     }),
   );
 }
@@ -221,6 +231,86 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
     expect(generated).not.toEqual(compat);
     // Default must equal the compatibility variant.
     expect(defaulted).toEqual(compat);
+  });
+
+  it("compatibility variant sets only AGENTCORE_MEMORY_ID on the Runtime", () => {
+    const template = runtimeMemoryTemplate("nonprod", "compatibility");
+    const runtime = singleResource(template, "AWS::BedrockAgentCore::Runtime");
+    const env = runtime.Properties.EnvironmentVariables as Record<string, unknown>;
+    expect(Object.keys(env)).toEqual(["AGENTCORE_MEMORY_ID"]);
+  });
+
+  it("generated-agent variant wires the full LiteLLM/MCP/tenant env contract", () => {
+    const template = runtimeMemoryTemplate("nonprod", "generated-agent");
+    const runtime = singleResource(template, "AWS::BedrockAgentCore::Runtime");
+    const env = runtime.Properties.EnvironmentVariables as Record<string, unknown>;
+    // Every var the container entrypoint reads must be present.
+    for (const key of [
+      "AGENTCORE_MEMORY_ID",
+      "AGENTCORE_TENANT_ID",
+      "AGENTCORE_AGENT_ID",
+      "AGENTCORE_ENV_NAME",
+      "AGENTCORE_GUARDRAIL_ID",
+      "AGENTCORE_MODEL_ID",
+      "AGENTCORE_GATEWAY_URL",
+      "AGENTCORE_INFERENCE_GATEWAY_URL",
+      "AGENTCORE_SUBSCRIBED_TOOLS",
+    ]) {
+      expect(env).toHaveProperty(key);
+    }
+    expect(env.AGENTCORE_TENANT_ID).toBe("demo");
+    expect(env.AGENTCORE_AGENT_ID).toBe("primary");
+    expect(env.AGENTCORE_ENV_NAME).toBe("nonprod");
+    // MCP (tools) and inference URLs are distinct Gateways, not the same value.
+    expect(env.AGENTCORE_GATEWAY_URL).not.toEqual(
+      env.AGENTCORE_INFERENCE_GATEWAY_URL,
+    );
+    expect(String(env.AGENTCORE_GATEWAY_URL)).toMatch(/\/mcp$/);
+    expect(env.AGENTCORE_SUBSCRIBED_TOOLS).toBe(
+      "target-tool-echo___echo,target-tool-ping___ping",
+    );
+  });
+
+  it("generated-agent variant fails closed when its runtime config is absent", () => {
+    const app = new App();
+    expect(
+      () =>
+        new D03WorkstreamRuntimeMemoryStack(app, "RuntimeMemory-missing-cfg", {
+          env: { account: NONPROD_ACCOUNT, region: REGION },
+          envName: "nonprod",
+          applicationId: "demo",
+          agentId: "primary",
+          tenantId: "demo",
+          costCentre: "engineering",
+          runtimeExecutionRoleArnOverride: `arn:aws:iam::${NONPROD_ACCOUNT}:role/AgenticAI-D03-nonprod-demo-primary-runtime`,
+          agentImageVariant: "generated-agent",
+          // generatedAgentRuntimeConfig deliberately omitted
+        }),
+    ).toThrow(/generatedAgentRuntimeConfig is required/);
+  });
+
+  it("generated-agent variant fails closed on empty subscribedTools", () => {
+    const app = new App();
+    expect(
+      () =>
+        new D03WorkstreamRuntimeMemoryStack(app, "RuntimeMemory-empty-tools", {
+          env: { account: NONPROD_ACCOUNT, region: REGION },
+          envName: "nonprod",
+          applicationId: "demo",
+          agentId: "primary",
+          tenantId: "demo",
+          costCentre: "engineering",
+          runtimeExecutionRoleArnOverride: `arn:aws:iam::${NONPROD_ACCOUNT}:role/AgenticAI-D03-nonprod-demo-primary-runtime`,
+          agentImageVariant: "generated-agent",
+          generatedAgentRuntimeConfig: {
+            mcpGatewayUrl: `https://gw.gateway.bedrock-agentcore.${REGION}.amazonaws.com/mcp`,
+            inferenceGatewayUrl: `https://inf.gateway.bedrock-agentcore.${REGION}.amazonaws.com/mcp`,
+            modelId: "agenticai-inference-nonprod-bedrock/openai.gpt-oss-120b",
+            guardrailId: `arn:aws:bedrock:${REGION}:${PLATFORM_ACCOUNT}:guardrail/example`,
+            subscribedTools: [],
+          },
+        }),
+    ).toThrow(/subscribedTools must list at least one/);
   });
 
   it("uses a rotating five-tagged key with live-observed grant-operation constraints", () => {
