@@ -188,7 +188,7 @@ describe('Phase Q — allowedGroups (per-developer entitlement)', () => {
     expect(doc).toContain(
       'permit(principal in CognitoGroup::"platform-ai", action == Action::"InvokeTool", resource == Tool::"tool-echo");',
     );
-    expect(doc).toMatch(/Q-entitlement: principal-bound/);
+    expect(doc).toMatch(/entitlement: principal-bound/);
     expect(doc).not.toMatch(/permit\(principal,\s*action == Action::"InvokeTool",\s*resource == Tool::"tool-echo"\);/);
     expect(doc).toContain('Default forbid');
   });
@@ -197,7 +197,7 @@ describe('Phase Q — allowedGroups (per-developer entitlement)', () => {
     const subset = resolveSubscribedTools(['tool-echo']);
     const doc = composeCedarPolicyDocument(subset);
     expect(doc).toContain(PLATFORM_TOOL_CATALOGUE['tool-echo'].cedarPolicy.trim());
-    expect(doc).not.toMatch(/Q-entitlement/);
+    expect(doc).not.toMatch(/entitlement:/);
   });
 
   it('composeCedarPolicyDocument never emits a Cedar wildcard for a tool with allowedGroups', () => {
@@ -213,6 +213,70 @@ describe('Phase Q — allowedGroups (per-developer entitlement)', () => {
     // permits when entitlement is declared.
     expect(doc).not.toContain(
       'permit(principal, action == Action::"InvokeTool", resource == Tool::"tool-echo");',
+    );
+  });
+});
+
+describe('Round 3 — allowedSubjects (per-developer subject entitlement)', () => {
+  it('validateToolSpec accepts a valid allowedSubjects list', () => {
+    const spec: ToolSpec = {
+      ...PLATFORM_TOOL_CATALOGUE['tool-echo'],
+      allowedSubjects: ['sub-alice', 'user:bob@example.com'],
+    };
+    expect(() => validateToolSpec(spec)).not.toThrow();
+  });
+
+  it('validateToolSpec rejects an empty allowedSubjects array', () => {
+    const spec = {
+      ...PLATFORM_TOOL_CATALOGUE['tool-echo'],
+      allowedSubjects: [],
+    } as unknown as ToolSpec;
+    expect(() => validateToolSpec(spec)).toThrow(/non-empty/);
+  });
+
+  it('validateToolSpec rejects an allowedSubjects entry with an unsafe character', () => {
+    const spec: ToolSpec = {
+      ...PLATFORM_TOOL_CATALOGUE['tool-echo'],
+      allowedSubjects: ['bad sub with spaces'],
+    };
+    expect(() => validateToolSpec(spec)).toThrow(/not a valid JWT sub value/);
+  });
+
+  it('composeCedarPolicyDocument emits a Developer permit per subject', () => {
+    const subset: readonly ToolSpec[] = [
+      {
+        ...PLATFORM_TOOL_CATALOGUE['tool-echo'],
+        allowedSubjects: ['sub-alice', 'sub-bob'],
+      },
+    ];
+    const doc = composeCedarPolicyDocument(subset);
+    expect(doc).toContain(
+      'permit(principal == Developer::"sub-alice", action == Action::"InvokeTool", resource == Tool::"tool-echo");',
+    );
+    expect(doc).toContain(
+      'permit(principal == Developer::"sub-bob", action == Action::"InvokeTool", resource == Tool::"tool-echo");',
+    );
+    expect(doc).toMatch(/entitlement: principal-bound/);
+    // The unconditional permit must be stripped once entitlement is declared.
+    expect(doc).not.toContain(
+      'permit(principal, action == Action::"InvokeTool", resource == Tool::"tool-echo");',
+    );
+  });
+
+  it('composeCedarPolicyDocument emits both group and subject permits when both are set (combined)', () => {
+    const subset: readonly ToolSpec[] = [
+      {
+        ...PLATFORM_TOOL_CATALOGUE['tool-echo'],
+        allowedGroups: ['retail-developers'],
+        allowedSubjects: ['sub-alice'],
+      },
+    ];
+    const doc = composeCedarPolicyDocument(subset);
+    expect(doc).toContain(
+      'permit(principal in CognitoGroup::"retail-developers", action == Action::"InvokeTool", resource == Tool::"tool-echo");',
+    );
+    expect(doc).toContain(
+      'permit(principal == Developer::"sub-alice", action == Action::"InvokeTool", resource == Tool::"tool-echo");',
     );
   });
 });

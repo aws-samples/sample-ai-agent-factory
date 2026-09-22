@@ -74,7 +74,21 @@ export interface ToolSpec {
    *      AWS_IAM mode has no JWT claims to evaluate against).
    */
   readonly allowedGroups?: readonly string[];
+  /**
+   * Round 3 — per-developer entitlement: the set of stable JWT `sub` values
+   * permitted to invoke this tool. Empty/undefined ⇒ no subject-scoping.
+   * When present, the composed Cedar bundle adds one
+   * `permit(principal == Developer::"<sub>", ...)` per subject, which the
+   * wrapper evaluates by exact `sub` equality. May be combined with
+   * `allowedGroups` (either a matching group OR a matching subject permits);
+   * when either is present the workstream Gateway must run in CUSTOM_JWT mode
+   * because AWS_IAM has no JWT claims to evaluate.
+   */
+  readonly allowedSubjects?: readonly string[];
 }
+
+/** JWT `sub` values: opaque, printable, bounded. */
+const SUBJECT_REGEX = /^[A-Za-z0-9._:@|-]{1,255}$/;
 
 /** Cognito group names: lower-case kebab/snake, max 128 chars (AWS limit). */
 const COGNITO_GROUP_REGEX = /^[A-Za-z0-9_+=,.@-]{1,128}$/;
@@ -170,6 +184,23 @@ export function validateToolSpec(spec: ToolSpec): void {
       }
     }
   }
+  if (spec.allowedSubjects !== undefined) {
+    if (
+      !Array.isArray(spec.allowedSubjects) ||
+      spec.allowedSubjects.length === 0
+    ) {
+      throw new Error(
+        `Tool ${spec.toolId}: allowedSubjects, when present, must be a non-empty array of JWT sub values`,
+      );
+    }
+    for (const s of spec.allowedSubjects) {
+      if (typeof s !== "string" || !SUBJECT_REGEX.test(s)) {
+        throw new Error(
+          `Tool ${spec.toolId}: allowedSubjects entry '${s}' is not a valid JWT sub value`,
+        );
+      }
+    }
+  }
 }
 
 /**
@@ -231,17 +262,34 @@ export function composeCedarPolicyDocument(
   subset: readonly ToolSpec[],
 ): string {
   const parts = subset.map((s) => {
-    if (s.allowedGroups && s.allowedGroups.length > 0) {
-      const permits = s.allowedGroups
-        .map(
-          (g) =>
+    const hasGroups = !!(s.allowedGroups && s.allowedGroups.length > 0);
+    const hasSubjects = !!(s.allowedSubjects && s.allowedSubjects.length > 0);
+    if (hasGroups || hasSubjects) {
+      const permits: string[] = [];
+      if (hasGroups) {
+        for (const g of s.allowedGroups!) {
+          permits.push(
             `permit(principal in CognitoGroup::"${g}", action == Action::"InvokeTool", resource == Tool::"${s.toolId}");`,
-        )
-        .join("\n");
+          );
+        }
+      }
+      if (hasSubjects) {
+        for (const sub of s.allowedSubjects!) {
+          permits.push(
+            `permit(principal == Developer::"${sub}", action == Action::"InvokeTool", resource == Tool::"${s.toolId}");`,
+          );
+        }
+      }
+      const scopeNote = [
+        hasGroups ? `groups [${s.allowedGroups!.join(", ")}]` : "",
+        hasSubjects ? `subjects [${s.allowedSubjects!.length} sub(s)]` : "",
+      ]
+        .filter(Boolean)
+        .join(" or ");
       return (
         `// Tool: ${s.toolId} (owner: ${s.ownerTeam})\n` +
-        `// Q-entitlement: principal-bound; only members of [${s.allowedGroups.join(", ")}] may invoke.\n` +
-        permits
+        `// entitlement: principal-bound; only ${scopeNote} may invoke.\n` +
+        permits.join("\n")
       );
     }
     return `// Tool: ${s.toolId} (owner: ${s.ownerTeam})\n${s.cedarPolicy.trim()}`;
