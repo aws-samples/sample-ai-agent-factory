@@ -402,11 +402,12 @@ class _McpToolAdapter:
 
 
 class _SigV4HttpxAuth:
-    """httpx auth flow that SigV4-signs each request with ambient AWS creds.
+    """Callable httpx auth function that SigV4-signs each request.
 
-    Kept minimal and dependency-light: reuses botocore's SigV4Auth over the
-    default credential chain (the AgentCore-vended Runtime execution role in the
-    container). Never logs credentials or signed headers.
+    ``httpx`` wraps callable auth objects in its sync/async-compatible
+    ``FunctionAuth`` adapter. The signer uses botocore over the default
+    credential chain (the AgentCore-vended Runtime execution role in the
+    container). It never logs credentials or signed headers.
     """
 
     def __init__(self, *, service: str, region: str) -> None:
@@ -416,7 +417,7 @@ class _SigV4HttpxAuth:
         self._region = region
         self._session = boto3.Session()
 
-    def auth_flow(self, request):  # httpx.Auth protocol
+    def __call__(self, request):
         from botocore.auth import SigV4Auth  # noqa: E402 lazy
         from botocore.awsrequest import AWSRequest  # noqa: E402 lazy
 
@@ -438,7 +439,7 @@ class _SigV4HttpxAuth:
         SigV4Auth(frozen, self._service, self._region).add_auth(aws_request)
         for key, value in aws_request.headers.items():
             request.headers[key] = value
-        yield request
+        return request
 
 
 class _AgentCoreMemoryAdapter:
@@ -603,9 +604,10 @@ def _fetch_inference_bearer() -> str:  # pragma: no cover - live path only
     """Acquire a Cognito M2M bearer for the Platform inference Gateway.
 
     Sanctioned path (live-proven by the Identity M2M spike): AgentCore Identity.
-    The Runtime carries a workload-identity token; a pre-created ``CognitoOauth2``
-    credential provider (seeded once with the inference Gateway's Cognito client
-    id + secret) exchanges it for a resource token at the Gateway scope via
+    The Runtime mints a workload-identity token by name via
+    ``GetWorkloadAccessToken``; a pre-created ``CognitoOauth2`` credential
+    provider (seeded once with the inference Gateway's Cognito client id +
+    secret) exchanges it for a resource token at the Gateway scope via
     ``GetResourceOauth2Token``. No cross-account Cognito describe and no raw
     Secrets Manager read is required — the provider holds the secret.
 
@@ -617,21 +619,26 @@ def _fetch_inference_bearer() -> str:  # pragma: no cover - live path only
         return seam
 
     provider_name = os.environ["AGENTCORE_INFERENCE_CREDENTIAL_PROVIDER"]
+    workload_name = os.environ["AGENTCORE_WORKLOAD_IDENTITY_NAME"]
     scope = os.environ["AGENTCORE_INFERENCE_SCOPE"]
     region = os.environ.get("AWS_REGION", "us-west-2")
 
     import boto3  # noqa: E402 lazy
 
     identity = boto3.client("bedrock-agentcore", region_name=region)
-    # The workload-identity token is provided to the container by the Runtime;
-    # the injection seam covers environments where it is supplied directly.
-    workload_token = os.environ["AGENTCORE_WORKLOAD_IDENTITY_TOKEN"]
-    resp = identity.get_resource_oauth2_token(
-        workloadIdentityToken=workload_token,
-        resourceCredentialProviderName=provider_name,
-        scopes=[scope],
-        oauth2Flow="M2M",
-    )
+    workload_resp = identity.get_workload_access_token(workloadName=workload_name)
+    workload_token = workload_resp.get("workloadAccessToken")
+    if not workload_token:
+        raise AgentError("GetWorkloadAccessToken did not return a workload token")
+    try:
+        resp = identity.get_resource_oauth2_token(
+            workloadIdentityToken=workload_token,
+            resourceCredentialProviderName=provider_name,
+            scopes=[scope],
+            oauth2Flow="M2M",
+        )
+    finally:
+        del workload_token
     token = resp.get("accessToken") or resp.get("access_token")
     if not token:
         raise AgentError("GetResourceOauth2Token did not return an access token")

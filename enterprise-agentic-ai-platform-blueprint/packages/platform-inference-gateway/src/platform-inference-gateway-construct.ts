@@ -472,6 +472,12 @@ export class PlatformInferenceGatewayConstruct extends Construct {
           clientId: SecretValue.unsafePlainText(
             this.userPoolClient.userPoolClientId,
           ),
+          issuer: SecretValue.unsafePlainText(
+            `https://cognito-idp.${stack.region}.${stack.urlSuffix}/${this.userPool.userPoolId}`,
+          ),
+          authorizationEndpoint: SecretValue.unsafePlainText(
+            `${this.userPoolDomain.baseUrl()}/oauth2/authorize`,
+          ),
           tokenEndpoint: SecretValue.unsafePlainText(this.tokenEndpoint),
           scope: SecretValue.unsafePlainText(this.oauthScope),
           gatewayUrl: SecretValue.unsafePlainText(this.gatewayUrl),
@@ -562,6 +568,7 @@ export class PlatformInferenceGatewayConstruct extends Construct {
           UserPoolId: this.userPool.userPoolId,
           ClientId: this.userPoolClient.userPoolClientId,
           SecretId: this.m2mSecret.secretArn,
+          MetadataVersion: '2',
         },
       });
       populator.node.addDependency(this.m2mSecret);

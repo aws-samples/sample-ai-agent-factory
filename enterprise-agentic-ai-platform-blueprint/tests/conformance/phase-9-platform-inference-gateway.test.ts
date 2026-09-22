@@ -390,6 +390,9 @@ describe('Phase 9 — opt-in cross-account M2M secret', () => {
     // lookup custom resource); it is merged in by the named populator instead.
     const templateJson = JSON.stringify(template.toJSON());
     expect(templateJson).not.toContain('DescribeCognitoUserPoolClient');
+    expect(templateJson).toContain('authorizationEndpoint');
+    expect(templateJson).toContain('issuer');
+    expect(templateJson).toContain('MetadataVersion');
     // The explicitly-named populator role exists (inside the AgenticAI* boundary).
     const roleNames = Object.values(
       template.findResources('AWS::IAM::Role'),

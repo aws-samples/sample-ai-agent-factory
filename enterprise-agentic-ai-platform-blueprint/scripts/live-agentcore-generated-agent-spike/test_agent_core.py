@@ -251,5 +251,61 @@ def test_uses_litellm_and_mcp_client():
     assert "MCPClient" in _SRC
 
 
+def test_sigv4_httpx_auth_is_callable():
+    assert "def __call__(self, request)" in _SRC
+    assert "def auth_flow(self, request)" not in _SRC
+
+
 def test_mcp_protocol_version_pinned():
     assert "2025-06-18" in _SRC
+
+# --------------------------------------------------------------------------
+# AgentCore Identity M2M bearer exchange
+# --------------------------------------------------------------------------
+
+
+def test_inference_bearer_mints_workload_token_then_resource_token(monkeypatch):
+    calls = []
+
+    class FakeIdentity:
+        def get_workload_access_token(self, **kwargs):
+            calls.append(("workload", kwargs))
+            return {"workloadAccessToken": "workload-token"}
+
+        def get_resource_oauth2_token(self, **kwargs):
+            calls.append(("resource", kwargs))
+            return {"accessToken": "resource-token"}
+
+    identity = FakeIdentity()
+
+    class FakeBoto3:
+        @staticmethod
+        def client(service, region_name=None):
+            assert service == "bedrock-agentcore"
+            assert region_name == "us-west-2"
+            return identity
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "boto3", FakeBoto3())
+    monkeypatch.delenv("AGENTCORE_INFERENCE_BEARER", raising=False)
+    monkeypatch.setenv(
+        "AGENTCORE_INFERENCE_CREDENTIAL_PROVIDER", "provider-nonprod"
+    )
+    monkeypatch.setenv("AGENTCORE_WORKLOAD_IDENTITY_NAME", "workload-nonprod")
+    monkeypatch.setenv("AGENTCORE_INFERENCE_SCOPE", "inference/invoke")
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+
+    assert agent_mod._fetch_inference_bearer() == "resource-token"
+    assert calls == [
+        ("workload", {"workloadName": "workload-nonprod"}),
+        (
+            "resource",
+            {
+                "workloadIdentityToken": "workload-token",
+                "resourceCredentialProviderName": "provider-nonprod",
+                "scopes": ["inference/invoke"],
+                "oauth2Flow": "M2M",
+            },
+        ),
+    ]

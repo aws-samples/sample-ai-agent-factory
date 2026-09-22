@@ -147,20 +147,33 @@ const NETWORK_MODE_PUBLIC = "PUBLIC";
  */
 const CREDENTIAL_PROVIDER_HANDLER = `
 import json
+import time
 import boto3
 from botocore.exceptions import ClientError
 
 _NOT_FOUND = ("ResourceNotFoundException", "ResourceNotFound")
+_TERMINAL = ("CREATE_FAILED", "UPDATE_FAILED", "DELETE_FAILED")
+_PENDING = ("CREATING", "UPDATING", "DELETING")
 
 
-def _derive_endpoints(token_endpoint):
-    # Cognito token endpoint: https://<domain>/oauth2/token
-    base = token_endpoint.rsplit("/oauth2/token", 1)[0]
-    return {
-        "issuer": base,
-        "authorizationEndpoint": base + "/oauth2/authorize",
-        "tokenEndpoint": token_endpoint,
-    }
+def _wait_provider(client, provider_name):
+    for _ in range(50):
+        try:
+            response = client.get_oauth2_credential_provider(name=provider_name)
+        except ClientError as e:
+            if e.response["Error"]["Code"] in _NOT_FOUND:
+                time.sleep(5)
+                continue
+            raise
+        status = response.get("status")
+        if status == "READY":
+            return
+        if status in _TERMINAL:
+            raise RuntimeError("Credential provider reached terminal status " + str(status))
+        if status not in _PENDING:
+            raise RuntimeError("Credential provider returned unknown status " + repr(status))
+        time.sleep(5)
+    raise TimeoutError("Credential provider did not reach READY within 250 seconds")
 
 
 def on_event(event, context):
@@ -189,7 +202,6 @@ def on_event(event, context):
     data = json.loads(raw)
     client_id = data["clientId"]
     client_secret = data["clientSecret"]
-    endpoints = _derive_endpoints(data["tokenEndpoint"])
 
     # WorkloadIdentity (idempotent).
     try:
@@ -202,9 +214,9 @@ def on_event(event, context):
         "includedOauth2ProviderConfig": {
             "clientId": client_id,
             "clientSecret": client_secret,
-            "issuer": endpoints["issuer"],
-            "authorizationEndpoint": endpoints["authorizationEndpoint"],
-            "tokenEndpoint": endpoints["tokenEndpoint"],
+            "issuer": data["issuer"],
+            "authorizationEndpoint": data["authorizationEndpoint"],
+            "tokenEndpoint": data["tokenEndpoint"],
         }
     }
     try:
@@ -223,6 +235,7 @@ def on_event(event, context):
             )
         else:
             raise
+    _wait_provider(client, provider_name)
     del client_secret, provider_config, data, raw
     return {"PhysicalResourceId": provider_name}
 `;
@@ -744,6 +757,7 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
       AGENTCORE_SUBSCRIBED_TOOLS: cfg.subscribedTools.join(","),
       AGENTCORE_INFERENCE_SCOPE: cfg.inferenceScope,
       AGENTCORE_INFERENCE_CREDENTIAL_PROVIDER: this.credentialProviderName(props),
+      AGENTCORE_WORKLOAD_IDENTITY_NAME: this.workloadIdentityName(props),
     };
   }
 

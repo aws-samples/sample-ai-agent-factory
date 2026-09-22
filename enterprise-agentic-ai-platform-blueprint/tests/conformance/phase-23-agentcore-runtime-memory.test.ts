@@ -278,6 +278,7 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
       "AGENTCORE_GATEWAY_URL",
       "AGENTCORE_INFERENCE_GATEWAY_URL",
       "AGENTCORE_SUBSCRIBED_TOOLS",
+      "AGENTCORE_WORKLOAD_IDENTITY_NAME",
     ]) {
       expect(env).toHaveProperty(key);
     }
@@ -292,6 +293,12 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
     expect(env.AGENTCORE_SUBSCRIBED_TOOLS).toBe(
       "target-tool-echo___echo,target-tool-ping___ping",
     );
+    expect(env.AGENTCORE_WORKLOAD_IDENTITY_NAME).toBe(
+      "AgenticAI_D03_nonprod_demo_primary",
+    );
+    const rendered = JSON.stringify(template.toJSON());
+    expect(rendered).toContain("get_oauth2_credential_provider");
+    expect(rendered).toContain("did not reach READY within 250 seconds");
   });
 
   it("generated-agent variant fails closed when its runtime config is absent", () => {
