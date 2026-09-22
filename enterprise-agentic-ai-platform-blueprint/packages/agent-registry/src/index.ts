@@ -69,3 +69,15 @@ export {
   AGENT_BUILDER_INSPECT_FORBIDDEN_FRAGMENTS,
   type AgentBuilderInspectRoleProps,
 } from "./agent-builder-inspect-role";
+
+export {
+  evaluateRegistrationRequest,
+  changesApprovedReference,
+  type RegistrationAction,
+  type RegistrarRole,
+  type ApprovedReferences,
+  type RegistrationPrincipal,
+  type RegistrationRecordState,
+  type RegistrationRequest,
+  type RegistrationDecision,
+} from "./agent-registration-api";
