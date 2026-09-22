@@ -373,6 +373,18 @@ function registryResolverCommands(
 } {
   return {
     commands: [
+      // These resolver commands run in a separate CodeBuild shell from the
+      // stage-aware synth command list, so the synth step's blueprint-dir cd
+      // does NOT persist here (confirmed live: the parent aws-samples checkout
+      // left CWD at the repo root, where pipelines/ does not exist, and the
+      // resolver failed to open pipelines/requirements-ga-registry-resolver.txt).
+      // Re-enter the blueprint package here, matching enterBlueprintSourceDirectory:
+      // no-op when the package is already at the checkout root, else cd into the
+      // nested blueprint directory; fail closed on any other layout.
+      'if [ -f package.json ] && [ -d pipelines ]; then :; ' +
+        "elif [ -f enterprise-agentic-ai-platform-blueprint/package.json ]; then " +
+        "cd enterprise-agentic-ai-platform-blueprint; " +
+        'else echo "ERROR: blueprint package not found for GA resolver"; exit 1; fi',
       'python3 -m venv "$PWD/.agenticai-ga-resolver-venv"',
       '"$PWD/.agenticai-ga-resolver-venv/bin/pip" install --disable-pip-version-check -r pipelines/requirements-ga-registry-resolver.txt',
       registryResolverCommand(
