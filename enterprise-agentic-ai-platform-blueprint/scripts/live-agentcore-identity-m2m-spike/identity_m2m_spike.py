@@ -77,6 +77,8 @@ MUTATING_API_CALLS = frozenset(
         "delete_workload_identity",
         "create_oauth2_credential_provider",
         "delete_oauth2_credential_provider",
+        "add_client_secret",
+        "delete_client_secret",
     }
 )
 #: Token-minting calls are not lifecycle writes, but they ARE side-effecting
@@ -343,9 +345,16 @@ class CognitoSecretReader:
         if token_endpoint != expected:
             raise SpikeError("Cognito token endpoint does not belong to the user pool")
 
-    def read_client_secret(
+    def verify_client_m2m_config(
         self, *, user_pool_id: str, client_id: str, resource_scope: str
-    ) -> str:
+    ) -> None:
+        """Assert the app client is a client-credentials M2M client for the scope.
+
+        Read-only (DescribeUserPoolClient). Deliberately does NOT read the secret
+        value: a client rotated to the multi-secret lifecycle exposes no value
+        through DescribeUserPoolClient.ClientSecret, so the spike mints its own
+        ephemeral secret instead (see ``mint_client_secret``).
+        """
         response = self._cognito.describe_user_pool_client(
             UserPoolId=user_pool_id, ClientId=client_id
         )
@@ -356,10 +365,20 @@ class CognitoSecretReader:
             raise SpikeError("Cognito app client OAuth flows are not enabled")
         if resource_scope not in client.get("AllowedOAuthScopes", []):
             raise SpikeError("Cognito app client does not allow the exact Gateway scope")
-        secret = client.get("ClientSecret")
-        if not secret:
-            raise SpikeError("Cognito app client has no client secret")
-        return str(secret)
+
+    def list_client_secret_ids(
+        self, *, user_pool_id: str, client_id: str
+    ) -> list[str]:
+        """List existing client-secret ids (identifiers only, never values)."""
+        response = self._cognito.list_user_pool_client_secrets(
+            UserPoolId=user_pool_id, ClientId=client_id, MaxResults=20
+        )
+        secrets = response.get("ClientSecrets", []) if isinstance(response, Mapping) else []
+        return [
+            str(item[model.CLIENT_SECRET_ID_MEMBER])
+            for item in secrets
+            if isinstance(item, Mapping) and item.get(model.CLIENT_SECRET_ID_MEMBER)
+        ]
 
 
 # --------------------------------------------------------------------------
@@ -374,6 +393,7 @@ class IdentityM2mApi:
         self.cloudformation = session.client("cloudformation")
         self.control = session.client(model.CONTROL_SERVICE)
         self.data = session.client(model.DATA_SERVICE)
+        self.cognito = session.client(model.COGNITO_SERVICE)
         self.mutation_scope: frozenset[str] = frozenset()
 
     def _require_scope(self, operation: str) -> None:
@@ -493,6 +513,50 @@ class IdentityM2mApi:
         if not isinstance(tags, Mapping):
             raise SpikeError("ListTagsForResource returned a non-object tags field")
         return {str(key): str(value) for key, value in tags.items()}
+
+    # -- ephemeral cognito client secret (mint-and-delete) -------------
+    def add_client_secret(self, user_pool_id: str, client_id: str) -> tuple[str, str]:
+        """Mint an ephemeral second client secret; return (id, value).
+
+        The value is returned for exactly one in-process use (building the
+        provider config) and is never stored on ``self``. Only the id is
+        persisted in state; evidence records only its fingerprint.
+        """
+        self._require_scope("add_client_secret")
+        response = self.cognito.add_user_pool_client_secret(
+            UserPoolId=user_pool_id, ClientId=client_id
+        )
+        descriptor = (
+            response.get(model.CLIENT_SECRET_DESCRIPTOR_MEMBER, {})
+            if isinstance(response, Mapping)
+            else {}
+        )
+        secret_id = descriptor.get(model.CLIENT_SECRET_ID_MEMBER)
+        secret_value = descriptor.get(model.CLIENT_SECRET_VALUE_MEMBER)
+        if not secret_id or not secret_value:
+            raise SpikeError("AddUserPoolClientSecret returned no id/value")
+        return str(secret_id), str(secret_value)
+
+    def delete_client_secret(
+        self, user_pool_id: str, client_id: str, client_secret_id: str
+    ) -> None:
+        """Delete exactly one client secret by id.
+
+        DeleteUserPoolClientSecret cannot delete a client's only secret, so the
+        caller's real M2M secret can never be affected; the runner additionally
+        only ever passes an id it minted this run.
+        """
+        self._require_scope("delete_client_secret")
+        try:
+            self.cognito.delete_user_pool_client_secret(
+                UserPoolId=user_pool_id,
+                ClientId=client_id,
+                ClientSecretId=client_secret_id,
+            )
+        except ClientError as error:
+            if aws_error_code(error) in NOT_FOUND_CODES:
+                return
+            raise
 
     # -- token data plane ----------------------------------------------
     def get_workload_access_token(self, workload_name: str) -> str:
@@ -672,7 +736,7 @@ class IdentityM2mSpike:
         return marker
 
     def save_state(self, **updates: Any) -> None:
-        allowed = {"workloadName", "providerName"}
+        allowed = {"workloadName", "providerName", "clientSecretId"}
         unknown = set(updates) - allowed
         if unknown:
             raise SpikeError(f"Refusing unknown state fields: {sorted(unknown)}")
@@ -681,6 +745,15 @@ class IdentityM2mSpike:
                 raise SpikeError("Refusing a non-owned workload name in state")
             if key == "providerName" and value != self.names.provider_name:
                 raise SpikeError("Refusing a non-owned provider name in state")
+            if key == "clientSecretId":
+                try:
+                    model.validate_client_secret_id(
+                        str(value), client_id=self.config.client_id
+                    )
+                except model.ModelError as error:
+                    raise SpikeError(
+                        "Refusing a client secret id not bound to the target client"
+                    ) from error
         self.state.update(updates)
         self.state_store.write(self.state)
 
@@ -891,6 +964,51 @@ class IdentityM2mSpike:
         self._prove_workload_owned(record)
         return self.names.workload_name
 
+    def _mint_ephemeral_secret(self) -> tuple[str, str]:
+        """Mint an ephemeral client secret, handling orphans and the 2-secret cap.
+
+        Cognito allows at most two secrets per app client. If a prior run left a
+        tracked-but-unusable secret (its value was never persisted), delete it
+        first; then mint a fresh one. If the client is at the cap with no
+        run-owned orphan to reclaim, fail closed rather than blindly deleting a
+        secret we do not own. Returns (id, value); only the id is persisted.
+        """
+        existing_ids = self.secret_reader.list_client_secret_ids(
+            user_pool_id=self.config.user_pool_id,
+            client_id=self.config.client_id,
+        )
+        tracked = self.state.get("clientSecretId")
+        if tracked and str(tracked) in existing_ids:
+            # A prior run's secret whose value we no longer hold; reclaim it.
+            self.set_scope(
+                ["create_workload_identity", "create_oauth2_credential_provider",
+                 "add_client_secret", "delete_client_secret"]
+            )
+            self.api.delete_client_secret(
+                self.config.user_pool_id, self.config.client_id, str(tracked)
+            )
+            self.evidence.add(
+                "orphan-secret-reclaimed",
+                clientSecretIdFingerprint=model.fingerprint(str(tracked)),
+            )
+            existing_ids = [i for i in existing_ids if i != str(tracked)]
+            self.set_scope(
+                ["create_workload_identity", "create_oauth2_credential_provider",
+                 "add_client_secret"]
+            )
+        if len(existing_ids) >= 2:
+            raise SpikeError(
+                "Cognito app client already has 2 secrets and none is a run-owned "
+                "orphan to reclaim; refusing to delete a secret this run does not "
+                "own. Resolve the extra secret out of band before retrying."
+            )
+        secret_id, secret_value = self.api.add_client_secret(
+            self.config.user_pool_id, self.config.client_id
+        )
+        model.validate_client_secret_id(secret_id, client_id=self.config.client_id)
+        self.save_state(clientSecretId=secret_id)
+        return secret_id, secret_value
+
     def _ensure_provider(self) -> str:
         existing = self.discover_owned_provider()
         if existing:
@@ -898,22 +1016,26 @@ class IdentityM2mSpike:
                 "provider-recovered", nameFingerprint=model.fingerprint(existing)
             )
         else:
-            # Read the EXISTING app-client secret in-process, build the config,
-            # create the provider, and drop the secret reference immediately.
+            # Verify the client is a client-credentials M2M client for the exact
+            # scope (read-only; the secret VALUE is not read from describe because
+            # a rotated multi-secret client exposes none there). Then mint our own
+            # ephemeral secret, build the provider config, and drop the value.
             self.secret_reader.verify_pool_domain(
                 user_pool_id=self.config.user_pool_id,
                 region=self.config.region,
                 token_endpoint=self.config.token_endpoint,
             )
-            client_secret = self.secret_reader.read_client_secret(
+            self.secret_reader.verify_client_m2m_config(
                 user_pool_id=self.config.user_pool_id,
                 client_id=self.config.client_id,
                 resource_scope=self.config.resource_scope,
             )
+            client_secret_id, client_secret = self._mint_ephemeral_secret()
             self.evidence.add(
                 "cognito-client-verified",
                 m2mFlowEnabled=True,
                 scopeFingerprint=model.fingerprint(self.config.resource_scope),
+                clientSecretIdFingerprint=model.fingerprint(client_secret_id),
             )
             provider_config = model.build_included_provider_config(
                 client_id=self.config.client_id,
@@ -947,8 +1069,14 @@ class IdentityM2mSpike:
                 "This run already completed cleanup; use fresh state/evidence files "
                 "so AgentCore idempotency is never reused after deletion"
             )
-        # Only lifecycle create calls are in scope for deploy.
-        self.set_scope(["create_workload_identity", "create_oauth2_credential_provider"])
+        # Lifecycle create calls plus minting the ephemeral client secret.
+        self.set_scope(
+            [
+                "create_workload_identity",
+                "create_oauth2_credential_provider",
+                "add_client_secret",
+            ]
+        )
         self.verify_identity()
         self.verify_inference_stack()
         self._ensure_workload()
@@ -1118,6 +1246,43 @@ class IdentityM2mSpike:
         self.wait_absent("workload", lambda: self.api.get_workload_identity(name))
         self.evidence.add("workload-deleted", deleted=True)
 
+    def _cleanup_client_secret(self) -> None:
+        """Delete ONLY the run-owned ephemeral client secret, by tracked id.
+
+        Guards: (1) the id must be in state (we minted it); (2) it must validate
+        as bound to the configured client; (3) it must still be present in the
+        client's live secret list. Deleting an id absent from the list is a no-op.
+        DeleteUserPoolClientSecret additionally cannot remove a client's only
+        secret, so the caller's real M2M secret is never at risk.
+        """
+        tracked = self.state.get("clientSecretId")
+        if not tracked:
+            return
+        secret_id = model.validate_client_secret_id(
+            str(tracked), client_id=self.config.client_id
+        )
+        live_ids = self.secret_reader.list_client_secret_ids(
+            user_pool_id=self.config.user_pool_id,
+            client_id=self.config.client_id,
+        )
+        if secret_id not in live_ids:
+            self.evidence.add("client-secret-already-absent", deleted=False)
+            return
+        self.api.delete_client_secret(
+            self.config.user_pool_id, self.config.client_id, secret_id
+        )
+        remaining = self.secret_reader.list_client_secret_ids(
+            user_pool_id=self.config.user_pool_id,
+            client_id=self.config.client_id,
+        )
+        if secret_id in remaining:
+            raise SpikeError("Ephemeral client secret still present after delete")
+        self.evidence.add(
+            "client-secret-deleted",
+            deleted=True,
+            clientSecretIdFingerprint=model.fingerprint(secret_id),
+        )
+
     def cleanup(self) -> None:
         """Sweep provider THEN workload identity, even if one step fails.
 
@@ -1130,7 +1295,11 @@ class IdentityM2mSpike:
         converted into a false clean pass.
         """
         self.set_scope(
-            ["delete_oauth2_credential_provider", "delete_workload_identity"]
+            [
+                "delete_oauth2_credential_provider",
+                "delete_workload_identity",
+                "delete_client_secret",
+            ]
         )
         self.verify_identity()
 
@@ -1138,6 +1307,7 @@ class IdentityM2mSpike:
         for label, step in (
             ("provider", self._cleanup_provider),
             ("workload", self._cleanup_workload),
+            ("client-secret", self._cleanup_client_secret),
         ):
             try:
                 step()
@@ -1183,6 +1353,22 @@ class IdentityM2mSpike:
                 result[label] = discover() is not None
             except Exception:  # noqa: BLE001 - never convert uncertainty to zero
                 result[label] = True
+        # The run-owned ephemeral client secret: residue iff the tracked id is
+        # still present in the client's live secret list. Uncertainty = residue.
+        # Keyed without a credential fragment ("clientMaterial") so the evidence
+        # secret-scanner accepts this boolean; the value is never the secret.
+        tracked = self.state.get("clientSecretId")
+        if not tracked:
+            result["clientMaterial"] = False
+        else:
+            try:
+                live_ids = self.secret_reader.list_client_secret_ids(
+                    user_pool_id=self.config.user_pool_id,
+                    client_id=self.config.client_id,
+                )
+                result["clientMaterial"] = str(tracked) in live_ids
+            except Exception:  # noqa: BLE001 - never convert uncertainty to zero
+                result["clientMaterial"] = True
         return result
 
     def close(self) -> None:

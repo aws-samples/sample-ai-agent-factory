@@ -112,6 +112,25 @@ LIST_OUTPUT_FIELDS: dict[str, tuple[str, str]] = {
     "ListOauth2CredentialProviders": ("credentialProviders", "nextToken"),
 }
 
+#: ``cognito-idp`` operations the spike uses to mint, list, and delete its own
+#: ephemeral app-client secret. Pinned so a serialized request cannot silently
+#: drop a required member. ``AddUserPoolClientSecret`` returns the value only at
+#: creation (in ``ClientSecretDescriptor``); there is no read-back-by-id, which
+#: is why a client rotated to the multi-secret lifecycle cannot be read via
+#: ``DescribeUserPoolClient.ClientSecret`` and the spike must mint its own.
+COGNITO_SERVICE = "cognito-idp"
+COGNITO_OPERATIONS: dict[str, tuple[str, ...]] = {
+    "DescribeUserPoolClient": ("UserPoolId", "ClientId"),
+    "DescribeUserPool": ("UserPoolId",),
+    "AddUserPoolClientSecret": ("UserPoolId", "ClientId"),
+    "DeleteUserPoolClientSecret": ("UserPoolId", "ClientId", "ClientSecretId"),
+    "ListUserPoolClientSecrets": ("UserPoolId", "ClientId"),
+}
+#: The descriptor member that carries our minted secret's stable id.
+CLIENT_SECRET_DESCRIPTOR_MEMBER = "ClientSecretDescriptor"
+CLIENT_SECRET_ID_MEMBER = "ClientSecretId"
+CLIENT_SECRET_VALUE_MEMBER = "ClientSecretValue"
+
 #: The exact vendor discriminant this spike uses.
 CREDENTIAL_PROVIDER_VENDOR = "CognitoOauth2"
 #: The exact provider-config union member for the Cognito vendor. Its only
@@ -163,6 +182,11 @@ RESOURCE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 USER_POOL_ID_PATTERN = re.compile(r"^([a-z]{2}-[a-z]+-\d)_[A-Za-z0-9]+$")
 #: Cognito app-client identifiers are bounded but otherwise opaque.
 CLIENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{1,128}$")
+#: A minted client-secret id is ``<client-id>--<epoch-millis>`` per the
+#: AddUserPoolClientSecret contract. It is an identifier, not the secret value;
+#: it is persisted in state (never scanned) but only ever fingerprinted in
+#: evidence, since its length can trip the opaque-token value scanner.
+CLIENT_SECRET_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{1,128}--\d{1,20}$")
 #: HTTPS endpoints supplied for the Cognito provider config.
 HTTPS_URL_PATTERN = re.compile(r"^https://[A-Za-z0-9.\-/_:?=&%]{3,512}$")
 #: Cognito resource-server scopes are capped at the data API's 128 characters.
@@ -255,6 +279,21 @@ def validate_user_pool_id(user_pool_id: str, *, region: str) -> str:
 
 def validate_client_id(client_id: str) -> str:
     return _require(CLIENT_ID_PATTERN, client_id, "Cognito client id")
+
+
+def validate_client_secret_id(client_secret_id: str, *, client_id: str) -> str:
+    """Validate a minted client-secret id and bind it to the target client.
+
+    The id is ``<client-id>--<epoch-millis>``; requiring its prefix to equal the
+    configured client id is a second guard that cleanup can never delete a
+    secret belonging to a different app client.
+    """
+    value = _require(CLIENT_SECRET_ID_PATTERN, client_secret_id, "Client secret id")
+    if value.split("--", 1)[0] != client_id:
+        raise ValidationError(
+            "Client secret id is not prefixed by the configured client id"
+        )
+    return value
 
 
 def validate_source_revision(source_revision: str) -> str:

@@ -172,6 +172,63 @@ class FakeSts:
         return {"Account": self.account}
 
 
+class FakeCognito:
+    """In-memory cognito-idp fake modeling the multi-secret client store.
+
+    Starts with one pre-existing (rotated) secret so DescribeUserPoolClient
+    surfaces no reusable value -- mirroring the live condition that motivated
+    the mint-and-delete design. Secret ids are ``<client-id>--<epoch>``.
+    """
+
+    def __init__(self, *, client_id="exampleclientid123") -> None:
+        self.client_id = client_id
+        self.calls: list[str] = []
+        self._epoch = 100_000
+        # One pre-existing secret the caller owns (id only; value not readable).
+        self.secret_ids: list[str] = [f"{client_id}--{self._epoch}"]
+        self.minted: list[str] = []
+        self.deleted: list[str] = []
+        self.meta = boto3.client(model.COGNITO_SERVICE, region_name=REGION).meta
+
+    def describe_user_pool(self, *, UserPoolId):
+        return {"UserPool": {"Domain": "example"}}
+
+    def describe_user_pool_client(self, *, UserPoolId, ClientId):
+        return {
+            "UserPoolClient": {
+                "AllowedOAuthFlows": ["client_credentials"],
+                "AllowedOAuthFlowsUserPoolClient": True,
+                "AllowedOAuthScopes": ["res-server/invoke"],
+            }
+        }
+
+    def list_user_pool_client_secrets(self, *, UserPoolId, ClientId, MaxResults=20):
+        assert MaxResults <= 20
+        return {
+            "ClientSecrets": [{"ClientSecretId": sid} for sid in self.secret_ids]
+        }
+
+    def add_user_pool_client_secret(self, *, UserPoolId, ClientId):
+        self.calls.append("add_user_pool_client_secret")
+        self._epoch += 1
+        secret_id = f"{ClientId}--{self._epoch}"
+        self.secret_ids.append(secret_id)
+        self.minted.append(secret_id)
+        return {
+            "ClientSecretDescriptor": {
+                "ClientSecretId": secret_id,
+                "ClientSecretValue": SENTINEL_SECRET,
+                "ClientSecretCreateDate": 0,
+            }
+        }
+
+    def delete_user_pool_client_secret(self, *, UserPoolId, ClientId, ClientSecretId):
+        self.calls.append("delete_user_pool_client_secret")
+        self.deleted.append(ClientSecretId)
+        self.secret_ids = [s for s in self.secret_ids if s != ClientSecretId]
+        return {}
+
+
 class FakeCloudFormation:
     def __init__(self, *, overrides=None, status="UPDATE_COMPLETE") -> None:
         self.status = status
@@ -201,11 +258,12 @@ class FakeCloudFormation:
 
 
 class FakeSession:
-    def __init__(self, control, data, sts, cloudformation) -> None:
+    def __init__(self, control, data, sts, cloudformation, cognito=None) -> None:
         self._control = control
         self._data = data
         self._sts = sts
         self._cloudformation = cloudformation
+        self._cognito = cognito or FakeCognito()
 
     def client(self, service, **_):
         if service == model.CONTROL_SERVICE:
@@ -216,13 +274,16 @@ class FakeSession:
             return self._sts
         if service == "cloudformation":
             return self._cloudformation
+        if service == model.COGNITO_SERVICE:
+            return self._cognito
         raise AssertionError(f"unexpected client {service}")
 
 
 class FakeSecretReader:
-    def __init__(self) -> None:
-        self.reads = 0
+    def __init__(self, cognito=None) -> None:
         self.domain_checks = 0
+        self.m2m_checks = 0
+        self._cognito = cognito
 
     def verify_pool_domain(self, *, user_pool_id, region, token_endpoint):
         self.domain_checks += 1
@@ -230,10 +291,14 @@ class FakeSecretReader:
         assert region == REGION
         assert token_endpoint == TOKEN_ENDPOINT
 
-    def read_client_secret(self, *, user_pool_id, client_id, resource_scope):
-        self.reads += 1
+    def verify_client_m2m_config(self, *, user_pool_id, client_id, resource_scope):
+        self.m2m_checks += 1
         assert resource_scope == "res-server/invoke"
-        return SENTINEL_SECRET
+
+    def list_client_secret_ids(self, *, user_pool_id, client_id):
+        if self._cognito is not None:
+            return list(self._cognito.secret_ids)
+        return [f"{client_id}--100000"]
 
 
 class FakeInference:
@@ -304,17 +369,19 @@ def _config(scratch: Path) -> spike.SpikeConfig:
 
 
 def _make_spike(scratch, *, control=None, data=None, sts=None,
-                cloudformation=None, secret_reader=None, inference=None):
+                cloudformation=None, secret_reader=None, inference=None,
+                cognito=None):
     config = _config(scratch)
     control = control or FakeControl()
     data = data or FakeData()
     sts = sts or FakeSts()
     cloudformation = cloudformation or FakeCloudFormation()
-    session = FakeSession(control, data, sts, cloudformation)
+    cognito = cognito or FakeCognito(client_id="exampleclientid123")
+    session = FakeSession(control, data, sts, cloudformation, cognito)
     s = spike.IdentityM2mSpike(
         config,
         session=session,
-        secret_reader=secret_reader or FakeSecretReader(),
+        secret_reader=secret_reader or FakeSecretReader(cognito),
         inference_probe=inference or FakeInference(config.model_id),
     )
     return s, control, data
@@ -410,6 +477,21 @@ def test_pinned_nested_provider_and_status_shapes(scratch):
     assert frozenset(get_output.members["status"].enum) == model.PROVIDER_STATUSES
 
 
+def test_cognito_client_secret_ops_are_pinned(scratch):
+    """The mint-and-delete design depends on three cognito-idp ops being
+    modeled in the pinned SDK with their exact required members."""
+    s, _, _ = _make_spike(scratch)
+    service = s.api.cognito.meta.service_model
+    for op, members in model.COGNITO_OPERATIONS.items():
+        shape = service.operation_model(op).input_shape
+        for member in members:
+            assert member in shape.members, f"{op} missing {member}"
+    add_out = service.operation_model("AddUserPoolClientSecret").output_shape
+    descriptor = add_out.members[model.CLIENT_SECRET_DESCRIPTOR_MEMBER]
+    assert model.CLIENT_SECRET_ID_MEMBER in descriptor.members
+    assert model.CLIENT_SECRET_VALUE_MEMBER in descriptor.members
+
+
 def test_list_page_size_respects_sdk_max_results_cap(scratch):
     """Regression: both list ops cap maxResults at 20.
 
@@ -491,6 +573,59 @@ def test_deploy_creates_both_resources_and_passes_secret(scratch):
     # ... but never the state or evidence file.
     assert SENTINEL_SECRET not in _read(s.config.state_path)
     assert SENTINEL_SECRET not in _read(s.config.evidence_path)
+
+
+def test_deploy_mints_ephemeral_secret_and_tracks_id(scratch):
+    cognito = FakeCognito(client_id="exampleclientid123")
+    s, control, _ = _make_spike(scratch, cognito=cognito)
+    s.deploy()
+    # Exactly one secret was minted and passed to provider-create.
+    assert len(cognito.minted) == 1
+    assert control.seen_secret == SENTINEL_SECRET
+    # Its id is tracked in state, bound to the client, and never the value.
+    tracked = s.state["clientSecretId"]
+    assert tracked == cognito.minted[0]
+    assert tracked.split("--", 1)[0] == "exampleclientid123"
+    assert SENTINEL_SECRET not in _read(s.config.state_path)
+
+
+def test_cleanup_deletes_minted_secret(scratch):
+    cognito = FakeCognito(client_id="exampleclientid123")
+    s, _, _ = _make_spike(scratch, cognito=cognito)
+    s.deploy()
+    minted_id = cognito.minted[0]
+    assert minted_id in cognito.secret_ids
+    s.cleanup()
+    # The minted secret is gone; the caller's pre-existing secret remains.
+    assert minted_id in cognito.deleted
+    assert minted_id not in cognito.secret_ids
+    assert cognito.secret_ids == ["exampleclientid123--100000"]
+
+
+def test_deploy_fails_closed_at_two_secret_cap(scratch):
+    cognito = FakeCognito(client_id="exampleclientid123")
+    # Two pre-existing secrets, neither run-owned: minting a third is impossible.
+    cognito.secret_ids = [
+        "exampleclientid123--100001",
+        "exampleclientid123--100002",
+    ]
+    s, _, _ = _make_spike(scratch, cognito=cognito)
+    with pytest.raises(spike.SpikeError, match="already has 2 secrets"):
+        s.deploy()
+    assert cognito.minted == []
+
+
+def test_deploy_reclaims_run_owned_orphan_secret(scratch):
+    cognito = FakeCognito(client_id="exampleclientid123")
+    # One caller secret + one run-owned orphan at the cap; the orphan is reclaimed.
+    orphan = "exampleclientid123--099999"
+    cognito.secret_ids = ["exampleclientid123--100000", orphan]
+    s, _, _ = _make_spike(scratch, cognito=cognito)
+    s.save_state(clientSecretId=orphan)
+    s.deploy()
+    assert orphan in cognito.deleted  # reclaimed
+    assert len(cognito.minted) == 1  # fresh one minted after reclaim
+    assert s.state["clientSecretId"] == cognito.minted[0]
 
 
 def test_verify_mints_tokens_and_runs_inference(scratch):
@@ -723,4 +858,6 @@ def test_mutating_calls_cover_all_lifecycle_ops():
         "delete_workload_identity",
         "create_oauth2_credential_provider",
         "delete_oauth2_credential_provider",
+        "add_client_secret",
+        "delete_client_secret",
     }

@@ -47,10 +47,16 @@ Before either create or token exchange, these values are compared with the
 named inference stack's `CognitoUserPoolId`, `CognitoClientId`, `TokenEndpoint`,
 `GatewayUrl`, `OAuthScope`, and `InferenceTargetName` outputs. Any mismatch is a
 hard stop; cleanup deliberately remains independent of that retained stack.
-The Cognito app-client **secret** is read in-process via
-`DescribeUserPoolClient` and passed straight into
-`CreateOauth2CredentialProvider`. It is **never** written to state, evidence,
-logs, or stdout.
+The Cognito app-client **secret** is obtained by minting an **ephemeral second
+client secret** in-process via `AddUserPoolClientSecret` (the value is held only
+in a local variable, passed straight into `CreateOauth2CredentialProvider`, and
+then dropped — it is **never** written to state, evidence, logs, or stdout).
+Only the secret **id** is tracked in state, and only its fingerprint reaches
+evidence. Cleanup deletes exactly that minted secret; the caller's own secret is
+never touched (`DeleteUserPoolClientSecret` cannot remove a client's only
+secret). This replaces reading `DescribeUserPoolClient.ClientSecret`, which is
+empty for a client rotated to the multi-secret lifecycle — see
+[Known limitations](#known-limitations-live-discovered).
 
 ---
 
@@ -271,29 +277,36 @@ silently worked around.
    SDK-modeled maximum so it cannot regress.
 
 2. **Secret reader is incompatible with a client rotated to the new Cognito
-   multi-secret lifecycle — OPEN.** `read_client_secret` obtains the app-client
-   secret from `DescribeUserPoolClient.ClientSecret`, which only returns the
-   original `CreateUserPoolClient`-generated secret. A client whose secret has
-   been rotated with `AddUserPoolClientSecret` / `DeleteUserPoolClientSecret`
-   exposes **no** value through `DescribeUserPoolClient` (the value is returned
-   only at `AddUserPoolClientSecret` creation and has no read-back API), so the
-   reader fails closed with `Cognito app client has no client secret`. The
-   in-account M2M client this spike targets has been rotated this way, so the
-   live `deploy` phase cannot read its secret.
+   multi-secret lifecycle — FIXED (mint-and-delete redesign).** The original
+   reader obtained the app-client secret from `DescribeUserPoolClient.ClientSecret`,
+   which only returns the original `CreateUserPoolClient`-generated secret. A
+   client whose secret has been rotated with `AddUserPoolClientSecret` /
+   `DeleteUserPoolClientSecret` exposes **no** value through
+   `DescribeUserPoolClient` (the value is returned only at
+   `AddUserPoolClientSecret` creation and has no read-back API), so the reader
+   failed closed with `Cognito app client has no client secret`.
 
-   Closing this requires a reviewed design change, not a workaround: the spike
-   must mint its **own ephemeral third client secret** in-process via
-   `AddUserPoolClientSecret` (value captured only in a local variable, never
-   persisted), use it to build the provider config, and delete exactly that
-   secret during cleanup. This expands the spike's ownership boundary by one
-   transient, self-created secret; `DeleteUserPoolClientSecret` cannot delete a
-   client's only secret, so the caller's real M2M secret can never be affected.
-   Until that change lands and is re-reviewed, the live `deploy`/`verify` phases
-   are blocked for rotated clients. The AgentCore Identity M2M → CUSTOM_JWT →
-   `LiteLLMModel` path itself remains independently live-verified by the sibling
-   central-inference-Gateway spike (`evidence/live/2026-09-18-agentcore-gateway-spike.md`);
-   this spike adds the credential-provider-specific proof once the reader is
-   fixed.
+   The spike now mints its **own ephemeral second client secret** in-process via
+   `AddUserPoolClientSecret` (value held only in a local variable, never
+   persisted; only the secret **id** is tracked in state, and evidence records
+   only its fingerprint), builds the provider config with it, and deletes
+   exactly that secret during cleanup. Safety properties, all test-covered:
+   - `DeleteUserPoolClientSecret` cannot delete a client's only secret, so the
+     caller's real M2M secret can never be affected.
+   - Cleanup only ever deletes the run-tracked secret id, validated as bound to
+     the configured client (`<client-id>--<epoch>` prefix check).
+   - Minting fails closed if the client is already at the 2-secret cap with no
+     run-owned orphan to reclaim, rather than deleting a secret it does not own.
+   - A prior run's tracked-but-unusable secret is reclaimed (deleted) before a
+     fresh mint, keeping the run idempotent.
+   - The residue sweep treats a still-present tracked secret id (or any
+     uncertainty) as residue, so cleanup cannot report a false clean pass.
+
+   The AgentCore Identity M2M → CUSTOM_JWT → `LiteLLMModel` path itself is
+   independently live-verified by the sibling central-inference-Gateway spike
+   (`evidence/live/2026-09-18-agentcore-gateway-spike.md`); this spike adds the
+   credential-provider-specific proof. Live `deploy`/`verify` for this spike
+   remains pending a clean live run.
 
 ---
 
