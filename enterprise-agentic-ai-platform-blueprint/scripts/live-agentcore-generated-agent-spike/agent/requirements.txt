@@ -5,6 +5,8 @@
 #   * strands-agents-tools      -> MCPClient (Tools Gateway)
 #   * litellm                   -> OpenAI-compatible transport for LiteLLMModel
 #   * mcp                       -> streamable-http MCP client transport
+#                                  (brought in transitively by strands-agents,
+#                                   not pinned here — see note below)
 #   * bedrock-agentcore         -> BedrockAgentCoreApp runtime contract + Memory
 #   * boto3/botocore            -> AgentCore Memory data-plane client
 #
@@ -12,10 +14,16 @@
 # spikes (strands-agents 1.44.0, litellm 1.89.1, boto3/botocore 1.43.97/.98).
 # Keep an exact pin for every dependency actually installed; the image is built
 # and vulnerability-scanned before any Runtime consumes it.
+#
+# mcp is intentionally NOT pinned here: strands-agents 1.44.0 requires
+# mcp>=1.23.0,<2.0.0, and the MCPClient + streamablehttp_client APIs this agent
+# imports are stable across that range. Pinning an exact mcp version that
+# conflicts with the strands-agents constraint (as an earlier 1.15.0 pin did)
+# breaks the image build. Let strands-agents resolve a compatible mcp; the
+# Dockerfile's `pip check` still verifies overall consistency.
 boto3==1.43.98
 botocore==1.43.98
 strands-agents==1.44.0
 strands-agents-tools==0.2.9
 litellm==1.89.1
-mcp==1.15.0
 bedrock-agentcore==1.23.1
