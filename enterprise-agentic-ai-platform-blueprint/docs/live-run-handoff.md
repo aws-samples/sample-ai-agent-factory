@@ -6,8 +6,8 @@ in that account's CloudShell (or an equivalent federated session). Nothing here
 runs offline; each run creates real, billable resources and tears them down to
 zero residue.
 
-- **Platform account:** `048834207240`
-- **Workstream account:** `986177197847`
+- **Platform account:** `<PLATFORM_ACCOUNT>`
+- **Workstream account:** `<WORKSTREAM_ACCOUNT>`
 - **Region:** `us-west-2`
 - **Branch head to check out for every run:** the current PR #31 head
   (`git rev-parse HEAD` after checkout of `revamp/agentcore-platform-blueprint`).
@@ -32,7 +32,7 @@ bypass twins — then tear down to zero residue.
 - The real agent + digest-pinned ARM64 container (commit `b00f958`), 15 offline
   tests green.
 
-**Sequence (Workstream `986177197847` / `us-west-2`, via the Workload pipeline):**
+**Sequence (Workstream `<WORKSTREAM_ACCOUNT>` / `us-west-2`, via the Workload pipeline):**
 1. Enable the pipeline Runtime/Memory foundation with the generated-agent image:
    set `agenticai/enablePipelineRuntimeMemory=true` and
    `agenticai/agentImageVariant=generated-agent` in the Workload pipeline root
@@ -133,7 +133,7 @@ Record evidence at `evidence/live/<date>-pipeline-policyengine-subject.md`.
 ## Run 4+ — org-level gates (after runs 1–3)
 
 These do not depend on runs 1–3 but are heavier / org-scoped:
-- **SCP 01–12 org soak** through the sandbox OU (Management `048834207240`? —
+- **SCP 01–12 org soak** through the sandbox OU (Management `<PLATFORM_ACCOUNT>`? —
   confirm the Management/Governance account; Organizations-level, requires
   explicit confirmation for any SCP attach).
 - **EMEA region matrix** — repeat the inference-Gateway + Runtime/Memory +
