@@ -95,9 +95,11 @@ PROVIDER_READY_TIMEOUT_SECONDS = 300
 ABSENT_TIMEOUT_SECONDS = 300
 POLL_INTERVAL_SECONDS = 5
 
-# Pagination guardrails.
+# Pagination guardrails. Both ListWorkloadIdentities and
+# ListOauth2CredentialProviders cap maxResults at 20 (AgentCore Control API
+# reference); a larger value fails closed with a ValidationException.
 MAX_LIST_PAGES = 100
-LIST_PAGE_SIZE = 50
+LIST_PAGE_SIZE = 20
 
 # Bounded inference probe.
 INFERENCE_MAX_TOKENS = 256

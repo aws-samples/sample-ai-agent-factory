@@ -256,5 +256,46 @@ no AWS calls at import or collection time.
 
 ---
 
+## Known limitations (live-discovered)
+
+Two findings surfaced during live bring-up. Both are recorded here rather than
+silently worked around.
+
+1. **`maxResults` cap on the list operations — FIXED.** `ListWorkloadIdentities`
+   and `ListOauth2CredentialProviders` cap `maxResults` at **20** (AgentCore
+   Control API reference). The paginator originally requested 50, which fails
+   closed with a `ValidationException` and — because the same page size was used
+   in the cleanup verification sweep — reported a false "cleanup incomplete".
+   `LIST_PAGE_SIZE` is now pinned to 20 and a regression
+   (`test_list_page_size_respects_sdk_max_results_cap`) ties the guard to the
+   SDK-modeled maximum so it cannot regress.
+
+2. **Secret reader is incompatible with a client rotated to the new Cognito
+   multi-secret lifecycle — OPEN.** `read_client_secret` obtains the app-client
+   secret from `DescribeUserPoolClient.ClientSecret`, which only returns the
+   original `CreateUserPoolClient`-generated secret. A client whose secret has
+   been rotated with `AddUserPoolClientSecret` / `DeleteUserPoolClientSecret`
+   exposes **no** value through `DescribeUserPoolClient` (the value is returned
+   only at `AddUserPoolClientSecret` creation and has no read-back API), so the
+   reader fails closed with `Cognito app client has no client secret`. The
+   in-account M2M client this spike targets has been rotated this way, so the
+   live `deploy` phase cannot read its secret.
+
+   Closing this requires a reviewed design change, not a workaround: the spike
+   must mint its **own ephemeral third client secret** in-process via
+   `AddUserPoolClientSecret` (value captured only in a local variable, never
+   persisted), use it to build the provider config, and delete exactly that
+   secret during cleanup. This expands the spike's ownership boundary by one
+   transient, self-created secret; `DeleteUserPoolClientSecret` cannot delete a
+   client's only secret, so the caller's real M2M secret can never be affected.
+   Until that change lands and is re-reviewed, the live `deploy`/`verify` phases
+   are blocked for rotated clients. The AgentCore Identity M2M → CUSTOM_JWT →
+   `LiteLLMModel` path itself remains independently live-verified by the sibling
+   central-inference-Gateway spike (`evidence/live/2026-09-18-agentcore-gateway-spike.md`);
+   this spike adds the credential-provider-specific proof once the reader is
+   fixed.
+
+---
+
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0

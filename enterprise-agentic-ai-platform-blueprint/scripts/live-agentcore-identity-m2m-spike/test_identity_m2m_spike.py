@@ -410,6 +410,24 @@ def test_pinned_nested_provider_and_status_shapes(scratch):
     assert frozenset(get_output.members["status"].enum) == model.PROVIDER_STATUSES
 
 
+def test_list_page_size_respects_sdk_max_results_cap(scratch):
+    """Regression: both list ops cap maxResults at 20.
+
+    A larger page size fails closed live with a ValidationException, so the
+    paginator's requested size must not exceed the SDK-modeled maximum for
+    either ListWorkloadIdentities or ListOauth2CredentialProviders.
+    """
+    s, _, _ = _make_spike(scratch)
+    service = s.api.control.meta.service_model
+    for op in ("ListWorkloadIdentities", "ListOauth2CredentialProviders"):
+        max_results = service.operation_model(op).input_shape.members["maxResults"]
+        assert max_results.metadata.get("max") == 20, (
+            f"{op} maxResults SDK cap changed; update LIST_PAGE_SIZE guard"
+        )
+        assert spike.LIST_PAGE_SIZE <= max_results.metadata["max"]
+    assert spike._page_kwargs(None)["maxResults"] <= 20
+
+
 # --------------------------------------------------------------------------
 # Scope guard
 # --------------------------------------------------------------------------
