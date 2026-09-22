@@ -1052,6 +1052,17 @@ export class WorkloadPipelineStack extends Stack {
     if (props.enablePipelineRuntimeMemory) {
       derived["agenticai/enablePipelineRuntimeMemory"] = "true";
     }
+    if (props.agentImageVariant === "generated-agent") {
+      derived["agenticai/agentImageVariant"] = "generated-agent";
+      if (!props.generatedAgentInference) {
+        throw new Error(
+          "WorkloadPipelineStack: generatedAgentInference is required when agentImageVariant is 'generated-agent'.",
+        );
+      }
+      derived["agenticai/generatedAgentInference"] = JSON.stringify(
+        props.generatedAgentInference,
+      );
+    }
     return {
       ...derived,
       ...(props.synthContext ?? {}),

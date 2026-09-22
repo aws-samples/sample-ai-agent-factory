@@ -1113,6 +1113,8 @@ switch (stage) {
       sharedSynthContext["agenticai/enablePipelineRuntimeMemory"] = "true";
       if (agentImageVariant === "generated-agent") {
         sharedSynthContext["agenticai/agentImageVariant"] = "generated-agent";
+        sharedSynthContext["agenticai/generatedAgentInference"] =
+          JSON.stringify(generatedAgentInference);
       }
     }
     if (Object.keys(gaRegistryRecordGenerations).length > 0) {

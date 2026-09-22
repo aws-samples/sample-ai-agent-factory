@@ -162,7 +162,10 @@ function roleTemplateWithGrants(): Template {
   );
 }
 
-function pipeline(enabled: boolean): {
+function pipeline(
+  enabled: boolean,
+  generated = false,
+): {
   readonly stack: WorkloadPipelineStack;
   readonly template: Template;
 } {
@@ -185,6 +188,26 @@ function pipeline(enabled: boolean): {
       gatewayRegion: REGION,
     },
     enablePipelineRuntimeMemory: enabled,
+    agentImageVariant: generated ? "generated-agent" : undefined,
+    generatedAgentInference: generated
+      ? {
+          nonprod: {
+            inferenceGatewayUrl: `https://inf-nonprod.gateway.bedrock-agentcore.${REGION}.amazonaws.com/mcp`,
+            inferenceScope: "agenticai-inference-nonprod-api/invoke",
+            modelId:
+              "agenticai-inference-nonprod-bedrock/openai.gpt-oss-120b",
+            guardrailId: `arn:aws:bedrock:${REGION}:${PLATFORM_ACCOUNT}:guardrail/nonprod`,
+            m2mSecretArn: `arn:aws:secretsmanager:${REGION}:${PLATFORM_ACCOUNT}:secret:agenticai/inference-m2m/nonprod`,
+          },
+          prod: {
+            inferenceGatewayUrl: `https://inf-prod.gateway.bedrock-agentcore.${REGION}.amazonaws.com/mcp`,
+            inferenceScope: "agenticai-inference-prod-api/invoke",
+            modelId: "agenticai-inference-prod-bedrock/openai.gpt-oss-120b",
+            guardrailId: `arn:aws:bedrock:${REGION}:${PLATFORM_ACCOUNT}:guardrail/prod`,
+            m2mSecretArn: `arn:aws:secretsmanager:${REGION}:${PLATFORM_ACCOUNT}:secret:agenticai/inference-m2m/prod`,
+          },
+        }
+      : undefined,
   });
   return { stack, template: Template.fromStack(stack) };
 }
@@ -1006,6 +1029,17 @@ describe("Phase 23 — opt-in pipeline graph", () => {
       (action: any) => action.Name === "RuntimeRolePropagation",
     );
     expect(rolePropagation.RunOrder).toBeGreaterThan(permissionReady.RunOrder);
+  });
+
+  it("persists generated-agent inference inputs through self-mutation", () => {
+    const { template } = pipeline(true, true);
+    const rendered = JSON.stringify(template.toJSON());
+    expect(rendered).toContain("agenticai/generatedAgentInference");
+    expect(rendered).toContain(
+      "agenticai-inference-nonprod-bedrock/openai.gpt-oss-120b",
+    );
+    expect(rendered).toContain("agenticai/inference-m2m/nonprod");
+    expect(rendered).toContain("agenticai/agentImageVariant");
   });
 
   it("rejects Runtime/Memory pipeline configuration without GA Registry mode", () => {
