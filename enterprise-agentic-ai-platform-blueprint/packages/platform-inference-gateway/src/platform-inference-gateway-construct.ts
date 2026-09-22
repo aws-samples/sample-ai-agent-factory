@@ -1,6 +1,7 @@
 import {
   ArnFormat,
   CfnResource,
+  CustomResource,
   Duration,
   SecretValue,
   Stack,
@@ -18,13 +19,17 @@ import {
 import {
   AccountPrincipal,
   Effect,
+  ManagedPolicy,
   Policy,
+  PolicyDocument,
   PolicyStatement,
   Role,
   ServicePrincipal,
 } from 'aws-cdk-lib/aws-iam';
 import { Key } from 'aws-cdk-lib/aws-kms';
+import { Code, Function, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
+import { Provider } from 'aws-cdk-lib/custom-resources';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
@@ -67,6 +72,38 @@ export interface PlatformInferenceGatewayConstructProps {
 
 const MAX_RATE = 10_000_000;
 const DEFAULT_MCP_VERSION = '2025-11-25';
+
+/**
+ * Inline handler that reads the Cognito app-client secret (same-account) and
+ * merges it into the metadata M2M secret via PutSecretValue. Runs on
+ * Create/Update; Delete is a no-op (the Secret is deleted by CloudFormation).
+ * The client secret is read in-process only and never logged.
+ */
+const M2M_SECRET_POPULATOR_HANDLER = `
+import json
+import boto3
+
+
+def on_event(event, context):
+    if event["RequestType"] == "Delete":
+        return {"PhysicalResourceId": event["ResourceProperties"]["SecretId"]}
+    props = event["ResourceProperties"]
+    region = props["Region"]
+    cognito = boto3.client("cognito-idp", region_name=region)
+    secrets = boto3.client("secretsmanager", region_name=region)
+    client = cognito.describe_user_pool_client(
+        UserPoolId=props["UserPoolId"], ClientId=props["ClientId"]
+    )["UserPoolClient"]
+    client_secret = client["ClientSecret"]
+    current = secrets.get_secret_value(SecretId=props["SecretId"])["SecretString"]
+    data = json.loads(current)
+    data["clientSecret"] = client_secret
+    secrets.put_secret_value(
+        SecretId=props["SecretId"], SecretString=json.dumps(data)
+    )
+    del client_secret, data
+    return {"PhysicalResourceId": props["SecretId"]}
+`;
 
 function validateName(label: string, value: string, maximum: number): void {
   if (
@@ -425,11 +462,16 @@ export class PlatformInferenceGatewayConstruct extends Construct {
         description:
           'Cross-account M2M connection metadata + client secret for the inference Gateway. Consumed by the Workstream CognitoOauth2 credential provider.',
         encryptionKey: secretKey,
+        // Metadata only at synth. The client secret is merged in at deploy time
+        // by an explicitly-named custom resource (below) reading it same-account
+        // via DescribeUserPoolClient. Reading userPoolClient.userPoolClientSecret
+        // here would emit a CDK-generated AwsCustomResource whose role name is
+        // outside the scoped AgenticAI* CFN-exec boundary (live defect: the
+        // exec role is denied iam:CreateRole for the generated name).
         secretObjectValue: {
           clientId: SecretValue.unsafePlainText(
             this.userPoolClient.userPoolClientId,
           ),
-          clientSecret: this.userPoolClient.userPoolClientSecret,
           tokenEndpoint: SecretValue.unsafePlainText(this.tokenEndpoint),
           scope: SecretValue.unsafePlainText(this.oauthScope),
           gatewayUrl: SecretValue.unsafePlainText(this.gatewayUrl),
@@ -446,6 +488,108 @@ export class PlatformInferenceGatewayConstruct extends Construct {
           actions: ['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret'],
           resources: ['*'],
         }),
+      );
+      // Deploy-time populator: an explicitly-named role (inside the AgenticAI*
+      // boundary) reads the Cognito client secret same-account and merges it
+      // into the metadata secret. Avoids the CDK-generated custom-resource role.
+      const populatorRoleName = `AgenticAI-InferenceM2mSecret-${props.envName}`.slice(0, 64);
+      const populatorRole = new Role(this, 'M2mSecretPopulatorRole', {
+        roleName: populatorRoleName,
+        assumedBy: new ServicePrincipal('lambda.amazonaws.com'),
+        description:
+          'Populates the inference M2M secret with the Cognito client secret at deploy time (same-account).',
+        inlinePolicies: {
+          Populate: new PolicyDocument({
+            statements: [
+              new PolicyStatement({
+                sid: 'ReadCognitoClientSecret',
+                effect: Effect.ALLOW,
+                actions: ['cognito-idp:DescribeUserPoolClient'],
+                resources: [this.userPool.userPoolArn],
+              }),
+              new PolicyStatement({
+                sid: 'WriteM2mSecret',
+                effect: Effect.ALLOW,
+                actions: ['secretsmanager:PutSecretValue'],
+                resources: [this.m2mSecret.secretArn],
+              }),
+              new PolicyStatement({
+                sid: 'EncryptM2mSecret',
+                effect: Effect.ALLOW,
+                actions: ['kms:GenerateDataKey', 'kms:Decrypt'],
+                resources: [secretKey.keyArn],
+              }),
+            ],
+          }),
+        },
+        managedPolicies: [
+          ManagedPolicy.fromAwsManagedPolicyName(
+            'service-role/AWSLambdaBasicExecutionRole',
+          ),
+        ],
+      });
+      const populatorFn = new Function(this, 'M2mSecretPopulatorFn', {
+        runtime: Runtime.PYTHON_3_13,
+        handler: 'index.on_event',
+        timeout: Duration.minutes(2),
+        role: populatorRole,
+        code: Code.fromInline(M2M_SECRET_POPULATOR_HANDLER),
+      });
+      const frameworkRole = new Role(this, 'M2mSecretPopulatorFwRole', {
+        roleName: `AgenticAI-InferenceM2mSecretFw-${props.envName}`.slice(0, 64),
+        assumedBy: new ServicePrincipal('lambda.amazonaws.com'),
+        description:
+          'Provider framework role for the inference M2M secret populator.',
+        managedPolicies: [
+          ManagedPolicy.fromAwsManagedPolicyName(
+            'service-role/AWSLambdaBasicExecutionRole',
+          ),
+        ],
+      });
+      const populatorProvider = new Provider(this, 'M2mSecretPopulatorProvider', {
+        onEventHandler: populatorFn,
+        // Explicit framework role (inside the AgenticAI* boundary); a generated
+        // role name would be denied iam:CreateRole by the scoped CFN exec role.
+        frameworkOnEventRole: frameworkRole,
+      });
+      const populator = new CustomResource(this, 'M2mSecretPopulator', {
+        serviceToken: populatorProvider.serviceToken,
+        properties: {
+          Region: stack.region,
+          UserPoolId: this.userPool.userPoolId,
+          ClientId: this.userPoolClient.userPoolClientId,
+          SecretId: this.m2mSecret.secretArn,
+        },
+      });
+      populator.node.addDependency(this.m2mSecret);
+      populator.node.addDependency(this.userPoolClient);
+      populatorFn.grantInvoke(frameworkRole);
+      NagSuppressions.addResourceSuppressions(
+        frameworkRole,
+        [
+          {
+            id: 'AwsSolutions-IAM4',
+            reason:
+              'SEC-005: AWSLambdaBasicExecutionRole is the standard log-write policy for the provider framework Lambda.',
+          },
+          {
+            id: 'AwsSolutions-IAM5',
+            reason:
+              'SEC-005: the provider framework role invokes exactly its onEvent function; CDK renders the grant as a function ARN which cdk-nag flags generically.',
+          },
+        ],
+        true,
+      );
+      NagSuppressions.addResourceSuppressions(
+        populatorRole,
+        [
+          {
+            id: 'AwsSolutions-IAM4',
+            reason:
+              'SEC-005: AWSLambdaBasicExecutionRole is the standard log-write policy for a custom-resource Lambda.',
+          },
+        ],
+        true,
       );
       NagSuppressions.addResourceSuppressions(
         this.m2mSecret,

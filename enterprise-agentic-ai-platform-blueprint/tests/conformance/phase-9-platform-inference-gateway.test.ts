@@ -386,6 +386,20 @@ describe('Phase 9 — opt-in cross-account M2M secret', () => {
     const doc = JSON.stringify((policy.Properties as Record<string, unknown>).ResourcePolicy);
     expect(doc).toContain('secretsmanager:GetSecretValue');
     expect(doc).toContain('444444444444');
+    // The client secret must NOT be read at synth (no CDK-generated Cognito
+    // lookup custom resource); it is merged in by the named populator instead.
+    const templateJson = JSON.stringify(template.toJSON());
+    expect(templateJson).not.toContain('DescribeCognitoUserPoolClient');
+    // The explicitly-named populator role exists (inside the AgenticAI* boundary).
+    const roleNames = Object.values(
+      template.findResources('AWS::IAM::Role'),
+    ).map((r: any) => r.Properties?.RoleName);
+    expect(
+      roleNames.some(
+        (n: unknown) =>
+          typeof n === 'string' && n.startsWith('AgenticAI-InferenceM2mSecret'),
+      ),
+    ).toBe(true);
   });
 
   it('rejects a non-12-digit reader account id', () => {
