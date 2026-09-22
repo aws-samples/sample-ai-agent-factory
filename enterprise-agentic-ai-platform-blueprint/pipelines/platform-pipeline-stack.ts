@@ -162,6 +162,9 @@ export class PlatformDeploymentStage extends Stage {
       tenantId: props.tenantId,
       costCentre: props.costCentre,
       modelRateLimits: props.inferenceModelRateLimits,
+      m2mSecretReaderAccountIds: props.gatewayWorkloadAccountId
+        ? [props.gatewayWorkloadAccountId]
+        : undefined,
     });
   }
 }

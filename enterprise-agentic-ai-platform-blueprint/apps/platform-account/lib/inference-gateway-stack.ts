@@ -66,5 +66,12 @@ export class InferenceGatewayStack extends Stack {
       value: this.inferenceGateway.tokenEndpoint,
       description: 'Cognito OAuth 2.0 client-credentials token endpoint.',
     });
+    if (this.inferenceGateway.m2mSecret) {
+      new CfnOutput(this, 'M2mSecretArn', {
+        value: this.inferenceGateway.m2mSecret.secretArn,
+        description:
+          'Cross-account M2M secret ARN. The Workstream credential provider reads it to seed CognitoOauth2.',
+      });
+    }
   }
 }

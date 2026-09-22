@@ -39,6 +39,25 @@ function synth(
   return Template.fromStack(stack);
 }
 
+function synthWithReaders(
+  readerAccountIds: readonly string[] | undefined,
+): Template {
+  const app = new App();
+  const stack = new Stack(app, 'TestPlatformInferenceGatewayReaders', {
+    env: { account: '123456789012', region: 'us-west-2' },
+  });
+  new PlatformInferenceGatewayConstruct(stack, 'InferenceGateway', {
+    envName: 'nonprod',
+    applicationId: 'platform-inference',
+    agentId: 'shared',
+    tenantId: 'shared',
+    costCentre: 'platform',
+    modelRateLimits: MODEL_LIMITS,
+    m2mSecretReaderAccountIds: readerAccountIds,
+  });
+  return Template.fromStack(stack);
+}
+
 function onlyResource(
   template: Template,
   type: string,
@@ -344,4 +363,34 @@ describe('Phase 9 — fail-closed configuration validation', () => {
       ).toThrow(/requestsPerMinute must be an integer/i);
     },
   );
+});
+
+describe('Phase 9 — opt-in cross-account M2M secret', () => {
+  it('creates no secret by default', () => {
+    const template = synthWithReaders(undefined);
+    expect(
+      Object.keys(template.findResources('AWS::SecretsManager::Secret')),
+    ).toHaveLength(0);
+  });
+
+  it('publishes a CMK-encrypted secret readable by the declared account', () => {
+    const template = synthWithReaders(['444444444444']);
+    const secret = onlyResource(template, 'AWS::SecretsManager::Secret');
+    // Encrypted with a dedicated CMK (KmsKeyId present).
+    expect((secret.Properties as Record<string, unknown>).KmsKeyId).toBeDefined();
+    // Resource policy grants GetSecretValue to the reader account.
+    const policy = onlyResource(
+      template,
+      'AWS::SecretsManager::ResourcePolicy',
+    );
+    const doc = JSON.stringify((policy.Properties as Record<string, unknown>).ResourcePolicy);
+    expect(doc).toContain('secretsmanager:GetSecretValue');
+    expect(doc).toContain('444444444444');
+  });
+
+  it('rejects a non-12-digit reader account id', () => {
+    expect(() => synthWithReaders(['not-an-account'])).toThrow(
+      /12-digit account IDs/,
+    );
+  });
 });

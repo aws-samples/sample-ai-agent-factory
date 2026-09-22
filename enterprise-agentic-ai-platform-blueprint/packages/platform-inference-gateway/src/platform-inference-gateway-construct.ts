@@ -2,6 +2,7 @@ import {
   ArnFormat,
   CfnResource,
   Duration,
+  SecretValue,
   Stack,
   Tags,
 } from 'aws-cdk-lib';
@@ -15,12 +16,15 @@ import {
   UserPoolResourceServer,
 } from 'aws-cdk-lib/aws-cognito';
 import {
+  AccountPrincipal,
   Effect,
   Policy,
   PolicyStatement,
   Role,
   ServicePrincipal,
 } from 'aws-cdk-lib/aws-iam';
+import { Key } from 'aws-cdk-lib/aws-kms';
+import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
@@ -50,6 +54,15 @@ export interface PlatformInferenceGatewayConstructProps {
   readonly rateLimitId?: string;
   readonly mcpVersion?: string;
   readonly accessTokenValidity?: Duration;
+  /**
+   * Opt-in: 12-digit AWS account IDs (the Workstream accounts) allowed to read
+   * the published M2M credential secret cross-account. When set, the construct
+   * publishes a Secrets Manager secret holding the connection metadata plus the
+   * generated client secret, with a resource policy granting exactly those
+   * accounts `secretsmanager:GetSecretValue`. Omitted by default — the secret
+   * is only created when a consumer account is declared.
+   */
+  readonly m2mSecretReaderAccountIds?: readonly string[];
 }
 
 const MAX_RATE = 10_000_000;
@@ -178,6 +191,8 @@ export class PlatformInferenceGatewayConstruct extends Construct {
   readonly discoveryUrl: string;
   readonly tokenEndpoint: string;
   readonly rateLimitId: string;
+  /** Present only when m2mSecretReaderAccountIds is set. */
+  readonly m2mSecret?: Secret;
 
   constructor(
     scope: Construct,
@@ -372,5 +387,77 @@ export class PlatformInferenceGatewayConstruct extends Construct {
     this.inferenceTargetId = this.inferenceTarget
       .getAtt('TargetId')
       .toString();
+
+    const readerAccounts = props.m2mSecretReaderAccountIds ?? [];
+    if (readerAccounts.length > 0) {
+      for (const acct of readerAccounts) {
+        if (!/^\d{12}$/.test(acct)) {
+          throw new Error(
+            `PlatformInferenceGatewayConstruct: m2mSecretReaderAccountIds must be 12-digit account IDs; got '${acct}'.`,
+          );
+        }
+      }
+      const uniqueReaders = [...new Set(readerAccounts)];
+      // Dedicated CMK so the cross-account grant is explicit and revocable.
+      const secretKey = new Key(this, 'M2mSecretKey', {
+        alias: `alias/agenticai/inference-m2m-${gatewayName}`,
+        description: `CMK for the cross-account inference M2M secret (${gatewayName}).`,
+        enableKeyRotation: true,
+      });
+      for (const acct of uniqueReaders) {
+        secretKey.addToResourcePolicy(
+          new PolicyStatement({
+            sid: `AllowDecrypt${acct}`,
+            effect: Effect.ALLOW,
+            principals: [new AccountPrincipal(acct)],
+            actions: ['kms:Decrypt', 'kms:DescribeKey'],
+            resources: ['*'],
+            conditions: {
+              StringEquals: {
+                'kms:ViaService': `secretsmanager.${stack.region}.amazonaws.com`,
+              },
+            },
+          }),
+        );
+      }
+      this.m2mSecret = new Secret(this, 'M2mSecret', {
+        secretName: `agenticai/inference-m2m/${gatewayName}`,
+        description:
+          'Cross-account M2M connection metadata + client secret for the inference Gateway. Consumed by the Workstream CognitoOauth2 credential provider.',
+        encryptionKey: secretKey,
+        secretObjectValue: {
+          clientId: SecretValue.unsafePlainText(
+            this.userPoolClient.userPoolClientId,
+          ),
+          clientSecret: this.userPoolClient.userPoolClientSecret,
+          tokenEndpoint: SecretValue.unsafePlainText(this.tokenEndpoint),
+          scope: SecretValue.unsafePlainText(this.oauthScope),
+          gatewayUrl: SecretValue.unsafePlainText(this.gatewayUrl),
+          inferenceTargetName: SecretValue.unsafePlainText(
+            this.inferenceTargetName,
+          ),
+        },
+      });
+      this.m2mSecret.addToResourcePolicy(
+        new PolicyStatement({
+          sid: 'AllowWorkstreamRead',
+          effect: Effect.ALLOW,
+          principals: uniqueReaders.map((a) => new AccountPrincipal(a)),
+          actions: ['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret'],
+          resources: ['*'],
+        }),
+      );
+      NagSuppressions.addResourceSuppressions(
+        this.m2mSecret,
+        [
+          {
+            id: 'AwsSolutions-SMG4',
+            reason:
+              'SEC-030: this secret mirrors a Cognito app-client secret whose rotation is owned by Cognito; automatic Secrets Manager rotation would desynchronise the two. Rotation is handled by rotating the Cognito client secret and redeploying.',
+          },
+        ],
+        true,
+      );
+    }
   }
 }
