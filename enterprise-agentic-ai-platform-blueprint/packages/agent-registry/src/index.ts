@@ -61,3 +61,11 @@ export {
   GaPlatformToolsConstruct,
   type GaPlatformToolsConstructProps,
 } from "./ga-platform-tools-construct";
+
+export {
+  AgentBuilderInspectRole,
+  AGENT_BUILDER_INSPECT_ACTIONS,
+  AGENT_BUILDER_INSPECT_RUNTIME_ACTIONS,
+  AGENT_BUILDER_INSPECT_FORBIDDEN_FRAGMENTS,
+  type AgentBuilderInspectRoleProps,
+} from "./agent-builder-inspect-role";
