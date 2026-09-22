@@ -44,6 +44,13 @@ export interface CedarEvaluationInput {
    * Empty array means the principal has no group membership.
    */
   readonly principalGroups: readonly string[];
+  /**
+   * The principal's stable subject identifier (the JWT `sub` claim). Enables
+   * per-developer entitlements (`permit(principal == Developer::"<sub>", ...)`)
+   * alongside group entitlements. Undefined/empty means no subject was
+   * presented, so subject-bound permits cannot match — fail-closed.
+   */
+  readonly principalSubject?: string;
 }
 
 export type CedarDecision =
@@ -52,6 +59,16 @@ export type CedarDecision =
 
 const PERMIT_REGEX =
   /permit\s*\(\s*principal(?:\s+in\s+CognitoGroup::"([^"]+)")?\s*,\s*action\s*==\s*Action::"InvokeTool"\s*,\s*resource\s*==\s*Tool::"([^"]+)"\s*\)\s*;/g;
+
+/**
+ * Per-developer (subject) permit grammar, additive to the group grammar:
+ *   permit(principal == Developer::"<sub>", action == Action::"InvokeTool",
+ *          resource == Tool::"<id>");
+ * The `sub` claim is a stable, opaque per-user identifier, so the principal is
+ * matched by exact equality (`==`), not set membership (`in`).
+ */
+const SUBJECT_PERMIT_REGEX =
+  /permit\s*\(\s*principal\s*==\s*Developer::"([^"]+)"\s*,\s*action\s*==\s*Action::"InvokeTool"\s*,\s*resource\s*==\s*Tool::"([^"]+)"\s*\)\s*;/g;
 
 /**
  * Pure Cedar evaluator scoped to the grammar emitted by
@@ -80,6 +97,30 @@ export function evaluateCedar(input: CedarEvaluationInput): CedarDecision {
     };
   }
   const principalGroups = Array.isArray(input.principalGroups) ? input.principalGroups : [];
+  const principalSubject =
+    typeof input.principalSubject === 'string' && input.principalSubject.length > 0
+      ? input.principalSubject
+      : undefined;
+
+  // 1. Subject-bound permits win first — the most specific entitlement.
+  const subjectBoundPermits: string[] = [];
+  SUBJECT_PERMIT_REGEX.lastIndex = 0;
+  let subjectMatch: RegExpExecArray | null;
+  while ((subjectMatch = SUBJECT_PERMIT_REGEX.exec(input.cedarPolicyDocument)) !== null) {
+    const boundSubject = subjectMatch[1];
+    const permitToolId = subjectMatch[2];
+    if (permitToolId === input.toolId && typeof boundSubject === 'string' && boundSubject.length > 0) {
+      subjectBoundPermits.push(boundSubject);
+    }
+  }
+  if (subjectBoundPermits.length > 0 && principalSubject !== undefined) {
+    if (subjectBoundPermits.includes(principalSubject)) {
+      return {
+        decision: 'allow',
+        reason: `principal subject matches Developer permit for tool '${input.toolId}'`,
+      };
+    }
+  }
 
   let unconditionalPermitMatched = false;
   const groupBoundPermits: string[] = [];
@@ -113,10 +154,24 @@ export function evaluateCedar(input: CedarEvaluationInput): CedarDecision {
           `principal in group(s) [${intersect.join(', ')}] matches Cedar permit for tool '${input.toolId}'`,
       };
     }
+    // Fall through to deny — but distinguish whether subject permits also
+    // existed so the reason is actionable.
+    const subjectNote =
+      subjectBoundPermits.length > 0
+        ? ` (subject permits present but principal sub ${principalSubject ? 'did not match' : 'absent'})`
+        : '';
     return {
       decision: 'deny',
       reason:
-        `principal groups [${principalGroups.join(', ') || '(none)'}] do not intersect tool '${input.toolId}' allow-list [${groupBoundPermits.join(', ')}]`,
+        `principal groups [${principalGroups.join(', ') || '(none)'}] do not intersect tool '${input.toolId}' allow-list [${groupBoundPermits.join(', ')}]${subjectNote}`,
+    };
+  }
+  if (subjectBoundPermits.length > 0) {
+    // Only subject permits exist for this tool and none matched the principal.
+    return {
+      decision: 'deny',
+      reason:
+        `principal sub ${principalSubject ? `'${principalSubject}'` : '(none)'} does not match tool '${input.toolId}' subject allow-list [${subjectBoundPermits.join(', ')}]`,
     };
   }
   return {
@@ -167,6 +222,36 @@ export function extractPrincipalGroupsFromEvent(event: unknown): readonly string
   return [];
 }
 
+/**
+ * Extracts the principal's stable subject identifier (JWT `sub` claim) from the
+ * same three documented event shapes as {@link extractPrincipalGroupsFromEvent}.
+ * Returns undefined when no `sub` is present — subject-bound permits then cannot
+ * match, which is fail-closed.
+ */
+export function extractPrincipalSubjectFromEvent(event: unknown): string | undefined {
+  if (!event || typeof event !== 'object') return undefined;
+  const ev = event as Record<string, unknown>;
+  const candidates: unknown[] = [
+    (ev.identity as Record<string, unknown> | undefined)?.claims,
+    ((ev.requestContext as Record<string, unknown> | undefined)?.authorizer as
+      | Record<string, unknown>
+      | undefined)?.jwt &&
+      (((ev.requestContext as Record<string, unknown>).authorizer as Record<string, unknown>)
+        .jwt as Record<string, unknown>).claims,
+    ev.claims,
+  ];
+  for (const c of candidates) {
+    if (c && typeof c === 'object') {
+      const claims = c as Record<string, unknown>;
+      const sub = claims['sub'];
+      if (typeof sub === 'string' && sub.length > 0) {
+        return sub;
+      }
+    }
+  }
+  return undefined;
+}
+
 export class CedarDeniedError extends Error {
   readonly toolId: string;
   readonly principalGroups: readonly string[];
@@ -209,10 +294,12 @@ export function withCedarEnforcement(
     const cedarDoc =
       options.cedarPolicyDocument ?? process.env.AGENTICAI_CEDAR_POLICY_DOCUMENT ?? '';
     const principalGroups = extractPrincipalGroupsFromEvent(event);
+    const principalSubject = extractPrincipalSubjectFromEvent(event);
     const decision = evaluateCedar({
       toolId: options.toolId,
       cedarPolicyDocument: cedarDoc,
       principalGroups,
+      principalSubject,
     });
     if (decision.decision === 'deny') {
       throw new CedarDeniedError(options.toolId, principalGroups, decision.reason);
