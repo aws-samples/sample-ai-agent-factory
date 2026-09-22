@@ -806,6 +806,22 @@ switch (stage) {
         true ||
       app.node.tryGetContext("agenticai/enablePipelineRuntimeMemory") ===
         "true";
+    const agentImageVariantRaw = app.node.tryGetContext(
+      "agenticai/agentImageVariant",
+    );
+    if (
+      agentImageVariantRaw !== undefined &&
+      agentImageVariantRaw !== "compatibility" &&
+      agentImageVariantRaw !== "generated-agent"
+    ) {
+      throw new Error(
+        "agenticai/agentImageVariant must be 'compatibility' or 'generated-agent'",
+      );
+    }
+    const agentImageVariant: "compatibility" | "generated-agent" =
+      agentImageVariantRaw === "generated-agent"
+        ? "generated-agent"
+        : "compatibility";
     const gatewayPolicyEngineMode = gatewayPolicyEngineModeContext(
       "agenticai/gatewayPolicyEngineMode",
     );
@@ -1028,6 +1044,9 @@ switch (stage) {
     }
     if (includeWorkload && enablePipelineRuntimeMemory) {
       sharedSynthContext["agenticai/enablePipelineRuntimeMemory"] = "true";
+      if (agentImageVariant === "generated-agent") {
+        sharedSynthContext["agenticai/agentImageVariant"] = "generated-agent";
+      }
     }
     if (Object.keys(gaRegistryRecordGenerations).length > 0) {
       sharedSynthContext["agenticai/gaRegistryRecordGenerations"] =
@@ -1109,6 +1128,7 @@ switch (stage) {
         gaRegistry,
         policyEngine,
         enablePipelineRuntimeMemory,
+        agentImageVariant,
         synthContext: sharedSynthContext,
       });
     }

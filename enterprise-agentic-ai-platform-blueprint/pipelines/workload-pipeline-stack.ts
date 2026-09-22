@@ -97,6 +97,8 @@ export interface WorkloadStageProps extends StageProps {
   readonly policyEngineIamRoleArns?: readonly string[];
   /** Opt-in: also deploy the native Runtime+Memory foundation (default false). */
   readonly enablePipelineRuntimeMemory?: boolean;
+  /** Which agent image the pipeline Runtime runs (default 'compatibility'). */
+  readonly agentImageVariant?: "compatibility" | "generated-agent";
   readonly auditOamSinkArn?: string;
   readonly notificationEmail?: string;
 }
@@ -152,6 +154,7 @@ export class WorkloadDeploymentStage extends Stage {
             tenantId: props.tenantId,
             costCentre: props.costCentre,
             runtimeExecutionRoleArnOverride: `${rolePrefix}/AgenticAI-D03-${props.envName}-${props.tenantId}-${props.agentId}-runtime`,
+            agentImageVariant: props.agentImageVariant,
           },
         );
         this.runtimeMemoryStack.addDependency(this.gatewayStack);
@@ -258,6 +261,8 @@ export interface WorkloadPipelineStackProps extends StackProps {
    * R2 Gateway-only rollback graph. Requires GA Registry mode.
    */
   readonly enablePipelineRuntimeMemory?: boolean;
+  /** Which agent image the pipeline Runtime runs (default 'compatibility'). */
+  readonly agentImageVariant?: "compatibility" | "generated-agent";
   readonly workloadNonprodEnv: Required<Environment>;
   readonly workloadProdEnv: Required<Environment>;
   /** Account-specific AZ names produced by read-only preflight. */
@@ -621,6 +626,7 @@ export class WorkloadPipelineStack extends Stack {
       policyEngineMode: props.policyEngine?.mode,
       policyEngineIamRoleArns: props.policyEngine?.nonprodIamRoleArns,
       enablePipelineRuntimeMemory: props.enablePipelineRuntimeMemory,
+      agentImageVariant: props.agentImageVariant,
       auditOamSinkArn: props.auditOamSinkArn,
       notificationEmail: props.notificationEmail,
     });
@@ -745,6 +751,7 @@ export class WorkloadPipelineStack extends Stack {
       policyEngineMode: props.policyEngine?.mode,
       policyEngineIamRoleArns: props.policyEngine?.prodIamRoleArns,
       enablePipelineRuntimeMemory: props.enablePipelineRuntimeMemory,
+      agentImageVariant: props.agentImageVariant,
       auditOamSinkArn: props.auditOamSinkArn,
       notificationEmail: props.notificationEmail,
     });

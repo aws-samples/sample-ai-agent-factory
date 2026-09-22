@@ -95,6 +95,7 @@ function singleResource(template: Template, type: string): Record<string, any> {
 
 function runtimeMemoryTemplate(
   envName: "nonprod" | "prod" = "nonprod",
+  agentImageVariant?: "compatibility" | "generated-agent",
 ): Template {
   const app = new App();
   const account = envName === "nonprod" ? NONPROD_ACCOUNT : PROD_ACCOUNT;
@@ -107,6 +108,7 @@ function runtimeMemoryTemplate(
       tenantId: "demo",
       costCentre: "engineering",
       runtimeExecutionRoleArnOverride: `arn:aws:iam::${account}:role/AgenticAI-D03-${envName}-demo-primary-runtime`,
+      agentImageVariant,
     }),
   );
 }
@@ -201,6 +203,24 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
     expect(rendered).not.toContain("LLM_GATEWAY");
     expect(rendered).not.toContain("TOOL_GATEWAY");
     expect(rendered).not.toContain("ClientSecret");
+  });
+
+  it("agentImageVariant selects a distinct image asset and defaults to compatibility", () => {
+    // The two variants build from different source directories, so their
+    // DockerImageAsset hashes differ, which changes the Runtime ContainerUri /
+    // asset references in the rendered template. The default and the explicit
+    // 'compatibility' variant must render identically (back-compat, 442de00).
+    const norm = (t: Template): string =>
+      JSON.stringify(t.toJSON()).replace(/RuntimeMemory-nonprod/g, "S");
+
+    const compat = norm(runtimeMemoryTemplate("nonprod", "compatibility"));
+    const generated = norm(runtimeMemoryTemplate("nonprod", "generated-agent"));
+    const defaulted = norm(runtimeMemoryTemplate("nonprod"));
+
+    // Distinct image content => distinct rendered template.
+    expect(generated).not.toEqual(compat);
+    // Default must equal the compatibility variant.
+    expect(defaulted).toEqual(compat);
   });
 
   it("uses a rotating five-tagged key with live-observed grant-operation constraints", () => {
