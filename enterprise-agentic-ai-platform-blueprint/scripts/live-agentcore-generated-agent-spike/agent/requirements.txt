@@ -1,0 +1,21 @@
+# Real generated-agent container dependencies. Unlike the inert compatibility
+# handler, this agent DOES wire the platform integrations, so it installs the
+# clients the contract mandates:
+#   * strands-agents            -> Agent + LiteLLMModel (LLM Gateway inference)
+#   * strands-agents-tools      -> MCPClient (Tools Gateway)
+#   * litellm                   -> OpenAI-compatible transport for LiteLLMModel
+#   * mcp                       -> streamable-http MCP client transport
+#   * bedrock-agentcore         -> BedrockAgentCoreApp runtime contract + Memory
+#   * boto3/botocore            -> AgentCore Memory data-plane client
+#
+# Pins match the versions live-proven by the inference-Gateway and Identity M2M
+# spikes (strands-agents 1.44.0, litellm 1.89.1, boto3/botocore 1.43.97/.98).
+# Keep an exact pin for every dependency actually installed; the image is built
+# and vulnerability-scanned before any Runtime consumes it.
+boto3==1.43.98
+botocore==1.43.98
+strands-agents==1.44.0
+strands-agents-tools==0.2.9
+litellm==1.89.1
+mcp==1.15.0
+bedrock-agentcore==1.23.1
