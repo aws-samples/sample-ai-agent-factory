@@ -215,6 +215,8 @@ export class PlatformInferenceGatewayConstruct extends Construct {
   readonly gatewayRole: Role;
   readonly userPool: UserPool;
   readonly userPoolClient: UserPoolClient;
+  /** Dedicated M2M client published cross-account for generated agents. */
+  readonly workstreamUserPoolClient?: UserPoolClient;
   readonly userPoolDomain: UserPoolDomain;
   readonly gateway: CfnGateway;
   readonly inferenceTarget: CfnResource;
@@ -331,6 +333,30 @@ export class PlatformInferenceGatewayConstruct extends Construct {
         scopes: [OAuthScope.resourceServer(resourceServer, invokeScope)],
       },
     });
+    if ((props.m2mSecretReaderAccountIds?.length ?? 0) > 0) {
+      // Do not reuse the long-lived Platform operator client: clients that
+      // entered Cognito's multi-secret lifecycle no longer expose
+      // ClientSecret through DescribeUserPoolClient. A new dedicated client
+      // isolates generated-agent rotation/recovery and leaves existing callers
+      // untouched.
+      this.workstreamUserPoolClient = new UserPoolClient(
+        this,
+        'GeneratedAgentMachineClient',
+        {
+          userPool: this.userPool,
+          userPoolClientName: `${gatewayName}-generated-agent-m2m`,
+          generateSecret: true,
+          preventUserExistenceErrors: true,
+          enableTokenRevocation: true,
+          accessTokenValidity:
+            props.accessTokenValidity ?? Duration.minutes(5),
+          oAuth: {
+            flows: { clientCredentials: true },
+            scopes: [OAuthScope.resourceServer(resourceServer, invokeScope)],
+          },
+        },
+      );
+    }
     this.userPoolDomain = this.userPool.addDomain('Domain', {
       cognitoDomain: {
         domainPrefix: `${gatewayName}-${stack.account}-${stack.region}`.toLowerCase(),
@@ -371,7 +397,12 @@ export class PlatformInferenceGatewayConstruct extends Construct {
       authorizerConfiguration: {
         customJwtAuthorizer: {
           discoveryUrl: this.discoveryUrl,
-          allowedClients: [this.userPoolClient.userPoolClientId],
+          allowedClients: [
+            this.userPoolClient.userPoolClientId,
+            ...(this.workstreamUserPoolClient
+              ? [this.workstreamUserPoolClient.userPoolClientId]
+              : []),
+          ],
           allowedScopes: [this.oauthScope],
         },
       },
@@ -470,7 +501,7 @@ export class PlatformInferenceGatewayConstruct extends Construct {
         // exec role is denied iam:CreateRole for the generated name).
         secretObjectValue: {
           clientId: SecretValue.unsafePlainText(
-            this.userPoolClient.userPoolClientId,
+            this.workstreamUserPoolClient!.userPoolClientId,
           ),
           issuer: SecretValue.unsafePlainText(
             `https://cognito-idp.${stack.region}.${stack.urlSuffix}/${this.userPool.userPoolId}`,
@@ -566,13 +597,13 @@ export class PlatformInferenceGatewayConstruct extends Construct {
         properties: {
           Region: stack.region,
           UserPoolId: this.userPool.userPoolId,
-          ClientId: this.userPoolClient.userPoolClientId,
+          ClientId: this.workstreamUserPoolClient!.userPoolClientId,
           SecretId: this.m2mSecret.secretArn,
-          MetadataVersion: '2',
+          MetadataVersion: '3',
         },
       });
       populator.node.addDependency(this.m2mSecret);
-      populator.node.addDependency(this.userPoolClient);
+      populator.node.addDependency(this.workstreamUserPoolClient!);
       populatorFn.grantInvoke(frameworkRole);
       NagSuppressions.addResourceSuppressions(
         frameworkRole,

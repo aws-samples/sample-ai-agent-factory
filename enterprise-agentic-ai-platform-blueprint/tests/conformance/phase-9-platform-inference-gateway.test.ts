@@ -375,6 +375,13 @@ describe('Phase 9 — opt-in cross-account M2M secret', () => {
 
   it('publishes a CMK-encrypted secret readable by the declared account', () => {
     const template = synthWithReaders(['444444444444']);
+    template.resourceCountIs('AWS::Cognito::UserPoolClient', 2);
+    const gateway = onlyResource(template, 'AWS::BedrockAgentCore::Gateway');
+    const allowedClients = (
+      (gateway.Properties as any).AuthorizerConfiguration.CustomJWTAuthorizer
+        .AllowedClients as unknown[]
+    );
+    expect(allowedClients).toHaveLength(2);
     const secret = onlyResource(template, 'AWS::SecretsManager::Secret');
     // Encrypted with a dedicated CMK (KmsKeyId present).
     expect((secret.Properties as Record<string, unknown>).KmsKeyId).toBeDefined();
