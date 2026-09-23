@@ -182,6 +182,7 @@ def on_event(event, context):
     region = props["Region"]
     provider_name = props["ProviderName"]
     workload_name = props["WorkloadName"]
+    tags = props["Tags"]
     client = boto3.client("bedrock-agentcore-control", region_name=region)
 
     if rt == "Delete":
@@ -205,7 +206,7 @@ def on_event(event, context):
 
     # WorkloadIdentity (idempotent).
     try:
-        client.create_workload_identity(name=workload_name)
+        client.create_workload_identity(name=workload_name, tags=tags)
     except ClientError as e:
         if "AlreadyExists" not in e.response["Error"]["Code"] and "Conflict" not in e.response["Error"]["Code"]:
             raise
@@ -224,6 +225,7 @@ def on_event(event, context):
             name=provider_name,
             credentialProviderVendor="CognitoOauth2",
             oauth2ProviderConfigInput=provider_config,
+            tags=tags,
         )
     except ClientError as e:
         code = e.response["Error"]["Code"]
@@ -756,7 +758,8 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
       AGENTCORE_INFERENCE_GATEWAY_URL: cfg.inferenceGatewayUrl,
       AGENTCORE_SUBSCRIBED_TOOLS: cfg.subscribedTools.join(","),
       AGENTCORE_INFERENCE_SCOPE: cfg.inferenceScope,
-      AGENTCORE_INFERENCE_CREDENTIAL_PROVIDER: this.credentialProviderName(props),
+      AGENTCORE_INFERENCE_CREDENTIAL_PROVIDER:
+        this.credentialProviderName(props),
       AGENTCORE_WORKLOAD_IDENTITY_NAME: this.workloadIdentityName(props),
     };
   }
@@ -816,6 +819,14 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
               },
             }),
             new PolicyStatement({
+              sid: "InitializeDefaultTokenVault",
+              effect: Effect.ALLOW,
+              actions: ["bedrock-agentcore:CreateTokenVault"],
+              resources: [
+                `arn:aws:bedrock-agentcore:${this.region}:${this.account}:token-vault/default`,
+              ],
+            }),
+            new PolicyStatement({
               sid: "ManageIdentityAndProvider",
               effect: Effect.ALLOW,
               actions: [
@@ -826,6 +837,7 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
                 "bedrock-agentcore:GetOauth2CredentialProvider",
                 "bedrock-agentcore:UpdateOauth2CredentialProvider",
                 "bedrock-agentcore:DeleteOauth2CredentialProvider",
+                "bedrock-agentcore:TagResource",
               ],
               // These control-plane actions take no resource-level ARN in the
               // current service model (SEC-011 family); scoped by account trust.
@@ -860,6 +872,7 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
         ProviderName: providerName,
         WorkloadName: workloadName,
         Scope: cfg.inferenceScope,
+        Tags: this.allocationTagRecord(props),
       },
     });
     NagSuppressions.addResourceSuppressions(

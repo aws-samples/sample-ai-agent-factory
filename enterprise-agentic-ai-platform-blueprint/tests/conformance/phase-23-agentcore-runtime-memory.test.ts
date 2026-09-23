@@ -116,7 +116,10 @@ function runtimeMemoryTemplate(
               inferenceGatewayUrl: `https://inf-${envName}.gateway.bedrock-agentcore.${REGION}.amazonaws.com/mcp`,
               modelId: `agenticai-inference-${envName}-bedrock/openai.gpt-oss-120b`,
               guardrailId: `arn:aws:bedrock:${REGION}:${PLATFORM_ACCOUNT}:guardrail/example`,
-              subscribedTools: ["target-tool-echo___echo", "target-tool-ping___ping"],
+              subscribedTools: [
+                "target-tool-echo___echo",
+                "target-tool-ping___ping",
+              ],
               inferenceScope: `agenticai-inference-${envName}-api/invoke`,
               m2mSecretArn: `arn:aws:secretsmanager:${REGION}:${PLATFORM_ACCOUNT}:secret:agenticai/inference-m2m/agenticai-inference-${envName}-abc`,
             }
@@ -194,8 +197,7 @@ function pipeline(
           nonprod: {
             inferenceGatewayUrl: `https://inf-nonprod.gateway.bedrock-agentcore.${REGION}.amazonaws.com/mcp`,
             inferenceScope: "agenticai-inference-nonprod-api/invoke",
-            modelId:
-              "agenticai-inference-nonprod-bedrock/openai.gpt-oss-120b",
+            modelId: "agenticai-inference-nonprod-bedrock/openai.gpt-oss-120b",
             guardrailId: `arn:aws:bedrock:${REGION}:${PLATFORM_ACCOUNT}:guardrail/nonprod`,
             m2mSecretArn: `arn:aws:secretsmanager:${REGION}:${PLATFORM_ACCOUNT}:secret:agenticai/inference-m2m/nonprod`,
           },
@@ -282,14 +284,20 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
   it("compatibility variant sets only AGENTCORE_MEMORY_ID on the Runtime", () => {
     const template = runtimeMemoryTemplate("nonprod", "compatibility");
     const runtime = singleResource(template, "AWS::BedrockAgentCore::Runtime");
-    const env = runtime.Properties.EnvironmentVariables as Record<string, unknown>;
+    const env = runtime.Properties.EnvironmentVariables as Record<
+      string,
+      unknown
+    >;
     expect(Object.keys(env)).toEqual(["AGENTCORE_MEMORY_ID"]);
   });
 
   it("generated-agent variant wires the full LiteLLM/MCP/tenant env contract", () => {
     const template = runtimeMemoryTemplate("nonprod", "generated-agent");
     const runtime = singleResource(template, "AWS::BedrockAgentCore::Runtime");
-    const env = runtime.Properties.EnvironmentVariables as Record<string, unknown>;
+    const env = runtime.Properties.EnvironmentVariables as Record<
+      string,
+      unknown
+    >;
     // Every var the container entrypoint reads must be present.
     for (const key of [
       "AGENTCORE_MEMORY_ID",
@@ -322,6 +330,50 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
     const rendered = JSON.stringify(template.toJSON());
     expect(rendered).toContain("get_oauth2_credential_provider");
     expect(rendered).toContain("did not reach READY within 250 seconds");
+  });
+
+  it("initializes only the default token vault and tags Identity resources", () => {
+    const template = runtimeMemoryTemplate("nonprod", "generated-agent");
+    const role = Object.values(template.findResources("AWS::IAM::Role")).find(
+      (resource: any) =>
+        resource.Properties.RoleName ===
+        "AgenticAI-D03-nonprod-demo-primary-idprov",
+    ) as any;
+    expect(role).toBeDefined();
+    const statements = role.Properties.Policies.flatMap(
+      (policy: any) => policy.PolicyDocument.Statement,
+    );
+    expect(statements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          Sid: "InitializeDefaultTokenVault",
+          Effect: "Allow",
+          Action: "bedrock-agentcore:CreateTokenVault",
+          Resource: `arn:aws:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:token-vault/default`,
+        }),
+        expect.objectContaining({
+          Sid: "ManageIdentityAndProvider",
+          Effect: "Allow",
+          Action: expect.arrayContaining(["bedrock-agentcore:TagResource"]),
+        }),
+      ]),
+    );
+
+    const credentialProviderResource = Object.values(
+      template.findResources("AWS::CloudFormation::CustomResource"),
+    ).find(
+      (resource: any) =>
+        resource.Properties.ProviderName ===
+        "AgenticAI_D03_nonprod_demo_primary_inference",
+    ) as any;
+    expect(credentialProviderResource).toBeDefined();
+    expect(credentialProviderResource.Properties.Tags).toEqual(REQUIRED_TAGS);
+    const handlerCode = JSON.stringify(template.toJSON());
+    expect(handlerCode).toContain(
+      "create_workload_identity(name=workload_name, tags=tags)",
+    );
+    expect(handlerCode).toContain("oauth2ProviderConfigInput=provider_config");
+    expect(handlerCode).toContain("tags=tags");
   });
 
   it("generated-agent variant fails closed when its runtime config is absent", () => {
@@ -909,9 +961,7 @@ describe("Phase 23 — prior-stage Runtime role", () => {
           Sid: "InvokeToolGateway",
           Effect: "Allow",
           Action: "bedrock-agentcore:InvokeGateway",
-          Resource: expect.stringContaining(
-            `:${NONPROD_ACCOUNT}:gateway/*`,
-          ),
+          Resource: expect.stringContaining(`:${NONPROD_ACCOUNT}:gateway/*`),
         }),
         expect.objectContaining({
           Sid: "AgentCoreIdentityInferenceToken",
@@ -924,9 +974,7 @@ describe("Phase 23 — prior-stage Runtime role", () => {
         expect.objectContaining({
           Sid: "ReadPlatformM2mSecret",
           Effect: "Allow",
-          Resource: expect.stringContaining(
-            "secret:agenticai/inference-m2m/",
-          ),
+          Resource: expect.stringContaining("secret:agenticai/inference-m2m/"),
         }),
         expect.objectContaining({
           Sid: "DecryptPlatformM2mSecret",
