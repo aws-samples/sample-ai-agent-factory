@@ -40,20 +40,26 @@ export interface D03WorkstreamRegistryRolesStackProps extends StackProps {
    * only when the RuntimeMemory stack runs the `"generated-agent"` variant.
    * When set, the role also gains: `bedrock-agentcore:InvokeGateway` on the
    * workstream tool Gateway ARN family; `GetWorkloadAccessToken` +
-   * `GetResourceOauth2Token` on the deterministic workload-identity and
-   * CognitoOauth2 credential-provider names; and cross-account
-   * `secretsmanager:GetSecretValue` + KMS decrypt on the Platform M2M secret.
+   * `GetResourceOauth2Token` on the `<prefix>_*` workload-identity family, the
+   * exact CognitoOauth2 credential provider, and their two parent containers;
+   * and `secretsmanager:GetSecretValue` on exactly that provider's
+   * service-managed client secret (live-proven 2026-09-23). The Runtime never
+   * reads the Platform M2M secret -- only the RuntimeMemory custom resource does.
    */
   readonly generatedAgentGrants?: GeneratedAgentRuntimeGrants;
 }
 
 /** Inputs for the opt-in generated-agent grants on the Runtime role. */
 export interface GeneratedAgentRuntimeGrants {
-  /** Platform M2M secret ARN published by the inference Gateway (Stage A). */
+  /**
+   * Platform M2M secret ARN published by the inference Gateway (Stage A).
+   * Retained as a pipeline-contract input; NOT granted to the Runtime role
+   * (the RuntimeMemory custom resource is the only reader).
+   */
   readonly m2mSecretArn: string;
   /** Deterministic CognitoOauth2 credential-provider name (this account). */
   readonly credentialProviderName: string;
-  /** Deterministic workload-identity name (this account). */
+  /** Deterministic workload-identity name PREFIX; RuntimeMemory mints `<prefix>_<12 hex>`. */
   readonly workloadIdentityName: string;
 }
 
@@ -431,32 +437,24 @@ export class D03WorkstreamRegistryRolesStack extends Stack {
           ],
         }),
       );
+      // Live-proven (2026-09-23, second generated-agent invoke): when the
+      // Runtime exchanges its workload token via GetResourceOauth2Token,
+      // AgentCore Identity reads the provider's MANAGED client secret AS THE
+      // CALLER and fails closed with "not authorized to perform:
+      // secretsmanager:GetSecretValue on ...:secret:bedrock-agentcore-identity!
+      // default/oauth2/<provider>-<random>". Grant exactly that provider's
+      // managed secret (Secrets Manager appends a random suffix, hence the
+      // trailing "-*" on an otherwise exact name). The Runtime never reads the
+      // Platform M2M secret -- only the RuntimeMemory custom resource does --
+      // so no cross-account secret or KMS grant belongs on this role.
       role.addToPolicy(
         new PolicyStatement({
-          sid: "ReadPlatformM2mSecret",
+          sid: "ReadManagedInferenceProviderSecret",
           effect: Effect.ALLOW,
-          actions: [
-            "secretsmanager:GetSecretValue",
-            "secretsmanager:DescribeSecret",
+          actions: ["secretsmanager:GetSecretValue"],
+          resources: [
+            `arn:aws:secretsmanager:${this.region}:${this.account}:secret:bedrock-agentcore-identity!default/oauth2/${grants.credentialProviderName}-*`,
           ],
-          resources: [grants.m2mSecretArn],
-        }),
-      );
-      role.addToPolicy(
-        new PolicyStatement({
-          sid: "DecryptPlatformM2mSecret",
-          effect: Effect.ALLOW,
-          actions: ["kms:Decrypt"],
-          // The Platform CMK id is not known at synth (cross-account, random).
-          // Constrain instead by ViaService + the exact secret's encryption
-          // context, which Secrets Manager sets to the secret ARN on decrypt.
-          resources: ["*"],
-          conditions: {
-            StringEquals: {
-              "kms:ViaService": `secretsmanager.${this.region}.amazonaws.com`,
-              "kms:EncryptionContext:SecretARN": grants.m2mSecretArn,
-            },
-          },
         }),
       );
     }

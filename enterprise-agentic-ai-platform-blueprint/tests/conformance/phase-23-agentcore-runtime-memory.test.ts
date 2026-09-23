@@ -1072,22 +1072,21 @@ describe("Phase 23 — prior-stage Runtime role", () => {
           ],
         }),
         expect.objectContaining({
-          Sid: "ReadPlatformM2mSecret",
+          // Live-proven: GetResourceOauth2Token reads the provider's MANAGED
+          // client secret as the caller; grant exactly that secret (random
+          // Secrets Manager suffix -> trailing "-*").
+          Sid: "ReadManagedInferenceProviderSecret",
           Effect: "Allow",
-          Resource: expect.stringContaining("secret:agenticai/inference-m2m/"),
-        }),
-        expect.objectContaining({
-          Sid: "DecryptPlatformM2mSecret",
-          Effect: "Allow",
-          Action: "kms:Decrypt",
-          Condition: expect.objectContaining({
-            StringEquals: expect.objectContaining({
-              "kms:ViaService": `secretsmanager.${REGION}.amazonaws.com`,
-            }),
-          }),
+          Action: "secretsmanager:GetSecretValue",
+          Resource: `arn:aws:secretsmanager:${REGION}:${NONPROD_ACCOUNT}:secret:bedrock-agentcore-identity!default/oauth2/AgenticAI_D03_nonprod_demo_primary_inference-*`,
         }),
       ]),
     );
+    // The Runtime never reads the Platform M2M secret and needs no KMS grant:
+    // only the RuntimeMemory custom resource seeds the provider from it.
+    const runtimeJson = JSON.stringify(statements);
+    expect(runtimeJson).not.toContain("secret:agenticai/inference-m2m/");
+    expect(runtimeJson).not.toContain("kms:Decrypt");
     // The workload identity is minted per Create by RuntimeMemory, so the
     // runtime role scopes GetWorkloadAccessToken to the prefix family; the
     // provider stays exact; both parent containers are included because the

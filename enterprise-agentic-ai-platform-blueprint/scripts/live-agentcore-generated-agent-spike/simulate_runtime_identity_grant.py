@@ -74,13 +74,16 @@ def main() -> int:
     vault = f"{base}:token-vault/default"
     identity = f"{directory}/workload-identity/{args.workload_prefix}_5dfed653a473"
     provider = f"{vault}/oauth2credentialprovider/{args.provider_name}"
+    sm = f"arn:{args.partition}:secretsmanager:{args.region}:{args.account}:secret"
+    managed_secret = f"{sm}:bedrock-agentcore-identity!default/oauth2/{args.provider_name}-e69ee5c7-W4Q3tK"
     cases = [
-        ("bedrock-agentcore:GetWorkloadAccessToken", directory),   # exact live denial
+        ("bedrock-agentcore:GetWorkloadAccessToken", directory),   # exact live denial #1
         ("bedrock-agentcore:GetWorkloadAccessToken", identity),
         ("bedrock-agentcore:GetResourceOauth2Token", provider),
         ("bedrock-agentcore:GetResourceOauth2Token", vault),
         ("bedrock-agentcore:GetResourceOauth2Token", identity),
         ("bedrock-agentcore:GetResourceOauth2Token", directory),
+        ("secretsmanager:GetSecretValue", managed_secret),           # exact live denial #2
         ("bedrock-agentcore:InvokeGateway", f"{base}:gateway/abc123"),
     ]
     negatives = [
@@ -88,6 +91,8 @@ def main() -> int:
         ("bedrock-agentcore:GetResourceOauth2Token", f"{vault}/oauth2credentialprovider/SomeOtherProvider"),
         ("bedrock-agentcore:GetWorkloadAccessToken", f"{directory}/workload-identity/Other_prefix_5dfed653a473"),
         ("bedrock-agentcore:CreateWorkloadIdentity", directory),
+        ("secretsmanager:GetSecretValue", f"{sm}:bedrock-agentcore-identity!default/oauth2/SomeOtherProvider-abc123-XyZ"),
+        ("secretsmanager:GetSecretValue", f"arn:{args.partition}:secretsmanager:{args.region}:111111111111:secret:agenticai/inference-m2m/agenticai-inference-nonprod-abc"),
         ("bedrock:InvokeModel", f"arn:{args.partition}:bedrock:{args.region}::foundation-model/anthropic.claude-3-haiku"),
     ]
 
