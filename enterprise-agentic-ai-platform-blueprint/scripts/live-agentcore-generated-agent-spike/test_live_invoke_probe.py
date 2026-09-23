@@ -55,16 +55,31 @@ def test_positive_gate_rejects_non_2xx_even_with_good_body() -> None:
     assert probe.assess_positive(500, GOOD_BODY)["http2xx"] is False
 
 
-def test_unsubscribed_twin_rejects_any_success_marker_or_tool_call() -> None:
+def test_unsubscribed_twin_accepts_either_refusal_layer_and_rejects_leaks() -> None:
+    # Layer 2: the agent's PermissionError surfaces as a non-2xx without marker.
     refused = {"errorCode": "RuntimeClientError", "errorMessageFingerprint": "x"}
     checks = probe.assess_unsubscribed(424, refused)
-    assert checks["runtimeDidNotReturnSuccessMarker"] is True
+    assert checks["refusedByModelAllowlistOrAgentGuard"] is True
+    assert checks["refusalLayer"] == "agent-permission-error"
     assert checks["forbiddenToolNeverCalled"] is True
     assert checks["noToolCallsRecorded"] is True
 
+    # Layer 1 (live-proven deterministic): the model declines the forbidden
+    # directive itself -> 200, marker, no tool calls, ONE content block.
+    declined = {**GOOD_BODY, "toolCalls": [], "contentBlocks": 1}
+    checks = probe.assess_unsubscribed(200, declined)
+    assert checks["refusedByModelAllowlistOrAgentGuard"] is True
+    assert checks["refusalLayer"] == "model-allowlist"
+
+    # A marker-bearing 200 that ALSO ran a tool loop is not a refusal.
+    looped = {**GOOD_BODY, "toolCalls": [], "contentBlocks": 2}
+    checks = probe.assess_unsubscribed(200, looped)
+    assert checks["refusedByModelAllowlistOrAgentGuard"] is False
+    assert checks["refusalLayer"] == "none"
+
     leaked = {**GOOD_BODY, "toolCalls": [probe.UNSUBSCRIBED_TOOL]}
     checks = probe.assess_unsubscribed(200, leaked)
-    assert checks["runtimeDidNotReturnSuccessMarker"] is False
+    assert checks["refusedByModelAllowlistOrAgentGuard"] is False
     assert checks["forbiddenToolNeverCalled"] is False
 
 

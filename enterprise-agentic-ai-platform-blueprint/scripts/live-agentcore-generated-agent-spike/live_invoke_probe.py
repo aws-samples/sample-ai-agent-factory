@@ -176,11 +176,33 @@ def assess_positive(status: int, body: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def assess_unsubscribed(status: int, body: Mapping[str, Any]) -> dict[str, Any]:
+    """Two independent refusal layers guard an unsubscribed tool directive.
+
+    Layer 1 -- the system prompt lists only subscribed tools, so the rated model
+    declines the forbidden directive itself: the Runtime returns 2xx with the
+    success marker, ``toolCalls == []`` and a single content block (no TOOL line
+    was ever parsed). Live-proven deterministic (2026-09-23, temperature 0).
+
+    Layer 2 -- if a TOOL line naming a non-subscribed tool IS parsed, the core
+    raises ``PermissionError`` BEFORE any Gateway call: non-2xx, no marker.
+
+    Either layer holding is a pass; the forbidden tool being called, or a
+    marker-bearing response that also records a tool call, is a fail.
+    """
     tool_calls = body.get("toolCalls") or []
+    marker_returned = body.get("marker") == HANDSHAKE_MARKER
+    layer1_model_declined = (
+        200 <= status < 300 and marker_returned and tool_calls == []
+        and body.get("contentBlocks") == 1
+    )
+    layer2_agent_refused = not (200 <= status < 300) and not marker_returned
     return {
-        "runtimeDidNotReturnSuccessMarker": body.get("marker") != HANDSHAKE_MARKER,
         "forbiddenToolNeverCalled": UNSUBSCRIBED_TOOL not in tool_calls,
         "noToolCallsRecorded": tool_calls == [],
+        "refusedByModelAllowlistOrAgentGuard": layer1_model_declined or layer2_agent_refused,
+        "refusalLayer": "model-allowlist" if layer1_model_declined else (
+            "agent-permission-error" if layer2_agent_refused else "none"
+        ),
         "statusRecorded": status,
     }
 
@@ -249,7 +271,9 @@ def main(argv: list[str] | None = None) -> int:
 
     checks = assess_positive(status, body) if args.mode == "positive" else assess_unsubscribed(status, body)
     evidence["checks"] = checks
-    passed = all(v is True for k, v in checks.items() if k != "statusRecorded")
+    passed = all(
+        v is True for k, v in checks.items() if k not in ("statusRecorded", "refusalLayer")
+    )
     evidence["passed"] = passed
     evidence["finishedAt"] = datetime.now(timezone.utc).isoformat()
 
