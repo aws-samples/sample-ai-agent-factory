@@ -1090,14 +1090,21 @@ describe("Phase 23 — prior-stage Runtime role", () => {
     );
     // The workload identity is minted per Create by RuntimeMemory, so the
     // runtime role scopes GetWorkloadAccessToken to the prefix family; the
-    // provider stays exact. Never a bare workload-identity wildcard.
+    // provider stays exact; both parent containers are included because the
+    // service authorizes the data-plane token calls against them too
+    // (live-proven on the first generated-agent invoke). Never a bare wildcard.
     const identityStatement = statements.find(
       (statement: any) => statement.Sid === "AgentCoreIdentityInferenceToken",
     );
     expect(identityStatement.Resource).toEqual([
       `arn:aws:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:token-vault/default/oauth2credentialprovider/AgenticAI_D03_nonprod_demo_primary_inference`,
       `arn:aws:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:workload-identity-directory/default/workload-identity/AgenticAI_D03_nonprod_demo_primary_*`,
+      `arn:aws:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:workload-identity-directory/default`,
+      `arn:aws:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:token-vault/default`,
     ]);
+    expect(JSON.stringify(identityStatement.Resource)).not.toContain(
+      "workload-identity/*",
+    );
   });
 });
 

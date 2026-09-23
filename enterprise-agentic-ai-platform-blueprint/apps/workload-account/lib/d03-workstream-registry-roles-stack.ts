@@ -406,6 +406,15 @@ export class D03WorkstreamRegistryRolesStack extends Stack {
       // (a fixed name proved unsafe live: TagResource 500s and deleted names
       // tombstone). Scope to this workstream's prefix family, not "*".
       const workloadIdentityArn = `arn:aws:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default/workload-identity/${grants.workloadIdentityName}_*`;
+      // Service reference: GetWorkloadAccessToken authorizes on `workload-identity`
+      // AND its parent `workload-identity-directory`; GetResourceOauth2Token on
+      // `oauth2credentialprovider`, `token-vault`, `workload-identity` and the
+      // directory. Live-proven (2026-09-23, first generated-agent invoke): the
+      // container was denied GetWorkloadAccessToken on the bare directory ARN
+      // with only the named-identity family granted. Both default containers
+      // are single fixed resources in this account/region -- never "*".
+      const workloadDirectoryArn = `arn:aws:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default`;
+      const tokenVaultArn = `arn:aws:bedrock-agentcore:${this.region}:${this.account}:token-vault/default`;
       role.addToPolicy(
         new PolicyStatement({
           sid: "AgentCoreIdentityInferenceToken",
@@ -414,7 +423,12 @@ export class D03WorkstreamRegistryRolesStack extends Stack {
             "bedrock-agentcore:GetWorkloadAccessToken",
             "bedrock-agentcore:GetResourceOauth2Token",
           ],
-          resources: [providerArn, workloadIdentityArn],
+          resources: [
+            providerArn,
+            workloadIdentityArn,
+            workloadDirectoryArn,
+            tokenVaultArn,
+          ],
         }),
       );
       role.addToPolicy(

@@ -1,0 +1,108 @@
+"""Simulate the Runtime execution role's AgentCore Identity grant.
+
+Reads a rendered RegistryRoles template, collects every policy statement
+attached to the ``AgenticAI-D03-<env>-<tenant>-<agent>-runtime`` role, resolves
+partition/account/region intrinsics, and runs ``iam:SimulateCustomPolicy`` for
+the exact data-plane pairs the generated agent exercises at invoke time --
+including the pair AgentCore denied on the first live invoke (2026-09-23):
+``GetWorkloadAccessToken`` on the bare ``workload-identity-directory/default``.
+
+Positive pairs must be ``allowed``; a foreign directory and a foreign provider
+must stay implicitly denied; the DenyDirectBedrockInvoke guard must still
+deny ``bedrock:InvokeModel``. Read-only. Exit 2 on any failure.
+
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+SPDX-License-Identifier: MIT-0
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import boto3
+
+
+def resolve(node: Any, partition: str, account: str, region: str) -> Any:
+    if isinstance(node, dict):
+        if "Fn::Join" in node:
+            sep, parts = node["Fn::Join"]
+            return sep.join(str(resolve(p, partition, account, region)) for p in parts)
+        if "Ref" in node:
+            return {"AWS::Partition": partition, "AWS::AccountId": account, "AWS::Region": region}.get(node["Ref"], node["Ref"])
+        if "Fn::GetAtt" in node:
+            return f"arn:{partition}:iam::{account}:role/RESOLVED-{node['Fn::GetAtt'][0]}"
+        return {k: resolve(v, partition, account, region) for k, v in node.items()}
+    if isinstance(node, list):
+        return [resolve(v, partition, account, region) for v in node]
+    return node
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--template", required=True, type=Path)
+    ap.add_argument("--role-name", required=True)
+    ap.add_argument("--account", required=True)
+    ap.add_argument("--region", default="us-west-2")
+    ap.add_argument("--partition", default="aws")
+    ap.add_argument("--workload-prefix", default="AgenticAI_D03_nonprod_demo_primary")
+    ap.add_argument("--provider-name", default="AgenticAI_D03_nonprod_demo_primary_inference")
+    args = ap.parse_args()
+
+    template = json.loads(args.template.read_text())
+    resources = template["Resources"]
+    role_id = next(
+        (lid for lid, r in resources.items() if r["Type"] == "AWS::IAM::Role" and r["Properties"].get("RoleName") == args.role_name),
+        None,
+    )
+    if role_id is None:
+        print(json.dumps({"passed": False, "error": "runtime role not found"}))
+        return 2
+    docs = []
+    role = resources[role_id]
+    for p in role["Properties"].get("Policies", []):
+        docs.append(json.dumps(resolve(p["PolicyDocument"], args.partition, args.account, args.region)))
+    for lid, r in resources.items():
+        if r["Type"] == "AWS::IAM::Policy" and role_id in json.dumps(r["Properties"].get("Roles", [])):
+            docs.append(json.dumps(resolve(r["Properties"]["PolicyDocument"], args.partition, args.account, args.region)))
+
+    base = f"arn:{args.partition}:bedrock-agentcore:{args.region}:{args.account}"
+    directory = f"{base}:workload-identity-directory/default"
+    vault = f"{base}:token-vault/default"
+    identity = f"{directory}/workload-identity/{args.workload_prefix}_5dfed653a473"
+    provider = f"{vault}/oauth2credentialprovider/{args.provider_name}"
+    cases = [
+        ("bedrock-agentcore:GetWorkloadAccessToken", directory),   # exact live denial
+        ("bedrock-agentcore:GetWorkloadAccessToken", identity),
+        ("bedrock-agentcore:GetResourceOauth2Token", provider),
+        ("bedrock-agentcore:GetResourceOauth2Token", vault),
+        ("bedrock-agentcore:GetResourceOauth2Token", identity),
+        ("bedrock-agentcore:GetResourceOauth2Token", directory),
+        ("bedrock-agentcore:InvokeGateway", f"{base}:gateway/abc123"),
+    ]
+    negatives = [
+        ("bedrock-agentcore:GetWorkloadAccessToken", f"{base}:workload-identity-directory/other"),
+        ("bedrock-agentcore:GetResourceOauth2Token", f"{vault}/oauth2credentialprovider/SomeOtherProvider"),
+        ("bedrock-agentcore:GetWorkloadAccessToken", f"{directory}/workload-identity/Other_prefix_5dfed653a473"),
+        ("bedrock-agentcore:CreateWorkloadIdentity", directory),
+        ("bedrock:InvokeModel", f"arn:{args.partition}:bedrock:{args.region}::foundation-model/anthropic.claude-3-haiku"),
+    ]
+
+    iam = boto3.client("iam", region_name=args.region)
+    verdict: dict[str, Any] = {"allowed": [], "denied": [], "negativeDenied": [], "negativeAllowed": []}
+    for action, resource in cases:
+        d = iam.simulate_custom_policy(PolicyInputList=docs, ActionNames=[action], ResourceArns=[resource])["EvaluationResults"][0]["EvalDecision"]
+        (verdict["allowed"] if d == "allowed" else verdict["denied"]).append({"action": action, "resourceSuffix": resource.split(":", 5)[-1], "decision": d})
+    for action, resource in negatives:
+        d = iam.simulate_custom_policy(PolicyInputList=docs, ActionNames=[action], ResourceArns=[resource])["EvaluationResults"][0]["EvalDecision"]
+        (verdict["negativeDenied"] if d != "allowed" else verdict["negativeAllowed"]).append({"action": action, "resourceSuffix": resource.split(":", 5)[-1], "decision": d})
+    verdict["passed"] = not verdict["denied"] and not verdict["negativeAllowed"]
+    print(json.dumps(verdict, indent=2, sort_keys=True))
+    return 0 if verdict["passed"] else 2
+
+
+if __name__ == "__main__":  # pragma: no cover - live entrypoint
+    sys.exit(main())
