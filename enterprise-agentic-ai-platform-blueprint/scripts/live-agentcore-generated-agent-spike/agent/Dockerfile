@@ -19,15 +19,8 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-# !!! ADVERSARIAL FIXTURE -- NOT FOR RELEASE !!!
-# Break-the-Platform twin for the image scan gate (2026-09-23): the base is
-# deliberately pinned to an outdated Debian 12 Python image (October 2023) that
-# ECR basic scanning must report with CRITICAL/HIGH findings. The pipeline's
-# AgentImageScanGate must refuse this digest, CloudFormation must roll the
-# RuntimeMemory stack back, the prior Runtime version must keep serving, and
-# production must never be reached. This commit is reverted immediately after
-# the evidence is captured; the AL2023 digest-pinned base is the real one.
-FROM public.ecr.aws/docker/library/python:3.12.0-slim-bookworm@sha256:be90aa1dbedbeee34dd3c4934a4f93a0227d4cf95a40196896c4c67750b21690
+# AWS-maintained AL2023 Python base, pinned to the live-scanned ARM64 digest.
+FROM public.ecr.aws/lambda/python:3.13@sha256:c78a03b745f2c27b349377ae979d88b96bc68b457668705cd24a32b5f433c9cf
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
