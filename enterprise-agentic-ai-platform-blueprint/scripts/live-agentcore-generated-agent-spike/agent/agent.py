@@ -65,8 +65,14 @@ ACTOR_FIELD = "actorId"
 #: Bounded tool-use loop — mirrors the blueprint task-agent max-iteration guard.
 MAX_TOOL_ITERATIONS_DEFAULT = 6
 
-#: Bounded, deterministic inference token cap (live-proven value, not 16).
-INFERENCE_MAX_TOKENS = 256
+#: Bounded, deterministic inference token cap. Live-proven 2026-09-23 against
+#: the rated ``openai.gpt-oss-120b`` (a reasoning model whose hidden reasoning
+#: counts toward ``max_tokens``): the spike's one-word prompt fit in 256, but
+#: the reference agent's tool-selection turn exhausted 256 before any visible
+#: output and Strands raised ``MaxTokensReachedException``. 2048 leaves
+#: headroom for reasoning plus a one-line ``TOOL`` directive while staying a
+#: hard, small bound per turn (the loop is additionally iteration-capped).
+INFERENCE_MAX_TOKENS = 2048
 
 
 class AgentError(RuntimeError):

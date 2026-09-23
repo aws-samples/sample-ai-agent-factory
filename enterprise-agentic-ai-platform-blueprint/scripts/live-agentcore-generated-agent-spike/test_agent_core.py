@@ -309,3 +309,52 @@ def test_inference_bearer_mints_workload_token_then_resource_token(monkeypatch):
             },
         ),
     ]
+
+
+def test_inference_token_bound_leaves_reasoning_headroom_and_stays_bounded(
+    monkeypatch,
+):
+    """Regression pin for the live 2026-09-23 ``MaxTokensReachedException``.
+
+    The rated ``openai.gpt-oss-120b`` is a reasoning model whose hidden
+    reasoning counts toward ``max_tokens``; a 256 cap starved the tool-selection
+    turn before any visible output. The bound must (a) leave reasoning headroom,
+    (b) stay a hard, small per-turn cap so cost is bounded together with the
+    iteration cap, and (c) actually reach the model params.
+    """
+    assert 1024 <= agent_mod.INFERENCE_MAX_TOKENS <= 4096
+    assert agent_mod.MAX_TOOL_ITERATIONS_DEFAULT <= 8
+
+    captured: dict = {}
+
+    class FakeModel:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    class FakeResult:
+        message = {"content": [{"text": "verified"}]}
+
+    class FakeAgent:
+        def __init__(self, *, model, callback_handler):
+            self.model = model
+
+        def __call__(self, _prompt):
+            return FakeResult()
+
+    adapter = agent_mod._LiteLlmAdapter.__new__(agent_mod._LiteLlmAdapter)
+    adapter._Agent = FakeAgent
+    adapter._LiteLLMModel = FakeModel
+    adapter._base = "https://example.test/inference/v1"
+    adapter._model_id = "target/openai.gpt-oss-120b"
+    adapter._bearer = "token"
+
+    text = adapter.complete(
+        [{"role": "user", "content": "hi"}],
+        guardrail_identifier="gr-1",
+        stream=False,
+    )
+
+    assert text == "verified"
+    assert captured["params"]["max_tokens"] == agent_mod.INFERENCE_MAX_TOKENS
+    assert captured["params"]["guardrail_identifier"] == "gr-1"
+    assert captured["params"]["temperature"] == 0
