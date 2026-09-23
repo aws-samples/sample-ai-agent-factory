@@ -215,7 +215,18 @@ def _recover_untagged_workload(client, name, expected_arn, tags):
         time.sleep(5)
     else:
         raise TimeoutError("Retained workload identity did not finish deleting within 120 seconds")
-    client.create_workload_identity(name=name, tags=tags)
+    # Live-proven (2026-09-23): the name stays reserved for a short window
+    # AFTER GetWorkloadIdentity already reports not-found, so the immediate
+    # recreate can still fail with 'already exists'. Retry with backoff; any
+    # other error, or exhaustion, fails closed.
+    for attempt in range(24):
+        try:
+            client.create_workload_identity(name=name, tags=tags)
+            break
+        except ClientError as e:
+            if not _is_already_exists(e) or attempt == 23:
+                raise
+            time.sleep(5)
     _assert_workload_owned(client, name, expected_arn, tags)
 
 
@@ -959,7 +970,10 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     const handler = new LambdaFunction(this, "InferenceCredProviderFn", {
       runtime: LambdaRuntime.PYTHON_3_13,
       handler: "index.on_event",
-      timeout: Duration.minutes(5),
+      // Bounded worst case: 120s delete-wait + 120s name-reservation retry +
+      // 250s provider READY wait. Must exceed the handler's own loops so a
+      // slow path fails on its explicit bound, never on a truncated invoke.
+      timeout: Duration.minutes(10),
       role,
       code: Code.fromInline(CREDENTIAL_PROVIDER_HANDLER),
     });

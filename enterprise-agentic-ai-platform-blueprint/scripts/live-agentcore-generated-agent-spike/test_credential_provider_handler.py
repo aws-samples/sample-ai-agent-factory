@@ -69,16 +69,22 @@ def _err(code: str, message: str = "x", status: int = 400) -> ClientError:
 
 
 class FakeControl:
-    def __init__(self, existing_tags: dict | None = None, existing: bool = True) -> None:
+    def __init__(self, existing_tags: dict | None = None, existing: bool = True, name_reserved_polls: int = 0) -> None:
         self.wl = {"tags": dict(existing_tags or {})} if existing else None
         self.deleting = 0
+        self.reserved = 0
+        self.name_reserved_polls = name_reserved_polls
         self.provider: dict | None = None
         self.calls: list[str] = []
 
     def create_workload_identity(self, name, tags):
         self.calls.append("create_wl")
-        if self.wl is not None:
-            raise _err("ValidationException", f"WorkloadIdentity {name} already exists")
+        if self.wl is not None or self.reserved > 0:
+            # Live: the name stays reserved briefly after the delete has already
+            # made GetWorkloadIdentity return not-found.
+            if self.wl is None:
+                self.reserved -= 1
+            raise _err("ValidationException", f"Workload identity with name '{name}' already exists")
         self.wl = {"tags": dict(tags)}
         self.deleting = 0
         return {"name": name, "workloadIdentityArn": WL_ARN}
@@ -95,6 +101,7 @@ class FakeControl:
         self.calls.append("delete_wl")
         self.wl = None
         self.deleting = 1
+        self.reserved = self.name_reserved_polls
         return {}
 
     def list_tags_for_resource(self, resourceArn):
@@ -206,3 +213,21 @@ def test_unexpected_arn_is_refused(monkeypatch, handler):
     with pytest.raises(RuntimeError, match="exact expected identity"):
         _run_create(monkeypatch, handler, fake)
     assert "delete_wl" not in fake.calls
+
+
+def test_recreate_retries_through_post_delete_name_reservation(monkeypatch, handler):
+    # Live 2026-09-23: GetWorkloadIdentity said not-found, yet the immediate
+    # CreateWorkloadIdentity still returned 'already exists' for a short window.
+    fake = FakeControl(existing_tags={}, name_reserved_polls=3)
+    _run_create(monkeypatch, handler, fake)
+    # 1 failed initial create + 3 reserved-name rejections + 1 success
+    assert fake.calls.count("create_wl") == 5
+    assert fake.calls[-1] == "create_provider"
+    assert fake.wl["tags"] == TAGS
+
+
+def test_recreate_fails_closed_when_name_never_frees(monkeypatch, handler):
+    fake = FakeControl(existing_tags={}, name_reserved_polls=10_000)
+    with pytest.raises(ClientError, match="already exists"):
+        _run_create(monkeypatch, handler, fake)
+    assert fake.provider is None
