@@ -78,6 +78,13 @@ def main() -> int:
     managed_secret = f"{sm}:bedrock-agentcore-identity!default/oauth2/{args.provider_name}-e69ee5c7-W4Q3tK"
     # Exact live Memory id shape: deterministic name + service-minted 10-char suffix.
     memory = f"{base}:memory/AgenticAI_D03_nonprod_demo_primary_memory-Tlr3wS2juR"
+    # Memory CMK (id is service-minted; the identity policy pins the alias +
+    # ViaService, so the simulation supplies exactly that request context).
+    cmk = f"arn:{args.partition}:kms:{args.region}:{args.account}:key/5c2a3e50-5452-4a85-9aac-918836bae705"
+    via_agentcore = {"ContextKeyName": "kms:ViaService", "ContextKeyValues": [f"bedrock-agentcore.{args.region}.amazonaws.com"], "ContextKeyType": "string"}
+    via_secrets = {"ContextKeyName": "kms:ViaService", "ContextKeyValues": [f"secretsmanager.{args.region}.amazonaws.com"], "ContextKeyType": "string"}
+    memory_alias = {"ContextKeyName": "kms:ResourceAliases", "ContextKeyValues": ["alias/agenticai/d03-runtime-memory-nonprod-demo-primary"], "ContextKeyType": "stringList"}
+    other_alias = {"ContextKeyName": "kms:ResourceAliases", "ContextKeyValues": ["alias/agenticai/d03-runtime-memory-prod-demo-primary"], "ContextKeyType": "stringList"}
     cases = [
         ("bedrock-agentcore:GetWorkloadAccessToken", directory),   # exact live denial #1
         ("bedrock-agentcore:GetWorkloadAccessToken", identity),
@@ -89,6 +96,8 @@ def main() -> int:
         ("bedrock-agentcore:InvokeGateway", f"{base}:gateway/abc123"),
         ("bedrock-agentcore:CreateEvent", memory),                   # live gap #3 (no grant)
         ("bedrock-agentcore:GetEvent", memory),
+        ("kms:GenerateDataKey", cmk, [via_agentcore, memory_alias]),  # live gap #4 (KMS as caller)
+        ("kms:Decrypt", cmk, [via_agentcore, memory_alias]),
     ]
     negatives = [
         ("bedrock-agentcore:GetWorkloadAccessToken", f"{base}:workload-identity-directory/other"),
@@ -102,15 +111,25 @@ def main() -> int:
         ("bedrock-agentcore:CreateEvent", f"{base}:memory/OtherTenant_memory-Abcdefghij"),
         ("bedrock-agentcore:DeleteEvent", memory),
         ("bedrock-agentcore:ListEvents", memory),
+        ("kms:Decrypt", cmk, [via_agentcore, other_alias]),          # foreign env's Memory CMK
+        ("kms:Decrypt", cmk, [via_secrets, memory_alias]),           # right key, wrong service path
+        ("kms:Decrypt", cmk, []),                                    # direct call, no service context
+        ("kms:CreateGrant", cmk, [via_agentcore, memory_alias]),
     ]
+
+    def evaluate(action: str, resource: str, context: list | None) -> str:
+        kwargs: dict[str, Any] = {"PolicyInputList": docs, "ActionNames": [action], "ResourceArns": [resource]}
+        if context:
+            kwargs["ContextEntries"] = context
+        return iam.simulate_custom_policy(**kwargs)["EvaluationResults"][0]["EvalDecision"]
 
     iam = boto3.client("iam", region_name=args.region)
     verdict: dict[str, Any] = {"allowed": [], "denied": [], "negativeDenied": [], "negativeAllowed": []}
-    for action, resource in cases:
-        d = iam.simulate_custom_policy(PolicyInputList=docs, ActionNames=[action], ResourceArns=[resource])["EvaluationResults"][0]["EvalDecision"]
+    for action, resource, *ctx in cases:
+        d = evaluate(action, resource, ctx[0] if ctx else None)
         (verdict["allowed"] if d == "allowed" else verdict["denied"]).append({"action": action, "resourceSuffix": resource.split(":", 5)[-1], "decision": d})
-    for action, resource in negatives:
-        d = iam.simulate_custom_policy(PolicyInputList=docs, ActionNames=[action], ResourceArns=[resource])["EvaluationResults"][0]["EvalDecision"]
+    for action, resource, *ctx in negatives:
+        d = evaluate(action, resource, ctx[0] if ctx else None)
         (verdict["negativeDenied"] if d != "allowed" else verdict["negativeAllowed"]).append({"action": action, "resourceSuffix": resource.split(":", 5)[-1], "decision": d})
     verdict["passed"] = not verdict["denied"] and not verdict["negativeAllowed"]
     print(json.dumps(verdict, indent=2, sort_keys=True))

@@ -43,6 +43,7 @@ import { CfnMemory, CfnRuntime } from "aws-cdk-lib/aws-bedrockagentcore";
 import { Platform } from "aws-cdk-lib/aws-ecr-assets";
 import { DockerImageAsset } from "aws-cdk-lib/aws-ecr-assets";
 import {
+  ArnPrincipal,
   Effect,
   ManagedPolicy,
   PolicyDocument,
@@ -732,6 +733,7 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
       memoryName,
       keyRemovalPolicy,
       keyPendingWindow,
+      this.runtimeExecutionRoleArn(props),
     );
     for (const [key, value] of Object.entries(
       this.allocationTagRecord(props),
@@ -1104,6 +1106,7 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     memoryName: string,
     removalPolicy: RemovalPolicy,
     pendingWindow: Duration,
+    runtimeRoleArn: string,
   ): Key {
     const key = new Key(this, "MemoryKey", {
       alias: `alias/agenticai/d03-runtime-memory-${base}`,
@@ -1114,6 +1117,35 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     });
     // Exact Memory name family + SourceAccount close the confused-deputy gap.
     const memoryArnLike = `arn:aws:bedrock-agentcore:${this.region}:${this.account}:memory/${memoryName}-*`;
+    // Live-proven (2026-09-23, fourth generated-agent invoke): the Memory data
+    // plane encrypts/decrypts events AS THE CALLING IDENTITY -- CreateEvent from
+    // the Runtime failed closed with "AccessDeniedException: Unable to perform
+    // KMS operations" although its IAM grant on the Memory was allowed. The
+    // official Memory encryption guide requires the caller to hold the KMS
+    // actions below via `kms:ViaService=bedrock-agentcore.<region>`. Trust
+    // exactly the prior-stage Runtime execution role (deterministic ARN); the
+    // service-principal grant statement stays for the service's own grants.
+    key.addToResourcePolicy(
+      new PolicyStatement({
+        sid: "AllowRuntimeRoleMemoryDataPlaneCrypto",
+        effect: Effect.ALLOW,
+        principals: [new ArnPrincipal(runtimeRoleArn)],
+        actions: [
+          "kms:Decrypt",
+          "kms:DescribeKey",
+          "kms:GenerateDataKey",
+          "kms:GenerateDataKeyWithoutPlaintext",
+          "kms:ReEncryptFrom",
+          "kms:ReEncryptTo",
+        ],
+        resources: ["*"],
+        conditions: {
+          StringEquals: {
+            "kms:ViaService": `bedrock-agentcore.${this.region}.amazonaws.com`,
+          },
+        },
+      }),
+    );
     key.addToResourcePolicy(
       new PolicyStatement({
         sid: "AllowAgentCoreMemoryCrypto",

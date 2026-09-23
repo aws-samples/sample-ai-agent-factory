@@ -484,6 +484,37 @@ export class D03WorkstreamRegistryRolesStack extends Stack {
           ],
         }),
       );
+      // Live-proven (2026-09-23, fourth generated-agent invoke): the Memory
+      // data plane performs KMS operations AS THE CALLER; CreateEvent failed
+      // closed with "Unable to perform KMS operations" once the Memory grant
+      // above was in place. KMS requires BOTH the key policy (the RuntimeMemory
+      // stage trusts this exact role) and this identity policy. The CMK id is
+      // minted later, so scope by the alias the RuntimeMemory stack assigns
+      // (`alias/agenticai/d03-runtime-memory-<env>-<tenant>-<agent>`) plus
+      // ViaService -- never an unconditioned kms:* on key/*.
+      role.addToPolicy(
+        new PolicyStatement({
+          sid: "MemoryCmkDataPlaneCrypto",
+          effect: Effect.ALLOW,
+          actions: [
+            "kms:Decrypt",
+            "kms:DescribeKey",
+            "kms:GenerateDataKey",
+            "kms:GenerateDataKeyWithoutPlaintext",
+            "kms:ReEncryptFrom",
+            "kms:ReEncryptTo",
+          ],
+          resources: [`arn:aws:kms:${this.region}:${this.account}:key/*`],
+          conditions: {
+            StringEquals: {
+              "kms:ViaService": `bedrock-agentcore.${this.region}.amazonaws.com`,
+            },
+            "ForAnyValue:StringEquals": {
+              "kms:ResourceAliases": `alias/agenticai/d03-runtime-memory-${props.envName}-${props.tenantId}-${props.agentId}`,
+            },
+          },
+        }),
+      );
     }
     return role;
   }

@@ -562,6 +562,33 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
       "ReEncryptFrom",
       "ReEncryptTo",
     ]);
+    // Live-proven (fourth generated-agent invoke): the Memory data plane does
+    // KMS AS THE CALLER, so the key must trust exactly the prior-stage Runtime
+    // role, only via the AgentCore service, with the documented action set.
+    const caller = statements.find(
+      (statement) => statement.Sid === "AllowRuntimeRoleMemoryDataPlaneCrypto",
+    );
+    expect(caller).toMatchObject({
+      Effect: "Allow",
+      Principal: {
+        AWS: `arn:aws:iam::${NONPROD_ACCOUNT}:role/AgenticAI-D03-nonprod-demo-primary-runtime`,
+      },
+      Action: [
+        "kms:Decrypt",
+        "kms:DescribeKey",
+        "kms:GenerateDataKey",
+        "kms:GenerateDataKeyWithoutPlaintext",
+        "kms:ReEncryptFrom",
+        "kms:ReEncryptTo",
+      ],
+      Condition: {
+        StringEquals: {
+          "kms:ViaService": `bedrock-agentcore.${REGION}.amazonaws.com`,
+        },
+      },
+    });
+    expect(JSON.stringify(caller.Action)).not.toContain("kms:CreateGrant");
+    expect(JSON.stringify(caller.Action)).not.toContain("kms:*");
   });
 
   it("always deletes Runtime and Memory while retaining only the production key", () => {
@@ -1091,14 +1118,49 @@ describe("Phase 23 — prior-stage Runtime role", () => {
           Action: ["bedrock-agentcore:CreateEvent", "bedrock-agentcore:GetEvent"],
           Resource: `arn:aws:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:memory/AgenticAI_D03_nonprod_demo_primary_memory-*`,
         }),
+        expect.objectContaining({
+          // Live-proven (fourth invoke): Memory does KMS as the caller. The
+          // CMK id is minted in the later RuntimeMemory stage, so the identity
+          // side is pinned by the exact alias plus ViaService (dual
+          // authorization with the key policy) -- never unconditioned key/*.
+          Sid: "MemoryCmkDataPlaneCrypto",
+          Effect: "Allow",
+          Action: [
+            "kms:Decrypt",
+            "kms:DescribeKey",
+            "kms:GenerateDataKey",
+            "kms:GenerateDataKeyWithoutPlaintext",
+            "kms:ReEncryptFrom",
+            "kms:ReEncryptTo",
+          ],
+          Resource: `arn:aws:kms:${REGION}:${NONPROD_ACCOUNT}:key/*`,
+          Condition: {
+            StringEquals: {
+              "kms:ViaService": `bedrock-agentcore.${REGION}.amazonaws.com`,
+            },
+            "ForAnyValue:StringEquals": {
+              "kms:ResourceAliases":
+                "alias/agenticai/d03-runtime-memory-nonprod-demo-primary",
+            },
+          },
+        }),
       ]),
     );
     expect(JSON.stringify(statements)).not.toContain(":memory/*");
-    // The Runtime never reads the Platform M2M secret and needs no KMS grant:
-    // only the RuntimeMemory custom resource seeds the provider from it.
+    expect(JSON.stringify(statements)).not.toContain("kms:CreateGrant");
+    // The Runtime never reads the Platform M2M secret and needs no KMS grant
+    // for it: only the RuntimeMemory custom resource seeds the provider from
+    // it. The ONLY KMS statement on this role is the Memory data-plane one
+    // (ViaService bedrock-agentcore), never a Secrets Manager KMS path.
     const runtimeJson = JSON.stringify(statements);
     expect(runtimeJson).not.toContain("secret:agenticai/inference-m2m/");
-    expect(runtimeJson).not.toContain("kms:Decrypt");
+    expect(runtimeJson).not.toContain("secretsmanager.us-west-2.amazonaws.com");
+    const kmsStatements = statements.filter((statement: any) =>
+      JSON.stringify(statement.Action).includes("kms:"),
+    );
+    expect(kmsStatements.map((statement: any) => statement.Sid)).toEqual([
+      "MemoryCmkDataPlaneCrypto",
+    ]);
     // The workload identity is minted per Create by RuntimeMemory, so the
     // runtime role scopes GetWorkloadAccessToken to the prefix family; the
     // provider stays exact; both parent containers are included because the
