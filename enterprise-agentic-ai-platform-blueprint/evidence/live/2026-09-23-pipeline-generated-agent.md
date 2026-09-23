@@ -121,6 +121,42 @@ production credential provider and exactly two production workload identities
 exist (the Runtime-managed one and the single identity the custom resource
 minted) — no orphans.
 
+## Induced rollback through the live High-finding image rejection gate
+
+One adversarial experiment closes two long-open gates at once — a **real**
+control firing is what induces the rollback, so no fault-injection hook was
+added to the infrastructure code.
+
+**Fixture.** A single commit pinned the agent image base to a deliberately
+outdated Debian 12 Python image (October 2023, exact arm64 manifest digest
+from the public ECR mirror, resolved without a container engine by
+`scripts/live-agentcore-generated-agent-spike/resolve_public_image_digest.py`).
+Nothing else changed. The commit is marked NOT FOR RELEASE and was reverted by
+the next commit; the reverted Dockerfile is byte-identical to its pre-fixture
+revision.
+
+**Observed live (nonproduction, same pipeline, exact fixture commit):**
+
+| Step | Result |
+|---|---|
+| Source → Build → self-mutation → Assets | succeeded; the outdated-base image was built for ARM64 and pushed under a new content-addressed asset tag |
+| RegistryRoles + `GatewayPermissionReady` + propagation | no-change; approved with the expected outcome stated in the approval summary |
+| Nonprod `ToolGateway` | succeeded (unchanged) |
+| Nonprod `RuntimeMemory.Deploy` | **failed as designed** — `AgentImageScanGate` refused the new digest with the exact message `refusing Runtime creation for digest sha256:… with blocking findings {"CRITICAL": 13, "HIGH": 79}` |
+| Independent read of the same digest's ECR basic scan | `COMPLETE`, `CRITICAL 13 / HIGH 79 / MEDIUM 72 / LOW 7` — the gate's counts match the service's |
+| CloudFormation | `UPDATE_ROLLBACK_COMPLETE`; the stack's container-digest output is the previous good digest |
+| Runtime | never left its prior version, `READY` on the previous good digest (the Runtime depends on the gate's digest attribute, so it was never even updated) |
+| Post-rollback positive probe | HTTP 200 in 8.8 s, all eight checks true — the prior deployment kept serving through the rejected release |
+| Pipeline | execution `Failed` at Nonprod; the Prod stage was never entered (production stack and Runtime timestamps unchanged) |
+
+**Recovery.** The revert commit was pushed and the pipeline re-run; the image
+returned to the previously admitted digest, so the gate resource and the
+Runtime were unchanged.
+
+The blocking-finding branch of the gate — previously proven only offline — is
+now proven live against the service's own scan results, together with a
+pipeline-level induced RuntimeMemory rollback and prior-version continuity.
+
 ## Bounded conclusion and remaining gates
 
 Proven: the pipeline-owned generated agent runs end to end in the real
@@ -132,11 +168,12 @@ every IAM/KMS grant scoped to exact resource families, simulated positive and
 negative before each approval, and production isolated from nonproduction
 resources at the role level.
 
-Not yet proven and therefore **not claimed**: an induced RuntimeMemory rollback
-through the pipeline, live High-finding image rejection, a live exercise of the
-core's layer-2 `PermissionError` (unreachable while layer 1 holds),
-matching-principal wrong-ExternalId / wrong-session-name twins, load,
-concurrency, quota, soak, chaos, upgrade and interrupted-deployment campaigns,
-EMEA regional coverage, Gateway OTEL span correlation, the 24-hour cost
-baseline, and dependency-ordered teardown with zero-residue inventory for this
-revision.
+Not yet proven and therefore **not claimed**: a live exercise of the core's
+layer-2 `PermissionError` (unreachable while layer 1 holds),
+matching-principal wrong-ExternalId / wrong-session-name twins, a live
+legacy-consumer rollback, load, concurrency, quota, soak, chaos, upgrade and
+interrupted-deployment campaigns, EMEA regional coverage, Gateway OTEL span
+correlation, the 24-hour cost baseline, and dependency-ordered teardown with
+zero-residue inventory for this revision (including deletion of the rejected
+fixture image from the shared asset repository, which the gate deliberately
+never touches).
