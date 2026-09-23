@@ -98,20 +98,31 @@ def main() -> int:
     cases = [("bedrock-agentcore:CreateTokenVault", vault)]
     cases += [(f"bedrock-agentcore:{a}", r) for a in identity_actions for r in (directory, identity)]
     cases += [(f"bedrock-agentcore:{a}", r) for a in provider_actions for r in (vault, provider)]
-    # Negative twins: a foreign directory/vault id, another resource type, and an
-    # identity outside this workstream's prefix family must stay implicitly denied.
+    # Exact live request shape for create-time tags: the service authorizes
+    # TagResource against the LITERAL family string ".../workload-identity/*"
+    # (live-proven 2026-09-23 -- a "<prefix>_*" policy resource was denied here).
+    cases += [
+        ("bedrock-agentcore:TagResource", f"{directory}/workload-identity/*"),
+        ("bedrock-agentcore:TagResource", f"{vault}/oauth2credentialprovider/*"),
+    ]
+    # Negative twins: a foreign directory/vault id and another resource type
+    # must stay implicitly denied.
     negatives = [
         ("bedrock-agentcore:CreateWorkloadIdentity", f"{base}:workload-identity-directory/other"),
         ("bedrock-agentcore:TagResource", f"{base}:runtime/abc"),
-        ("bedrock-agentcore:DeleteWorkloadIdentity", f"{directory}/workload-identity/Other_prefix_6a340de12e6f"),
     ]
-    # Documented residual: the Runtime-managed sibling identity that AgentCore
-    # auto-creates for the Runtime is named "<prefix>_runtime-<id>", which an IAM
-    # wildcard cannot separate from the minted "<prefix>_<12 hex>" form. IAM
-    # therefore ALLOWS it; the compensating control is the handler's exact
-    # PhysicalResourceId ownership check (pinned offline in
-    # test_credential_provider_handler.py::test_delete_removes_only_the_owned_...).
+    # Documented residuals -- IAM allows these; the compensating control is the
+    # handler itself (pinned offline in test_credential_provider_handler.py):
+    # * the provider role's workload family MUST be the literal
+    #   ".../workload-identity/*" because the service authorizes create-time tags
+    #   against that literal request resource (a "<prefix>_*" narrowing was
+    #   denied live), so an identity under a FOREIGN prefix is IAM-allowed; the
+    #   handler only ever deletes the name recorded in its own PhysicalResourceId
+    #   and refuses any name outside "<prefix>_";
+    # * the Runtime-managed sibling "<prefix>_runtime-<id>" shares the prefix;
+    #   the same PhysicalResourceId ownership check protects it.
     residuals = [
+        ("bedrock-agentcore:DeleteWorkloadIdentity", f"{directory}/workload-identity/Other_prefix_6a340de12e6f"),
         ("bedrock-agentcore:DeleteWorkloadIdentity", f"{directory}/workload-identity/{args.workload_prefix}_runtime-4FWnYiEydR"),
     ]
 

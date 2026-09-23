@@ -884,11 +884,14 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     const providerName = this.credentialProviderName(props);
     const workloadPrefix = this.workloadIdentityNamePrefix(props);
     const providerArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:token-vault/default/oauth2credentialprovider/${providerName}`;
-    // Family ARNs: the authorizer evaluates create-time tagging against these.
-    // The workload family is narrowed to this workstream's prefix because the
-    // handler mints "<prefix>_<12 hex>" per Create (see _unique_workload_name).
+    // Family ARNs: the authorizer evaluates create-time tagging against the
+    // LITERAL family ARN ".../workload-identity/*" (live-proven 2026-09-23:
+    // narrowing this to "<prefix>_*" was denied because the request resource
+    // is the literal wildcard string, which "<prefix>_*" does not match). Do
+    // not narrow here; the runtime role's token grant is the place that scopes
+    // to the "<prefix>_*" family of real, named identities.
     const providerFamilyArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:token-vault/default/oauth2credentialprovider/*`;
-    const workloadFamilyArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default/workload-identity/${workloadPrefix}_*`;
+    const workloadFamilyArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default/workload-identity/*`;
     // Container ARNs: the modeled parent resource of each create action.
     const tokenVaultArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:token-vault/default`;
     const workloadDirectoryArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default`;

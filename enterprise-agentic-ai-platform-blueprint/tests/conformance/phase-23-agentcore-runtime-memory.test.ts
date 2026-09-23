@@ -399,15 +399,17 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
     const lifecycleResourcesJson = JSON.stringify(lifecycleResources);
     for (const suffix of [
       `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:workload-identity-directory/default"`,
-      // Narrowed to this workstream's prefix family: the handler mints
-      // "<prefix>_<12 hex>" per Create.
-      `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:workload-identity-directory/default/workload-identity/AgenticAI_D03_nonprod_demo_primary_*`,
+      // LITERAL family: the service authorizes create-time tags against the
+      // literal ".../workload-identity/*" request resource (live-proven: a
+      // "<prefix>_*" narrowing was denied). The runtime role, not this role,
+      // narrows to the "<prefix>_*" family of real named identities.
+      `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:workload-identity-directory/default/workload-identity/*"`,
       `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:token-vault/default"`,
       `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:token-vault/default/oauth2credentialprovider/*`,
     ]) {
       expect(lifecycleResourcesJson).toContain(suffix);
     }
-    expect(lifecycleResourcesJson).not.toContain("workload-identity/*");
+    expect(lifecycleResourcesJson).not.toMatch(/"\*"/);
     expect(lifecycleResourcesJson).not.toMatch(/"\*"/);
     // No statement in the provider role may carry a bare "*" resource.
     for (const statement of statements) {
