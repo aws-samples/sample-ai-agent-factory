@@ -1,8 +1,8 @@
 # Live evidence — pipeline-owned generated agent (LiteLLMModel + MCPClient + Memory) on AgentCore Runtime
 
 - **Date:** 2026-09-23
-- **Status:** PASS for the bounded nonproduction gate described below; production, rollback and teardown remain open
-- **Deployed Git HEAD (passing invoke):** `172f78f6ec26bd6560b1f553a5121407b6010acc`
+- **Status:** PASS for the bounded nonproduction AND production deployment-and-invoke gate described below; rollback and teardown remain open
+- **Deployed Git HEAD (passing invokes, both environments):** `172f78f6ec26bd6560b1f553a5121407b6010acc`
 - **Region:** `us-west-2`
 - **Topology:** one Platform account (inference Gateway, Cognito M2M, published cross-account M2M secret) and one Workstream test account (tool Gateway, Runtime, Memory, Identity), environment-qualified nonproduction resources
 - **Agent:** the reference Strands agent from `scripts/live-agentcore-generated-agent-spike/agent/` — `LiteLLMModel` against the Platform inference Gateway (`CUSTOM_JWT`, Cognito M2M via AgentCore Identity) and `MCPClient` against the workstream tool Gateway (`AWS_IAM`, SigV4), with AgentCore Memory short-term events
@@ -92,20 +92,51 @@ and the legacy system prompt.
 - The CDK Runtime image is the exact `@sha256` digest admitted by the
   zero-Critical/High scan gate; Runtime `READY`, Memory `ACTIVE`.
 
+## Production stage
+
+The same exact-head execution then presented the pipeline's `ProdGatewayApproval`.
+A stale approval token belonging to an earlier, superseded execution (an old
+image) was explicitly **rejected** so the verified revision advanced and
+presented its own gate. Before approving, the **production** Runtime execution
+role was verified in the Workstream account with `iam:SimulatePrincipalPolicy`:
+`CreateEvent`/`GetEvent` allowed on the production Memory name family and the
+KMS pair allowed with the AgentCore `ViaService` + production CMK alias context,
+while `ListEvents`, the **nonproduction** Memory and the **nonproduction** CMK
+alias were denied from the production role (environment isolation).
+
+Production `ToolGateway` and `RuntimeMemory` (first generated-agent production
+deploy: minted workload identity, CognitoOauth2 credential provider seeded from
+the production M2M secret, digest-pinned Runtime, CMK-encrypted Memory) reached
+`CREATE_COMPLETE` with Runtime `READY` and Memory `ACTIVE`, and:
+
+| Probe | Result |
+|---|---|
+| `positive` | HTTP 200 in 9.9 s; all eight checks true (`discoveredToolCount = 3`, `toolCalls = [echo]`, `contentBlocks = 2`, `memoryRoundTrip = true`) |
+| `unsubscribed-tool` | pass, `refusalLayer = model-allowlist`, forbidden tool never called |
+| `wrong-account` | refused before any invoke |
+
+Independent read-back: both production Memory events decode as JSON
+(`toolCalls = [echo]` for the positive run, `[]` for the twin); exactly one
+production credential provider and exactly two production workload identities
+exist (the Runtime-managed one and the single identity the custom resource
+minted) — no orphans.
+
 ## Bounded conclusion and remaining gates
 
 Proven: the pipeline-owned generated agent runs end to end in the real
-two-Gateway topology in nonproduction — SigV4 MCP discovery and tool call,
-AgentCore Identity M2M inference on the rated model behind the baseline
-Guardrail, and a verified Memory round trip — with a wrong-account twin and an
-unsubscribed-tool twin holding, and every IAM/KMS grant scoped to exact
-resource families and simulated positive/negative before approval.
+two-Gateway topology in **both** nonproduction and production — SigV4 MCP
+discovery and tool call, AgentCore Identity M2M inference on the rated model
+behind the baseline Guardrail, and a verified Memory round trip — with a
+wrong-account twin and an unsubscribed-tool twin holding in each environment,
+every IAM/KMS grant scoped to exact resource families, simulated positive and
+negative before each approval, and production isolated from nonproduction
+resources at the role level.
 
-Not yet proven and therefore **not claimed**: the production stage (gated on
-`ProdGatewayApproval`), an induced RuntimeMemory rollback through the
-pipeline, live High-finding image rejection, a live exercise of the core's
-layer-2 `PermissionError` (unreachable while layer 1 holds), matching-principal
-wrong-ExternalId / wrong-session-name twins, load, concurrency, quota, soak,
-chaos, upgrade and interrupted-deployment campaigns, EMEA regional coverage,
-Gateway OTEL span correlation, the 24-hour cost baseline, and dependency-ordered
-teardown with zero-residue inventory for this revision.
+Not yet proven and therefore **not claimed**: an induced RuntimeMemory rollback
+through the pipeline, live High-finding image rejection, a live exercise of the
+core's layer-2 `PermissionError` (unreachable while layer 1 holds),
+matching-principal wrong-ExternalId / wrong-session-name twins, load,
+concurrency, quota, soak, chaos, upgrade and interrupted-deployment campaigns,
+EMEA regional coverage, Gateway OTEL span correlation, the 24-hour cost
+baseline, and dependency-ordered teardown with zero-residue inventory for this
+revision.
