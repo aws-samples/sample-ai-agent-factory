@@ -4,19 +4,17 @@ Reads a rendered CloudFormation template (from ``cdk synth`` / the phase-23
 test harness) for the nonprod RuntimeMemory stack, extracts the inline policy
 of the ``AgenticAI-D03-<env>-<tenant>-<agent>-idprov`` role, substitutes the
 partition/account/region intrinsics, and runs ``iam:SimulateCustomPolicy``
-for the exact (action, resource) pairs AgentCore denied live on 2026-09-23:
+for EVERY bedrock-agentcore call the custom-resource handler makes
+(create/get/update/delete of the WorkloadIdentity and Oauth2CredentialProvider,
+``TagResource``, ``ListTagsForResource``, ``CreateTokenVault``), each evaluated
+against both the modeled parent container (``workload-identity-directory/
+default``, ``token-vault/default``) and the named resource. This is exactly
+the pattern AgentCore denied live, three times, on 2026-09-23.
 
-* CreateWorkloadIdentity      on workload-identity-directory/default
-* TagResource                 on workload-identity-directory/default
-* TagResource                 on .../workload-identity/*  (family)
-* CreateOauth2CredentialProvider on token-vault/default
-* TagResource                 on token-vault/default
-* CreateTokenVault            on token-vault/default
-
-Every pair must evaluate ``allowed``; a bare-"*" resource must NOT be present
-outside the ViaService-bound KMS statement. Prints a compact JSON verdict and
-exits 2 on any non-allowed decision. Read-only: SimulateCustomPolicy mutates
-nothing.
+Every pair must evaluate ``allowed``; foreign containers must stay implicitly
+denied; a bare-"*" resource must NOT be present outside the ViaService-bound
+KMS statement. Prints a compact JSON verdict and exits 2 on any failure.
+Read-only: SimulateCustomPolicy mutates nothing.
 
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
@@ -74,19 +72,29 @@ def main() -> int:
     base = f"arn:{args.partition}:bedrock-agentcore:{args.region}:{args.account}"
     directory = f"{base}:workload-identity-directory/default"
     vault = f"{base}:token-vault/default"
-    cases = [
-        ("bedrock-agentcore:CreateWorkloadIdentity", directory),
-        ("bedrock-agentcore:CreateWorkloadIdentity", f"{directory}/workload-identity/AgenticAI_D03_probe"),
-        ("bedrock-agentcore:TagResource", directory),
-        ("bedrock-agentcore:TagResource", f"{directory}/workload-identity/AgenticAI_D03_probe"),
-        ("bedrock-agentcore:CreateOauth2CredentialProvider", vault),
-        ("bedrock-agentcore:CreateOauth2CredentialProvider", f"{vault}/oauth2credentialprovider/AgenticAI_D03_probe"),
-        ("bedrock-agentcore:TagResource", vault),
-        ("bedrock-agentcore:TagResource", f"{vault}/oauth2credentialprovider/AgenticAI_D03_probe"),
-        ("bedrock-agentcore:CreateTokenVault", vault),
-        ("bedrock-agentcore:DeleteWorkloadIdentity", f"{directory}/workload-identity/AgenticAI_D03_probe"),
-        ("bedrock-agentcore:DeleteOauth2CredentialProvider", f"{vault}/oauth2credentialprovider/AgenticAI_D03_probe"),
-    ]
+    identity = f"{directory}/workload-identity/AgenticAI_D03_probe"
+    provider = f"{vault}/oauth2credentialprovider/AgenticAI_D03_probe"
+    # Every bedrock-agentcore call the custom-resource handler makes, evaluated
+    # against BOTH the parent container and the named resource -- the service
+    # authorizer has been observed live to use either.
+    identity_actions = (
+        "CreateWorkloadIdentity",
+        "GetWorkloadIdentity",
+        "DeleteWorkloadIdentity",
+        "TagResource",
+        "ListTagsForResource",
+    )
+    provider_actions = (
+        "CreateOauth2CredentialProvider",
+        "GetOauth2CredentialProvider",
+        "UpdateOauth2CredentialProvider",
+        "DeleteOauth2CredentialProvider",
+        "TagResource",
+        "ListTagsForResource",
+    )
+    cases = [("bedrock-agentcore:CreateTokenVault", vault)]
+    cases += [(f"bedrock-agentcore:{a}", r) for a in identity_actions for r in (directory, identity)]
+    cases += [(f"bedrock-agentcore:{a}", r) for a in provider_actions for r in (vault, provider)]
     # Negative twin: a foreign directory/vault id must stay implicitly denied.
     negatives = [
         ("bedrock-agentcore:CreateWorkloadIdentity", f"{base}:workload-identity-directory/other"),

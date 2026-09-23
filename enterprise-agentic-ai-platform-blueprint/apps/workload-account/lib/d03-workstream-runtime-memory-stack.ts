@@ -891,16 +891,16 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
               resources: [tokenVaultArn],
             }),
             new PolicyStatement({
-              // Service reference (bedrock-agentcore): CreateWorkloadIdentity
-              // authorizes on BOTH `workload-identity` and its parent
-              // `workload-identity-directory`; CreateOauth2CredentialProvider on
-              // BOTH `oauth2credentialprovider` and its parent `token-vault`.
-              // Tags supplied on create are additionally authorized as
-              // TagResource against those same resources -- live-proven twice
-              // (2026-09-23): the family wildcard alone was denied on
-              // `.../workload-identity/*`, then on the bare directory ARN.
-              // Scope is the two default containers plus the two deterministic
-              // families in this account/region; never a bare "*".
+              // Service reference (bedrock-agentcore): the WorkloadIdentity and
+              // Oauth2CredentialProvider actions authorize on BOTH the named
+              // resource and its parent container (`workload-identity-directory`
+              // / `token-vault`). Live-proven three times (2026-09-23): the
+              // exact-ARN scoping was denied for create-time TagResource on the
+              // family, then on the bare directory ARN, then for the post-create
+              // ListTagsForResource read on the same directory ARN. Every
+              // handler call (create/get/update/delete/tag/list-tags) is
+              // therefore granted on the two default containers plus the two
+              // deterministic families in this account/region -- never "*".
               sid: "ManageIdentityAndProvider",
               effect: Effect.ALLOW,
               actions: [
@@ -912,6 +912,7 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
                 "bedrock-agentcore:UpdateOauth2CredentialProvider",
                 "bedrock-agentcore:DeleteOauth2CredentialProvider",
                 "bedrock-agentcore:TagResource",
+                "bedrock-agentcore:ListTagsForResource",
               ],
               resources: [
                 workloadDirectoryArn,
@@ -919,16 +920,6 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
                 tokenVaultArn,
                 providerFamilyArn,
               ],
-            }),
-            new PolicyStatement({
-              // Post-create ownership verification/repair on the exact ARNs.
-              sid: "VerifyIdentityOwnershipTags",
-              effect: Effect.ALLOW,
-              actions: [
-                "bedrock-agentcore:ListTagsForResource",
-                "bedrock-agentcore:TagResource",
-              ],
-              resources: [providerArn, workloadArn],
             }),
           ],
         }),

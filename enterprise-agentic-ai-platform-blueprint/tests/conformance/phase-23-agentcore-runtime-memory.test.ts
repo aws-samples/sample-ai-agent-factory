@@ -350,14 +350,6 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
           Effect: "Allow",
           Action: "bedrock-agentcore:CreateTokenVault",
         }),
-        expect.objectContaining({
-          Sid: "VerifyIdentityOwnershipTags",
-          Effect: "Allow",
-          Action: [
-            "bedrock-agentcore:ListTagsForResource",
-            "bedrock-agentcore:TagResource",
-          ],
-        }),
       ]),
     );
     const tokenVaultStatement = statements.find(
@@ -370,47 +362,41 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
       `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:token-vault/default"`,
     );
     expect(tokenVaultResourceJson).not.toContain("*");
-    const ownershipTagStatement = statements.find(
-      (statement: any) => statement.Sid === "VerifyIdentityOwnershipTags",
-    );
-    const ownershipResourcesJson = JSON.stringify(
-      ownershipTagStatement.Resource,
-    );
-    expect(ownershipResourcesJson).toContain(
-      ":token-vault/default/oauth2credentialprovider/AgenticAI_D03_nonprod_demo_primary_inference",
-    );
-    expect(ownershipResourcesJson).toContain(
-      ":workload-identity-directory/default/workload-identity/AgenticAI_D03_nonprod_demo_primary",
-    );
 
-    // Lifecycle + create-time tagging are scoped to the modeled parent
-    // containers and the two deterministic families (service reference:
-    // CreateWorkloadIdentity -> workload-identity + workload-identity-directory;
-    // CreateOauth2CredentialProvider -> oauth2credentialprovider + token-vault).
-    // Live-proven twice on 2026-09-23; pin it so it can never widen to "*".
+    // Every bedrock-agentcore call the handler makes (create/get/update/delete,
+    // tag, list-tags) is scoped to the modeled parent containers and the two
+    // deterministic families (service reference: CreateWorkloadIdentity ->
+    // workload-identity + workload-identity-directory; CreateOauth2Credential-
+    // Provider -> oauth2credentialprovider + token-vault). Live-proven three
+    // times on 2026-09-23; pin the exact action set and resources so it can
+    // never widen to "*" nor silently drop a call the handler depends on.
     const lifecycleStatement = statements.find(
       (statement: any) => statement.Sid === "ManageIdentityAndProvider",
     );
     expect(lifecycleStatement).toBeDefined();
     expect(lifecycleStatement.Effect).toBe("Allow");
-    expect(lifecycleStatement.Action).toEqual(
-      expect.arrayContaining([
-        "bedrock-agentcore:CreateWorkloadIdentity",
+    expect([...lifecycleStatement.Action].sort()).toEqual(
+      [
         "bedrock-agentcore:CreateOauth2CredentialProvider",
-        "bedrock-agentcore:DeleteWorkloadIdentity",
+        "bedrock-agentcore:CreateWorkloadIdentity",
         "bedrock-agentcore:DeleteOauth2CredentialProvider",
+        "bedrock-agentcore:DeleteWorkloadIdentity",
+        "bedrock-agentcore:GetOauth2CredentialProvider",
+        "bedrock-agentcore:GetWorkloadIdentity",
+        "bedrock-agentcore:ListTagsForResource",
         "bedrock-agentcore:TagResource",
-      ]),
+        "bedrock-agentcore:UpdateOauth2CredentialProvider",
+      ].sort(),
     );
     const lifecycleResources = lifecycleStatement.Resource;
     expect(Array.isArray(lifecycleResources)).toBe(true);
     expect(lifecycleResources).toHaveLength(4);
     const lifecycleResourcesJson = JSON.stringify(lifecycleResources);
     for (const suffix of [
-      ":workload-identity-directory/default\"",
-      ":workload-identity-directory/default/workload-identity/*",
-      ":token-vault/default\"",
-      ":token-vault/default/oauth2credentialprovider/*",
+      `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:workload-identity-directory/default"`,
+      `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:workload-identity-directory/default/workload-identity/*`,
+      `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:token-vault/default"`,
+      `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:token-vault/default/oauth2credentialprovider/*`,
     ]) {
       expect(lifecycleResourcesJson).toContain(suffix);
     }
