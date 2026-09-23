@@ -55,6 +55,8 @@ def main() -> int:
     ap.add_argument("--account", required=True)
     ap.add_argument("--region", default="us-west-2")
     ap.add_argument("--partition", default="aws")
+    ap.add_argument("--workload-prefix", default="AgenticAI_D03_nonprod_demo_primary")
+    ap.add_argument("--provider-name", default="AgenticAI_D03_nonprod_demo_primary_inference")
     args = ap.parse_args()
 
     template = json.loads(args.template.read_text())
@@ -72,8 +74,9 @@ def main() -> int:
     base = f"arn:{args.partition}:bedrock-agentcore:{args.region}:{args.account}"
     directory = f"{base}:workload-identity-directory/default"
     vault = f"{base}:token-vault/default"
-    identity = f"{directory}/workload-identity/AgenticAI_D03_probe"
-    provider = f"{vault}/oauth2credentialprovider/AgenticAI_D03_probe"
+    # Minted form: "<prefix>_<12 hex>" (see _unique_workload_name in the stack).
+    identity = f"{directory}/workload-identity/{args.workload_prefix}_6a340de12e6f"
+    provider = f"{vault}/oauth2credentialprovider/{args.provider_name}"
     # Every bedrock-agentcore call the custom-resource handler makes, evaluated
     # against BOTH the parent container and the named resource -- the service
     # authorizer has been observed live to use either.
@@ -95,10 +98,21 @@ def main() -> int:
     cases = [("bedrock-agentcore:CreateTokenVault", vault)]
     cases += [(f"bedrock-agentcore:{a}", r) for a in identity_actions for r in (directory, identity)]
     cases += [(f"bedrock-agentcore:{a}", r) for a in provider_actions for r in (vault, provider)]
-    # Negative twin: a foreign directory/vault id must stay implicitly denied.
+    # Negative twins: a foreign directory/vault id, another resource type, and an
+    # identity outside this workstream's prefix family must stay implicitly denied.
     negatives = [
         ("bedrock-agentcore:CreateWorkloadIdentity", f"{base}:workload-identity-directory/other"),
         ("bedrock-agentcore:TagResource", f"{base}:runtime/abc"),
+        ("bedrock-agentcore:DeleteWorkloadIdentity", f"{directory}/workload-identity/Other_prefix_6a340de12e6f"),
+    ]
+    # Documented residual: the Runtime-managed sibling identity that AgentCore
+    # auto-creates for the Runtime is named "<prefix>_runtime-<id>", which an IAM
+    # wildcard cannot separate from the minted "<prefix>_<12 hex>" form. IAM
+    # therefore ALLOWS it; the compensating control is the handler's exact
+    # PhysicalResourceId ownership check (pinned offline in
+    # test_credential_provider_handler.py::test_delete_removes_only_the_owned_...).
+    residuals = [
+        ("bedrock-agentcore:DeleteWorkloadIdentity", f"{directory}/workload-identity/{args.workload_prefix}_runtime-4FWnYiEydR"),
     ]
 
     iam = boto3.client("iam", region_name=args.region)
@@ -114,6 +128,17 @@ def main() -> int:
         decision = res["EvaluationResults"][0]["EvalDecision"]
         (verdict["negativeDenied"] if decision != "allowed" else verdict["negativeAllowed"]).append(
             {"action": action, "resourceSuffix": resource.split(":", 5)[-1], "decision": decision}
+        )
+    verdict["documentedResiduals"] = []
+    for action, resource in residuals:
+        res = iam.simulate_custom_policy(PolicyInputList=docs, ActionNames=[action], ResourceArns=[resource])
+        verdict["documentedResiduals"].append(
+            {
+                "action": action,
+                "resourceSuffix": resource.split(":", 5)[-1],
+                "decision": res["EvaluationResults"][0]["EvalDecision"],
+                "compensatingControl": "handler PhysicalResourceId ownership check",
+            }
         )
 
     bare_star = [

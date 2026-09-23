@@ -181,6 +181,10 @@ def _assert_tags(client, resource_arn, expected_tags):
     raise RuntimeError("Refusing resource with missing or foreign ownership tags")
 
 
+def _workload_arn(directory_arn, name):
+    return directory_arn + "/workload-identity/" + name
+
+
 def _assert_workload_owned(client, name, expected_arn, tags):
     response = client.get_workload_identity(name=name)
     if response.get("name") != name or response.get("workloadIdentityArn") != expected_arn:
@@ -188,46 +192,20 @@ def _assert_workload_owned(client, name, expected_arn, tags):
     _assert_tags(client, expected_arn, tags)
 
 
-def _recover_untagged_workload(client, name, expected_arn, tags):
-    # Live-proven (2026-09-23): TagResource on an EXISTING WorkloadIdentity
-    # returns a deterministic InternalServerErrorException, so an in-place tag
-    # migration is not available for this resource type. The only retained
-    # shape this code adopts is the pre-tagging partial create from a failed
-    # earlier run: exact name AND exact ARN AND zero tags. It is deleted and
-    # recreated with create-time tags. Anything else (foreign or partial tags)
-    # is a hard refusal -- never adopted, never deleted.
-    response = client.get_workload_identity(name=name)
-    if response.get("name") != name or response.get("workloadIdentityArn") != expected_arn:
-        raise RuntimeError("Workload identity response does not match the exact expected identity")
-    live = client.list_tags_for_resource(resourceArn=expected_arn).get("tags", {})
-    if live == tags:
-        return
-    if live != {}:
-        raise RuntimeError("Refusing workload identity with foreign or partial ownership tags")
-    client.delete_workload_identity(name=name)
-    for _ in range(24):
-        try:
-            client.get_workload_identity(name=name)
-        except ClientError as e:
-            if _is_not_found(e):
-                break
-            raise
-        time.sleep(5)
-    else:
-        raise TimeoutError("Retained workload identity did not finish deleting within 120 seconds")
-    # Live-proven (2026-09-23): the name stays reserved for a short window
-    # AFTER GetWorkloadIdentity already reports not-found, so the immediate
-    # recreate can still fail with 'already exists'. Retry with backoff; any
-    # other error, or exhaustion, fails closed.
-    for attempt in range(24):
-        try:
-            client.create_workload_identity(name=name, tags=tags)
-            break
-        except ClientError as e:
-            if not _is_already_exists(e) or attempt == 23:
-                raise
-            time.sleep(5)
-    _assert_workload_owned(client, name, expected_arn, tags)
+def _unique_workload_name(prefix, request_id):
+    # Live-proven (2026-09-23, five consecutive rollbacks): a FIXED deterministic
+    # WorkloadIdentity name is not a safe dependency. TagResource on an existing
+    # identity returns a service 500; after DeleteWorkloadIdentity the name is
+    # tombstoned -- GetWorkloadIdentity reports not-found while
+    # CreateWorkloadIdentity keeps reporting 'already exists' (CLI-reproduced,
+    # persisting > 20 minutes). Every Create therefore mints a fresh name from
+    # the CloudFormation RequestId (unique per lifecycle request), and the
+    # Runtime learns the name from this resource's attributes, never from a
+    # synth-time constant. Ownership is proven by exact ARN + all five tags.
+    suffix = "".join(ch for ch in request_id.lower() if ch in "0123456789abcdef")[:12]
+    if len(suffix) < 12:
+        raise RuntimeError("CloudFormation RequestId did not yield a 12-hex workload suffix")
+    return prefix + "_" + suffix
 
 
 def _assert_provider_owned(client, name, expected_arn, tags):
@@ -263,10 +241,16 @@ def on_event(event, context):
     region = props["Region"]
     provider_name = props["ProviderName"]
     provider_arn = props["ProviderArn"]
-    workload_name = props["WorkloadName"]
-    workload_arn = props["WorkloadArn"]
+    workload_prefix = props["WorkloadNamePrefix"]
+    directory_arn = props["WorkloadDirectoryArn"]
     tags = props["Tags"]
     client = boto3.client("bedrock-agentcore-control", region_name=region)
+
+    # The physical id carries the exact workload-identity name this resource
+    # owns ("<provider>|<workload>"); Delete and Update read it back so they
+    # only ever touch the identity this resource created.
+    physical_id = event.get("PhysicalResourceId") or ""
+    owned_workload = physical_id.split("|", 1)[1] if "|" in physical_id else None
 
     if rt == "Delete":
         try:
@@ -275,13 +259,16 @@ def on_event(event, context):
         except ClientError as e:
             if not _is_not_found(e):
                 raise
-        try:
-            _assert_workload_owned(client, workload_name, workload_arn, tags)
-            client.delete_workload_identity(name=workload_name)
-        except ClientError as e:
-            if not _is_not_found(e):
-                raise
-        return {"PhysicalResourceId": provider_name}
+        if owned_workload and owned_workload.startswith(workload_prefix + "_"):
+            try:
+                _assert_workload_owned(
+                    client, owned_workload, _workload_arn(directory_arn, owned_workload), tags
+                )
+                client.delete_workload_identity(name=owned_workload)
+            except ClientError as e:
+                if not _is_not_found(e):
+                    raise
+        return {"PhysicalResourceId": physical_id or provider_name}
 
     # Create/Update: read the secret in-process only and bind it to the synth input.
     secrets = boto3.client("secretsmanager", region_name=region)
@@ -292,18 +279,24 @@ def on_event(event, context):
     client_id = data["clientId"]
     client_secret = data["clientSecret"]
 
-    # AgentCore returns ValidationException (not ConflictException) for an
-    # existing WorkloadIdentity. Adopt an exact identity that already carries
-    # all expected tags; recover (delete + recreate with create-time tags) only
-    # the exact zero-tag partial-create shape; refuse everything else.
-    try:
+    # Update: keep the identity this resource already owns when it is intact
+    # (exact ARN + all five tags); otherwise mint a replacement below.
+    workload_name = None
+    if rt == "Update" and owned_workload and owned_workload.startswith(workload_prefix + "_"):
+        try:
+            _assert_workload_owned(
+                client, owned_workload, _workload_arn(directory_arn, owned_workload), tags
+            )
+            workload_name = owned_workload
+        except ClientError as e:
+            if not _is_not_found(e):
+                raise
+    if workload_name is None:
+        workload_name = _unique_workload_name(workload_prefix, event["RequestId"])
+        # A fresh per-request name must never collide; any 'already exists'
+        # here is a real defect (or a tombstone) and fails closed by design.
         client.create_workload_identity(name=workload_name, tags=tags)
-    except ClientError as e:
-        if not _is_already_exists(e):
-            raise
-        _recover_untagged_workload(client, workload_name, workload_arn, tags)
-    else:
-        _assert_workload_owned(client, workload_name, workload_arn, tags)
+        _assert_workload_owned(client, workload_name, _workload_arn(directory_arn, workload_name), tags)
 
     provider_config = {
         "includedOauth2ProviderConfig": {
@@ -333,7 +326,10 @@ def on_event(event, context):
     _wait_provider(client, provider_name)
     _assert_provider_owned(client, provider_name, provider_arn, tags)
     del client_secret, provider_config, data, raw
-    return {"PhysicalResourceId": provider_name}
+    return {
+        "PhysicalResourceId": provider_name + "|" + workload_name,
+        "Data": {"WorkloadName": workload_name},
+    }
 `;
 
 /*
@@ -777,7 +773,10 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
       roleArn: runtimeRoleArn,
       // Compatibility variant reads ONLY AGENTCORE_MEMORY_ID. The generated
       // agent additionally needs its LLM/MCP/tenant wiring (validated below).
-      environmentVariables: this.buildRuntimeEnvironment(props),
+      environmentVariables: this.buildRuntimeEnvironment(
+        props,
+        identityProvider,
+      ),
       tags: this.allocationTagRecord(props),
     });
     this.runtime.applyRemovalPolicy(RemovalPolicy.DESTROY);
@@ -806,6 +805,7 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
    */
   private buildRuntimeEnvironment(
     props: D03WorkstreamRuntimeMemoryStackProps,
+    identityProvider?: CustomResource,
   ): Record<string, string> {
     const env: Record<string, string> = {
       AGENTCORE_MEMORY_ID: this.memory.attrMemoryId,
@@ -841,6 +841,11 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
         "D03WorkstreamRuntimeMemoryStack: generatedAgentRuntimeConfig.subscribedTools must list at least one qualified tool name.",
       );
     }
+    if (!identityProvider) {
+      throw new Error(
+        "D03WorkstreamRuntimeMemoryStack: the generated-agent variant requires the inference credential-provider custom resource to supply the workload identity name.",
+      );
+    }
     return {
       ...env,
       AGENTCORE_TENANT_ID: props.tenantId,
@@ -854,7 +859,9 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
       AGENTCORE_INFERENCE_SCOPE: cfg.inferenceScope,
       AGENTCORE_INFERENCE_CREDENTIAL_PROVIDER:
         this.credentialProviderName(props),
-      AGENTCORE_WORKLOAD_IDENTITY_NAME: this.workloadIdentityName(props),
+      // Minted per Create by the custom resource; never a synth-time constant.
+      AGENTCORE_WORKLOAD_IDENTITY_NAME:
+        identityProvider.getAttString("WorkloadName"),
     };
   }
 
@@ -875,12 +882,13 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     }
     const cfg = props.generatedAgentRuntimeConfig!;
     const providerName = this.credentialProviderName(props);
-    const workloadName = this.workloadIdentityName(props);
+    const workloadPrefix = this.workloadIdentityNamePrefix(props);
     const providerArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:token-vault/default/oauth2credentialprovider/${providerName}`;
-    const workloadArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default/workload-identity/${workloadName}`;
     // Family ARNs: the authorizer evaluates create-time tagging against these.
+    // The workload family is narrowed to this workstream's prefix because the
+    // handler mints "<prefix>_<12 hex>" per Create (see _unique_workload_name).
     const providerFamilyArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:token-vault/default/oauth2credentialprovider/*`;
-    const workloadFamilyArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default/workload-identity/*`;
+    const workloadFamilyArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default/workload-identity/${workloadPrefix}_*`;
     // Container ARNs: the modeled parent resource of each create action.
     const tokenVaultArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:token-vault/default`;
     const workloadDirectoryArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default`;
@@ -988,8 +996,10 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
         SecretArn: cfg.m2mSecretArn,
         ProviderName: providerName,
         ProviderArn: providerArn,
-        WorkloadName: workloadName,
-        WorkloadArn: workloadArn,
+        // The identity name is minted per Create by the handler (see
+        // _unique_workload_name) and surfaced as the `WorkloadName` attribute.
+        WorkloadNamePrefix: workloadPrefix,
+        WorkloadDirectoryArn: workloadDirectoryArn,
         Scope: cfg.inferenceScope,
         Tags: this.allocationTagRecord(props),
       },
@@ -1024,8 +1034,12 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     );
   }
 
-  /** Deterministic workload-identity name for this workstream. */
-  private workloadIdentityName(
+  /**
+   * Deterministic workload-identity NAME PREFIX for this workstream. The
+   * handler appends "_<12 hex>" per Create so a tombstoned or retained name
+   * can never block a deploy; IAM scopes to "<prefix>_*".
+   */
+  private workloadIdentityNamePrefix(
     props: D03WorkstreamRuntimeMemoryStackProps,
   ): string {
     return `AgenticAI_D03_${props.envName}_${props.tenantId}_${props.agentId}`.replace(

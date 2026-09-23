@@ -402,7 +402,10 @@ export class D03WorkstreamRegistryRolesStack extends Stack {
         }),
       );
       const providerArn = `arn:aws:bedrock-agentcore:${this.region}:${this.account}:token-vault/default/oauth2credentialprovider/${grants.credentialProviderName}`;
-      const workloadIdentityArn = `arn:aws:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default/workload-identity/${grants.workloadIdentityName}`;
+      // The RuntimeMemory custom resource mints "<prefix>_<12 hex>" per Create
+      // (a fixed name proved unsafe live: TagResource 500s and deleted names
+      // tombstone). Scope to this workstream's prefix family, not "*".
+      const workloadIdentityArn = `arn:aws:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default/workload-identity/${grants.workloadIdentityName}_*`;
       role.addToPolicy(
         new PolicyStatement({
           sid: "AgentCoreIdentityInferenceToken",

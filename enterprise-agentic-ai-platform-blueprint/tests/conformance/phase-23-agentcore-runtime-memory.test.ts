@@ -158,8 +158,10 @@ function roleTemplateWithGrants(): Template {
       enablePipelineRuntimeMemory: true,
       generatedAgentGrants: {
         m2mSecretArn: `arn:aws:secretsmanager:${REGION}:${PLATFORM_ACCOUNT}:secret:agenticai/inference-m2m/agenticai-inference-nonprod-abc`,
-        credentialProviderName: "AgenticAI-D03-nonprod-demo-primary-inference",
-        workloadIdentityName: "AgenticAI-D03-nonprod-demo-primary",
+        // Same underscore form the Workload pipeline computes and RuntimeMemory
+        // mints from; the grant family must match the minted "<prefix>_<hex>".
+        credentialProviderName: "AgenticAI_D03_nonprod_demo_primary_inference",
+        workloadIdentityName: "AgenticAI_D03_nonprod_demo_primary",
       },
     }),
   );
@@ -324,9 +326,12 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
     expect(env.AGENTCORE_SUBSCRIBED_TOOLS).toBe(
       "target-tool-echo___echo,target-tool-ping___ping",
     );
-    expect(env.AGENTCORE_WORKLOAD_IDENTITY_NAME).toBe(
-      "AgenticAI_D03_nonprod_demo_primary",
-    );
+    // The identity name is minted per Create by the custom resource and read
+    // back through its attribute -- never a synth-time constant (a fixed name
+    // proved unsafe live: TagResource 500s and deleted names tombstone).
+    expect(env.AGENTCORE_WORKLOAD_IDENTITY_NAME).toEqual({
+      "Fn::GetAtt": ["InferenceCredProvider", "WorkloadName"],
+    });
     const rendered = JSON.stringify(template.toJSON());
     expect(rendered).toContain("get_oauth2_credential_provider");
     expect(rendered).toContain("did not reach READY within 250 seconds");
@@ -394,12 +399,15 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
     const lifecycleResourcesJson = JSON.stringify(lifecycleResources);
     for (const suffix of [
       `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:workload-identity-directory/default"`,
-      `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:workload-identity-directory/default/workload-identity/*`,
+      // Narrowed to this workstream's prefix family: the handler mints
+      // "<prefix>_<12 hex>" per Create.
+      `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:workload-identity-directory/default/workload-identity/AgenticAI_D03_nonprod_demo_primary_*`,
       `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:token-vault/default"`,
       `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:token-vault/default/oauth2credentialprovider/*`,
     ]) {
       expect(lifecycleResourcesJson).toContain(suffix);
     }
+    expect(lifecycleResourcesJson).not.toContain("workload-identity/*");
     expect(lifecycleResourcesJson).not.toMatch(/"\*"/);
     // No statement in the provider role may carry a bare "*" resource.
     for (const statement of statements) {
@@ -426,12 +434,19 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
     expect(providerArnJson).toContain(
       `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:token-vault/default/oauth2credentialprovider/AgenticAI_D03_nonprod_demo_primary_inference`,
     );
-    const workloadArnJson = JSON.stringify(
-      credentialProviderResource.Properties.WorkloadArn,
+    // The exact identity name is NOT a synth-time property: the resource
+    // receives the prefix + directory and the handler mints "<prefix>_<12 hex>".
+    expect(credentialProviderResource.Properties.WorkloadName).toBeUndefined();
+    expect(credentialProviderResource.Properties.WorkloadArn).toBeUndefined();
+    expect(credentialProviderResource.Properties.WorkloadNamePrefix).toBe(
+      "AgenticAI_D03_nonprod_demo_primary",
     );
-    expect(workloadArnJson).toContain("AWS::Partition");
-    expect(workloadArnJson).toContain(
-      `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:workload-identity-directory/default/workload-identity/AgenticAI_D03_nonprod_demo_primary`,
+    const directoryArnJson = JSON.stringify(
+      credentialProviderResource.Properties.WorkloadDirectoryArn,
+    );
+    expect(directoryArnJson).toContain("AWS::Partition");
+    expect(directoryArnJson).toContain(
+      `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:workload-identity-directory/default"`,
     );
     const handlerCode = JSON.stringify(template.toJSON());
     expect(handlerCode).toContain(
@@ -440,20 +455,19 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
     expect(handlerCode).toContain(
       'code == \\"ValidationException\\" and \\"already exists\\" in message',
     );
-    // Recovery of the exact zero-tag partial create is delete + recreate with
-    // create-time tags (TagResource on an existing WorkloadIdentity returns a
-    // deterministic service 500 -- live-proven 2026-09-23), and foreign or
-    // partial tags remain a hard refusal. The handler must not tag in place.
+    // Unique-per-create identity (live-proven 2026-09-23 over five rollbacks:
+    // TagResource on an existing identity returns a service 500 and a deleted
+    // name tombstones -- Get says not-found while Create says already-exists).
+    // The handler must mint from the RequestId, surface the name as the
+    // WorkloadName attribute, and never tag in place or adopt a retained name.
     expect(handlerCode).toContain(
-      "_recover_untagged_workload(client, workload_name, workload_arn, tags)",
+      "_unique_workload_name(workload_prefix, event[\\\"RequestId\\\"])",
     );
-    expect(handlerCode).toContain("client.delete_workload_identity(name=name)");
-    expect(handlerCode).toContain(
-      "Refusing workload identity with foreign or partial ownership tags",
-    );
+    expect(handlerCode).toContain('\\"Data\\": {\\"WorkloadName\\": workload_name}');
     expect(handlerCode).toContain(
       "Refusing resource with missing or foreign ownership tags",
     );
+    expect(handlerCode).not.toContain("_recover_untagged_workload");
     expect(handlerCode).not.toContain("allow_untagged");
     expect(handlerCode).not.toContain("client.tag_resource(");
     expect(handlerCode).toContain("oauth2ProviderConfigInput=provider_config");
@@ -1072,6 +1086,16 @@ describe("Phase 23 — prior-stage Runtime role", () => {
         }),
       ]),
     );
+    // The workload identity is minted per Create by RuntimeMemory, so the
+    // runtime role scopes GetWorkloadAccessToken to the prefix family; the
+    // provider stays exact. Never a bare workload-identity wildcard.
+    const identityStatement = statements.find(
+      (statement: any) => statement.Sid === "AgentCoreIdentityInferenceToken",
+    );
+    expect(identityStatement.Resource).toEqual([
+      `arn:aws:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:token-vault/default/oauth2credentialprovider/AgenticAI_D03_nonprod_demo_primary_inference`,
+      `arn:aws:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:workload-identity-directory/default/workload-identity/AgenticAI_D03_nonprod_demo_primary_*`,
+    ]);
   });
 });
 
