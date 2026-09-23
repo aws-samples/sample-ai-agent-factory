@@ -336,8 +336,9 @@ def test_inference_token_bound_leaves_reasoning_headroom_and_stays_bounded(
         message = {"content": [{"text": "verified"}]}
 
     class FakeAgent:
-        def __init__(self, *, model, callback_handler):
+        def __init__(self, *, model, callback_handler, system_prompt=None):
             self.model = model
+            captured["system_prompt"] = system_prompt
 
         def __call__(self, _prompt):
             return FakeResult()
@@ -350,28 +351,38 @@ def test_inference_token_bound_leaves_reasoning_headroom_and_stays_bounded(
     adapter._bearer = "token"
 
     text = adapter.complete(
-        [{"role": "user", "content": "hi"}],
+        [
+            {"role": "system", "content": "protocol: TOOL <name> <json>"},
+            {"role": "user", "content": "hi"},
+        ],
         guardrail_identifier="gr-1",
         stream=False,
     )
 
     assert text == "verified"
+    # Live-proven gap (fourth invoke, toolCalls=[]): the system turn used to be
+    # dropped, so the model never saw the TOOL protocol.
+    assert captured["system_prompt"] == "protocol: TOOL <name> <json>"
     assert captured["params"]["max_tokens"] == agent_mod.INFERENCE_MAX_TOKENS
     assert captured["params"]["guardrail_identifier"] == "gr-1"
     assert captured["params"]["temperature"] == 0
 
 
-def test_memory_adapter_writes_timestamped_document_and_reads_back_by_id():
-    """Regression pin for the live 2026-09-23 ``ParamValidationError``.
+def test_memory_adapter_writes_timestamped_text_and_reads_back_by_id():
+    """Regression pin for two live 2026-09-23 Memory defects.
 
-    CreateEvent REQUIRES ``eventTimestamp`` (pinned botocore model), the
-    ``blob`` union member is a ``document`` (structured JSON, not a string),
-    and the round trip must read back the exact ``eventId`` it wrote because
-    ListEvents ordering is unspecified.
+    CreateEvent REQUIRES ``eventTimestamp`` (pinned botocore model). The
+    ``blob`` document member is returned by the service as a lossy
+    ``{k=v, ...}`` rendering and cannot round-trip structured data, so the
+    record travels as canonical JSON text in a ``conversational`` turn (the
+    member that round-trips byte-exact live). The round trip must read back
+    the exact ``eventId`` it wrote because ListEvents ordering is unspecified.
     """
+    import json
     from datetime import datetime
 
     calls: list[tuple[str, dict]] = []
+    record = {"replyFingerprint": "abc", "toolCalls": []}
 
     class FakeDataPlane:
         def create_event(self, **kwargs):
@@ -383,7 +394,14 @@ def test_memory_adapter_writes_timestamped_document_and_reads_back_by_id():
             return {
                 "event": {
                     "eventId": kwargs["eventId"],
-                    "payload": [{"blob": {"replyFingerprint": "abc", "toolCalls": []}}],
+                    "payload": [
+                        {
+                            "conversational": {
+                                "role": "ASSISTANT",
+                                "content": {"text": json.dumps(record, sort_keys=True)},
+                            }
+                        }
+                    ],
                 }
             }
 
@@ -391,22 +409,51 @@ def test_memory_adapter_writes_timestamped_document_and_reads_back_by_id():
     adapter._memory_id = "mem-1"
     adapter._client = FakeDataPlane()
 
-    event_id = adapter.put_event(
-        actor_id="actor-1",
-        session_id="sess-1",
-        payload={"replyFingerprint": "abc", "toolCalls": []},
-    )
+    event_id = adapter.put_event(actor_id="actor-1", session_id="sess-1", payload=record)
     assert event_id == "evt-123"
     name, kwargs = calls[0]
     assert name == "create_event"
     assert kwargs["memoryId"] == "mem-1"
     assert isinstance(kwargs["eventTimestamp"], datetime)
     assert kwargs["eventTimestamp"].tzinfo is not None
-    assert kwargs["payload"] == [{"blob": {"replyFingerprint": "abc", "toolCalls": []}}]
+    assert kwargs["payload"] == [
+        {
+            "conversational": {
+                "role": "ASSISTANT",
+                "content": {"text": '{"replyFingerprint": "abc", "toolCalls": []}'},
+            }
+        }
+    ]
+    assert "blob" not in json.dumps(kwargs["payload"])
 
-    record = adapter.get_event(actor_id="actor-1", session_id="sess-1", event_id=event_id)
-    assert record == {"replyFingerprint": "abc", "toolCalls": []}
+    got = adapter.get_event(actor_id="actor-1", session_id="sess-1", event_id=event_id)
+    assert got == record
     assert calls[1] == (
         "get_event",
         {"memoryId": "mem-1", "actorId": "actor-1", "sessionId": "sess-1", "eventId": "evt-123"},
     )
+
+
+def test_system_prompt_states_tool_protocol_and_subscribed_names():
+    """Regression pin for the live toolCalls=[] gap (fourth invoke).
+
+    The model complied 4/4 once the system turn actually reached it
+    (inference_prompt_probe.py); the prompt must carry the exact TOOL protocol
+    and the subscribed names, and the core must send it as the system role.
+    """
+    seen: list[list[dict]] = []
+
+    class RecordingLlm:
+        def complete(self, messages, *, guardrail_identifier, stream):
+            seen.append([dict(m) for m in messages])
+            return "<done/>"
+
+    core = ReferenceAgentCore(_cfg(), RecordingLlm(), FakeTools(["target-demo___tool-echo"]))
+    core.run("hi", actor_id="a", session_id="s")
+
+    system = [m for m in seen[0] if m["role"] == "system"]
+    assert len(system) == 1
+    text = system[0]["content"]
+    assert "TOOL <qualified_tool_name> <json_object_arguments>" in text
+    assert "target-demo___tool-echo" in text
+    assert "<done/>" in text

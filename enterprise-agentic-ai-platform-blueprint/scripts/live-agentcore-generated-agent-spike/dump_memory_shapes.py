@@ -29,6 +29,9 @@ def main() -> None:
         if shape.type_name == "structure":
             for sub, subshape in shape.members.items():
                 print(f"     .{sub}: {subshape.type_name} ({subshape.name})")
+                if subshape.type_name == "structure":
+                    for sub2, subshape2 in subshape.members.items():
+                        print(f"        .{sub2}: {subshape2.type_name} ({subshape2.name})")
     event = model.shape_for("Event")
     print(f"\nEvent members: {list(event.members)}")
 

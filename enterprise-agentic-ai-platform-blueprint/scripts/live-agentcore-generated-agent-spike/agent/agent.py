@@ -192,9 +192,19 @@ class ReferenceAgentCore:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
 
     def _system_prompt(self) -> str:
+        # Live-proven 2026-09-23 (inference_prompt_probe.py, 4/4 identical
+        # replies at temperature 0): once the system turn actually reaches the
+        # model it emits the exact TOOL directive. State the protocol and the
+        # subscribed names explicitly so compliance never depends on the user
+        # prompt alone; the core still refuses any name outside the allowlist.
+        tools = ", ".join(self.config.subscribed_tools) or "(none subscribed)"
         return (
-            "You are a governed reference agent. Use only subscribed tools via "
-            "the Tools Gateway. Respond with '<done/>' when the task is complete."
+            "You are a governed reference agent. You can call tools ONLY through "
+            "the Tools Gateway using this exact protocol: reply with a single line "
+            "'TOOL <qualified_tool_name> <json_object_arguments>' and nothing else. "
+            f"Subscribed tools: {tools}. When you call a tool, the TOOL line must "
+            "be your entire reply -- do not describe, explain, quote or wrap it. "
+            "Respond with '<done/>' when the task is complete."
         )
 
     def run(self, prompt: str, *, actor_id: str, session_id: str) -> AgentResult:
@@ -344,7 +354,13 @@ class _LiteLlmAdapter:
                 "guardrail_identifier": guardrail_identifier,
             },
         )
-        agent = self._Agent(model=model, callback_handler=None)
+        # The system turn was previously dropped on the floor (only user/tool
+        # roles were joined), so the model never saw the TOOL protocol. Hand it
+        # to Strands as the agent's system prompt.
+        system_prompt = "\n".join(
+            m["content"] for m in messages if m.get("role") == "system"
+        ) or None
+        agent = self._Agent(model=model, callback_handler=None, system_prompt=system_prompt)
         # Collapse the message list into a single deterministic user turn; the
         # reference agent is single-shot per iteration by design.
         user_turn = "\n".join(
@@ -474,17 +490,29 @@ class _AgentCoreMemoryAdapter:
         self._client = boto3.client("bedrock-agentcore", region_name=region)
 
     def put_event(self, *, actor_id: str, session_id: str, payload: Mapping[str, Any]) -> str:
+        import json
         from datetime import datetime, timezone
 
-        # Shape pinned against the botocore model (live-verified 2026-09-23):
-        # ``eventTimestamp`` is REQUIRED, and ``blob`` is a ``document`` union
-        # member — the record travels as structured JSON, never a string.
+        # Shape pinned against the botocore model and LIVE behaviour
+        # (2026-09-23): ``eventTimestamp`` is REQUIRED. The ``blob`` union
+        # member accepts a document but the service returns it as a lossy
+        # ``{k=v, ...}`` rendering, so it cannot round-trip structured data;
+        # the ``conversational`` text member round-trips byte-exact (the same
+        # member the live-proven runtime-memory spike uses). Carry the record
+        # as canonical JSON text in an ASSISTANT turn.
         resp = self._client.create_event(
             memoryId=self._memory_id,
             actorId=actor_id,
             sessionId=session_id,
             eventTimestamp=datetime.now(timezone.utc),
-            payload=[{"blob": dict(payload)}],
+            payload=[
+                {
+                    "conversational": {
+                        "role": "ASSISTANT",
+                        "content": {"text": json.dumps(payload, sort_keys=True)},
+                    }
+                }
+            ],
         )
         return str(resp.get("event", {}).get("eventId", ""))
 
@@ -508,17 +536,20 @@ class _AgentCoreMemoryAdapter:
             if error.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
                 return None
             raise
-        blobs = (resp.get("event") or {}).get("payload") or []
-        for item in blobs:
-            blob = item.get("blob")
-            if isinstance(blob, Mapping):
-                return blob
-            if isinstance(blob, str):
-                try:
-                    decoded = json.loads(blob)
-                except json.JSONDecodeError:
-                    return None
-                return decoded if isinstance(decoded, Mapping) else None
+        blocks = (resp.get("event") or {}).get("payload") or []
+        for item in blocks:
+            conversational = item.get("conversational")
+            if not isinstance(conversational, Mapping):
+                continue
+            content = conversational.get("content")
+            text = content.get("text") if isinstance(content, Mapping) else None
+            if not isinstance(text, str):
+                continue
+            try:
+                decoded = json.loads(text)
+            except json.JSONDecodeError:
+                return None
+            return decoded if isinstance(decoded, Mapping) else None
         return None
 
 
