@@ -156,12 +156,56 @@ _TERMINAL = ("CREATE_FAILED", "UPDATE_FAILED", "DELETE_FAILED")
 _PENDING = ("CREATING", "UPDATING", "DELETING")
 
 
+def _error_code(error):
+    return error.response["Error"]["Code"]
+
+
+def _is_not_found(error):
+    return _error_code(error) in _NOT_FOUND
+
+
+def _is_already_exists(error):
+    code = _error_code(error)
+    message = error.response["Error"].get("Message", "")
+    return (
+        "AlreadyExists" in code
+        or "Conflict" in code
+        or (code == "ValidationException" and "already exists" in message)
+    )
+
+
+def _assert_tags(client, resource_arn, expected_tags, allow_untagged=False):
+    live = client.list_tags_for_resource(resourceArn=resource_arn).get("tags", {})
+    if live == expected_tags:
+        return
+    if allow_untagged and live == {}:
+        client.tag_resource(resourceArn=resource_arn, tags=expected_tags)
+        live = client.list_tags_for_resource(resourceArn=resource_arn).get("tags", {})
+        if live == expected_tags:
+            return
+    raise RuntimeError("Refusing resource with missing or foreign ownership tags")
+
+
+def _assert_workload_owned(client, name, expected_arn, tags, allow_untagged=False):
+    response = client.get_workload_identity(name=name)
+    if response.get("name") != name or response.get("workloadIdentityArn") != expected_arn:
+        raise RuntimeError("Workload identity response does not match the exact expected identity")
+    _assert_tags(client, expected_arn, tags, allow_untagged)
+
+
+def _assert_provider_owned(client, name, expected_arn, tags):
+    response = client.get_oauth2_credential_provider(name=name)
+    if response.get("name") != name or response.get("credentialProviderArn") != expected_arn:
+        raise RuntimeError("Credential provider response does not match the exact expected provider")
+    _assert_tags(client, expected_arn, tags)
+
+
 def _wait_provider(client, provider_name):
     for _ in range(50):
         try:
             response = client.get_oauth2_credential_provider(name=provider_name)
         except ClientError as e:
-            if e.response["Error"]["Code"] in _NOT_FOUND:
+            if _is_not_found(e):
                 time.sleep(5)
                 continue
             raise
@@ -181,35 +225,49 @@ def on_event(event, context):
     props = event["ResourceProperties"]
     region = props["Region"]
     provider_name = props["ProviderName"]
+    provider_arn = props["ProviderArn"]
     workload_name = props["WorkloadName"]
+    workload_arn = props["WorkloadArn"]
     tags = props["Tags"]
     client = boto3.client("bedrock-agentcore-control", region_name=region)
 
     if rt == "Delete":
-        for call in (
-            lambda: client.delete_oauth2_credential_provider(name=provider_name),
-            lambda: client.delete_workload_identity(name=workload_name),
-        ):
-            try:
-                call()
-            except ClientError as e:
-                if e.response["Error"]["Code"] not in _NOT_FOUND:
-                    raise
+        try:
+            _assert_provider_owned(client, provider_name, provider_arn, tags)
+            client.delete_oauth2_credential_provider(name=provider_name)
+        except ClientError as e:
+            if not _is_not_found(e):
+                raise
+        try:
+            _assert_workload_owned(client, workload_name, workload_arn, tags)
+            client.delete_workload_identity(name=workload_name)
+        except ClientError as e:
+            if not _is_not_found(e):
+                raise
         return {"PhysicalResourceId": provider_name}
 
-    # Create/Update: read the secret in-process only.
+    # Create/Update: read the secret in-process only and bind it to the synth input.
     secrets = boto3.client("secretsmanager", region_name=region)
     raw = secrets.get_secret_value(SecretId=props["SecretArn"])["SecretString"]
     data = json.loads(raw)
+    if data.get("scope") != props["Scope"]:
+        raise RuntimeError("Platform M2M secret scope does not match the synth input")
     client_id = data["clientId"]
     client_secret = data["clientSecret"]
 
-    # WorkloadIdentity (idempotent).
+    # AgentCore returns ValidationException (not ConflictException) for an
+    # existing WorkloadIdentity. Adopt only an exact identity with either all
+    # expected tags or no tags from the known pre-tagging partial-create path.
     try:
         client.create_workload_identity(name=workload_name, tags=tags)
     except ClientError as e:
-        if "AlreadyExists" not in e.response["Error"]["Code"] and "Conflict" not in e.response["Error"]["Code"]:
+        if not _is_already_exists(e):
             raise
+        _assert_workload_owned(
+            client, workload_name, workload_arn, tags, allow_untagged=True
+        )
+    else:
+        _assert_workload_owned(client, workload_name, workload_arn, tags)
 
     provider_config = {
         "includedOauth2ProviderConfig": {
@@ -228,16 +286,16 @@ def on_event(event, context):
             tags=tags,
         )
     except ClientError as e:
-        code = e.response["Error"]["Code"]
-        if "AlreadyExists" in code or "Conflict" in code:
-            client.update_oauth2_credential_provider(
-                name=provider_name,
-                credentialProviderVendor="CognitoOauth2",
-                oauth2ProviderConfigInput=provider_config,
-            )
-        else:
+        if not _is_already_exists(e):
             raise
+        _assert_provider_owned(client, provider_name, provider_arn, tags)
+        client.update_oauth2_credential_provider(
+            name=provider_name,
+            credentialProviderVendor="CognitoOauth2",
+            oauth2ProviderConfigInput=provider_config,
+        )
     _wait_provider(client, provider_name)
+    _assert_provider_owned(client, provider_name, provider_arn, tags)
     del client_secret, provider_config, data, raw
     return {"PhysicalResourceId": provider_name}
 `;
@@ -782,6 +840,8 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     const cfg = props.generatedAgentRuntimeConfig!;
     const providerName = this.credentialProviderName(props);
     const workloadName = this.workloadIdentityName(props);
+    const providerArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:token-vault/default/oauth2credentialprovider/${providerName}`;
+    const workloadArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default/workload-identity/${workloadName}`;
 
     const roleName = `AgenticAI-D03-${props.envName}-${props.tenantId}-${props.agentId}-idprov`;
     if (roleName.length > 64) {
@@ -837,11 +897,19 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
                 "bedrock-agentcore:GetOauth2CredentialProvider",
                 "bedrock-agentcore:UpdateOauth2CredentialProvider",
                 "bedrock-agentcore:DeleteOauth2CredentialProvider",
-                "bedrock-agentcore:TagResource",
               ],
               // These control-plane actions take no resource-level ARN in the
               // current service model (SEC-011 family); scoped by account trust.
               resources: ["*"],
+            }),
+            new PolicyStatement({
+              sid: "VerifyIdentityOwnershipTags",
+              effect: Effect.ALLOW,
+              actions: [
+                "bedrock-agentcore:ListTagsForResource",
+                "bedrock-agentcore:TagResource",
+              ],
+              resources: [providerArn, workloadArn],
             }),
           ],
         }),
@@ -870,7 +938,9 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
         Region: this.region,
         SecretArn: cfg.m2mSecretArn,
         ProviderName: providerName,
+        ProviderArn: providerArn,
         WorkloadName: workloadName,
+        WorkloadArn: workloadArn,
         Scope: cfg.inferenceScope,
         Tags: this.allocationTagRecord(props),
       },

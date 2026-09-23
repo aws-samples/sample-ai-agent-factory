@@ -352,11 +352,26 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
           Resource: `arn:aws:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:token-vault/default`,
         }),
         expect.objectContaining({
-          Sid: "ManageIdentityAndProvider",
+          Sid: "VerifyIdentityOwnershipTags",
           Effect: "Allow",
-          Action: expect.arrayContaining(["bedrock-agentcore:TagResource"]),
+          Action: [
+            "bedrock-agentcore:ListTagsForResource",
+            "bedrock-agentcore:TagResource",
+          ],
         }),
       ]),
+    );
+    const ownershipTagStatement = statements.find(
+      (statement: any) => statement.Sid === "VerifyIdentityOwnershipTags",
+    );
+    const ownershipResourcesJson = JSON.stringify(
+      ownershipTagStatement.Resource,
+    );
+    expect(ownershipResourcesJson).toContain(
+      ":token-vault/default/oauth2credentialprovider/AgenticAI_D03_nonprod_demo_primary_inference",
+    );
+    expect(ownershipResourcesJson).toContain(
+      ":workload-identity-directory/default/workload-identity/AgenticAI_D03_nonprod_demo_primary",
     );
 
     const credentialProviderResource = Object.values(
@@ -368,9 +383,30 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
     ) as any;
     expect(credentialProviderResource).toBeDefined();
     expect(credentialProviderResource.Properties.Tags).toEqual(REQUIRED_TAGS);
+    const providerArnJson = JSON.stringify(
+      credentialProviderResource.Properties.ProviderArn,
+    );
+    expect(providerArnJson).toContain("AWS::Partition");
+    expect(providerArnJson).toContain(
+      `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:token-vault/default/oauth2credentialprovider/AgenticAI_D03_nonprod_demo_primary_inference`,
+    );
+    const workloadArnJson = JSON.stringify(
+      credentialProviderResource.Properties.WorkloadArn,
+    );
+    expect(workloadArnJson).toContain("AWS::Partition");
+    expect(workloadArnJson).toContain(
+      `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:workload-identity-directory/default/workload-identity/AgenticAI_D03_nonprod_demo_primary`,
+    );
     const handlerCode = JSON.stringify(template.toJSON());
     expect(handlerCode).toContain(
       "create_workload_identity(name=workload_name, tags=tags)",
+    );
+    expect(handlerCode).toContain(
+      'code == \\"ValidationException\\" and \\"already exists\\" in message',
+    );
+    expect(handlerCode).toContain("allow_untagged=True");
+    expect(handlerCode).toContain(
+      "Refusing resource with missing or foreign ownership tags",
     );
     expect(handlerCode).toContain("oauth2ProviderConfigInput=provider_config");
     expect(handlerCode).toContain("tags=tags");
