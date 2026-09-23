@@ -292,3 +292,35 @@ def test_unique_name_requires_twelve_hex_chars(handler):
     with pytest.raises(RuntimeError, match="12-hex"):
         handler._unique_workload_name(PREFIX, "not-hex-at-all")
     assert handler._unique_workload_name(PREFIX, REQUEST_ID) == EXPECTED_NAME
+
+
+def test_failed_provider_step_removes_identity_minted_in_same_request(monkeypatch, handler):
+    # Live 2026-09-23: CloudFormation's rollback Delete arrives with a
+    # service-generated PhysicalResourceId when Create fails, so the handler
+    # must compensate for its own minted identity or it is orphaned.
+    fake = FakeControl()
+
+    def denied(**_):
+        fake.calls.append("create_provider")
+        raise _err("AccessDeniedException", "not authorized to perform: secretsmanager:CreateSecret", 403)
+
+    fake.create_oauth2_credential_provider = denied
+    with pytest.raises(ClientError, match="secretsmanager:CreateSecret"):
+        _run(monkeypatch, handler, fake, _event("Create"))
+    assert f"delete_wl:{EXPECTED_NAME}" in fake.calls
+    assert EXPECTED_NAME not in fake.identities
+
+
+def test_failed_provider_step_on_update_keeps_reused_identity(monkeypatch, handler):
+    fake = FakeControl()
+    created = _run(monkeypatch, handler, fake, _event("Create"))
+    fake.calls.clear()
+
+    def boom(**_):
+        raise _err("InternalServerErrorException", "Internal server error", 500)
+
+    fake.update_oauth2_credential_provider = boom
+    with pytest.raises(ClientError):
+        _run(monkeypatch, handler, fake, _event("Update", physical_id=created["PhysicalResourceId"]))
+    assert not any(c.startswith("delete_wl") for c in fake.calls)
+    assert EXPECTED_NAME in fake.identities

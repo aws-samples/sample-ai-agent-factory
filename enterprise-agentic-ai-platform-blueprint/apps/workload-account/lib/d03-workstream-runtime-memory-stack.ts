@@ -291,12 +291,14 @@ def on_event(event, context):
         except ClientError as e:
             if not _is_not_found(e):
                 raise
+    minted_this_request = False
     if workload_name is None:
         workload_name = _unique_workload_name(workload_prefix, event["RequestId"])
         # A fresh per-request name must never collide; any 'already exists'
         # here is a real defect (or a tombstone) and fails closed by design.
         client.create_workload_identity(name=workload_name, tags=tags)
         _assert_workload_owned(client, workload_name, _workload_arn(directory_arn, workload_name), tags)
+        minted_this_request = True
 
     provider_config = {
         "includedOauth2ProviderConfig": {
@@ -308,24 +310,38 @@ def on_event(event, context):
         }
     }
     try:
-        client.create_oauth2_credential_provider(
-            name=provider_name,
-            credentialProviderVendor="CognitoOauth2",
-            oauth2ProviderConfigInput=provider_config,
-            tags=tags,
-        )
-    except ClientError as e:
-        if not _is_already_exists(e):
-            raise
+        try:
+            client.create_oauth2_credential_provider(
+                name=provider_name,
+                credentialProviderVendor="CognitoOauth2",
+                oauth2ProviderConfigInput=provider_config,
+                tags=tags,
+            )
+        except ClientError as e:
+            if not _is_already_exists(e):
+                raise
+            _assert_provider_owned(client, provider_name, provider_arn, tags)
+            client.update_oauth2_credential_provider(
+                name=provider_name,
+                credentialProviderVendor="CognitoOauth2",
+                oauth2ProviderConfigInput=provider_config,
+            )
+        _wait_provider(client, provider_name)
         _assert_provider_owned(client, provider_name, provider_arn, tags)
-        client.update_oauth2_credential_provider(
-            name=provider_name,
-            credentialProviderVendor="CognitoOauth2",
-            oauth2ProviderConfigInput=provider_config,
-        )
-    _wait_provider(client, provider_name)
-    _assert_provider_owned(client, provider_name, provider_arn, tags)
-    del client_secret, provider_config, data, raw
+    except Exception:
+        # Live-proven (2026-09-23): when Create fails, CloudFormation's rollback
+        # Delete arrives with a service-generated PhysicalResourceId, not ours,
+        # so the identity minted above would be orphaned. Compensate here: the
+        # identity is exactly ours (just created + ownership-verified), so
+        # removing it is safe; the original error is re-raised unchanged.
+        if minted_this_request:
+            try:
+                client.delete_workload_identity(name=workload_name)
+            except ClientError:
+                pass
+        raise
+    finally:
+        del client_secret, provider_config, data, raw
     return {
         "PhysicalResourceId": provider_name + "|" + workload_name,
         "Data": {"WorkloadName": workload_name},
@@ -918,6 +934,25 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
                 "secretsmanager:DescribeSecret",
               ],
               resources: [cfg.m2mSecretArn],
+            }),
+            new PolicyStatement({
+              // Live-proven (2026-09-23): CreateOauth2CredentialProvider with a
+              // MANAGED client secret stores it in a Secrets Manager secret it
+              // creates on the CALLER's behalf and fails closed with
+              // "not authorized to perform: secretsmanager:CreateSecret". The
+              // service names those secrets under its reserved
+              // "bedrock-agentcore-identity!" prefix, so the grant is scoped to
+              // that family in this account/region only -- never the Platform
+              // M2M secret, never a bare "*".
+              sid: "AllowServiceManagedProviderSecret",
+              effect: Effect.ALLOW,
+              actions: [
+                "secretsmanager:CreateSecret",
+                "secretsmanager:TagResource",
+              ],
+              resources: [
+                `arn:${this.partition}:secretsmanager:${this.region}:${this.account}:secret:bedrock-agentcore-identity!*`,
+              ],
             }),
             new PolicyStatement({
               sid: "DecryptPlatformM2mSecret",
