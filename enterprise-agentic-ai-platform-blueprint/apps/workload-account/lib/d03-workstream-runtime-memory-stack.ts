@@ -842,6 +842,9 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     const workloadName = this.workloadIdentityName(props);
     const providerArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:token-vault/default/oauth2credentialprovider/${providerName}`;
     const workloadArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default/workload-identity/${workloadName}`;
+    // Family ARNs: the authorizer evaluates create-time tagging against these.
+    const providerFamilyArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:token-vault/default/oauth2credentialprovider/*`;
+    const workloadFamilyArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default/workload-identity/*`;
 
     const roleName = `AgenticAI-D03-${props.envName}-${props.tenantId}-${props.agentId}-idprov`;
     if (roleName.length > 64) {
@@ -911,6 +914,19 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
               ],
               resources: [providerArn, workloadArn],
             }),
+            new PolicyStatement({
+              // Live-proven (2026-09-23): AgentCore authorizes the tags passed
+              // on CreateWorkloadIdentity / CreateOauth2CredentialProvider as an
+              // implicit TagResource against the resource FAMILY ARN
+              // (".../workload-identity/*"), not the exact named ARN, because
+              // the resource does not exist yet. Exact-ARN scoping alone fails
+              // closed with AccessDenied on the family wildcard. Scope stays
+              // within the two deterministic families in this account/region.
+              sid: "TagIdentityResourcesOnCreate",
+              effect: Effect.ALLOW,
+              actions: ["bedrock-agentcore:TagResource"],
+              resources: [providerFamilyArn, workloadFamilyArn],
+            }),
           ],
         }),
       },
@@ -951,7 +967,7 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
         {
           id: "AwsSolutions-IAM5",
           reason:
-            "SEC-011: bedrock-agentcore WorkloadIdentity/Oauth2CredentialProvider control-plane actions take no resource-level ARN in the current service model; kms:Decrypt is constrained by ViaService + the exact secret's encryption context.",
+            "SEC-011: bedrock-agentcore WorkloadIdentity/Oauth2CredentialProvider control-plane actions take no resource-level ARN in the current service model; create-time TagResource is authorized by the service against the two deterministic resource-family ARNs in this account/region (live-proven); kms:Decrypt is constrained by ViaService + the exact secret's encryption context.",
         },
         {
           id: "AwsSolutions-IAM4",

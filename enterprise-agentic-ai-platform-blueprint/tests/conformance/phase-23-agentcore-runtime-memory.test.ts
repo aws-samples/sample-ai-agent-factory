@@ -374,6 +374,27 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
       ":workload-identity-directory/default/workload-identity/AgenticAI_D03_nonprod_demo_primary",
     );
 
+    // Create-time tagging is authorized against the resource FAMILY (live-proven
+    // AccessDenied on ".../workload-identity/*"); pin it to exactly the two
+    // deterministic families -- never a bare "*" -- and to TagResource only.
+    const createTagStatement = statements.find(
+      (statement: any) => statement.Sid === "TagIdentityResourcesOnCreate",
+    );
+    expect(createTagStatement).toBeDefined();
+    expect(createTagStatement.Effect).toBe("Allow");
+    expect(createTagStatement.Action).toBe("bedrock-agentcore:TagResource");
+    const createTagResources = createTagStatement.Resource;
+    expect(Array.isArray(createTagResources)).toBe(true);
+    expect(createTagResources).toHaveLength(2);
+    const createTagResourcesJson = JSON.stringify(createTagResources);
+    expect(createTagResourcesJson).toContain(
+      ":token-vault/default/oauth2credentialprovider/*",
+    );
+    expect(createTagResourcesJson).toContain(
+      ":workload-identity-directory/default/workload-identity/*",
+    );
+    expect(createTagResourcesJson).not.toMatch(/"\*"/);
+
     const credentialProviderResource = Object.values(
       template.findResources("AWS::CloudFormation::CustomResource"),
     ).find(
