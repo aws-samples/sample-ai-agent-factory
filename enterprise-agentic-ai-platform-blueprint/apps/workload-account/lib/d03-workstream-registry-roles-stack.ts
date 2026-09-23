@@ -43,8 +43,10 @@ export interface D03WorkstreamRegistryRolesStackProps extends StackProps {
    * `GetResourceOauth2Token` on the `<prefix>_*` workload-identity family, the
    * exact CognitoOauth2 credential provider, and their two parent containers;
    * and `secretsmanager:GetSecretValue` on exactly that provider's
-   * service-managed client secret (live-proven 2026-09-23). The Runtime never
-   * reads the Platform M2M secret -- only the RuntimeMemory custom resource does.
+   * service-managed client secret (live-proven 2026-09-23); and
+   * `bedrock-agentcore:CreateEvent` + `GetEvent` on exactly this workstream's
+   * deterministic Memory name family. The Runtime never reads the Platform
+   * M2M secret -- only the RuntimeMemory custom resource does.
    */
   readonly generatedAgentGrants?: GeneratedAgentRuntimeGrants;
 }
@@ -454,6 +456,31 @@ export class D03WorkstreamRegistryRolesStack extends Stack {
           actions: ["secretsmanager:GetSecretValue"],
           resources: [
             `arn:aws:secretsmanager:${this.region}:${this.account}:secret:bedrock-agentcore-identity!default/oauth2/${grants.credentialProviderName}-*`,
+          ],
+        }),
+      );
+      // Live-proven gap (2026-09-23, third generated-agent invoke): the agent
+      // writes one short-term event per turn and reads that exact event back
+      // (CreateEvent + GetEvent by id -- ListEvents ordering is unspecified),
+      // but the role carried no Memory data-plane grant at all. The Memory is
+      // created later (RuntimeMemory stage) with the deterministic name
+      // `AgenticAI_D03_<env>_<tenant>_<agent>_memory` and a service-minted
+      // `-<10 chars>` id suffix, so scope to exactly that name family.
+      const memoryBase =
+        `${props.envName}-${props.tenantId}-${props.agentId}`.replace(
+          /-/g,
+          "_",
+        );
+      role.addToPolicy(
+        new PolicyStatement({
+          sid: "ShortTermMemoryEvents",
+          effect: Effect.ALLOW,
+          actions: [
+            "bedrock-agentcore:CreateEvent",
+            "bedrock-agentcore:GetEvent",
+          ],
+          resources: [
+            `arn:aws:bedrock-agentcore:${this.region}:${this.account}:memory/AgenticAI_D03_${memoryBase}_memory-*`,
           ],
         }),
       );

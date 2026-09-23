@@ -71,9 +71,10 @@ class FakeMemory:
         self.events.setdefault((actor_id, session_id), []).append(dict(payload))
         return f"event-{len(self.events[(actor_id, session_id)])}"
 
-    def get_last_event(self, *, actor_id, session_id):
-        seq = self.events.get((actor_id, session_id))
-        return seq[-1] if seq else None
+    def get_event(self, *, actor_id, session_id, event_id):
+        seq = self.events.get((actor_id, session_id)) or []
+        index = int(event_id.rsplit("-", 1)[1]) - 1
+        return seq[index] if 0 <= index < len(seq) else None
 
 
 def _cfg(**overrides):
@@ -358,3 +359,54 @@ def test_inference_token_bound_leaves_reasoning_headroom_and_stays_bounded(
     assert captured["params"]["max_tokens"] == agent_mod.INFERENCE_MAX_TOKENS
     assert captured["params"]["guardrail_identifier"] == "gr-1"
     assert captured["params"]["temperature"] == 0
+
+
+def test_memory_adapter_writes_timestamped_document_and_reads_back_by_id():
+    """Regression pin for the live 2026-09-23 ``ParamValidationError``.
+
+    CreateEvent REQUIRES ``eventTimestamp`` (pinned botocore model), the
+    ``blob`` union member is a ``document`` (structured JSON, not a string),
+    and the round trip must read back the exact ``eventId`` it wrote because
+    ListEvents ordering is unspecified.
+    """
+    from datetime import datetime
+
+    calls: list[tuple[str, dict]] = []
+
+    class FakeDataPlane:
+        def create_event(self, **kwargs):
+            calls.append(("create_event", kwargs))
+            return {"event": {"eventId": "evt-123", "payload": kwargs["payload"]}}
+
+        def get_event(self, **kwargs):
+            calls.append(("get_event", kwargs))
+            return {
+                "event": {
+                    "eventId": kwargs["eventId"],
+                    "payload": [{"blob": {"replyFingerprint": "abc", "toolCalls": []}}],
+                }
+            }
+
+    adapter = agent_mod._AgentCoreMemoryAdapter.__new__(agent_mod._AgentCoreMemoryAdapter)
+    adapter._memory_id = "mem-1"
+    adapter._client = FakeDataPlane()
+
+    event_id = adapter.put_event(
+        actor_id="actor-1",
+        session_id="sess-1",
+        payload={"replyFingerprint": "abc", "toolCalls": []},
+    )
+    assert event_id == "evt-123"
+    name, kwargs = calls[0]
+    assert name == "create_event"
+    assert kwargs["memoryId"] == "mem-1"
+    assert isinstance(kwargs["eventTimestamp"], datetime)
+    assert kwargs["eventTimestamp"].tzinfo is not None
+    assert kwargs["payload"] == [{"blob": {"replyFingerprint": "abc", "toolCalls": []}}]
+
+    record = adapter.get_event(actor_id="actor-1", session_id="sess-1", event_id=event_id)
+    assert record == {"replyFingerprint": "abc", "toolCalls": []}
+    assert calls[1] == (
+        "get_event",
+        {"memoryId": "mem-1", "actorId": "actor-1", "sessionId": "sess-1", "eventId": "evt-123"},
+    )

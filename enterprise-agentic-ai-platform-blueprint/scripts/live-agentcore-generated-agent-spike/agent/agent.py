@@ -107,11 +107,18 @@ class ToolClient(Protocol):
 
 
 class MemoryClient(Protocol):
-    """AgentCore Memory, actor-scoped short-term events."""
+    """AgentCore Memory, actor-scoped short-term events.
+
+    ``put_event`` returns the service-minted ``eventId``; ``get_event`` reads
+    that exact record back. ``ListEvents`` ordering is unspecified by the API
+    reference, so a "latest event" read is not a valid round-trip proof.
+    """
 
     def put_event(self, *, actor_id: str, session_id: str, payload: Mapping[str, Any]) -> str: ...
 
-    def get_last_event(self, *, actor_id: str, session_id: str) -> Mapping[str, Any] | None: ...
+    def get_event(
+        self, *, actor_id: str, session_id: str, event_id: str
+    ) -> Mapping[str, Any] | None: ...
 
 
 # --------------------------------------------------------------------------
@@ -232,10 +239,14 @@ class ReferenceAgentCore:
                 "replyFingerprint": self._fingerprint(reply),
                 "toolCalls": tool_calls,
             }
-            self.memory.put_event(
+            event_id = self.memory.put_event(
                 actor_id=actor_id, session_id=session_id, payload=event_payload
             )
-            last = self.memory.get_last_event(actor_id=actor_id, session_id=session_id)
+            if not event_id:
+                raise AgentError("Memory put_event returned no eventId")
+            last = self.memory.get_event(
+                actor_id=actor_id, session_id=session_id, event_id=event_id
+            )
             memory_round_trip = (
                 isinstance(last, Mapping)
                 and last.get("replyFingerprint") == event_payload["replyFingerprint"]
@@ -463,36 +474,51 @@ class _AgentCoreMemoryAdapter:
         self._client = boto3.client("bedrock-agentcore", region_name=region)
 
     def put_event(self, *, actor_id: str, session_id: str, payload: Mapping[str, Any]) -> str:
-        import json
+        from datetime import datetime, timezone
 
+        # Shape pinned against the botocore model (live-verified 2026-09-23):
+        # ``eventTimestamp`` is REQUIRED, and ``blob`` is a ``document`` union
+        # member — the record travels as structured JSON, never a string.
         resp = self._client.create_event(
             memoryId=self._memory_id,
             actorId=actor_id,
             sessionId=session_id,
-            payload=[{"blob": json.dumps(payload, sort_keys=True)}],
+            eventTimestamp=datetime.now(timezone.utc),
+            payload=[{"blob": dict(payload)}],
         )
         return str(resp.get("event", {}).get("eventId", ""))
 
-    def get_last_event(self, *, actor_id: str, session_id: str) -> Mapping[str, Any] | None:
+    def get_event(
+        self, *, actor_id: str, session_id: str, event_id: str
+    ) -> Mapping[str, Any] | None:
         import json
 
-        resp = self._client.list_events(
-            memoryId=self._memory_id,
-            actorId=actor_id,
-            sessionId=session_id,
-            maxResults=1,
-        )
-        events = resp.get("events") or []
-        if not events:
-            return None
-        blobs = events[0].get("payload") or []
+        from botocore.exceptions import ClientError
+
+        # Read back the exact record by id (same call the live-proven
+        # runtime-memory spike uses); ListEvents ordering is unspecified.
+        try:
+            resp = self._client.get_event(
+                memoryId=self._memory_id,
+                actorId=actor_id,
+                sessionId=session_id,
+                eventId=event_id,
+            )
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+                return None
+            raise
+        blobs = (resp.get("event") or {}).get("payload") or []
         for item in blobs:
             blob = item.get("blob")
-            if blob:
+            if isinstance(blob, Mapping):
+                return blob
+            if isinstance(blob, str):
                 try:
-                    return json.loads(blob)
+                    decoded = json.loads(blob)
                 except json.JSONDecodeError:
                     return None
+                return decoded if isinstance(decoded, Mapping) else None
         return None
 
 

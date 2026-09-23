@@ -1039,6 +1039,7 @@ describe("Phase 23 — prior-stage Runtime role", () => {
     expect(json).not.toContain("bedrock-agentcore:InvokeGateway");
     expect(json).not.toContain("GetResourceOauth2Token");
     expect(json).not.toContain("ReadPlatformM2mSecret");
+    expect(json).not.toContain("bedrock-agentcore:CreateEvent");
   });
 
   it("adds scoped generated-agent grants when generatedAgentGrants is set", () => {
@@ -1080,8 +1081,19 @@ describe("Phase 23 — prior-stage Runtime role", () => {
           Action: "secretsmanager:GetSecretValue",
           Resource: `arn:aws:secretsmanager:${REGION}:${NONPROD_ACCOUNT}:secret:bedrock-agentcore-identity!default/oauth2/AgenticAI_D03_nonprod_demo_primary_inference-*`,
         }),
+        expect.objectContaining({
+          // Live-proven (third generated-agent invoke): the agent's per-turn
+          // CreateEvent + GetEvent-by-id round trip had no Memory grant at all.
+          // Scope to exactly this workstream's deterministic Memory name with
+          // the service-minted id suffix; never a bare "memory/*".
+          Sid: "ShortTermMemoryEvents",
+          Effect: "Allow",
+          Action: ["bedrock-agentcore:CreateEvent", "bedrock-agentcore:GetEvent"],
+          Resource: `arn:aws:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:memory/AgenticAI_D03_nonprod_demo_primary_memory-*`,
+        }),
       ]),
     );
+    expect(JSON.stringify(statements)).not.toContain(":memory/*");
     // The Runtime never reads the Platform M2M secret and needs no KMS grant:
     // only the RuntimeMemory custom resource seeds the provider from it.
     const runtimeJson = JSON.stringify(statements);

@@ -76,6 +76,8 @@ def main() -> int:
     provider = f"{vault}/oauth2credentialprovider/{args.provider_name}"
     sm = f"arn:{args.partition}:secretsmanager:{args.region}:{args.account}:secret"
     managed_secret = f"{sm}:bedrock-agentcore-identity!default/oauth2/{args.provider_name}-e69ee5c7-W4Q3tK"
+    # Exact live Memory id shape: deterministic name + service-minted 10-char suffix.
+    memory = f"{base}:memory/AgenticAI_D03_nonprod_demo_primary_memory-Tlr3wS2juR"
     cases = [
         ("bedrock-agentcore:GetWorkloadAccessToken", directory),   # exact live denial #1
         ("bedrock-agentcore:GetWorkloadAccessToken", identity),
@@ -85,6 +87,8 @@ def main() -> int:
         ("bedrock-agentcore:GetResourceOauth2Token", directory),
         ("secretsmanager:GetSecretValue", managed_secret),           # exact live denial #2
         ("bedrock-agentcore:InvokeGateway", f"{base}:gateway/abc123"),
+        ("bedrock-agentcore:CreateEvent", memory),                   # live gap #3 (no grant)
+        ("bedrock-agentcore:GetEvent", memory),
     ]
     negatives = [
         ("bedrock-agentcore:GetWorkloadAccessToken", f"{base}:workload-identity-directory/other"),
@@ -94,6 +98,10 @@ def main() -> int:
         ("secretsmanager:GetSecretValue", f"{sm}:bedrock-agentcore-identity!default/oauth2/SomeOtherProvider-abc123-XyZ"),
         ("secretsmanager:GetSecretValue", f"arn:{args.partition}:secretsmanager:{args.region}:111111111111:secret:agenticai/inference-m2m/agenticai-inference-nonprod-abc"),
         ("bedrock:InvokeModel", f"arn:{args.partition}:bedrock:{args.region}::foundation-model/anthropic.claude-3-haiku"),
+        ("bedrock-agentcore:CreateEvent", f"{base}:memory/AgenticAI_D03_prod_demo_primary_memory-Abcdefghij"),
+        ("bedrock-agentcore:CreateEvent", f"{base}:memory/OtherTenant_memory-Abcdefghij"),
+        ("bedrock-agentcore:DeleteEvent", memory),
+        ("bedrock-agentcore:ListEvents", memory),
     ]
 
     iam = boto3.client("iam", region_name=args.region)
