@@ -440,10 +440,22 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
     expect(handlerCode).toContain(
       'code == \\"ValidationException\\" and \\"already exists\\" in message',
     );
-    expect(handlerCode).toContain("allow_untagged=True");
+    // Recovery of the exact zero-tag partial create is delete + recreate with
+    // create-time tags (TagResource on an existing WorkloadIdentity returns a
+    // deterministic service 500 -- live-proven 2026-09-23), and foreign or
+    // partial tags remain a hard refusal. The handler must not tag in place.
+    expect(handlerCode).toContain(
+      "_recover_untagged_workload(client, workload_name, workload_arn, tags)",
+    );
+    expect(handlerCode).toContain("client.delete_workload_identity(name=name)");
+    expect(handlerCode).toContain(
+      "Refusing workload identity with foreign or partial ownership tags",
+    );
     expect(handlerCode).toContain(
       "Refusing resource with missing or foreign ownership tags",
     );
+    expect(handlerCode).not.toContain("allow_untagged");
+    expect(handlerCode).not.toContain("client.tag_resource(");
     expect(handlerCode).toContain("oauth2ProviderConfigInput=provider_config");
     expect(handlerCode).toContain("tags=tags");
   });

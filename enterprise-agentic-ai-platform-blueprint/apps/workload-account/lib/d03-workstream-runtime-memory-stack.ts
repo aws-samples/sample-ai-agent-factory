@@ -174,23 +174,49 @@ def _is_already_exists(error):
     )
 
 
-def _assert_tags(client, resource_arn, expected_tags, allow_untagged=False):
+def _assert_tags(client, resource_arn, expected_tags):
     live = client.list_tags_for_resource(resourceArn=resource_arn).get("tags", {})
     if live == expected_tags:
         return
-    if allow_untagged and live == {}:
-        client.tag_resource(resourceArn=resource_arn, tags=expected_tags)
-        live = client.list_tags_for_resource(resourceArn=resource_arn).get("tags", {})
-        if live == expected_tags:
-            return
     raise RuntimeError("Refusing resource with missing or foreign ownership tags")
 
 
-def _assert_workload_owned(client, name, expected_arn, tags, allow_untagged=False):
+def _assert_workload_owned(client, name, expected_arn, tags):
     response = client.get_workload_identity(name=name)
     if response.get("name") != name or response.get("workloadIdentityArn") != expected_arn:
         raise RuntimeError("Workload identity response does not match the exact expected identity")
-    _assert_tags(client, expected_arn, tags, allow_untagged)
+    _assert_tags(client, expected_arn, tags)
+
+
+def _recover_untagged_workload(client, name, expected_arn, tags):
+    # Live-proven (2026-09-23): TagResource on an EXISTING WorkloadIdentity
+    # returns a deterministic InternalServerErrorException, so an in-place tag
+    # migration is not available for this resource type. The only retained
+    # shape this code adopts is the pre-tagging partial create from a failed
+    # earlier run: exact name AND exact ARN AND zero tags. It is deleted and
+    # recreated with create-time tags. Anything else (foreign or partial tags)
+    # is a hard refusal -- never adopted, never deleted.
+    response = client.get_workload_identity(name=name)
+    if response.get("name") != name or response.get("workloadIdentityArn") != expected_arn:
+        raise RuntimeError("Workload identity response does not match the exact expected identity")
+    live = client.list_tags_for_resource(resourceArn=expected_arn).get("tags", {})
+    if live == tags:
+        return
+    if live != {}:
+        raise RuntimeError("Refusing workload identity with foreign or partial ownership tags")
+    client.delete_workload_identity(name=name)
+    for _ in range(24):
+        try:
+            client.get_workload_identity(name=name)
+        except ClientError as e:
+            if _is_not_found(e):
+                break
+            raise
+        time.sleep(5)
+    else:
+        raise TimeoutError("Retained workload identity did not finish deleting within 120 seconds")
+    client.create_workload_identity(name=name, tags=tags)
+    _assert_workload_owned(client, name, expected_arn, tags)
 
 
 def _assert_provider_owned(client, name, expected_arn, tags):
@@ -256,16 +282,15 @@ def on_event(event, context):
     client_secret = data["clientSecret"]
 
     # AgentCore returns ValidationException (not ConflictException) for an
-    # existing WorkloadIdentity. Adopt only an exact identity with either all
-    # expected tags or no tags from the known pre-tagging partial-create path.
+    # existing WorkloadIdentity. Adopt an exact identity that already carries
+    # all expected tags; recover (delete + recreate with create-time tags) only
+    # the exact zero-tag partial-create shape; refuse everything else.
     try:
         client.create_workload_identity(name=workload_name, tags=tags)
     except ClientError as e:
         if not _is_already_exists(e):
             raise
-        _assert_workload_owned(
-            client, workload_name, workload_arn, tags, allow_untagged=True
-        )
+        _recover_untagged_workload(client, workload_name, workload_arn, tags)
     else:
         _assert_workload_owned(client, workload_name, workload_arn, tags)
 
