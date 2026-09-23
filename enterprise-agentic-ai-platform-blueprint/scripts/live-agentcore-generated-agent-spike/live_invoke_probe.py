@@ -108,7 +108,12 @@ def resolve_runtime(session: boto3.Session, region: str, args: argparse.Namespac
     stack = cfn.describe_stacks(StackName=args.stack_name)["Stacks"][0]
     outputs = {o["OutputKey"]: o["OutputValue"] for o in stack.get("Outputs", [])}
     status = stack["StackStatus"]
-    if status not in ("CREATE_COMPLETE", "UPDATE_COMPLETE"):
+    # UPDATE_ROLLBACK_COMPLETE is a stable terminal state: CloudFormation has
+    # restored the last good template, so the prior deployment is exactly what
+    # is serving. It is the state a rejected release (e.g. the scan gate
+    # refusing a digest) leaves behind and must remain probe-able; in-progress
+    # and *_FAILED states still refuse.
+    if status not in ("CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE"):
         raise ProbeError(f"stack is {status}; refusing to invoke against an unhealthy deployment")
     if "RuntimeArn" not in outputs:
         raise ProbeError("stack has no RuntimeArn output")
