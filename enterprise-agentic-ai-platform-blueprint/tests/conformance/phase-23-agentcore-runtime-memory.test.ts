@@ -349,7 +349,6 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
           Sid: "InitializeDefaultTokenVault",
           Effect: "Allow",
           Action: "bedrock-agentcore:CreateTokenVault",
-          Resource: `arn:aws:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:token-vault/default`,
         }),
         expect.objectContaining({
           Sid: "VerifyIdentityOwnershipTags",
@@ -361,6 +360,16 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
         }),
       ]),
     );
+    const tokenVaultStatement = statements.find(
+      (statement: any) => statement.Sid === "InitializeDefaultTokenVault",
+    );
+    // Partition-safe ARN renders as Fn::Join; assert the exact immutable suffix
+    // and that it is the single default vault (no wildcard).
+    const tokenVaultResourceJson = JSON.stringify(tokenVaultStatement.Resource);
+    expect(tokenVaultResourceJson).toContain(
+      `:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:token-vault/default"`,
+    );
+    expect(tokenVaultResourceJson).not.toContain("*");
     const ownershipTagStatement = statements.find(
       (statement: any) => statement.Sid === "VerifyIdentityOwnershipTags",
     );
@@ -374,26 +383,46 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
       ":workload-identity-directory/default/workload-identity/AgenticAI_D03_nonprod_demo_primary",
     );
 
-    // Create-time tagging is authorized against the resource FAMILY (live-proven
-    // AccessDenied on ".../workload-identity/*"); pin it to exactly the two
-    // deterministic families -- never a bare "*" -- and to TagResource only.
-    const createTagStatement = statements.find(
-      (statement: any) => statement.Sid === "TagIdentityResourcesOnCreate",
+    // Lifecycle + create-time tagging are scoped to the modeled parent
+    // containers and the two deterministic families (service reference:
+    // CreateWorkloadIdentity -> workload-identity + workload-identity-directory;
+    // CreateOauth2CredentialProvider -> oauth2credentialprovider + token-vault).
+    // Live-proven twice on 2026-09-23; pin it so it can never widen to "*".
+    const lifecycleStatement = statements.find(
+      (statement: any) => statement.Sid === "ManageIdentityAndProvider",
     );
-    expect(createTagStatement).toBeDefined();
-    expect(createTagStatement.Effect).toBe("Allow");
-    expect(createTagStatement.Action).toBe("bedrock-agentcore:TagResource");
-    const createTagResources = createTagStatement.Resource;
-    expect(Array.isArray(createTagResources)).toBe(true);
-    expect(createTagResources).toHaveLength(2);
-    const createTagResourcesJson = JSON.stringify(createTagResources);
-    expect(createTagResourcesJson).toContain(
-      ":token-vault/default/oauth2credentialprovider/*",
+    expect(lifecycleStatement).toBeDefined();
+    expect(lifecycleStatement.Effect).toBe("Allow");
+    expect(lifecycleStatement.Action).toEqual(
+      expect.arrayContaining([
+        "bedrock-agentcore:CreateWorkloadIdentity",
+        "bedrock-agentcore:CreateOauth2CredentialProvider",
+        "bedrock-agentcore:DeleteWorkloadIdentity",
+        "bedrock-agentcore:DeleteOauth2CredentialProvider",
+        "bedrock-agentcore:TagResource",
+      ]),
     );
-    expect(createTagResourcesJson).toContain(
+    const lifecycleResources = lifecycleStatement.Resource;
+    expect(Array.isArray(lifecycleResources)).toBe(true);
+    expect(lifecycleResources).toHaveLength(4);
+    const lifecycleResourcesJson = JSON.stringify(lifecycleResources);
+    for (const suffix of [
+      ":workload-identity-directory/default\"",
       ":workload-identity-directory/default/workload-identity/*",
-    );
-    expect(createTagResourcesJson).not.toMatch(/"\*"/);
+      ":token-vault/default\"",
+      ":token-vault/default/oauth2credentialprovider/*",
+    ]) {
+      expect(lifecycleResourcesJson).toContain(suffix);
+    }
+    expect(lifecycleResourcesJson).not.toMatch(/"\*"/);
+    // No statement in the provider role may carry a bare "*" resource.
+    for (const statement of statements) {
+      const resources = Array.isArray(statement.Resource)
+        ? statement.Resource
+        : [statement.Resource];
+      if (statement.Sid === "DecryptPlatformM2mSecret") continue; // ViaService + context bound
+      expect(resources).not.toContain("*");
+    }
 
     const credentialProviderResource = Object.values(
       template.findResources("AWS::CloudFormation::CustomResource"),

@@ -845,6 +845,9 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     // Family ARNs: the authorizer evaluates create-time tagging against these.
     const providerFamilyArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:token-vault/default/oauth2credentialprovider/*`;
     const workloadFamilyArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default/workload-identity/*`;
+    // Container ARNs: the modeled parent resource of each create action.
+    const tokenVaultArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:token-vault/default`;
+    const workloadDirectoryArn = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default`;
 
     const roleName = `AgenticAI-D03-${props.envName}-${props.tenantId}-${props.agentId}-idprov`;
     if (roleName.length > 64) {
@@ -885,11 +888,19 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
               sid: "InitializeDefaultTokenVault",
               effect: Effect.ALLOW,
               actions: ["bedrock-agentcore:CreateTokenVault"],
-              resources: [
-                `arn:aws:bedrock-agentcore:${this.region}:${this.account}:token-vault/default`,
-              ],
+              resources: [tokenVaultArn],
             }),
             new PolicyStatement({
+              // Service reference (bedrock-agentcore): CreateWorkloadIdentity
+              // authorizes on BOTH `workload-identity` and its parent
+              // `workload-identity-directory`; CreateOauth2CredentialProvider on
+              // BOTH `oauth2credentialprovider` and its parent `token-vault`.
+              // Tags supplied on create are additionally authorized as
+              // TagResource against those same resources -- live-proven twice
+              // (2026-09-23): the family wildcard alone was denied on
+              // `.../workload-identity/*`, then on the bare directory ARN.
+              // Scope is the two default containers plus the two deterministic
+              // families in this account/region; never a bare "*".
               sid: "ManageIdentityAndProvider",
               effect: Effect.ALLOW,
               actions: [
@@ -900,12 +911,17 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
                 "bedrock-agentcore:GetOauth2CredentialProvider",
                 "bedrock-agentcore:UpdateOauth2CredentialProvider",
                 "bedrock-agentcore:DeleteOauth2CredentialProvider",
+                "bedrock-agentcore:TagResource",
               ],
-              // These control-plane actions take no resource-level ARN in the
-              // current service model (SEC-011 family); scoped by account trust.
-              resources: ["*"],
+              resources: [
+                workloadDirectoryArn,
+                workloadFamilyArn,
+                tokenVaultArn,
+                providerFamilyArn,
+              ],
             }),
             new PolicyStatement({
+              // Post-create ownership verification/repair on the exact ARNs.
               sid: "VerifyIdentityOwnershipTags",
               effect: Effect.ALLOW,
               actions: [
@@ -913,19 +929,6 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
                 "bedrock-agentcore:TagResource",
               ],
               resources: [providerArn, workloadArn],
-            }),
-            new PolicyStatement({
-              // Live-proven (2026-09-23): AgentCore authorizes the tags passed
-              // on CreateWorkloadIdentity / CreateOauth2CredentialProvider as an
-              // implicit TagResource against the resource FAMILY ARN
-              // (".../workload-identity/*"), not the exact named ARN, because
-              // the resource does not exist yet. Exact-ARN scoping alone fails
-              // closed with AccessDenied on the family wildcard. Scope stays
-              // within the two deterministic families in this account/region.
-              sid: "TagIdentityResourcesOnCreate",
-              effect: Effect.ALLOW,
-              actions: ["bedrock-agentcore:TagResource"],
-              resources: [providerFamilyArn, workloadFamilyArn],
             }),
           ],
         }),
@@ -967,7 +970,7 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
         {
           id: "AwsSolutions-IAM5",
           reason:
-            "SEC-011: bedrock-agentcore WorkloadIdentity/Oauth2CredentialProvider control-plane actions take no resource-level ARN in the current service model; create-time TagResource is authorized by the service against the two deterministic resource-family ARNs in this account/region (live-proven); kms:Decrypt is constrained by ViaService + the exact secret's encryption context.",
+            "SEC-011: bedrock-agentcore WorkloadIdentity/Oauth2CredentialProvider lifecycle and create-time TagResource are scoped to the modeled parent containers (default token vault and workload-identity directory) plus the two deterministic resource families in this account/region -- never a bare '*'; kms:Decrypt is constrained by ViaService + the exact secret's encryption context.",
         },
         {
           id: "AwsSolutions-IAM4",
