@@ -136,8 +136,9 @@ authorization core (`fea0640`).
    (`pipelines/resolve_ga_registry_context.py`).
 3. Workload pipeline deploys the three stable roles per environment, stops at
    `GatewayPermissionReady`.
-4. Re-run Platform with `enableGaGatewayInvokePermissions=true` and the two
-   `GatewayServiceRoleArn` outputs; approve `GatewayPermissionReady`.
+4. Re-run Platform with `enableGaGatewayInvokePermissions=true`, the two
+   `GatewayServiceRoleArn` outputs and their two current `GatewayServiceRoleId`
+   outputs (`agenticai/gaGatewayServiceRoleIds`); approve `GatewayPermissionReady`.
 5. Workload deploys the nonproduction Gateway; validator requires `APPROVED` +
    descriptor-digest + target-ARN match. Prove MCP `tools/list`+`tools/call`.
 6. **Adversarial twins:** wrong descriptor digest, wrong target ARN, wrong tool,

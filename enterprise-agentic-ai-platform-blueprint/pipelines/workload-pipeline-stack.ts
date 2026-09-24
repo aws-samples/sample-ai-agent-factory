@@ -709,8 +709,8 @@ export class WorkloadPipelineStack extends Stack {
         "GatewayPermissionReady",
         {
           comment: props.enablePipelineRuntimeMemory
-            ? "Stable Gateway and Runtime roles exist. Continue only after Platform tool permissions are exact; the pipeline then enforces the AgentCore propagation window."
-            : "Stable Workstream roles exist. Continue only after the Platform pipeline grants both exact Gateway service-role ARNs on every tool alias.",
+            ? "Stable Gateway and Runtime roles exist. Continue only after the Platform pipeline granted every tool alias to both GatewayServiceRoleArn outputs bound to their current GatewayServiceRoleId outputs; the pipeline then enforces the AgentCore propagation window."
+            : "Stable Workstream roles exist. Continue only after the Platform pipeline granted every tool alias to both GatewayServiceRoleArn outputs bound to their current GatewayServiceRoleId outputs.",
         },
       );
       const postSteps: Step[] = [gatewayPermissionReady];

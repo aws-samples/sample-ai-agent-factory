@@ -101,6 +101,37 @@ function stringArrayContext(key: string): readonly string[] {
   return parsed;
 }
 
+/** Parse a JSON object whose keys and values are non-empty strings. */
+function stringRecordContext(key: string): Readonly<Record<string, string>> {
+  const raw = app.node.tryGetContext(key);
+  if (raw === undefined) return {};
+
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(`Context '${key}' must be a JSON object of strings.`, {
+        cause: error,
+      });
+    }
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    Object.entries(parsed).some(
+      ([name, value]) =>
+        name.length === 0 || typeof value !== "string" || value.length === 0,
+    )
+  ) {
+    throw new Error(
+      `Context '${key}' must be a JSON object of non-empty strings.`,
+    );
+  }
+  return parsed as Record<string, string>;
+}
+
 /**
  * Parse `agenticai/generatedAgentInference` — per-env Platform inference inputs
  * for the generated-agent Runtime. Required (and validated) only when the
@@ -440,6 +471,9 @@ switch (stage) {
           ) === "true",
         gatewayServiceRoleArns: stringArrayContext(
           "agenticai/gaGatewayServiceRoleArns",
+        ),
+        gatewayServiceRoleIds: stringRecordContext(
+          "agenticai/gaGatewayServiceRoleIds",
         ),
         gatewayWorkloadAccountId: String(
           app.node.tryGetContext(
@@ -901,6 +935,9 @@ switch (stage) {
     const gaGatewayServiceRoleArns = stringArrayContext(
       "agenticai/gaGatewayServiceRoleArns",
     );
+    const gaGatewayServiceRoleIds = stringRecordContext(
+      "agenticai/gaGatewayServiceRoleIds",
+    );
     const gaRegistryRecordGenerations = gaRegistryRecordGenerationsContext(
       "agenticai/gaRegistryRecordGenerations",
     );
@@ -933,6 +970,12 @@ switch (stage) {
         gaGatewayServiceRoleArns.length === 0
       ) {
         missing.push("agenticai/gaGatewayServiceRoleArns");
+      }
+      if (
+        enableGaGatewayInvokePermissions &&
+        Object.keys(gaGatewayServiceRoleIds).length === 0
+      ) {
+        missing.push("agenticai/gaGatewayServiceRoleIds");
       }
     }
     if (includeWorkload || includePlatform) {
@@ -1108,6 +1151,9 @@ switch (stage) {
       sharedSynthContext["agenticai/gaGatewayServiceRoleArns"] = JSON.stringify(
         gaGatewayServiceRoleArns,
       );
+      sharedSynthContext["agenticai/gaGatewayServiceRoleIds"] = JSON.stringify(
+        gaGatewayServiceRoleIds,
+      );
     }
     if (includeWorkload && enablePipelineRuntimeMemory) {
       sharedSynthContext["agenticai/enablePipelineRuntimeMemory"] = "true";
@@ -1160,6 +1206,7 @@ switch (stage) {
         inferenceModelRateLimits,
         grantGatewayInvokePermissions: enableGaGatewayInvokePermissions,
         gatewayServiceRoleArns: gaGatewayServiceRoleArns,
+        gatewayServiceRoleIds: gaGatewayServiceRoleIds,
         gatewayWorkloadAccountIds: {
           nonprod: String(workloadNonprodAccount),
           prod: String(workloadProdAccount),

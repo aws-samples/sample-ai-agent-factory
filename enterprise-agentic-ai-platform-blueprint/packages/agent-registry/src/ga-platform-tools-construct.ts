@@ -40,9 +40,23 @@ export interface GaPlatformToolsConstructProps {
   readonly grantGatewayInvokePermissions?: boolean;
   /** Exact existing Gateway service-role ARNs produced by the Workload pipeline. */
   readonly gatewayServiceRoleArns?: readonly string[];
+  /**
+   * Current IAM `RoleId` (`AROA...`) of every supplied Gateway service-role
+   * ARN, keyed by that ARN — the `GatewayServiceRoleId` output of the Workload
+   * `RegistryRoles` stack. Lambda resolves a role principal to its RoleId when
+   * the permission is stored, so a role that is deleted and recreated (teardown
+   * + redeploy, rollback) keeps its ARN string but is denied by the old
+   * statement. Binding the permission's identity to the RoleId makes
+   * CloudFormation replace the statement whenever the role instance changes;
+   * an unchanged ARN alone would be a silent no-op update.
+   */
+  readonly gatewayServiceRoleIds?: Readonly<Record<string, string>>;
   /** Workload account that must own this environment's Gateway role. */
   readonly gatewayWorkloadAccountId?: string;
 }
+
+/** IAM unique identifier of a role: `AROA` followed by uppercase alphanumerics. */
+const IAM_ROLE_ID_PATTERN = /^AROA[A-Z0-9]{16,}$/;
 
 const TOOL_HANDLER = `
 exports.handler = async (event, context) => {
@@ -161,6 +175,30 @@ export class GaPlatformToolsConstruct extends Construct {
         `GaPlatformToolsConstruct: no ${props.envName} Gateway role ARN was supplied.`,
       );
     }
+    const gatewayServiceRoleIds = props.gatewayServiceRoleIds ?? {};
+    if (
+      !props.grantGatewayInvokePermissions &&
+      Object.keys(gatewayServiceRoleIds).length > 0
+    ) {
+      throw new Error(
+        "GaPlatformToolsConstruct: role IDs must not be supplied before the permission phase.",
+      );
+    }
+    for (const roleArn of gatewayServiceRoleArns) {
+      const roleId = gatewayServiceRoleIds[roleArn];
+      if (typeof roleId !== "string" || !IAM_ROLE_ID_PATTERN.test(roleId)) {
+        throw new Error(
+          `GaPlatformToolsConstruct: gatewayServiceRoleIds must map '${roleArn}' to its current IAM RoleId (AROA...); read the RegistryRoles stack output GatewayServiceRoleId.`,
+        );
+      }
+    }
+    for (const roleArn of Object.keys(gatewayServiceRoleIds)) {
+      if (!gatewayServiceRoleArns.includes(roleArn)) {
+        throw new Error(
+          `GaPlatformToolsConstruct: gatewayServiceRoleIds names '${roleArn}', which is not a supplied Gateway role ARN.`,
+        );
+      }
+    }
 
     const tags = {
       "application-id": props.applicationId,
@@ -270,8 +308,11 @@ export class GaPlatformToolsConstruct extends Construct {
       });
       if (props.grantGatewayInvokePermissions) {
         for (const principalArn of environmentGatewayRoleArns) {
+          // The RoleId is part of the permission's identity: a recreated role
+          // (same ARN, new RoleId) yields a new logical id, so CloudFormation
+          // replaces the statement instead of leaving the stale one in place.
           const principalId = createHash("sha256")
-            .update(principalArn)
+            .update(`${principalArn}\n${gatewayServiceRoleIds[principalArn]}`)
             .digest("hex")
             .slice(0, 12);
           alias.addPermission(

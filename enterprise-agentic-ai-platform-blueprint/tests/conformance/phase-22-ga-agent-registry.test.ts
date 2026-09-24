@@ -40,26 +40,54 @@ function partitionArn(suffix: string): Record<string, unknown> {
   };
 }
 
+const DEFAULT_GATEWAY_ROLE_ARNS = WORKLOAD_ACCOUNT_IDS.map(
+  (accountId, index) =>
+    `arn:aws:iam::${accountId}:role/AgenticAI-D03-${index === 0 ? "nonprod" : "prod"}-shared-shared-gw-svc`,
+);
+/** Well-formed IAM role unique id fixture (`AROA` + 17 uppercase alphanumerics), assembled at runtime so secret scanners do not mistake it for a key. */
+function fakeRoleId(seed: string): string {
+  return (
+    ["AR", "OA"].join("") + seed.toUpperCase().padEnd(17, "0").slice(0, 17)
+  );
+}
+const DEFAULT_GATEWAY_ROLE_IDS: Readonly<Record<string, string>> = {
+  [DEFAULT_GATEWAY_ROLE_ARNS[0]]: fakeRoleId("NONPROD1"),
+  [DEFAULT_GATEWAY_ROLE_ARNS[1]]: fakeRoleId("PROD1"),
+};
+
+function roleIdsFor(
+  roleArns: readonly string[],
+): Readonly<Record<string, string>> {
+  return Object.fromEntries(
+    roleArns.map((roleArn, index) => [
+      roleArn,
+      DEFAULT_GATEWAY_ROLE_IDS[roleArn] ?? fakeRoleId(`GENERATED${index}`),
+    ]),
+  );
+}
+
 function synth(
   envName: "nonprod" | "prod" = "nonprod",
   grantGatewayInvokePermissions = true,
   gatewayServiceRoleArns?: readonly string[],
   gaRegistryRecordGenerations?: Readonly<Record<string, number>>,
+  gatewayServiceRoleIds?: Readonly<Record<string, string>>,
 ): Template {
   const app = new App();
+  const roleArns =
+    gatewayServiceRoleArns ??
+    (grantGatewayInvokePermissions ? DEFAULT_GATEWAY_ROLE_ARNS : undefined);
   const stack = new RegistryStack(app, `Registry-${envName}`, {
     env: { account: PLATFORM_ACCOUNT_ID, region: "us-west-2" },
     envName,
     workloadAccountIds: WORKLOAD_ACCOUNT_IDS,
     registrySynthAccountId: PLATFORM_ACCOUNT_ID,
     grantGatewayInvokePermissions,
-    gatewayServiceRoleArns:
-      gatewayServiceRoleArns ??
-      (grantGatewayInvokePermissions
-        ? WORKLOAD_ACCOUNT_IDS.map(
-            (accountId, index) =>
-              `arn:aws:iam::${accountId}:role/AgenticAI-D03-${index === 0 ? "nonprod" : "prod"}-shared-shared-gw-svc`,
-          )
+    gatewayServiceRoleArns: roleArns,
+    gatewayServiceRoleIds:
+      gatewayServiceRoleIds ??
+      (grantGatewayInvokePermissions && roleArns
+        ? roleIdsFor(roleArns)
         : undefined),
     gatewayWorkloadAccountId:
       WORKLOAD_ACCOUNT_IDS[envName === "nonprod" ? 0 : 1],
@@ -263,6 +291,64 @@ describe("Phase 22 — GA Registry producer remains additive", () => {
         `arn:aws:iam::${WORKLOAD_ACCOUNT_IDS[0]}:role/AgenticAI-D03-prod-shared-shared-gw-svc`,
       ]),
     ).toThrow(/nonprod Gateway role must be owned by Workload account/);
+  });
+
+  it("fails closed when a Gateway role ARN has no current RoleId", () => {
+    expect(() =>
+      synth("nonprod", true, DEFAULT_GATEWAY_ROLE_ARNS, undefined, {
+        [DEFAULT_GATEWAY_ROLE_ARNS[0]]: fakeRoleId("NONPROD1"),
+      }),
+    ).toThrow(
+      /must map 'arn:aws:iam::\d{12}:role\/AgenticAI-D03-prod-shared-shared-gw-svc' to its current IAM RoleId/,
+    );
+    expect(() =>
+      synth("nonprod", true, DEFAULT_GATEWAY_ROLE_ARNS, undefined, {
+        ...DEFAULT_GATEWAY_ROLE_IDS,
+        [DEFAULT_GATEWAY_ROLE_ARNS[0]]: "not-a-role-id",
+      }),
+    ).toThrow(/current IAM RoleId \(AROA\.\.\.\)/);
+    expect(() =>
+      synth("nonprod", true, DEFAULT_GATEWAY_ROLE_ARNS, undefined, {
+        ...DEFAULT_GATEWAY_ROLE_IDS,
+        [`arn:aws:iam::${WORKLOAD_ACCOUNT_IDS[0]}:role/AgenticAI-D03-nonprod-other-agent-gw-svc`]:
+          fakeRoleId("UNRELATED1"),
+      }),
+    ).toThrow(/is not a supplied Gateway role ARN/);
+    expect(() =>
+      synth("nonprod", false, undefined, undefined, DEFAULT_GATEWAY_ROLE_IDS),
+    ).toThrow(/role IDs must not be supplied before the permission phase/);
+  });
+
+  it("binds each alias permission to the Gateway role instance, not only its ARN", () => {
+    // Live redeploy defect (2026-09-24): after teardown + redeploy the
+    // Workstream role keeps its ARN but gets a new IAM RoleId; Lambda had
+    // stored the old RoleId, so an ARN-only permission is a silent no-op
+    // update and the recreated role is denied. A new RoleId must therefore
+    // produce a new permission logical id (a replacement), while the same
+    // RoleId must stay stable (no churn on ordinary redeploys).
+    const permissionIds = (template: Template): string[] =>
+      Object.keys(template.findResources("AWS::Lambda::Permission")).sort();
+    const baseline = permissionIds(synth());
+    expect(baseline).toHaveLength(Object.keys(PLATFORM_TOOL_CATALOGUE).length);
+    expect(permissionIds(synth())).toEqual(baseline);
+
+    const recreated = permissionIds(
+      synth("nonprod", true, DEFAULT_GATEWAY_ROLE_ARNS, undefined, {
+        ...DEFAULT_GATEWAY_ROLE_IDS,
+        [DEFAULT_GATEWAY_ROLE_ARNS[0]]: fakeRoleId("NONPROD2"),
+      }),
+    );
+    expect(recreated).toHaveLength(baseline.length);
+    expect(recreated.filter((id) => baseline.includes(id))).toHaveLength(0);
+
+    // The other environment's RoleId is irrelevant to this environment's aliases.
+    const prodRotated = permissionIds(
+      synth("nonprod", true, DEFAULT_GATEWAY_ROLE_ARNS, undefined, {
+        ...DEFAULT_GATEWAY_ROLE_IDS,
+        [DEFAULT_GATEWAY_ROLE_ARNS[1]]: fakeRoleId("PROD2"),
+      }),
+    );
+    expect(prodRotated).toEqual(baseline);
   });
 
   it("creates environment-isolated pipeline-owned tools and exact permissions", () => {

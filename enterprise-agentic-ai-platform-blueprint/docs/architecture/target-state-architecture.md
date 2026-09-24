@@ -290,10 +290,12 @@ three layers below passed the bounded Registry and Gateway-only envelope recorde
    assembly. A deploy-time validator re-reads each record and requires both the same descriptor
    SHA-256 and an explicit match between the live governance target ARN and the Gateway target.
 2. **Deploy.** Stable Gateway, validator, and GatewayAdmin roles are created in a prerequisite
-   pipeline stage, which outputs the two exact environment-qualified Gateway role ARNs. The
-   pipeline pauses while the Platform pipeline validates those ARNs from
-   `agenticai/gaGatewayServiceRoleArns` and grants each tool alias only to its matching environment
-   principal. No Platform-side tenant/agent configuration is used to infer a principal. SCP-09
+   pipeline stage, which outputs the two exact environment-qualified Gateway role ARNs and their
+   current IAM RoleIds. The pipeline pauses while the Platform pipeline validates those ARNs from
+   `agenticai/gaGatewayServiceRoleArns` and RoleIds from `agenticai/gaGatewayServiceRoleIds` and
+   grants each tool alias only to its matching environment principal, with each permission bound
+   to the role instance so a recreated role is re-granted rather than silently denied. No
+   Platform-side tenant/agent configuration is used to infer a principal. SCP-09
    denies Gateway mutation from every principal except environment-qualified, pipeline-created
    GatewayAdmin roles in configured Workstream accounts.
 3. **Runtime.** The Gateway service role lists exactly the N subscribed target ARNs, and a service

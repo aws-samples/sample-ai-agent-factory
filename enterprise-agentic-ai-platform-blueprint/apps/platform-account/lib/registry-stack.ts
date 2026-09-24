@@ -22,6 +22,8 @@ export interface RegistryStackProps extends StackProps {
   readonly registrySynthAccountId: string;
   readonly grantGatewayInvokePermissions?: boolean;
   readonly gatewayServiceRoleArns?: readonly string[];
+  /** Current IAM RoleId per Gateway role ARN (RegistryRoles `GatewayServiceRoleId`). */
+  readonly gatewayServiceRoleIds?: Readonly<Record<string, string>>;
   readonly gatewayWorkloadAccountId?: string;
   readonly gaRegistryRecordGenerations?: Readonly<Record<string, number>>;
   readonly applicationId: string;
@@ -59,6 +61,7 @@ export class RegistryStack extends Stack {
       costCentre: props.costCentre,
       grantGatewayInvokePermissions: props.grantGatewayInvokePermissions,
       gatewayServiceRoleArns: props.gatewayServiceRoleArns,
+      gatewayServiceRoleIds: props.gatewayServiceRoleIds,
       gatewayWorkloadAccountId: props.gatewayWorkloadAccountId,
     });
 

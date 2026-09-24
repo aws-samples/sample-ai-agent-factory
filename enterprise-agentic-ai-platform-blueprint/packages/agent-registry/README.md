@@ -81,11 +81,15 @@ explicit match between the live governance target ARN and the Gateway target.
 This closes status, descriptor, and target drift between synth and deploy.
 
 Before Gateway deployment, the Workload `RegistryRoles` stage emits one exact
-`GatewayServiceRoleArn` per environment and pauses. The Platform permission
-phase accepts exactly those two ARNs through
-`agenticai/gaGatewayServiceRoleArns`, validates account/name/environment
-cardinality, and grants each environment's aliases only to its matching role.
-It never derives a principal from independent Platform tenant/agent settings.
+`GatewayServiceRoleArn` plus its current `GatewayServiceRoleId` per environment
+and pauses. The Platform permission phase accepts exactly those two ARNs through
+`agenticai/gaGatewayServiceRoleArns` and their RoleIds through
+`agenticai/gaGatewayServiceRoleIds`, validates account/name/environment
+cardinality and RoleId shape, and grants each environment's aliases only to its
+matching role. Each permission's identity is bound to the RoleId, so a recreated
+role (same ARN, new RoleId) replaces the statement instead of leaving Lambda's
+stored copy of the old RoleId in place. It never derives a principal from
+independent Platform tenant/agent settings.
 After nonproduction MCP proof, GA mode uses `ProdGatewayApproval`; app-only
 evaluation/canary gates remain exclusive to legacy/full-agent mode.
 

@@ -181,6 +181,14 @@ export class D03WorkstreamRegistryRolesStack extends Stack {
         "Exact existing principal ARN for agenticai/gaGatewayServiceRoleArns.",
       value: this.gatewayServiceRole.roleArn,
     });
+    // Lambda stores a role principal as its IAM RoleId. This value changes on
+    // every recreation of the role (teardown + redeploy, rollback), while the
+    // ARN string does not; the Platform binds each alias permission to it.
+    new CfnOutput(this, "GatewayServiceRoleId", {
+      description:
+        "Current IAM RoleId for agenticai/gaGatewayServiceRoleIds; changes whenever this role is recreated.",
+      value: this.gatewayServiceRole.roleId,
+    });
 
     const taggedRoles = [
       this.gatewayServiceRole,

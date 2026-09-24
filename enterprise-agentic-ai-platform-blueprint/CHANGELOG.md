@@ -63,6 +63,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Deploy-time Registry validation now explicitly compares the live governance target ARN with the synth-wired Gateway target in addition to requiring the exact descriptor SHA-256.
 - Developer subscriptions now store stable tool IDs in `agenticai/gaRegistryExpectedToolIds`; environment-specific RegistryRecord IDs never enter developer repositories.
 - SCP-09 now exempts only environment-qualified `AgenticAI-D03-*-GatewayAdmin` roles in configured Workstream accounts. The prior Platform-account exception could not create a resource in a Workstream account.
+- Platform tool-alias permissions are now bound to the Workstream Gateway role instance. The Workload `RegistryRoles` stack exposes each role's current IAM `GatewayServiceRoleId` beside its ARN, the permission phase requires `agenticai/gaGatewayServiceRoleIds` mapping every supplied ARN to a well-formed RoleId, and each `AWS::Lambda::Permission` identity hashes the RoleId with the ARN. Found live on 2026-09-24 after teardown and redeploy: Lambda stores a role principal as its RoleId, so all four alias policies still named the deleted roles' `AROA...` ids while the ARN-only permission resources would have been an unchanged no-op update; a recreated role was denied without any template change.
 
 ### Verification
 
