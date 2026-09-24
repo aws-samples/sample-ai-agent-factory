@@ -62,6 +62,8 @@ from typing import Any, Mapping, Protocol, Sequence
 #: Deterministic marker the live ``verify`` step matches on to confirm a real
 #: InvokeAgentRuntime round-trip without recording any request content.
 HANDSHAKE_MARKER = "agentcore-generated-agent-ok"
+# Protocol terminator the model emits when the task is complete.
+DONE_MARKER = "<done/>"
 
 #: The scalar field the entrypoint reads from the invocation payload.
 PROMPT_FIELD = "prompt"
@@ -211,7 +213,7 @@ class ReferenceAgentCore:
             "'TOOL <qualified_tool_name> <json_object_arguments>' and nothing else. "
             f"Subscribed tools: {tools}. When you call a tool, the TOOL line must "
             "be your entire reply -- do not describe, explain, quote or wrap it. "
-            "Respond with '<done/>' when the task is complete."
+            f"Respond with '{DONE_MARKER}' when the task is complete."
         )
 
     def run(self, prompt: str, *, actor_id: str, session_id: str) -> AgentResult:
@@ -293,10 +295,24 @@ class ReferenceAgentCore:
             if line.startswith("TOOL "):
                 rest = line[len("TOOL ") :].strip()
                 name, _, raw_args = rest.partition(" ")
+                raw_args = raw_args.strip()
+                if not raw_args:
+                    return name, {}
+                # Decode exactly one JSON value from the start of the arguments.
+                # The rated reasoning model appends the done marker to the same
+                # line in about two of three runs (live 2026-09-24:
+                # 'TOOL <name> {"message":"probe"}<done/>'); the marker is part
+                # of the protocol, so it is the only trailing text tolerated.
+                # Anything else after the object still fails closed.
                 try:
-                    args = json.loads(raw_args) if raw_args.strip() else {}
+                    args, end = json.JSONDecoder().raw_decode(raw_args)
                 except json.JSONDecodeError as exc:
                     raise AgentError(f"malformed TOOL arguments: {exc}") from exc
+                trailing = raw_args[end:].strip()
+                if trailing and trailing != DONE_MARKER:
+                    raise AgentError(
+                        f"malformed TOOL arguments: unexpected trailing text {trailing[:40]!r}"
+                    )
                 if not isinstance(args, dict):
                     raise AgentError("TOOL arguments must be a JSON object")
                 return name, args
@@ -414,7 +430,7 @@ class _LiteLlmAdapter:
         # Return the concatenated text content.
         return "".join(
             b.get("text", "") for b in blocks if isinstance(b, Mapping)
-        ) or "<done/>"
+        ) or DONE_MARKER
 
 
 class _McpToolAdapter:

@@ -172,6 +172,27 @@ def test_malformed_tool_arguments_fail_closed():
         core.run("x", actor_id="a", session_id="s")
 
 
+def test_tool_directive_tolerates_only_the_done_marker_after_the_arguments():
+    # Live 2026-09-24: the rated reasoning model appends the done marker to the
+    # TOOL line in most runs. The marker is protocol; anything else is not.
+    parse = ReferenceAgentCore._parse_tool_request
+    assert parse('TOOL target-demo___tool-echo {"message":"probe"}<done/>') == (
+        "target-demo___tool-echo",
+        {"message": "probe"},
+    )
+    assert parse('TOOL target-demo___tool-echo {"message":"probe"} <done/>') == (
+        "target-demo___tool-echo",
+        {"message": "probe"},
+    )
+    assert parse("TOOL target-demo___tool-echo") == ("target-demo___tool-echo", {})
+    with pytest.raises(AgentError, match="trailing text"):
+        parse('TOOL target-demo___tool-echo {"message":"probe"} and then some prose')
+    with pytest.raises(AgentError, match="trailing text"):
+        parse('TOOL target-demo___tool-echo {"a":1}{"b":2}')
+    with pytest.raises(AgentError, match="JSON object"):
+        parse("TOOL target-demo___tool-echo [1,2]")
+
+
 def test_max_iterations_bounds_the_loop():
     # Always requests a tool -> loop must stop at max_iterations.
     llm = FakeLlm(['TOOL target-demo___tool-echo {}'])
