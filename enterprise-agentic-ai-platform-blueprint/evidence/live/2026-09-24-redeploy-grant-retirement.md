@@ -1,7 +1,7 @@
 # Live evidence — redeploy after teardown: Platform tool-alias grant retirement
 
 - **Date:** 2026-09-24
-- **Status:** PASS — stale grants proven live, wrong fix rejected live, two-phase repair proven live; contract documented
+- **Status:** PASS — stale grants proven live, wrong fix rejected live, two-phase repair proven live, both environments redeployed and probed (positive + wrong-account + unsubscribed-tool), matching-principal wrong-ExternalId and wrong-session-name reader-trust twins denied with exact STS 403 AccessDenied in both environments; contract documented
 - **Fix commits:** `4abd5cd` (RoleId-bound permissions — reverted), `d2186b9` (explicit two-phase retire/regrant contract, diagnostic `GatewayServiceRoleId` output, tests, README §6.3/§16, runbook rows)
 - **Region:** `us-west-2`
 - **Scope:** Platform account — the Platform pipeline and both environments' `Registry` stacks; Workstream test account — both environments' `RegistryRoles` stacks (read-only)
@@ -60,6 +60,56 @@ were started explicitly.
 3. `GatewayPermissionReady` was approved only after both environments were
    verified; the Workload pipeline continued into the AgentCore propagation
    window.
+
+## Redeployment and probes after the repair (both environments)
+
+The Workload pipeline execution on `d2186b9` deployed the nonproduction
+`ToolGateway` and `RuntimeMemory` stacks without error; after the production
+approval it deployed both production stacks the same way. Each `RuntimeMemory`
+deploy passed the exact-digest zero-finding image gate on the way in.
+
+Positive probe (`live_invoke_probe.py --mode positive`), one
+`InvokeAgentRuntime` per environment, HTTP 200 with every check true: the
+exact handshake marker; SigV4 MCP `tools/list` discovering three tools;
+governed `tools/call` of the subscribed echo tool only; Identity M2M through
+the Platform inference Gateway to the rated model with two content blocks; a
+Memory event round trip. Runtime status `READY` in both environments; invoke
+latency 9.4 s (nonproduction) and 8.6 s (production).
+
+Denial twins per environment: `unsubscribed-tool` returned HTTP 200 with the
+forbidden tool never called and an empty tool-call list; `wrong-account`
+refused before any call when the probe was told to expect the other account.
+(A first `wrong-account` run mistakenly passed the deployment's own account as
+the expectation and correctly reported `passed: false`; the mode's contract is
+that the guard must refuse, and it did once given a different account.)
+
+## RegistryReader matching-principal trust twins (both environments)
+
+The reader trust admits only the `AgenticAI-D03-<env>-*-RegistryValidator`
+role with the exact ExternalId and a `registry-*` session name. That role is
+Lambda-trusted, so `registry_reader_trust_twins.py` drove the deployed
+validator function itself with a real `Create` event built from the GA
+context (registry id, record id, tool id, target ARN, descriptor digest,
+deployed revision):
+
+| Step                                          | Nonproduction                      | Production                         |
+| --------------------------------------------- | ---------------------------------- | ---------------------------------- |
+| positive (unchanged environment)              | success payload                    | success payload                    |
+| wrong ExternalId                              | STS `403 AccessDenied`             | STS `403 AccessDenied`             |
+| wrong session name (`not-a-registry-session`) | STS `403 AccessDenied`             | STS `403 AccessDenied`             |
+| environment restored byte-for-byte            | yes                                | yes                                |
+| positive after restore                        | success payload (same fingerprint) | success payload (same fingerprint) |
+
+CloudTrail independently shows, for the nonproduction validator role, the
+positive `AssumeRole` with session name `registry-nonprod-validator` and an
+ExternalId present, two `AccessDenied` `AssumeRole` events, then the positive
+again after the restore. Production's twin events were still inside
+CloudTrail's indexing delay when this was written; the Lambda-side STS 403
+`AccessDenied` responses are recorded for both environments.
+
+The function environment was changed only on the validator Lambda, only for the
+two denial invocations, and was verified identical afterwards; the pipeline
+remains the owner of the deployed configuration.
 
 ## Contract now documented
 

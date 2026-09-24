@@ -123,6 +123,9 @@ hardening commit `7774299` removed every exact service-created log group, and
 independent inventory found zero unintended residue. See
 [`../../evidence/live/2026-09-21-pipeline-ga-agent-registry-r2.md`](../../evidence/live/2026-09-21-pipeline-ga-agent-registry-r2.md).
 
-A live redeployment to the legacy consumer, matching-principal wrong-ExternalId
-and wrong-session-name twins, EMEA regions, load/chaos behavior, and final
-placeholder retirement remain release gates.
+The matching-principal wrong-ExternalId and wrong-session-name reader-trust
+twins passed live on 2026-09-24 through the deployed validator role in both
+environments (exact STS `403 AccessDenied`; positive access before and after).
+A live redeployment to the legacy consumer (or its explicit retirement), EMEA
+regions, load/chaos behavior, and final placeholder retirement remain release
+gates.
