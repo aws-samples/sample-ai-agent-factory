@@ -1,7 +1,7 @@
 # Live evidence — dependency-ordered teardown of the generated-agent revision
 
 - **Date:** 2026-09-24
-- **Status:** PASS — zero residue for this revision in both accounts; two teardown defects found live and fixed
+- **Status:** PASS WITH AMENDMENT — zero residue for this revision in the Workstream account and for the Workload root in the Platform account; two teardown defects found live and fixed. **Amended 2026-09-24 (redeploy):** the four Platform tool-alias grants to the deleted Workstream Gateway roles were **not** retired before the role stacks were deleted (the 09-21 and 09-22 campaigns did retire them). Lambda kept the deleted roles' RoleIds in those policies and rejected every later `AddPermission` on the aliases; the repair and the resulting contract are recorded in [`2026-09-24-redeploy-grant-retirement.md`](2026-09-24-redeploy-grant-retirement.md).
 - **Torn-down revision:** the deployment proven in [`2026-09-23-pipeline-generated-agent.md`](2026-09-23-pipeline-generated-agent.md) and the rollback campaign (`e5760e5`)
 - **Fix commits (this campaign):** `6c42395` (provider-secret `DeleteSecret` grant), `0994732` (teardown by-name dependency guard), `8ecc88e` (fail-closed stranded-stack recovery)
 - **Region:** `us-west-2`
@@ -61,6 +61,12 @@ cross-account M2M secrets are Platform-owned and stay with it by design.
 
 ## Honest residuals
 
+- **Platform grants left behind (found on redeploy).** The teardown did not
+  run the Platform pipeline with the permission phase disabled before deleting
+  `RegistryRoles`, so the four alias policies kept statements for the deleted
+  roles. This was Platform-side residue of the revision and made the aliases
+  reject every later grant until a two-phase retire/regrant run removed it.
+  README §16 now requires retirement before role deletion.
 - Two Memory CMKs and one pipeline CMK are pending deletion (7 days), which
   is the shortest window KMS allows; cancellation is possible until then.
 - Log groups and asset images had to be removed outside CloudFormation; the
