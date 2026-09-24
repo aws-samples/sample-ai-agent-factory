@@ -88,9 +88,19 @@ The account's AgentCore quota for new Runtime session creation is 25 per
 second (adjustable); these runs stayed well inside it and were not meant to
 find the ceiling.
 
-## Runtime soak — see below
+## Runtime soak — PASS
 
-SOAK_PLACEHOLDER
+One full positive session every 40 seconds for 30 minutes against the
+nonproduction Runtime: **48 invocations, 48 passed, 0 failed**; invoke latency
+p50 7.95 s, p95 10.03 s, max 10.72 s, mean 7.95 s; Runtime `READY` at the end.
+Every invocation exercised the complete governed loop (SigV4 MCP discovery,
+governed tool call, M2M inference through the Platform Gateway, Memory event
+round trip), so the soak also stands as a 30-minute steady-state check of the
+Identity token path and the Memory service.
+
+A first soak attempt ended after eight green invocations when the probe's
+session credentials rotated underneath it; it was restarted as a fresh run and
+the eight earlier results are not counted above.
 
 ## Honest residuals
 
