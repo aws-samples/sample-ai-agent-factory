@@ -17,13 +17,60 @@ The construct emits:
    per configured provider-qualified model and a final zero-request wildcard.
 4. A Cognito User Pool, resource server, confidential client-credentials app
    client, and Cognito domain for `CUSTOM_JWT` inbound authentication.
-5. A Gateway role with only `bedrock-mantle:ListModels` and
-   `bedrock-mantle:CreateInference`. Its trust policy requires the same account
-   and the named Gateway ARN pattern.
+5. A Gateway role with only `bedrock-mantle:ListModels`,
+   `bedrock-mantle:CreateInference` pinned to the allocated models with the
+   `bedrock-mantle:Model` condition (both the provider-qualified id and the
+   provider-stripped alias), and `lambda:InvokeFunction` on exactly the
+   guardrail interceptor. Its trust policy requires the same account and the
+   named Gateway ARN pattern.
+6. A Gateway REQUEST interceptor (`lambda/guardrail-interceptor/index.py`) with
+   its own role (`bedrock:ApplyGuardrail` on exactly the configured guardrail
+   ARN plus basic logging). The Gateway is created with
+   `InterceptorConfigurations` naming that function, `interceptionPoints:
+["REQUEST"]` and `passRequestHeaders: false`.
 
 The Cognito client secret is managed by Cognito and is never emitted as a
 CloudFormation output. The stack outputs the client ID, token endpoint, OAuth
-scope, Gateway URL, target ID, target name, and rate-limit ID.
+scope, Gateway URL, target ID, target name, rate-limit ID, the interceptor
+function ARN, and the enforced guardrail identifier and version.
+
+## Server-side guardrail enforcement
+
+Live on 2026-09-24 the Bedrock Mantle connector was proven to ignore a
+client-supplied `guardrail_identifier` (a bogus or absent value still returned
+HTTP 200): the Gateway calls Mantle under its own role, the parameter is not part
+of the OpenAI contract, `bedrock-mantle` exposes no guardrail IAM condition key,
+and AgentCore Policy guardrail providers accept only string data paths while the
+OpenAI `messages` field is a set of records (the strict schema validator rejects
+`context.input.messages` for `BedrockGuardrails::PromptAttack`). The construct
+therefore requires `inputGuardrail` and enforces it with a REQUEST interceptor:
+
+| Interceptor outcome                                    | Gateway response                   |
+| ------------------------------------------------------ | ---------------------------------- |
+| Guardrail intervened with a `BLOCKED` action           | HTTP 403 `guardrail_intervened`    |
+| Guardrail API error, throttle, or misconfiguration     | HTTP 503 `guardrail_unavailable`   |
+| Request text above `maxGuardedCharacters` (200 000)    | HTTP 413 `guarded_input_too_large` |
+| Body is not a JSON object                              | HTTP 400 `invalid_request_error`   |
+| No evaluable text (`GET /models`, empty body), or pass | Request forwarded unchanged        |
+
+Every text segment the model would see is evaluated (`messages[].content`
+strings and text parts, `system`, `input`, `prompt`, `instructions`), in
+25 000-character batches, with `source=INPUT`. Anonymize-only interventions
+(for example email masking) do not block; only `BLOCKED` actions do. The
+interceptor never logs or echoes request text; the 403 body names the guardrail
+id/version and the tripped assessment types only. Request headers are never
+passed to the interceptor. The offline handler tests live next to the handler
+(`python -m pytest packages/platform-inference-gateway/lambda/guardrail-interceptor -q`).
+
+Wire the same stage's baseline guardrail from `GuardrailStack`:
+
+```ts
+inputGuardrail: {
+  guardrailIdentifier: guardrail.baseline.guardrail.attrGuardrailId,
+  guardrailVersion: guardrail.baseline.guardrail.attrVersion,
+  guardrailArn: guardrail.baseline.guardrail.attrGuardrailArn,
+},
+```
 
 ## Model identifiers
 
@@ -47,15 +94,20 @@ fail synthesis.
 ## CDK usage
 
 ```ts
-new PlatformInferenceGatewayConstruct(this, 'InferenceGateway', {
-  envName: 'nonprod',
-  applicationId: 'platform-inference',
-  agentId: 'shared',
-  tenantId: 'shared',
-  costCentre: 'platform',
+new PlatformInferenceGatewayConstruct(this, "InferenceGateway", {
+  envName: "nonprod",
+  applicationId: "platform-inference",
+  agentId: "shared",
+  tenantId: "shared",
+  costCentre: "platform",
+  inputGuardrail: {
+    guardrailIdentifier: guardrail.baseline.guardrail.attrGuardrailId,
+    guardrailVersion: guardrail.baseline.guardrail.attrVersion,
+    guardrailArn: guardrail.baseline.guardrail.attrGuardrailArn,
+  },
   modelRateLimits: [
     {
-      qualifiedModelId: 'openai.gpt-oss-120b',
+      qualifiedModelId: "openai.gpt-oss-120b",
       requestsPerMinute: 10,
       tokensPerMinute: 10_000,
     },

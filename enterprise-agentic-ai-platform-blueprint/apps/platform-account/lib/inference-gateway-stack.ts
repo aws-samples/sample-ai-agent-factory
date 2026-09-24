@@ -49,6 +49,19 @@ export class InferenceGatewayStack extends Stack {
       value: this.inferenceGateway.rateLimitId,
       description: 'Native Gateway model rate-limit identifier.',
     });
+    new CfnOutput(this, 'GuardrailInterceptorFunctionArn', {
+      value: this.inferenceGateway.guardrailInterceptor.functionArn,
+      description:
+        'REQUEST interceptor that applies the platform guardrail to every inference request (fails closed).',
+    });
+    new CfnOutput(this, 'EnforcedGuardrailIdentifier', {
+      value: props.inputGuardrail.guardrailIdentifier,
+      description: 'Bedrock Guardrail applied server-side by the interceptor.',
+    });
+    new CfnOutput(this, 'EnforcedGuardrailVersion', {
+      value: props.inputGuardrail.guardrailVersion,
+      description: 'Version of the server-side enforced guardrail.',
+    });
     new CfnOutput(this, 'CognitoUserPoolId', {
       value: this.inferenceGateway.userPool.userPoolId,
       description: 'Cognito User Pool that issues M2M access tokens.',

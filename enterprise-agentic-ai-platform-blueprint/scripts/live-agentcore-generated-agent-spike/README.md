@@ -79,8 +79,11 @@ exercises the three platform integrations the blueprint mandates.
   `inference-auth` (no / malformed / forged bearer -> 401), `runtime-fuzz`
   (malformed, empty, oversized and wrong-shape payloads -> controlled 4xx or
   the fixed default run; Runtime stays `READY`; positive re-proof) and
-  `inference-guardrail`, which found the open defect that the Gateway path
-  ignores the request guardrail parameter. See
+  `inference-guardrail`, which found the defect that the Gateway path
+  ignores the request guardrail parameter (fixed by the Gateway REQUEST
+  interceptor in `packages/platform-inference-gateway/lambda/guardrail-interceptor/`;
+  the probe's pass gate now expects HTTP 403 for a tripping prompt and 200
+  for the benign control). See
   `../../evidence/live/2026-09-24-chaos-dependency-failure.md`. Offline tests:
   `python -m pytest test_load_rate_limit_probe.py test_chaos_dependency_probe.py -q`.
 

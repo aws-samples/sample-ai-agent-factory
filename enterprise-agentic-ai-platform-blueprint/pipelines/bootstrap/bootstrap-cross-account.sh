@@ -62,6 +62,13 @@ QUALIFIER="hnb659fds"
 # `kms:DescribeKey` on the exact Memory key with
 # `kms:ViaService=bedrock-agentcore.<region>.amazonaws.com`; do not grant
 # unconstrained KMS administration.
+# The Platform inference Gateway creates an exact
+# `AgenticAI-InferenceGuardrail-<environment>` role and an exact
+# `agenticai-inference-guardrail-<environment>` Lambda (the guardrail REQUEST
+# interceptor). Allow IAM and Lambda lifecycle actions on only those names and
+# `iam:PassRole` on that role only with
+# `iam:PassedToService=lambda.amazonaws.com`; its identity policy is limited to
+# `bedrock:ApplyGuardrail` on the stage's exact baseline guardrail ARN.
 # The optional Gateway PolicyEngine path also requires kms:CreateGrant,
 # kms:Decrypt, kms:GenerateDataKey, and kms:DescribeKey on its exact
 # AgenticAI PolicyEngine CMK. Scope them with

@@ -422,7 +422,7 @@ switch (stage) {
           "Platform stage requires non-empty context 'agenticai/workloadAccountIds' for the GA Registry reader trust.",
         );
       }
-      new GuardrailStack(app, "AgenticAI-Platform-GuardrailStack", {
+      const guardrailStack = new GuardrailStack(app, "AgenticAI-Platform-GuardrailStack", {
         env: { account: platformAccount, region },
         pipelineRoleArn,
       });
@@ -457,7 +457,7 @@ switch (stage) {
         tenantId: String(tenantId),
         costCentre: String(costCentre),
       });
-      new InferenceGatewayStack(
+      const inferenceGatewayStack = new InferenceGatewayStack(
         app,
         "AgenticAI-Platform-InferenceGatewayStack",
         {
@@ -468,8 +468,15 @@ switch (stage) {
           agentId: String(agentId),
           costCentre: String(costCentre),
           modelRateLimits: inferenceModelRateLimits,
+          inputGuardrail: {
+            guardrailIdentifier:
+              guardrailStack.baseline.guardrail.attrGuardrailId,
+            guardrailVersion: guardrailStack.baseline.guardrail.attrVersion,
+            guardrailArn: guardrailStack.baseline.guardrail.attrGuardrailArn,
+          },
         },
       );
+      inferenceGatewayStack.addDependency(guardrailStack);
     }
     break;
   }

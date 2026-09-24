@@ -134,7 +134,7 @@ export class PlatformDeploymentStage extends Stage {
         organizationId: props.organizationId,
       });
     }
-    new GuardrailStack(this, "Guardrail", {
+    const guardrail = new GuardrailStack(this, "Guardrail", {
       env: props.env,
       pipelineRoleArn: props.pipelineRoleArn,
       existingAdminRoleArn: props.existingGuardrailAdminRoleArn,
@@ -154,7 +154,7 @@ export class PlatformDeploymentStage extends Stage {
       tenantId: props.tenantId,
       costCentre: props.costCentre,
     });
-    new InferenceGatewayStack(this, "InferenceGateway", {
+    const inferenceGateway = new InferenceGatewayStack(this, "InferenceGateway", {
       env: props.env,
       envName: props.envName,
       applicationId: props.applicationId,
@@ -162,10 +162,18 @@ export class PlatformDeploymentStage extends Stage {
       tenantId: props.tenantId,
       costCentre: props.costCentre,
       modelRateLimits: props.inferenceModelRateLimits,
+      // The stage's own baseline guardrail is enforced server-side on every
+      // inference request by the Gateway REQUEST interceptor.
+      inputGuardrail: {
+        guardrailIdentifier: guardrail.baseline.guardrail.attrGuardrailId,
+        guardrailVersion: guardrail.baseline.guardrail.attrVersion,
+        guardrailArn: guardrail.baseline.guardrail.attrGuardrailArn,
+      },
       m2mSecretReaderAccountIds: props.gatewayWorkloadAccountId
         ? [props.gatewayWorkloadAccountId]
         : undefined,
     });
+    inferenceGateway.addDependency(guardrail);
   }
 }
 

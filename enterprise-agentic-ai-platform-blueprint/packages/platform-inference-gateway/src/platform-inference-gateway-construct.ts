@@ -1,3 +1,5 @@
+import * as path from 'node:path';
+
 import {
   ArnFormat,
   CfnResource,
@@ -27,7 +29,7 @@ import {
   ServicePrincipal,
 } from 'aws-cdk-lib/aws-iam';
 import { Key } from 'aws-cdk-lib/aws-kms';
-import { Code, Function, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { Code, Function as LambdaFunction, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
 import { Provider } from 'aws-cdk-lib/custom-resources';
 import { NagSuppressions } from 'cdk-nag';
@@ -47,6 +49,19 @@ export interface InferenceModelRateLimit {
   readonly tokensPerMinute: number;
 }
 
+/**
+ * The Bedrock Guardrail that the Gateway REQUEST interceptor applies to every
+ * inference request before the model is called. All three values normally
+ * come from the same-stage `GuardrailStack` (`attrGuardrailId`,
+ * `attrVersion`, `attrGuardrailArn`); the ARN scopes the interceptor role's
+ * `bedrock:ApplyGuardrail` grant to exactly this guardrail.
+ */
+export interface InferenceInputGuardrail {
+  readonly guardrailIdentifier: string;
+  readonly guardrailVersion: string;
+  readonly guardrailArn: string;
+}
+
 export interface PlatformInferenceGatewayConstructProps {
   readonly envName: string;
   readonly applicationId: string;
@@ -54,11 +69,27 @@ export interface PlatformInferenceGatewayConstructProps {
   readonly tenantId: string;
   readonly costCentre: string;
   readonly modelRateLimits: readonly InferenceModelRateLimit[];
+  /**
+   * Mandatory server-side guardrail. The Gateway's Mantle connector ignores
+   * any client-supplied `guardrail_identifier`, `bedrock-mantle` exposes no
+   * guardrail IAM condition key, and AgentCore Policy guardrail providers
+   * cannot read the OpenAI `messages` set (live 2026-09-24), so the only
+   * enforcement point is a REQUEST interceptor calling `ApplyGuardrail`.
+   * Making the prop required keeps the inference path guardrail-free by
+   * construction impossible.
+   */
+  readonly inputGuardrail: InferenceInputGuardrail;
   readonly gatewayName?: string;
   readonly targetName?: string;
   readonly rateLimitId?: string;
   readonly mcpVersion?: string;
   readonly accessTokenValidity?: Duration;
+  /**
+   * Upper bound on the request text (characters) the interceptor evaluates;
+   * larger requests are refused with HTTP 413 rather than passed unguarded.
+   * Defaults to 200 000.
+   */
+  readonly maxGuardedCharacters?: number;
   /**
    * Opt-in: 12-digit AWS account IDs (the Workstream accounts) allowed to read
    * the published M2M credential secret cross-account. When set, the construct
@@ -169,6 +200,42 @@ function validateModelRateLimits(
   }
 }
 
+function validateInputGuardrail(guardrail: InferenceInputGuardrail | undefined): void {
+  if (!guardrail) {
+    throw new Error(
+      'PlatformInferenceGatewayConstruct: inputGuardrail is required; the inference path must never deploy guardrail-free.',
+    );
+  }
+  for (const [key, value] of Object.entries(guardrail)) {
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      throw new Error(
+        `PlatformInferenceGatewayConstruct: inputGuardrail.${key} must be a non-empty string.`,
+      );
+    }
+  }
+}
+
+/**
+ * IAM `bedrock-mantle:Model` values for the allow-listed models. The
+ * connector accepts both the provider-qualified id (`openai.gpt-oss-120b`)
+ * and the provider-stripped alias (`gpt-oss-120b`), so both spellings of each
+ * allocated model are permitted and everything else is denied by IAM even
+ * when the fail-open rate limiter admits it.
+ */
+export function allowedMantleModelIds(
+  limits: readonly InferenceModelRateLimit[],
+): string[] {
+  const ids = new Set<string>();
+  for (const limit of limits) {
+    ids.add(limit.qualifiedModelId);
+    const dot = limit.qualifiedModelId.indexOf('.');
+    if (dot > 0 && dot < limit.qualifiedModelId.length - 1) {
+      ids.add(limit.qualifiedModelId.slice(dot + 1));
+    }
+  }
+  return [...ids].sort();
+}
+
 function buildRateLimitEntries(
   limits: readonly InferenceModelRateLimit[],
 ): Record<string, unknown>[] {
@@ -232,6 +299,9 @@ export class PlatformInferenceGatewayConstruct extends Construct {
   readonly rateLimitId: string;
   /** Present only when m2mSecretReaderAccountIds is set. */
   readonly m2mSecret?: Secret;
+  /** REQUEST interceptor applying the platform guardrail to every request. */
+  readonly guardrailInterceptor: LambdaFunction;
+  readonly guardrailInterceptorRole: Role;
 
   constructor(
     scope: Construct,
@@ -250,6 +320,17 @@ export class PlatformInferenceGatewayConstruct extends Construct {
     validateName('targetName', targetName, 100);
     validateName('rateLimitId', this.rateLimitId, 64);
     validateModelRateLimits(props.modelRateLimits);
+    validateInputGuardrail(props.inputGuardrail);
+    const maxGuardedCharacters = props.maxGuardedCharacters ?? 200_000;
+    if (
+      !Number.isInteger(maxGuardedCharacters) ||
+      maxGuardedCharacters < 1_000 ||
+      maxGuardedCharacters > 5_000_000
+    ) {
+      throw new Error(
+        `PlatformInferenceGatewayConstruct: maxGuardedCharacters must be an integer from 1000 through 5000000; got ${maxGuardedCharacters}.`,
+      );
+    }
     for (const [key, value] of Object.entries(requiredTags(props))) {
       validateTagValue(key, value);
       Tags.of(this).add(key, value);
@@ -275,14 +356,24 @@ export class PlatformInferenceGatewayConstruct extends Construct {
     const mantlePolicy = new Policy(this, 'BedrockMantlePolicy', {
       statements: [
         new PolicyStatement({
-          sid: 'InvokeBedrockMantle',
+          sid: 'ListBedrockMantleModels',
           effect: Effect.ALLOW,
-          actions: [
-            'bedrock-mantle:ListModels',
-            'bedrock-mantle:CreateInference',
-          ],
+          actions: ['bedrock-mantle:ListModels'],
           // These preview actions do not expose resource-level permissions.
           resources: ['*'],
+        }),
+        new PolicyStatement({
+          sid: 'InvokeAllocatedBedrockMantleModels',
+          effect: Effect.ALLOW,
+          actions: ['bedrock-mantle:CreateInference'],
+          resources: ['*'],
+          // Fail-closed model allow-list: the native rate limiter is fail-open
+          // traffic shaping, so IAM denies every model outside the allocation.
+          conditions: {
+            StringEquals: {
+              'bedrock-mantle:Model': allowedMantleModelIds(props.modelRateLimits),
+            },
+          },
         }),
       ],
     });
@@ -293,7 +384,7 @@ export class PlatformInferenceGatewayConstruct extends Construct {
         {
           id: 'AwsSolutions-IAM5',
           reason:
-            'SEC-027: bedrock-mantle ListModels/CreateInference currently support only Resource="*"; the trust policy scopes assumption to this account and named Gateway ARN.',
+            'SEC-027: bedrock-mantle ListModels/CreateInference currently support only Resource="*"; CreateInference is pinned to the allocated models with bedrock-mantle:Model and the trust policy scopes assumption to this account and named Gateway ARN.',
         },
         {
           id: 'NIST.800.53.R5-IAMNoInlinePolicy',
@@ -384,6 +475,87 @@ export class PlatformInferenceGatewayConstruct extends Construct {
       `${this.userPool.userPoolId}/.well-known/openid-configuration`;
     this.tokenEndpoint = `${this.userPoolDomain.baseUrl()}/oauth2/token`;
 
+    // Server-side guardrail enforcement. Explicitly-named role and function so
+    // both stay inside the AgenticAI* CFN-exec boundary and the Gateway role's
+    // invoke grant names one exact function ARN.
+    const interceptorName = `agenticai-inference-guardrail-${props.envName}`.slice(0, 64);
+    this.guardrailInterceptorRole = new Role(this, 'GuardrailInterceptorRole', {
+      roleName: `AgenticAI-InferenceGuardrail-${props.envName}`.slice(0, 64),
+      assumedBy: new ServicePrincipal('lambda.amazonaws.com'),
+      description:
+        'Applies the platform baseline Bedrock Guardrail to every inference Gateway request (REQUEST interceptor).',
+      inlinePolicies: {
+        ApplyGuardrail: new PolicyDocument({
+          statements: [
+            new PolicyStatement({
+              sid: 'ApplyPlatformGuardrail',
+              effect: Effect.ALLOW,
+              actions: ['bedrock:ApplyGuardrail'],
+              resources: [props.inputGuardrail.guardrailArn],
+            }),
+          ],
+        }),
+      },
+      managedPolicies: [
+        ManagedPolicy.fromAwsManagedPolicyName(
+          'service-role/AWSLambdaBasicExecutionRole',
+        ),
+      ],
+    });
+    this.guardrailInterceptor = new LambdaFunction(this, 'GuardrailInterceptor', {
+      functionName: interceptorName,
+      description:
+        'AgentCore inference Gateway REQUEST interceptor: bedrock:ApplyGuardrail on every request body; fails closed.',
+      runtime: Runtime.PYTHON_3_13,
+      handler: 'index.handler',
+      timeout: Duration.seconds(25),
+      memorySize: 256,
+      role: this.guardrailInterceptorRole,
+      code: Code.fromAsset(
+        path.join(__dirname, '..', 'lambda', 'guardrail-interceptor'),
+        { exclude: ['test_*.py', '__pycache__', '.pytest_cache'] },
+      ),
+      environment: {
+        GUARDRAIL_IDENTIFIER: props.inputGuardrail.guardrailIdentifier,
+        GUARDRAIL_VERSION: props.inputGuardrail.guardrailVersion,
+        MAX_GUARDED_CHARACTERS: String(maxGuardedCharacters),
+        ENV_NAME: props.envName,
+      },
+    });
+    const interceptorInvokePolicy = new Policy(this, 'GuardrailInterceptorInvoke', {
+      statements: [
+        new PolicyStatement({
+          sid: 'InvokeGuardrailInterceptor',
+          effect: Effect.ALLOW,
+          actions: ['lambda:InvokeFunction'],
+          resources: [this.guardrailInterceptor.functionArn],
+        }),
+      ],
+    });
+    this.gatewayRole.attachInlinePolicy(interceptorInvokePolicy);
+    NagSuppressions.addResourceSuppressions(
+      this.guardrailInterceptorRole,
+      [
+        {
+          id: 'AwsSolutions-IAM4',
+          reason:
+            'SEC-005: AWSLambdaBasicExecutionRole is the standard log-write policy for the interceptor Lambda; its only other grant is bedrock:ApplyGuardrail on the exact platform guardrail ARN.',
+        },
+      ],
+      true,
+    );
+    NagSuppressions.addResourceSuppressions(
+      this.guardrailInterceptor,
+      [
+        {
+          id: 'AwsSolutions-L1',
+          reason:
+            'SEC-031: pinned to the Python 3.13 runtime shipped with this release; bumped deliberately with the offline handler tests.',
+        },
+      ],
+      true,
+    );
+
     this.gateway = new CfnGateway(this, 'Gateway', {
       name: gatewayName,
       roleArn: this.gatewayRole.roleArn,
@@ -393,6 +565,15 @@ export class PlatformInferenceGatewayConstruct extends Construct {
           supportedVersions: [props.mcpVersion ?? DEFAULT_MCP_VERSION],
         },
       },
+      // The interceptor evaluates the request body before the target is called;
+      // headers (bearer tokens) are deliberately never passed to it.
+      interceptorConfigurations: [
+        {
+          interceptor: { lambda: { arn: this.guardrailInterceptor.functionArn } },
+          interceptionPoints: ['REQUEST'],
+          inputConfiguration: { passRequestHeaders: false },
+        },
+      ],
       authorizerType: 'CUSTOM_JWT',
       authorizerConfiguration: {
         customJwtAuthorizer: {
@@ -411,6 +592,8 @@ export class PlatformInferenceGatewayConstruct extends Construct {
       tags: requiredTags(props),
     });
     this.gateway.node.addDependency(mantlePolicy);
+    this.gateway.node.addDependency(interceptorInvokePolicy);
+    this.gateway.node.addDependency(this.guardrailInterceptor);
 
     // CDK 2.251.0 has the Gateway L1 but predates the August 2026 inference
     // branch on GatewayTarget and the GatewayRateLimit L1. Use their published
@@ -568,7 +751,7 @@ export class PlatformInferenceGatewayConstruct extends Construct {
           ),
         ],
       });
-      const populatorFn = new Function(this, 'M2mSecretPopulatorFn', {
+      const populatorFn = new LambdaFunction(this, 'M2mSecretPopulatorFn', {
         runtime: Runtime.PYTHON_3_13,
         handler: 'index.on_event',
         timeout: Duration.minutes(2),

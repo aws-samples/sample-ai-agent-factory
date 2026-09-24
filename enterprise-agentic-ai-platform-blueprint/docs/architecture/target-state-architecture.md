@@ -328,20 +328,24 @@ Agent on AgentCore Runtime
   -> AgentCore Identity     : authenticate the caller, resolve tenant and agent identity
   -> Native rate limits     : traffic management, evaluated BEFORE policy, FAILS OPEN
   -> Policy engine          : authorization decision, FAILS CLOSED
-  -> Bedrock Guardrail      : content and prompt-attack screening — OPEN DEFECT 2026-09-24: on this
-                               path the Gateway calls Mantle under its own role and ignores the
-                               request guardrail parameter (live: bogus/absent id -> HTTP 200); the
-                               remedy is PolicyEngine guardrail policies on the Gateway (ENFORCE)
-  -> Inference target       : allow-listed Bedrock model, per-tenant inference profile
+  -> Guardrail interceptor  : Gateway REQUEST interceptor runs bedrock:ApplyGuardrail with the
+                               stage baseline Guardrail on every request body BEFORE the model
+                               call; FAILS CLOSED (403 intervened / 503 unavailable / 413 over
+                               budget). Added 2026-09-24 after the live finding that the Mantle
+                               connector ignores the request guardrail parameter (bogus/absent
+                               id -> HTTP 200) and that AgentCore Policy guardrail providers
+                               cannot read the OpenAI `messages` set
+  -> Inference target       : allow-listed Bedrock model (IAM `bedrock-mantle:Model` pin on the
+                               Gateway role, FAILS CLOSED), per-tenant inference profile
   -> Invocation log         : record to the archive in Management/Governance
 ```
 
-| Control                | Placement                                                       | Fails  | Role                                                                                                                                                                                                                                             |
-| ---------------------- | --------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **WAF**                | In front of the central Inference Gateway, Platform account     | Closed | Request-shape and volumetric defence. Rate-based rules are the backstop for the fail-open gap in §7.4.                                                                                                                                           |
-| **AgentCore Identity** | Platform account                                                | Closed | Authentication and identity resolution. Tenant and agent identity are established here and carried forward; they are never taken from a client-supplied header.                                                                                  |
-| **Policy engine**      | Platform account, inference path; Workstream account, tool path | Closed | **The authorization decision.** Rate limiting is not authorization. Every entitlement statement — which tenant may reach which model, which principal may reach which tool — is decided here.                                                    |
-| **Bedrock Guardrails** | Attached to every inference call                                | Closed | Content filters, prompt-attack detection, PII handling. The baseline profile is mandatory; a call without a guardrail identifier is denied by service control policy, by an IAM identity-policy deny, and by the inference target configuration. |
+| Control                | Placement                                                       | Fails  | Role                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ---------------------- | --------------------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **WAF**                | In front of the central Inference Gateway, Platform account     | Closed | Request-shape and volumetric defence. Rate-based rules are the backstop for the fail-open gap in §7.4.                                                                                                                                                                                                                                                                                                                              |
+| **AgentCore Identity** | Platform account                                                | Closed | Authentication and identity resolution. Tenant and agent identity are established here and carried forward; they are never taken from a client-supplied header.                                                                                                                                                                                                                                                                     |
+| **Policy engine**      | Platform account, inference path; Workstream account, tool path | Closed | **The authorization decision.** Rate limiting is not authorization. Every entitlement statement — which tenant may reach which model, which principal may reach which tool — is decided here.                                                                                                                                                                                                                                       |
+| **Bedrock Guardrails** | Gateway REQUEST interceptor, Platform account                   | Closed | Content filters, prompt-attack detection, denied topics, PII handling. On the Gateway path the interceptor applies the stage baseline Guardrail to every request body with `bedrock:ApplyGuardrail` before the model call; the caller cannot opt out because the parameter it might send is ignored by the connector. The D-01 service-control, IAM and target-configuration denies remain the controls for direct Bedrock callers. |
 
 **Guardrail segregation of duties (Planned, carried from the current Verified design).** A single
 `GuardrailAdminRole` in the Platform account is the only principal permitted to mutate guardrails; a

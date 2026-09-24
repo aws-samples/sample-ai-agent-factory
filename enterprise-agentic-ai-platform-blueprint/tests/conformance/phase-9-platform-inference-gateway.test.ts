@@ -8,6 +8,13 @@ import {
   type InferenceModelRateLimit,
 } from '@agenticai/platform-inference-gateway';
 
+const GUARDRAIL = {
+  guardrailIdentifier: 'abcdef123456',
+  guardrailVersion: 'DRAFT',
+  guardrailArn:
+    'arn:aws:bedrock:us-west-2:123456789012:guardrail/abcdef123456',
+} as const;
+
 const MODEL_LIMITS: readonly InferenceModelRateLimit[] = [
   {
     qualifiedModelId: 'openai.gpt-oss-120b',
@@ -35,6 +42,7 @@ function synth(
     tenantId: 'shared',
     costCentre: 'platform',
     modelRateLimits,
+    inputGuardrail: GUARDRAIL,
   });
   return Template.fromStack(stack);
 }
@@ -53,6 +61,7 @@ function synthWithReaders(
     tenantId: 'shared',
     costCentre: 'platform',
     modelRateLimits: MODEL_LIMITS,
+    inputGuardrail: GUARDRAIL,
     m2mSecretReaderAccountIds: readerAccountIds,
   });
   return Template.fromStack(stack);
@@ -71,6 +80,26 @@ function properties(resource: Record<string, unknown>): Record<string, unknown> 
   return resource.Properties as Record<string, unknown>;
 }
 
+function policiesBySid(template: Template): Record<string, Record<string, unknown>> {
+  const bySid: Record<string, Record<string, unknown>> = {};
+  for (const resource of Object.values(
+    template.findResources('AWS::IAM::Policy'),
+  )) {
+    const props = properties(resource as Record<string, unknown>);
+    for (const statement of (props.PolicyDocument as { Statement: any[] })
+      .Statement) {
+      bySid[statement.Sid] = props;
+    }
+  }
+  return bySid;
+}
+
+function mantlePolicy(template: Template): Record<string, unknown> {
+  const policy = policiesBySid(template).InvokeAllocatedBedrockMantleModels;
+  expect(policy).toBeDefined();
+  return policy;
+}
+
 describe('Phase 9 — native Platform inference Gateway', () => {
   it('emits Gateway, inference target and native rate limit without the old load balancers', () => {
     const template = synth();
@@ -79,7 +108,8 @@ describe('Phase 9 — native Platform inference Gateway', () => {
     template.resourceCountIs('AWS::BedrockAgentCore::GatewayRateLimit', 1);
     template.resourceCountIs('AWS::ElasticLoadBalancingV2::LoadBalancer', 0);
     template.resourceCountIs('AWS::EC2::VPCEndpointService', 0);
-    template.resourceCountIs('AWS::Lambda::Function', 0);
+    // The only Lambda on the default path is the guardrail REQUEST interceptor.
+    template.resourceCountIs('AWS::Lambda::Function', 1);
   });
 
   it('uses MCP and the Cognito custom-JWT authorizer', () => {
@@ -138,6 +168,7 @@ describe('Phase 9 — native Platform inference Gateway', () => {
         tenantId: 'shared',
         costCentre: 'platform',
         modelRateLimits: MODEL_LIMITS,
+        inputGuardrail: GUARDRAIL,
       },
     );
 
@@ -210,6 +241,7 @@ describe('Phase 9 — native Platform inference Gateway', () => {
       tenantId: 'shared',
       costCentre: 'platform',
       modelRateLimits: MODEL_LIMITS,
+      inputGuardrail: GUARDRAIL,
     });
     const template = Template.fromStack(stack);
 
@@ -252,7 +284,13 @@ describe('Phase 9 — native Platform inference Gateway', () => {
 
 describe('Phase 9 — Gateway IAM boundary and lifecycle ordering', () => {
   it('trusts AgentCore only from this account and named Gateway ARN', () => {
-    const role = properties(onlyResource(synth(), 'AWS::IAM::Role'));
+    const roles = Object.values(synth().findResources('AWS::IAM::Role')).map(
+      (resource) => properties(resource as Record<string, unknown>),
+    );
+    const role = roles.find(
+      (candidate) => candidate.RoleName === 'AgenticAI-InferenceGateway-nonprod',
+    ) as Record<string, unknown>;
+    expect(role).toBeDefined();
     const trust = role.AssumeRolePolicyDocument as {
       Statement: Array<{
         Action: string;
@@ -285,12 +323,35 @@ describe('Phase 9 — Gateway IAM boundary and lifecycle ordering', () => {
   });
 
   it('grants exactly the two live-proven Bedrock Mantle actions', () => {
-    const policy = JSON.stringify(
-      properties(onlyResource(synth(), 'AWS::IAM::Policy')),
-    );
+    const policy = JSON.stringify(mantlePolicy(synth()));
     expect(policy).toContain('bedrock-mantle:ListModels');
     expect(policy).toContain('bedrock-mantle:CreateInference');
     expect(policy).not.toContain('bedrock:InvokeModel');
+  });
+
+  it('pins CreateInference to the allocated models with bedrock-mantle:Model (fail closed)', () => {
+    const statements = (
+      mantlePolicy(synth()).PolicyDocument as { Statement: any[] }
+    ).Statement;
+    const invoke = statements.find(
+      (statement) => statement.Sid === 'InvokeAllocatedBedrockMantleModels',
+    );
+    expect(invoke.Action).toEqual('bedrock-mantle:CreateInference');
+    expect(invoke.Condition).toEqual({
+      StringEquals: {
+        'bedrock-mantle:Model': [
+          'anthropic.claude-sonnet-4-5-20250929-v1:0',
+          'claude-sonnet-4-5-20250929-v1:0',
+          'gpt-oss-120b',
+          'openai.gpt-oss-120b',
+        ],
+      },
+    });
+    const list = statements.find(
+      (statement) => statement.Sid === 'ListBedrockMantleModels',
+    );
+    expect(list.Action).toEqual('bedrock-mantle:ListModels');
+    expect(list.Condition).toBeUndefined();
   });
 
   it('orders target after Gateway and rate limit after target', () => {
@@ -323,6 +384,7 @@ describe('Phase 9 — fail-closed configuration validation', () => {
         tenantId: 'shared',
         costCentre: 'platform',
         modelRateLimits,
+        inputGuardrail: GUARDRAIL,
       });
     };
   }
@@ -416,5 +478,141 @@ describe('Phase 9 — opt-in cross-account M2M secret', () => {
     expect(() => synthWithReaders(['not-an-account'])).toThrow(
       /12-digit account IDs/,
     );
+  });
+});
+
+describe('Phase 9 — server-side guardrail enforcement (REQUEST interceptor)', () => {
+  it('attaches exactly one REQUEST interceptor to the Gateway and never passes headers', () => {
+    const template = synth();
+    const gateway = properties(
+      onlyResource(template, 'AWS::BedrockAgentCore::Gateway'),
+    );
+    const functions = template.findResources('AWS::Lambda::Function');
+    const functionLogicalId = Object.keys(functions)[0];
+    expect(gateway.InterceptorConfigurations).toEqual([
+      {
+        Interceptor: {
+          Lambda: { Arn: { 'Fn::GetAtt': [functionLogicalId, 'Arn'] } },
+        },
+        InterceptionPoints: ['REQUEST'],
+        InputConfiguration: { PassRequestHeaders: false },
+      },
+    ]);
+    expect(gateway.PolicyEngineConfiguration).toBeUndefined();
+  });
+
+  it('configures the interceptor with the guardrail identity and a bounded text budget', () => {
+    const fn = properties(onlyResource(synth(), 'AWS::Lambda::Function'));
+    expect(fn.FunctionName).toBe('agenticai-inference-guardrail-nonprod');
+    expect(fn.Handler).toBe('index.handler');
+    expect(fn.Runtime).toBe('python3.13');
+    expect(fn.Timeout).toBe(25);
+    expect((fn.Environment as any).Variables).toEqual({
+      GUARDRAIL_IDENTIFIER: 'abcdef123456',
+      GUARDRAIL_VERSION: 'DRAFT',
+      MAX_GUARDED_CHARACTERS: '200000',
+      ENV_NAME: 'nonprod',
+    });
+    // Shipped as a file asset (real handler), not an inline stub.
+    expect((fn.Code as any).S3Bucket).toBeDefined();
+    expect((fn.Code as any).ZipFile).toBeUndefined();
+  });
+
+  it('grants the interceptor role ApplyGuardrail on exactly the platform guardrail ARN', () => {
+    const template = synth();
+    const roles = Object.values(template.findResources('AWS::IAM::Role')).map(
+      (resource) => properties(resource as Record<string, unknown>),
+    );
+    const role = roles.find(
+      (candidate) => candidate.RoleName === 'AgenticAI-InferenceGuardrail-nonprod',
+    ) as any;
+    expect(role).toBeDefined();
+    expect(role.AssumeRolePolicyDocument.Statement[0].Principal).toEqual({
+      Service: 'lambda.amazonaws.com',
+    });
+    const statements = role.Policies[0].PolicyDocument.Statement;
+    expect(statements).toEqual([
+      {
+        Sid: 'ApplyPlatformGuardrail',
+        Effect: 'Allow',
+        Action: 'bedrock:ApplyGuardrail',
+        Resource: 'arn:aws:bedrock:us-west-2:123456789012:guardrail/abcdef123456',
+      },
+    ]);
+    expect(JSON.stringify(role)).not.toContain('bedrock-mantle');
+  });
+
+  it('lets the Gateway role invoke exactly the interceptor function and orders the Gateway after that grant', () => {
+    const template = synth();
+    const invoke = policiesBySid(template).InvokeGuardrailInterceptor as any;
+    const functionLogicalId = Object.keys(
+      template.findResources('AWS::Lambda::Function'),
+    )[0];
+    const statement = invoke.PolicyDocument.Statement.find(
+      (candidate: any) => candidate.Sid === 'InvokeGuardrailInterceptor',
+    );
+    expect(statement.Action).toBe('lambda:InvokeFunction');
+    expect(statement.Resource).toEqual({
+      'Fn::GetAtt': [functionLogicalId, 'Arn'],
+    });
+    expect(invoke.Roles).toEqual([
+      { Ref: expect.stringMatching(/GatewayRole/) },
+    ]);
+    const gateway = onlyResource(template, 'AWS::BedrockAgentCore::Gateway');
+    const policyLogicalIds = Object.entries(
+      template.findResources('AWS::IAM::Policy'),
+    )
+      .filter(([, resource]) =>
+        JSON.stringify(resource).includes('InvokeGuardrailInterceptor'),
+      )
+      .map(([logicalId]) => logicalId);
+    expect(policyLogicalIds).toHaveLength(1);
+    expect(gateway.DependsOn as string[]).toEqual(
+      expect.arrayContaining([policyLogicalIds[0], functionLogicalId]),
+    );
+  });
+
+  it('refuses to synthesize without a guardrail or with a blank guardrail field', () => {
+    const build = (inputGuardrail: unknown) => () => {
+      const stack = new Stack(new App(), 'NoGuardrail', {
+        env: { account: '123456789012', region: 'us-west-2' },
+      });
+      return new PlatformInferenceGatewayConstruct(stack, 'Gateway', {
+        envName: 'nonprod',
+        applicationId: 'platform-inference',
+        agentId: 'shared',
+        tenantId: 'shared',
+        costCentre: 'platform',
+        modelRateLimits: MODEL_LIMITS,
+        inputGuardrail: inputGuardrail as any,
+      });
+    };
+    expect(build(undefined)).toThrow(/inputGuardrail is required/);
+    expect(build({ ...GUARDRAIL, guardrailVersion: ' ' })).toThrow(
+      /inputGuardrail\.guardrailVersion must be a non-empty string/,
+    );
+    expect(build({ ...GUARDRAIL, guardrailArn: '' })).toThrow(
+      /inputGuardrail\.guardrailArn must be a non-empty string/,
+    );
+  });
+
+  it('exposes the interceptor and enforced guardrail as stack outputs', () => {
+    const stack = new InferenceGatewayStack(new App(), 'OutputsStack', {
+      env: { account: '123456789012', region: 'us-west-2' },
+      envName: 'prod',
+      applicationId: 'platform-inference',
+      agentId: 'shared',
+      tenantId: 'shared',
+      costCentre: 'platform',
+      modelRateLimits: MODEL_LIMITS,
+      inputGuardrail: GUARDRAIL,
+    });
+    const template = Template.fromStack(stack);
+    template.hasOutput('GuardrailInterceptorFunctionArn', {});
+    template.hasOutput('EnforcedGuardrailIdentifier', { Value: 'abcdef123456' });
+    template.hasOutput('EnforcedGuardrailVersion', { Value: 'DRAFT' });
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      FunctionName: 'agenticai-inference-guardrail-prod',
+    });
   });
 });
