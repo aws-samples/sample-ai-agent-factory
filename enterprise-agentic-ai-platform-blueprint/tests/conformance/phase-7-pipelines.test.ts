@@ -279,93 +279,6 @@ describe("Phase 7 — Platform pipeline", () => {
     });
   });
 
-  it("forwards RoleId-bound Gateway permissions through the permission phase", () => {
-    const roleArns = [
-      "arn:aws:iam::444444444444:role/AgenticAI-D03-nonprod-shared-shared-gw-svc",
-      "arn:aws:iam::555555555555:role/AgenticAI-D03-prod-shared-shared-gw-svc",
-    ];
-    // Assembled at runtime so secret scanners do not mistake the fixtures for keys.
-    const fakeRoleId = (seed: string): string =>
-      ["AR", "OA"].join("") + seed.padEnd(17, "0").slice(0, 17);
-    const roleIds = {
-      [roleArns[0]]: fakeRoleId("NONPROD1"),
-      [roleArns[1]]: fakeRoleId("PROD1"),
-    };
-    const build = (ids?: Readonly<Record<string, string>>) =>
-      new PlatformPipelineStack(new App(), "PP", {
-        env: { account: "111111111111", region: "us-west-2" },
-        githubRepo: "aws-samples/sample-ai-agent-factory",
-        githubConnectionArn: GITHUB_CONNECTION,
-        organizationId: "o-example123",
-        logArchive: {
-          env: { account: "333333333333", region: "us-west-2" },
-          envName: "nonprod",
-        },
-        audit: {
-          env: { account: "666666666666", region: "us-west-2" },
-          envName: "nonprod",
-        },
-        platformNonprod: {
-          env: { account: "111111111111", region: "us-west-2" },
-          envName: "nonprod",
-        },
-        platformProd: {
-          env: { account: "222222222222", region: "us-west-2" },
-          envName: "prod",
-        },
-        workloadAccountIds: ["444444444444", "555555555555"],
-        gatewayWorkloadAccountIds: {
-          nonprod: "444444444444",
-          prod: "555555555555",
-        },
-        applicationId: "platform-inference",
-        tenantId: "shared",
-        agentId: "shared",
-        costCentre: "platform",
-        inferenceModelRateLimits: [
-          {
-            qualifiedModelId: "openai.gpt-oss-120b",
-            requestsPerMinute: 10,
-            tokensPerMinute: 10_000,
-          },
-        ],
-        grantGatewayInvokePermissions: true,
-        gatewayServiceRoleArns: roleArns,
-        gatewayServiceRoleIds: ids,
-      });
-
-    // The permission phase is fail-closed without the RoleIds.
-    expect(() => Template.fromStack(build())).toThrow(
-      /gatewayServiceRoleIds must map/,
-    );
-
-    const root = build(roleIds);
-    const rendered = JSON.stringify(
-      Template.fromStack(root).toJSON(),
-    ).replaceAll("\\", "");
-    expect(rendered).toContain("agenticai/enableGaGatewayInvokePermissions");
-    expect(rendered).toContain("agenticai/gaGatewayServiceRoleIds");
-    expect(rendered).toContain(`"${roleIds[roleArns[0]]}"`);
-    expect(rendered).toContain(`"${roleIds[roleArns[1]]}"`);
-
-    for (const [stageId, expectedRoleArn] of [
-      ["Nonprod", roleArns[0]],
-      ["Prod", roleArns[1]],
-    ] as const) {
-      const stage = root.node.findChild(stageId) as PlatformDeploymentStage;
-      const registry = stage.node.findChild("Registry") as RegistryStack;
-      const permissions = Object.values(
-        Template.fromStack(registry).findResources("AWS::Lambda::Permission"),
-      ) as any[];
-      expect(permissions).toHaveLength(2);
-      for (const permission of permissions) {
-        expect(JSON.stringify(permission.Properties.Principal)).toContain(
-          expectedRoleArn.slice(expectedRoleArn.indexOf(":iam::")),
-        );
-      }
-    }
-  });
-
   it("forwards environment-scoped GA record replacement generations", () => {
     const app = new App();
     const root = createPlatformPipeline(app, "222222222222", {
@@ -632,13 +545,14 @@ describe("Phase 7 — R2 GA Registry Workload pipeline", () => {
           Value: { "Fn::GetAtt": [expect.any(String), "Arn"] },
         }),
       );
-      // The Platform binds each alias permission to the role INSTANCE; the
-      // RoleId output is what a recreated role changes while its ARN does not.
+      // Lambda stores a granted role principal as its RoleId; the output lets
+      // an operator recognise a stale Platform alias grant after the role was
+      // recreated (README §6.3 grant retirement).
       const outputs = roleTemplate.toJSON().Outputs ?? {};
       expect(outputs.GatewayServiceRoleId).toEqual(
         expect.objectContaining({
           Description:
-            "Current IAM RoleId for agenticai/gaGatewayServiceRoleIds; changes whenever this role is recreated.",
+            "Current IAM RoleId of GatewayServiceRoleArn; a Platform alias grant showing a different AROA principal is stale and must be retired and re-granted.",
           Value: { "Fn::GetAtt": [expect.any(String), "RoleId"] },
         }),
       );

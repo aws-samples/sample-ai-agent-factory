@@ -181,12 +181,14 @@ export class D03WorkstreamRegistryRolesStack extends Stack {
         "Exact existing principal ARN for agenticai/gaGatewayServiceRoleArns.",
       value: this.gatewayServiceRole.roleArn,
     });
-    // Lambda stores a role principal as its IAM RoleId. This value changes on
-    // every recreation of the role (teardown + redeploy, rollback), while the
-    // ARN string does not; the Platform binds each alias permission to it.
+    // Lambda stores a role principal as its IAM RoleId, and this value changes
+    // on every recreation of the role while the ARN does not. It is exposed so
+    // an operator can tell a live Platform alias grant that still names an
+    // earlier instance (`aws lambda get-policy` shows an `AROA...` principal)
+    // from one bound to this role; see README §6.3 on grant retirement.
     new CfnOutput(this, "GatewayServiceRoleId", {
       description:
-        "Current IAM RoleId for agenticai/gaGatewayServiceRoleIds; changes whenever this role is recreated.",
+        "Current IAM RoleId of GatewayServiceRoleArn; a Platform alias grant showing a different AROA principal is stale and must be retired and re-granted.",
       value: this.gatewayServiceRole.roleId,
     });
 

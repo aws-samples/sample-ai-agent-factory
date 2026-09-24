@@ -62,8 +62,6 @@ export interface PlatformPipelineStackProps extends StackProps {
   readonly inferenceModelRateLimits: readonly InferenceModelRateLimit[];
   readonly grantGatewayInvokePermissions?: boolean;
   readonly gatewayServiceRoleArns?: readonly string[];
-  /** Current IAM RoleId per Gateway role ARN; forwarded as `agenticai/gaGatewayServiceRoleIds`. */
-  readonly gatewayServiceRoleIds?: Readonly<Record<string, string>>;
   readonly gatewayWorkloadAccountIds?: Readonly<
     Record<"nonprod" | "prod", string>
   >;
@@ -109,7 +107,6 @@ export interface PlatformDeploymentStageProps extends StageProps {
   readonly inferenceModelRateLimits: readonly InferenceModelRateLimit[];
   readonly grantGatewayInvokePermissions?: boolean;
   readonly gatewayServiceRoleArns?: readonly string[];
-  readonly gatewayServiceRoleIds?: Readonly<Record<string, string>>;
   readonly gatewayWorkloadAccountId?: string;
   readonly gaRegistryRecordGenerations?: Readonly<Record<string, number>>;
 }
@@ -150,7 +147,6 @@ export class PlatformDeploymentStage extends Stage {
       registrySynthAccountId: props.registrySynthAccountId,
       grantGatewayInvokePermissions: props.grantGatewayInvokePermissions,
       gatewayServiceRoleArns: props.gatewayServiceRoleArns,
-      gatewayServiceRoleIds: props.gatewayServiceRoleIds,
       gatewayWorkloadAccountId: props.gatewayWorkloadAccountId,
       gaRegistryRecordGenerations: props.gaRegistryRecordGenerations,
       applicationId: props.applicationId,
@@ -237,7 +233,6 @@ export class PlatformPipelineStack extends Stack {
       registrySynthAccountId: props.platformNonprod.env.account,
       grantGatewayInvokePermissions: props.grantGatewayInvokePermissions,
       gatewayServiceRoleArns: props.gatewayServiceRoleArns,
-      gatewayServiceRoleIds: props.gatewayServiceRoleIds,
     };
     const platformAccountIsShared =
       props.platformNonprod.env.account === props.platformProd.env.account;
@@ -412,9 +407,6 @@ export class PlatformPipelineStack extends Stack {
       derived["agenticai/enableGaGatewayInvokePermissions"] = "true";
       derived["agenticai/gaGatewayServiceRoleArns"] = JSON.stringify(
         props.gatewayServiceRoleArns ?? [],
-      );
-      derived["agenticai/gaGatewayServiceRoleIds"] = JSON.stringify(
-        props.gatewayServiceRoleIds ?? {},
       );
     }
     if (
