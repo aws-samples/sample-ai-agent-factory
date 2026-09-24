@@ -268,6 +268,27 @@ describe("Round 1B — teardown stage mapping", () => {
     expect(run.stdout).toContain(`DESTROYED ${unrelatedRoles}`);
   });
 
+  it("recovery script for stranded ToolGateway stacks is fail-closed (stub-driven)", () => {
+    // Covers: wrong-account refusal before any mutation; a failed wait keeps
+    // the temporary roles for diagnosis; roles are removed only after both
+    // stacks are confirmed gone; DeleteGatewayTarget is granted, no Create*.
+    const check = spawnSync(
+      "bash",
+      [
+        path.join(
+          REPO_ROOT,
+          "tests",
+          "scripts",
+          "check-recover-stranded-toolgateway.sh",
+        ),
+      ],
+      { cwd: REPO_ROOT, encoding: "utf8", env: baseEnv() },
+    );
+    expect(check.stderr).toBe("");
+    expect(check.status).toBe(0);
+    expect(check.stdout.trim()).toBe("all checks passed");
+  });
+
   it("passes the owning stage (and stage-gating context) to cdk destroy", () => {
     const run = runTeardown(["--stack", APP_STACK], {
       env: {
