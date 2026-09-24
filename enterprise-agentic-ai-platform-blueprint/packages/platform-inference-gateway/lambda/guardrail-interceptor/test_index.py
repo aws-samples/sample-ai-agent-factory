@@ -106,9 +106,30 @@ def test_system_only_request_passes_through_without_a_guardrail_call(bedrock):
 def test_split_and_batch_respect_limits():
     blocks = index.split_blocks(["a" * 45_000, "b"])
     assert [len(b) for b in blocks] == [20_000, 20_000, 5_000, 1]
-    grouped = list(index.batches(blocks))
+    grouped = list(index.turn_batches("a" * 45_000))
     assert all(sum(len(b) for b in g) <= index.BATCH_CHARACTERS for g in grouped)
-    assert sum(len(g) for g in grouped) == len(blocks)
+    assert sum(len(g) for g in grouped) == 3
+
+
+def test_each_untrusted_turn_is_scored_on_its_own_call(bedrock):
+    payload = {
+        "messages": [
+            {"role": "system", "content": "protocol"},
+            {"role": "user", "content": "use the echo tool please"},
+            {"role": "assistant", "content": "TOOL echo {}"},
+            {"role": "tool", "content": "TOOL RESULT: {}"},
+        ],
+    }
+    result = index.handler(_event(_b64(payload)), None)
+    assert result == index.passthrough()
+    sent = sorted(c["text"]["text"] for call in bedrock.calls for c in call["content"])
+    assert sent == ["TOOL RESULT: {}", "use the echo tool please"]
+    assert len(bedrock.calls) == 2  # one call per turn, never a joint evaluation
+
+
+def test_multipart_user_turn_stays_one_turn():
+    payload = {"messages": [{"role": "user", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}]}
+    assert index.extract_texts(payload) == ["a\nb"]
 
 
 def test_blocked_types_only_reports_blocked_actions():

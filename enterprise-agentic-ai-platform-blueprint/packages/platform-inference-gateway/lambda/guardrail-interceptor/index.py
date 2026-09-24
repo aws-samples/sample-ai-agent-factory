@@ -18,6 +18,9 @@ Contract (HTTP/inference interceptor payload, ``interceptorInputVersion`` 1.0)
   unlabeled message, plus bare `prompt`/`input` strings. The pipeline-owned
   `system`/`developer` prompt, top-level `system`/`instructions` and prior
   `assistant` output are NOT guarded (Bedrock guarded-content convention).
+* Each guarded turn is scored on its own ApplyGuardrail call (concurrently),
+  never concatenated with other turns: the prompt-attack classifier scores
+  unrelated turns differently when joined (proven live 2026-09-24).
 * Blocked by the guardrail          -> short-circuit HTTP 403 (no model call)
 * Guardrail API unavailable/error   -> short-circuit HTTP 503 (fail closed)
 * Body too large to evaluate        -> short-circuit HTTP 413 (fail closed)
@@ -38,6 +41,7 @@ import base64
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Iterable
 
 import boto3
@@ -186,7 +190,7 @@ def _is_guarded_message(message: dict[str, Any]) -> bool:
 
 
 def _texts_from_turns(value: Any) -> Iterable[str]:
-    """Texts of the guarded turns in a `messages`/`input` value."""
+    """One string per guarded turn in a `messages`/`input` value."""
     if isinstance(value, str):
         if value:
             yield value
@@ -195,24 +199,33 @@ def _texts_from_turns(value: Any) -> Iterable[str]:
         for item in value:
             if isinstance(item, dict) and "role" in item:
                 if _is_guarded_message(item):
-                    yield from _texts_from_content(item.get("content"))
+                    turn = "\n".join(_texts_from_content(item.get("content")))
+                    if turn:
+                        yield turn
             else:
-                yield from _texts_from_content(item)
+                turn = "\n".join(_texts_from_content(item))
+                if turn:
+                    yield turn
         return
     if isinstance(value, dict):
         if "role" in value:
             if _is_guarded_message(value):
-                yield from _texts_from_content(value.get("content"))
+                turn = "\n".join(_texts_from_content(value.get("content")))
+                if turn:
+                    yield turn
         else:
-            yield from _texts_from_content(value)
+            turn = "\n".join(_texts_from_content(value))
+            if turn:
+                yield turn
 
 
 def extract_texts(payload: dict[str, Any]) -> list[str]:
-    """Collect every guarded text segment across the supported request shapes.
+    """Collect the guarded turns across the supported request shapes.
 
-    `messages` / `input` turns are role-scoped (see GUARDED_ROLES); a bare
-    `prompt` or `input` string is guarded. Top-level `system` and
-    `instructions` are the pipeline-owned system prompt and are not guarded.
+    Each element is ONE untrusted turn (a user or tool message, or a bare
+    `prompt`/`input` string). `messages` / `input` turns are role-scoped
+    (see GUARDED_ROLES). Top-level `system` and `instructions` are the
+    pipeline-owned system prompt and are not guarded.
     """
     texts: list[str] = []
     for field in INPUT_FIELDS:
@@ -229,10 +242,11 @@ def split_blocks(texts: Iterable[str]) -> list[str]:
     return blocks
 
 
-def batches(blocks: list[str]) -> Iterable[list[str]]:
+def turn_batches(turn: str) -> Iterable[list[str]]:
+    """Content blocks for ONE turn, grouped under the per-call budget."""
     batch: list[str] = []
     size = 0
-    for block in blocks:
+    for block in split_blocks([turn]):
         if batch and size + len(block) > BATCH_CHARACTERS:
             yield batch
             batch, size = [], 0
@@ -266,10 +280,10 @@ def blocked_types(assessments: Iterable[dict[str, Any]]) -> list[str]:
     return sorted(set(tripped))
 
 
-def apply_guardrail(blocks: list[str], cfg: dict[str, Any]) -> tuple[bool, list[str]]:
-    """Evaluate all blocks; return (blocked, tripped types)."""
+def evaluate_turn(turn: str, cfg: dict[str, Any]) -> list[str]:
+    """Tripped assessment types for ONE untrusted turn (empty = allowed)."""
     tripped: list[str] = []
-    for batch in batches(blocks):
+    for batch in turn_batches(turn):
         try:
             response = _bedrock_runtime().apply_guardrail(
                 guardrailIdentifier=cfg["identifier"],
@@ -281,6 +295,25 @@ def apply_guardrail(blocks: list[str], cfg: dict[str, Any]) -> tuple[bool, list[
             raise GuardrailUnavailable(str(exc)[:300]) from exc
         if response.get("action") == "GUARDRAIL_INTERVENED":
             tripped.extend(blocked_types(response.get("assessments") or []))
+    return tripped
+
+
+def apply_guardrail(turns: list[str], cfg: dict[str, Any]) -> tuple[bool, list[str]]:
+    """Evaluate every untrusted turn on its own; return (blocked, tripped).
+
+    Turns are scored separately -- the way a Converse loop would have scored
+    each input as it arrived -- because the prompt-attack classifier scores
+    the concatenation of unrelated turns differently from each turn alone
+    (live 2026-09-24: a benign user request plus a benign tool result scored
+    PROMPT_ATTACK LOW only when evaluated together).
+    """
+    tripped: list[str] = []
+    if len(turns) == 1:
+        tripped = evaluate_turn(turns[0], cfg)
+    else:
+        with ThreadPoolExecutor(max_workers=min(8, len(turns))) as pool:
+            for result in pool.map(lambda turn: evaluate_turn(turn, cfg), turns):
+                tripped.extend(result)
     return (len(tripped) > 0, sorted(set(tripped)))
 
 
@@ -328,8 +361,8 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         _log("rejected_invalid_body", path=path, requestId=rid, reason="not_an_object")
         return short_circuit(400, "invalid_request_error", "Request body must be a JSON object.")
 
-    blocks = split_blocks(extract_texts(payload))
-    total = sum(len(block) for block in blocks)
+    turns = extract_texts(payload)
+    total = sum(len(turn) for turn in turns)
     if total == 0:
         _log("passthrough_no_text", path=path, method=method, requestId=rid)
         return passthrough()
@@ -342,7 +375,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         )
 
     try:
-        blocked, tripped = apply_guardrail(blocks, cfg)
+        blocked, tripped = apply_guardrail(turns, cfg)
     except GuardrailUnavailable as exc:
         _log("fail_closed_guardrail_error", path=path, requestId=rid, reason=str(exc))
         return short_circuit(503, "guardrail_unavailable", "Guardrail evaluation is unavailable; request refused.")
@@ -359,5 +392,5 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 "tripped": tripped,
             },
         )
-    _log("allowed", path=path, requestId=rid, characters=total, blocks=len(blocks))
+    _log("allowed", path=path, requestId=rid, characters=total, turns=len(turns))
     return passthrough()

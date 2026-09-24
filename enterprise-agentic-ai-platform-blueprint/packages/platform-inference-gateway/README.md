@@ -61,8 +61,14 @@ included, plus bare `input`/`prompt` strings — while the pipeline-owned
 `assistant` output sit outside the guard. Guarding the system prompt is not an
 option: the prompt-attack classifier scores any instruction-shaped text, and the
 reference agent's own protocol prompt scored `PROMPT_ATTACK` HIGH live on
-2026-09-24, which refused every governed agent call. Guarded text is evaluated
-in 25 000-character batches with `source=INPUT`. Anonymize-only interventions
+2026-09-24, which refused every governed agent call. Each untrusted turn is
+scored on its own `ApplyGuardrail` call (turns run concurrently; a long turn is
+chunked into 25 000-character calls) with `source=INPUT` — never concatenated
+with other turns, because the prompt-attack classifier scores unrelated turns
+differently when joined (a benign request plus a benign tool result scored
+`PROMPT_ATTACK` LOW only when evaluated together). Agents must therefore send
+prior turns as separate messages rather than collapsing them into one user turn;
+the reference agent's Strands adapter does so. Anonymize-only interventions
 (for example email masking) do not block; only `BLOCKED` actions do. The
 interceptor never logs or echoes request text; the 403 body names the guardrail
 id/version and the tripped assessment types only (`error.code`,

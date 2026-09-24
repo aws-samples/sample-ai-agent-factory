@@ -309,6 +309,30 @@ def _compact(value: Mapping[str, Any]) -> str:
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
 
 
+def _split_history(
+    messages: Sequence[Mapping[str, str]],
+) -> tuple[list[dict[str, Any]], str]:
+    """Split the agent's message list into Strands history and the prompt.
+
+    Returns ``(history, prompt)`` where ``history`` holds every earlier
+    non-system turn in Strands/Bedrock message form (``user``/``assistant``
+    roles with text content blocks; a ``tool`` result is a user-role turn in
+    this text protocol) and ``prompt`` is the text of the newest user or tool
+    turn. Each untrusted turn therefore reaches the Gateway as its own message
+    and is guardrail-scored on its own.
+    """
+    turns = [m for m in messages if m.get("role") in ("user", "assistant", "tool")]
+    if not turns or turns[-1].get("role") == "assistant":
+        history_turns, prompt = turns, ""
+    else:
+        history_turns, prompt = turns[:-1], turns[-1]["content"]
+    history: list[dict[str, Any]] = []
+    for turn in history_turns:
+        role = "assistant" if turn.get("role") == "assistant" else "user"
+        history.append({"role": role, "content": [{"text": turn["content"]}]})
+    return history, prompt
+
+
 # --------------------------------------------------------------------------
 # Production wiring — real Strands / AgentCore adapters (lazy imports)
 # --------------------------------------------------------------------------
@@ -367,13 +391,22 @@ class _LiteLlmAdapter:
         system_prompt = "\n".join(
             m["content"] for m in messages if m.get("role") == "system"
         ) or None
-        agent = self._Agent(model=model, callback_handler=None, system_prompt=system_prompt)
-        # Collapse the message list into a single deterministic user turn; the
-        # reference agent is single-shot per iteration by design.
-        user_turn = "\n".join(
-            m["content"] for m in messages if m.get("role") in ("user", "tool")
+        # Keep the turn structure: prior user/assistant/tool turns become
+        # Strands conversation history and only the newest untrusted turn is
+        # the prompt. The Gateway guardrail interceptor scores every untrusted
+        # turn on its own; the earlier collapse of user+tool turns into one
+        # user turn made the prompt-attack classifier score the concatenation
+        # (live 2026-09-24: a benign request plus a benign tool result tripped
+        # PROMPT_ATTACK LOW only when joined). Tool results are user-role input
+        # in this text protocol, which also keeps user/assistant alternation.
+        history, prompt = _split_history(messages)
+        agent = self._Agent(
+            model=model,
+            callback_handler=None,
+            system_prompt=system_prompt,
+            messages=history,
         )
-        result = agent(user_turn or "Reply with exactly the word verified.")
+        result = agent(prompt or "Reply with exactly the word verified.")
         message = result.message
         if not message or not message.get("content"):
             raise AgentError("LiteLLMModel returned no Strands message content")

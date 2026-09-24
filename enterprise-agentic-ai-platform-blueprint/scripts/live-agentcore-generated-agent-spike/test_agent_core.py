@@ -336,11 +336,13 @@ def test_inference_token_bound_leaves_reasoning_headroom_and_stays_bounded(
         message = {"content": [{"text": "verified"}]}
 
     class FakeAgent:
-        def __init__(self, *, model, callback_handler, system_prompt=None):
+        def __init__(self, *, model, callback_handler, system_prompt=None, messages=None):
             self.model = model
             captured["system_prompt"] = system_prompt
+            captured["history"] = messages
 
-        def __call__(self, _prompt):
+        def __call__(self, prompt):
+            captured["prompt"] = prompt
             return FakeResult()
 
     adapter = agent_mod._LiteLlmAdapter.__new__(agent_mod._LiteLlmAdapter)
@@ -366,6 +368,31 @@ def test_inference_token_bound_leaves_reasoning_headroom_and_stays_bounded(
     assert captured["params"]["max_tokens"] == agent_mod.INFERENCE_MAX_TOKENS
     assert captured["params"]["guardrail_identifier"] == "gr-1"
     assert captured["params"]["temperature"] == 0
+    # The system turn is the Strands system prompt; the single user turn is the
+    # prompt with no collapsed history.
+    assert captured["system_prompt"] == "protocol: TOOL <name> <json>"
+    assert captured["history"] == []
+    assert captured["prompt"] == "hi"
+
+    # Follow-up iteration: earlier turns travel as separate history messages
+    # and the tool result is the prompt on its own -- never joined with the
+    # user prompt (the Gateway guardrail scores each untrusted turn alone).
+    adapter.complete(
+        [
+            {"role": "system", "content": "protocol: TOOL <name> <json>"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": 'TOOL echo {"message":"probe"}'},
+            {"role": "tool", "content": '{"content":[{"text":"probe","type":"text"}]}'},
+        ],
+        guardrail_identifier="gr-1",
+        stream=False,
+    )
+    assert captured["history"] == [
+        {"role": "user", "content": [{"text": "hi"}]},
+        {"role": "assistant", "content": [{"text": 'TOOL echo {"message":"probe"}'}]},
+    ]
+    assert captured["prompt"] == '{"content":[{"text":"probe","type":"text"}]}'
+
 
 
 def test_memory_adapter_writes_timestamped_text_and_reads_back_by_id():
@@ -457,3 +484,47 @@ def test_system_prompt_states_tool_protocol_and_subscribed_names():
     assert "TOOL <qualified_tool_name> <json_object_arguments>" in text
     assert "target-demo___tool-echo" in text
     assert "<done/>" in text
+
+
+# ---------------------------------------------------------------------------
+# Turn structure handed to Strands (each untrusted turn is guardrail-scored
+# on its own at the Gateway, so turns must never be collapsed together)
+# ---------------------------------------------------------------------------
+def test_split_history_first_iteration_has_no_history() -> None:
+    from agent import _split_history
+
+    history, prompt = _split_history(
+        [{"role": "system", "content": "protocol"}, {"role": "user", "content": "please echo"}]
+    )
+    assert history == []
+    assert prompt == "please echo"
+
+
+def test_split_history_keeps_prior_turns_separate_and_tool_result_as_prompt() -> None:
+    from agent import _split_history
+
+    history, prompt = _split_history(
+        [
+            {"role": "system", "content": "protocol"},
+            {"role": "user", "content": "please echo"},
+            {"role": "assistant", "content": 'TOOL echo {"message":"probe"}'},
+            {"role": "tool", "content": '{"content":[{"text":"probe","type":"text"}]}'},
+        ]
+    )
+    assert history == [
+        {"role": "user", "content": [{"text": "please echo"}]},
+        {"role": "assistant", "content": [{"text": 'TOOL echo {"message":"probe"}'}]},
+    ]
+    assert prompt == '{"content":[{"text":"probe","type":"text"}]}'
+    # No turn text is ever joined with another turn's text.
+    assert "please echo" not in prompt
+
+
+def test_split_history_never_starts_with_an_assistant_prompt() -> None:
+    from agent import _split_history
+
+    history, prompt = _split_history(
+        [{"role": "user", "content": "u"}, {"role": "assistant", "content": "a"}]
+    )
+    assert prompt == ""
+    assert [h["role"] for h in history] == ["user", "assistant"]
