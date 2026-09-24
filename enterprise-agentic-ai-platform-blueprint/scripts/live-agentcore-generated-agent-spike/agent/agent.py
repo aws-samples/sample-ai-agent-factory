@@ -33,7 +33,12 @@ Contract invariants (enforced by tests):
 * No direct ``bedrock``/``bedrock-runtime`` client and no ``lambda`` invoke ever
   appear in this module — inference goes through ``LiteLLMModel`` and tools
   through ``MCPClient``.
-* Every LLM call carries a non-empty ``guardrail_identifier`` (R-BED-028 +
+* Every LLM call carries a non-empty ``guardrail_identifier`` — a CLIENT-SIDE
+  invariant only. Live 2026-09-24: the AgentCore inference Gateway forwards the
+  request to Bedrock Mantle under its own role and ignores this parameter, so
+  server-side enforcement must come from PolicyEngine guardrail policies on the
+  Gateway (open defect, see evidence/live/2026-09-24-chaos-dependency-failure.md).
+  Original rationale (R-BED-028 +
   SCP-02 + IAM deny + VPCE policy).
 * Memory is scoped by ``actor_id`` only; no real end-user identity is placed in
   session tags (spec §3.4.6).

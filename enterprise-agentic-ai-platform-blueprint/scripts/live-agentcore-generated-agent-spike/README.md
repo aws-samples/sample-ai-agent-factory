@@ -66,6 +66,24 @@ exercises the three platform integrations the blueprint mandates.
   ExternalId value is never printed. Offline contract tests:
   `python -m pytest test_registry_reader_trust_twins.py -q`.
 
+- **Load, rate-limit, concurrency and soak.** `load_rate_limit_probe.py` runs
+  `rate-limit-rpm` / `rate-limit-tpm` / `zero-rate` against the Platform
+  inference Gateway with the agent's exact OpenAI-compatible request shape
+  (bearer re-minted in memory before Cognito's five-minute validity lapses),
+  and `concurrency` / `soak` against the Runtime by fanning out the positive
+  live probe. Live 2026-09-24: zero-rate exact 429; RPM/TPM approximate
+  (traffic shaping, not a ceiling); 8-way concurrency and a 30-minute soak
+  green. See `../../evidence/live/2026-09-24-load-rate-limit.md`.
+
+- **Chaos and dependency failure.** `chaos_dependency_probe.py` runs
+  `inference-auth` (no / malformed / forged bearer -> 401), `runtime-fuzz`
+  (malformed, empty, oversized and wrong-shape payloads -> controlled 4xx or
+  the fixed default run; Runtime stays `READY`; positive re-proof) and
+  `inference-guardrail`, which found the open defect that the Gateway path
+  ignores the request guardrail parameter. See
+  `../../evidence/live/2026-09-24-chaos-dependency-failure.md`. Offline tests:
+  `python -m pytest test_load_rate_limit_probe.py test_chaos_dependency_probe.py -q`.
+
 The bearer token is acquired by the Runtime via AgentCore Identity M2M (workload
 identity → OAuth2 credential provider → `GetResourceOauth2Token`), the recipe
 live-proven by `../live-agentcore-identity-m2m-spike` and recorded in
