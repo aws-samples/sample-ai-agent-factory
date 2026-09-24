@@ -22,7 +22,7 @@ for a in "$@"; do
   prev="$a"
 done
 case "$*" in
-  *get-caller-identity*) echo "${STUB_ACCOUNT:-986177197847}"; exit 0 ;;
+  *get-caller-identity*) echo "${STUB_ACCOUNT:-333333333333}"; exit 0 ;;
   *"iam get-role"*) exit 254 ;;                       # roles never pre-exist
   *"iam create-role"*) echo "arn:aws:iam::000000000000:role/x"; exit 0 ;;
   *"wait stack-delete-complete"*) exit "${STUB_WAIT_EXIT:-0}" ;;
@@ -45,12 +45,12 @@ run() {
 fail() { printf 'CHECK FAILED: %s\n' "$1" >&2; exit 1; }
 
 # 1. Wrong account -> refuses before any mutation.
-r=$(run env AGENTICAI_EXPECTED_ACCOUNT=111111111111 STUB_ACCOUNT=986177197847)
+r=$(run env AGENTICAI_EXPECTED_ACCOUNT=111111111111 STUB_ACCOUNT=333333333333)
 [ "$r" = "exit=2" ] || fail "wrong account should exit 2, got $r"
 grep -q "create-role" "$LOG" && fail "wrong account must not create roles"
 
 # 2. Wait fails -> exit 1, roles created but NEVER deleted.
-r=$(run env AGENTICAI_EXPECTED_ACCOUNT=986177197847 STUB_WAIT_EXIT=255)
+r=$(run env AGENTICAI_EXPECTED_ACCOUNT=333333333333 STUB_WAIT_EXIT=255)
 [ "$r" = "exit=1" ] || fail "failed wait should exit 1, got $r"
 grep -q "iam create-role --role-name AgenticAI-D03-nonprod-GatewayAdmin" "$LOG" || fail "roles should be created"
 grep -q "bedrock-agentcore:DeleteGatewayTarget" "$LOG.policies" || fail "DeleteGatewayTarget grant must be present"
@@ -59,7 +59,7 @@ grep -q "iam delete-role " "$LOG" && fail "roles must be kept when a wait fails"
 grep -q "describe-stack-events" "$LOG" || fail "failure path must dump FAILED events"
 
 # 3. Happy path -> all four roles removed after both stacks are gone.
-r=$(run env AGENTICAI_EXPECTED_ACCOUNT=986177197847)
+r=$(run env AGENTICAI_EXPECTED_ACCOUNT=333333333333)
 [ "$r" = "exit=0" ] || fail "happy path should exit 0, got $r"
 [ "$(grep -c 'iam delete-role --role-name' "$LOG")" = "4" ] || fail "expected 4 role deletions"
 [ "$(grep -c 'cloudformation delete-stack' "$LOG")" = "2" ] || fail "expected 2 stack deletions"
