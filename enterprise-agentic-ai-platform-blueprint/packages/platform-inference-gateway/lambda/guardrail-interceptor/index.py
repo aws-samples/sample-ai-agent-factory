@@ -14,6 +14,10 @@ platform baseline guardrail BEFORE the Gateway calls the target.
 
 Contract (HTTP/inference interceptor payload, ``interceptorInputVersion`` 1.0)
 -----------------------------------------------------------------------------
+* Guarded content = the untrusted turns: `user`, `tool`/`function` and any
+  unlabeled message, plus bare `prompt`/`input` strings. The pipeline-owned
+  `system`/`developer` prompt, top-level `system`/`instructions` and prior
+  `assistant` output are NOT guarded (Bedrock guarded-content convention).
 * Blocked by the guardrail          -> short-circuit HTTP 403 (no model call)
 * Guardrail API unavailable/error   -> short-circuit HTTP 503 (fail closed)
 * Body too large to evaluate        -> short-circuit HTTP 413 (fail closed)
@@ -23,7 +27,10 @@ Contract (HTTP/inference interceptor payload, ``interceptorInputVersion`` 1.0)
 * MCP-shaped payloads               -> pass through unchanged
 
 The interceptor never logs or returns request text; decisions are logged with
-the guardrail assessment types only.
+the guardrail assessment types only. The JSON error body (``error.code``,
+``error.tripped``) is the client contract: the Gateway does not propagate the
+``x-agenticai-guardrail`` header from a short-circuit response (proven live
+2026-09-24), so that header only aids direct invocation tests.
 """
 from __future__ import annotations
 
@@ -47,7 +54,18 @@ BATCH_CHARACTERS = 25_000
 BLOCK_CHARACTERS = 20_000
 # Fields that carry model input across the OpenAI-, Anthropic- and
 # Responses-style request shapes served on the /inference path.
-INPUT_FIELDS = ("messages", "input", "prompt", "system", "instructions")
+INPUT_FIELDS = ("messages", "input", "prompt")
+# Roles whose content is UNTRUSTED and therefore guarded: end-user turns and
+# tool results. This mirrors Bedrock's own guarded-content convention
+# (Converse `guardContent` blocks / InvokeModel input tags), where the
+# pipeline-owned system prompt sits outside the guard: the prompt-attack
+# classifier scores any instruction-shaped text, so guarding the agent's own
+# protocol instructions blocks every legitimate agent (proven live
+# 2026-09-24: the reference agent's system prompt scored PROMPT_ATTACK HIGH).
+# Prior assistant turns are model output already produced, not input to
+# guard. A message without a recognisable role is guarded (fail closed).
+GUARDED_ROLES = {"user", "tool", "function"}
+UNGUARDED_ROLES = {"system", "developer", "assistant"}
 TEXT_PART_TYPES = {"text", "input_text", "output_text"}
 
 _BEDROCK = None
@@ -157,12 +175,49 @@ def _texts_from_content(content: Any) -> Iterable[str]:
         yield from _texts_from_content(content["content"])
 
 
+def _is_guarded_message(message: dict[str, Any]) -> bool:
+    role = message.get("role")
+    if not isinstance(role, str):
+        return True  # unlabeled -> untrusted
+    role = role.lower()
+    if role in UNGUARDED_ROLES:
+        return False
+    return True  # user, tool, function and any unknown role
+
+
+def _texts_from_turns(value: Any) -> Iterable[str]:
+    """Texts of the guarded turns in a `messages`/`input` value."""
+    if isinstance(value, str):
+        if value:
+            yield value
+        return
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict) and "role" in item:
+                if _is_guarded_message(item):
+                    yield from _texts_from_content(item.get("content"))
+            else:
+                yield from _texts_from_content(item)
+        return
+    if isinstance(value, dict):
+        if "role" in value:
+            if _is_guarded_message(value):
+                yield from _texts_from_content(value.get("content"))
+        else:
+            yield from _texts_from_content(value)
+
+
 def extract_texts(payload: dict[str, Any]) -> list[str]:
-    """Collect every text segment the model would see, across request shapes."""
+    """Collect every guarded text segment across the supported request shapes.
+
+    `messages` / `input` turns are role-scoped (see GUARDED_ROLES); a bare
+    `prompt` or `input` string is guarded. Top-level `system` and
+    `instructions` are the pipeline-owned system prompt and are not guarded.
+    """
     texts: list[str] = []
     for field in INPUT_FIELDS:
         if field in payload:
-            texts.extend(_texts_from_content(payload[field]))
+            texts.extend(_texts_from_turns(payload[field]))
     return texts
 
 

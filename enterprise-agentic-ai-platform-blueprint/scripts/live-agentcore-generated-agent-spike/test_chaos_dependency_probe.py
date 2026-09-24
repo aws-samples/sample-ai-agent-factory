@@ -62,7 +62,7 @@ INTERCEPTOR_BLOCK = FakeResponse(
     403,
     json.dumps({"error": {"code": "guardrail_intervened", "type": "guardrail_intervened", "message": "blocked",
                           "guardrail": {"id": "g1", "version": "DRAFT"}, "tripped": ["contentPolicy.PROMPT_ATTACK"]}}),
-    {"x-agenticai-guardrail": "guardrail_intervened"},
+    # No marker header: the Gateway strips custom headers on short-circuit.
 )
 
 

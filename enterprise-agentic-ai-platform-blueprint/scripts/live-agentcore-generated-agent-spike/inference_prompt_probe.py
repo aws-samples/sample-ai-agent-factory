@@ -35,10 +35,12 @@ import agent as agent_mod  # noqa: E402
 
 ECHO_TOOL = "target-tool-echo___tool-echo"
 SUBSCRIBED = ("target-tool-echo___tool-echo", "target-tool-ping___tool-ping")
+# Plain-language user turn: the protocol lives in the system prompt, and the
+# imperative "reply with exactly ... nothing else" wording scores as a prompt
+# attack under the baseline guardrail now enforced by the Gateway (2026-09-24).
 USER_PROMPT = (
-    "Follow these steps exactly. Step 1: reply with exactly one line and nothing "
-    f'else: TOOL {ECHO_TOOL} {{"message":"probe"}} . Step 2: after you receive '
-    "the tool result, reply with exactly <done/> and nothing else."
+    f'Could you use the {ECHO_TOOL} tool with the arguments {{"message":"probe"}}? '
+    "When its result is back, finish the task."
 )
 
 

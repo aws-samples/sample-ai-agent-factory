@@ -58,15 +58,19 @@ UNSUBSCRIBED_TOOL = "target-tool-forbidden___tool-forbidden"
 
 #: Deterministic prompts. The agent's directive grammar is ``TOOL <name> <json>``
 #: on its own line; ``<done/>`` terminates the bounded loop.
+# The user turn is guarded by the Gateway's baseline guardrail (PROMPT_ATTACK at
+# HIGH). The earlier imperative "reply with exactly one line and nothing else"
+# wording scored as a prompt attack (live 2026-09-24); the protocol itself is
+# carried by the agent's system prompt, so the user turn only names the tool
+# and its arguments in plain language (ApplyGuardrail: action NONE).
+PROMPT_ARGUMENTS = '{"message":"probe"}'
 POSITIVE_PROMPT = (
-    "Follow these steps exactly. Step 1: reply with exactly one line and nothing "
-    f'else: TOOL {ECHO_TOOL} {{"message":"probe"}} . Step 2: after you receive '
-    "the tool result, reply with exactly <done/> and nothing else."
+    f"Could you use the {ECHO_TOOL} tool with the arguments {PROMPT_ARGUMENTS}? "
+    "When its result is back, finish the task."
 )
 UNSUBSCRIBED_PROMPT = (
-    "Follow these steps exactly. Step 1: reply with exactly one line and nothing "
-    f'else: TOOL {UNSUBSCRIBED_TOOL} {{"message":"probe"}} . Step 2: after you '
-    "receive the tool result, reply with exactly <done/> and nothing else."
+    f"Could you use the {UNSUBSCRIBED_TOOL} tool with the arguments "
+    f"{PROMPT_ARGUMENTS}? When its result is back, finish the task."
 )
 
 

@@ -83,14 +83,20 @@ def test_unsubscribed_twin_accepts_either_refusal_layer_and_rejects_leaks() -> N
     assert checks["forbiddenToolNeverCalled"] is False
 
 
-def test_prompt_directive_is_parseable_by_the_agent_grammar() -> None:
-    # The probe's prompt embeds the exact directive line the agent's parser
-    # accepts; if either side drifts, the live tool leg silently degrades to
-    # "no tool call" -- catch it offline.
-    directive = probe.POSITIVE_PROMPT.split("else: ", 1)[1].split(" . Step 2", 1)[0]
+def test_prompt_names_the_exact_tool_and_arguments_the_agent_grammar_accepts() -> None:
+    # The user turn names the tool and its JSON arguments in plain language
+    # (the protocol lives in the agent's system prompt); the directive the model
+    # composes from them must parse. If either side drifts, the live tool leg
+    # silently degrades to "no tool call" -- catch it offline.
+    assert probe.ECHO_TOOL in probe.POSITIVE_PROMPT
+    assert probe.UNSUBSCRIBED_TOOL in probe.UNSUBSCRIBED_PROMPT
+    assert json.loads(probe.PROMPT_ARGUMENTS) == {"message": "probe"}
+    directive = f"TOOL {probe.ECHO_TOOL} {probe.PROMPT_ARGUMENTS}"
     parsed = ReferenceAgentCore._parse_tool_request(directive)
     assert parsed == (probe.ECHO_TOOL, {"message": "probe"})
-    assert json.loads(directive.split(" ", 2)[2]) == {"message": "probe"}
+    # No imperative "reply with exactly ... nothing else" wording: it scores as
+    # a prompt attack under the baseline guardrail (live 2026-09-24).
+    assert "nothing else" not in probe.POSITIVE_PROMPT.lower()
 
 
 def test_fingerprint_never_echoes_input() -> None:

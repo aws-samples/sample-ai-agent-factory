@@ -78,6 +78,9 @@ def post_completion(client: httpx.Client, base: str, headers: dict, body: dict) 
     resp = client.post(f"{base}/chat/completions", headers=headers, json=body, timeout=120)
     text = resp.text
     content = None
+    # The Gateway does not propagate custom headers from an interceptor
+    # short-circuit; the JSON error body (error.code / error.tripped) is the
+    # contract. The header is read only as a secondary hint.
     interceptor_code = resp.headers.get("x-agenticai-guardrail")
     tripped = None
     if resp.status_code == 200:
@@ -85,11 +88,12 @@ def post_completion(client: httpx.Client, base: str, headers: dict, body: dict) 
             content = resp.json()["choices"][0]["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError):
             content = None
-    elif interceptor_code:
+    else:
         try:
-            error = resp.json().get("error", {})
-            interceptor_code = error.get("code", interceptor_code)
-            tripped = error.get("tripped")
+            error = resp.json().get("error")
+            if isinstance(error, dict):
+                interceptor_code = error.get("code") or interceptor_code
+                tripped = error.get("tripped")
         except (ValueError, AttributeError):
             pass
     return {
@@ -156,7 +160,9 @@ def mode_inference_guardrail(args) -> dict:
     prompt = {"role": "user", "content": "Reply with exactly the word ok."}
 
     def body(content: str, guardrail: str | None) -> dict:
-        payload = {"model": args.model_id, "messages": [{"role": "user", "content": content}], "max_tokens": 16, "temperature": 0}
+        # gpt-oss is a reasoning model: a tiny budget is spent on reasoning and
+        # leaves content null with finish_reason=length; 64 is enough for "ok".
+        payload = {"model": args.model_id, "messages": [{"role": "user", "content": content}], "max_tokens": 64, "temperature": 0}
         if guardrail is not None:
             payload["guardrail_identifier"] = guardrail
         return payload

@@ -53,12 +53,21 @@ therefore requires `inputGuardrail` and enforces it with a REQUEST interceptor:
 | Body is not a JSON object                              | HTTP 400 `invalid_request_error`   |
 | No evaluable text (`GET /models`, empty body), or pass | Request forwarded unchanged        |
 
-Every text segment the model would see is evaluated (`messages[].content`
-strings and text parts, `system`, `input`, `prompt`, `instructions`), in
-25 000-character batches, with `source=INPUT`. Anonymize-only interventions
+The guarded content follows Bedrock's own guarded-content convention (Converse
+`guardContent` blocks, InvokeModel input tags): the untrusted turns are
+evaluated — `user`, `tool`/`function` and role-less messages, text parts
+included, plus bare `input`/`prompt` strings — while the pipeline-owned
+`system`/`developer` prompt, top-level `system`/`instructions` and prior
+`assistant` output sit outside the guard. Guarding the system prompt is not an
+option: the prompt-attack classifier scores any instruction-shaped text, and the
+reference agent's own protocol prompt scored `PROMPT_ATTACK` HIGH live on
+2026-09-24, which refused every governed agent call. Guarded text is evaluated
+in 25 000-character batches with `source=INPUT`. Anonymize-only interventions
 (for example email masking) do not block; only `BLOCKED` actions do. The
 interceptor never logs or echoes request text; the 403 body names the guardrail
-id/version and the tripped assessment types only. Request headers are never
+id/version and the tripped assessment types only (`error.code`,
+`error.guardrail`, `error.tripped`); that body is the client contract because
+the Gateway does not propagate custom headers from a short-circuit response. Request headers are never
 passed to the interceptor. The offline handler tests live next to the handler
 (`python -m pytest packages/platform-inference-gateway/lambda/guardrail-interceptor -q`).
 
