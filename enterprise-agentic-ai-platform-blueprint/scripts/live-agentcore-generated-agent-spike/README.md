@@ -49,12 +49,22 @@ exercises the three platform integrations the blueprint mandates.
   python -m pytest test_agent_core.py -q
   ```
 
-- **NOT yet live-verified.** A real `InvokeAgentRuntime` round-trip that proves
-  `LiteLLMModel` inference + `MCPClient` `tools/list`/`tools/call` + a Memory
-  event round-trip through the pipeline-owned Runtime/Memory path — plus MCP and
-  bypass twins and zero-residue teardown — remains the open live gate. The
-  container must be rebuilt from the exact product revision and re-scanned to
-  zero Critical/High findings before any Runtime consumes it by digest.
+- **Live-verified through the pipeline.** `live_invoke_probe.py` proved the
+  real `InvokeAgentRuntime` round-trip (`LiteLLMModel` inference + `MCPClient`
+  `tools/list`/`tools/call` + a Memory event round-trip) in both environments on
+  2026-09-23, again after the 2026-09-24 teardown and redeploy, plus the
+  wrong-account and unsubscribed-tool twins; see
+  `../../evidence/live/2026-09-23-pipeline-generated-agent.md` and
+  `../../evidence/live/2026-09-24-redeploy-grant-retirement.md`.
+
+- **RegistryReader trust twins.** `registry_reader_trust_twins.py` drives the
+  deployed Workstream validator Lambda — the only principal the reader trust
+  admits — through a positive invoke, a wrong-ExternalId twin and a
+  wrong-session-name twin (each must fail with exactly STS `403 AccessDenied`),
+  restores the function environment byte-for-byte in `finally` and re-proves the
+  positive afterwards. Evidence carries fingerprints and codes only; the
+  ExternalId value is never printed. Offline contract tests:
+  `python -m pytest test_registry_reader_trust_twins.py -q`.
 
 The bearer token is acquired by the Runtime via AgentCore Identity M2M (workload
 identity → OAuth2 credential provider → `GetResourceOauth2Token`), the recipe
