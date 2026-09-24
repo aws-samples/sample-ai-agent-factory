@@ -111,6 +111,23 @@ def main() -> int:
         ("bedrock-agentcore:CreateWorkloadIdentity", f"{base}:workload-identity-directory/other"),
         ("bedrock-agentcore:TagResource", f"{base}:runtime/abc"),
     ]
+    # Exact live denial (2026-09-24 teardown): DeleteOauth2CredentialProvider
+    # deletes the provider's MANAGED secret as the caller
+    # ("not authorized to perform: secretsmanager:DeleteSecret"). The managed
+    # secret is named "<reserved-prefix>default/oauth2/<providerName>-<random>".
+    secret_base = f"arn:{args.partition}:secretsmanager:{args.region}:{args.account}:secret"
+    own_managed_secret = f"{secret_base}:bedrock-agentcore-identity!default/oauth2/{args.provider_name}-e69ee5c7"
+    cases += [("secretsmanager:DeleteSecret", own_managed_secret)]
+    # The delete grant must be pinned to THIS provider's secret: the other
+    # environment's provider secret and any non-managed secret stay denied.
+    other_env = "prod" if "_nonprod_" in args.provider_name else "nonprod"
+    other_provider_name = args.provider_name.replace(
+        "_nonprod_" if other_env == "prod" else "_prod_", f"_{other_env}_"
+    )
+    negatives += [
+        ("secretsmanager:DeleteSecret", f"{secret_base}:bedrock-agentcore-identity!default/oauth2/{other_provider_name}-f1ebd019"),
+        ("secretsmanager:DeleteSecret", f"{secret_base}:agenticai/inference-m2m/agenticai-inference-nonprod-jIwCNw"),
+    ]
     # Documented residuals -- IAM allows these; the compensating control is the
     # handler itself (pinned offline in test_credential_provider_handler.py):
     # * the provider role's workload family MUST be the literal

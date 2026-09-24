@@ -410,7 +410,31 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
       expect(lifecycleResourcesJson).toContain(suffix);
     }
     expect(lifecycleResourcesJson).not.toMatch(/"\*"/);
-    expect(lifecycleResourcesJson).not.toMatch(/"\*"/);
+    // Live-proven (2026-09-24 teardown): DeleteOauth2CredentialProvider deletes
+    // the provider's managed secret as the caller. The create-time grant must
+    // stay on the reserved family (the random suffix is unknowable before
+    // create), but the delete grant is pinned to exactly THIS provider's
+    // secret and never widens to the family or gains extra actions.
+    const managedSecretCreate = statements.find(
+      (statement: any) => statement.Sid === "AllowServiceManagedProviderSecret",
+    );
+    expect([...managedSecretCreate.Action].sort()).toEqual(
+      ["secretsmanager:CreateSecret", "secretsmanager:TagResource"].sort(),
+    );
+    const managedSecretDelete = statements.find(
+      (statement: any) =>
+        statement.Sid === "AllowServiceManagedProviderSecretDelete",
+    );
+    expect(managedSecretDelete).toBeDefined();
+    expect(managedSecretDelete.Effect).toBe("Allow");
+    expect(managedSecretDelete.Action).toBe("secretsmanager:DeleteSecret");
+    const managedSecretDeleteJson = JSON.stringify(
+      managedSecretDelete.Resource,
+    );
+    expect(managedSecretDeleteJson).toContain(
+      `:secretsmanager:${REGION}:${NONPROD_ACCOUNT}:secret:bedrock-agentcore-identity!default/oauth2/AgenticAI_D03_nonprod_demo_primary_inference-*`,
+    );
+    expect(managedSecretDeleteJson).not.toContain("identity!*");
     // No statement in the provider role may carry a bare "*" resource.
     for (const statement of statements) {
       const resources = Array.isArray(statement.Resource)
@@ -463,9 +487,11 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
     // The handler must mint from the RequestId, surface the name as the
     // WorkloadName attribute, and never tag in place or adopt a retained name.
     expect(handlerCode).toContain(
-      "_unique_workload_name(workload_prefix, event[\\\"RequestId\\\"])",
+      '_unique_workload_name(workload_prefix, event[\\"RequestId\\"])',
     );
-    expect(handlerCode).toContain('\\"Data\\": {\\"WorkloadName\\": workload_name}');
+    expect(handlerCode).toContain(
+      '\\"Data\\": {\\"WorkloadName\\": workload_name}',
+    );
     expect(handlerCode).toContain(
       "Refusing resource with missing or foreign ownership tags",
     );
@@ -1115,7 +1141,10 @@ describe("Phase 23 — prior-stage Runtime role", () => {
           // the service-minted id suffix; never a bare "memory/*".
           Sid: "ShortTermMemoryEvents",
           Effect: "Allow",
-          Action: ["bedrock-agentcore:CreateEvent", "bedrock-agentcore:GetEvent"],
+          Action: [
+            "bedrock-agentcore:CreateEvent",
+            "bedrock-agentcore:GetEvent",
+          ],
           Resource: `arn:aws:bedrock-agentcore:${REGION}:${NONPROD_ACCOUNT}:memory/AgenticAI_D03_nonprod_demo_primary_memory-*`,
         }),
         expect.objectContaining({

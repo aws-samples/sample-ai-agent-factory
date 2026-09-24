@@ -957,6 +957,22 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
               ],
             }),
             new PolicyStatement({
+              // Live-proven (2026-09-24 teardown): DeleteOauth2CredentialProvider
+              // deletes that managed secret as the CALLER and fails closed with
+              // "not authorized to perform: secretsmanager:DeleteSecret",
+              // leaving the stack DELETE_FAILED. Unlike create, the secret's
+              // name is known at delete time -- the service names it
+              // "<prefix>default/oauth2/<providerName>-<random>" -- so this
+              // grant is pinned to exactly this provider's secret (trailing
+              // "-*" covers only the Secrets Manager random suffix).
+              sid: "AllowServiceManagedProviderSecretDelete",
+              effect: Effect.ALLOW,
+              actions: ["secretsmanager:DeleteSecret"],
+              resources: [
+                `arn:${this.partition}:secretsmanager:${this.region}:${this.account}:secret:bedrock-agentcore-identity!default/oauth2/${providerName}-*`,
+              ],
+            }),
+            new PolicyStatement({
               sid: "DecryptPlatformM2mSecret",
               effect: Effect.ALLOW,
               actions: ["kms:Decrypt"],
