@@ -51,9 +51,19 @@ done
 exit 0
 `;
 
-/** `npx` stub: records every invocation, exits with STUB_DESTROY_EXIT. */
+/**
+ * `npx` stub: records every invocation, exits with STUB_DESTROY_EXIT. When
+ * STUB_DESTROY_FAIL_MATCH is set, only an invocation whose argv contains that
+ * substring fails (exit 1); every other destroy succeeds.
+ */
 const NPX_STUB = `#!/usr/bin/env bash
 printf '%s\\n' "npx $*" >> "\${STUB_LOG:?}"
+if [ -n "\${STUB_DESTROY_FAIL_MATCH:-}" ]; then
+  case "$*" in
+    *"\${STUB_DESTROY_FAIL_MATCH}"*) exit 1 ;;
+    *) exit 0 ;;
+  esac
+fi
 exit "\${STUB_DESTROY_EXIT:-0}"
 `;
 
@@ -138,6 +148,21 @@ function scriptCode(): string[] {
 const NETWORK_STACK = "AgenticAI-Workload-NetworkStack";
 const APP_STACK = "AgenticAI-Workload-AppStack";
 const WORKLOAD_CONTEXT = { AGENTICAI_WORKLOAD_ACCOUNT_ID: "111111111111" };
+/** Complete R2 context the pipeline-deployed stacks need to synthesize. */
+const PIPELINE_CONTEXT = {
+  AGENTICAI_GITHUB_REPO: "aws-samples/sample-ai-agent-factory",
+  AGENTICAI_GITHUB_CONNECTION_ARN:
+    "arn:aws:codeconnections:us-west-2:111111111111:connection/example",
+  AGENTICAI_PLATFORM_NONPROD_ACCOUNT_ID: "111111111111",
+  AGENTICAI_PLATFORM_PROD_ACCOUNT_ID: "222222222222",
+  AGENTICAI_WORKLOAD_NONPROD_ACCOUNT_ID: "333333333333",
+  AGENTICAI_WORKLOAD_PROD_ACCOUNT_ID: "444444444444",
+  AGENTICAI_WORKLOAD_NONPROD_AVAILABILITY_ZONES: '["us-west-2a","us-west-2b"]',
+  AGENTICAI_WORKLOAD_PROD_AVAILABILITY_ZONES: '["us-west-2a","us-west-2b"]',
+  AGENTICAI_GA_REGISTRY_NONPROD_CONTEXT_FILE: "/scratch/nonprod.json",
+  AGENTICAI_GA_REGISTRY_PROD_CONTEXT_FILE: "/scratch/prod.json",
+  AGENTICAI_GA_REGISTRY_EXPECTED_TOOL_IDS: '["tool-echo","tool-ping"]',
+};
 
 describe("Round 1B — teardown stage mapping", () => {
   it("maps every planned stack to its owning bin/ stage and destroys nothing in --dry-run", () => {
@@ -202,6 +227,47 @@ describe("Round 1B — teardown stage mapping", () => {
     }
   });
 
+  it("never destroys a by-name producer after its consumer failed (live-proven 2026-09-24)", () => {
+    // RegistryRoles is imported BY NAME by ToolGateway/RuntimeMemory, so
+    // CloudFormation cannot protect it. Deleting it while the consumer still
+    // exists strands the consumer: its custom-resource Lambdas lose their
+    // execution role and every delete times out after an hour.
+    const failing = "AgenticAI-demo-primary-nonprod-ToolGateway";
+    const blockedRoles = "AgenticAI-demo-primary-nonprod-RegistryRoles";
+    const blockedRoot = "AgenticAI-WorkloadPipelineStack";
+    const unrelatedRoles = "AgenticAI-demo-primary-prod-RegistryRoles";
+    const run = runTeardown(
+      [
+        "--stack",
+        failing,
+        "--stack",
+        unrelatedRoles,
+        "--stack",
+        blockedRoles,
+        "--stack",
+        blockedRoot,
+      ],
+      {
+        env: {
+          ...PIPELINE_CONTEXT,
+          STUB_DESCRIBE_MODE: "exists",
+          STUB_DESTROY_FAIL_MATCH: failing,
+        },
+        input: "y\n",
+      },
+    );
+    expect(run.status).toBe(EXIT.destroyFailed);
+    const destroyed = run.npxCalls.map((call) => call.split(" ").at(-1) ?? "");
+    expect(destroyed).toContain(failing);
+    expect(destroyed).toContain(unrelatedRoles);
+    expect(destroyed).not.toContain(blockedRoles);
+    expect(destroyed).not.toContain(blockedRoot);
+    expect(run.stdout).toContain(`FAILED    ${failing}`);
+    expect(run.stdout).toContain(`BLOCKED   ${blockedRoles}`);
+    expect(run.stdout).toContain(`BLOCKED   ${blockedRoot}`);
+    expect(run.stdout).toContain(`DESTROYED ${unrelatedRoles}`);
+  });
+
   it("passes the owning stage (and stage-gating context) to cdk destroy", () => {
     const run = runTeardown(["--stack", APP_STACK], {
       env: {
@@ -226,19 +292,7 @@ describe("Round 1B — teardown stage mapping", () => {
   it("requires and forwards complete R2 context for pipeline-deployed stacks", () => {
     const stack = "AgenticAI-demo-primary-nonprod-ToolGateway";
     const env = {
-      AGENTICAI_GITHUB_REPO: "aws-samples/sample-ai-agent-factory",
-      AGENTICAI_GITHUB_CONNECTION_ARN:
-        "arn:aws:codeconnections:us-west-2:111111111111:connection/example",
-      AGENTICAI_PLATFORM_NONPROD_ACCOUNT_ID: "111111111111",
-      AGENTICAI_PLATFORM_PROD_ACCOUNT_ID: "222222222222",
-      AGENTICAI_WORKLOAD_NONPROD_ACCOUNT_ID: "333333333333",
-      AGENTICAI_WORKLOAD_PROD_ACCOUNT_ID: "444444444444",
-      AGENTICAI_WORKLOAD_NONPROD_AVAILABILITY_ZONES:
-        '["us-west-2a","us-west-2b"]',
-      AGENTICAI_WORKLOAD_PROD_AVAILABILITY_ZONES: '["us-west-2a","us-west-2b"]',
-      AGENTICAI_GA_REGISTRY_NONPROD_CONTEXT_FILE: "/scratch/nonprod.json",
-      AGENTICAI_GA_REGISTRY_PROD_CONTEXT_FILE: "/scratch/prod.json",
-      AGENTICAI_GA_REGISTRY_EXPECTED_TOOL_IDS: '["tool-echo","tool-ping"]',
+      ...PIPELINE_CONTEXT,
       STUB_DESCRIBE_MODE: "exists",
       STUB_DESTROY_EXIT: "0",
     };

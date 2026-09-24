@@ -633,9 +633,40 @@ destroy_stack() {
   cleanup_service_log_groups
 }
 
+# Producers that a consumer stack imports BY NAME (invisible to CloudFormation's
+# export/import dependency tracking). The ToolGateway and RuntimeMemory stacks
+# run their custom resources on execution roles created by the same-environment
+# RegistryRoles stack; deleting RegistryRoles while a consumer still exists
+# leaves that consumer unable to delete itself (Lambda fails every invoke before
+# the handler runs, CloudFormation waits out its one-hour timeout, live-proven
+# 2026-09-24). Every workstream stack is also declared by the Workload root.
+blocked_producers_for() {
+  local stack="$1" env
+  case "$stack" in
+    AgenticAI-*-RuntimeMemory|AgenticAI-*-ToolGateway)
+      env="${stack%-*}"          # strip -RuntimeMemory / -ToolGateway
+      env="${env##*-}"           # keep the trailing environment token
+      printf '%s\n' "AgenticAI-${TENANT_ID}-${AGENT_ID}-${env}-RegistryRoles"
+      printf '%s\n' "AgenticAI-WorkloadPipelineStack"
+      ;;
+    AgenticAI-*-RegistryRoles)
+      printf '%s\n' "AgenticAI-WorkloadPipelineStack"
+      ;;
+  esac
+}
+
+is_blocked_producer() {
+  local candidate="$1" blocked
+  for blocked in "${BLOCKED_PRODUCERS[@]}"; do
+    [ "$blocked" = "$candidate" ] && return 0
+  done
+  return 1
+}
+
 destroy_planned_stacks() {
-  local i stack status failures=0
+  local i stack status failures=0 producer
   RESULTS=()
+  BLOCKED_PRODUCERS=()
   for i in "${!PLANNED_STACKS[@]}"; do
     stack="${PLANNED_STACKS[$i]}"
     status="${STACK_STATUS[$i]}"
@@ -652,13 +683,23 @@ destroy_planned_stacks() {
       fi
       continue
     fi
+    if is_blocked_producer "$stack"; then
+      printf '\n-> BLOCKED %s: a stack that imports its roles by name failed to destroy; resolve that stack first, then re-run\n' \
+        "$stack" >&2
+      RESULTS+=("BLOCKED   $stack")
+      failures=$((failures + 1))
+      continue
+    fi
     if destroy_stack "$stack"; then
       RESULTS+=("DESTROYED $stack")
     else
-      printf 'ERROR: cdk destroy failed or exact post-destroy log cleanup failed for %s (was %s); continuing so remaining stacks are attempted\n' \
+      printf 'ERROR: cdk destroy failed or exact post-destroy log cleanup failed for %s (was %s); continuing with unrelated stacks only\n' \
         "$stack" "$status" >&2
       RESULTS+=("FAILED    $stack")
       failures=$((failures + 1))
+      while IFS= read -r producer; do
+        [ -n "$producer" ] && BLOCKED_PRODUCERS+=("$producer")
+      done < <(blocked_producers_for "$stack")
     fi
   done
   return "$failures"
