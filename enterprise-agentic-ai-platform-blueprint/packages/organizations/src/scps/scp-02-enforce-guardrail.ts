@@ -53,6 +53,12 @@ const NOT_AWS_SERVICE = {
   BoolIfExists: { "aws:PrincipalIsAWSService": "false" },
 };
 
+/**
+ * Role-name prefix of the Platform inference Gateway's Mantle role
+ * (`AgenticAI-InferenceGateway-<env>`, platform-inference-gateway construct).
+ */
+export const INFERENCE_GATEWAY_ROLE_PREFIX = "AgenticAI-InferenceGateway-";
+
 export function scp02EnforceGuardrail(opts: Scp02Options = {}): ScpDefinition {
   const approved = opts.approvedGuardrailIds ?? [];
   for (const id of approved) {
@@ -71,6 +77,27 @@ export function scp02EnforceGuardrail(opts: Scp02Options = {}): ScpDefinition {
       Resource: "*",
       Condition: {
         Null: { "bedrock:GuardrailIdentifier": "true" },
+        ...NOT_AWS_SERVICE,
+      },
+    },
+    {
+      // Bedrock Mantle has no guardrail condition key, so a direct
+      // `bedrock-mantle:CreateInference` from a workload principal would skip
+      // this SCP and the model allow-list. Guardrail enforcement on the
+      // Mantle path exists only in the Platform inference Gateway's REQUEST
+      // interceptor, so only that Gateway's role may call Mantle
+      // (live-found gap, 2026-09-25).
+      Sid: "DenyDirectMantleInference",
+      Effect: "Deny",
+      Action: ["bedrock-mantle:CreateInference"],
+      Resource: "*",
+      Condition: {
+        ArnNotLike: {
+          "aws:PrincipalArn": [
+            `arn:aws:iam::*:role/${INFERENCE_GATEWAY_ROLE_PREFIX}*`,
+            `arn:aws:sts::*:assumed-role/${INFERENCE_GATEWAY_ROLE_PREFIX}*/*`,
+          ],
+        },
         ...NOT_AWS_SERVICE,
       },
     },

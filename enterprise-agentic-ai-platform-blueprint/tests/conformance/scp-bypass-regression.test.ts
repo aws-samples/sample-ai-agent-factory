@@ -132,10 +132,11 @@ describe("SCP bypass regression — SCP-02 (empty-string GuardrailIdentifier)", 
     try {
       const scp02 = renderSet()[1];
       const parsed = scp02.body as any;
-      expect(parsed.Statement).toHaveLength(1);
+      expect(parsed.Statement).toHaveLength(2);
       expect(
         parsed.Statement[0].Condition.Null["bedrock:GuardrailIdentifier"],
       ).toBe("true");
+      expect(parsed.Statement[1].Sid).toBe("DenyDirectMantleInference");
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining("TODO-APPROVED-GUARDRAILS"),
       );

@@ -51,16 +51,17 @@ describe('Phase 1 — SCPs 01-08 (spec §2.2)', () => {
     t.resourceCountIs('AWS::Organizations::Policy', 8);
   });
 
-  it('omits the VPC-mode SCP-03/04 by default (public-endpoint workloads would be locked out)', () => {
+  it('omits the VPC-mode SCP-03/04/07 by default (public-endpoint workloads would be locked out)', () => {
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const t = synth({ vpceIds: false });
-      t.resourceCountIs('AWS::Organizations::Policy', 6);
+      t.resourceCountIs('AWS::Organizations::Policy', 5);
       const names = Object.values(t.findResources('AWS::Organizations::Policy')).map(
         (r: Record<string, unknown>) => (r.Properties as Record<string, unknown>).Name as string,
       );
       expect(names).not.toContain('AgenticAI-SCP-03-EnforceAgentCoreVpce');
       expect(names).not.toContain('AgenticAI-SCP-04-EnforceBedrockVpce');
+      expect(names).not.toContain('AgenticAI-SCP-07-DenyPublicAgentCore');
     } finally {
       warn.mockRestore();
     }

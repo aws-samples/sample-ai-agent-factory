@@ -93,7 +93,7 @@ describe("buildScpSet", () => {
       approvedRegions: PLATFORM_APPROVED_REGIONS,
       platformGuardrailAdminRoleArn: PLATFORM_GUARDRAIL_ADMIN_ROLE_ARN,
     });
-    expect(set.map((s) => s.id)).toEqual(["scp-01", "scp-02", "scp-05", "scp-06", "scp-07", "scp-08"]);
+    expect(set.map((s) => s.id)).toEqual(["scp-01", "scp-02", "scp-05", "scp-06", "scp-08"]);
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("TODO-AGENTCORE-VPCE-IDS"));
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("TODO-BEDROCK-VPCE-IDS"));
   });
@@ -228,13 +228,28 @@ describe("SCP-02 enforce Guardrail", () => {
       approvedGuardrailIds: [APPROVED_GUARDRAIL],
     })[1];
     const parsed = scp02.body as any;
-    expect(parsed.Statement).toHaveLength(3);
-    expect(parsed.Statement[1].Condition.ArnNotLike["bedrock:GuardrailIdentifier"]).toEqual([
+    const bySid = (sid: string) => parsed.Statement.find((s: any) => s.Sid === sid);
+    expect(parsed.Statement).toHaveLength(4);
+    expect(bySid("DenyBedrockWithoutApprovedGuardrail").Condition.ArnNotLike["bedrock:GuardrailIdentifier"]).toEqual([
       APPROVED_GUARDRAIL,
       `${APPROVED_GUARDRAIL}:*`,
     ]);
-    expect(parsed.Statement[2].Condition.StringEquals["bedrock:GuardrailIdentifier"]).toBe("");
+    expect(bySid("DenyBedrockWithEmptyGuardrail").Condition.StringEquals["bedrock:GuardrailIdentifier"]).toBe("");
     expect(scp02.bodyJson).not.toContain("ForAllValues");
+  });
+
+  it("denies direct Bedrock Mantle inference to everyone except the Platform inference Gateway role", () => {
+    // Mantle has no guardrail condition key; guardrails on that path are
+    // enforced only by the Platform Gateway's interceptor (2026-09-25).
+    const parsed = renderSet()[1].body as any;
+    const mantle = parsed.Statement.find((s: any) => s.Sid === "DenyDirectMantleInference");
+    expect(mantle.Action).toEqual(["bedrock-mantle:CreateInference"]);
+    expect(mantle.Resource).toBe("*");
+    expect(mantle.Condition.ArnNotLike["aws:PrincipalArn"]).toEqual([
+      "arn:aws:iam::*:role/AgenticAI-InferenceGateway-*",
+      "arn:aws:sts::*:assumed-role/AgenticAI-InferenceGateway-*/*",
+    ]);
+    expect(mantle.Condition.BoolIfExists["aws:PrincipalIsAWSService"]).toBe("false");
   });
 
   it("rejects approved guardrail ids that are not unversioned guardrail ARNs", () => {

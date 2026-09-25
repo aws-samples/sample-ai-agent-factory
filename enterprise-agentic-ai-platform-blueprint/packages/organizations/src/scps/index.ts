@@ -172,9 +172,20 @@ export function buildScpSet(
   set.push(
     scp05DenyGuardrailModification(opts.platformGuardrailAdminRoleArn),
     scp06RestrictRegions(opts.approvedRegions),
-    scp07DenyPublicAgentCore(),
-    scp08DenyEcrPublic(),
   );
+  if (opts.approvedAgentCoreVpceIds && opts.approvedAgentCoreVpceIds.length > 0) {
+    // SCP-07 (Runtimes must be VPC-attached) belongs to the same VPC-mode
+    // posture as SCP-03: the reference Runtime runs networkMode PUBLIC, and
+    // SCP-07 would deny the pipeline's own Create/UpdateAgentRuntime.
+    set.push(scp07DenyPublicAgentCore());
+  } else {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "SCP-07: no VPC-mode AgentCore endpoint ids were supplied. Skipping the VPC-only Runtime rule — " +
+        "it would deny PUBLIC-network Runtime deployments. [TODO-AGENTCORE-VPCE-IDS]",
+    );
+  }
+  set.push(scp08DenyEcrPublic());
 
   if (
     opts.gatewayAdminWorkloadAccountIds &&
