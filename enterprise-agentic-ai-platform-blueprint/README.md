@@ -553,7 +553,7 @@ The blueprint maps to all six pillars: **Operational Excellence** (dashboards + 
 
 **Adding a workload application** (per workstream): provision two accounts via Account Factory (`agenticai-<ws>-nonprod` / `-prod` under `AgenticAI-Workloads`), bootstrap both with trust to platform-nonprod, deploy `D03PlatformCoreStack` (which also emits the workstream's Identity Center permission sets + `RegistryConsumerGrant` + roster row), then a `WorkloadPipelineStack` instance. The developer then works entirely from the workstream account via the `agenticai` CLI (§1.1).
 
-**Account closure.** `bash scripts/teardown.sh` destroys stacks in reverse dependency order (`RETAIN` resources remain by design). Manual remaining steps: empty + delete retained S3 buckets, cancel KMS keys pending deletion, `aws organizations close-account`. Accounts enter `SUSPENDED` for ≥ 90 days before Organizations deletes them.
+**Account closure.** `bash scripts/teardown.sh` destroys stacks in reverse dependency order (`RETAIN` resources remain by design; `scripts/sweep_orphans.py` removes them, see §16). Manual remaining steps: empty and delete retained S3 buckets that are not under Object Lock, cancel KMS keys pending deletion, `aws organizations close-account`. A COMPLIANCE-mode Object Lock bucket holding records cannot be emptied until its retention ends; closing the account is the only way to remove it earlier. Accounts enter `SUSPENDED` for ≥ 90 days before Organizations deletes them.
 
 **Edge cases.** No-Control-Tower fallback (advanced; replace Account Factory with `organizations:CreateAccount` + manual baseline). Existing Log Archive/Audit via `agenticai/adoptExistingLogArchive`. Shared-services TGW via `agenticai/transitGatewayId`. CIDR conflicts via `agenticai/vpcCidr`.
 
@@ -599,7 +599,7 @@ Know what **has** been live-verified and what **has not** before adopting.
 - **D-03 v3 full end-to-end tool-call round-trip** (2026-05-05, re-verified 2026-07-02): IAM user → AssumeRole → runtime role → MCP over the CUSTOM_JWT gateway → Gateway service role → cross-account `lambda:InvokeFunction` → tool Lambda → MCP `tools/call` reply, for both demo tools; unauthenticated gateway calls return `401`.
 - **Per-developer Cedar entitlement** (2026-07-02): non-member JWT denied (`CedarDeniedError` before user code), member JWT allowed.
 - **Gap-closure surface** (2026-05-15, re-verified 2026-07-02): eval-gates GOVERNANCE bucket, EU AI Act COMPLIANCE 7-year bucket + 3 conformity docs, agent-version GSIs + rollback Step Function, MCP probe, kill-switch Step Function (4 revoke branches), chargeback bucket, HITL Step Function, online-eval watchdog.
-- **D-03 guardrail triple-gate, `dynamodb:LeadingKeys` tenant isolation, `kms:ViaService` cross-account scoping**, and **clean teardown to zero residuals**.
+- **D-03 guardrail triple-gate, `dynamodb:LeadingKeys` tenant isolation, `kms:ViaService` cross-account scoping**. The earlier "clean teardown to zero residuals" result for these campaigns was measured only against `AgenticAI-D03-` names and KMS aliases; the 2026-09-25 inventory found alias-less keys, service log groups and stub user pools those checks could not see (see §16 and the final-teardown evidence).
 
 **Not live-verified or deliberately deferred.**
 
@@ -620,10 +620,26 @@ The 35 packages under `packages/` are enumerated in [`CHANGELOG.md`](CHANGELOG.m
 
 ## 16. Cleanup
 
+**Pipeline topology (the reference deployment).** The Platform and Workload pipelines deploy stage stacks (`Nonprod-/Prod-{Registry,InferenceGateway,Guardrail}`, `Nonprod-Audit`, `Nonprod-LogArchive`) that `cdk destroy` in `scripts/teardown.sh` does not map. Tear those down with `scripts/final_teardown.py`, one account at a time with that account's credentials, in the order Workstream → Platform → Management. It is a dry run unless you pass `--apply`. It deletes stacks in dependency order, stops at the first failure, and cleans what each stack retained (Registry records, then Registry, DynamoDB tables, SSM parameters, Cognito pools, log groups, image digests, and customer-managed keys last, as 7-day scheduled deletions). The plan is saved to `~/.agenticai-teardown/` before every delete, so an interrupted run finishes with `--resume-residue`:
+
+```bash
+python3 scripts/final_teardown.py --account-role workstream --expected-account <workstream-id>            # dry run
+python3 scripts/final_teardown.py --account-role workstream --expected-account <workstream-id> --apply
+python3 scripts/final_teardown.py --account-role platform   --expected-account <platform-id>   --apply
+python3 scripts/final_teardown.py --account-role management --expected-account <management-id> --apply
+```
+
+Earlier deployments and rolled-back creates can leave residue that no stack owns any more (service log groups, `RETAIN` keys, stub user pools). `scripts/sweep_orphans.py` finds it with the same matchers as the inventory and removes it in two reviewed steps: `--plan-out plan.json` (read-only), then `--apply plan.json`. Apply acts only on plan entries and re-checks each one live. The sweep refuses to run while project stacks are live, and never empties a bucket holding Object-Locked data or schedules a key that encrypts one.
+
+**Measure, don't assume.** Run `scripts/residue_inventory.py --expected-account <id> --region <r> --global` before and after, in every account and every Region you deployed to. Every surface must read zero except customer-managed keys in `PendingDeletion`. The older `pytest tests/teardown/` suite only checks `AgenticAI-D03-` names and KMS aliases, so it cannot see alias-less keys or log groups.
+
+**Object Lock is permanent.** The EU AI Act record-keeping bucket (`ConformityAssessmentConstruct`, gap-closure stack) uses Object Lock in COMPLIANCE mode for 7 years. Once it holds a record, nobody can delete it before that date, including the account root; neither can the key that encrypts it (the sweep protects both). Deploy the gap-closure stack only into an account you intend to keep for that period. The evaluation corpus bucket uses GOVERNANCE mode (90 days), which an administrator with `s3:BypassGovernanceRetention` can clear.
+
+**Direct stages.** For stages deployed without the pipelines:
+
 ```bash
 export AGENTICAI_INFERENCE_MODEL_RATE_LIMITS='[{"qualifiedModelId":"openai.gpt-oss-120b","requestsPerMinute":10,"tokensPerMinute":10000}]'
-bash scripts/teardown.sh     # reverse-dependency stack sweep
-pytest tests/teardown/       # verify zero residuals
+bash scripts/teardown.sh     # reverse-dependency stack sweep of the directly-deployed stages
 ```
 
 The teardown refuses to synthesize a present Platform Gateway or pipeline stack without the model-rate allocation and its account/role context. For an R2 Workload deployment, also provide both resolved GA context files, stable tool IDs, Workstream account/AZ tuples, and the Gateway Region. If pipeline Runtime/Memory is enabled, export `AGENTICAI_ENABLE_PIPELINE_RUNTIME_MEMORY=true` so destroy synthesizes the native Runtime/Memory stacks and captures their exact service-created Runtime logs. If PolicyEngine is enabled, export `AGENTICAI_GATEWAY_POLICY_ENGINE_MODE` plus both environment-specific IAM-role JSON arrays so destroy synthesizes the deployed graph rather than the default `OFF` graph. **Retire the Platform grants first:** before destroying an R2/GA Workload deployment, run the Platform pipeline with `agenticai/enableGaGatewayInvokePermissions=false` and confirm each tool alias has no resource policy; Lambda binds the grants to the Workstream roles' RoleIds, and a grant left behind after the roles are deleted blocks every later re-grant on that alias until the same two-phase toggle removes it (§6.3). The script destroys production/nonproduction ToolGateway stacks before their RegistryRoles stacks and then removes the Workload pipeline root. A PolicyEngine CMK enters its configured seven-day pending-deletion window after the service retires both grants; this is intentional. Before each stack deletion, the script snapshots the exact physical IDs of its CodeBuild projects and Lambda functions; after a successful `cdk destroy`, it verifies those resources are absent and deletes only their exact service-created default CloudWatch log groups. A rerun against an already-absent stack recovers exact IDs from CloudFormation's deleted-stack event history, so failed cleanup and prior deployment generations remain recoverable without prefix-wide deletion. Missing groups are idempotent, while discovery, resource-absence, or deletion errors fail the teardown. A direct `cdk destroy` bypasses this cleanup and can leave empty `/aws/codebuild/*` or `/aws/lambda/*` groups. `cdk destroy` runs dependency-ordered. The EU AI Act Object-Lock COMPLIANCE 7-year bucket cannot be deleted before its retention expires — this is intentional and documented.
