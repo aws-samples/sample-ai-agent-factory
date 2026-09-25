@@ -62,6 +62,12 @@ from typing import Any, Mapping, Protocol, Sequence
 #: Deterministic marker the live ``verify`` step matches on to confirm a real
 #: InvokeAgentRuntime round-trip without recording any request content.
 HANDSHAKE_MARKER = "agentcore-generated-agent-ok"
+#: Semantic version of this agent revision, reported in every response as
+#: ``agentVersion`` so an upgrade campaign (and fleet inventory) can confirm
+#: which revision is serving without reading container digests. Bump it on
+#: every behaviour-changing agent release; the deployment-continuity probe
+#: gates on the observed transition.
+AGENT_VERSION = "1.1.0"
 # Protocol terminator the model emits when the task is complete.
 DONE_MARKER = "<done/>"
 
@@ -708,6 +714,7 @@ def _load_entrypoint():  # pragma: no cover - exercised only in the live contain
         result = core.run(prompt_text, actor_id=actor_id, session_id=session_id)
         return {
             "marker": result.marker,
+            "agentVersion": AGENT_VERSION,
             "replyFingerprint": result.reply_fingerprint,
             "toolCalls": result.tool_calls,
             "discoveredToolCount": len(result.discovered_tools),

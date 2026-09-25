@@ -507,6 +507,18 @@ def test_system_prompt_states_tool_protocol_and_subscribed_names():
     assert "<done/>" in text
 
 
+def test_agent_version_is_semantic_and_reported_by_the_entrypoint():
+    """The upgrade campaign gates on the ``agentVersion`` the running
+    revision reports, so the constant must be a semantic version and the
+    entrypoint must place it in the response next to the marker."""
+    assert re.fullmatch(r"\d+\.\d+\.\d+", agent_mod.AGENT_VERSION)
+    assert '"agentVersion": AGENT_VERSION' in _SRC
+    # The version travels in the response body only, never in the Memory event
+    # payload (which stays fingerprints + tool names).
+    event_block = _SRC[_SRC.index("event_payload = {") : _SRC.index("event_id = self.memory.put_event")]
+    assert "AGENT_VERSION" not in event_block
+
+
 # ---------------------------------------------------------------------------
 # Turn structure handed to Strands (each untrusted turn is guardrail-scored
 # on its own at the Gateway, so turns must never be collapsed together)
