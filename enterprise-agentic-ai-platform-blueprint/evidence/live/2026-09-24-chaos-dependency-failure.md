@@ -1,7 +1,7 @@
 # Live evidence — chaos and dependency failure on the redeployed revision
 
 - **Date:** 2026-09-24
-- **Status:** PASS WITH DEFECT — authentication and Runtime input-handling fail closed; the "guardrail on every call" claim does **not** hold on the Gateway inference path and is recorded as an open defect with the documented server-side remedy
+- **Status:** PASS WITH DEFECT — authentication and Runtime input-handling fail closed; the "guardrail on every call" claim did **not** hold on the Gateway inference path at this revision and was recorded as an open defect with the documented server-side remedy. **Closed 2026-09-24/25** by the Gateway REQUEST interceptor, live-proven in both environments in [`2026-09-24-guardrail-enforcement.md`](2026-09-24-guardrail-enforcement.md); this document remains the failing twin of that proof
 - **Revision under test:** `d2186b9`, deployed through the pipeline in both environments earlier the same day
 - **Probe:** `scripts/live-agentcore-generated-agent-spike/chaos_dependency_probe.py` (standalone, venv, fail-closed account guard; evidence holds codes, error classes, latencies and fingerprints only)
 - **Region:** `us-west-2`

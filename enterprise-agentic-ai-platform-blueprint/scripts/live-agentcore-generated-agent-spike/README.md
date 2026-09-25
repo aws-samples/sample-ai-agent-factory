@@ -82,9 +82,13 @@ exercises the three platform integrations the blueprint mandates.
   `inference-guardrail`, which found the defect that the Gateway path
   ignores the request guardrail parameter (fixed by the Gateway REQUEST
   interceptor in `packages/platform-inference-gateway/lambda/guardrail-interceptor/`;
-  the probe's pass gate now expects HTTP 403 for a tripping prompt and 200
-  for the benign control). See
-  `../../evidence/live/2026-09-24-chaos-dependency-failure.md`. Offline tests:
+  the probe's pass gate expects HTTP 403 `guardrail_intervened` for every
+  tripping prompt, with and without the client parameter, and 200 for the
+  benign controls). Live 2026-09-24/25: PASS in both environments, with the
+  interceptor's own decision log corroborating every count. See
+  `../../evidence/live/2026-09-24-chaos-dependency-failure.md` (the failing
+  pre-interceptor run) and
+  `../../evidence/live/2026-09-24-guardrail-enforcement.md`. Offline tests:
   `python -m pytest test_load_rate_limit_probe.py test_chaos_dependency_probe.py -q`.
 
 The bearer token is acquired by the Runtime via AgentCore Identity M2M (workload
