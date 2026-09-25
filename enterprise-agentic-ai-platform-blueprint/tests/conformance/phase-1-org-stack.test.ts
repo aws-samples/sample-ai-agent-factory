@@ -16,12 +16,15 @@ import { OrgStack } from '../../apps/management-account/lib/org-stack';
 
 const ADMIN_ROLE = 'arn:aws:iam::111111111111:role/AgenticAI-GuardrailAdmin';
 
-function synth(opts: { attachToWorkloadsOu?: boolean } = {}) {
+function synth(opts: { attachToWorkloadsOu?: boolean; vpceIds?: boolean } = {}) {
   const app = new App();
+  const withVpce = opts.vpceIds ?? true;
   const stack = new OrgStack(app, 'TestOrgStack', {
     env: { account: '222222222222', region: 'us-west-2' },
     platformGuardrailAdminRoleArn: ADMIN_ROLE,
     attachToWorkloadsOu: opts.attachToWorkloadsOu ?? false,
+    approvedAgentCoreVpceIds: withVpce ? ['vpce-0a1b2c3d4e5f60001'] : undefined,
+    approvedBedrockVpceIds: withVpce ? ['vpce-0a1b2c3d4e5f60002'] : undefined,
   });
   return Template.fromStack(stack);
 }
@@ -43,9 +46,24 @@ describe('Phase 1 — OU hierarchy (spec §2.1.2)', () => {
 });
 
 describe('Phase 1 — SCPs 01-08 (spec §2.2)', () => {
-  it('emits exactly 8 Organizations::Policy resources', () => {
+  it('emits exactly 8 Organizations::Policy resources when the VPC endpoint ids are supplied', () => {
     const t = synth();
     t.resourceCountIs('AWS::Organizations::Policy', 8);
+  });
+
+  it('omits the VPC-mode SCP-03/04 by default (public-endpoint workloads would be locked out)', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const t = synth({ vpceIds: false });
+      t.resourceCountIs('AWS::Organizations::Policy', 6);
+      const names = Object.values(t.findResources('AWS::Organizations::Policy')).map(
+        (r: Record<string, unknown>) => (r.Properties as Record<string, unknown>).Name as string,
+      );
+      expect(names).not.toContain('AgenticAI-SCP-03-EnforceAgentCoreVpce');
+      expect(names).not.toContain('AgenticAI-SCP-04-EnforceBedrockVpce');
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('each SCP is typed as SERVICE_CONTROL_POLICY', () => {
@@ -137,7 +155,9 @@ describe('Phase 1 — SCP-01 model allow-list comes from the SSOT', () => {
     const policyProps = (entries[0] as Record<string, unknown>).Properties as Record<string, unknown>;
     const content = policyProps.Content;
     const body = typeof content === 'string' ? JSON.parse(content) : (content as any);
-    const allow = body.Statement[0].Condition['ForAllValues:StringNotEquals']['bedrock:FoundationModel'];
+    // Allow-list lives on the resource (the old bedrock:FoundationModel condition key does not exist).
+    const allow = body.Statement[0].NotResource;
+    expect(JSON.stringify(body)).not.toContain('bedrock:FoundationModel');
     expect(allow).toContain(
       'arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0',
     );

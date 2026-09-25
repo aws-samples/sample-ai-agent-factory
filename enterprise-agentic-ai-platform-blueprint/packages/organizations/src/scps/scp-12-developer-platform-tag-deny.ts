@@ -22,7 +22,7 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { toScpDefinition, type ScpDefinition } from './index';
+import { toScpDefinition, type ScpDefinition } from "./index";
 
 export interface Scp12Options {
   /**
@@ -40,60 +40,68 @@ export interface Scp12Options {
   readonly developerPermissionSetPrefix?: string;
 }
 
-export function scp12DeveloperPlatformTagDeny(opts: Scp12Options = {}): ScpDefinition {
-  const prefix = opts.developerPermissionSetPrefix ?? 'AgenticAI-WS-Dev-';
+export function scp12DeveloperPlatformTagDeny(
+  opts: Scp12Options = {},
+): ScpDefinition {
+  const prefix = opts.developerPermissionSetPrefix ?? "AgenticAI-WS-Dev-";
   const ssoRoleArn = `arn:aws:iam::*:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_${prefix}*`;
   const ssoSessionArn = `arn:aws:sts::*:assumed-role/AWSReservedSSO_${prefix}*/*`;
 
   const body = {
-    Version: '2012-10-17',
+    Version: "2012-10-17",
     Statement: [
       {
-        Sid: 'DenyDeveloperMutationOfPlatformOwnedResources',
-        Effect: 'Deny',
-        // Lifecycle write actions — narrow enough to avoid catching reads
-        // and broad enough that a developer cannot get cute with rare
-        // mutator verbs (Modify*, Detach*, Disable*, etc.).
+        Sid: "DenyDeveloperMutationOfPlatformOwnedResources",
+        Effect: "Deny",
+        // Lifecycle write actions on EXISTING resources. A resource-tag
+        // condition can only protect a resource that already carries the
+        // tag, so `Create*` (the resource does not exist yet) is not listed:
+        // it could never match (live IAM Access Analyzer, 2026-09-25).
+        // `organizations:*` mutations are Management-account-only APIs a
+        // member-account developer cannot call, so they are not listed
+        // either.
+        //
+        // COVERAGE LIMIT (documented, not a bypass of this SCP's intent):
+        // Access Analyzer reports DENY_WITH_UNSUPPORTED_TAG_CONDITION_KEY —
+        // some actions matched by these wildcards do not populate
+        // `aws:ResourceTag`, and for those the deny does not fire. Those
+        // actions are still subject to the identity policies of the
+        // permission set; this SCP is a backstop, not the only control.
         Action: [
-          'bedrock-agentcore:Update*',
-          'bedrock-agentcore:Delete*',
-          'bedrock-agentcore:Create*',
-          'bedrock-agentcore:Put*',
-          'bedrock-agentcore:TagResource',
-          'bedrock-agentcore:UntagResource',
-          'iam:Update*',
-          'iam:Delete*',
-          'iam:Put*',
-          'iam:AttachRolePolicy',
-          'iam:DetachRolePolicy',
-          'iam:TagRole',
-          'iam:UntagRole',
-          'lambda:Update*',
-          'lambda:Delete*',
-          'lambda:Put*',
-          'lambda:TagResource',
-          'lambda:UntagResource',
-          'kms:ScheduleKeyDeletion',
-          'kms:DisableKey',
-          'kms:Update*',
-          'kms:Put*',
-          'organizations:Update*',
-          'organizations:Delete*',
-          'organizations:AttachPolicy',
-          'organizations:DetachPolicy',
+          "bedrock-agentcore:Update*",
+          "bedrock-agentcore:Delete*",
+          "bedrock-agentcore:Put*",
+          "bedrock-agentcore:TagResource",
+          "bedrock-agentcore:UntagResource",
+          "iam:Update*",
+          "iam:Delete*",
+          "iam:Put*",
+          "iam:AttachRolePolicy",
+          "iam:DetachRolePolicy",
+          "iam:TagRole",
+          "iam:UntagRole",
+          "lambda:Update*",
+          "lambda:Delete*",
+          "lambda:Put*",
+          "lambda:TagResource",
+          "lambda:UntagResource",
+          "kms:ScheduleKeyDeletion",
+          "kms:DisableKey",
+          "kms:Update*",
+          "kms:Put*",
         ],
-        Resource: '*',
+        Resource: "*",
         Condition: {
           // Fire only when the resource is owned by the platform team.
           StringEquals: {
-            'aws:ResourceTag/agenticai:owner': 'platform',
+            "aws:ResourceTag/agenticai:owner": "platform",
           },
           // Narrow to the developer permission-set assumed-role principals.
           ArnLike: {
-            'aws:PrincipalArn': [ssoRoleArn, ssoSessionArn],
+            "aws:PrincipalArn": [ssoRoleArn, ssoSessionArn],
           },
           BoolIfExists: {
-            'aws:PrincipalIsAWSService': 'false',
+            "aws:PrincipalIsAWSService": "false",
           },
         },
       },
@@ -101,9 +109,9 @@ export function scp12DeveloperPlatformTagDeny(opts: Scp12Options = {}): ScpDefin
   };
 
   return toScpDefinition(
-    'scp-12',
-    'AgenticAI-SCP-12-DeveloperPlatformTagDeny',
-    'Deny developer Identity Center permission sets from mutating any resource tagged agenticai:owner=platform (D-03 v3 / v0.5.0).',
+    "scp-12",
+    "AgenticAI-SCP-12-DeveloperPlatformTagDeny",
+    "Deny developer Identity Center permission sets from mutating any resource tagged agenticai:owner=platform (D-03 v3 / v0.5.0).",
     body,
   );
 }

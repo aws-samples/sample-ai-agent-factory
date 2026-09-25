@@ -13,8 +13,11 @@
  *   - SCP-09 locks down AgentCore Gateway mutation to the platform admin role.
  *   - SCP-10 restricts Lambda invocations from D-03 runtime roles to the set
  *     of catalogued tool target ARNs.
- * Both are conditionally emitted — callers wire them through `buildScpSet`
- * options; if the inputs are absent a synth-time warning is logged.
+ * SCPs 03, 04 and 09-12 are conditionally emitted — callers wire them through
+ * `buildScpSet` options; if the inputs are absent a synth-time warning is
+ * logged. SCP-03/04 are VPC-mode controls and need explicit endpoint ids.
+ * Organizations allows at most 10 SCPs per target including FullAWSAccess
+ * (`SCP_MAX_ATTACHED_PER_TARGET`); the full twelve cannot share one OU.
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
@@ -128,6 +131,17 @@ export interface BuildScpSetOptions {
    * Default `AgenticAI-WS-Dev-`. Test fixtures only.
    */
   readonly developerPermissionSetPrefix?: string;
+  /**
+   * Exact AgentCore interface VPC endpoint ids for SCP-03. SCP-03 is emitted
+   * only when supplied: it is a VPC-mode control, and attaching it to an OU
+   * whose Runtimes run `networkMode: PUBLIC` denies their own AgentCore
+   * calls (live IAM evaluator, 2026-09-25).
+   */
+  readonly approvedAgentCoreVpceIds?: readonly string[];
+  /** Exact Bedrock Runtime VPC endpoint ids for SCP-04 (same rule as SCP-03). */
+  readonly approvedBedrockVpceIds?: readonly string[];
+  /** Platform pipeline role-name patterns exempted by SCP-11 (default: CDK cfn-exec role). */
+  readonly registryPipelineRoleNamePatterns?: readonly string[];
 }
 
 export function buildScpSet(
@@ -136,13 +150,31 @@ export function buildScpSet(
   const set: ScpDefinition[] = [
     scp01ModelAllowlist(opts.allowedModelArns),
     scp02EnforceGuardrail({ approvedGuardrailIds: opts.approvedGuardrailIds }),
-    scp03EnforceAgentCoreVpce(),
-    scp04EnforceBedrockVpce(),
+  ];
+  if (opts.approvedAgentCoreVpceIds && opts.approvedAgentCoreVpceIds.length > 0) {
+    set.push(scp03EnforceAgentCoreVpce(opts.approvedAgentCoreVpceIds));
+  } else {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "SCP-03: approvedAgentCoreVpceIds was not supplied. Skipping the AgentCore VPCE lockdown — " +
+        "it is a VPC-mode control and would deny PUBLIC-network Runtimes' own calls. [TODO-AGENTCORE-VPCE-IDS]",
+    );
+  }
+  if (opts.approvedBedrockVpceIds && opts.approvedBedrockVpceIds.length > 0) {
+    set.push(scp04EnforceBedrockVpce(opts.approvedBedrockVpceIds));
+  } else {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "SCP-04: approvedBedrockVpceIds was not supplied. Skipping the Bedrock VPCE lockdown — " +
+        "it is a VPC-mode control. [TODO-BEDROCK-VPCE-IDS]",
+    );
+  }
+  set.push(
     scp05DenyGuardrailModification(opts.platformGuardrailAdminRoleArn),
     scp06RestrictRegions(opts.approvedRegions),
     scp07DenyPublicAgentCore(),
     scp08DenyEcrPublic(),
-  ];
+  );
 
   if (
     opts.gatewayAdminWorkloadAccountIds &&
@@ -184,6 +216,7 @@ export function buildScpSet(
       scp11RegistryMutationLockdown({
         platformAccountId: opts.platformAccountId,
         registryAdminRoleName: opts.registryAdminRoleName,
+        pipelineRoleNamePatterns: opts.registryPipelineRoleNamePatterns,
       }),
     );
   } else if (opts.enableRegistryLockdown && !opts.platformAccountId) {
@@ -211,6 +244,14 @@ export function buildScpSet(
  * Spec §2.2.11 L995 calls this out explicitly (`R-SCP-017`).
  */
 export const SCP_BODY_HARD_LIMIT = 5120;
+
+/**
+ * AWS Organizations hard limit on SCPs directly attached to one root, OU or
+ * account (10), which includes the mandatory `FullAWSAccess` policy. A
+ * construct that attaches this set must stay at or below
+ * `SCP_MAX_ATTACHED_PER_TARGET - 1` of its own policies per target.
+ */
+export const SCP_MAX_ATTACHED_PER_TARGET = 10;
 
 /**
  * Our build-time soft limit. 120-char headroom lets the allow-list grow

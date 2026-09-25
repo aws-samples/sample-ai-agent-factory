@@ -8,7 +8,12 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { buildScpSet, SCP_BODY_HARD_LIMIT, SCP_BODY_SOFT_LIMIT } from "./index";
+import {
+  buildScpSet,
+  SCP_BODY_HARD_LIMIT,
+  SCP_BODY_SOFT_LIMIT,
+  SCP_MAX_ATTACHED_PER_TARGET,
+} from "./index";
 import {
   allowedModelArns,
   PLATFORM_APPROVED_REGIONS,
@@ -22,12 +27,18 @@ const ALLOWED_TOOL_TARGET_ARNS = [
   "arn:aws:lambda:us-west-2:333333333333:function:tool-search",
   "arn:aws:lambda:us-west-2:333333333333:function:tool-weather",
 ];
+const AGENTCORE_VPCE_IDS = ["vpce-0a1b2c3d4e5f60001", "vpce-0a1b2c3d4e5f60002"];
+const BEDROCK_VPCE_IDS = ["vpce-0a1b2c3d4e5f60003"];
+const APPROVED_GUARDRAIL =
+  "arn:aws:bedrock:us-west-2:111111111111:guardrail/platformdefault";
 
 function renderSet() {
   return buildScpSet({
     allowedModelArns: allowedModelArns("us-west-2"),
     approvedRegions: PLATFORM_APPROVED_REGIONS,
     platformGuardrailAdminRoleArn: PLATFORM_GUARDRAIL_ADMIN_ROLE_ARN,
+    approvedAgentCoreVpceIds: AGENTCORE_VPCE_IDS,
+    approvedBedrockVpceIds: BEDROCK_VPCE_IDS,
   });
 }
 
@@ -36,6 +47,8 @@ function renderFullSet() {
     allowedModelArns: allowedModelArns("us-west-2"),
     approvedRegions: PLATFORM_APPROVED_REGIONS,
     platformGuardrailAdminRoleArn: PLATFORM_GUARDRAIL_ADMIN_ROLE_ARN,
+    approvedAgentCoreVpceIds: AGENTCORE_VPCE_IDS,
+    approvedBedrockVpceIds: BEDROCK_VPCE_IDS,
     platformAccountId: PLATFORM_ACCOUNT_ID,
     gatewayAdminWorkloadAccountIds: WORKLOAD_ACCOUNT_IDS,
     allowedToolTargetArns: ALLOWED_TOOL_TARGET_ARNS,
@@ -55,7 +68,7 @@ afterEach(() => {
 });
 
 describe("buildScpSet", () => {
-  it("produces exactly 8 SCPs (SCP-01 through SCP-08)", () => {
+  it("produces SCP-01 through SCP-08 when the VPC-mode endpoint ids are supplied", () => {
     const set = renderSet();
     expect(set).toHaveLength(8);
     const ids = set.map((s) => s.id);
@@ -69,6 +82,38 @@ describe("buildScpSet", () => {
       "scp-07",
       "scp-08",
     ]);
+  });
+
+  it("omits the VPC-mode SCP-03/04 (with warnings) when no endpoint ids are supplied", () => {
+    // Live IAM evaluator 2026-09-25: attached to an OU whose Runtimes use
+    // PUBLIC networking, SCP-03 denies their own AgentCore calls.
+    warnSpy.mockClear();
+    const set = buildScpSet({
+      allowedModelArns: allowedModelArns("us-west-2"),
+      approvedRegions: PLATFORM_APPROVED_REGIONS,
+      platformGuardrailAdminRoleArn: PLATFORM_GUARDRAIL_ADMIN_ROLE_ARN,
+    });
+    expect(set.map((s) => s.id)).toEqual(["scp-01", "scp-02", "scp-05", "scp-06", "scp-07", "scp-08"]);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("TODO-AGENTCORE-VPCE-IDS"));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("TODO-BEDROCK-VPCE-IDS"));
+  });
+
+  it("the fully enabled set exceeds what one OU can hold (Organizations: 10 incl. FullAWSAccess)", () => {
+    const set = buildScpSet({
+      allowedModelArns: allowedModelArns("us-west-2"),
+      approvedRegions: PLATFORM_APPROVED_REGIONS,
+      platformGuardrailAdminRoleArn: PLATFORM_GUARDRAIL_ADMIN_ROLE_ARN,
+      approvedGuardrailIds: [APPROVED_GUARDRAIL],
+      approvedAgentCoreVpceIds: AGENTCORE_VPCE_IDS,
+      approvedBedrockVpceIds: BEDROCK_VPCE_IDS,
+      platformAccountId: PLATFORM_ACCOUNT_ID,
+      gatewayAdminWorkloadAccountIds: WORKLOAD_ACCOUNT_IDS,
+      allowedToolTargetArns: ALLOWED_TOOL_TARGET_ARNS,
+      enableRegistryLockdown: true,
+      enableDeveloperPlatformTagDeny: true,
+    });
+    expect(set).toHaveLength(12);
+    expect(set.length).toBeGreaterThan(SCP_MAX_ATTACHED_PER_TARGET - 1);
   });
 
   it("every SCP body is valid JSON and IAM-shaped", () => {
@@ -115,28 +160,43 @@ describe("buildScpSet", () => {
 });
 
 describe("SCP-01 model allow-list", () => {
-  it("embeds exactly the PLATFORM_ALLOWED_MODELS as foundation-model ARNs", () => {
-    const set = renderSet();
-    const scp01 = set[0];
-    const parsed = scp01.body as any;
-    const condition =
-      parsed.Statement[0].Condition["ForAllValues:StringNotEquals"];
-    expect(condition["bedrock:FoundationModel"]).toEqual([
+  it("allow-lists exactly the platform foundation models and their inference profiles on the resource", () => {
+    const parsed = renderSet()[0].body as any;
+    const stmt = parsed.Statement[0];
+    expect(stmt.Condition).toBeUndefined();
+    expect(stmt.Resource).toBeUndefined();
+    expect(stmt.NotResource).toEqual([
       "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0",
       "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+      "arn:aws:bedrock:us-west-2:*:inference-profile/*anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "arn:aws:bedrock:us-west-2:*:inference-profile/*anthropic.claude-haiku-4-5-20251001-v1:0",
     ]);
   });
 
-  it("covers the five Bedrock inference actions enumerated in spec §2.2.2", () => {
-    const set = renderSet();
-    const parsed = set[0].body as any;
-    expect(parsed.Statement[0].Action.sort()).toEqual([
-      "bedrock:Converse",
-      "bedrock:ConverseStream",
+  it("never keys on the non-existent bedrock:FoundationModel condition key (live-found lockout)", () => {
+    // 2026-09-25: `ForAllValues:StringNotEquals` on an absent key evaluates
+    // true, so the old body denied every model, allow-listed ones included.
+    expect(renderSet()[0].bodyJson).not.toContain("bedrock:FoundationModel");
+    expect(renderSet()[0].bodyJson).not.toContain("ForAllValues");
+  });
+
+  it("lists only valid IAM actions (Converse authorizes as InvokeModel*)", () => {
+    const parsed = renderSet()[0].body as any;
+    expect([...parsed.Statement[0].Action].sort()).toEqual([
       "bedrock:CreateModelInvocationJob",
       "bedrock:InvokeModel",
       "bedrock:InvokeModelWithResponseStream",
     ]);
+  });
+
+  it("rejects wildcard or non-foundation-model allow-list entries", () => {
+    expect(() =>
+      buildScpSet({
+        allowedModelArns: ["arn:aws:bedrock:us-west-2::foundation-model/*"],
+        approvedRegions: PLATFORM_APPROVED_REGIONS,
+        platformGuardrailAdminRoleArn: PLATFORM_GUARDRAIL_ADMIN_ROLE_ARN,
+      }),
+    ).toThrow(/exact foundation-model ARNs/);
   });
 
   it("rejects an empty allow-list at synth time", () => {
@@ -151,33 +211,79 @@ describe("SCP-01 model allow-list", () => {
 });
 
 describe("SCP-02 enforce Guardrail", () => {
-  it("denies Bedrock inference when GuardrailIdentifier is Null", () => {
+  it("denies Bedrock inference when GuardrailIdentifier is Null, on valid IAM actions only", () => {
     const scp02 = renderSet()[1];
     const parsed = scp02.body as any;
     const stmt = parsed.Statement[0];
     expect(stmt.Condition.Null["bedrock:GuardrailIdentifier"]).toBe("true");
-    expect(stmt.Action).toContain("bedrock:InvokeModel");
-    expect(stmt.Action).toContain("bedrock:ConverseStream");
+    expect([...stmt.Action].sort()).toEqual(["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]);
+    expect(scp02.bodyJson).not.toContain("Converse");
+  });
+
+  it("matches approved guardrails and their numeric versions with ArnNotLike, plus an empty-string twin", () => {
+    const scp02 = buildScpSet({
+      allowedModelArns: allowedModelArns("us-west-2"),
+      approvedRegions: PLATFORM_APPROVED_REGIONS,
+      platformGuardrailAdminRoleArn: PLATFORM_GUARDRAIL_ADMIN_ROLE_ARN,
+      approvedGuardrailIds: [APPROVED_GUARDRAIL],
+    })[1];
+    const parsed = scp02.body as any;
+    expect(parsed.Statement).toHaveLength(3);
+    expect(parsed.Statement[1].Condition.ArnNotLike["bedrock:GuardrailIdentifier"]).toEqual([
+      APPROVED_GUARDRAIL,
+      `${APPROVED_GUARDRAIL}:*`,
+    ]);
+    expect(parsed.Statement[2].Condition.StringEquals["bedrock:GuardrailIdentifier"]).toBe("");
+    expect(scp02.bodyJson).not.toContain("ForAllValues");
+  });
+
+  it("rejects approved guardrail ids that are not unversioned guardrail ARNs", () => {
+    expect(() =>
+      buildScpSet({
+        allowedModelArns: allowedModelArns("us-west-2"),
+        approvedRegions: PLATFORM_APPROVED_REGIONS,
+        platformGuardrailAdminRoleArn: PLATFORM_GUARDRAIL_ADMIN_ROLE_ARN,
+        approvedGuardrailIds: ["platform-default"],
+      }),
+    ).toThrow(/unversioned guardrail ARNs/);
   });
 });
 
 describe("SCP-03 AgentCore VPCE enforcement", () => {
-  it("uses SSM-resolved approved VPCE list", () => {
+  it("renders the explicit approved VPCE ids as a real list (no SSM placeholder)", () => {
     const scp03 = renderSet()[2];
     const parsed = scp03.body as any;
     const stmt = parsed.Statement[0];
     expect(stmt.Action).toEqual(["bedrock-agentcore:*"]);
-    expect(stmt.Condition.StringNotEquals["aws:SourceVpce"]).toContain(
-      "ssm:/agenticai/network",
-    );
+    expect(stmt.Condition.StringNotEquals["aws:SourceVpce"]).toEqual(AGENTCORE_VPCE_IDS);
+    // Live-found 2026-09-25: a StringList SSM parameter resolved to one
+    // comma-joined string, which never equals a real endpoint id.
+    expect(scp03.bodyJson).not.toContain("resolve:ssm");
+  });
+
+  it("rejects malformed endpoint ids", () => {
+    expect(() =>
+      buildScpSet({
+        allowedModelArns: allowedModelArns("us-west-2"),
+        approvedRegions: PLATFORM_APPROVED_REGIONS,
+        platformGuardrailAdminRoleArn: PLATFORM_GUARDRAIL_ADMIN_ROLE_ARN,
+        approvedAgentCoreVpceIds: ["vpce-a,vpce-b"],
+      }),
+    ).toThrow(/not a VPC endpoint id/);
   });
 });
 
 describe("SCP-04 Bedrock VPCE enforcement", () => {
-  it("includes ApplyGuardrail in its action list per spec §2.2.5", () => {
+  it("includes ApplyGuardrail, lists only valid actions, and uses the explicit ids", () => {
     const scp04 = renderSet()[3];
     const parsed = scp04.body as any;
-    expect(parsed.Statement[0].Action).toContain("bedrock:ApplyGuardrail");
+    expect([...parsed.Statement[0].Action].sort()).toEqual([
+      "bedrock:ApplyGuardrail",
+      "bedrock:InvokeModel",
+      "bedrock:InvokeModelWithResponseStream",
+    ]);
+    expect(parsed.Statement[0].Condition.StringNotEquals["aws:SourceVpce"]).toEqual(BEDROCK_VPCE_IDS);
+    expect(scp04.bodyJson).not.toContain("resolve:ssm");
   });
 });
 
@@ -311,7 +417,7 @@ describe("SCP-09 gateway mutation lockdown", () => {
 
   it("denies CreateGateway (not just Update/Delete) so rogue unmanaged Gateways are blocked", () => {
     const parsed = getScp09().body as any;
-    const actions: string[] = parsed.Statement[0].Action;
+    const actions: string[] = parsed.Statement.flatMap((s: any) => s.Action);
     expect(actions).toContain("bedrock-agentcore:CreateGateway");
     expect(actions).toContain("bedrock-agentcore:UpdateGateway");
     expect(actions).toContain("bedrock-agentcore:DeleteGateway");
@@ -322,11 +428,15 @@ describe("SCP-09 gateway mutation lockdown", () => {
     expect(actions).toContain("bedrock-agentcore:UntagResource");
   });
 
-  it("scopes Resource to arn:aws:bedrock-agentcore:*:*:gateway/*", () => {
+  it("scopes mutations to arn:aws:bedrock-agentcore:*:*:gateway/* and creation to '*' (creates have no ARN yet)", () => {
     const parsed = getScp09().body as any;
     expect(parsed.Statement[0].Resource).toBe(
       "arn:aws:bedrock-agentcore:*:*:gateway/*",
     );
+    expect(parsed.Statement[0].Action).not.toContain("bedrock-agentcore:CreateGateway");
+    expect(parsed.Statement[1].Action).toEqual(["bedrock-agentcore:CreateGateway"]);
+    expect(parsed.Statement[1].Resource).toBe("*");
+    expect(parsed.Statement[1].Condition).toEqual(parsed.Statement[0].Condition);
   });
 
   it("body stays under the 5000-char soft limit", () => {
@@ -445,10 +555,26 @@ describe("SCP-11 registry mutation lockdown", () => {
     );
   });
 
-  it("denies the four registry-mutation actions and only those", () => {
+  it("exempts the Platform pipeline's CloudFormation execution role (it deploys the GA Registry)", () => {
+    const arns: string[] = (getScp11().body as any).Statement[0].Condition.ArnNotLike["aws:PrincipalArn"];
+    expect(arns).toEqual(
+      expect.arrayContaining([
+        `arn:aws:iam::${PLATFORM_ACCOUNT_ID}:role/cdk-*-cfn-exec-role-${PLATFORM_ACCOUNT_ID}-*`,
+        `arn:aws:sts::${PLATFORM_ACCOUNT_ID}:assumed-role/cdk-*-cfn-exec-role-${PLATFORM_ACCOUNT_ID}-*/*`,
+      ]),
+    );
+  });
+
+  it("denies registry-level mutations in BOTH the GA agent-registry and the AgentCore namespaces", () => {
+    // Live-found 2026-09-25: the deployed GA Registry signs as `agent-registry`,
+    // so a bedrock-agentcore-only SCP governed nothing that was deployed.
     const parsed = getScp11().body as any;
-    const actions: string[] = parsed.Statement[0].Action;
-    expect(actions.sort()).toEqual([
+    const actions: string[] = parsed.Statement.flatMap((s: any) => s.Action);
+    expect([...actions].sort()).toEqual([
+      "agent-registry:CreateRegistry",
+      "agent-registry:DeleteRegistry",
+      "agent-registry:UpdateRegistry",
+      "agent-registry:UpdateRegistryRecordStatus",
       "bedrock-agentcore:CreateRegistry",
       "bedrock-agentcore:DeleteRegistry",
       "bedrock-agentcore:UpdateRegistry",
@@ -456,20 +582,29 @@ describe("SCP-11 registry mutation lockdown", () => {
     ]);
   });
 
-  it("does NOT deny CreateRegistryRecord or data-plane Search/Invoke", () => {
+  it("does NOT deny record publishing or data-plane Search/Invoke", () => {
     const parsed = getScp11().body as any;
-    const actions: string[] = parsed.Statement[0].Action;
-    expect(actions).not.toContain("bedrock-agentcore:CreateRegistryRecord");
-    expect(actions).not.toContain("bedrock-agentcore:UpdateRegistryRecord");
-    expect(actions).not.toContain("bedrock-agentcore:SearchRegistryRecords");
+    const actions: string[] = parsed.Statement.flatMap((s: any) => s.Action);
+    for (const prefix of ["agent-registry", "bedrock-agentcore"]) {
+      expect(actions).not.toContain(`${prefix}:CreateRegistryRecord`);
+      expect(actions).not.toContain(`${prefix}:UpdateRegistryRecord`);
+      expect(actions).not.toContain(`${prefix}:SearchRegistryRecords`);
+    }
     expect(actions).not.toContain("bedrock-agentcore:InvokeRegistryMcp");
   });
 
-  it("scopes Resource to arn:aws:bedrock-agentcore:*:*:registry/*", () => {
+  it("scopes mutations to both Registry ARN families and creation to '*' (creates have no ARN yet)", () => {
     const parsed = getScp11().body as any;
-    expect(parsed.Statement[0].Resource).toBe(
+    expect(parsed.Statement[0].Resource).toEqual([
+      "arn:aws:agent-registry:*:*:registry/*",
       "arn:aws:bedrock-agentcore:*:*:registry/*",
-    );
+    ]);
+    expect(parsed.Statement[1].Action).toEqual([
+      "agent-registry:CreateRegistry",
+      "bedrock-agentcore:CreateRegistry",
+    ]);
+    expect(parsed.Statement[1].Resource).toBe("*");
+    expect(parsed.Statement[1].Condition).toEqual(parsed.Statement[0].Condition);
   });
 
   it("includes PrincipalIsAWSService=false guard", () => {

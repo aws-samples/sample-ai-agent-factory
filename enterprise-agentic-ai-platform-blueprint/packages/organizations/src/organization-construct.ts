@@ -2,11 +2,15 @@
  * OrganizationConstruct
  *
  * Emits the AWS Organization, OU hierarchy (Security, Shared Services,
- * AgenticAI-Platform, AgenticAI-Workloads, Sandbox), and SCPs 01-08.
+ * AgenticAI-Platform, AgenticAI-Workloads, Sandbox), and SCPs 01-08
+ * (SCP-03/04 only when explicit VPC endpoint ids are supplied — they are
+ * VPC-mode controls).
  *
  * SCP ATTACHMENT STRATEGY (Phase 1, sandbox-first):
- *   - Sandbox OU:          all 8 SCPs attached (soak before promotion).
+ *   - Sandbox OU:          every emitted SCP attached (soak before promotion).
  *   - AgenticAI-Workloads: attached iff `attachToWorkloadsOu: true`.
+ * AWS Organizations allows at most 10 SCPs per target including
+ * FullAWSAccess; synth fails if the emitted set would exceed it.
  *
  * The soak runs the four canonical denial tests against a real account under
  * Sandbox OU. Once those pass, a follow-up deployment with
@@ -36,7 +40,13 @@ import {
   allowedModelArns,
 } from '@agenticai/platform-baselines';
 
-import { buildScpSet, type ScpDefinition, SCP_BODY_SOFT_LIMIT, SCP_BODY_HARD_LIMIT } from './scps';
+import {
+  buildScpSet,
+  type ScpDefinition,
+  SCP_BODY_SOFT_LIMIT,
+  SCP_BODY_HARD_LIMIT,
+  SCP_MAX_ATTACHED_PER_TARGET,
+} from './scps';
 
 export interface OrganizationConstructProps {
   /**
@@ -79,6 +89,15 @@ export interface OrganizationConstructProps {
    * GuardrailIdentifier values can bypass) and emits a synth-time warning.
    */
   readonly approvedGuardrailIds?: readonly string[];
+
+  /**
+   * Exact AgentCore / Bedrock interface VPC endpoint ids. SCP-03 / SCP-04 are
+   * emitted only when these are supplied: they are VPC-mode controls, and
+   * attaching them to an OU whose workloads use public AgentCore/Bedrock
+   * endpoints denies those workloads' own calls.
+   */
+  readonly approvedAgentCoreVpceIds?: readonly string[];
+  readonly approvedBedrockVpceIds?: readonly string[];
 }
 
 export class OrganizationConstruct extends Construct {
@@ -138,6 +157,8 @@ export class OrganizationConstruct extends Construct {
       approvedRegions: PLATFORM_APPROVED_REGIONS,
       platformGuardrailAdminRoleArn: props.platformGuardrailAdminRoleArn,
       approvedGuardrailIds: props.approvedGuardrailIds,
+      approvedAgentCoreVpceIds: props.approvedAgentCoreVpceIds,
+      approvedBedrockVpceIds: props.approvedBedrockVpceIds,
     });
 
     const scpMap = new Map<string, CfnPolicy>();
@@ -164,10 +185,13 @@ export class OrganizationConstruct extends Construct {
 
     this.scps = scpMap;
 
-    // Rough sanity: verify we produced exactly 8 SCPs.
-    if (this.scps.size !== 8) {
+    // AWS Organizations allows at most 10 SCPs directly attached per target,
+    // including the mandatory FullAWSAccess policy. Fail synth instead of
+    // failing the deployment.
+    if (this.scps.size > SCP_MAX_ATTACHED_PER_TARGET - 1) {
       throw new Error(
-        `OrganizationConstruct produced ${this.scps.size} SCPs; expected 8 per spec §2.2 SCPs 01-08.`,
+        `OrganizationConstruct would attach ${this.scps.size} SCPs per target; AWS Organizations allows ` +
+          `${SCP_MAX_ATTACHED_PER_TARGET - 1} plus FullAWSAccess.`,
       );
     }
 

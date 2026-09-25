@@ -1,88 +1,122 @@
 /**
- * SCP-11 — AgentCore Registry Mutation Lockdown (D-03 v3 / v0.5.0).
+ * SCP-11 — Agent Registry Mutation Lockdown (D-03 v3 / v0.5.0+).
  *
- * Mirrors SCP-09 but for the AWS Bedrock AgentCore Registry control plane.
+ * Mirrors SCP-09 for the tool Registry control plane: registry-level
+ * mutations and record approval-status transitions are allowed only for the
+ * Platform account's pipeline (its CloudFormation execution role) and the
+ * `AgenticAI-RegistryAdmin` break-glass role. Every other principal —
+ * workstream developer permission sets, runtime roles, a workload account's
+ * root — is denied at the Organization boundary.
  *
- * Under v0.5.0 the platform-account hosts the org-wide AgentCore Registry. Any
- * mutation of that registry (creating, deleting, or transitioning record
- * approval status) must only be possible from the
- * `AgenticAI-RegistryAdmin` role in the platform account. Every other
- * principal — including workstream developer permission sets, runtime roles,
- * and the workload account's root — must be denied at the Org boundary.
+ * Both Registry control planes are covered:
+ *   - GA AWS Agent Registry (`agent-registry:*`, ARNs
+ *     `arn:aws:agent-registry:*:*:registry/*`) — the Registry this platform
+ *     deploys (native `AWS::AgentRegistry::*` resources);
+ *   - the earlier AgentCore Registry (`bedrock-agentcore:*Registry*`).
  *
- * Actions denied (paired with the curator + admin actions in
- * the AgentCore Registry sample IAM documentation):
- *   - bedrock-agentcore:CreateRegistry
- *   - bedrock-agentcore:DeleteRegistry
- *   - bedrock-agentcore:UpdateRegistry
- *   - bedrock-agentcore:UpdateRegistryRecordStatus  (approve/reject/deprecate)
+ * LIVE-FOUND DEFECT (2026-09-25): the previous revision denied only the
+ * `bedrock-agentcore:` actions. The deployed GA Registry signs requests as
+ * `agent-registry` (botocore signing name), so the SCP governed nothing that
+ * was deployed. It also exempted only `AgenticAI-RegistryAdmin`, a role the
+ * reference deployment does not create — extending it to the GA namespace
+ * without exempting the pipeline would have blocked CloudFormation from
+ * deploying the Registry.
  *
- * `CreateRegistryRecord`, `UpdateRegistryRecord`, and the data-plane
- * `SearchRegistryRecords`/`InvokeRegistryMcp` are intentionally **not**
- * denied here — those are publisher + consumer surfaces and are scoped
- * separately via IAM at the consumer/publisher principal.
+ * Publisher/consumer surfaces (record create/update, submit, search,
+ * discovery) are intentionally not denied here; IAM scopes them per
+ * principal.
  *
- * SECURITY NOTE (bypass-regression — same shape as SCP-05/SCP-09):
- *   When the admin role is assumed, IAM evaluates `aws:PrincipalArn` as the
- *   assumed-role session ARN; we therefore ArnNotLike against BOTH the role
- *   ARN and the `assumed-role/<name>/*` form. `PrincipalIsAWSService=false`
- *   guard prevents AWS-owned principals from being self-denied.
+ * Both the role ARN and the `assumed-role/<name>/*` session form are matched
+ * (bypass-regression, same shape as SCP-05/SCP-09); AWS service principals
+ * are exempt.
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { toScpDefinition, type ScpDefinition } from './index';
+import { toScpDefinition, type ScpDefinition } from "./index";
 
 export interface Scp11Options {
-  /** Platform account id hosting `AgenticAI-RegistryAdmin`. Required. */
+  /** Platform account id hosting the Registry. Required. */
   readonly platformAccountId: string;
-  /**
-   * Optional override for the admin role name. Default
-   * `AgenticAI-RegistryAdmin`. Conformance tests pin the default; only
-   * override in test fixtures.
-   */
+  /** Break-glass admin role name. Default `AgenticAI-RegistryAdmin`. */
   readonly registryAdminRoleName?: string;
+  /**
+   * Role-name patterns of the Platform pipeline principals that deploy the
+   * Registry. Default: the CDK bootstrap CloudFormation execution role for
+   * any qualifier and region.
+   */
+  readonly pipelineRoleNamePatterns?: readonly string[];
 }
 
-export function scp11RegistryMutationLockdown(opts: Scp11Options): ScpDefinition {
+export const SCP11_REGISTRY_ACTIONS: readonly string[] = [
+  "agent-registry:DeleteRegistry",
+  "agent-registry:UpdateRegistry",
+  "agent-registry:UpdateRegistryRecordStatus",
+  "bedrock-agentcore:DeleteRegistry",
+  "bedrock-agentcore:UpdateRegistry",
+  "bedrock-agentcore:UpdateRegistryRecordStatus",
+];
+
+/**
+ * Registry creation has no registry ARN yet and authorizes against "*"
+ * (live IAM evaluator, 2026-09-25), so it needs its own "*"-scoped
+ * statement; both actions are Registry-specific.
+ */
+export const SCP11_REGISTRY_CREATE_ACTIONS: readonly string[] = [
+  "agent-registry:CreateRegistry",
+  "bedrock-agentcore:CreateRegistry",
+];
+
+export function scp11RegistryMutationLockdown(
+  opts: Scp11Options,
+): ScpDefinition {
   if (!/^[0-9]{12}$/.test(opts.platformAccountId)) {
     throw new Error(
       `SCP-11: platformAccountId must be a 12-digit AWS account id; got '${opts.platformAccountId}'.`,
     );
   }
-  const adminRoleName = opts.registryAdminRoleName ?? 'AgenticAI-RegistryAdmin';
-  const adminRoleArn = `arn:aws:iam::${opts.platformAccountId}:role/${adminRoleName}`;
-  const adminSessionArn = `arn:aws:sts::${opts.platformAccountId}:assumed-role/${adminRoleName}/*`;
+  const account = opts.platformAccountId;
+  const roleNames = [
+    opts.registryAdminRoleName ?? "AgenticAI-RegistryAdmin",
+    ...(opts.pipelineRoleNamePatterns ?? [`cdk-*-cfn-exec-role-${account}-*`]),
+  ];
+  const exempt = roleNames.flatMap((name) => [
+    `arn:aws:iam::${account}:role/${name}`,
+    `arn:aws:sts::${account}:assumed-role/${name}/*`,
+  ]);
+
+  const exemptCondition = {
+    ArnNotLike: { "aws:PrincipalArn": exempt },
+    BoolIfExists: { "aws:PrincipalIsAWSService": "false" },
+  };
 
   const body = {
-    Version: '2012-10-17',
+    Version: "2012-10-17",
     Statement: [
       {
-        Sid: 'DenyRegistryMutationExceptRegistryAdmin',
-        Effect: 'Deny',
-        Action: [
-          'bedrock-agentcore:CreateRegistry',
-          'bedrock-agentcore:DeleteRegistry',
-          'bedrock-agentcore:UpdateRegistry',
-          'bedrock-agentcore:UpdateRegistryRecordStatus',
+        Sid: "DenyRegistryMutationExceptPlatformPipeline",
+        Effect: "Deny",
+        Action: Array.from(SCP11_REGISTRY_ACTIONS),
+        Resource: [
+          "arn:aws:agent-registry:*:*:registry/*",
+          "arn:aws:bedrock-agentcore:*:*:registry/*",
         ],
-        Resource: 'arn:aws:bedrock-agentcore:*:*:registry/*',
-        Condition: {
-          ArnNotLike: {
-            'aws:PrincipalArn': [adminRoleArn, adminSessionArn],
-          },
-          BoolIfExists: {
-            'aws:PrincipalIsAWSService': 'false',
-          },
-        },
+        Condition: exemptCondition,
+      },
+      {
+        Sid: "DenyRegistryCreationExceptPlatformPipeline",
+        Effect: "Deny",
+        Action: Array.from(SCP11_REGISTRY_CREATE_ACTIONS),
+        Resource: "*",
+        Condition: exemptCondition,
       },
     ],
   };
 
   return toScpDefinition(
-    'scp-11',
-    'AgenticAI-SCP-11-RegistryMutationLockdown',
-    'Only the platform AgenticAI-RegistryAdmin role may create/update/delete the AgentCore Registry or change record approval status (D-03 v3 / v0.5.0).',
+    "scp-11",
+    "AgenticAI-SCP-11-RegistryMutationLockdown",
+    "Only the Platform pipeline and the RegistryAdmin break-glass role may mutate the tool Registry or change record approval status (D-03 v3).",
     body,
   );
 }

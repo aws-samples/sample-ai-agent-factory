@@ -53,6 +53,15 @@ export function scp09GatewayMutationLockdown(
       `arn:aws:sts::${accountId}:assumed-role/AgenticAI-D03-*-GatewayAdmin/*`,
   );
 
+  const exemptCondition = {
+    ArnNotLike: {
+      "aws:PrincipalArn": [...adminRoleArns, ...adminRoleSessionArns],
+    },
+    BoolIfExists: {
+      "aws:PrincipalIsAWSService": "false",
+    },
+  };
+
   const body = {
     Version: "2012-10-17",
     Statement: [
@@ -60,7 +69,6 @@ export function scp09GatewayMutationLockdown(
         Sid: "DenyGatewayMutationExceptPlatformAdmin",
         Effect: "Deny",
         Action: [
-          "bedrock-agentcore:CreateGateway",
           "bedrock-agentcore:UpdateGateway",
           "bedrock-agentcore:DeleteGateway",
           "bedrock-agentcore:CreateGatewayTarget",
@@ -71,14 +79,19 @@ export function scp09GatewayMutationLockdown(
           "bedrock-agentcore:UntagResource",
         ],
         Resource: "arn:aws:bedrock-agentcore:*:*:gateway/*",
-        Condition: {
-          ArnNotLike: {
-            "aws:PrincipalArn": [...adminRoleArns, ...adminRoleSessionArns],
-          },
-          BoolIfExists: {
-            "aws:PrincipalIsAWSService": "false",
-          },
-        },
+        Condition: exemptCondition,
+      },
+      {
+        // LIVE-FOUND GAP (IAM evaluator, 2026-09-25): a create call has no
+        // Gateway ARN yet and authorizes against "*", so CreateGateway inside
+        // the gateway-scoped statement above never matched — any principal
+        // could create a rogue Gateway. It gets its own "*" statement; the
+        // action is Gateway-specific, so "*" widens nothing else.
+        Sid: "DenyGatewayCreationExceptPlatformAdmin",
+        Effect: "Deny",
+        Action: ["bedrock-agentcore:CreateGateway"],
+        Resource: "*",
+        Condition: exemptCondition,
       },
     ],
   };

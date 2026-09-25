@@ -35,7 +35,7 @@ import {
 const PLATFORM_GUARDRAIL_ADMIN_ROLE_ARN =
   "arn:aws:iam::111111111111:role/AgenticAI-GuardrailAdmin";
 const APPROVED_GUARDRAIL_IDS = [
-  "arn:aws:bedrock:us-west-2:111111111111:guardrail/platform-default",
+  "arn:aws:bedrock:us-west-2:111111111111:guardrail/platformdefault",
 ];
 const PLATFORM_ACCOUNT_ID = "222222222222";
 const WORKLOAD_ACCOUNT_ID = "333333333333";
@@ -57,6 +57,8 @@ function renderSet(
     approvedRegions: PLATFORM_APPROVED_REGIONS,
     platformGuardrailAdminRoleArn: PLATFORM_GUARDRAIL_ADMIN_ROLE_ARN,
     approvedGuardrailIds: opts.approvedGuardrailIds,
+    approvedAgentCoreVpceIds: ["vpce-0a1b2c3d4e5f60001"],
+    approvedBedrockVpceIds: ["vpce-0a1b2c3d4e5f60002"],
     platformAccountId: opts.platformAccountId,
     gatewayAdminWorkloadAccountIds: opts.gatewayAdminWorkloadAccountIds,
     allowedToolTargetArns: opts.allowedToolTargetArns,
@@ -94,7 +96,7 @@ function arnLikeFires(patterns: readonly string[], candidate: string): boolean {
 }
 
 describe("SCP bypass regression — SCP-02 (empty-string GuardrailIdentifier)", () => {
-  it("with approvedGuardrailIds emits both the Null gate and the allow-list Deny", () => {
+  it("with approvedGuardrailIds emits the Null gate, the ARN allow-list Deny and the empty-string twin", () => {
     const scp02 = renderSet({
       approvedGuardrailIds: APPROVED_GUARDRAIL_IDS,
     })[1];
@@ -105,18 +107,24 @@ describe("SCP bypass regression — SCP-02 (empty-string GuardrailIdentifier)", 
     );
     expect(nullStmt).toBeDefined();
 
+    // ARN operators: the key is ARN-typed and may carry `<arn>:<version>`.
+    // (`ForAllValues:` on this single-valued key was flagged overly
+    // permissive by Access Analyzer, 2026-09-25.)
     const allowListStmt = parsed.Statement.find(
-      (s: any) =>
-        s.Condition?.["ForAllValues:StringNotEquals"]?.[
-          "bedrock:GuardrailIdentifier"
-        ],
+      (s: any) => s.Condition?.ArnNotLike?.["bedrock:GuardrailIdentifier"],
     );
     expect(allowListStmt).toBeDefined();
     expect(
-      allowListStmt.Condition["ForAllValues:StringNotEquals"][
-        "bedrock:GuardrailIdentifier"
-      ],
-    ).toEqual(APPROVED_GUARDRAIL_IDS);
+      allowListStmt.Condition.ArnNotLike["bedrock:GuardrailIdentifier"],
+    ).toEqual([APPROVED_GUARDRAIL_IDS[0], `${APPROVED_GUARDRAIL_IDS[0]}:*`]);
+
+    // ARN operators do not match an empty value; the explicit twin closes
+    // the `GuardrailIdentifier=""` bypass (live IAM evaluator, 2026-09-25).
+    const emptyStmt = parsed.Statement.find(
+      (s: any) => s.Condition?.StringEquals?.["bedrock:GuardrailIdentifier"] === "",
+    );
+    expect(emptyStmt).toBeDefined();
+    expect(scp02.bodyJson).not.toContain("ForAllValues");
   });
 
   it("falls back to Null-only gate when approvedGuardrailIds is omitted (with warning)", () => {
