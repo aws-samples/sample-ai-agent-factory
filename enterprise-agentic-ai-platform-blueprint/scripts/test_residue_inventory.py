@@ -39,9 +39,31 @@ def test_project_names_match(name):
     assert inv.is_project_name(name)
 
 
-@pytest.mark.parametrize("name", ["IagRegistryStack", "BedrockRouterStack", "FAST-stack", "ukiaipl-core", "cdk-hnb659fds-assets", ""])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "IagRegistryStack",
+        "BedrockRouterStack",
+        "FAST-stack",
+        "ukiaipl-core",
+        "cdk-hnb659fds-assets",
+        "",
+        # Generic CDK stage prefixes from another team's pipeline in a shared account.
+        "Prod-PaymentsService",
+        "Nonprod-Frontend-Fn1234",
+        "Prod-RegistryOfSomethingElse",
+    ],
+)
 def test_unrelated_names_do_not_match(name):
     assert not inv.is_project_name(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["Nonprod-Audit", "Nonprod-LogArchive-CustomS3AutoDeleteObjectsCustom-G6wbBAIOySHl", "Prod-Guardrail", "Prod-InferenceGateway-InferenceGatewayM2mSecretPop-Wjnnusi6Dug2"],
+)
+def test_this_projects_stage_stacks_match(name):
+    assert inv.is_project_name(name)
 
 
 @pytest.mark.parametrize(
@@ -54,6 +76,8 @@ def test_unrelated_names_do_not_match(name):
         ("/agenticai/gateway/nonprod/access", True),
         ("/aws/lambda/IagRegistryStack-Handler", False),
         ("/aws/lambda/some-other-function", False),
+        ("/aws/lambda/Prod-PaymentsService-Handler-abc", False),
+        ("/aws/codebuild/Nonprod-Frontend-Build", False),
     ],
 )
 def test_log_group_matcher(group, expected):
@@ -65,8 +89,11 @@ def test_log_group_matcher(group, expected):
     [
         ("agenticai-aiact-nonprod-123456789012-us-east-1", True),
         ("agenticai-platformpipelin-platformpipelineartifact-nkfxv8rxwqxq", True),
+        ("nonprod-logarchive-archiveaccesslogs-abc", True),
         ("aws-cloudtrail-logs-123456789012-3ec67777", False),
         ("cdk-hnb659fds-assets-123456789012-us-west-2", False),
+        ("prod-payments-artifacts", False),
+        ("nonprod-frontend-site", False),
     ],
 )
 def test_bucket_matcher(bucket, expected):

@@ -34,13 +34,16 @@ CFG = Config(connect_timeout=5, read_timeout=20, retries={"max_attempts": 4, "mo
 
 #: Names the blueprint creates start with one of these (case-sensitive where
 #: CloudFormation derives them from a stack name, lower-case where the code
-#: names them explicitly).
-PROJECT_NAME = re.compile(r"^(AgenticAI|agenticai|Nonprod-|Prod-|WorkloadPipeline|PlatformPipeline)")
+#: names them explicitly). The pipeline stage stacks are listed by exact name:
+#: `Nonprod-`/`Prod-` alone is a generic CDK stage prefix, and in a shared
+#: account it would claim another team's `Prod-*` resources as this project's.
+STAGE_STACKS = r"(Nonprod|Prod)-(Registry|InferenceGateway|Guardrail|Audit|LogArchive)"
+PROJECT_NAME = re.compile(rf"^(AgenticAI|agenticai|{STAGE_STACKS}(-|$)|WorkloadPipeline|PlatformPipeline)")
 #: S3 bucket names are lower-case versions of the same stack-derived prefixes.
-PROJECT_BUCKET = re.compile(r"^(agenticai|nonprod-|prod-)")
+PROJECT_BUCKET = re.compile(r"^(agenticai|(nonprod|prod)-(registry|inferencegateway|guardrail|audit|logarchive)-)")
 #: Log groups: service prefixes followed by a project name.
 PROJECT_LOG_GROUP = re.compile(
-    r"^(/aws/(lambda|codebuild|bedrock-agentcore/runtimes|vendedlogs/[^/]+)/(AgenticAI|agenticai|Nonprod-|Prod-|WorkloadPipeline|PlatformPipeline)|/agenticai/)"
+    rf"^(/aws/(lambda|codebuild|bedrock-agentcore/runtimes|vendedlogs/[^/]+)/(AgenticAI|agenticai|{STAGE_STACKS}-|WorkloadPipeline|PlatformPipeline)|/agenticai/)"
 )
 #: AgentCore Identity keeps OAuth2 provider secrets under this service prefix.
 PROJECT_SECRET = re.compile(r"(^(AgenticAI|agenticai)|^bedrock-agentcore-identity!default/oauth2/(AgenticAI|agenticai))")
