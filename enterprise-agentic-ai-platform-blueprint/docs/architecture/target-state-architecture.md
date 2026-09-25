@@ -2,8 +2,9 @@
 
 - **Status:** Accepted target state; implementation in progress. The central inference boundary,
   pipeline-owned R2 Registry/Tool Gateway, pipeline-owned PolicyEngine, and pipeline-owned
-  Runtime/Memory foundation are live-verified in `us-west-2`; generated-agent integration,
-  organization-SCP, EMEA, load/chaos/upgrade, and OTEL correlation gates remain open.
+  Runtime/Memory foundation are live-verified in `us-west-2`, as are generated-agent integration,
+  load/chaos, upgrade/interrupted-deployment and OTEL rate-limit span correlation; the
+  organization-SCP and EMEA gates remain open.
 - **Date:** 2026-09-18
 - **Supersedes (conceptually):** the two mutually-exclusive deployment patterns described in
   [`README.md`](../../README.md) §1 and §3 — the distributed pattern (D-01) and the
@@ -73,8 +74,12 @@ for the full precedence, telemetry, and fail-open matrix:
   pipeline-owned production limit separately reached `ACTIVE` without being destructively mutated.
   Precedence across multiple dimensions, Policy behavior when customer limits are absent,
   fail-open behavior, token reconciliation, and missing-decision alarming remain release gates.
-  OTEL rate-limit span correlation is a reproduced blocker. No AgentCore-specific managed-outage
+  OTEL rate-limit span correlation passed on 2026-09-25 on the pipeline-owned nonproduction
+  Gateway once Transaction Search was enabled (it is a hard prerequisite for a `TRACES`
+  delivery); allowed-decision spans carry no request id and are joined through the Gateway's
+  application log. No AgentCore-specific managed-outage
   injection hook is currently documented; the test plan must not fabricate one. See
+  [`../../evidence/live/2026-09-25-gateway-otel-span-correlation.md`](../../evidence/live/2026-09-25-gateway-otel-span-correlation.md),
   [`../../evidence/live/2026-09-18-agentcore-gateway-spike.md`](../../evidence/live/2026-09-18-agentcore-gateway-spike.md)
   and [§17](#17-sources).
 

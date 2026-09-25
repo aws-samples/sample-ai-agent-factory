@@ -198,8 +198,9 @@ These do not depend on runs 1–3 but are heavier / org-scoped:
 - **EMEA region matrix** — repeat the inference-Gateway + Runtime/Memory +
   PolicyEngine proofs in an EMEA AgentCore region (mandatory per the standing
   EMEA rule; do not extrapolate from `us-west-2`).
-- **OTEL rate-limit span correlation** — the reproduced `us-west-2` blocker;
-  retry after any AWS-side fix.
+- **OTEL rate-limit span correlation** — passed 2026-09-25 on the
+  pipeline-owned nonproduction Gateway (requires Transaction Search; see
+  `evidence/live/2026-09-25-gateway-otel-span-correlation.md`).
 - **24-hour cost baseline** — sustained live traffic against the deployed slice.
 
 ---
