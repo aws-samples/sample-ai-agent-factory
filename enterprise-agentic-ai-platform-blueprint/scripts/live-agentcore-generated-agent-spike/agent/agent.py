@@ -67,9 +67,28 @@ HANDSHAKE_MARKER = "agentcore-generated-agent-ok"
 #: which revision is serving without reading container digests. Bump it on
 #: every behaviour-changing agent release; the deployment-continuity probe
 #: gates on the observed transition.
-AGENT_VERSION = "1.1.0"
+AGENT_VERSION = "1.2.0"
 # Protocol terminator the model emits when the task is complete.
 DONE_MARKER = "<done/>"
+#: Corrective turns the loop may spend on replies that carry neither a TOOL
+#: directive nor the done marker (they count toward ``max_iterations`` too).
+#: Live 2026-09-25: the rated reasoning model occasionally leaks a reasoning
+#: fragment glued in front of the directive ('We need to output the TOOL
+#: line.TOOL <name> {...}'), which the line-start grammar correctly refuses to
+#: execute; the loop used to treat that reply as task completion. One notice
+#: repaired every measured case (10/10); two bound the cost.
+MAX_PROTOCOL_REPAIRS = 2
+#: Corrective user-role turn. Plain and non-imperative on purpose: it is an
+#: untrusted turn to the Gateway's guardrail interceptor, and this wording
+#: scored clean (10/10 allowed, 10/10 repaired, live 2026-09-25).
+PROTOCOL_NOTICE = (
+    "Agent runtime notice: the previous reply had no tool request and no "
+    f"{DONE_MARKER} marker, so nothing was executed."
+)
+#: Why the bounded loop stopped, reported as ``stopReason``.
+STOP_DONE = "done"
+STOP_PROTOCOL_VIOLATION = "protocol_violation"
+STOP_MAX_ITERATIONS = "max_iterations"
 
 #: The scalar field the entrypoint reads from the invocation payload.
 PROMPT_FIELD = "prompt"
@@ -180,6 +199,8 @@ class AgentResult:
     discovered_tools: list[str] = field(default_factory=list)
     memory_round_trip: bool = False
     content_blocks: int = 0
+    stop_reason: str = STOP_DONE
+    protocol_repairs: int = 0
 
 
 class ReferenceAgentCore:
@@ -219,7 +240,9 @@ class ReferenceAgentCore:
             "'TOOL <qualified_tool_name> <json_object_arguments>' and nothing else. "
             f"Subscribed tools: {tools}. When you call a tool, the TOOL line must "
             "be your entire reply -- do not describe, explain, quote or wrap it. "
-            f"Respond with '{DONE_MARKER}' when the task is complete."
+            f"Respond with '{DONE_MARKER}' when the task is complete. If you "
+            f"decline or cannot complete the task, say so briefly and end that "
+            f"reply with '{DONE_MARKER}'."
         )
 
     def run(self, prompt: str, *, actor_id: str, session_id: str) -> AgentResult:
@@ -237,6 +260,8 @@ class ReferenceAgentCore:
         tool_calls: list[str] = []
         reply = ""
         content_blocks = 0
+        repairs = 0
+        stop_reason = STOP_MAX_ITERATIONS
         for _ in range(self.config.max_iterations):
             reply = self.llm.complete(
                 messages,
@@ -246,7 +271,19 @@ class ReferenceAgentCore:
             content_blocks += 1
             tool_request = self._parse_tool_request(reply)
             if tool_request is None:
-                break
+                if DONE_MARKER in reply:
+                    stop_reason = STOP_DONE
+                    break
+                # Neither a directive nor the terminator: the task is NOT
+                # complete. Never execute a directive buried mid-line (it may
+                # be quoted reasoning); ask once more within the budget.
+                if repairs >= MAX_PROTOCOL_REPAIRS:
+                    stop_reason = STOP_PROTOCOL_VIOLATION
+                    break
+                repairs += 1
+                messages.append({"role": "assistant", "content": reply})
+                messages.append({"role": "user", "content": PROTOCOL_NOTICE})
+                continue
             name, arguments = tool_request
             if name not in self.config.subscribed_tools:
                 raise PermissionError(
@@ -284,6 +321,8 @@ class ReferenceAgentCore:
             discovered_tools=discovered,
             memory_round_trip=memory_round_trip,
             content_blocks=content_blocks,
+            stop_reason=stop_reason,
+            protocol_repairs=repairs,
         )
 
     @staticmethod
@@ -433,10 +472,12 @@ class _LiteLlmAdapter:
         if not message or not message.get("content"):
             raise AgentError("LiteLLMModel returned no Strands message content")
         blocks = message["content"]
-        # Return the concatenated text content.
+        # Return the concatenated text content. An empty reply stays empty: the
+        # core treats it as a protocol violation instead of a completed task
+        # (it used to be replaced by the done marker, which hid the failure).
         return "".join(
             b.get("text", "") for b in blocks if isinstance(b, Mapping)
-        ) or DONE_MARKER
+        )
 
 
 class _McpToolAdapter:
@@ -720,6 +761,8 @@ def _load_entrypoint():  # pragma: no cover - exercised only in the live contain
             "discoveredToolCount": len(result.discovered_tools),
             "memoryRoundTrip": result.memory_round_trip,
             "contentBlocks": result.content_blocks,
+            "stopReason": result.stop_reason,
+            "protocolRepairs": result.protocol_repairs,
             "memoryConfigured": bool(os.environ.get("AGENTCORE_MEMORY_ID")),
         }
 

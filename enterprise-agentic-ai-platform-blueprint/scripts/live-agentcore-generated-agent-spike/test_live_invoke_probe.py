@@ -42,6 +42,8 @@ def test_positive_gate_requires_all_five_legs() -> None:
         ({"contentBlocks": 0}, "inferenceContentBlocksPositive"),
         ({"memoryRoundTrip": False}, "memoryRoundTrip"),
         ({"memoryConfigured": False}, "memoryConfigured"),
+        ({"stopReason": "protocol_violation"}, "stopReasonDone"),
+        ({"stopReason": "max_iterations"}, "stopReasonDone"),
     ],
 )
 def test_positive_gate_fails_closed_per_leg(mutation: dict, failing_check: str) -> None:
@@ -81,6 +83,22 @@ def test_unsubscribed_twin_accepts_either_refusal_layer_and_rejects_leaks() -> N
     checks = probe.assess_unsubscribed(200, leaked)
     assert checks["refusedByModelAllowlistOrAgentGuard"] is False
     assert checks["forbiddenToolNeverCalled"] is False
+
+    # 1.2.0+: a decline preceded by one counted protocol repair is still the
+    # model's refusal; an extra block that is NOT a counted repair is not.
+    repaired = {**GOOD_BODY, "toolCalls": [], "contentBlocks": 2, "protocolRepairs": 1}
+    assert probe.assess_unsubscribed(200, repaired)["refusalLayer"] == "model-allowlist"
+    uncounted = {**GOOD_BODY, "toolCalls": [], "contentBlocks": 3, "protocolRepairs": 1}
+    assert probe.assess_unsubscribed(200, uncounted)["refusalLayer"] == "none"
+
+
+def test_positive_gate_tolerates_revisions_without_stop_reason_only() -> None:
+    import agent as agent_mod
+
+    assert probe.STOP_DONE == agent_mod.STOP_DONE
+    legacy = {k: v for k, v in GOOD_BODY.items() if k != "stopReason"}
+    assert probe.assess_positive(200, legacy)["stopReasonDone"] is True
+    assert probe.assess_positive(200, {**GOOD_BODY, "stopReason": "done"})["stopReasonDone"] is True
 
 
 def test_prompt_names_the_exact_tool_and_arguments_the_agent_grammar_accepts() -> None:

@@ -138,6 +138,11 @@ def sample_passed(status: int, body: Mapping[str, Any]) -> bool:
     return all(assess_positive(status, body).values())
 
 
+def failed_checks(checks: Mapping[str, Any]) -> list[str]:
+    """Names of the positive checks that did not hold, sorted (no values)."""
+    return sorted(name for name, value in checks.items() if value is not True)
+
+
 def version_timeline(samples: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Collapse consecutive samples with the same version into segments."""
     segments: list[dict[str, Any]] = []
@@ -271,12 +276,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         t0 = time.monotonic()
         status, body, _session = invoke(session, args.region, current_arn or runtime_arn, payload, args.timeout)
         latency = round(time.monotonic() - t0, 2)
+        checks = assess_positive(status, body)
         sample = {
             "index": index,
             "atSeconds": round(t0 - t_start, 1),
             "httpStatus": status,
             "latencySeconds": latency,
-            "passed": sample_passed(status, body),
+            "passed": all(checks.values()),
+            # Names only (never reply text), so a failed sample is diagnosable
+            # from the evidence alone -- live 2026-09-25 a sample recorded only
+            # passed=false and needed Memory and interceptor forensics.
+            "failedChecks": failed_checks(checks),
+            "stopReason": body.get("stopReason"),
+            "protocolRepairs": body.get("protocolRepairs"),
+            "toolCallCount": len(body.get("toolCalls") or []),
+            "contentBlocks": body.get("contentBlocks"),
             "agentVersion": version_of(body),
             "stackStatus": stack_status,
             "runtimeStatus": rt_status,

@@ -59,6 +59,17 @@ def test_sample_passes_only_when_every_positive_check_holds() -> None:
     assert p.sample_passed(424, {"errorCode": "RuntimeClientError"}) is False
 
 
+def test_failed_checks_name_the_silent_partial_success_shape() -> None:
+    # Live 2026-09-25 (prod, agent 1.1.0): HTTP 200, marker present, no tool
+    # call. The sample must say WHICH legs failed, not only passed=false.
+    silent = {**_good_body(), "toolCalls": []}
+    checks = p.assess_positive(200, silent)
+    assert p.failed_checks(checks) == ["echoToolCalled"]
+    violated = {**_good_body("1.2.0"), "toolCalls": [], "stopReason": "protocol_violation"}
+    assert p.failed_checks(p.assess_positive(200, violated)) == ["echoToolCalled", "stopReasonDone"]
+    assert p.failed_checks(p.assess_positive(200, _good_body())) == []
+
+
 def test_version_timeline_collapses_runs_and_ignores_failed_samples() -> None:
     samples = [
         _sample(0, "none"),

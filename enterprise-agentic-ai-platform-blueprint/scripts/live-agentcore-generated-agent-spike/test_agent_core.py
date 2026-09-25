@@ -201,6 +201,75 @@ def test_max_iterations_bounds_the_loop():
     out = core.run("loop", actor_id="a", session_id="s")
     assert out.content_blocks == 3
     assert out.tool_calls == ["target-demo___tool-echo"] * 3
+    assert out.stop_reason == agent_mod.STOP_MAX_ITERATIONS
+
+
+class RecordingFakeLlm(FakeLlm):
+    """FakeLlm that also snapshots the message list of every call."""
+
+    def __init__(self, replies):
+        super().__init__(replies)
+        self.seen: list[list[dict]] = []
+
+    def complete(self, messages, *, guardrail_identifier, stream):
+        self.seen.append([dict(m) for m in messages])
+        return super().complete(messages, guardrail_identifier=guardrail_identifier, stream=stream)
+
+
+def test_buried_directive_is_never_executed_and_is_repaired_by_a_notice():
+    # Live 2026-09-25 (prod sampler, agent 1.1.0): the reply glued a reasoning
+    # fragment in front of the directive. The loop used to stop there and
+    # report success with no tool call; now it must ask again, once.
+    garbled = 'We need to output the TOOL line.TOOL target-demo___tool-echo {"message":"hi"}'
+    llm = RecordingFakeLlm([garbled, 'TOOL target-demo___tool-echo {"message":"hi"}', "<done/>"])
+    tools = FakeTools(["target-demo___tool-echo"])
+    out = ReferenceAgentCore(_cfg(), llm, tools).run("echo hi", actor_id="a", session_id="s")
+    assert tools.called == [("target-demo___tool-echo", {"message": "hi"})]
+    assert out.tool_calls == ["target-demo___tool-echo"]
+    assert out.protocol_repairs == 1
+    assert out.stop_reason == agent_mod.STOP_DONE
+    assert out.content_blocks == 3
+    # The second call carried the garbled reply and the notice as a USER turn.
+    assert llm.seen[1][-2:] == [
+        {"role": "assistant", "content": garbled},
+        {"role": "user", "content": agent_mod.PROTOCOL_NOTICE},
+    ]
+    assert agent_mod.DONE_MARKER in agent_mod.PROTOCOL_NOTICE
+
+
+def test_persistent_protocol_violation_stops_after_the_repair_budget():
+    llm = FakeLlm(["I'm sorry, but I can't comply with that."])
+    tools = FakeTools(["target-demo___tool-echo"])
+    out = ReferenceAgentCore(_cfg(), llm, tools).run("x", actor_id="a", session_id="s")
+    assert out.stop_reason == agent_mod.STOP_PROTOCOL_VIOLATION
+    assert out.protocol_repairs == agent_mod.MAX_PROTOCOL_REPAIRS
+    assert out.content_blocks == 1 + agent_mod.MAX_PROTOCOL_REPAIRS
+    assert out.tool_calls == [] and tools.called == []
+
+
+def test_repairs_count_toward_max_iterations():
+    llm = FakeLlm(["no marker here"])
+    out = ReferenceAgentCore(_cfg(max_iterations=2), llm, FakeTools([])).run(
+        "x", actor_id="a", session_id="s"
+    )
+    assert out.content_blocks == 2
+    assert out.stop_reason == agent_mod.STOP_MAX_ITERATIONS
+
+
+def test_empty_reply_is_a_protocol_violation_not_completion():
+    llm = FakeLlm(["", "<done/>"])
+    out = ReferenceAgentCore(_cfg(), llm, FakeTools([])).run("x", actor_id="a", session_id="s")
+    assert out.protocol_repairs == 1
+    assert out.stop_reason == agent_mod.STOP_DONE
+    # The adapter no longer fabricates the done marker for an empty reply.
+    assert "or DONE_MARKER" not in _SRC
+
+
+def test_decline_instruction_and_stop_reason_reach_the_response():
+    prompt = ReferenceAgentCore(_cfg(), FakeLlm(["<done/>"]), FakeTools([]))._system_prompt()
+    assert "decline" in prompt and prompt.count(agent_mod.DONE_MARKER) == 2
+    assert '"stopReason": result.stop_reason' in _SRC
+    assert '"protocolRepairs": result.protocol_repairs' in _SRC
 
 
 # --------------------------------------------------------------------------

@@ -53,6 +53,9 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 HANDSHAKE_MARKER = "agentcore-generated-agent-ok"
+#: The agent's ``stopReason`` for a completed task (mirrors agent.STOP_DONE;
+#: a unit test pins the two together).
+STOP_DONE = "done"
 ECHO_TOOL = "target-tool-echo___tool-echo"
 UNSUBSCRIBED_TOOL = "target-tool-forbidden___tool-forbidden"
 
@@ -180,6 +183,10 @@ def assess_positive(status: int, body: Mapping[str, Any]) -> dict[str, Any]:
         and body["contentBlocks"] > 0,
         "memoryConfigured": body.get("memoryConfigured") is True,
         "memoryRoundTrip": body.get("memoryRoundTrip") is True,
+        # 1.2.0+ reports why its loop stopped; a protocol violation or an
+        # exhausted loop is not a completed task. Revisions before 1.2.0 omit
+        # the field (tolerated so a sampler can straddle an upgrade).
+        "stopReasonDone": body.get("stopReason", STOP_DONE) == STOP_DONE,
     }
     return checks
 
@@ -200,9 +207,13 @@ def assess_unsubscribed(status: int, body: Mapping[str, Any]) -> dict[str, Any]:
     """
     tool_calls = body.get("toolCalls") or []
     marker_returned = body.get("marker") == HANDSHAKE_MARKER
+    # 1.2.0+ may spend bounded corrective turns before the model's decline;
+    # without tool calls every inference turn is then the decline or a repair.
+    repairs = body.get("protocolRepairs")
+    repairs = repairs if isinstance(repairs, int) and repairs >= 0 else 0
     layer1_model_declined = (
         200 <= status < 300 and marker_returned and tool_calls == []
-        and body.get("contentBlocks") == 1
+        and body.get("contentBlocks") == 1 + repairs
     )
     layer2_agent_refused = not (200 <= status < 300) and not marker_returned
     return {
