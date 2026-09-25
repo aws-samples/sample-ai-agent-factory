@@ -67,7 +67,7 @@ HANDSHAKE_MARKER = "agentcore-generated-agent-ok"
 #: which revision is serving without reading container digests. Bump it on
 #: every behaviour-changing agent release; the deployment-continuity probe
 #: gates on the observed transition.
-AGENT_VERSION = "1.2.0"
+AGENT_VERSION = "1.2.1"
 # Protocol terminator the model emits when the task is complete.
 DONE_MARKER = "<done/>"
 #: Corrective turns the loop may spend on replies that carry neither a TOOL
