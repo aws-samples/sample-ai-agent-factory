@@ -28,6 +28,15 @@ body. (A first attempt with a model id containing `:` returned HTTP 400
 "Model ID contains invalid characters" — a request-shape rejection, not a
 rate-limit result, and recorded here so it is not mistaken for one.)
 
+**Production twin (added 2026-09-25, before the final teardown).** The same
+control against the pipeline-owned **production** inference Gateway on the
+Platform `e72c19c` revision, no configuration change: the unallocated
+`claude-haiku-4-5` returned exactly HTTP 429 with a rate-limit error body
+(`2026-09-25T17:03:29Z`), and the positive twin on the allow-listed model,
+paced below the allocation, returned HTTP 200 twice plus HTTP 200 on the
+recovery call after the window. The exact-429 control is therefore proven in
+both environments.
+
 ## Per-model requests-per-minute — approximate, not a ceiling
 
 | Run   | Shape                             | Admitted (200) | Throttled (429) | Notes                                                                                                             |
