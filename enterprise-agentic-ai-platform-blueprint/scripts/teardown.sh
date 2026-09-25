@@ -40,7 +40,7 @@
 #   AGENTICAI_WORKLOAD_NONPROD_AVAILABILITY_ZONES AGENTICAI_WORKLOAD_PROD_AVAILABILITY_ZONES
 #   AGENTICAI_GITHUB_REPO                AGENTICAI_GITHUB_CONNECTION_ARN
 #   AGENTICAI_D03_PLATFORM_ACCOUNT_ID    AGENTICAI_D03_WORKLOAD_ACCOUNT_IDS
-#   AGENTICAI_D03_EXTERNAL_ID            AGENTICAI_D03_ALLOWED_TOOL_IDS
+#   AGENTICAI_D03_EXTERNAL_ID            AGENTICAI_GA_REGISTRY_CONTEXT_FILE
 #   AGENTICAI_APPROVER_ROLE_ARN          AGENTICAI_TENANT_ID (default demo)
 #   AGENTICAI_AGENT_ID (default primary) AGENTICAI_ENV_NAME (default nonprod)
 #   AGENTICAI_APPLICATION_ID            AGENTICAI_COST_CENTRE
@@ -148,7 +148,7 @@ required_env_for_stack() {
     AgenticAI-GapClosureStack)
       printf '%s\n' "AGENTICAI_APPROVER_ROLE_ARN" ;;
     AgenticAI-D03-WorkstreamGateway-*)
-      printf '%s\n' "AGENTICAI_D03_PLATFORM_ACCOUNT_ID AGENTICAI_D03_ALLOWED_TOOL_IDS" ;;
+      printf '%s\n' "AGENTICAI_D03_PLATFORM_ACCOUNT_ID AGENTICAI_GA_REGISTRY_CONTEXT_FILE AGENTICAI_GA_REGISTRY_EXPECTED_TOOL_IDS" ;;
     AgenticAI-D03-WorkloadAgentStack)
       printf '%s\n' "AGENTICAI_D03_PLATFORM_ACCOUNT_ID AGENTICAI_D03_EXTERNAL_ID" ;;
     AgenticAI-D03-PlatformCoreStack)
@@ -252,7 +252,10 @@ set_context_args_for_stack() {
       ;;
     AgenticAI-D03-WorkstreamGateway-*)
       add_context "agenticai/d03PlatformAccountId=${AGENTICAI_D03_PLATFORM_ACCOUNT_ID:-}"
-      add_context "agenticai/d03AllowedToolIds=${AGENTICAI_D03_ALLOWED_TOOL_IDS:-}"
+      # The legacy agenticai/d03AllowedToolIds path was retired; the stage now
+      # synthesizes only from the pipeline-resolved GA Registry context.
+      add_context "agenticai/gaRegistryContextFile=${AGENTICAI_GA_REGISTRY_CONTEXT_FILE:-}"
+      add_context "agenticai/gaRegistryExpectedToolIds=${AGENTICAI_GA_REGISTRY_EXPECTED_TOOL_IDS:-}"
       add_workstream_identity_context "$stack"
       ;;
     AgenticAI-D03-WorkloadAgentStack)

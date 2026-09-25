@@ -4,11 +4,14 @@
  * Deployed INTO the workload account (the workstream's own account) by the
  * platform pipeline via cross-account CDK deploy role. One stack per
  * `(tenantId, agentId)` allocation — each allocation gets a dedicated
- * Gateway + N Targets where N = `allowedToolIds.length`.
+ * Gateway + N Targets where N = the APPROVED GA Registry records it subscribes
+ * to (`gaRegistryContext.records`). The legacy v0.4.0 `allowedToolIds`
+ * catalogue path was retired on 2026-09-25.
  *
  * D-03 v3 three-layer tool-governance model, runtime enforcement layer 3:
- *   - Layer 1 (synth-time): `resolveSubscribedTools()` throws if any id is
- *     not in the PLATFORM_TOOL_CATALOGUE SSOT or is marked deprecated.
+ *   - Layer 1 (synth-time): the pipeline-resolved GA Registry context must
+ *     match the expected tool IDs, environment and Platform account, and each
+ *     record is re-validated (status + descriptor digest) at deploy time.
  *   - Layer 2 (SCP-10, org-level): denies `lambda:InvokeFunction` on any
  *     ARN that is not an approved tool alias.
  *   - Layer 3 (this stack): GatewayServiceRole IAM policy lists exactly the
@@ -71,8 +74,6 @@ import type { GaRegistryConsumerContext } from "@agenticai/agent-registry";
 import {
   composeAgentCorePolicyDefinitions,
   composeCedarPolicyDocument,
-  resolveSubscribedTools,
-  resolveTargetArn,
   validateToolSpec,
   ToolSpec,
 } from "@agenticai/platform-tool-catalogue";
@@ -86,14 +87,9 @@ export interface D03WorkstreamGatewayStackProps extends StackProps {
   readonly workloadAccountId: string;
   readonly platformAccountId: string;
   /**
-   * Legacy v0.4.0 path: kebab-case tool ids resolved against the in-process
-   * `PLATFORM_TOOL_CATALOGUE`. Mutually exclusive with
-   * `gaRegistryContext` — pass exactly one.
-   */
-  readonly allowedToolIds?: readonly string[];
-  /**
-   * R2 GA path: complete, pipeline-resolved and template-bound Registry
-   * context. Mutually exclusive with `allowedToolIds`.
+   * Complete, pipeline-resolved and template-bound GA Registry context — the
+   * only supported subscription mode (the legacy `allowedToolIds` catalogue
+   * path was retired on 2026-09-25).
    *
    * The Platform-side Workload synth reads the versioned SSM pointers and
    * APPROVED records, validates the complete governance documents, and pins
@@ -101,7 +97,7 @@ export interface D03WorkstreamGatewayStackProps extends StackProps {
    * record through RegistryReaderRole at deploy time and compares its digest,
    * closing the synth-to-deploy drift window.
    */
-  readonly gaRegistryContext?: GaRegistryConsumerContext;
+  readonly gaRegistryContext: GaRegistryConsumerContext;
   /** Application allocation tag; defaults to tenantId for legacy callers. */
   readonly applicationId?: string;
   /** Cost allocation tag; required for the pipeline-owned R2 path. */
@@ -180,9 +176,21 @@ export class D03WorkstreamGatewayStack extends Stack {
   ) {
     super(scope, id, props);
 
-    // ---- Mode selection: legacy catalogue rollback vs strict GA Registry ----
+    // ---- Subscription source: the strict GA Registry context (only mode) ----
     const registryContext = props.gaRegistryContext;
-    const usingRegistry = registryContext !== undefined;
+    const legacyAllowedToolIds = (props as { allowedToolIds?: unknown })
+      .allowedToolIds;
+    if (
+      registryContext === undefined ||
+      registryContext === null ||
+      legacyAllowedToolIds !== undefined
+    ) {
+      // Kept for untyped callers: the legacy `allowedToolIds` catalogue path
+      // was retired on 2026-09-25 and must not silently come back.
+      throw new Error(
+        "D03WorkstreamGatewayStack: 'gaRegistryContext' is required — the legacy 'allowedToolIds' catalogue path was retired.",
+      );
+    }
     const policyEngineMode = props.policyEngineMode ?? "OFF";
     const policyEngineUsesJwt =
       typeof props.cognitoDiscoveryUrl === "string" &&
@@ -190,11 +198,6 @@ export class D03WorkstreamGatewayStack extends Stack {
     if (!(["OFF", "LOG_ONLY", "ENFORCE"] as const).includes(policyEngineMode)) {
       throw new Error(
         `D03WorkstreamGatewayStack: unsupported PolicyEngine mode '${policyEngineMode}'.`,
-      );
-    }
-    if (policyEngineMode !== "OFF" && !usingRegistry) {
-      throw new Error(
-        "D03WorkstreamGatewayStack: PolicyEngine requires the strict GA Registry path.",
       );
     }
     if (
@@ -214,307 +217,241 @@ export class D03WorkstreamGatewayStack extends Stack {
         "D03WorkstreamGatewayStack: CUSTOM_JWT PolicyEngine mode must not carry IAM role principals.",
       );
     }
-    if (
-      usingRegistry &&
-      Array.isArray(props.allowedToolIds) &&
-      props.allowedToolIds.length > 0
-    ) {
+    if (registryContext.environment !== props.envName) {
       throw new Error(
-        "D03WorkstreamGatewayStack: 'allowedToolIds' (legacy) and 'gaRegistryContext' are mutually exclusive — pass exactly one.",
+        "D03WorkstreamGatewayStack: GA Registry environment does not match envName.",
       );
     }
-    if (
-      !usingRegistry &&
-      (!props.allowedToolIds || props.allowedToolIds.length === 0)
-    ) {
+    if (registryContext.platformAccountId !== props.platformAccountId) {
       throw new Error(
-        "D03WorkstreamGatewayStack: must supply either 'allowedToolIds' (legacy rollback) or 'gaRegistryContext' (R2 GA).",
+        "D03WorkstreamGatewayStack: GA Registry platform account does not match.",
       );
     }
-    if (usingRegistry) {
-      if (registryContext.environment !== props.envName) {
-        throw new Error(
-          "D03WorkstreamGatewayStack: GA Registry environment does not match envName.",
-        );
-      }
-      if (registryContext.platformAccountId !== props.platformAccountId) {
-        throw new Error(
-          "D03WorkstreamGatewayStack: GA Registry platform account does not match.",
-        );
-      }
-      if (registryContext.records.length === 0) {
-        throw new Error(
-          "D03WorkstreamGatewayStack: GA Registry context has no records.",
-        );
-      }
-      if (!props.costCentre) {
-        throw new Error(
-          "D03WorkstreamGatewayStack: costCentre is required in R2 GA mode.",
-        );
-      }
+    if (registryContext.records.length === 0) {
+      throw new Error(
+        "D03WorkstreamGatewayStack: GA Registry context has no records.",
+      );
+    }
+    if (!props.costCentre) {
+      throw new Error(
+        "D03WorkstreamGatewayStack: costCentre is required in R2 GA mode.",
+      );
     }
 
-    let subset: readonly ToolSpec[] = [];
     const resolvedToolArns: Record<string, string> = {};
-    let cedarPolicy: string;
-    /** When using the Registry, each entry is a deploy-time `GetRegistryRecord` validator custom resource. */
+    /** Each entry is a deploy-time `GetRegistryRecord` validator custom resource. */
     const registryFetchers: Record<string, CustomResource> = {};
 
-    if (usingRegistry) {
-      // ---- R2 GA Registry path ----
-      // The Platform-side pipeline synth already resolved and validated the
-      // complete governance documents. Use those immutable values to build
-      // exact target schemas/IAM/Cedar, then re-fetch each record at deploy
-      // time and compare its status + descriptor digest to close the TOCTOU
-      // window between synth and CloudFormation execution.
-      const context = registryContext;
-      const validatorRoleName = `AgenticAI-D03-${props.envName}-${props.tenantId}-${props.agentId}-RegistryValidator`;
-      if (validatorRoleName.length > 64) {
-        throw new Error(
-          "D03WorkstreamGatewayStack: generated RegistryValidator role name exceeds 64 characters.",
-        );
-      }
-      let validatorRole: Role;
-      if (props.registryValidatorRoleArnOverride) {
-        validatorRole = Role.fromRoleArn(
-          this,
-          "RegistryValidatorRole",
-          props.registryValidatorRoleArnOverride,
-          { mutable: false },
-        ) as Role;
-      } else {
-        validatorRole = new Role(this, "RegistryValidatorRole", {
-          roleName: validatorRoleName,
-          assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
-          description:
-            "Pipeline-owned Workstream role that revalidates GA Registry subscriptions at deploy time.",
-          inlinePolicies: {
-            AssumeRegistryReader: new PolicyDocument({
-              statements: [
-                new PolicyStatement({
-                  effect: Effect.ALLOW,
-                  actions: ["sts:AssumeRole"],
-                  resources: [context.readerRoleArn],
-                }),
-              ],
-            }),
-          },
-          managedPolicies: [
-            ManagedPolicy.fromAwsManagedPolicyName(
-              "service-role/AWSLambdaBasicExecutionRole",
-            ),
-          ],
-        });
-        NagSuppressions.addResourceSuppressions(
-          validatorRole,
-          [
-            {
-              id: "AwsSolutions-IAM4",
-              appliesTo: [
-                "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
-              ],
-              reason:
-                "SEC-010: AWSLambdaBasicExecutionRole is the documented logging policy for the pipeline-owned Registry validator Lambda.",
-            },
-          ],
-          true,
-        );
-      }
-
-      const validatorEnv: Record<string, string> = {
-        REGISTRY_READER_ROLE_ARN: context.readerRoleArn,
-        REGISTRY_READER_EXTERNAL_ID: context.readerExternalId,
-        REGISTRY_READER_SESSION_NAME: `registry-${props.envName}-validator`,
-        GATEWAY_AUTHORIZER_MODE:
-          typeof props.cognitoDiscoveryUrl === "string" &&
-          props.cognitoDiscoveryUrl.length > 0
-            ? "CUSTOM_JWT"
-            : "AWS_IAM",
-      };
-      const validatorFn = new LambdaFunction(
-        this,
-        "RegistryRecordValidatorFn",
-        {
-          functionName:
-            `agenticai-d03-${props.envName}-${props.tenantId}-${props.agentId}-reg-validator`.slice(
-              0,
-              64,
-            ),
-          runtime: Runtime.NODEJS_20_X,
-          handler: "index.handler",
-          timeout: Duration.minutes(1),
-          memorySize: 256,
-          logRetention: RetentionDays.ONE_MONTH,
-          description:
-            "Revalidates APPROVED GA Registry records and descriptor digests at deploy time.",
-          code: Code.fromInline(REGISTRY_RECORD_VALIDATOR_HANDLER),
-          environment: validatorEnv,
-          role: validatorRole,
-        },
+    // ---- GA Registry subscription ----
+    // The Platform-side pipeline synth already resolved and validated the
+    // complete governance documents. Use those immutable values to build
+    // exact target schemas/IAM/Cedar, then re-fetch each record at deploy
+    // time and compare its status + descriptor digest to close the TOCTOU
+    // window between synth and CloudFormation execution.
+    const context = registryContext;
+    const validatorRoleName = `AgenticAI-D03-${props.envName}-${props.tenantId}-${props.agentId}-RegistryValidator`;
+    if (validatorRoleName.length > 64) {
+      throw new Error(
+        "D03WorkstreamGatewayStack: generated RegistryValidator role name exceeds 64 characters.",
       );
-      const validatorProvider = new Provider(
+    }
+    let validatorRole: Role;
+    if (props.registryValidatorRoleArnOverride) {
+      validatorRole = Role.fromRoleArn(
         this,
-        "RegistryRecordValidatorProvider",
-        {
-          onEventHandler: validatorFn,
-          logRetention: RetentionDays.ONE_MONTH,
+        "RegistryValidatorRole",
+        props.registryValidatorRoleArnOverride,
+        { mutable: false },
+      ) as Role;
+    } else {
+      validatorRole = new Role(this, "RegistryValidatorRole", {
+        roleName: validatorRoleName,
+        assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
+        description:
+          "Pipeline-owned Workstream role that revalidates GA Registry subscriptions at deploy time.",
+        inlinePolicies: {
+          AssumeRegistryReader: new PolicyDocument({
+            statements: [
+              new PolicyStatement({
+                effect: Effect.ALLOW,
+                actions: ["sts:AssumeRole"],
+                resources: [context.readerRoleArn],
+              }),
+            ],
+          }),
         },
-      );
+        managedPolicies: [
+          ManagedPolicy.fromAwsManagedPolicyName(
+            "service-role/AWSLambdaBasicExecutionRole",
+          ),
+        ],
+      });
       NagSuppressions.addResourceSuppressions(
-        validatorProvider,
+        validatorRole,
         [
-          {
-            id: "AwsSolutions-IAM5",
-            reason:
-              "SEC-029: CDK Provider framework invokes versions/aliases of the single validator Lambda created in this stack.",
-          },
           {
             id: "AwsSolutions-IAM4",
+            appliesTo: [
+              "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+            ],
             reason:
-              "SEC-010: AWSLambdaBasicExecutionRole is the documented logging policy for CDK provider framework Lambdas.",
-          },
-          {
-            id: "AwsSolutions-L1",
-            reason:
-              "SEC-006: Provider framework Lambda runtime is managed by aws-cdk-lib.",
-          },
-          {
-            id: "NIST.800.53.R5-LambdaConcurrency",
-            reason: "SEC-007: Provisioning-time only.",
-          },
-          {
-            id: "NIST.800.53.R5-LambdaDLQ",
-            reason: "SEC-008: CloudFormation surfaces failures.",
-          },
-          {
-            id: "NIST.800.53.R5-LambdaInsideVPC",
-            reason: "SEC-009: Control-plane only.",
+              "SEC-010: AWSLambdaBasicExecutionRole is the documented logging policy for the pipeline-owned Registry validator Lambda.",
           },
         ],
         true,
       );
-
-      const registrySpecs: ToolSpec[] = [];
-      for (const resolved of context.records) {
-        const document = resolved.document;
-        const spec: ToolSpec = {
-          toolId: document.toolId,
-          toolType: document.target.type,
-          targetArn: document.target.arn,
-          cedarPolicy: document.authorization.cedarPolicy,
-          ownerTeam: document.ownership.ownerTeam,
-          costCentre: document.ownership.costCentre,
-          description: document.description,
-          approvalStatus: "approved",
-          inputSchema: document.mcp.inputSchema,
-          allowedGroups:
-            document.authorization.allowedGroups.length > 0
-              ? document.authorization.allowedGroups
-              : undefined,
-        };
-        validateToolSpec(spec);
-        registrySpecs.push(spec);
-        resolvedToolArns[spec.toolId] = spec.targetArn;
-        registryFetchers[spec.toolId] = new CustomResource(
-          this,
-          `RegistryValidate-${spec.toolId}`,
-          {
-            resourceType: "Custom::AgenticAIRegistryRecordValidator",
-            serviceToken: validatorProvider.serviceToken,
-            properties: {
-              registryId: context.registryId,
-              recordId: resolved.recordId,
-              expectedToolId: spec.toolId,
-              expectedTargetArn: spec.targetArn,
-              expectedDescriptorSha256: resolved.descriptorSha256,
-              validationRevision: context.sourceRevision,
-              tenantId: props.tenantId,
-              agentId: props.agentId,
-            },
-          },
-        );
-      }
-      subset = registrySpecs;
-      const usingJwt =
-        typeof props.cognitoDiscoveryUrl === "string" &&
-        props.cognitoDiscoveryUrl.length > 0;
-      const entitledTools = subset.filter(
-        (spec) =>
-          Array.isArray(spec.allowedGroups) && spec.allowedGroups.length > 0,
-      );
-      if (entitledTools.length > 0 && !usingJwt) {
-        throw new Error(
-          `D03WorkstreamGatewayStack: GA record tool(s) [${entitledTools
-            .map((spec) => spec.toolId)
-            .join(
-              ", ",
-            )}] require CUSTOM_JWT because allowedGroups is non-empty.`,
-        );
-      }
-      cedarPolicy = composeCedarPolicyDocument(subset);
-      NagSuppressions.addResourceSuppressions(
-        validatorFn,
-        [
-          {
-            id: "AwsSolutions-L1",
-            reason:
-              "SEC-006: NodeJS 20 is the latest CDK-supported runtime for the inline validator.",
-          },
-          {
-            id: "NIST.800.53.R5-LambdaConcurrency",
-            reason:
-              "SEC-007: Provisioning-time Lambda invoked only by CloudFormation.",
-          },
-          {
-            id: "NIST.800.53.R5-LambdaDLQ",
-            reason:
-              "SEC-008: CloudFormation surfaces custom-resource failures.",
-          },
-          {
-            id: "NIST.800.53.R5-LambdaInsideVPC",
-            reason:
-              "SEC-009: The GA Agent Registry control plane is reached only during deployment.",
-          },
-        ],
-        true,
-      );
-    } else {
-      // ---- Legacy v0.4.0 catalogue path (unchanged) ----
-      // resolveSubscribedTools throws on unknown ids or deprecated subscriptions.
-      subset = resolveSubscribedTools(props.allowedToolIds!);
-      // Resolve every ToolSpec to a concrete tool Lambda ARN.
-      // `${PLATFORM_ACCOUNT_ID}` is substituted with props.platformAccountId
-      // unless the tool explicitly declares a cross-account targetAccountId.
-      for (const spec of subset) {
-        resolvedToolArns[spec.toolId] = resolveTargetArn(
-          spec,
-          props.platformAccountId,
-        );
-      }
-      // Phase Q (v0.6.0): when any subscribed tool declares allowedGroups, the
-      // workstream Gateway MUST be configured for CUSTOM_JWT — Cedar group
-      // binding has nothing to evaluate against without JWT claims. Fail the
-      // synth with an actionable error rather than silently degrading to
-      // "any authenticated principal" semantics.
-      const usingJwt =
-        typeof props.cognitoDiscoveryUrl === "string" &&
-        props.cognitoDiscoveryUrl.length > 0;
-      const entitledTools = subset.filter(
-        (s) => Array.isArray(s.allowedGroups) && s.allowedGroups.length > 0,
-      );
-      if (entitledTools.length > 0 && !usingJwt) {
-        throw new Error(
-          `D03WorkstreamGatewayStack: tool(s) [${entitledTools
-            .map((s) => s.toolId)
-            .join(
-              ", ",
-            )}] declare allowedGroups (per-developer entitlement) but no cognitoDiscoveryUrl was supplied. ` +
-            `Phase Q requires CUSTOM_JWT auth so the Cedar evaluator can read the principal's cognito:groups claim. ` +
-            `Either set cognitoDiscoveryUrl on D03WorkstreamGatewayStackProps or remove allowedGroups from the affected tool(s).`,
-        );
-      }
-      cedarPolicy = composeCedarPolicyDocument(subset);
     }
+
+    const validatorEnv: Record<string, string> = {
+      REGISTRY_READER_ROLE_ARN: context.readerRoleArn,
+      REGISTRY_READER_EXTERNAL_ID: context.readerExternalId,
+      REGISTRY_READER_SESSION_NAME: `registry-${props.envName}-validator`,
+      GATEWAY_AUTHORIZER_MODE:
+        typeof props.cognitoDiscoveryUrl === "string" &&
+        props.cognitoDiscoveryUrl.length > 0
+          ? "CUSTOM_JWT"
+          : "AWS_IAM",
+    };
+    const validatorFn = new LambdaFunction(this, "RegistryRecordValidatorFn", {
+      functionName:
+        `agenticai-d03-${props.envName}-${props.tenantId}-${props.agentId}-reg-validator`.slice(
+          0,
+          64,
+        ),
+      runtime: Runtime.NODEJS_20_X,
+      handler: "index.handler",
+      timeout: Duration.minutes(1),
+      memorySize: 256,
+      logRetention: RetentionDays.ONE_MONTH,
+      description:
+        "Revalidates APPROVED GA Registry records and descriptor digests at deploy time.",
+      code: Code.fromInline(REGISTRY_RECORD_VALIDATOR_HANDLER),
+      environment: validatorEnv,
+      role: validatorRole,
+    });
+    const validatorProvider = new Provider(
+      this,
+      "RegistryRecordValidatorProvider",
+      {
+        onEventHandler: validatorFn,
+        logRetention: RetentionDays.ONE_MONTH,
+      },
+    );
+    NagSuppressions.addResourceSuppressions(
+      validatorProvider,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "SEC-029: CDK Provider framework invokes versions/aliases of the single validator Lambda created in this stack.",
+        },
+        {
+          id: "AwsSolutions-IAM4",
+          reason:
+            "SEC-010: AWSLambdaBasicExecutionRole is the documented logging policy for CDK provider framework Lambdas.",
+        },
+        {
+          id: "AwsSolutions-L1",
+          reason:
+            "SEC-006: Provider framework Lambda runtime is managed by aws-cdk-lib.",
+        },
+        {
+          id: "NIST.800.53.R5-LambdaConcurrency",
+          reason: "SEC-007: Provisioning-time only.",
+        },
+        {
+          id: "NIST.800.53.R5-LambdaDLQ",
+          reason: "SEC-008: CloudFormation surfaces failures.",
+        },
+        {
+          id: "NIST.800.53.R5-LambdaInsideVPC",
+          reason: "SEC-009: Control-plane only.",
+        },
+      ],
+      true,
+    );
+
+    const registrySpecs: ToolSpec[] = [];
+    for (const resolved of context.records) {
+      const document = resolved.document;
+      const spec: ToolSpec = {
+        toolId: document.toolId,
+        toolType: document.target.type,
+        targetArn: document.target.arn,
+        cedarPolicy: document.authorization.cedarPolicy,
+        ownerTeam: document.ownership.ownerTeam,
+        costCentre: document.ownership.costCentre,
+        description: document.description,
+        approvalStatus: "approved",
+        inputSchema: document.mcp.inputSchema,
+        allowedGroups:
+          document.authorization.allowedGroups.length > 0
+            ? document.authorization.allowedGroups
+            : undefined,
+      };
+      validateToolSpec(spec);
+      registrySpecs.push(spec);
+      resolvedToolArns[spec.toolId] = spec.targetArn;
+      registryFetchers[spec.toolId] = new CustomResource(
+        this,
+        `RegistryValidate-${spec.toolId}`,
+        {
+          resourceType: "Custom::AgenticAIRegistryRecordValidator",
+          serviceToken: validatorProvider.serviceToken,
+          properties: {
+            registryId: context.registryId,
+            recordId: resolved.recordId,
+            expectedToolId: spec.toolId,
+            expectedTargetArn: spec.targetArn,
+            expectedDescriptorSha256: resolved.descriptorSha256,
+            validationRevision: context.sourceRevision,
+            tenantId: props.tenantId,
+            agentId: props.agentId,
+          },
+        },
+      );
+    }
+    const subset: readonly ToolSpec[] = registrySpecs;
+    const usingJwt =
+      typeof props.cognitoDiscoveryUrl === "string" &&
+      props.cognitoDiscoveryUrl.length > 0;
+    const entitledTools = subset.filter(
+      (spec) =>
+        Array.isArray(spec.allowedGroups) && spec.allowedGroups.length > 0,
+    );
+    if (entitledTools.length > 0 && !usingJwt) {
+      throw new Error(
+        `D03WorkstreamGatewayStack: GA record tool(s) [${entitledTools
+          .map((spec) => spec.toolId)
+          .join(", ")}] require CUSTOM_JWT because allowedGroups is non-empty.`,
+      );
+    }
+    const cedarPolicy = composeCedarPolicyDocument(subset);
+    NagSuppressions.addResourceSuppressions(
+      validatorFn,
+      [
+        {
+          id: "AwsSolutions-L1",
+          reason:
+            "SEC-006: NodeJS 20 is the latest CDK-supported runtime for the inline validator.",
+        },
+        {
+          id: "NIST.800.53.R5-LambdaConcurrency",
+          reason:
+            "SEC-007: Provisioning-time Lambda invoked only by CloudFormation.",
+        },
+        {
+          id: "NIST.800.53.R5-LambdaDLQ",
+          reason: "SEC-008: CloudFormation surfaces custom-resource failures.",
+        },
+        {
+          id: "NIST.800.53.R5-LambdaInsideVPC",
+          reason:
+            "SEC-009: The GA Agent Registry control plane is reached only during deployment.",
+        },
+      ],
+      true,
+    );
     this.subscribedTools = subset;
     const subscribedIds: readonly string[] = subset.map((spec) => spec.toolId);
     const targetArns = Object.values(resolvedToolArns);
@@ -1554,7 +1491,7 @@ export class D03WorkstreamGatewayStack extends Stack {
     new CfnOutput(this, "SubscribedToolCount", {
       value: String(subscribedIds.length),
       description:
-        "Number of tools subscribed via allowedToolIds. Matches the N GatewayTarget resources.",
+        "Number of GA Registry records subscribed. Matches the N GatewayTarget resources.",
     });
     new CfnOutput(this, "PerTenantCedarPolicy", {
       // The legacy composed Cedar document remains visible for wrapper parity

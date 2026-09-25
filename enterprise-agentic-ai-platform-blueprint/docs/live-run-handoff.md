@@ -149,8 +149,9 @@ authorization core (`fea0640`).
    wrong-session-name denials; and the REG-07..REG-12 authority denials against
    the deployed intake path.
 8. Approve `ProdGatewayApproval`; repeat proof in production.
-9. Rollback to legacy `allowedToolIds` mode; then dependency-ordered teardown
-   (targets → barrier → Gateway → RegistryRoles → pipeline root) with an
+9. Dependency-ordered teardown (the legacy `allowedToolIds` rollback mode was
+   retired on 2026-09-25; retire the Platform grants first, then
+   targets → barrier → Gateway → RegistryRoles → pipeline root) with an
    independent residual inventory.
 
 Record evidence at `evidence/live/<date>-pipeline-r2-workload.md`.

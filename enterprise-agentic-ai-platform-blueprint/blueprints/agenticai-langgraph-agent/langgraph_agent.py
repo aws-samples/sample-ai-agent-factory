@@ -62,7 +62,8 @@ class LangGraphAgent:
             raise PermissionError(
                 f"Tool '{qualified_name}' not in agent's allow-list "
                 f"({list(self.config.qualified_tool_names)}). "
-                "Subscribe via D03TenantAllocation.allowedToolIds."
+                "Subscribe via an APPROVED GA Agent Registry record "
+                "(agenticai/gaRegistryExpectedToolIds)."
             )
         return self.gateway.call_tool(
             qualified_name, payload, protocol_version=MCP_PROTOCOL_VERSION

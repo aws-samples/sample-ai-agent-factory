@@ -3,14 +3,16 @@
  *
  * Pins the shape of `D03WorkstreamGatewayStack` against the three-layer
  * tool-governance model (see README §3.3 v3):
- *   - Layer 1 (synth-time): unknown `allowedToolIds` fail the CDK synth.
+ *   - Layer 1 (synth-time): the stack refuses to synthesize without a
+ *     pipeline-resolved GA Registry context (the legacy `allowedToolIds`
+ *     catalogue path is retired) and re-validates every record at deploy.
  *   - Layer 3 (runtime): Gateway service role inline policy lists exactly
  *     the resolved N tool ARNs — no wildcards, no extras.
  *
  * Also pins:
  *   - Exactly one `Custom::BedrockAgentCoreGateway` resource per stack.
  *   - Exactly N `Custom::BedrockAgentCoreGatewayTarget` resources.
- *   - Each target's `lambdaArn` matches the catalogue's resolved ARN.
+ *   - Each target's `lambdaArn` matches the approved GA record's target ARN.
  *   - CfnOutputs surface `GatewayId` / `GatewayArn` / one per tool.
  *   - Stack tags include `tenant-id` and `agent-id`.
  *
@@ -25,23 +27,29 @@ import { App } from "aws-cdk-lib";
 import type { GaRegistryConsumerContext } from "@agenticai/agent-registry";
 import { Template } from "aws-cdk-lib/assertions";
 
-import {
-  PLATFORM_TOOL_CATALOGUE,
-  resolveTargetArn,
-  type ToolId,
-} from "@agenticai/platform-tool-catalogue";
+import { type ToolId } from "@agenticai/platform-tool-catalogue";
 
 import { D03WorkstreamGatewayStack } from "../../apps/platform-account/lib/d03-workstream-gateway-stack";
+import {
+  FIXTURE_PLATFORM_ACCOUNT_ID,
+  GA_RECORD_IDS,
+  gaRegistryContext,
+} from "./fixtures/ga-registry-context";
 
-const PLATFORM_ACCOUNT_ID = "222222222222";
+const PLATFORM_ACCOUNT_ID = FIXTURE_PLATFORM_ACCOUNT_ID;
 const WORKLOAD_ACCOUNT_ID = "333333333333";
 
 interface SynthOpts {
-  readonly allowedToolIds?: readonly ToolId[];
+  readonly toolIds?: readonly ToolId[];
   readonly tenantId?: string;
   readonly agentId?: string;
   readonly cognitoDiscoveryUrl?: string;
   readonly cognitoAudience?: readonly string[];
+}
+
+/** Target ARN the GA fixture's governance record pins for one tool. */
+function recordTargetArn(toolId: ToolId): string {
+  return gaRegistryContext([toolId]).records[0].document.target.arn;
 }
 
 function synth(opts: SynthOpts = {}): {
@@ -49,14 +57,14 @@ function synth(opts: SynthOpts = {}): {
   stack: D03WorkstreamGatewayStack;
 } {
   const app = new App();
-  const allowedToolIds = opts.allowedToolIds ?? ["tool-echo", "tool-ping"];
+  const toolIds = opts.toolIds ?? ["tool-echo", "tool-ping"];
   const tenantId = opts.tenantId ?? "acme";
   const agentId = opts.agentId ?? "primary";
   const stack = new D03WorkstreamGatewayStack(
     app,
     `AgenticAI-D03-WorkstreamGateway-${tenantId}-${agentId}`,
     {
-      env: { account: WORKLOAD_ACCOUNT_ID, region: "us-east-1" },
+      env: { account: WORKLOAD_ACCOUNT_ID, region: "us-west-2" },
       tenantId,
       agentId,
       envName: "nonprod",
@@ -64,7 +72,7 @@ function synth(opts: SynthOpts = {}): {
       platformAccountId: PLATFORM_ACCOUNT_ID,
       applicationId: "demo-app",
       costCentre: "engineering",
-      allowedToolIds,
+      gaRegistryContext: gaRegistryContext(toolIds),
       cognitoDiscoveryUrl: opts.cognitoDiscoveryUrl,
       cognitoAudience: opts.cognitoAudience,
     },
@@ -97,7 +105,7 @@ describe("Phase 10 — D03WorkstreamGatewayStack shape", () => {
   });
 
   it("waits for target deletion convergence before deleting the Gateway", () => {
-    const { template } = synth({ allowedToolIds: ["tool-echo", "tool-ping"] });
+    const { template } = synth({ toolIds: ["tool-echo", "tool-ping"] });
     const resources = template.toJSON().Resources as Record<string, any>;
     const [gatewayId] = Object.entries(resources).find(
       ([, resource]) => resource.Type === "Custom::BedrockAgentCoreGateway",
@@ -130,7 +138,7 @@ describe("Phase 10 — D03WorkstreamGatewayStack shape", () => {
   });
 
   it("polls target inventory until the Gateway is safe to delete", async () => {
-    const { template } = synth({ allowedToolIds: ["tool-echo"] });
+    const { template } = synth({ toolIds: ["tool-echo"] });
     const waiter = Object.values(
       template.findResources("AWS::Lambda::Function"),
     ).find(
@@ -190,9 +198,9 @@ describe("Phase 10 — D03WorkstreamGatewayStack shape", () => {
     });
   });
 
-  it("emits exactly N gateway-target resources where N = allowedToolIds.length", () => {
+  it("emits exactly N gateway-target resources where N = subscribed GA records", () => {
     const ids: ToolId[] = ["tool-echo", "tool-ping"];
-    const { template } = synth({ allowedToolIds: ids });
+    const { template } = synth({ toolIds: ids });
     const targets = template.findResources(
       "Custom::BedrockAgentCoreGatewayTarget",
     );
@@ -200,7 +208,7 @@ describe("Phase 10 — D03WorkstreamGatewayStack shape", () => {
   });
 
   it("single-tool subscription emits exactly one target", () => {
-    const { template } = synth({ allowedToolIds: ["tool-echo"] });
+    const { template } = synth({ toolIds: ["tool-echo"] });
     const targets = template.findResources(
       "Custom::BedrockAgentCoreGatewayTarget",
     );
@@ -211,7 +219,7 @@ describe("Phase 10 — D03WorkstreamGatewayStack shape", () => {
 describe("Phase 10 — layer-3 enforcement (Gateway service role inline policy)", () => {
   it("inline policy lists exactly the N resolved tool ARNs — no wildcards, no extras", () => {
     const ids: ToolId[] = ["tool-echo", "tool-ping"];
-    const { template } = synth({ allowedToolIds: ids });
+    const { template } = synth({ toolIds: ids });
     // The service role has a single inline policy `InvokeSubscribedTools`.
     const roles = template.findResources("AWS::IAM::Role", {
       Properties: {
@@ -246,10 +254,8 @@ describe("Phase 10 — layer-3 enforcement (Gateway service role inline policy)"
     const resources = Array.isArray(stmt.Resource)
       ? stmt.Resource
       : [stmt.Resource];
-    // Exact ARNs — must match what the catalogue resolves.
-    const expected = ids.map((id) =>
-      resolveTargetArn(PLATFORM_TOOL_CATALOGUE[id], PLATFORM_ACCOUNT_ID),
-    );
+    // Exact ARNs — must match what the approved GA records pin.
+    const expected = ids.map((id) => recordTargetArn(id));
     expect(resources).toHaveLength(expected.length);
     for (const arn of expected) {
       expect(resources).toContain(arn);
@@ -262,10 +268,10 @@ describe("Phase 10 — layer-3 enforcement (Gateway service role inline policy)"
   });
 });
 
-describe("Phase 10 — each target's lambdaArn matches the catalogue's resolved ARN", () => {
+describe("Phase 10 — each target's lambdaArn matches the approved GA record's target ARN", () => {
   it("per-tool GatewayTarget carries the expected lambdaArn in its CreateGatewayTarget params", () => {
     const ids: ToolId[] = ["tool-echo", "tool-ping"];
-    const { template } = synth({ allowedToolIds: ids });
+    const { template } = synth({ toolIds: ids });
     const targets = template.findResources(
       "Custom::BedrockAgentCoreGatewayTarget",
     );
@@ -274,10 +280,7 @@ describe("Phase 10 — each target's lambdaArn matches the catalogue's resolved 
     // Inner quotes are therefore double-escaped (`\\\"`).
     const rendered = JSON.stringify(targets);
     for (const id of ids) {
-      const expected = resolveTargetArn(
-        PLATFORM_TOOL_CATALOGUE[id],
-        PLATFORM_ACCOUNT_ID,
-      );
+      const expected = recordTargetArn(id);
       expect(rendered).toContain(expected);
       // And the tool id must appear as the inlinePayload.name (the inner
       // JSON renders `"name":"<id>"` which, after one level of outer
@@ -287,22 +290,45 @@ describe("Phase 10 — each target's lambdaArn matches the catalogue's resolved 
   });
 });
 
-describe("Phase 10 — synth-time SSOT gate (layer 1)", () => {
-  it("throws when allowedToolIds contains an id not in the catalogue", () => {
-    expect(() => synth({ allowedToolIds: ["not-a-real-tool"] })).toThrow(
-      /Unknown tool id\(s\)/,
-    );
+describe("Phase 10 — synth-time subscription gate (layer 1)", () => {
+  const baseProps = {
+    env: { account: WORKLOAD_ACCOUNT_ID, region: "us-west-2" },
+    tenantId: "acme",
+    agentId: "primary",
+    envName: "nonprod",
+    workloadAccountId: WORKLOAD_ACCOUNT_ID,
+    platformAccountId: PLATFORM_ACCOUNT_ID,
+    applicationId: "demo-app",
+    costCentre: "engineering",
+  };
+
+  it("refuses a stack without a GA Registry context (legacy path retired)", () => {
+    expect(
+      () =>
+        new D03WorkstreamGatewayStack(
+          new App(),
+          "AgenticAI-D03-WorkstreamGateway-acme-nocontext",
+          baseProps as unknown as ConstructorParameters<
+            typeof D03WorkstreamGatewayStack
+          >[2],
+        ),
+    ).toThrow(/'gaRegistryContext' is required/);
   });
 
-  it("error message lists the known catalogue keys for the operator", () => {
-    try {
-      synth({ allowedToolIds: ["bogus-tool-x"] });
-      fail("expected throw");
-    } catch (err) {
-      const msg = (err as Error).message;
-      expect(msg).toContain("bogus-tool-x");
-      expect(msg).toContain("tool-echo");
-    }
+  it("refuses the retired allowedToolIds prop from an untyped caller", () => {
+    expect(
+      () =>
+        new D03WorkstreamGatewayStack(
+          new App(),
+          "AgenticAI-D03-WorkstreamGateway-acme-legacy",
+          {
+            ...baseProps,
+            allowedToolIds: ["tool-echo"],
+          } as unknown as ConstructorParameters<
+            typeof D03WorkstreamGatewayStack
+          >[2],
+        ),
+    ).toThrow(/legacy 'allowedToolIds' catalogue path was retired/);
   });
 });
 
@@ -331,16 +357,13 @@ describe("Phase 10 — tags + outputs surface", () => {
 
   it("emits one ToolTarget-<toolId> output per subscribed tool", () => {
     const ids: ToolId[] = ["tool-echo", "tool-ping"];
-    const { template } = synth({ allowedToolIds: ids });
+    const { template } = synth({ toolIds: ids });
     const outputs = template.findOutputs("*");
     for (const id of ids) {
       const key = `ToolTarget${id.replace(/-/g, "")}`;
       // CDK strips non-alphanumeric from the logical id; just look for any
       // output whose value contains the resolved ARN.
-      const expected = resolveTargetArn(
-        PLATFORM_TOOL_CATALOGUE[id],
-        PLATFORM_ACCOUNT_ID,
-      );
+      const expected = recordTargetArn(id);
       const match = Object.values(outputs).find(
         (o) => JSON.stringify((o as any).Value) === JSON.stringify(expected),
       );
@@ -350,70 +373,6 @@ describe("Phase 10 — tags + outputs surface", () => {
     }
   });
 });
-
-const GA_REGISTRY_ID = "ABCDEFGHIJKLMNOP";
-const GA_REGISTRY_ARN = `arn:aws:agent-registry:us-west-2:${PLATFORM_ACCOUNT_ID}:registry/${GA_REGISTRY_ID}`;
-const GA_RECORD_IDS: Record<string, string> = {
-  "tool-echo": "ABCDEFGHIJKL",
-  "tool-ping": "MNOPQRSTUVWX",
-};
-
-function gaRegistryContext(
-  toolIds: readonly ToolId[] = ["tool-echo", "tool-ping"],
-): GaRegistryConsumerContext {
-  return {
-    schemaVersion: "agenticai.ga-registry-consumer-context/1.0",
-    environment: "nonprod",
-    region: "us-west-2",
-    platformAccountId: PLATFORM_ACCOUNT_ID,
-    sourceRevision: "a".repeat(40),
-    registryId: GA_REGISTRY_ID,
-    registryArn: GA_REGISTRY_ARN,
-    readerRoleArn: `arn:aws:iam::${PLATFORM_ACCOUNT_ID}:role/AgenticAI-RegistryReader-nonprod`,
-    readerExternalId: `agenticai-registry-v1-nonprod-${PLATFORM_ACCOUNT_ID}`,
-    records: [...toolIds].sort().map((toolId, index) => {
-      const source = PLATFORM_TOOL_CATALOGUE[toolId];
-      const recordId = GA_RECORD_IDS[toolId];
-      return {
-        recordId,
-        recordArn: `${GA_REGISTRY_ARN}/record/${recordId}`,
-        descriptorSha256: String(index + 1).repeat(64),
-        document: {
-          schemaVersion: "agenticai.tool-governance/1.0",
-          catalogueVersion: "2",
-          toolId,
-          description: source.description,
-          desiredApprovalStatus: "approved",
-          target: {
-            type: source.toolType ?? "lambda",
-            arn:
-              `arn:aws:lambda:us-west-2:${PLATFORM_ACCOUNT_ID}:function:` +
-              `agenticai-platform-nonprod-${toolId}:PROD`,
-          },
-          mcp: {
-            toolName: toolId,
-            description: source.description,
-            inputSchema: source.inputSchema ?? { type: "object" },
-          },
-          authorization: {
-            defaultDecision: "DENY",
-            cedarPolicy: source.cedarPolicy,
-            allowedSubjects: [],
-            allowedGroups: source.allowedGroups ?? [],
-            combination:
-              source.allowedGroups && source.allowedGroups.length > 0
-                ? "GROUP_ONLY"
-                : "AUTHENTICATED",
-          },
-          ownership: {
-            ownerTeam: source.ownerTeam,
-            costCentre: source.costCentre,
-          },
-        },
-      };
-    }),
-  };
-}
 
 describe("Phase 10 — R2 GA Registry subscription path", () => {
   function synthRegistry(
@@ -686,7 +645,7 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
     );
   });
 
-  it("rejects environment/account drift, conflicts, and empty mode", () => {
+  it("rejects environment/account drift and a missing Registry context", () => {
     const wrongEnvironment = gaRegistryContext();
     (wrongEnvironment as any).environment = "prod";
     expect(() => synthRegistry({ context: wrongEnvironment })).toThrow(
@@ -696,7 +655,7 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
     const app = new App();
     expect(
       () =>
-        new D03WorkstreamGatewayStack(app, "Conflict", {
+        new D03WorkstreamGatewayStack(app, "NoContext", {
           env: { account: WORKLOAD_ACCOUNT_ID, region: "us-east-1" },
           tenantId: "a",
           agentId: "b",
@@ -707,8 +666,10 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
           costCentre: "engineering",
           allowedToolIds: ["tool-echo"],
           gaRegistryContext: gaRegistryContext(["tool-echo"]),
-        }),
-    ).toThrow(/mutually exclusive/);
+        } as unknown as ConstructorParameters<
+          typeof D03WorkstreamGatewayStack
+        >[2]),
+    ).toThrow(/legacy 'allowedToolIds' catalogue path was retired/);
 
     expect(
       () =>
@@ -721,8 +682,10 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
           platformAccountId: PLATFORM_ACCOUNT_ID,
           applicationId: "demo",
           costCentre: "engineering",
-        }),
-    ).toThrow(/either 'allowedToolIds'.*or 'gaRegistryContext'/);
+        } as unknown as ConstructorParameters<
+          typeof D03WorkstreamGatewayStack
+        >[2]),
+    ).toThrow(/'gaRegistryContext' is required/);
   });
 
   it("preserves the R2 template when PolicyEngine mode is OFF", () => {

@@ -709,13 +709,9 @@ switch (stage) {
     );
     const workloadAccountId =
       account ?? app.node.tryGetContext("agenticai/d03WorkloadAccountId");
-    const rawAllowed = app.node.tryGetContext("agenticai/d03AllowedToolIds");
-    const allowedToolIds: string[] = Array.isArray(rawAllowed)
-      ? rawAllowed
-      : typeof rawAllowed === "string"
-        ? (JSON.parse(rawAllowed) as string[])
-        : [];
-    // R2 GA path. The Platform-side resolver writes a strict context file;
+    // GA Registry path (the only subscription mode; the legacy
+    // `agenticai/d03AllowedToolIds` catalogue path was retired on 2026-09-25).
+    // The Platform-side resolver writes a strict context file;
     // the parser below revalidates it before any stack is synthesized.
     const expectedRegistryToolIds = stringArrayContext(
       "agenticai/gaRegistryExpectedToolIds",
@@ -754,9 +750,9 @@ switch (stage) {
     if (!agentId) missing.push("agenticai/agentId");
     if (!platformAccountId) missing.push("agenticai/d03PlatformAccountId");
     if (!workloadAccountId) missing.push("agenticai/d03WorkloadAccountId");
-    if (!usingRegistryPath && !allowedToolIds.length) {
+    if (!usingRegistryPath) {
       missing.push(
-        "agenticai/d03AllowedToolIds OR agenticai/gaRegistryContextFile (one required)",
+        "agenticai/gaRegistryContextFile (the legacy agenticai/d03AllowedToolIds path was retired)",
       );
     }
     if (usingRegistryPath && expectedRegistryToolIds.length === 0) {
@@ -765,6 +761,11 @@ switch (stage) {
     if (missing.length) {
       throw new Error(
         `d03-workstream-gateway stage requires: ${missing.join(", ")}`,
+      );
+    }
+    if (gaRegistryContext === undefined) {
+      throw new Error(
+        "d03-workstream-gateway stage: agenticai/gaRegistryContextFile produced no GA Registry context",
       );
     }
 
@@ -778,7 +779,6 @@ switch (stage) {
         envName,
         workloadAccountId,
         platformAccountId,
-        allowedToolIds: usingRegistryPath ? undefined : allowedToolIds,
         gaRegistryContext,
         applicationId: String(
           app.node.tryGetContext("agenticai/applicationId") ?? tenantId,

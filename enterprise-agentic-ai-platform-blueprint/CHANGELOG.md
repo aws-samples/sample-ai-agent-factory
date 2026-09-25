@@ -74,6 +74,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The inference Gateway role's `bedrock-mantle:CreateInference` grant is now conditioned on `bedrock-mantle:Model` for the allocated models (provider-qualified id and provider-stripped alias); any model outside the allocation is denied by IAM instead of relying on the fail-open zero-rate wildcard. `bedrock-mantle:ListModels` remains unconditioned.
 - README, threat model and target-state architecture no longer describe the native Gateway rate limit as a hard quota control: it is approximate, fail-open traffic shaping; per-account Bedrock quotas and SCP/IAM are the quota and abuse controls.
 
+### Removed
+
+- The legacy `allowedToolIds` catalogue consumer path of `D03WorkstreamGatewayStack` (maintainer decision, 2026-09-25): `gaRegistryContext` is now required, a stray `allowedToolIds` fails the synth, `bin` no longer reads `agenticai/d03AllowedToolIds`, and `scripts/teardown.sh` synthesizes the direct workstream-gateway stage from `AGENTICAI_GA_REGISTRY_CONTEXT_FILE` / `AGENTICAI_GA_REGISTRY_EXPECTED_TOOL_IDS`. The legacy-path conformance tests now run on the GA path through a shared fixture (`tests/conformance/fixtures/ga-registry-context.ts`); a before/after synthesis of five GA configurations (IAM, one tool, CUSTOM_JWT, PolicyEngine LOG_ONLY and ENFORCE) differs only in the `SubscribedToolCount` output description.
+
 ### Verification
 
 - The isolated AgentCore Runtime and Memory campaign passed on exact commit `88d5381`: a zero-finding digest-pinned `linux/arm64` image built from the reviewed SHA, Memory reached `ACTIVE`, Runtime reached `READY`, exact `InvokeAgentRuntime` and short-term `CreateEvent`/`GetEvent` round trips passed, Runtime-before-Memory cleanup completed, service grants and exact logs were retired, the prerequisite stack deleted, and independent inventory found zero active residue. Sanitized details are in `evidence/live/2026-09-21-agentcore-runtime-memory-compatibility-spike.md`.

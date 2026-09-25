@@ -467,7 +467,8 @@ describe("Round 1B — teardown stage mapping", () => {
           STUB_LIST_OUTPUT:
             "AgenticAI-Platform-AuditStack\tAgenticAI-D03-WorkstreamGateway-acme-billing",
           AGENTICAI_D03_PLATFORM_ACCOUNT_ID: "222222222222",
-          AGENTICAI_D03_ALLOWED_TOOL_IDS: '["tool-one"]',
+          AGENTICAI_GA_REGISTRY_CONTEXT_FILE: "/tmp/ga-registry-nonprod.json",
+          AGENTICAI_GA_REGISTRY_EXPECTED_TOOL_IDS: '["tool-one"]',
         },
         input: "y\n",
       },
@@ -477,6 +478,11 @@ describe("Round 1B — teardown stage mapping", () => {
     expect(run.npxCalls[0]).toContain("--context stage=d03-workstream-gateway");
     expect(run.npxCalls[0]).toContain("--context agenticai/tenantId=acme");
     expect(run.npxCalls[0]).toContain("--context agenticai/agentId=billing");
+    expect(run.npxCalls[0]).toContain(
+      "--context agenticai/gaRegistryContextFile=/tmp/ga-registry-nonprod.json",
+    );
+    // The legacy allowedToolIds path is retired and must never be synthesized.
+    expect(run.npxCalls[0]).not.toContain("d03AllowedToolIds");
   });
 });
 

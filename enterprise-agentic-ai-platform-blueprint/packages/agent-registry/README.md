@@ -95,8 +95,8 @@ evaluation/canary gates remain exclusive to legacy/full-agent mode.
 
 Catalogue revision 2 emits RegistryRecord version `2.0.0` and environment-
 qualified Platform tool Lambdas and Gateway roles. The old `allowedToolIds`
-catalogue path remains available only as the explicit rollback mode until its
-own live rollback deployment passes.
+catalogue consumer path was retired on 2026-09-25; the GA Registry context is
+the only subscription source.
 
 ## Current proof boundary
 
@@ -126,6 +126,5 @@ independent inventory found zero unintended residue. See
 The matching-principal wrong-ExternalId and wrong-session-name reader-trust
 twins passed live on 2026-09-24 through the deployed validator role in both
 environments (exact STS `403 AccessDenied`; positive access before and after).
-A live redeployment to the legacy consumer (or its explicit retirement), EMEA
-regions, load/chaos behavior, and final placeholder retirement remain release
-gates.
+EMEA regions and final placeholder retirement remain release gates (the legacy
+consumer path was retired on 2026-09-25 instead of being redeployed).
