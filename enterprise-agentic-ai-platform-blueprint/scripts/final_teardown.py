@@ -120,7 +120,7 @@ def log(*parts: object) -> None:
 REQUIRED_OPERATIONS = {
     "cloudformation": ("DeleteStack", "GetTemplate", "ListStackResources"),
     "bedrock-agentcore-control": ("ListAgentRuntimeVersions", "GetAgentRuntime"),
-    "agent-registry-control": ("ListRegistryRecords", "DeleteRegistryRecord", "DeleteRegistry"),
+    "agent-registry-control": ("ListRegistryRecords", "DeleteRegistryRecord", "DeleteRegistry", "GetRegistry"),
     "cognito-idp": ("UpdateUserPool", "DeleteUserPool"),
     "dynamodb": ("DeleteTable",),
     "ecr": ("BatchDeleteImage",),
@@ -274,7 +274,14 @@ def registry_id_from(pid: str) -> str:
     return pid.split(":registry/", 1)[1].split("/", 1)[0]
 
 
-def delete_registry(acct: Account, pid: str) -> None:
+def delete_registry(acct: Account, pid: str, poll_seconds: float = 10.0, timeout_seconds: float = 900.0) -> None:
+    """Delete a GA Registry and WAIT until it is gone.
+
+    `DeleteRegistry` is asynchronous (the Registry passes through `DELETING`)
+    and returns `ConflictException` while record deletions are still settling.
+    The caller schedules the Registry's CMK next, so returning before the
+    Registry is gone could pull the key out from under an in-flight delete.
+    """
     client = acct.client("agent-registry-control")
     registry_id = registry_id_from(pid)
     # Any record CloudFormation did not know about still blocks the delete.
@@ -292,7 +299,29 @@ def delete_registry(acct: Account, pid: str) -> None:
         token = resp.get("nextToken")
         if not token:
             break
-    client.delete_registry(registryId=registry_id)
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            client.delete_registry(registryId=registry_id)
+            break
+        except ClientError as error:
+            if error.response["Error"]["Code"] != "ConflictException" or time.monotonic() > deadline:
+                raise
+            log("      registry busy (records still deleting); retrying")
+            time.sleep(poll_seconds)
+    while True:
+        try:
+            status = client.get_registry(registryId=registry_id).get("status")
+        except ClientError as error:
+            if error.response["Error"]["Code"] in GONE_CODES:
+                log("      registry gone")
+                return
+            raise
+        if status == "DELETE_FAILED":
+            raise SystemExit(f"STOPPED: registry ...{registry_id[-4:]} is DELETE_FAILED; its CMK was NOT scheduled")
+        if time.monotonic() > deadline:
+            raise SystemExit(f"STOPPED: registry ...{registry_id[-4:]} still {status} after {timeout_seconds:.0f}s; re-run --resume-residue")
+        time.sleep(poll_seconds)
 
 
 HANDLERS = {

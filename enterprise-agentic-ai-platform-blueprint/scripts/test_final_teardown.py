@@ -270,6 +270,10 @@ def test_resume_residue_finishes_cleanup_after_the_stack_is_gone(monkeypatch, tm
 # ------------------------------------------------------------ retained types
 
 
+def registry_gone(**_):
+    raise client_error("ResourceNotFoundException", "gone")
+
+
 def test_registry_records_before_registry_and_keys_last(monkeypatch, tmp_path):
     reg = f"arn:aws:agent-registry:us-west-2:{ACCOUNT}:registry/REG1"
     resources = [
@@ -284,7 +288,7 @@ def test_registry_records_before_registry_and_keys_last(monkeypatch, tmp_path):
         FakeCfn(stacks),
         responses={
             "kms": {"describe_key": {"KeyMetadata": {"KeyState": "Enabled"}}},
-            "agent-registry-control": {"list_registry_records": {"registryRecords": []}},
+            "agent-registry-control": {"list_registry_records": {"registryRecords": []}, "get_registry": registry_gone},
             "dynamodb": {"get_waiter": lambda name: type("W", (), {"wait": lambda self, **k: None})()},
         },
     )
@@ -305,11 +309,78 @@ def test_stray_registry_record_is_deleted_before_the_registry(monkeypatch, tmp_p
     reg = f"arn:aws:agent-registry:us-west-2:{ACCOUNT}:registry/REG1"
     stacks = {"Prod-Registry": {"status": "UPDATE_COMPLETE", "resources": [("Reg", "AWS::AgentRegistry::Registry", reg)],
                                 "policies": {"Reg": "RetainExceptOnCreate"}}}
-    fake = FakeAccount(FakeCfn(stacks), responses={"agent-registry-control": {"list_registry_records": {"registryRecords": [{"recordId": "STRAY"}]}}})
+    fake = FakeAccount(FakeCfn(stacks), responses={"agent-registry-control": {"list_registry_records": {"registryRecords": [{"recordId": "STRAY"}]}, "get_registry": registry_gone}})
     monkeypatch.setattr(ft, "build_plan", lambda t, a: {"platform": ["Prod-Registry"]})
     run_main(monkeypatch, tmp_path, fake, "--account-role", "platform", "--apply")
     ops = [(op, kw) for svc, op, kw in fake.calls if svc == "agent-registry-control" and op.startswith("delete")]
     assert ops == [("delete_registry_record", {"registryId": "REG1", "recordId": "STRAY"}), ("delete_registry", {"registryId": "REG1"})]
+
+
+class AsyncRegistry:
+    """DeleteRegistry conflicts N times, then the Registry is DELETING for M polls."""
+
+    def __init__(self, conflicts: int = 0, deleting_polls: int = 0, final: str = "gone") -> None:
+        self.conflicts, self.deleting_polls, self.final = conflicts, deleting_polls, final
+
+    def delete_registry(self, **_):
+        if self.conflicts:
+            self.conflicts -= 1
+            raise client_error("ConflictException", "records still deleting")
+        return {"status": "DELETING"}
+
+    def get_registry(self, **_):
+        if self.deleting_polls:
+            self.deleting_polls -= 1
+            return {"status": "DELETING"}
+        if self.final == "gone":
+            raise client_error("ResourceNotFoundException", "gone")
+        return {"status": self.final}
+
+
+def _registry_stack_with_key():
+    reg = f"arn:aws:agent-registry:us-west-2:{ACCOUNT}:registry/REG1"
+    return {
+        "Prod-Registry": {
+            "status": "UPDATE_COMPLETE",
+            "resources": [("Reg", "AWS::AgentRegistry::Registry", reg), ("Key", "AWS::KMS::Key", "key-1")],
+            "policies": {"Reg": "RetainExceptOnCreate", "Key": "Retain"},
+        }
+    }
+
+
+def _fake_with_registry(reg: AsyncRegistry) -> FakeAccount:
+    return FakeAccount(
+        FakeCfn(_registry_stack_with_key()),
+        responses={
+            "agent-registry-control": {
+                "list_registry_records": {"registryRecords": []},
+                "delete_registry": reg.delete_registry,
+                "get_registry": reg.get_registry,
+            },
+            "kms": {"describe_key": {"KeyMetadata": {"KeyState": "Enabled"}}},
+        },
+    )
+
+
+def test_registry_delete_retries_conflict_and_waits_before_the_key(monkeypatch, tmp_path):
+    monkeypatch.setattr(ft.time, "sleep", lambda s: None)
+    fake = _fake_with_registry(AsyncRegistry(conflicts=2, deleting_polls=3))
+    monkeypatch.setattr(ft, "build_plan", lambda t, a: {"platform": ["Prod-Registry"]})
+    assert run_main(monkeypatch, tmp_path, fake, "--account-role", "platform", "--apply") == 0
+    ops = [op for svc, op, _ in fake.calls if op in {"delete_registry", "get_registry", "schedule_key_deletion"}]
+    assert ops.count("delete_registry") == 3
+    assert ops.index("schedule_key_deletion") > max(i for i, op in enumerate(ops) if op == "get_registry"), (
+        "the key must be scheduled only after the Registry is confirmed gone"
+    )
+
+
+def test_registry_delete_failed_stops_before_the_key(monkeypatch, tmp_path):
+    monkeypatch.setattr(ft.time, "sleep", lambda s: None)
+    fake = _fake_with_registry(AsyncRegistry(final="DELETE_FAILED"))
+    monkeypatch.setattr(ft, "build_plan", lambda t, a: {"platform": ["Prod-Registry"]})
+    with pytest.raises(SystemExit, match="DELETE_FAILED"):
+        run_main(monkeypatch, tmp_path, fake, "--account-role", "platform", "--apply")
+    assert not any(op == "schedule_key_deletion" for _, op, _ in fake.calls)
 
 
 @pytest.mark.parametrize("protection,expected", [("ACTIVE", ["describe_user_pool", "update_user_pool", "delete_user_pool"]),
