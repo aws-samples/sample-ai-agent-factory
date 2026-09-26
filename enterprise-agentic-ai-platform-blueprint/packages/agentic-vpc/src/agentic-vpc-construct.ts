@@ -87,16 +87,7 @@ import {
 import { StringParameter, StringListParameter } from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { allowedModelArns, PLATFORM_ALLOWED_MODELS } from '@agenticai/platform-baselines';
-
-/**
- * Default AgentCore-supported AZ IDs in us-east-1 as of 2026-05. Update via
- * the `supportedAvailabilityZoneIds` prop if the service expands its set.
- */
-const DEFAULT_AGENTCORE_SUPPORTED_AZ_IDS_US_EAST_1: readonly string[] = [
-  'use1-az1',
-  'use1-az2',
-  'use1-az4',
-];
+import { resolveAgentCoreSupportedAvailabilityZoneIds } from './agentcore-supported-azs';
 
 export interface AgenticVpcConstructProps {
   /**
@@ -125,8 +116,9 @@ export interface AgenticVpcConstructProps {
    * subnets that sit in one of these AZ IDs. Pass the output to the
    * AgentCore Runtime attach step.
    *
-   * Defaults: in `us-east-1`, `['use1-az1','use1-az2','use1-az4']`. In
-   * other regions, undefined (no filter) — supply explicitly.
+   * Defaults to the documented regional set for `us-east-1`, `us-west-2`,
+   * and `eu-west-1`. Other Regions have no implicit set — supply this prop
+   * explicitly after verifying the current AgentCore VPC documentation.
    *
    * TODO v2: AZ-ID filter — plumb this through the `Vpc.availabilityZones`
    * prop at synth time. Requires a pre-synth bootstrap step to resolve
@@ -443,11 +435,10 @@ export class AgenticVpcConstruct extends Construct {
     // ---- AgentCore AZ-ID compatibility filter (TODO v2: AZ-ID filter) ----
     // Deploy-time resolution: describe workload-subnet AZ-IDs and emit only
     // the subnet ids that match the supported-AZ-IDs set.
-    const supportedAzIds =
-      props.supportedAvailabilityZoneIds ??
-      (stack.region === 'us-east-1'
-        ? DEFAULT_AGENTCORE_SUPPORTED_AZ_IDS_US_EAST_1
-        : undefined);
+    const supportedAzIds = resolveAgentCoreSupportedAvailabilityZoneIds(
+      stack.region,
+      props.supportedAvailabilityZoneIds,
+    );
 
     if (supportedAzIds && supportedAzIds.length > 0) {
       const workloadSubnets = this.vpc.selectSubnets({ subnetGroupName: 'workload' }).subnets;

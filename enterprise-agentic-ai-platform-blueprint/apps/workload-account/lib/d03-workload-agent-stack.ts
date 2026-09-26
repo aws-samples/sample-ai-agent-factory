@@ -50,20 +50,7 @@ import {
 } from 'aws-cdk-lib/custom-resources';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
-
-/**
- * AgentCore Runtime only supports specific AZ IDs in each region (for
- * us-east-1 today: `use1-az1`, `use1-az2`, `use1-az4`). The last live test
- * hit an unsupported AZ (`use1-az6`) because CDK selects AZs by *name*
- * (us-east-1a/b/c/...) and the AZ-name -> AZ-ID mapping is account-specific
- * and only knowable at deploy time. The helper below resolves it at deploy
- * time via an `ec2:DescribeAvailabilityZones` custom resource.
- */
-const DEFAULT_AGENTCORE_SUPPORTED_AZ_IDS_US_EAST_1: readonly string[] = [
-  'use1-az1',
-  'use1-az2',
-  'use1-az4',
-];
+import { resolveAgentCoreSupportedAvailabilityZoneIds } from '@agenticai/agentic-vpc';
 
 export interface D03WorkloadAgentStackProps extends StackProps {
   /** Platform account id (12-digit string supplied at synth). */
@@ -109,8 +96,9 @@ export interface D03WorkloadAgentStackProps extends StackProps {
    */
   readonly retainDataKeys?: boolean;
   /**
-   * AZ-ID allow-list for AgentCore Runtime. Defaults to the known-supported
-   * us-east-1 AZ IDs (`use1-az1`, `-az2`, `-az4`). The stack creates a VPC
+   * AZ-ID allow-list for AgentCore Runtime. Defaults to the documented
+   * regional set for `us-east-1`, `us-west-2`, and `eu-west-1`. Other Regions
+   * require an explicit reviewed value. The stack creates a VPC
    * across CDK's AZ-name selection (which is cost-driven and not AZ-ID
    * aware), then emits an `agentcoreCompatibleSubnetIds` CfnOutput that
    * names the subset of subnets whose AZ-ID matches this allow-list.
@@ -486,11 +474,10 @@ export class D03WorkloadAgentStack extends Stack {
     // `workload` subnets that sit in AgentCore-supported AZs. Callers
     // (AgentCore Runtime stack / test harness) must read this output and
     // attach Runtime to these subnets only.
-    const supportedAzIds =
-      props.supportedAvailabilityZoneIds ??
-      (this.region === 'us-east-1'
-        ? DEFAULT_AGENTCORE_SUPPORTED_AZ_IDS_US_EAST_1
-        : undefined);
+    const supportedAzIds = resolveAgentCoreSupportedAvailabilityZoneIds(
+      this.region,
+      props.supportedAvailabilityZoneIds,
+    );
 
     if (supportedAzIds && supportedAzIds.length > 0) {
       const workloadSubnets = this.vpc.selectSubnets({ subnetGroupName: 'workload' }).subnets;

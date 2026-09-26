@@ -126,11 +126,12 @@ describe('Phase 20 — C-D: Chargeback emits a separate Athena results bucket', 
 });
 
 describe('Phase 20 — H-A: DDB cross-account access is ArnLike-bounded', () => {
-  it('PLATFORM_APPROVED_REGIONS filter keeps EU regions out of allowedBedrockResources', () => {
+  it('PLATFORM_APPROVED_REGIONS includes Ireland but excludes unapproved EMEA regions', () => {
     // M-E in same suite for efficiency.
     const arns = allowedBedrockResources('us-east-1', '111111111111');
     const joined = arns.join(',');
-    expect(joined).not.toMatch(/eu-west-1|eu-west-2|eu-central-1|eu-north-1/);
+    expect(joined).toContain('arn:aws:bedrock:eu-west-1::foundation-model/');
+    expect(joined).not.toMatch(/eu-west-2|eu-west-3|eu-central-1|eu-north-1|eu-south-1|eu-south-2/);
     expect(joined).toMatch(/us-east-1|us-east-2|us-west-2/);
   });
 });

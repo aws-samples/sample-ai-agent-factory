@@ -1,6 +1,4 @@
 {
-  "agenticai/defaultRegion": "us-west-2",
-  "agenticai/approvedRegions": ["us-west-2", "us-east-1"],
   "agenticai/bootstrapQualifier": "hnb659fds",
   "agenticai/regulated": true,
 

@@ -57,6 +57,10 @@ describe('PLATFORM_APPROVED_REGIONS', () => {
     expect(PLATFORM_APPROVED_REGIONS).toContain('us-east-1');
   });
 
+  it('includes eu-west-1 as the sole currently supported EMEA onboarding target', () => {
+    expect(PLATFORM_APPROVED_REGIONS).toContain('eu-west-1');
+  });
+
   it('is non-empty (SCP-06 cannot allow zero regions)', () => {
     expect(PLATFORM_APPROVED_REGIONS.length).toBeGreaterThan(0);
   });

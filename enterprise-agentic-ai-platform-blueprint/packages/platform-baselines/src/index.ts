@@ -23,4 +23,5 @@ export {
   allowedBedrockResources,
 } from './allowed-models';
 export { PLATFORM_APPROVED_REGIONS } from './approved-regions';
+export { resolveDeploymentRegion } from './deployment-region';
 export { GUARDRAIL_PROFILES, type GuardrailProfile } from './guardrail-profiles';

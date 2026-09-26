@@ -50,12 +50,20 @@ import {
 } from "../apps/platform-account/lib/d03-workstream-gateway-stack";
 import { GapClosureStack } from "../apps/workload-account/lib/gap-closure-stack";
 import type { InferenceModelRateLimit } from "@agenticai/platform-inference-gateway";
+import { resolveDeploymentRegion } from "@agenticai/platform-baselines";
 
 const app = new App();
 
 const stage: string | undefined = app.node.tryGetContext("stage");
 const regulated: boolean =
   app.node.tryGetContext("agenticai/regulated") !== false;
+
+function deploymentRegion(): string {
+  return resolveDeploymentRegion(
+    process.env.CDK_DEFAULT_REGION,
+    app.node.tryGetContext("agenticai/defaultRegion"),
+  );
+}
 
 /**
  * Read the platform Guardrail Admin role ARN. Until Phase 3 stands up the
@@ -338,7 +346,7 @@ switch (stage) {
     new OrgStack(app, "AgenticAI-Management-OrgStack", {
       env: {
         account: process.env.CDK_DEFAULT_ACCOUNT,
-        region: process.env.CDK_DEFAULT_REGION ?? "us-west-2",
+        region: deploymentRegion(),
       },
       platformGuardrailAdminRoleArn: guardrailAdminRoleArn(),
       attachToWorkloadsOu,
@@ -361,7 +369,7 @@ switch (stage) {
       "agenticai/logArchiveAccountId",
     );
     const auditAccount = app.node.tryGetContext("agenticai/auditAccountId");
-    const region = process.env.CDK_DEFAULT_REGION ?? "us-west-2";
+    const region = deploymentRegion();
 
     if (typeof orgId !== "string" || !orgId.startsWith("o-")) {
       throw new Error(
@@ -488,7 +496,7 @@ switch (stage) {
     );
     const vpcCidr = app.node.tryGetContext("agenticai/vpcCidr");
     const availabilityZones = stringArrayContext("agenticai/availabilityZones");
-    const region = process.env.CDK_DEFAULT_REGION ?? "us-west-2";
+    const region = deploymentRegion();
 
     const missing: string[] = [];
     if (!workloadAccount) missing.push("agenticai/workloadAccountId");
@@ -571,7 +579,7 @@ switch (stage) {
     break;
   case "d03-platform": {
     // D-03 centralised-platform deployment (see README §3.3).
-    const region = process.env.CDK_DEFAULT_REGION ?? "us-east-1";
+    const region = deploymentRegion();
     const account = process.env.CDK_DEFAULT_ACCOUNT;
     const rawIds = app.node.tryGetContext("agenticai/d03WorkloadAccountIds");
     const workloadAccountIds: readonly string[] = Array.isArray(rawIds)
@@ -642,7 +650,7 @@ switch (stage) {
     break;
   }
   case "d03-workload": {
-    const region = process.env.CDK_DEFAULT_REGION ?? "us-east-1";
+    const region = deploymentRegion();
     const account = process.env.CDK_DEFAULT_ACCOUNT;
     const platformAccountId = app.node.tryGetContext(
       "agenticai/d03PlatformAccountId",
@@ -699,7 +707,7 @@ switch (stage) {
     // the workload account must already carry the runtime role the Gateway
     // resource policy references. Deployed INTO the workload account via
     // the platform pipeline's cross-account CDK deploy role.
-    const region = process.env.CDK_DEFAULT_REGION ?? "us-east-1";
+    const region = deploymentRegion();
     const account = process.env.CDK_DEFAULT_ACCOUNT; // must be the workload account at deploy time
     const tenantId = app.node.tryGetContext("agenticai/tenantId");
     const agentId = app.node.tryGetContext("agenticai/agentId");
@@ -805,7 +813,7 @@ switch (stage) {
     // Root CDK Pipelines. Each deployed pipeline self-synthesizes only its own
     // root stack; this prevents the Platform pipeline from needing Workload
     // Registry context and lets the Workload synth resolve it just in time.
-    const region = process.env.CDK_DEFAULT_REGION ?? "us-west-2";
+    const region = deploymentRegion();
     const selectionRaw =
       app.node.tryGetContext("agenticai/pipelineSelection") ?? "both";
     if (!["platform", "workload", "both"].includes(String(selectionRaw))) {
@@ -1212,7 +1220,7 @@ switch (stage) {
     break;
   }
   case "gap-closure": {
-    const region = process.env.CDK_DEFAULT_REGION ?? "us-east-1";
+    const region = deploymentRegion();
     const account = process.env.CDK_DEFAULT_ACCOUNT;
     const tenantId = app.node.tryGetContext("agenticai/tenantId") ?? "demo";
     const agentId = app.node.tryGetContext("agenticai/agentId") ?? "primary";
