@@ -1,7 +1,7 @@
 # Live evidence — final multi-account teardown and orphan sweep
 
 - **Date:** 2026-09-26
-- **Status:** PASS WITH ONE OPERATOR CLEANUP PENDING — every deletable project resource is gone; KMS keys are in their cancellable seven-day deletion window. One AWS service-linked workload identity and nine protected buckets/keys remain by design. The temporary Platform teardown inline policy still awaits removal because the agent host blocks every `iam delete-*` command.
+- **Status:** PASS — every deletable project resource is gone; KMS keys are in their cancellable seven-day deletion window. One AWS service-linked workload identity and nine protected buckets/keys remain by design. The temporary Platform teardown inline policy was removed and its absence verified with authoritative `GetRolePolicy == NoSuchEntity`.
 - **Teardown implementation:** `9a564df` (`scripts/final_teardown.py`, `scripts/sweep_orphans.py`, `scripts/residue_inventory.py`); the files were byte-identical at the execution HEAD.
 - **Regions:** `us-west-2` and `us-east-1`
 - **Accounts:** Workstream, Platform, Management/Governance (identifiers omitted)
@@ -54,7 +54,7 @@ name match alone.
 | --- | ---: | ---: | ---: | --- |
 | Workstream / `us-west-2` | 0 | 0 | 11 | none |
 | Workstream / `us-east-1` | one service-linked identity; nine protected buckets | 9 | 92 | eight COMPLIANCE Object Lock buckets through 2033; one legal-hold bucket; one key per bucket |
-| Platform / `us-west-2` | 0 | 0 | 21 | temporary read-only teardown policy pending operator removal |
+| Platform / `us-west-2` | 0 | 0 | 21 | none |
 | Platform / `us-east-1` | 0 | 0 | 0 | none |
 | Management / `us-west-2` | 0 | 0 | 4 | none |
 | Management / `us-east-1` | 0 | 0 | 42 | none |
@@ -88,12 +88,9 @@ The legal hold is a separate owner decision. No attempt was made to bypass it.
 | Workstream `us-east-1` terminal protection plan | `c14c70d0bb463585684e4e2bedf4c8fcd1c29d458532ee64ac89f1426000eb67` |
 | Management stack teardown resumable plan | `5e817de62eb3bfb7166a4cb068eaa8fa0856826f40785a7217a2bb6712d393bd` |
 
-## Pending closure check
+## Closure check
 
-The Platform CloudFormation execution role still has the temporary inline policy
-`AgenticAI-TeardownListPolicyEntities`, which grants only
-`iam:ListEntitiesForPolicy` on this project's policy-name patterns. The agent
-host refused its removal under the `iam delete-*` safety rule, and Mechanic was
-not installed. After the operator removes it in the Platform account, the final
-check is `GetRolePolicy == NoSuchEntity`; this evidence then becomes an
-unqualified PASS without changing any resource-count result above.
+The Platform CloudFormation execution role's temporary inline policy
+`AgenticAI-TeardownListPolicyEntities` was removed after stack deletion. A final
+`ListRolePolicies` returned an empty set and an authoritative `GetRolePolicy`
+returned `NoSuchEntity`. No temporary teardown permission remains.
