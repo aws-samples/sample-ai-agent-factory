@@ -39,7 +39,7 @@ chmod +x "$STUB_DIR/bin/sleep"
 run() {
   : > "$LOG"
   : > "$LOG.policies"
-  PATH="$STUB_DIR/bin:$PATH" STUB_LOG="$LOG" "$@" bash "$SCRIPT" >"$STUB_DIR/out" 2>"$STUB_DIR/err" && echo "exit=0" || echo "exit=$?"
+  PATH="$STUB_DIR/bin:$PATH" AWS_REGION=us-west-2 STUB_LOG="$LOG" "$@" bash "$SCRIPT" >"$STUB_DIR/out" 2>"$STUB_DIR/err" && echo "exit=0" || echo "exit=$?"
 }
 
 fail() { printf 'CHECK FAILED: %s\n' "$1" >&2; exit 1; }

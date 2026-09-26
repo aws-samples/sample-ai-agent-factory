@@ -164,7 +164,7 @@ PROVIDER_TERMINAL_FAILURES = frozenset(
 # Region boundary -- this isolated campaign targets one retained deployment
 # --------------------------------------------------------------------------
 
-SUPPORTED_REGIONS = frozenset({"us-west-2"})
+SUPPORTED_REGIONS = frozenset({"us-west-2", "eu-west-1"})
 
 # --------------------------------------------------------------------------
 # Patterns transcribed from the pinned SDK / documented constraints

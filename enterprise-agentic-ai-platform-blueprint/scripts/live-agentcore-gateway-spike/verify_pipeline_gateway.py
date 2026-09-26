@@ -7,7 +7,6 @@ import hashlib
 import re
 import sys
 from dataclasses import replace
-from typing import Any, Mapping
 
 from botocore.exceptions import ClientError
 
@@ -230,7 +229,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--account-id", required=True)
     parser.add_argument("--git-head", required=True)
     parser.add_argument("--stack-name", default="Prod-InferenceGateway")
-    parser.add_argument("--region", default="us-west-2")
+    parser.add_argument("--region", required=True)
     parser.add_argument("--prefix", default="pipeline-gateway-verify")
     parser.add_argument(
         "--model",

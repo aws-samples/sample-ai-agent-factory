@@ -74,7 +74,7 @@ TERMINAL_STACK_STATES = frozenset(
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--expected-account", required=True, help="12-digit account the creds MUST belong to")
-    parser.add_argument("--region", default="us-west-2")
+    parser.add_argument("--region", required=True)
     parser.add_argument("--stack-name", required=True, help="RuntimeMemory stack exposing the RuntimeArn output")
     parser.add_argument("--duration-seconds", type=int, default=900, help="Sampling window (wall clock)")
     parser.add_argument(

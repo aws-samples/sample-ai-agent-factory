@@ -2708,7 +2708,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=COMMANDS)
     parser.add_argument("--account-id", required=True)
-    parser.add_argument("--region", default="us-west-2")
+    parser.add_argument("--region", required=True)
     parser.add_argument("--prefix", default="aiaf-pe-spike")
     parser.add_argument("--state-file")
     parser.add_argument("--evidence-file")

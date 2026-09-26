@@ -310,7 +310,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--mode", required=True, choices=("rate-limit-rpm", "rate-limit-tpm", "zero-rate", "concurrency", "soak"))
     ap.add_argument("--expected-account", required=True)
-    ap.add_argument("--region", default="us-west-2")
+    ap.add_argument("--region", required=True)
     ap.add_argument("--evidence-dir", required=True, type=Path)
     # inference legs
     ap.add_argument("--secret-arn")

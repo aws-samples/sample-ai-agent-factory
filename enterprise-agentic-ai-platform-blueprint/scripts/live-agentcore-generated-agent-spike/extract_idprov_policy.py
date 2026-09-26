@@ -28,7 +28,7 @@ def main() -> int:
     ap.add_argument("--template", required=True, type=Path)
     ap.add_argument("--role-name", required=True)
     ap.add_argument("--account", required=True)
-    ap.add_argument("--region", default="us-west-2")
+    ap.add_argument("--region", required=True)
     ap.add_argument("--partition", default="aws")
     ap.add_argument("--policy-name", default="SeedCredentialProvider")
     ap.add_argument("--out", required=True, type=Path)

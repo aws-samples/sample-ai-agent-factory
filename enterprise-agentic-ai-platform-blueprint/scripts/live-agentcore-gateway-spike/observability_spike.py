@@ -628,7 +628,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("deploy", "verify", "cleanup", "all"))
     parser.add_argument("--account-id", required=True)
-    parser.add_argument("--region", default="us-west-2")
+    parser.add_argument("--region", required=True)
     parser.add_argument("--prefix", default="aiaf-live-20260918")
     parser.add_argument("--model", default="bedrock-mantle/openai.gpt-oss-120b")
     parser.add_argument("--state-file")

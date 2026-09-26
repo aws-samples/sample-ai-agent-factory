@@ -13,15 +13,16 @@
 #   AGENTICAI_EXPECTED_ACCOUNT=<12 digits> bash scripts/recover-stranded-toolgateway.sh
 #
 # Optional: AGENTICAI_TENANT_ID (default demo), AGENTICAI_AGENT_ID (default
-# primary), AWS_REGION (default us-west-2), AGENTICAI_ENVS (default
-# "nonprod prod").
+# primary), AGENTICAI_ENVS (default "nonprod prod"). AWS_REGION or
+# AWS_DEFAULT_REGION is required.
 #
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 set -euo pipefail
 
 export AWS_PAGER=""
-REGION="${AWS_REGION:-us-west-2}"
+REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
+: "${REGION:?set AWS_REGION or AWS_DEFAULT_REGION to the explicit recovery Region}"
 TENANT_ID="${AGENTICAI_TENANT_ID:-demo}"
 AGENT_ID="${AGENTICAI_AGENT_ID:-primary}"
 ENVS="${AGENTICAI_ENVS:-nonprod prod}"

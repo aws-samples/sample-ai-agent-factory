@@ -47,6 +47,7 @@
 #   AGENTICAI_INFERENCE_MODEL_RATE_LIMITS (required JSON array for Platform)
 #   AGENTICAI_GA_REGISTRY_NONPROD_CONTEXT_FILE AGENTICAI_GA_REGISTRY_PROD_CONTEXT_FILE
 #   AGENTICAI_GA_REGISTRY_EXPECTED_TOOL_IDS     AGENTICAI_WORKSTREAM_GATEWAY_REGION
+#   CDK_DEFAULT_REGION (or AWS_REGION/AWS_DEFAULT_REGION; no implicit default)
 #
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
@@ -59,6 +60,7 @@ CDK_CONTEXT_ARGS=()
 TENANT_ID="${AGENTICAI_TENANT_ID:-demo}"
 AGENT_ID="${AGENTICAI_AGENT_ID:-primary}"
 ENV_NAME="${AGENTICAI_ENV_NAME:-nonprod}"
+DEPLOY_REGION="${CDK_DEFAULT_REGION:-${AWS_REGION:-${AWS_DEFAULT_REGION:-}}}"
 
 # Reverse dependency order: consumers before producers.
 BASE_STACKS=(
@@ -220,7 +222,7 @@ set_context_args_for_stack() {
       add_context "agenticai/gaRegistryExpectedToolIds=${AGENTICAI_GA_REGISTRY_EXPECTED_TOOL_IDS:-}"
       add_context "agenticai/gaRegistryNonprodContextFile=${AGENTICAI_GA_REGISTRY_NONPROD_CONTEXT_FILE:-}"
       add_context "agenticai/gaRegistryProdContextFile=${AGENTICAI_GA_REGISTRY_PROD_CONTEXT_FILE:-}"
-      add_context "agenticai/workstreamGatewayRegion=${AGENTICAI_WORKSTREAM_GATEWAY_REGION:-us-west-2}"
+      add_context "agenticai/workstreamGatewayRegion=${AGENTICAI_WORKSTREAM_GATEWAY_REGION:-$DEPLOY_REGION}"
       if [ -n "${AGENTICAI_GATEWAY_POLICY_ENGINE_MODE:-}" ]; then
         add_context "agenticai/gatewayPolicyEngineMode=${AGENTICAI_GATEWAY_POLICY_ENGINE_MODE}"
         add_context "agenticai/gatewayPolicyEngineNonprodIamRoleArns=${AGENTICAI_GATEWAY_POLICY_ENGINE_NONPROD_IAM_ROLE_ARNS:-}"
@@ -335,6 +337,8 @@ discover_workstream_gateway_stacks() {
     printf 'AgenticAI-D03-WorkstreamGateway-%s-%s\n' "$TENANT_ID" "$AGENT_ID"
     return 0
   fi
+  # JMESPath backticks are literals, not shell substitution.
+  # shellcheck disable=SC2016
   if ! out=$(aws cloudformation list-stacks \
       --query 'StackSummaries[?StackStatus!=`DELETE_COMPLETE`].StackName' \
       --output text 2>&1); then
@@ -725,6 +729,8 @@ print_summary() {
 
 main() {
   parse_args "$@"
+  [ -n "$DEPLOY_REGION" ] || fail 2 "set CDK_DEFAULT_REGION, AWS_REGION, or AWS_DEFAULT_REGION to the explicit teardown Region"
+  export CDK_DEFAULT_REGION="$DEPLOY_REGION"
   if [ "$DRY_RUN" = true ]; then
     require_tools npx
   else

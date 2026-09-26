@@ -79,7 +79,7 @@ def invoke(lam, function_name: str, event: dict) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--expected-account", required=True)
-    parser.add_argument("--region", default="us-west-2")
+    parser.add_argument("--region", required=True)
     parser.add_argument("--function-name", required=True)
     parser.add_argument("--ga-context", required=True, type=Path)
     parser.add_argument("--validation-revision", required=True, help="full 40-hex Git SHA of the deployed revision")

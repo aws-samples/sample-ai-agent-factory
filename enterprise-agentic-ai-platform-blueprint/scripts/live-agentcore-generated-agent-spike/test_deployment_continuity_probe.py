@@ -35,7 +35,16 @@ def _sample(index: int, version: str, passed: bool = True, stack: str = "UPDATE_
 
 
 def _args(**overrides) -> object:
-    argv = ["--expected-account", "111111111111", "--stack-name", "s", "--evidence-out", "e.json"]
+    argv = [
+        "--expected-account",
+        "111111111111",
+        "--region",
+        "us-west-2",
+        "--stack-name",
+        "s",
+        "--evidence-out",
+        "e.json",
+    ]
     for key, value in overrides.items():
         flag = "--" + key.replace("_", "-")
         if value is True:

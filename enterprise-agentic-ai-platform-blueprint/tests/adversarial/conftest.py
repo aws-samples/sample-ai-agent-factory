@@ -72,7 +72,11 @@ def _default_identity_probe():
 
     def probe(account_key: str, expected_account_id: str) -> str:
         prefix = account_key.split("-", 1)[0].upper()
-        region = os.environ.get("AWS_REGION", "us-east-1")
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        if not region:
+            raise RuntimeError(
+                "AWS_REGION or AWS_DEFAULT_REGION is required for adversarial live mode"
+            )
         access_key = os.environ.get(f"AWS_ACCESS_KEY_ID_{prefix}")
         secret_key = os.environ.get(f"AWS_SECRET_ACCESS_KEY_{prefix}")
         token = os.environ.get(f"AWS_SESSION_TOKEN_{prefix}")
@@ -108,7 +112,11 @@ def live_mode() -> LiveModeStatus:
 def region(live_mode: LiveModeStatus) -> str:
     if live_mode.resolved is not None:
         return live_mode.resolved.manifest.primary_region
-    return os.environ.get("AWS_REGION", "us-east-1")
+    return (
+        os.environ.get("AWS_REGION")
+        or os.environ.get("AWS_DEFAULT_REGION")
+        or "offline-test-region"
+    )
 
 
 @pytest.fixture(scope="session")

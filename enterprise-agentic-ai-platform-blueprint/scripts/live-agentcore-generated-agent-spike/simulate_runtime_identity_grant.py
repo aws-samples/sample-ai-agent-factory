@@ -46,7 +46,7 @@ def main() -> int:
     ap.add_argument("--template", required=True, type=Path)
     ap.add_argument("--role-name", required=True)
     ap.add_argument("--account", required=True)
-    ap.add_argument("--region", default="us-west-2")
+    ap.add_argument("--region", required=True)
     ap.add_argument("--partition", default="aws")
     ap.add_argument("--workload-prefix", default="AgenticAI_D03_nonprod_demo_primary")
     ap.add_argument("--provider-name", default="AgenticAI_D03_nonprod_demo_primary_inference")

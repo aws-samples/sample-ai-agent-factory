@@ -549,3 +549,9 @@ def test_token_shape_proofs():
     assert not model.workload_access_token_ok(None)
     assert model.resource_token_ok("y" * 40)
     assert not model.resource_token_ok("")
+
+
+def test_region_gate_includes_ireland_only_after_review() -> None:
+    assert model.region_is_supported("us-west-2")
+    assert model.region_is_supported("eu-west-1")
+    assert not model.region_is_supported("eu-central-1")

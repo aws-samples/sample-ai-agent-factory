@@ -89,7 +89,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--mode", choices=("positive", "wrong-account", "unsubscribed-tool"), required=True)
     parser.add_argument("--expected-account", required=True, help="12-digit account the creds MUST belong to")
-    parser.add_argument("--region", default="us-west-2")
+    parser.add_argument("--region", required=True)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--stack-name", help="RuntimeMemory stack exposing RuntimeArn/MemoryId outputs")
     group.add_argument("--runtime-arn", help="Explicit Runtime ARN (bypasses stack lookup)")

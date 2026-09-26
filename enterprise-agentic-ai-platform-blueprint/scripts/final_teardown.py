@@ -35,9 +35,9 @@ account the credentials must belong to, so the tool cannot delete in the wrong
 account or touch unrelated stacks. Run the roles in this order — workstream,
 then platform, then management — each with that account's credentials:
 
-    python3 scripts/final_teardown.py --account-role workstream --expected-account <12-digit id>
-    python3 scripts/final_teardown.py --account-role workstream --expected-account <12-digit id> --apply
-    python3 scripts/final_teardown.py --account-role workstream --expected-account <12-digit id> --resume-residue
+    python3 scripts/final_teardown.py --account-role workstream --expected-account <12-digit id> --region <region>
+    python3 scripts/final_teardown.py --account-role workstream --expected-account <12-digit id> --region <region> --apply
+    python3 scripts/final_teardown.py --account-role workstream --expected-account <12-digit id> --region <region> --resume-residue
 
 Retire the Platform tool-alias grants first only when the Platform Registry
 stacks stay (the grants are deleted with the aliases when they go too).
@@ -56,9 +56,6 @@ from pathlib import Path
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError, WaiterError
-
-DEFAULT_REGION = "us-west-2"
-
 
 def build_plan(tenant: str, agent: str) -> dict[str, list[str]]:
     """Dependency order per account (first deleted first).
@@ -138,7 +135,7 @@ def missing_operations(session: boto3.Session) -> list[str]:
         if service not in available:
             missing.append(f"{service} (service unknown to botocore)")
             continue
-        model = session.client(service, region_name=session.region_name or DEFAULT_REGION).meta.service_model
+        model = session.client(service, region_name=session.region_name).meta.service_model
         missing.extend(f"{service}:{op}" for op in operations if op not in model.operation_names)
     return missing
 
@@ -435,7 +432,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--account-role", required=True, choices=ROLES)
     ap.add_argument("--expected-account", required=True)
-    ap.add_argument("--region", default=DEFAULT_REGION)
+    ap.add_argument("--region", required=True)
     ap.add_argument("--tenant-id", default="demo")
     ap.add_argument("--agent-id", default="primary")
     ap.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR, help="where the resumable plan is kept")

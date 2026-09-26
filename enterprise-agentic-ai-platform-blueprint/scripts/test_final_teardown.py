@@ -145,7 +145,20 @@ class FakeAccount:
 
 def run_main(monkeypatch, tmp_path: Path, fake: FakeAccount, *argv: str) -> int:
     monkeypatch.setattr(ft, "Account", lambda expected, region: fake)
-    monkeypatch.setattr(sys, "argv", ["final_teardown.py", "--expected-account", ACCOUNT, "--state-dir", str(tmp_path), *argv])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "final_teardown.py",
+            "--expected-account",
+            ACCOUNT,
+            "--region",
+            "us-west-2",
+            "--state-dir",
+            str(tmp_path),
+            *argv,
+        ],
+    )
     return ft.main()
 
 

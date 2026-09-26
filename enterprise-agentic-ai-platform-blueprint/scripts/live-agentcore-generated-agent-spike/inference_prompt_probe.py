@@ -97,7 +97,7 @@ def main() -> int:
     ap.add_argument("--inference-gateway-url", required=True)
     ap.add_argument("--model-id", required=True)
     ap.add_argument("--guardrail-id", required=True)
-    ap.add_argument("--region", default="us-west-2")
+    ap.add_argument("--region", required=True)
     ap.add_argument("--repeats", type=int, default=2)
     args = ap.parse_args()
 

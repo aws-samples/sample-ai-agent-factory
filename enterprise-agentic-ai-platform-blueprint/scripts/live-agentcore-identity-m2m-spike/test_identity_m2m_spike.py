@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import boto3
 import pytest
@@ -399,7 +399,7 @@ def _read(path: Path) -> str:
 
 def test_build_config_rejects_bad_account(scratch):
     args = spike.parse_args(
-        ["deploy", "--source-revision", SOURCE_REVISION, "--account-id", "abc", "--user-pool-id", "p", "--client-id", "c",
+        ["deploy", "--source-revision", SOURCE_REVISION, "--account-id", "abc", "--region", REGION, "--user-pool-id", "p", "--client-id", "c",
          "--issuer", "https://i.example.com", "--authorization-endpoint", "https://i.example.com/a",
          "--token-endpoint", "https://i.example.com/t", "--resource-scope", "r/s",
          "--gateway-url", "https://g.example.com", "--model-id", "m"]
@@ -424,7 +424,7 @@ def test_build_config_requires_scratch(tmp_path, monkeypatch):
     monkeypatch.delenv("KIROCREW_SCRATCH", raising=False)
     args = spike.parse_args(
         ["deploy", "--source-revision", SOURCE_REVISION,
-         "--account-id", ACCOUNT, "--user-pool-id", USER_POOL_ID,
+         "--account-id", ACCOUNT, "--region", REGION, "--user-pool-id", USER_POOL_ID,
          "--client-id", "exampleclientid123", "--issuer", ISSUER,
          "--authorization-endpoint", AUTHORIZATION_ENDPOINT,
          "--token-endpoint", TOKEN_ENDPOINT, "--resource-scope", "res-server/invoke",
