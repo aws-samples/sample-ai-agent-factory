@@ -44,14 +44,16 @@ import {
   BlockPublicAccess,
   Bucket,
   BucketEncryption,
-  ObjectLockMode,
   ObjectLockRetention,
 } from 'aws-cdk-lib/aws-s3';
 import { Topic } from 'aws-cdk-lib/aws-sns';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
-import { allowedBedrockResources } from '@agenticai/platform-baselines';
+import {
+  allowedBedrockResources,
+  assertEmeaProfilePathSupported,
+} from '@agenticai/platform-baselines';
 
 import {
   DEFAULT_EVAL_THRESHOLDS,
@@ -92,6 +94,7 @@ export class EvaluationGatesConstruct extends Construct {
     super(scope, id);
 
     const stack = Stack.of(this);
+    assertEmeaProfilePathSupported(stack.region, 'EvaluationGatesConstruct');
 
     this.thresholds = { ...DEFAULT_EVAL_THRESHOLDS, ...(props.thresholds ?? {}) };
     validateThresholds(this.thresholds);

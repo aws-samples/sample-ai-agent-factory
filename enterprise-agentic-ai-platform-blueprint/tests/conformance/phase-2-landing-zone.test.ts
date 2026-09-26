@@ -15,12 +15,13 @@ import { Template } from 'aws-cdk-lib/assertions';
 import { LogArchiveStack } from '../../apps/platform-account/lib/log-archive-stack';
 import { AuditStack } from '../../apps/platform-account/lib/audit-stack';
 
-function synthLogArchive() {
+function synthLogArchive(retainOnDelete?: boolean) {
   const app = new App();
   const stack = new LogArchiveStack(app, 'TestLogArchive', {
     env: { account: '333333333333', region: 'us-west-2' },
     organizationId: 'o-example123',
     workloadAccountIds: ['444444444444', '555555555555'],
+    retainOnDelete,
   });
   return Template.fromStack(stack);
 }
@@ -108,6 +109,82 @@ describe('Phase 2 — LogArchiveStack', () => {
     });
   });
 
+  it('provisions the encrypted on-demand Kinesis target and Logs delivery role', () => {
+    const t = synthLogArchive();
+    t.hasResourceProperties('AWS::Kinesis::Stream', {
+      Name: 'agenticai-central-logs',
+      RetentionPeriodHours: 24,
+      StreamModeDetails: { StreamMode: 'ON_DEMAND' },
+      StreamEncryption: {
+        EncryptionType: 'KMS',
+        KeyId: { 'Fn::GetAtt': ['LogArchiveLogArchiveKey88359CE6', 'Arn'] },
+      },
+    });
+    t.hasResourceProperties('AWS::IAM::Role', {
+      RoleName: 'AgenticAI-LogArchive-CWLDestinationRole',
+    });
+
+    const resources = t.toJSON().Resources as Record<string, any>;
+    const destinationEntry = Object.entries(resources).find(
+      ([, resource]) => resource.Type === 'AWS::Logs::Destination',
+    );
+    expect(destinationEntry).toBeDefined();
+    const [, destination] = destinationEntry!;
+    expect(JSON.stringify(destination.Properties.RoleArn)).toContain('CloudWatchLogsDestinationRole');
+    expect(JSON.stringify(destination.Properties.TargetArn)).toContain('CentralLogStream');
+
+    const destinationRoleEntry = Object.entries(resources).find(
+      ([, resource]) =>
+        resource.Type === 'AWS::IAM::Role' &&
+        resource.Properties.RoleName === 'AgenticAI-LogArchive-CWLDestinationRole',
+    );
+    expect(destinationRoleEntry).toBeDefined();
+    const [destinationRoleId, destinationRole] = destinationRoleEntry!;
+    const trust = JSON.stringify(destinationRole.Properties.AssumeRolePolicyDocument);
+    expect(trust).toContain('logs.amazonaws.com');
+    expect(trust).toContain(':logs:us-west-2:444444444444:*');
+    expect(trust).toContain(':logs:us-west-2:555555555555:*');
+
+    const destinationPolicyEntry = Object.entries(resources).find(
+      ([, resource]) =>
+        resource.Type === 'AWS::IAM::Policy' &&
+        resource.Properties.Roles.some((role: any) => role.Ref === destinationRoleId),
+    );
+    expect(destinationPolicyEntry).toBeDefined();
+    const [destinationPolicyId, destinationPolicy] = destinationPolicyEntry!;
+    const grantedActions = destinationPolicy.Properties.PolicyDocument.Statement.flatMap(
+      (statement: any) =>
+        Array.isArray(statement.Action) ? statement.Action : [statement.Action],
+    );
+    expect(grantedActions).toEqual(
+      expect.arrayContaining(['kinesis:PutRecord', 'kinesis:PutRecords', 'kms:GenerateDataKey*']),
+    );
+    expect(destination.DependsOn).toEqual(expect.arrayContaining([destinationPolicyId]));
+  });
+
+  it('destroys nonproduction archives but retains the production-default archives', () => {
+    const ephemeral = synthLogArchive(false).toJSON().Resources as Record<string, any>;
+    for (const resource of Object.values(ephemeral)) {
+      if (['AWS::S3::Bucket', 'AWS::KMS::Key', 'AWS::Kinesis::Stream'].includes(resource.Type)) {
+        expect(resource.DeletionPolicy).toBe('Delete');
+        expect(resource.UpdateReplacePolicy).toBe('Delete');
+      }
+    }
+    expect(
+      Object.values(ephemeral).filter(
+        (resource) => resource.Type === 'Custom::S3AutoDeleteObjects',
+      ),
+    ).toHaveLength(3);
+
+    const retained = synthLogArchive().toJSON().Resources as Record<string, any>;
+    for (const resource of Object.values(retained)) {
+      if (['AWS::S3::Bucket', 'AWS::KMS::Key', 'AWS::Kinesis::Stream'].includes(resource.Type)) {
+        expect(resource.DeletionPolicy).toBe('Retain');
+        expect(resource.UpdateReplacePolicy).toBe('Retain');
+      }
+    }
+  });
+
   it('CWL destination policy trusts the provided workload account ids', () => {
     const t = synthLogArchive();
     const dests = t.findResources('AWS::Logs::Destination');
@@ -117,9 +194,11 @@ describe('Phase 2 — LogArchiveStack', () => {
     // Destination policies may serialise as either a string or an object.
     const parsed: { Statement: any[] } =
       typeof rawPolicy === 'string' ? JSON.parse(rawPolicy) : (rawPolicy as any);
-    const principalArns = parsed.Statement[0].Principal.AWS;
-    expect(principalArns).toContain('arn:aws:iam::444444444444:root');
-    expect(principalArns).toContain('arn:aws:iam::555555555555:root');
+    const principalAccountIds: string[] = parsed.Statement[0].Principal.AWS;
+    expect(principalAccountIds).toEqual(
+      expect.arrayContaining(['444444444444', '555555555555']),
+    );
+    expect(principalAccountIds.every((principal) => /^\d{12}$/.test(principal))).toBe(true);
   });
 });
 

@@ -7,6 +7,10 @@
  * several AWS services (Organizations, IAM Identity Center, CloudFront) are
  * global-from-us-east-1 and workloads occasionally touch them. It is also
  * the region where the D-03 v3 live verification was performed (2026-05-05).
+ * `eu-west-1` is the EMEA onboarding target: as of 2026-09-26 it is the only
+ * European Region that offers AWS Agent Registry, which the governed R2 tool
+ * path requires. Adding it to this list authorizes only the Region boundary;
+ * live readiness still requires the independent EMEA matrix in README §15.
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
@@ -19,4 +23,5 @@
 export const PLATFORM_APPROVED_REGIONS: readonly string[] = [
   'us-west-2',
   'us-east-1',
+  'eu-west-1',
 ] as const;

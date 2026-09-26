@@ -1,48 +1,217 @@
 # @agenticai/platform-inference-gateway
 
-D-03 centralised-platform **PrivateLink primitive**. Stands up the *network*
-half of the workload-to-platform inference path described in
-README §3.3, residual-risks row "Cross-account PrivateLink →
-LiteLLM attack surface".
+Pipeline-owned central inference path for Amazon Bedrock AgentCore. It replaces
+the former NLB/LiteLLM placeholder with a real AgentCore Gateway, a Bedrock
+Mantle inference target, Cognito machine-to-machine authentication, and native
+Gateway model rate limits.
 
-## What it emits
+## Resources
 
-1. An internal `NetworkLoadBalancer` in the platform-account VPC (multi-AZ,
-   private-isolated subnets, deletion-protection on, S3 access logging on).
-2. A listener on TCP:443 (or TLS:443 if you pass an ACM `certificate`).
-3. A `NetworkTargetGroup` of type `ALB`. When `targetAlb` is passed it
-   registers that ALB via `AlbArnTarget`. When omitted the target group is
-   empty — so the D-03 *current* shape (`AssumeRole → Bedrock direct`) still
-   synths cleanly; wire the LiteLLM ALB in later by re-running CDK with
-   `targetAlb` set.
-4. A `VpcEndpointService` wrapping the NLB with
-   `acceptanceRequired: false` and `AllowedPrincipals` locked to the
-   `arn:aws:iam::<acct>:root` of each workload account id you supply.
-5. `CfnOutput` of the endpoint service name — pass it to each workload
-   account via context / SSM / pipeline parameter.
+The construct emits:
 
-## When to pass `targetAlb`
+1. An `AWS::BedrockAgentCore::Gateway` using MCP protocol version `2025-11-25`.
+2. An `AWS::BedrockAgentCore::GatewayTarget` whose inference connector is
+   `bedrock-mantle` and whose outbound credential provider is
+   `GATEWAY_IAM_ROLE`.
+3. An `AWS::BedrockAgentCore::GatewayRateLimit` with one explicit RPM/TPM entry
+   per configured provider-qualified model and a final zero-request wildcard.
+4. A Cognito User Pool, resource server, confidential client-credentials app
+   client, and Cognito domain for `CUSTOM_JWT` inbound authentication.
+5. A Gateway role with only `bedrock-mantle:ListModels`,
+   `bedrock-mantle:CreateInference` pinned to the allocated models with the
+   `bedrock-mantle:Model` condition (both the provider-qualified id and the
+   provider-stripped alias), and `lambda:InvokeFunction` on exactly the
+   guardrail interceptor. Its trust policy requires the same account and the
+   named Gateway ARN pattern.
+6. A Gateway REQUEST interceptor (`lambda/guardrail-interceptor/index.py`) with
+   its own role (`bedrock:ApplyGuardrail` on exactly the configured guardrail
+   ARN plus basic logging). The Gateway is created with
+   `InterceptorConfigurations` naming that function, `interceptionPoints:
+["REQUEST"]` and `passRequestHeaders: false`.
 
-- **Don't pass** while D-03 runs its current `AssumeRole → Bedrock`
-  shape. The construct still provisions the NLB + endpoint service so
-  cross-account consumers can wire VPCE scaffolding today.
-- **Pass** when a platform-account LiteLLM deployment exists and you want
-  workload agents to hit it cross-account. The ALB must already expose a
-  listener on `targetAlbPort` (default 443); the NLB forwards at L4.
+The Cognito client secret is managed by Cognito and is never emitted as a
+CloudFormation output. The stack outputs the client ID, token endpoint, OAuth
+scope, Gateway URL, target ID, target name, rate-limit ID, the interceptor
+function ARN, and the enforced guardrail identifier and version.
 
-## Consumer wiring
+## Server-side guardrail enforcement
 
-In a workload account:
+Live on 2026-09-24 the Bedrock Mantle connector was proven to ignore a
+client-supplied `guardrail_identifier` (a bogus or absent value still returned
+HTTP 200): the Gateway calls Mantle under its own role, the parameter is not part
+of the OpenAI contract, `bedrock-mantle` exposes no guardrail IAM condition key,
+and AgentCore Policy guardrail providers accept only string data paths while the
+OpenAI `messages` field is a set of records (the strict schema validator rejects
+`context.input.messages` for `BedrockGuardrails::PromptAttack`). The construct
+therefore requires `inputGuardrail` and enforces it with a REQUEST interceptor:
+
+| Interceptor outcome                                    | Gateway response                   |
+| ------------------------------------------------------ | ---------------------------------- |
+| Guardrail intervened with a `BLOCKED` action           | HTTP 403 `guardrail_intervened`    |
+| Guardrail API error, throttle, or misconfiguration     | HTTP 503 `guardrail_unavailable`   |
+| Request text above `maxGuardedCharacters` (200 000)    | HTTP 413 `guarded_input_too_large` |
+| Body is not a JSON object                              | HTTP 400 `invalid_request_error`   |
+| No evaluable text (`GET /models`, empty body), or pass | Request forwarded unchanged        |
+
+The guarded content follows Bedrock's own guarded-content convention (Converse
+`guardContent` blocks, InvokeModel input tags): the untrusted turns are
+evaluated — `user`, `tool`/`function` and role-less messages, text parts
+included, plus bare `input`/`prompt` strings — while the pipeline-owned
+`system`/`developer` prompt, top-level `system`/`instructions` and prior
+`assistant` output sit outside the guard. Guarding the system prompt is not an
+option: the prompt-attack classifier scores any instruction-shaped text, and the
+reference agent's own protocol prompt scored `PROMPT_ATTACK` HIGH live on
+2026-09-24, which refused every governed agent call. Each untrusted turn is
+scored on its own `ApplyGuardrail` call (turns run concurrently; a long turn is
+chunked into 25 000-character calls) with `source=INPUT` — never concatenated
+with other turns, because the prompt-attack classifier scores unrelated turns
+differently when joined (a benign request plus a benign tool result scored
+`PROMPT_ATTACK` LOW only when evaluated together). Agents must therefore send
+prior turns as separate messages rather than collapsing them into one user turn;
+the reference agent's Strands adapter does so. Anonymize-only interventions
+(for example email masking) do not block; only `BLOCKED` actions do. The
+interceptor never logs or echoes request text; the 403 body names the guardrail
+id/version and the tripped assessment types only (`error.code`,
+`error.guardrail`, `error.tripped`); that body is the client contract because
+the Gateway does not propagate custom headers from a short-circuit response. Request headers are never
+passed to the interceptor. The offline handler tests live next to the handler
+(`python -m pytest packages/platform-inference-gateway/lambda/guardrail-interceptor -q`).
+
+Wire the same stage's baseline guardrail from `GuardrailStack`:
 
 ```ts
-const vpce = new InterfaceVpcEndpoint(this, 'PlatformInferenceVpce', {
-  vpc,
-  service: new InterfaceVpcEndpointService(platformInferenceServiceName, 443),
-  subnets: { subnetGroupName: 'vpce' },
-  securityGroups: [vpceSg],
-  privateDnsEnabled: false,
+inputGuardrail: {
+  guardrailIdentifier: guardrail.baseline.guardrail.attrGuardrailId,
+  guardrailVersion: guardrail.baseline.guardrail.attrVersion,
+  guardrailArn: guardrail.baseline.guardrail.attrGuardrailArn,
+},
+```
+
+## Model identifiers
+
+Invocation and rate-limit identifiers are intentionally different. AgentCore
+prefixes every discovered model ID with the Gateway **target name**, not the
+connector ID:
+
+```text
+InferenceTargetName output: agenticai-inference-prod-bedrock
+LiteLLMModel route:         agenticai-inference-prod-bedrock/openai.gpt-oss-120b
+Rate-limit key:             openai.gpt-oss-120b
+```
+
+Construct the route as `<InferenceTargetName>/<qualifiedModelId>` or select the
+exact ID returned by `/inference/v1/models`; never hard-code `bedrock-mantle` as
+the route prefix unless that is the target's actual name. Passing a target-prefixed
+route as `qualifiedModelId` fails synthesis. Duplicate models, missing allocations,
+fractional rates, zero positive rates, and rates above the service maximum also
+fail synthesis.
+
+## CDK usage
+
+```ts
+new PlatformInferenceGatewayConstruct(this, "InferenceGateway", {
+  envName: "nonprod",
+  applicationId: "platform-inference",
+  agentId: "shared",
+  tenantId: "shared",
+  costCentre: "platform",
+  inputGuardrail: {
+    guardrailIdentifier: guardrail.baseline.guardrail.attrGuardrailId,
+    guardrailVersion: guardrail.baseline.guardrail.attrVersion,
+    guardrailArn: guardrail.baseline.guardrail.attrGuardrailArn,
+  },
+  modelRateLimits: [
+    {
+      qualifiedModelId: "openai.gpt-oss-120b",
+      requestsPerMinute: 10,
+      tokensPerMinute: 10_000,
+    },
+  ],
 });
 ```
 
-See `apps/workload-account/lib/d03-workload-agent-stack.ts` for the
-production wiring.
+The Platform CDK app requires the same allocation through context:
+
+```bash
+MODEL_LIMITS='[{"qualifiedModelId":"openai.gpt-oss-120b","requestsPerMinute":10,"tokensPerMinute":10000}]'
+
+npx cdk synth --strict \
+  --context stage=platform \
+  --context agenticai/organizationId=o-example123 \
+  --context agenticai/platformAccountId=111111111111 \
+  --context agenticai/pipelineRoleArn=arn:aws:iam::111111111111:role/ExamplePipelineRole \
+  --context agenticai/inferenceModelRateLimits="$MODEL_LIMITS"
+```
+
+Use placeholder values only for offline synthesis. Real deployment belongs to
+the Platform pipeline, which creates separate nonproduction and production
+Gateway stacks. Workstream builders must not deploy this stack or deploy
+anything directly into a workstream account.
+
+## Agent configuration
+
+Generated Strands agents configure `LiteLLMModel` with:
+
+```python
+provider_model_id = "openai.gpt-oss-120b"
+model_route = f"{inference_target_name}/{provider_model_id}"
+
+LiteLLMModel(
+    model_id=f"openai/{model_route}",
+    client_args={
+        "api_base": f"{gateway_url}/inference/v1",
+        "api_key": access_token,
+    },
+)
+```
+
+`inference_target_name` comes from the `InferenceTargetName` stack output. The
+access token comes from the output Cognito token endpoint using the client
+credentials grant and the output OAuth scope. The endpoint is derived from
+CDK's `UserPoolDomain.baseUrl()` so managed domains use the required
+`amazoncognito.com` suffix rather than the AWS service API suffix. Secrets and
+access tokens stay in process memory and must not be written to evidence or
+logs.
+
+## Security semantics
+
+Rate limiting runs before AgentCore Policy and is fail-open. The wildcard
+zero-rate entry is a normal-operation traffic control, not an authorization
+boundary. Authentication, Gateway Policy in `ENFORCE` mode, Guardrails, IAM,
+and SCP controls remain required before production release.
+
+Every taggable resource receives exactly these allocation tags:
+`application-id`, `agent-id`, `tenant-id`, `cost-centre`, and `environment`.
+Gateway targets and rate limits currently expose no tag property in their
+CloudFormation resource contracts.
+
+## Test
+
+```bash
+npm run build
+npx jest --runInBand tests/conformance/phase-9-platform-inference-gateway.test.ts
+npm run lint
+npm run scrub
+```
+
+The compatibility spike under `scripts/live-agentcore-gateway-spike/` is the
+live proof for Cognito JWT, `LiteLLMModel`, streaming, non-streaming, HTTP 429,
+and cleanup. OTEL span correlation remains explicitly blocked in `us-west-2`;
+do not interpret resource synthesis as observability proof.
+
+## Cleanup
+
+For a standalone nonproduction stack, set the same context used at deployment
+and run:
+
+```bash
+export AGENTICAI_INFERENCE_MODEL_RATE_LIMITS="$MODEL_LIMITS"
+bash scripts/teardown.sh \
+  --stack AgenticAI-Platform-InferenceGatewayStack
+```
+
+The teardown script is fail-closed: it refuses to synthesize this stack without
+`AGENTICAI_PLATFORM_ACCOUNT_ID`, `AGENTICAI_PIPELINE_ROLE_ARN`,
+`AGENTICAI_ORGANIZATION_ID`, and `AGENTICAI_INFERENCE_MODEL_RATE_LIMITS`.
+Pipeline-created stage stacks are removed through the pipeline/CloudFormation
+lifecycle rather than an out-of-band workstream deployment.

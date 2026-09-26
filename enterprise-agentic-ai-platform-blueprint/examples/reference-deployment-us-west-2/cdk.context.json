@@ -1,6 +1,4 @@
 {
-  "agenticai/defaultRegion": "us-west-2",
-  "agenticai/approvedRegions": ["us-west-2", "us-east-1"],
   "agenticai/bootstrapQualifier": "hnb659fds",
   "agenticai/regulated": true,
 
@@ -18,7 +16,6 @@
 
   "agenticai/workloadAccountIds": ["000000000007", "000000000008"],
 
-  "agenticai/pipelineRoleArn": "arn:aws:iam::000000000005:role/AgenticAI-PlatformPipelineRole",
   "agenticai/guardrailAdminRoleArn": "arn:aws:iam::000000000005:role/AgenticAI-GuardrailAdmin",
   "agenticai/auditOamSinkArn": "arn:aws:oam:us-west-2:000000000003:sink/REPLACE-ME",
 

@@ -4,7 +4,10 @@
  * Under D-03 v3, AgentCore Gateway is deployed into the workstream account by
  * the platform pipeline but is PLATFORM-GOVERNED. Any mutation of the Gateway
  * (changing targets, Cedar, the Lambda interceptor, or tags) must only be
- * possible from the `AgenticAI-D03-GatewayAdmin` role in the platform account.
+ * possible only from environment-qualified `AgenticAI-D03-*-GatewayAdmin`
+ * roles in configured Workstream accounts. Those roles are created by the
+ * Workload pipeline before Gateway deployment and trust only Lambda, so the
+ * AgentCore API call executes in the account that owns the Gateway.
  * Every other principal — including the workload account's root / admin IAM
  * user / any runtime role — must be denied.
  *
@@ -21,57 +24,82 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { toScpDefinition, type ScpDefinition } from './index';
+import { toScpDefinition, type ScpDefinition } from "./index";
 
 export interface Scp09Options {
-  /** Platform account id hosting `AgenticAI-D03-GatewayAdmin`. Required. */
-  readonly platformAccountId: string;
+  /** Workstream accounts hosting pipeline-created environment GatewayAdmin roles. */
+  readonly workloadAccountIds: readonly string[];
 }
 
-export function scp09GatewayMutationLockdown(opts: Scp09Options): ScpDefinition {
-  if (!/^[0-9]{12}$/.test(opts.platformAccountId)) {
+export function scp09GatewayMutationLockdown(
+  opts: Scp09Options,
+): ScpDefinition {
+  const workloadAccountIds = [...new Set(opts.workloadAccountIds)].sort();
+  if (
+    workloadAccountIds.length === 0 ||
+    workloadAccountIds.some((accountId) => !/^[0-9]{12}$/.test(accountId))
+  ) {
     throw new Error(
-      `SCP-09: platformAccountId must be a 12-digit AWS account id; got '${opts.platformAccountId}'.`,
+      "SCP-09: workloadAccountIds must be a non-empty list of 12-digit account IDs.",
     );
   }
 
-  const adminRoleArn = `arn:aws:iam::${opts.platformAccountId}:role/AgenticAI-D03-GatewayAdmin`;
-  const adminRoleSessionArn = `arn:aws:sts::${opts.platformAccountId}:assumed-role/AgenticAI-D03-GatewayAdmin/*`;
+  const adminRoleArns = workloadAccountIds.map(
+    (accountId) =>
+      `arn:aws:iam::${accountId}:role/AgenticAI-D03-*-GatewayAdmin`,
+  );
+  const adminRoleSessionArns = workloadAccountIds.map(
+    (accountId) =>
+      `arn:aws:sts::${accountId}:assumed-role/AgenticAI-D03-*-GatewayAdmin/*`,
+  );
+
+  const exemptCondition = {
+    ArnNotLike: {
+      "aws:PrincipalArn": [...adminRoleArns, ...adminRoleSessionArns],
+    },
+    BoolIfExists: {
+      "aws:PrincipalIsAWSService": "false",
+    },
+  };
 
   const body = {
-    Version: '2012-10-17',
+    Version: "2012-10-17",
     Statement: [
       {
-        Sid: 'DenyGatewayMutationExceptPlatformAdmin',
-        Effect: 'Deny',
+        Sid: "DenyGatewayMutationExceptPlatformAdmin",
+        Effect: "Deny",
         Action: [
-          'bedrock-agentcore:CreateGateway',
-          'bedrock-agentcore:UpdateGateway',
-          'bedrock-agentcore:DeleteGateway',
-          'bedrock-agentcore:CreateGatewayTarget',
-          'bedrock-agentcore:UpdateGatewayTarget',
-          'bedrock-agentcore:DeleteGatewayTarget',
-          'bedrock-agentcore:SynchronizeGatewayTargets',
-          'bedrock-agentcore:TagResource',
-          'bedrock-agentcore:UntagResource',
+          "bedrock-agentcore:UpdateGateway",
+          "bedrock-agentcore:DeleteGateway",
+          "bedrock-agentcore:CreateGatewayTarget",
+          "bedrock-agentcore:UpdateGatewayTarget",
+          "bedrock-agentcore:DeleteGatewayTarget",
+          "bedrock-agentcore:SynchronizeGatewayTargets",
+          "bedrock-agentcore:TagResource",
+          "bedrock-agentcore:UntagResource",
         ],
-        Resource: 'arn:aws:bedrock-agentcore:*:*:gateway/*',
-        Condition: {
-          ArnNotLike: {
-            'aws:PrincipalArn': [adminRoleArn, adminRoleSessionArn],
-          },
-          BoolIfExists: {
-            'aws:PrincipalIsAWSService': 'false',
-          },
-        },
+        Resource: "arn:aws:bedrock-agentcore:*:*:gateway/*",
+        Condition: exemptCondition,
+      },
+      {
+        // LIVE-FOUND GAP (IAM evaluator, 2026-09-25): a create call has no
+        // Gateway ARN yet and authorizes against "*", so CreateGateway inside
+        // the gateway-scoped statement above never matched — any principal
+        // could create a rogue Gateway. It gets its own "*" statement; the
+        // action is Gateway-specific, so "*" widens nothing else.
+        Sid: "DenyGatewayCreationExceptPlatformAdmin",
+        Effect: "Deny",
+        Action: ["bedrock-agentcore:CreateGateway"],
+        Resource: "*",
+        Condition: exemptCondition,
       },
     ],
   };
 
   return toScpDefinition(
-    'scp-09',
-    'AgenticAI-SCP-09-GatewayMutationLockdown',
-    'Only the platform AgenticAI-D03-GatewayAdmin role may create or mutate AgentCore Gateways (D-03 v3).',
+    "scp-09",
+    "AgenticAI-SCP-09-GatewayMutationLockdown",
+    "Only pipeline-created, environment-qualified Workstream GatewayAdmin roles may mutate AgentCore Gateways.",
     body,
   );
 }

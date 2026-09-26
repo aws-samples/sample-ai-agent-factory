@@ -27,7 +27,9 @@ except ImportError:  # pragma: no cover
 def _session_from_env(prefix: str, default_profile: str) -> Optional['boto3.session.Session']:
     if boto3 is None:
         return None
-    region = os.environ.get('AWS_REGION', 'us-east-1')
+    region = os.environ.get('AWS_REGION') or os.environ.get('AWS_DEFAULT_REGION')
+    if not region:
+        return None
     ak = os.environ.get(f'AWS_ACCESS_KEY_ID_{prefix}')
     sk = os.environ.get(f'AWS_SECRET_ACCESS_KEY_{prefix}')
     st = os.environ.get(f'AWS_SESSION_TOKEN_{prefix}')
@@ -47,7 +49,10 @@ def _session_from_env(prefix: str, default_profile: str) -> Optional['boto3.sess
 
 @pytest.fixture(scope='session')
 def region() -> str:
-    return os.environ.get('AWS_REGION', 'us-east-1')
+    value = os.environ.get('AWS_REGION') or os.environ.get('AWS_DEFAULT_REGION')
+    if not value:
+        pytest.skip('AWS_REGION or AWS_DEFAULT_REGION is required for live teardown tests')
+    return value
 
 
 @pytest.fixture(scope='session')

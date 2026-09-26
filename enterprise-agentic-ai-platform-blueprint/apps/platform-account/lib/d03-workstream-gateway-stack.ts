@@ -4,60 +4,81 @@
  * Deployed INTO the workload account (the workstream's own account) by the
  * platform pipeline via cross-account CDK deploy role. One stack per
  * `(tenantId, agentId)` allocation — each allocation gets a dedicated
- * Gateway + N Targets where N = `allowedToolIds.length`.
+ * Gateway + N Targets where N = the APPROVED GA Registry records it subscribes
+ * to (`gaRegistryContext.records`). The legacy v0.4.0 `allowedToolIds`
+ * catalogue path was retired on 2026-09-25.
  *
  * D-03 v3 three-layer tool-governance model, runtime enforcement layer 3:
- *   - Layer 1 (synth-time): `resolveSubscribedTools()` throws if any id is
- *     not in the PLATFORM_TOOL_CATALOGUE SSOT or is marked deprecated.
+ *   - Layer 1 (synth-time): the pipeline-resolved GA Registry context must
+ *     match the expected tool IDs, environment and Platform account, and each
+ *     record is re-validated (status + descriptor digest) at deploy time.
  *   - Layer 2 (SCP-10, org-level): denies `lambda:InvokeFunction` on any
  *     ARN that is not an approved tool alias.
  *   - Layer 3 (this stack): GatewayServiceRole IAM policy lists exactly the
  *     resolved tool target ARNs. No wildcards; no extras. The Gateway
  *     physically cannot invoke anything outside the subscribed set.
  *
- * AgentCore API shape (CreateGateway + CreateGatewayTarget) is SDK-only as of
- * the cut of this blueprint — no CloudFormation L1 exists — so we wrap the
- * calls in `AwsCustomResource`, matching the pattern used by
- * `D03PlatformCoreStack.ConfigureInvocationLogging`.
- *
- * Policy engine: the live API requires `policyEngineConfiguration.arn` to be
- * a pre-existing `policy-engine/*` ARN (Cedar policies are attached to a
- * policy-engine resource, not inlined on the Gateway). Creating the
- * policy-engine is a separate AgentCore API that is still stabilising; until
- * the PolicyEngine CR lands we emit the composed Cedar document as a
- * `PerTenantCedarPolicy` CfnOutput for audit. This is TODO-GW-POLICY-ENGINE
- * — tracked in README §3 — and is the documented deviation for Phase 10.
+ * Gateway lifecycle remains wrapped in `AwsCustomResource` because that path is
+ * already live-proven for service-minted IDs and asynchronous target deletion.
+ * PolicyEngine is opt-in: CloudFormation owns the engine and strict per-tool
+ * policies, while bounded custom resources associate in LOG_ONLY, wait for
+ * targets to expose their actions, validate policies, and promote to the
+ * requested mode. Deletion keeps the requested mode while policies and targets
+ * are removed, then rolls back to LOG_ONLY and detaches. The Lambda Cedar
+ * wrapper remains active in both modes until pipeline/live parity, rollback,
+ * and zero-residual teardown pass. This is the active TODO-GW-POLICY-ENGINE
+ * migration boundary tracked in README §3.
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { CfnOutput, CustomResource, Duration, Stack, StackProps, Tags } from 'aws-cdk-lib';
+import { createHash } from "node:crypto";
+
 import {
+  CfnOutput,
+  CfnResource,
+  CustomResource,
+  Duration,
+  RemovalPolicy,
+  Stack,
+  StackProps,
+  Tags,
+} from "aws-cdk-lib";
+import {
+  AccountRootPrincipal,
+  CfnPolicy as CfnIamPolicy,
   Effect,
   ManagedPolicy,
   PolicyDocument,
   PolicyStatement,
   Role,
   ServicePrincipal,
-} from 'aws-cdk-lib/aws-iam';
-import { Code, Function as LambdaFunction, Runtime } from 'aws-cdk-lib/aws-lambda';
-import { RetentionDays } from 'aws-cdk-lib/aws-logs';
+} from "aws-cdk-lib/aws-iam";
+import {
+  Code,
+  Function as LambdaFunction,
+  Runtime,
+} from "aws-cdk-lib/aws-lambda";
+import { Key } from "aws-cdk-lib/aws-kms";
+import { RetentionDays } from "aws-cdk-lib/aws-logs";
 import {
   AwsCustomResource,
-  AwsCustomResourcePolicy,
   PhysicalResourceId,
   PhysicalResourceIdReference,
   Provider,
-} from 'aws-cdk-lib/custom-resources';
-import { NagSuppressions } from 'cdk-nag';
-import { Construct } from 'constructs';
+} from "aws-cdk-lib/custom-resources";
+import { NagSuppressions } from "cdk-nag";
+import { Construct } from "constructs";
 
+import type { GaRegistryConsumerContext } from "@agenticai/agent-registry";
 import {
+  composeAgentCorePolicyDefinitions,
   composeCedarPolicyDocument,
-  resolveSubscribedTools,
-  resolveTargetArn,
+  validateToolSpec,
   ToolSpec,
-} from '@agenticai/platform-tool-catalogue';
+} from "@agenticai/platform-tool-catalogue";
+
+export type GatewayPolicyEngineMode = "OFF" | "LOG_ONLY" | "ENFORCE";
 
 export interface D03WorkstreamGatewayStackProps extends StackProps {
   readonly tenantId: string;
@@ -66,46 +87,34 @@ export interface D03WorkstreamGatewayStackProps extends StackProps {
   readonly workloadAccountId: string;
   readonly platformAccountId: string;
   /**
-   * Legacy v0.4.0 path: kebab-case tool ids resolved against the in-process
-   * `PLATFORM_TOOL_CATALOGUE`. Mutually exclusive with
-   * `subscribedRegistryRecords` — pass exactly one.
-   */
-  readonly allowedToolIds?: readonly string[];
-  /**
-   * v0.5.0 path: kebab-case record ids resolved at deploy time via
-   * `GetRegistryRecord` against the platform AgentCore Registry. When set,
-   * `registryId` MUST also be supplied; the synth fails the build if any
-   * record id is missing or DEPRECATED at deploy time.
+   * Complete, pipeline-resolved and template-bound GA Registry context — the
+   * only supported subscription mode (the legacy `allowedToolIds` catalogue
+   * path was retired on 2026-09-25).
    *
-   * Subscribed record metadata (Lambda arn, Cedar policy) is sourced from the
-   * Registry record's `metadata` map populated at seed time by
-   * `D03PlatformCoreStack.enableAgentRegistry`.
+   * The Platform-side Workload synth reads the versioned SSM pointers and
+   * APPROVED records, validates the complete governance documents, and pins
+   * the resulting target/schema/Cedar data here. This stack re-fetches every
+   * record through RegistryReaderRole at deploy time and compares its digest,
+   * closing the synth-to-deploy drift window.
    */
-  readonly subscribedRegistryRecords?: readonly string[];
-  /** AgentCore Registry id (token from `D03PlatformCoreStack.agentRegistry.registryId`). */
-  readonly registryId?: string;
-  /**
-   * Optional ARN of a cross-account role in the platform account that the
-   * deploy-time Registry validator Lambda will assume to read records.
-   *
-   * Required when the platform Registry lives in a different AWS account
-   * from the workstream gateway (the typical centralised-platform topology).
-   * The role must:
-   *   - trust this stack's account (`workloadAccountId`)
-   *   - trust the supplied externalId (when set, defaults to a
-   *     deterministic `agenticai-v05-<workloadAccountId>` token)
-   *   - allow `bedrock-agentcore:GetRegistryRecord` on the registry's ARN
-   *
-   * When unset, the validator Lambda calls GetRegistryRecord directly
-   * with its own (workload-account) credentials — works only when the
-   * registry lives in the same account as the gateway stack.
-   */
-  readonly registryReaderRoleArn?: string;
-  /** External id used when assuming `registryReaderRoleArn`. */
-  readonly registryReaderExternalId?: string;
+  readonly gaRegistryContext: GaRegistryConsumerContext;
+  /** Application allocation tag; defaults to tenantId for legacy callers. */
+  readonly applicationId?: string;
+  /** Cost allocation tag; required for the pipeline-owned R2 path. */
+  readonly costCentre?: string;
   /** Cognito User Pool discoveryUrl for CUSTOM_JWT authorizer. Optional — falls back to AWS_IAM. */
   readonly cognitoDiscoveryUrl?: string;
   readonly cognitoAudience?: readonly string[];
+  /**
+   * Gateway-native Cedar evaluation. OFF preserves the R2 rollback path;
+   * LOG_ONLY evaluates beside the Lambda wrapper; ENFORCE applies both gates.
+   */
+  readonly policyEngineMode?: GatewayPolicyEngineMode;
+  /**
+   * Exact pathless IAM role ARNs permitted by an AWS_IAM Gateway PolicyEngine.
+   * Ignored only when mode is OFF; CUSTOM_JWT mode rejects this field.
+   */
+  readonly policyEngineIamRoleArns?: readonly string[];
   /**
    * Optional — import an existing IAM role instead of creating a new one.
    * Use when the role was pre-created out-of-band so that its RoleId is
@@ -114,6 +123,8 @@ export interface D03WorkstreamGatewayStackProps extends StackProps {
    * policies. When set, the stack skips role creation and imports the ARN.
    */
   readonly gatewayServiceRoleArnOverride?: string;
+  /** Import the stable pipeline-created Registry validator role. */
+  readonly registryValidatorRoleArnOverride?: string;
   /**
    * Optional — import an existing IAM role for the AgentCore provisioning
    * custom resources instead of creating one inline. Because a freshly-created
@@ -128,237 +139,330 @@ export interface D03WorkstreamGatewayStackProps extends StackProps {
   readonly crExecRoleArnOverride?: string;
 }
 
+function policyEngineResourceName(raw: string): string {
+  let normalized = raw.replace(/[^A-Za-z0-9_]/g, "_");
+  if (!/^[A-Za-z]/.test(normalized)) normalized = `P_${normalized}`;
+  if (normalized.length > 48) {
+    const digest = createHash("sha256")
+      .update(raw, "utf8")
+      .digest("hex")
+      .slice(0, 8);
+    normalized = `${normalized.slice(0, 39)}_${digest}`;
+  }
+  if (!/^[A-Za-z][A-Za-z0-9_]{0,47}$/.test(normalized)) {
+    throw new Error(
+      `D03WorkstreamGatewayStack: invalid PolicyEngine resource name '${normalized}'.`,
+    );
+  }
+  return normalized;
+}
+
 export class D03WorkstreamGatewayStack extends Stack {
   /** Resolved ToolSpec subset — exposed for test assertion convenience. */
   readonly subscribedTools: readonly ToolSpec[];
+  /** MCP endpoint URL of this Gateway (deploy-time token), ends with `/mcp`. */
+  readonly mcpGatewayUrl: string;
+  /** Subscribed qualified MCP tool names (`<targetName>___<toolName>`). */
+  readonly subscribedToolQualifiedNames: readonly string[];
   /** Service role the AgentCore Gateway assumes to invoke tool Lambdas. */
   readonly gatewayServiceRole: Role;
   /** AwsCustomResource for CreateGateway — physical id stable across deploys. */
   readonly gatewayResource: AwsCustomResource;
 
-  constructor(scope: Construct, id: string, props: D03WorkstreamGatewayStackProps) {
+  constructor(
+    scope: Construct,
+    id: string,
+    props: D03WorkstreamGatewayStackProps,
+  ) {
     super(scope, id, props);
 
-    // ---- Mode selection: legacy catalogue vs v0.5.0 Registry ----
-    // The two paths are mutually exclusive: subscribedRegistryRecords requires
-    // a registryId. Both empty / both set => synth-time error.
-    const usingRegistry =
-      Array.isArray(props.subscribedRegistryRecords) &&
-      props.subscribedRegistryRecords.length > 0;
-    if (usingRegistry && (!props.registryId || props.registryId.length === 0)) {
+    // ---- Subscription source: the strict GA Registry context (only mode) ----
+    const registryContext = props.gaRegistryContext;
+    const legacyAllowedToolIds = (props as { allowedToolIds?: unknown })
+      .allowedToolIds;
+    if (
+      registryContext === undefined ||
+      registryContext === null ||
+      legacyAllowedToolIds !== undefined
+    ) {
+      // Kept for untyped callers: the legacy `allowedToolIds` catalogue path
+      // was retired on 2026-09-25 and must not silently come back.
       throw new Error(
-        "D03WorkstreamGatewayStack: 'registryId' is required when 'subscribedRegistryRecords' is set.",
+        "D03WorkstreamGatewayStack: 'gaRegistryContext' is required — the legacy 'allowedToolIds' catalogue path was retired.",
+      );
+    }
+    const policyEngineMode = props.policyEngineMode ?? "OFF";
+    const policyEngineUsesJwt =
+      typeof props.cognitoDiscoveryUrl === "string" &&
+      props.cognitoDiscoveryUrl.length > 0;
+    if (!(["OFF", "LOG_ONLY", "ENFORCE"] as const).includes(policyEngineMode)) {
+      throw new Error(
+        `D03WorkstreamGatewayStack: unsupported PolicyEngine mode '${policyEngineMode}'.`,
       );
     }
     if (
-      usingRegistry &&
-      Array.isArray(props.allowedToolIds) &&
-      props.allowedToolIds.length > 0
+      policyEngineMode === "OFF" &&
+      (props.policyEngineIamRoleArns?.length ?? 0) > 0
     ) {
       throw new Error(
-        "D03WorkstreamGatewayStack: 'allowedToolIds' (legacy) and 'subscribedRegistryRecords' (v0.5.0) are mutually exclusive — pass exactly one.",
+        "D03WorkstreamGatewayStack: PolicyEngine IAM principals require LOG_ONLY or ENFORCE mode.",
       );
     }
-    if (!usingRegistry && (!props.allowedToolIds || props.allowedToolIds.length === 0)) {
+    if (
+      policyEngineMode !== "OFF" &&
+      policyEngineUsesJwt &&
+      (props.policyEngineIamRoleArns?.length ?? 0) > 0
+    ) {
       throw new Error(
-        "D03WorkstreamGatewayStack: must supply either 'allowedToolIds' (legacy) or 'subscribedRegistryRecords' + 'registryId' (v0.5.0).",
+        "D03WorkstreamGatewayStack: CUSTOM_JWT PolicyEngine mode must not carry IAM role principals.",
+      );
+    }
+    if (registryContext.environment !== props.envName) {
+      throw new Error(
+        "D03WorkstreamGatewayStack: GA Registry environment does not match envName.",
+      );
+    }
+    if (registryContext.platformAccountId !== props.platformAccountId) {
+      throw new Error(
+        "D03WorkstreamGatewayStack: GA Registry platform account does not match.",
+      );
+    }
+    if (registryContext.records.length === 0) {
+      throw new Error(
+        "D03WorkstreamGatewayStack: GA Registry context has no records.",
+      );
+    }
+    if (!props.costCentre) {
+      throw new Error(
+        "D03WorkstreamGatewayStack: costCentre is required in R2 GA mode.",
       );
     }
 
-    let subset: readonly ToolSpec[] = [];
-    let resolvedToolArns: Record<string, string> = {};
-    let cedarPolicy: string;
-    /** When using the Registry, each entry is a deploy-time `GetRegistryRecord` validator custom resource. */
+    const resolvedToolArns: Record<string, string> = {};
+    /** Each entry is a deploy-time `GetRegistryRecord` validator custom resource. */
     const registryFetchers: Record<string, CustomResource> = {};
 
-    if (usingRegistry) {
-      // ---- v0.5.0 Registry path ----
-      // For every subscribed record, fetch its metadata from the live
-      // Registry at deploy time AND assert `status === 'APPROVED'`. The
-      // assertion is the third leg of the three-layer governance model:
-      // a record that has been deprecated or rejected by a curator MUST
-      // not deploy into a workstream Gateway, even if a developer left
-      // the recordId in cdk.context.json by mistake.
-      //
-      // We can't use `AwsCustomResource` here because `AwsCustomResource`
-      // has no fail-on-condition primitive — its onCreate Lambda never
-      // throws when the SDK call succeeds. Instead, we provision a single
-      // Lambda-backed Provider + one CustomResource per subscribed record
-      // id. The Lambda calls GetRegistryRecord, asserts status==APPROVED,
-      // and throws an actionable error otherwise. Throwing in the Provider
-      // returns FAILED to CFN, which fails the stack deploy with the
-      // Lambda's error message bubbled into the CFN event log — exactly
-      // what the developer needs to triage a "stale subscription" PR.
-      const recordIds = props.subscribedRegistryRecords as readonly string[];
-      const validatorEnv: Record<string, string> = {};
-      if (props.registryReaderRoleArn) {
-        validatorEnv.REGISTRY_READER_ROLE_ARN = props.registryReaderRoleArn;
-        validatorEnv.REGISTRY_READER_EXTERNAL_ID =
-          props.registryReaderExternalId ?? `agenticai-v05-${props.workloadAccountId}`;
-      }
-      // Phase Q: allow the validator to fail the deploy when a record
-      // declares allowedGroups but the workstream Gateway is not configured
-      // for CUSTOM_JWT auth — Cedar group binding has nothing to evaluate
-      // against without JWT claims.
-      validatorEnv.GATEWAY_AUTHORIZER_MODE =
-        typeof props.cognitoDiscoveryUrl === 'string' && props.cognitoDiscoveryUrl.length > 0
-          ? 'CUSTOM_JWT'
-          : 'AWS_IAM';
-      const validatorFn = new LambdaFunction(this, 'RegistryRecordValidatorFn', {
-        functionName: `agenticai-d03-${props.tenantId}-${props.agentId}-reg-validator`.slice(0, 64),
-        runtime: Runtime.NODEJS_20_X,
-        handler: 'index.handler',
-        timeout: Duration.minutes(1),
-        memorySize: 256,
-        logRetention: RetentionDays.ONE_MONTH,
-        description: 'Validates that subscribed AgentCore Registry records are APPROVED at deploy time.',
-        code: Code.fromInline(REGISTRY_RECORD_VALIDATOR_HANDLER),
-        environment: validatorEnv,
-      });
-      if (props.registryReaderRoleArn) {
-        validatorFn.addToRolePolicy(
-          new PolicyStatement({
-            effect: Effect.ALLOW,
-            actions: ['sts:AssumeRole'],
-            resources: [props.registryReaderRoleArn],
-          }),
-        );
-      } else {
-        validatorFn.addToRolePolicy(
-          new PolicyStatement({
-            effect: Effect.ALLOW,
-            actions: [
-              'bedrock-agentcore:GetRegistryRecord',
-              'bedrock-agentcore:ListRegistryRecords',
+    // ---- GA Registry subscription ----
+    // The Platform-side pipeline synth already resolved and validated the
+    // complete governance documents. Use those immutable values to build
+    // exact target schemas/IAM/Cedar, then re-fetch each record at deploy
+    // time and compare its status + descriptor digest to close the TOCTOU
+    // window between synth and CloudFormation execution.
+    const context = registryContext;
+    const validatorRoleName = `AgenticAI-D03-${props.envName}-${props.tenantId}-${props.agentId}-RegistryValidator`;
+    if (validatorRoleName.length > 64) {
+      throw new Error(
+        "D03WorkstreamGatewayStack: generated RegistryValidator role name exceeds 64 characters.",
+      );
+    }
+    let validatorRole: Role;
+    if (props.registryValidatorRoleArnOverride) {
+      validatorRole = Role.fromRoleArn(
+        this,
+        "RegistryValidatorRole",
+        props.registryValidatorRoleArnOverride,
+        { mutable: false },
+      ) as Role;
+    } else {
+      validatorRole = new Role(this, "RegistryValidatorRole", {
+        roleName: validatorRoleName,
+        assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
+        description:
+          "Pipeline-owned Workstream role that revalidates GA Registry subscriptions at deploy time.",
+        inlinePolicies: {
+          AssumeRegistryReader: new PolicyDocument({
+            statements: [
+              new PolicyStatement({
+                effect: Effect.ALLOW,
+                actions: ["sts:AssumeRole"],
+                resources: [context.readerRoleArn],
+              }),
             ],
-            resources: ['*'],
           }),
-        );
-      }
-      const validatorProvider = new Provider(this, 'RegistryRecordValidatorProvider', {
-        onEventHandler: validatorFn,
-        logRetention: RetentionDays.ONE_MONTH,
+        },
+        managedPolicies: [
+          ManagedPolicy.fromAwsManagedPolicyName(
+            "service-role/AWSLambdaBasicExecutionRole",
+          ),
+        ],
       });
-      // The Provider framework Lambda gets auto-generated permissions to
-      // invoke the onEventHandler — its DefaultPolicy contains an
-      // `lambda:InvokeFunction` allow on the validator Fn.Arn:* that
-      // cdk-nag flags. Suppress on the framework path.
-      NagSuppressions.addResourceSuppressionsByPath(
-        Stack.of(this),
-        '/' + Stack.of(this).stackName + '/RegistryRecordValidatorProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource',
+      NagSuppressions.addResourceSuppressions(
+        validatorRole,
         [
           {
-            id: 'AwsSolutions-IAM5',
-            reason: 'SEC-029: CDK Provider framework needs lambda:InvokeFunction on the validator Lambda; the Resource wildcard is on Lambda versions/aliases of a single function we just created in this stack.',
+            id: "AwsSolutions-IAM4",
+            appliesTo: [
+              "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+            ],
+            reason:
+              "SEC-010: AWSLambdaBasicExecutionRole is the documented logging policy for the pipeline-owned Registry validator Lambda.",
           },
         ],
         true,
       );
-      NagSuppressions.addResourceSuppressionsByPath(
-        Stack.of(this),
-        '/' + Stack.of(this).stackName + '/RegistryRecordValidatorProvider/framework-onEvent/ServiceRole/Resource',
-        [
-          { id: 'AwsSolutions-IAM4', reason: 'SEC-010: AWSLambdaBasicExecutionRole is the documented managed policy for CDK provider framework Lambdas.' },
-        ],
-        true,
-      );
-      NagSuppressions.addResourceSuppressionsByPath(
-        Stack.of(this),
-        '/' + Stack.of(this).stackName + '/RegistryRecordValidatorProvider/framework-onEvent/Resource',
-        [
-          { id: 'AwsSolutions-L1', reason: 'SEC-006: Provider framework Lambda runtime is managed by aws-cdk-lib.' },
-          { id: 'NIST.800.53.R5-LambdaConcurrency', reason: 'SEC-007: Provisioning-time only.' },
-          { id: 'NIST.800.53.R5-LambdaDLQ', reason: 'SEC-008: CFN surfaces failures.' },
-          { id: 'NIST.800.53.R5-LambdaInsideVPC', reason: 'SEC-009: Control-plane only.' },
-        ],
-        true,
-      );
-      // Cedar union — assembled from per-record validators' attribute
-      // tokens (`Data.cedarPolicy`). Joined with a header + separators
-      // identical to the legacy composeCedarPolicyDocument layout so
-      // audit downstream stays stable.
-      const cedarHeader =
-        '// AgenticAI workstream Cedar — union of per-record snippets sourced from\n' +
-        `// the platform AgentCore Registry (registryId=${props.registryId}).\n`;
-      const cedarParts: string[] = [];
-      for (const recId of recordIds) {
-        const validator = new CustomResource(this, `RegistryFetch-${recId}`, {
-          resourceType: 'Custom::AgenticAIRegistryRecordValidator',
+    }
+
+    const validatorEnv: Record<string, string> = {
+      REGISTRY_READER_ROLE_ARN: context.readerRoleArn,
+      REGISTRY_READER_EXTERNAL_ID: context.readerExternalId,
+      REGISTRY_READER_SESSION_NAME: `registry-${props.envName}-validator`,
+      GATEWAY_AUTHORIZER_MODE:
+        typeof props.cognitoDiscoveryUrl === "string" &&
+        props.cognitoDiscoveryUrl.length > 0
+          ? "CUSTOM_JWT"
+          : "AWS_IAM",
+    };
+    const validatorFn = new LambdaFunction(this, "RegistryRecordValidatorFn", {
+      functionName:
+        `agenticai-d03-${props.envName}-${props.tenantId}-${props.agentId}-reg-validator`.slice(
+          0,
+          64,
+        ),
+      runtime: Runtime.NODEJS_20_X,
+      handler: "index.handler",
+      timeout: Duration.minutes(1),
+      memorySize: 256,
+      logRetention: RetentionDays.ONE_MONTH,
+      description:
+        "Revalidates APPROVED GA Registry records and descriptor digests at deploy time.",
+      code: Code.fromInline(REGISTRY_RECORD_VALIDATOR_HANDLER),
+      environment: validatorEnv,
+      role: validatorRole,
+    });
+    const validatorProvider = new Provider(
+      this,
+      "RegistryRecordValidatorProvider",
+      {
+        onEventHandler: validatorFn,
+        logRetention: RetentionDays.ONE_MONTH,
+      },
+    );
+    NagSuppressions.addResourceSuppressions(
+      validatorProvider,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "SEC-029: CDK Provider framework invokes versions/aliases of the single validator Lambda created in this stack.",
+        },
+        {
+          id: "AwsSolutions-IAM4",
+          reason:
+            "SEC-010: AWSLambdaBasicExecutionRole is the documented logging policy for CDK provider framework Lambdas.",
+        },
+        {
+          id: "AwsSolutions-L1",
+          reason:
+            "SEC-006: Provider framework Lambda runtime is managed by aws-cdk-lib.",
+        },
+        {
+          id: "NIST.800.53.R5-LambdaConcurrency",
+          reason: "SEC-007: Provisioning-time only.",
+        },
+        {
+          id: "NIST.800.53.R5-LambdaDLQ",
+          reason: "SEC-008: CloudFormation surfaces failures.",
+        },
+        {
+          id: "NIST.800.53.R5-LambdaInsideVPC",
+          reason: "SEC-009: Control-plane only.",
+        },
+      ],
+      true,
+    );
+
+    const registrySpecs: ToolSpec[] = [];
+    for (const resolved of context.records) {
+      const document = resolved.document;
+      const spec: ToolSpec = {
+        toolId: document.toolId,
+        toolType: document.target.type,
+        targetArn: document.target.arn,
+        cedarPolicy: document.authorization.cedarPolicy,
+        ownerTeam: document.ownership.ownerTeam,
+        costCentre: document.ownership.costCentre,
+        description: document.description,
+        approvalStatus: "approved",
+        inputSchema: document.mcp.inputSchema,
+        allowedGroups:
+          document.authorization.allowedGroups.length > 0
+            ? document.authorization.allowedGroups
+            : undefined,
+      };
+      validateToolSpec(spec);
+      registrySpecs.push(spec);
+      resolvedToolArns[spec.toolId] = spec.targetArn;
+      registryFetchers[spec.toolId] = new CustomResource(
+        this,
+        `RegistryValidate-${spec.toolId}`,
+        {
+          resourceType: "Custom::AgenticAIRegistryRecordValidator",
           serviceToken: validatorProvider.serviceToken,
           properties: {
-            // Embed the registry/record pair so the Lambda can look it up.
-            // ChangeNonce flips on every synth so an updated record (e.g.
-            // newly DEPRECATED) is re-validated on the next deploy.
-            registryId: props.registryId,
-            recordId: recId,
+            registryId: context.registryId,
+            recordId: resolved.recordId,
+            expectedToolId: spec.toolId,
+            expectedTargetArn: spec.targetArn,
+            expectedDescriptorSha256: resolved.descriptorSha256,
+            validationRevision: context.sourceRevision,
             tenantId: props.tenantId,
             agentId: props.agentId,
-            changeNonce: `${Date.now()}`,
           },
-        });
-        registryFetchers[recId] = validator;
-        // Lambda returns the resolved metadata fields under `Data.*`. Pin
-        // them as CFN attribute tokens — the same Cedar bytes that the
-        // platform stored are the bytes the workstream gateway uses.
-        const arnToken = validator.getAttString('gatewayTargetArn');
-        const cedarToken = validator.getAttString('cedarPolicy');
-        resolvedToolArns[recId] = arnToken;
-        cedarParts.push(cedarToken);
-      }
-      cedarPolicy = cedarHeader + cedarParts.join('\n\n');
-      // `subset` stays empty — there is no in-process catalogue to mirror;
-      // the synth-time three-layer model is preserved by SCP-11/SCP-09 +
-      // the deploy-time validator above (records that don't exist or are
-      // not status==APPROVED fail the deploy with an actionable error).
-      subset = [];
-      NagSuppressions.addResourceSuppressions(
-        validatorFn,
-        [
-          { id: 'AwsSolutions-IAM5', reason: 'SEC-029: GetRegistryRecord/ListRegistryRecords accept resource:* — AgentCore registry-record ARN is the resource being read; deny would require knowing the recordId-to-arn mapping ahead of time, which is what this Lambda is computing.' },
-          { id: 'AwsSolutions-IAM4', reason: 'SEC-010: AWSLambdaBasicExecutionRole is the documented managed policy for CDK provider Lambdas.' },
-          { id: 'AwsSolutions-L1', reason: 'SEC-006: NodeJS 20 is the latest CDK-supported runtime as of v0.5.0.' },
-          { id: 'NIST.800.53.R5-LambdaConcurrency', reason: 'SEC-007: Provisioning-time Lambda invoked only by CloudFormation; concurrency would break deploys.' },
-          { id: 'NIST.800.53.R5-LambdaDLQ', reason: 'SEC-008: CFN surfaces custom-resource failures directly; DLQ would go unconsumed.' },
-          { id: 'NIST.800.53.R5-LambdaInsideVPC', reason: 'SEC-009: AgentCore control-plane is a public IAM-auth endpoint; placing the provisioning Lambda in a VPC would require extra VPCEs only for stack deploys.' },
-        ],
-        true,
+        },
       );
-    } else {
-      // ---- Legacy v0.4.0 catalogue path (unchanged) ----
-      // resolveSubscribedTools throws on unknown ids or deprecated subscriptions.
-      subset = resolveSubscribedTools(props.allowedToolIds!);
-      // Resolve every ToolSpec to a concrete tool Lambda ARN.
-      // `${PLATFORM_ACCOUNT_ID}` is substituted with props.platformAccountId
-      // unless the tool explicitly declares a cross-account targetAccountId.
-      for (const spec of subset) {
-        resolvedToolArns[spec.toolId] = resolveTargetArn(spec, props.platformAccountId);
-      }
-      // Phase Q (v0.6.0): when any subscribed tool declares allowedGroups, the
-      // workstream Gateway MUST be configured for CUSTOM_JWT — Cedar group
-      // binding has nothing to evaluate against without JWT claims. Fail the
-      // synth with an actionable error rather than silently degrading to
-      // "any authenticated principal" semantics.
-      const usingJwt =
-        typeof props.cognitoDiscoveryUrl === 'string' && props.cognitoDiscoveryUrl.length > 0;
-      const entitledTools = subset.filter(
-        (s) => Array.isArray(s.allowedGroups) && s.allowedGroups.length > 0,
-      );
-      if (entitledTools.length > 0 && !usingJwt) {
-        throw new Error(
-          `D03WorkstreamGatewayStack: tool(s) [${entitledTools
-            .map((s) => s.toolId)
-            .join(', ')}] declare allowedGroups (per-developer entitlement) but no cognitoDiscoveryUrl was supplied. ` +
-            `Phase Q requires CUSTOM_JWT auth so the Cedar evaluator can read the principal's cognito:groups claim. ` +
-            `Either set cognitoDiscoveryUrl on D03WorkstreamGatewayStackProps or remove allowedGroups from the affected tool(s).`,
-        );
-      }
-      cedarPolicy = composeCedarPolicyDocument(subset);
     }
+    const subset: readonly ToolSpec[] = registrySpecs;
+    const usingJwt =
+      typeof props.cognitoDiscoveryUrl === "string" &&
+      props.cognitoDiscoveryUrl.length > 0;
+    const entitledTools = subset.filter(
+      (spec) =>
+        Array.isArray(spec.allowedGroups) && spec.allowedGroups.length > 0,
+    );
+    if (entitledTools.length > 0 && !usingJwt) {
+      throw new Error(
+        `D03WorkstreamGatewayStack: GA record tool(s) [${entitledTools
+          .map((spec) => spec.toolId)
+          .join(", ")}] require CUSTOM_JWT because allowedGroups is non-empty.`,
+      );
+    }
+    const cedarPolicy = composeCedarPolicyDocument(subset);
+    NagSuppressions.addResourceSuppressions(
+      validatorFn,
+      [
+        {
+          id: "AwsSolutions-L1",
+          reason:
+            "SEC-006: NodeJS 20 is the latest CDK-supported runtime for the inline validator.",
+        },
+        {
+          id: "NIST.800.53.R5-LambdaConcurrency",
+          reason:
+            "SEC-007: Provisioning-time Lambda invoked only by CloudFormation.",
+        },
+        {
+          id: "NIST.800.53.R5-LambdaDLQ",
+          reason: "SEC-008: CloudFormation surfaces custom-resource failures.",
+        },
+        {
+          id: "NIST.800.53.R5-LambdaInsideVPC",
+          reason:
+            "SEC-009: The GA Agent Registry control plane is reached only during deployment.",
+        },
+      ],
+      true,
+    );
     this.subscribedTools = subset;
-    const subscribedIds: readonly string[] = usingRegistry
-      ? (props.subscribedRegistryRecords as readonly string[])
-      : subset.map((s) => s.toolId);
+    const subscribedIds: readonly string[] = subset.map((spec) => spec.toolId);
     const targetArns = Object.values(resolvedToolArns);
+    const targetNames = Object.fromEntries(
+      subscribedIds.map((toolId) => [toolId, `target-${toolId}`.slice(0, 100)]),
+    );
+    // MCP qualified names: `<targetName>___<toolName>`. The governance contract
+    // pins mcp.toolName === toolId, so the qualified name is deterministic.
+    this.subscribedToolQualifiedNames = subscribedIds.map(
+      (toolId) => `${targetNames[toolId]}___${toolId}`,
+    );
 
     // ---- GatewayServiceRole (D-03 v3, layer 3 enforcement) ----
     // Trusted by bedrock-agentcore.amazonaws.com — the AgentCore Gateway
@@ -374,31 +478,36 @@ export class D03WorkstreamGatewayStack extends Stack {
     // may be pre-created out-of-band and imported via the
     // `agenticai/d03GatewayRoleArnOverride` context flag; in that mode the
     // stack imports the existing role rather than creating a new one.
-    const gwRoleNameDefault = `AgenticAI-D03-${props.tenantId}-${props.agentId}-gw-svc`;
+    const gwRoleNameDefault = `AgenticAI-D03-${props.envName}-${props.tenantId}-${props.agentId}-gw-svc`;
+    if (gwRoleNameDefault.length > 64) {
+      throw new Error(
+        "D03WorkstreamGatewayStack: generated Gateway service role name exceeds 64 characters.",
+      );
+    }
     const gwRoleArnOverride =
-      (this.node.tryGetContext('agenticai/d03GatewayRoleArnOverride') as
+      (this.node.tryGetContext("agenticai/d03GatewayRoleArnOverride") as
         | string
         | undefined) ?? props.gatewayServiceRoleArnOverride;
 
-    if (typeof gwRoleArnOverride === 'string' && gwRoleArnOverride.length > 0) {
+    if (typeof gwRoleArnOverride === "string" && gwRoleArnOverride.length > 0) {
       this.gatewayServiceRole = Role.fromRoleArn(
         this,
-        'GatewayServiceRole',
+        "GatewayServiceRole",
         gwRoleArnOverride,
         { mutable: false },
       ) as Role;
     } else {
-      this.gatewayServiceRole = new Role(this, 'GatewayServiceRole', {
+      this.gatewayServiceRole = new Role(this, "GatewayServiceRole", {
         roleName: gwRoleNameDefault,
-        assumedBy: new ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+        assumedBy: new ServicePrincipal("bedrock-agentcore.amazonaws.com"),
         description: `D-03 v3: service role assumed by AgentCore Gateway for tenant=${props.tenantId} agent=${props.agentId}. Scoped to the exact N subscribed tool ARNs.`,
         inlinePolicies: {
           InvokeSubscribedTools: new PolicyDocument({
             statements: [
               new PolicyStatement({
-                sid: 'InvokeSubscribedTools',
+                sid: "InvokeSubscribedTools",
                 effect: Effect.ALLOW,
-                actions: ['lambda:InvokeFunction'],
+                actions: ["lambda:InvokeFunction"],
                 // EXACT set — no wildcards. Layer-3 of the three-layer model.
                 resources: targetArns,
               }),
@@ -413,9 +522,9 @@ export class D03WorkstreamGatewayStack extends Stack {
     // fall back to AWS_IAM (SigV4) otherwise — `aws:PrincipalArn` on the
     // runtime role is still enforced by the Gateway resource policy below.
     const useJwt =
-      typeof props.cognitoDiscoveryUrl === 'string' &&
+      typeof props.cognitoDiscoveryUrl === "string" &&
       props.cognitoDiscoveryUrl.length > 0;
-    const authorizerType = useJwt ? 'CUSTOM_JWT' : 'AWS_IAM';
+    const authorizerType = useJwt ? "CUSTOM_JWT" : "AWS_IAM";
     const authorizerConfiguration = useJwt
       ? {
           customJWTAuthorizer: {
@@ -431,33 +540,39 @@ export class D03WorkstreamGatewayStack extends Stack {
     // Name pattern per live API help: ([0-9a-zA-Z][-]?){1,100}. We bake
     // env/tenant/agent into the name so an operator reading the Bedrock console
     // can see the mapping without cross-referencing tags.
-    const gatewayName = `agenticai-d03-${props.envName}-${props.tenantId}-${props.agentId}-gw`.slice(
-      0,
-      100,
-    );
-    const gatewayPhysicalId = `AgenticAI-D03-Gateway-${props.tenantId}-${props.agentId}`;
+    const gatewayName =
+      `agenticai-d03-${props.envName}-${props.tenantId}-${props.agentId}-gw`.slice(
+        0,
+        100,
+      );
 
     const createGatewayParams: Record<string, unknown> = {
       name: gatewayName,
       description: `D-03 v3 per-workstream AgentCore Gateway for ${props.tenantId}/${props.agentId} (${props.envName}).`,
       roleArn: this.gatewayServiceRole.roleArn,
-      protocolType: 'MCP',
+      protocolType: "MCP",
       protocolConfiguration: {
         mcp: {
           // MCP versions accepted by AgentCore as of 2026-05-05:
           // 2025-11-25, 2025-03-26, 2025-06-18. We pin the earliest that
           // satisfies the currently-documented MCP feature set we rely on.
-          supportedVersions: ['2025-06-18'],
-          searchType: 'SEMANTIC',
+          supportedVersions: ["2025-06-18"],
+          // Semantic search is optional. Live ENFORCE adversarial testing proved
+          // it returned unauthorized tool schemas even when tools/list was
+          // empty and direct tools/call was policy-denied. Preserve the exact
+          // R2 OFF template, but remove this discovery surface during migration.
+          ...(policyEngineMode === "OFF" ? { searchType: "SEMANTIC" } : {}),
         },
       },
       authorizerType,
       ...(authorizerConfiguration ? { authorizerConfiguration } : {}),
       tags: {
-        deviation: 'D-03',
-        'tenant-id': props.tenantId,
-        'agent-id': props.agentId,
-        'workload-account-id': props.workloadAccountId,
+        deviation: "D-03",
+        "application-id": props.applicationId ?? props.tenantId,
+        "tenant-id": props.tenantId,
+        "agent-id": props.agentId,
+        "cost-centre": props.costCentre ?? "unassigned",
+        "workload-account-id": props.workloadAccountId,
         environment: props.envName,
       },
     };
@@ -476,23 +591,31 @@ export class D03WorkstreamGatewayStack extends Stack {
     // a role that already exists has long since propagated to the AgentCore
     // control plane, so there is no deploy-time race to wait out.
     const crExecRoleArnOverride =
-      (this.node.tryGetContext('agenticai/d03CrExecRoleArnOverride') as string | undefined) ??
-      props.crExecRoleArnOverride;
-    let crRole: import('aws-cdk-lib/aws-iam').IRole;
+      (this.node.tryGetContext("agenticai/d03CrExecRoleArnOverride") as
+        | string
+        | undefined) ?? props.crExecRoleArnOverride;
+    let crRole: import("aws-cdk-lib/aws-iam").IRole;
     let propGate: CustomResource | undefined;
     if (crExecRoleArnOverride) {
       // addGrantsToResources:false + same-account import so CDK treats it as a
       // pre-existing role and does not attempt to mutate it or emit a
       // cross-account PassRole. The role is pre-created with all needed
       // permissions out-of-band.
-      crRole = Role.fromRoleArn(this, 'AgentCoreCrRole', crExecRoleArnOverride, {
-        mutable: false,
-        addGrantsToResources: false,
-      });
+      crRole = Role.fromRoleArn(
+        this,
+        "AgentCoreCrRole",
+        crExecRoleArnOverride,
+        {
+          mutable: false,
+          addGrantsToResources: false,
+        },
+      );
     } else {
-      const inlineCrRole = new Role(this, 'AgentCoreCrRole', {
-        assumedBy: new ServicePrincipal('lambda.amazonaws.com'),
-        description: 'Shared execution role for the D-03 AgentCore Gateway/Target custom resources.',
+      const inlineCrRole = new Role(this, "AgentCoreCrRole", {
+        roleName: `AgenticAI-D03-${props.envName}-GatewayAdmin`,
+        assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
+        description:
+          "Shared execution role for the D-03 AgentCore Gateway/Target custom resources.",
         inlinePolicies: {
           AgentCoreProvisioning: new PolicyDocument({
             statements: [
@@ -502,25 +625,37 @@ export class D03WorkstreamGatewayStack extends Stack {
                 // GatewayTarget (+ the Workload Identity CreateGateway spawns).
                 // Provisioning-only shared CR role; bounded by SCP-09 at org
                 // level. Application/runtime IAM must use explicit actions.
-                actions: ['bedrock-agentcore:*'],
-                resources: ['*'],
+                actions: ["bedrock-agentcore:*"],
+                resources: ["*"],
               }),
               new PolicyStatement({
-                actions: ['iam:PassRole'],
+                actions: ["iam:PassRole"],
                 resources: [this.gatewayServiceRole.roleArn],
               }),
             ],
           }),
         },
         managedPolicies: [
-          ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+          ManagedPolicy.fromAwsManagedPolicyName(
+            "service-role/AWSLambdaBasicExecutionRole",
+          ),
         ],
       });
       NagSuppressions.addResourceSuppressions(
         inlineCrRole,
         [
-          { id: 'AwsSolutions-IAM4', appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'], reason: 'SEC-010: CDK custom-resource default execution role.' },
-          { id: 'AwsSolutions-IAM5', reason: 'SEC-028: shared AgentCore provisioning CR role; bedrock-agentcore:* required by action-family evaluator, bounded by SCP-09 + provisioning-only lifetime.' },
+          {
+            id: "AwsSolutions-IAM4",
+            appliesTo: [
+              "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+            ],
+            reason: "SEC-010: CDK custom-resource default execution role.",
+          },
+          {
+            id: "AwsSolutions-IAM5",
+            reason:
+              "SEC-028: shared AgentCore provisioning CR role; bedrock-agentcore:* required by action-family evaluator, bounded by SCP-09 + provisioning-only lifetime.",
+          },
         ],
         true,
       );
@@ -532,70 +667,94 @@ export class D03WorkstreamGatewayStack extends Stack {
       // This gate delays the first AgentCore mutate until propagation settles.
       // (When crExecRoleArnOverride is supplied, this branch is skipped
       // entirely — a pre-created role has already propagated.)
-      const propGateOnEvent = new LambdaFunction(this, 'CrPropGateOnEvent', {
+      const propGateOnEvent = new LambdaFunction(this, "CrPropGateOnEvent", {
         runtime: Runtime.NODEJS_20_X,
-        handler: 'index.onEvent',
+        handler: "index.onEvent",
         timeout: Duration.seconds(30),
         code: Code.fromInline(IAM_PROP_GATE_HANDLER),
-        description: 'AgentCore CR IAM-propagation gate — onEvent.',
+        description: "AgentCore CR IAM-propagation gate — onEvent.",
       });
-      const propGateIsComplete = new LambdaFunction(this, 'CrPropGateIsComplete', {
-        runtime: Runtime.NODEJS_20_X,
-        handler: 'index.isComplete',
-        timeout: Duration.seconds(30),
-        code: Code.fromInline(IAM_PROP_GATE_HANDLER),
-        description: 'AgentCore CR IAM-propagation gate — isComplete.',
-      });
-      const propProvider = new Provider(this, 'CrPropGateProvider', {
+      const propGateIsComplete = new LambdaFunction(
+        this,
+        "CrPropGateIsComplete",
+        {
+          runtime: Runtime.NODEJS_20_X,
+          handler: "index.isComplete",
+          timeout: Duration.seconds(30),
+          code: Code.fromInline(IAM_PROP_GATE_HANDLER),
+          description: "AgentCore CR IAM-propagation gate — isComplete.",
+        },
+      );
+      const propProvider = new Provider(this, "CrPropGateProvider", {
         onEventHandler: propGateOnEvent,
         isCompleteHandler: propGateIsComplete,
         queryInterval: Duration.seconds(15),
         totalTimeout: Duration.minutes(10),
       });
-      propGate = new CustomResource(this, 'CrPropGate', {
+      propGate = new CustomResource(this, "CrPropGate", {
         serviceToken: propProvider.serviceToken,
         properties: { RoleArn: inlineCrRole.roleArn },
       });
       propGate.node.addDependency(inlineCrRole);
-      NagSuppressions.addResourceSuppressions(propGateOnEvent, [{ id: 'AwsSolutions-IAM4', appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'], reason: 'SEC-010: CDK Provider framework Lambda default execution role.' }], true);
-      NagSuppressions.addResourceSuppressions(propGateIsComplete, [{ id: 'AwsSolutions-IAM4', appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'], reason: 'SEC-010: CDK Provider framework Lambda default execution role.' }], true);
+      NagSuppressions.addResourceSuppressions(
+        propGateOnEvent,
+        [
+          {
+            id: "AwsSolutions-IAM4",
+            appliesTo: [
+              "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+            ],
+            reason:
+              "SEC-010: CDK Provider framework Lambda default execution role.",
+          },
+        ],
+        true,
+      );
+      NagSuppressions.addResourceSuppressions(
+        propGateIsComplete,
+        [
+          {
+            id: "AwsSolutions-IAM4",
+            appliesTo: [
+              "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+            ],
+            reason:
+              "SEC-010: CDK Provider framework Lambda default execution role.",
+          },
+        ],
+        true,
+      );
     }
 
-    this.gatewayResource = new AwsCustomResource(this, 'GatewayResource', {
-      resourceType: 'Custom::BedrockAgentCoreGateway',
+    this.gatewayResource = new AwsCustomResource(this, "GatewayResource", {
+      resourceType: "Custom::BedrockAgentCoreGateway",
       role: crRole,
       onCreate: {
-        service: 'bedrock-agentcore-control',
-        action: 'createGateway',
+        service: "bedrock-agentcore-control",
+        action: "createGateway",
         parameters: createGatewayParams,
-        physicalResourceId: PhysicalResourceId.of(gatewayPhysicalId),
+        physicalResourceId: PhysicalResourceId.fromResponse("gatewayId"),
       },
       onUpdate: {
-        // Update-on-change delegated to the service — AgentCore `UpdateGateway`
-        // is a separate API; for v1 we no-op updates and rely on replace if
-        // the gateway name (physicalResourceId) ever changes. We MUST NOT set
-        // `ignoreErrorCodesMatching` on onCreate/onUpdate here: CDK disallows
-        // it alongside `getResponseField()` / `getDataString()` (the
-        // IgnoreErrorCodesMatchingNotAllowed check). Idempotency is instead
-        // enforced by the stable physicalResourceId — CloudFormation will
-        // skip the Create call on subsequent deploys.
-        service: 'bedrock-agentcore-control',
-        action: 'getGateway',
+        // Update-on-change remains a read validation for v1, but uses the
+        // actual service-minted Gateway ID retained by CloudFormation.
+        service: "bedrock-agentcore-control",
+        action: "getGateway",
         parameters: {
-          gatewayIdentifier: new PhysicalResourceIdReferenceShim(gatewayPhysicalId).value,
+          gatewayIdentifier: new PhysicalResourceIdReference(),
         },
-        physicalResourceId: PhysicalResourceId.of(gatewayPhysicalId),
+        physicalResourceId: PhysicalResourceId.fromResponse("gatewayId"),
       },
       onDelete: {
-        service: 'bedrock-agentcore-control',
-        action: 'deleteGateway',
+        service: "bedrock-agentcore-control",
+        action: "deleteGateway",
         parameters: {
-          gatewayIdentifier: new PhysicalResourceIdReferenceShim(gatewayPhysicalId).value,
+          gatewayIdentifier: new PhysicalResourceIdReference(),
         },
-        // Tolerate the common rollback cases where the Gateway was never
-        // created (CFN invokes Delete after a Create-failure) or was
-        // deleted out-of-band.
-        ignoreErrorCodesMatching: '(ResourceNotFoundException|ValidationException)',
+        // Tolerate only an already-absent Gateway. ValidationException must
+        // fail loudly because it can mean asynchronously deleting targets are
+        // still associated; swallowing that response orphaned a live Gateway.
+        ignoreErrorCodesMatching: "ResourceNotFoundException",
       },
       // Uses the shared crRole (policy attached above) — no per-CR policy, so
       // the IAM-propagation race is gated by CrPropGate below.
@@ -608,24 +767,568 @@ export class D03WorkstreamGatewayStack extends Stack {
 
     // The Gateway create returns an object of shape `{ gatewayId, gatewayArn, ... }`.
     // We can read back those attributes for downstream CfnOutputs + per-target wiring.
-    const gatewayIdToken = this.gatewayResource.getResponseField('gatewayId');
-    const gatewayArnToken = this.gatewayResource.getResponseField('gatewayArn');
+    const gatewayIdToken = this.gatewayResource.getResponseField("gatewayId");
+    const gatewayArnToken = this.gatewayResource.getResponseField("gatewayArn");
+    // Deterministic MCP endpoint URL for the service-minted Gateway id.
+    this.mcpGatewayUrl = `https://${gatewayIdToken}.gateway.bedrock-agentcore.${this.region}.amazonaws.com/mcp`;
+
+    let policyEngineStateProvider: Provider | undefined;
+    let policyEngineModeRollbackMutation: AwsCustomResource | undefined;
+    const policyEnginePoliciesByToolId = new Map<string, CfnResource>();
+    if (policyEngineMode !== "OFF") {
+      const iamRoleArns = [...(props.policyEngineIamRoleArns ?? [])].sort();
+      for (const roleArn of iamRoleArns) {
+        const match =
+          /^arn:(?:aws|aws-us-gov|aws-cn):iam::(\d{12}):role\//.exec(roleArn);
+        if (!match || match[1] !== props.workloadAccountId) {
+          throw new Error(
+            `D03WorkstreamGatewayStack: PolicyEngine IAM role '${roleArn}' must belong to the Workstream account.`,
+          );
+        }
+      }
+
+      const engineName = policyEngineResourceName(
+        `AgenticAI_${props.envName}_${props.tenantId}_${props.agentId}_pe`,
+      );
+      const policyEngineArnPattern = `arn:${this.partition}:bedrock-agentcore:${this.region}:${this.account}:policy-engine/*`;
+      const policyEngineKey = new Key(this, "GatewayPolicyEngineKey", {
+        alias: `alias/agenticai/policy-engine-${props.envName}-${props.tenantId}-${props.agentId}`,
+        description: `CMK for Gateway PolicyEngine ${props.tenantId}/${props.agentId} (${props.envName}).`,
+        enableKeyRotation: true,
+        pendingWindow: Duration.days(7),
+        removalPolicy: RemovalPolicy.DESTROY,
+      });
+      policyEngineKey.addToResourcePolicy(
+        new PolicyStatement({
+          sid: "AllowPolicyEngineGrantCreation",
+          effect: Effect.ALLOW,
+          principals: [new AccountRootPrincipal()],
+          actions: ["kms:CreateGrant"],
+          resources: ["*"],
+          conditions: {
+            StringEquals: {
+              "kms:ViaService": `bedrock-agentcore.${this.region}.${this.urlSuffix}`,
+              "kms:GrantConstraintType": "EncryptionContextSubset",
+            },
+            StringLike: {
+              "kms:EncryptionContext:aws:bedrock-agentcore-policy:policy-engine-arn":
+                policyEngineArnPattern,
+            },
+            "ForAllValues:StringEquals": {
+              "kms:GrantOperations": [
+                "Encrypt",
+                "Decrypt",
+                "GenerateDataKey",
+                "GenerateDataKeyWithoutPlaintext",
+                "ReEncryptFrom",
+                "ReEncryptTo",
+              ],
+            },
+          },
+        }),
+      );
+      policyEngineKey.addToResourcePolicy(
+        new PolicyStatement({
+          sid: "AllowPolicyEngineCryptography",
+          effect: Effect.ALLOW,
+          principals: [new AccountRootPrincipal()],
+          actions: ["kms:Decrypt", "kms:GenerateDataKey"],
+          resources: ["*"],
+          conditions: {
+            StringEquals: {
+              "kms:ViaService": `bedrock-agentcore.${this.region}.${this.urlSuffix}`,
+              "aws:SourceAccount": this.account,
+            },
+            ArnLike: { "aws:SourceArn": policyEngineArnPattern },
+            StringLike: {
+              "kms:EncryptionContext:aws:bedrock-agentcore-policy:policy-engine-arn":
+                policyEngineArnPattern,
+            },
+          },
+        }),
+      );
+      policyEngineKey.addToResourcePolicy(
+        new PolicyStatement({
+          sid: "AllowPolicyEngineKeyValidation",
+          effect: Effect.ALLOW,
+          principals: [new AccountRootPrincipal()],
+          actions: ["kms:DescribeKey"],
+          resources: ["*"],
+          conditions: {
+            StringEquals: {
+              "kms:ViaService": `bedrock-agentcore.${this.region}.${this.urlSuffix}`,
+            },
+          },
+        }),
+      );
+
+      const policyEngine = new CfnResource(this, "GatewayPolicyEngine", {
+        type: "AWS::BedrockAgentCore::PolicyEngine",
+        properties: {
+          Name: engineName,
+          Description: `Gateway PolicyEngine for ${props.tenantId}/${props.agentId} (${props.envName}).`,
+          EncryptionKeyArn: policyEngineKey.keyArn,
+          Tags: [
+            {
+              Key: "application-id",
+              Value: props.applicationId ?? props.tenantId,
+            },
+            { Key: "agent-id", Value: props.agentId },
+            { Key: "tenant-id", Value: props.tenantId },
+            { Key: "cost-centre", Value: props.costCentre ?? "unassigned" },
+            { Key: "environment", Value: props.envName },
+          ],
+        },
+      });
+      const policyEngineArn = policyEngine.getAtt("PolicyEngineArn").toString();
+      const policyEngineId = policyEngine.getAtt("PolicyEngineId").toString();
+
+      const definitions = composeAgentCorePolicyDefinitions(subset, {
+        authorizerType,
+        gatewayArn: gatewayArnToken,
+        policyNamePrefix: engineName,
+        targetNames,
+        iamRoleArns,
+      });
+
+      const gatewayRolePolicy = new CfnIamPolicy(
+        this,
+        "GatewayPolicyEngineAccess",
+        {
+          policyName: `AgenticAI-${props.envName}-PolicyEngineAccess`,
+          roles: [this.gatewayServiceRole.roleName],
+          policyDocument: {
+            Version: "2012-10-17",
+            Statement: [
+              {
+                Sid: "ReadPolicyEngine",
+                Effect: "Allow",
+                Action: "bedrock-agentcore:GetPolicyEngine",
+                Resource: policyEngineArn,
+              },
+              {
+                Sid: "EvaluateGatewayPolicy",
+                Effect: "Allow",
+                Action: [
+                  "bedrock-agentcore:AuthorizeAction",
+                  "bedrock-agentcore:PartiallyAuthorizeActions",
+                ],
+                Resource: [policyEngineArn, gatewayArnToken],
+              },
+              // GetPolicyEngine decrypts through the assumed Gateway role. The
+              // combined FAS-oriented condition block did not produce an
+              // identity-based allow for that runtime KMS request, as proved
+              // by CloudTrail. Keep decrypt access on the exact CMK; the key
+              // policy and service-created grants retain their constraints.
+              {
+                Sid: "UsePolicyEngineKey",
+                Effect: "Allow",
+                Action: "kms:Decrypt",
+                Resource: policyEngineKey.keyArn,
+              },
+              {
+                Sid: "ValidatePolicyEngineKey",
+                Effect: "Allow",
+                Action: "kms:DescribeKey",
+                Resource: policyEngineKey.keyArn,
+                Condition: {
+                  StringEquals: {
+                    "kms:ViaService": `bedrock-agentcore.${this.region}.${this.urlSuffix}`,
+                  },
+                },
+              },
+            ],
+          },
+        },
+      );
+      gatewayRolePolicy.node.addDependency(policyEngine);
+      gatewayRolePolicy.node.addDependency(this.gatewayResource);
+
+      const rolePropagationOnEvent = new LambdaFunction(
+        this,
+        "PolicyEngineRolePropagationOnEvent",
+        {
+          runtime: Runtime.NODEJS_20_X,
+          handler: "index.onEvent",
+          timeout: Duration.seconds(30),
+          code: Code.fromInline(IAM_PROP_GATE_HANDLER),
+          role: crRole,
+          description:
+            "Records the Gateway PolicyEngine role-policy propagation window.",
+        },
+      );
+      const rolePropagationIsComplete = new LambdaFunction(
+        this,
+        "PolicyEngineRolePropagationIsComplete",
+        {
+          runtime: Runtime.NODEJS_20_X,
+          handler: "index.isComplete",
+          timeout: Duration.seconds(30),
+          code: Code.fromInline(IAM_PROP_GATE_HANDLER),
+          role: crRole,
+          description:
+            "Waits for exact Gateway PolicyEngine role permissions to propagate.",
+        },
+      );
+      const rolePropagationProvider = new Provider(
+        this,
+        "PolicyEngineRolePropagationProvider",
+        {
+          onEventHandler: rolePropagationOnEvent,
+          isCompleteHandler: rolePropagationIsComplete,
+          queryInterval: Duration.seconds(15),
+          totalTimeout: Duration.minutes(10),
+        },
+      );
+      const rolePropagation = new CustomResource(
+        this,
+        "PolicyEngineRolePropagation",
+        {
+          serviceToken: rolePropagationProvider.serviceToken,
+          properties: {
+            RoleArn: this.gatewayServiceRole.roleArn,
+            PolicyEngineArn: policyEngineArn,
+            GatewayArn: gatewayArnToken,
+            WaitMs: 360000,
+          },
+        },
+      );
+      rolePropagation.node.addDependency(gatewayRolePolicy);
+
+      const stateOnEvent = new LambdaFunction(
+        this,
+        "PolicyEngineGatewayStateOnEvent",
+        {
+          runtime: Runtime.NODEJS_20_X,
+          handler: "index.onEvent",
+          timeout: Duration.seconds(30),
+          code: Code.fromInline(POLICY_ENGINE_GATEWAY_STATE_HANDLER),
+          role: crRole,
+          description: "Records a Gateway PolicyEngine state-check lifecycle.",
+        },
+      );
+      const stateIsComplete = new LambdaFunction(
+        this,
+        "PolicyEngineGatewayStateIsComplete",
+        {
+          runtime: Runtime.NODEJS_20_X,
+          handler: "index.isComplete",
+          timeout: Duration.seconds(30),
+          code: Code.fromInline(POLICY_ENGINE_GATEWAY_STATE_HANDLER),
+          role: crRole,
+          description:
+            "Waits for Gateway PolicyEngine and target readiness convergence.",
+        },
+      );
+      const stateProvider = new Provider(
+        this,
+        "PolicyEngineGatewayStateProvider",
+        {
+          onEventHandler: stateOnEvent,
+          isCompleteHandler: stateIsComplete,
+          queryInterval: Duration.seconds(10),
+          totalTimeout: Duration.minutes(10),
+        },
+      );
+      policyEngineStateProvider = stateProvider;
+      const stateCheck = (
+        id: string,
+        expectedMode: "DETACHED" | "LOG_ONLY" | "ENFORCE",
+        checkOn: "CREATE_UPDATE" | "DELETE",
+      ): CustomResource =>
+        new CustomResource(this, id, {
+          serviceToken: stateProvider.serviceToken,
+          properties: {
+            GatewayIdentifier: gatewayIdToken,
+            PolicyEngineArn: policyEngineArn,
+            ExpectedMode: expectedMode,
+            CheckOn: checkOn,
+          },
+        });
+
+      const gatewayUpdateParameters = {
+        gatewayIdentifier: gatewayIdToken,
+        name: gatewayName,
+        roleArn: this.gatewayServiceRole.roleArn,
+        protocolType: "MCP",
+        protocolConfiguration: createGatewayParams.protocolConfiguration,
+        authorizerType,
+        ...(authorizerConfiguration ? { authorizerConfiguration } : {}),
+      };
+      const logOnlyParameters = {
+        ...gatewayUpdateParameters,
+        policyEngineConfiguration: {
+          arn: policyEngineArn,
+          mode: "LOG_ONLY",
+        },
+      };
+      const desiredModeParameters = {
+        ...gatewayUpdateParameters,
+        policyEngineConfiguration: {
+          arn: policyEngineArn,
+          mode: policyEngineMode,
+        },
+      };
+
+      // The managed association performs the idempotent detach on delete;
+      // this state check remains a verify-only backstop before dependencies
+      // that own the role, engine, and key are removed.
+      const detachReady = stateCheck(
+        "PolicyEngineDetachReady",
+        "DETACHED",
+        "DELETE",
+      );
+      detachReady.node.addDependency(rolePropagation);
+      const association = new CustomResource(this, "PolicyEngineAssociation", {
+        resourceType: "Custom::AgenticAIPolicyEngineAssociation",
+        serviceToken: stateProvider.serviceToken,
+        properties: {
+          GatewayIdentifier: gatewayIdToken,
+          PolicyEngineArn: policyEngineArn,
+          ExpectedMode: "LOG_ONLY",
+          CheckOn: "CREATE_UPDATE",
+          ManageAssociation: true,
+          PhysicalResourceId: `policy-engine-association-${props.envName}-${props.tenantId}-${props.agentId}`,
+          GatewayUpdateParameters: gatewayUpdateParameters,
+        },
+      });
+      association.node.addDependency(detachReady);
+      association.node.addDependency(rolePropagation);
+
+      const associationReady = stateCheck(
+        "PolicyEngineAssociationReady",
+        "LOG_ONLY",
+        "CREATE_UPDATE",
+      );
+      associationReady.node.addDependency(association);
+
+      const policyResources = definitions.map((definition) => {
+        const policy = new CfnResource(
+          this,
+          `GatewayPolicy-${definition.toolId}`,
+          {
+            type: "AWS::BedrockAgentCore::Policy",
+            properties: {
+              Name: definition.policyName,
+              Description: `Policy for ${definition.toolId} on ${props.tenantId}/${props.agentId}.`,
+              PolicyEngineId: policyEngineId,
+              Definition: {
+                Cedar: { Statement: definition.statement },
+              },
+              ValidationMode: "FAIL_ON_ANY_FINDINGS",
+              EnforcementMode: "ACTIVE",
+            },
+          },
+        );
+        policy.node.addDependency(associationReady);
+        policyEnginePoliciesByToolId.set(definition.toolId, policy);
+        return policy;
+      });
+
+      const modeRollbackReady = stateCheck(
+        "PolicyEngineModeRollbackReady",
+        "LOG_ONLY",
+        "DELETE",
+      );
+      modeRollbackReady.node.addDependency(associationReady);
+
+      // CloudFormation reverses dependencies during deletion, but AgentCore
+      // requires targets to exist before strict policies can validate their
+      // actions. This read-only create/update resource becomes the delete-time
+      // LOG_ONLY mutation after policies and targets have been removed.
+      const modeRollbackMutation = new AwsCustomResource(
+        this,
+        "PolicyEngineModeRollbackMutation",
+        {
+          resourceType: "Custom::AgenticAIPolicyEngineModeRollback",
+          role: crRole,
+          onCreate: {
+            service: "bedrock-agentcore-control",
+            action: "getGateway",
+            parameters: { gatewayIdentifier: gatewayIdToken },
+            physicalResourceId: PhysicalResourceId.of(
+              `policy-engine-mode-rollback-${props.envName}-${props.tenantId}-${props.agentId}`,
+            ),
+          },
+          onUpdate: {
+            service: "bedrock-agentcore-control",
+            action: "getGateway",
+            parameters: { gatewayIdentifier: gatewayIdToken },
+            physicalResourceId: PhysicalResourceId.of(
+              `policy-engine-mode-rollback-${props.envName}-${props.tenantId}-${props.agentId}`,
+            ),
+          },
+          onDelete: {
+            service: "bedrock-agentcore-control",
+            action: "updateGateway",
+            parameters: logOnlyParameters,
+            ignoreErrorCodesMatching: "ResourceNotFoundException",
+          },
+        },
+      );
+      modeRollbackMutation.node.addDependency(modeRollbackReady);
+      policyEngineModeRollbackMutation = modeRollbackMutation;
+
+      // Requested-mode deletion is deliberately a no-op. ENFORCE therefore
+      // remains fail-closed while policies and targets delete; the separate
+      // rollback mutator switches to LOG_ONLY only after target convergence.
+      const modeMutation = new AwsCustomResource(
+        this,
+        "PolicyEngineModeMutation",
+        {
+          resourceType: "Custom::AgenticAIPolicyEngineMode",
+          role: crRole,
+          onCreate: {
+            service: "bedrock-agentcore-control",
+            action: "updateGateway",
+            parameters: desiredModeParameters,
+            physicalResourceId: PhysicalResourceId.of(
+              `policy-engine-mode-${props.envName}-${props.tenantId}-${props.agentId}`,
+            ),
+          },
+          onUpdate: {
+            service: "bedrock-agentcore-control",
+            action: "updateGateway",
+            parameters: desiredModeParameters,
+            physicalResourceId: PhysicalResourceId.of(
+              `policy-engine-mode-${props.envName}-${props.tenantId}-${props.agentId}`,
+            ),
+          },
+        },
+      );
+      modeMutation.node.addDependency(modeRollbackMutation);
+      for (const policy of policyResources) {
+        modeMutation.node.addDependency(policy);
+      }
+      const modeReady = stateCheck(
+        "PolicyEngineModeReady",
+        policyEngineMode,
+        "CREATE_UPDATE",
+      );
+      modeReady.node.addDependency(modeMutation);
+
+      for (const provider of [rolePropagationProvider, stateProvider]) {
+        NagSuppressions.addResourceSuppressions(
+          provider,
+          [
+            {
+              id: "AwsSolutions-IAM4",
+              reason:
+                "SEC-010: CDK Provider framework logging role for provisioning-only PolicyEngine waiters.",
+            },
+            {
+              id: "AwsSolutions-IAM5",
+              reason:
+                "SEC-029: CDK Provider framework invokes versioned waiter handlers generated inside this stack.",
+            },
+            {
+              id: "AwsSolutions-L1",
+              reason:
+                "SEC-006: Provider framework Lambda runtime is managed by aws-cdk-lib.",
+            },
+            {
+              id: "NIST.800.53.R5-LambdaConcurrency",
+              reason: "SEC-007: Provisioning-time only.",
+            },
+            {
+              id: "NIST.800.53.R5-LambdaDLQ",
+              reason: "SEC-008: CloudFormation surfaces failures.",
+            },
+            {
+              id: "NIST.800.53.R5-LambdaInsideVPC",
+              reason: "SEC-009: Control-plane only.",
+            },
+          ],
+          true,
+        );
+      }
+
+      new CfnOutput(this, "PolicyEngineArn", {
+        value: policyEngineArn,
+        description: "AgentCore Gateway PolicyEngine ARN.",
+      });
+      new CfnOutput(this, "PolicyEngineMode", {
+        value: policyEngineMode,
+        description:
+          "Gateway PolicyEngine mode. The Lambda Cedar wrapper remains active during migration.",
+      });
+      new CfnOutput(this, "PolicyEnginePolicyCount", {
+        value: String(definitions.length),
+        description: "Number of strict per-tool AgentCore policies.",
+      });
+    }
+
+    // DeleteGateway rejects a Gateway while asynchronously deleting targets
+    // still appear in ListGatewayTargets. Insert a polling barrier in the
+    // dependency chain: create Gateway -> barrier -> targets, which reverses
+    // to delete targets -> wait until none remain -> delete Gateway.
+    const targetDeleteBarrierOnEvent = new LambdaFunction(
+      this,
+      "TargetDeleteBarrierOnEvent",
+      {
+        runtime: Runtime.NODEJS_20_X,
+        handler: "index.onEvent",
+        timeout: Duration.seconds(30),
+        code: Code.fromInline(TARGET_DELETION_BARRIER_HANDLER),
+        role: crRole,
+        description: "Records the Gateway target-deletion barrier lifecycle.",
+      },
+    );
+    const targetDeleteBarrierIsComplete = new LambdaFunction(
+      this,
+      "TargetDeleteBarrierIsComplete",
+      {
+        runtime: Runtime.NODEJS_20_X,
+        handler: "index.isComplete",
+        timeout: Duration.seconds(30),
+        code: Code.fromInline(TARGET_DELETION_BARRIER_HANDLER),
+        role: crRole,
+        description:
+          "Waits until AgentCore reports no targets before Gateway deletion.",
+      },
+    );
+    const targetDeleteBarrierProvider = new Provider(
+      this,
+      "TargetDeleteBarrierProvider",
+      {
+        onEventHandler: targetDeleteBarrierOnEvent,
+        isCompleteHandler: targetDeleteBarrierIsComplete,
+        queryInterval: Duration.seconds(10),
+        totalTimeout: Duration.minutes(10),
+      },
+    );
+    const targetDeleteBarrier = new CustomResource(
+      this,
+      "TargetDeleteBarrier",
+      {
+        serviceToken: targetDeleteBarrierProvider.serviceToken,
+        properties: { GatewayIdentifier: gatewayIdToken },
+      },
+    );
+    targetDeleteBarrier.node.addDependency(this.gatewayResource);
+    if (policyEngineModeRollbackMutation) {
+      targetDeleteBarrier.node.addDependency(policyEngineModeRollbackMutation);
+    }
 
     // ---- N GatewayTargets, one per subscribed tool ----
-    // Naming: `target-<toolId>` (kebab-case). Both the legacy ToolSpec.toolId
-    // and the v0.5.0 RegistryRecord.recordId are validated as kebab-case at
-    // their source, so the composed name satisfies the AgentCore target-name
-    // pattern in either mode.
+    // Naming: `target-<toolId>` (kebab-case). Both the legacy catalogue and
+    // strict GA context expose a validated stable toolId; opaque Registry
+    // record IDs never become MCP tool names.
+    const targetResources: Array<{
+      toolId: string;
+      targetName: string;
+      resource: AwsCustomResource;
+    }> = [];
     for (const subId of subscribedIds) {
       const resolvedArn = resolvedToolArns[subId];
-      const targetName = `target-${subId}`.slice(0, 100);
-      const targetPhysicalId = `AgenticAI-D03-GwTarget-${props.tenantId}-${props.agentId}-${subId}`;
+      const targetName = targetNames[subId];
 
-      // Description + inputSchema source — legacy uses ToolSpec, v0.5.0 uses
-      // a deploy-time-readable token from the registry fetcher.
+      // Description + inputSchema source — both modes now use a validated
+      // ToolSpec; GA mode builds it from the pipeline-resolved governance document.
       const legacySpec = subset.find((s) => s.toolId === subId);
-      const description = legacySpec?.description ?? `Subscribed registry record ${subId}`;
-      const inputSchema = legacySpec?.inputSchema ?? { type: 'object' };
+      const description =
+        legacySpec?.description ?? `Subscribed registry record ${subId}`;
+      const inputSchema = legacySpec?.inputSchema ?? { type: "object" };
 
       const createTargetParams = {
         gatewayIdentifier: gatewayIdToken,
@@ -653,57 +1356,68 @@ export class D03WorkstreamGatewayStack extends Stack {
         // layer-3 enforcement above.
         credentialProviderConfigurations: [
           {
-            credentialProviderType: 'GATEWAY_IAM_ROLE',
+            credentialProviderType: "GATEWAY_IAM_ROLE",
           },
         ],
       };
 
-      const targetResource = new AwsCustomResource(this, `GatewayTarget-${subId}`, {
-        resourceType: 'Custom::BedrockAgentCoreGatewayTarget',
-        role: crRole,
-        onCreate: {
-          service: 'bedrock-agentcore-control',
-          action: 'createGatewayTarget',
-          parameters: createTargetParams,
-          // Use the API-returned targetId as the physical id so onDelete can
-          // reference it. AgentCore mints a 10-char id (`[0-9a-zA-Z]{10}`);
-          // friendly names (like our per-tool kebab) are rejected on delete.
-          physicalResourceId: PhysicalResourceId.fromResponse('targetId'),
-        },
-        onUpdate: {
-          service: 'bedrock-agentcore-control',
-          action: 'getGatewayTarget',
-          parameters: {
-            gatewayIdentifier: gatewayIdToken,
-            targetId: new PhysicalResourceIdReference(),
+      const targetResource = new AwsCustomResource(
+        this,
+        `GatewayTarget-${subId}`,
+        {
+          resourceType: "Custom::BedrockAgentCoreGatewayTarget",
+          role: crRole,
+          onCreate: {
+            service: "bedrock-agentcore-control",
+            action: "createGatewayTarget",
+            parameters: createTargetParams,
+            // Use the API-returned targetId as the physical id so onDelete can
+            // reference it. AgentCore mints a 10-char id (`[0-9a-zA-Z]{10}`);
+            // friendly names (like our per-tool kebab) are rejected on delete.
+            physicalResourceId: PhysicalResourceId.fromResponse("targetId"),
           },
-          physicalResourceId: PhysicalResourceId.fromResponse('targetId'),
-        },
-        onDelete: {
-          service: 'bedrock-agentcore-control',
-          action: 'deleteGatewayTarget',
-          parameters: {
-            gatewayIdentifier: gatewayIdToken,
-            targetId: new PhysicalResourceIdReference(),
+          onUpdate: {
+            service: "bedrock-agentcore-control",
+            action: "getGatewayTarget",
+            parameters: {
+              gatewayIdentifier: gatewayIdToken,
+              targetId: new PhysicalResourceIdReference(),
+            },
+            physicalResourceId: PhysicalResourceId.fromResponse("targetId"),
           },
-          // When Create fails, CFN calls Delete with the ORIGINAL physical id
-          // (our logical name) instead of the 10-char id from a successful
-          // Create — AgentCore rejects it with ValidationException. Swallow
-          // that + the normal "already-deleted" case to keep rollback clean.
-          ignoreErrorCodesMatching: '(ResourceNotFoundException|ValidationException)',
+          onDelete: {
+            service: "bedrock-agentcore-control",
+            action: "deleteGatewayTarget",
+            parameters: {
+              gatewayIdentifier: gatewayIdToken,
+              targetId: new PhysicalResourceIdReference(),
+            },
+            // When Create fails, CFN calls Delete with the ORIGINAL physical id
+            // (our logical name) instead of the 10-char id from a successful
+            // Create — AgentCore rejects it with ValidationException. Swallow
+            // that + the normal "already-deleted" case to keep rollback clean.
+            ignoreErrorCodesMatching:
+              "(ResourceNotFoundException|ValidationException)",
+          },
+          // Uses the shared crRole (see GatewayResource) — its policy already
+          // grants the bedrock-agentcore:* provisioning scope, and the IAM
+          // propagation race is gated by CrPropGate (dependency added below).
         },
-        // Uses the shared crRole (see GatewayResource) — its policy already
-        // grants the bedrock-agentcore:* provisioning scope, and the IAM
-        // propagation race is gated by CrPropGate (dependency added below).
-      });
+      );
       // Explicit dependency so the Gateway exists before its targets.
       targetResource.node.addDependency(this.gatewayResource);
+      targetResource.node.addDependency(targetDeleteBarrier);
       // When using the Registry, also depend on the per-record fetcher so the
       // CFN graph orders the live-record validation before target creation.
       const fetcher = registryFetchers[subId];
       if (fetcher) {
         targetResource.node.addDependency(fetcher);
       }
+      targetResources.push({
+        toolId: subId,
+        targetName,
+        resource: targetResource,
+      });
 
       // Per-tool CfnOutput so auditors / downstream stacks can consume the
       // resolved tool ARN without re-deriving from catalogue + platform-acct.
@@ -715,40 +1429,76 @@ export class D03WorkstreamGatewayStack extends Stack {
       });
     }
 
+    if (policyEngineStateProvider) {
+      const sortedTargets = [...targetResources].sort((left, right) =>
+        left.toolId.localeCompare(right.toolId),
+      );
+      if (sortedTargets.length !== policyEnginePoliciesByToolId.size) {
+        throw new Error(
+          "D03WorkstreamGatewayStack: every PolicyEngine policy must have one Gateway target.",
+        );
+      }
+      const targetReady = new CustomResource(
+        this,
+        "PolicyEngineTargetActionsReady",
+        {
+          resourceType: "Custom::AgenticAIPolicyEngineTargetReady",
+          serviceToken: policyEngineStateProvider.serviceToken,
+          properties: {
+            GatewayIdentifier: gatewayIdToken,
+            Targets: sortedTargets.map(({ targetName, resource }) => ({
+              TargetIdentifier: resource.getResponseField("targetId"),
+              ExpectedName: targetName,
+            })),
+          },
+        },
+      );
+      for (const { resource } of sortedTargets) {
+        targetReady.node.addDependency(resource);
+      }
+      for (const policy of policyEnginePoliciesByToolId.values()) {
+        policy.node.addDependency(targetReady);
+      }
+    }
+
     // ---- Stack-level tags (flow to every taggable resource) ----
-    Tags.of(this).add('deviation', 'D-03');
-    Tags.of(this).add('tenant-id', props.tenantId);
-    Tags.of(this).add('agent-id', props.agentId);
-    Tags.of(this).add('workload-account-id', props.workloadAccountId);
-    Tags.of(this).add('environment', props.envName);
+    Tags.of(this).add("deviation", "D-03");
+    Tags.of(this).add("application-id", props.applicationId ?? props.tenantId);
+    Tags.of(this).add("tenant-id", props.tenantId);
+    Tags.of(this).add("agent-id", props.agentId);
+    Tags.of(this).add("cost-centre", props.costCentre ?? "unassigned");
+    Tags.of(this).add("workload-account-id", props.workloadAccountId);
+    Tags.of(this).add("environment", props.envName);
 
     // ---- CfnOutputs ----
-    new CfnOutput(this, 'GatewayId', {
+    new CfnOutput(this, "GatewayId", {
       value: gatewayIdToken,
-      description: 'AgentCore Gateway id (opaque). Workload runtime consumes this as the MCP endpoint target.',
-      exportName: `AgenticAI-D03-GatewayId-${props.tenantId}-${props.agentId}`,
+      description:
+        "AgentCore Gateway id (opaque). Workload runtime consumes this as the MCP endpoint target.",
+      exportName: `AgenticAI-D03-GatewayId-${props.envName}-${props.tenantId}-${props.agentId}`,
     });
-    new CfnOutput(this, 'GatewayArn', {
+    new CfnOutput(this, "GatewayArn", {
       value: gatewayArnToken,
-      description: 'AgentCore Gateway ARN.',
-      exportName: `AgenticAI-D03-GatewayArn-${props.tenantId}-${props.agentId}`,
+      description: "AgentCore Gateway ARN.",
+      exportName: `AgenticAI-D03-GatewayArn-${props.envName}-${props.tenantId}-${props.agentId}`,
     });
-    new CfnOutput(this, 'GatewayServiceRoleArn', {
+    new CfnOutput(this, "GatewayServiceRoleArn", {
       value: this.gatewayServiceRole.roleArn,
-      description: 'IAM role the Gateway assumes to invoke the N subscribed tool Lambdas.',
-      exportName: `AgenticAI-D03-GatewayServiceRoleArn-${props.tenantId}-${props.agentId}`,
+      description:
+        "IAM role the Gateway assumes to invoke the N subscribed tool Lambdas.",
+      exportName: `AgenticAI-D03-GatewayServiceRoleArn-${props.envName}-${props.tenantId}-${props.agentId}`,
     });
-    new CfnOutput(this, 'SubscribedToolCount', {
+    new CfnOutput(this, "SubscribedToolCount", {
       value: String(subscribedIds.length),
-      description: 'Number of tools subscribed via allowedToolIds. Matches the N GatewayTarget resources.',
+      description:
+        "Number of GA Registry records subscribed. Matches the N GatewayTarget resources.",
     });
-    new CfnOutput(this, 'PerTenantCedarPolicy', {
-      // The composed Cedar doc — emitted for audit. Once AgentCore policy-engine
-      // CR lands (TODO-GW-POLICY-ENGINE) this becomes the payload uploaded
-      // to the policy-engine resource rather than just an output.
+    new CfnOutput(this, "PerTenantCedarPolicy", {
+      // The legacy composed Cedar document remains visible for wrapper parity
+      // and rollback auditing while Gateway-native PolicyEngine is opt-in.
       value: cedarPolicy,
       description:
-        'Composed Cedar policy for this workstream (union of per-tool snippets + default forbid). Audit-only until policy-engine CR support lands.',
+        "Legacy Lambda-wrapper Cedar policy retained for PolicyEngine parity and rollback auditing.",
     });
 
     // ---- NagSuppressions ----
@@ -760,50 +1510,124 @@ export class D03WorkstreamGatewayStack extends Stack {
     NagSuppressions.addStackSuppressions(
       this,
       [
-        { id: 'AwsSolutions-L1', reason: 'SEC-006: CDK-managed AwsCustomResource Lambda runtime.' },
         {
-          id: 'NIST.800.53.R5-LambdaConcurrency',
-          reason: 'SEC-007: Provisioning-time Lambda invoked only by CloudFormation; concurrency would break deploys.',
+          id: "AwsSolutions-L1",
+          reason: "SEC-006: CDK-managed AwsCustomResource Lambda runtime.",
         },
         {
-          id: 'NIST.800.53.R5-LambdaDLQ',
-          reason: 'SEC-008: CFN surfaces custom-resource failures directly; DLQ would go unconsumed.',
+          id: "NIST.800.53.R5-LambdaConcurrency",
+          reason:
+            "SEC-007: Provisioning-time Lambda invoked only by CloudFormation; concurrency would break deploys.",
         },
         {
-          id: 'NIST.800.53.R5-LambdaInsideVPC',
-          reason: 'SEC-009: AgentCore control-plane is a public IAM-auth endpoint; placing the provisioning Lambda in a VPC would require extra VPCEs only for stack deploys.',
+          id: "NIST.800.53.R5-LambdaDLQ",
+          reason:
+            "SEC-008: CFN surfaces custom-resource failures directly; DLQ would go unconsumed.",
         },
         {
-          id: 'AwsSolutions-IAM4',
-          appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'],
-          reason: 'SEC-010: AWSLambdaBasicExecutionRole is the documented managed policy for CDK custom-resource Lambdas.',
+          id: "NIST.800.53.R5-LambdaInsideVPC",
+          reason:
+            "SEC-009: AgentCore control-plane is a public IAM-auth endpoint; placing the provisioning Lambda in a VPC would require extra VPCEs only for stack deploys.",
         },
         {
-          id: 'AwsSolutions-IAM5',
-          appliesTo: ['Resource::*'],
-          reason: 'SEC-011: AgentCore CreateGateway / CreateGatewayTarget are account-level control-plane APIs; no concrete ARN exists at the time of the Create call (the Gateway is being minted). Scoped by action list.',
+          id: "AwsSolutions-IAM4",
+          appliesTo: [
+            "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+          ],
+          reason:
+            "SEC-010: AWSLambdaBasicExecutionRole is the documented managed policy for CDK custom-resource Lambdas.",
         },
         {
-          id: 'AwsSolutions-IAM5',
-          appliesTo: ['Action::bedrock-agentcore:*'],
-          reason: 'SEC-028: AgentCore action-family evaluation rejects narrow per-action allow-lists for `CreateGatewayTarget` (discovered live 2026-05-05). Scoped by (a) the CDK-managed singleton Lambda lifetime (bounded to stack create/update/delete), (b) Resource:* constrained by the AgentCore control-plane service itself having no per-resource ARN until post-create, and (c) SCP-09 org-level deny on gateway-mutation to every principal except the platform GatewayAdmin role.',
+          id: "AwsSolutions-IAM5",
+          appliesTo: ["Resource::*"],
+          reason:
+            "SEC-011: AgentCore CreateGateway / CreateGatewayTarget are account-level control-plane APIs; no concrete ARN exists at the time of the Create call (the Gateway is being minted). Scoped by action list.",
         },
         {
-          id: 'NIST.800.53.R5-IAMNoInlinePolicy',
-          reason: 'SEC-005: GatewayServiceRole uses an inline policy to keep the exact N target-ARN allow-list visible on the role itself (layer-3 enforcement of the three-layer model).',
+          id: "AwsSolutions-IAM5",
+          appliesTo: ["Action::bedrock-agentcore:*"],
+          reason:
+            "SEC-028: AgentCore action-family evaluation rejects narrow per-action allow-lists for `CreateGatewayTarget` (discovered live 2026-05-05). Scoped by (a) the CDK-managed singleton Lambda lifetime (bounded to stack create/update/delete), (b) Resource:* constrained by the AgentCore control-plane service itself having no per-resource ARN until post-create, and (c) SCP-09 org-level deny on gateway-mutation to every principal except the platform GatewayAdmin role.",
+        },
+        {
+          id: "NIST.800.53.R5-IAMNoInlinePolicy",
+          reason:
+            "SEC-005: GatewayServiceRole uses an inline policy to keep the exact N target-ARN allow-list visible on the role itself (layer-3 enforcement of the three-layer model).",
         },
         // SEC-029: CDK custom-resources Provider framework internals for the
-        // IAM-propagation gate (CrPropGate). The waiter Step Function and the
-        // framework onEvent/isComplete/onTimeout Lambda roles are
-        // framework-generated and reference each other with function-arn
+        // IAM-propagation and target-deletion gates. Their waiter Step
+        // Functions and framework onEvent/isComplete/onTimeout Lambda roles
+        // are framework-generated and reference each other with function-arn
         // version wildcards (<arn>:*), without ALL-events logging or X-Ray.
         // Not authorable without forking the framework; provisioning-only.
-        { id: 'AwsSolutions-SF1', reason: 'SEC-029: CDK Provider framework waiter Step Function (IAM-propagation gate); logging config is framework-owned.' },
-        { id: 'AwsSolutions-SF2', reason: 'SEC-029: CDK Provider framework waiter Step Function; X-Ray is framework-owned.' },
-        { id: 'AwsSolutions-IAM5', appliesTo: ['Resource::<CrPropGateIsComplete083CF04D.Arn>:*'], reason: 'SEC-029: Provider framework inter-Lambda invoke version wildcard.' },
-        { id: 'AwsSolutions-IAM5', appliesTo: ['Resource::<CrPropGateOnEventB36FE5AB.Arn>:*'], reason: 'SEC-029: Provider framework inter-Lambda invoke version wildcard.' },
-        { id: 'AwsSolutions-IAM5', appliesTo: ['Resource::<CrPropGateProviderframeworkisCompleteDF39D816.Arn>:*'], reason: 'SEC-029: Provider framework waiter → isComplete invoke version wildcard.' },
-        { id: 'AwsSolutions-IAM5', appliesTo: ['Resource::<CrPropGateProviderframeworkonTimeout9DAB4B92.Arn>:*'], reason: 'SEC-029: Provider framework waiter → onTimeout invoke version wildcard.' },
+        {
+          id: "AwsSolutions-SF1",
+          reason:
+            "SEC-029: CDK Provider framework waiter Step Function (IAM-propagation gate); logging config is framework-owned.",
+        },
+        {
+          id: "AwsSolutions-SF2",
+          reason:
+            "SEC-029: CDK Provider framework waiter Step Function; X-Ray is framework-owned.",
+        },
+        {
+          id: "AwsSolutions-IAM5",
+          appliesTo: ["Resource::<CrPropGateIsComplete083CF04D.Arn>:*"],
+          reason:
+            "SEC-029: Provider framework inter-Lambda invoke version wildcard.",
+        },
+        {
+          id: "AwsSolutions-IAM5",
+          appliesTo: ["Resource::<CrPropGateOnEventB36FE5AB.Arn>:*"],
+          reason:
+            "SEC-029: Provider framework inter-Lambda invoke version wildcard.",
+        },
+        {
+          id: "AwsSolutions-IAM5",
+          appliesTo: [
+            "Resource::<CrPropGateProviderframeworkisCompleteDF39D816.Arn>:*",
+          ],
+          reason:
+            "SEC-029: Provider framework waiter → isComplete invoke version wildcard.",
+        },
+        {
+          id: "AwsSolutions-IAM5",
+          appliesTo: [
+            "Resource::<CrPropGateProviderframeworkonTimeout9DAB4B92.Arn>:*",
+          ],
+          reason:
+            "SEC-029: Provider framework waiter → onTimeout invoke version wildcard.",
+        },
+        {
+          id: "AwsSolutions-IAM5",
+          appliesTo: [
+            "Resource::<TargetDeleteBarrierIsCompleteFE1AD9CE.Arn>:*",
+          ],
+          reason:
+            "SEC-029: Target deletion Provider framework invokes the versioned isComplete handler.",
+        },
+        {
+          id: "AwsSolutions-IAM5",
+          appliesTo: ["Resource::<TargetDeleteBarrierOnEvent9DDC866B.Arn>:*"],
+          reason:
+            "SEC-029: Target deletion Provider framework invokes the versioned onEvent handler.",
+        },
+        {
+          id: "AwsSolutions-IAM5",
+          appliesTo: [
+            "Resource::<TargetDeleteBarrierProviderframeworkisCompleteCC8BC692.Arn>:*",
+          ],
+          reason:
+            "SEC-029: Target deletion waiter invokes the Provider framework isComplete version.",
+        },
+        {
+          id: "AwsSolutions-IAM5",
+          appliesTo: [
+            "Resource::<TargetDeleteBarrierProviderframeworkonTimeout94122D57.Arn>:*",
+          ],
+          reason:
+            "SEC-029: Target deletion waiter invokes the Provider framework timeout version.",
+        },
       ],
       true,
     );
@@ -811,23 +1635,323 @@ export class D03WorkstreamGatewayStack extends Stack {
 }
 
 /**
- * Internal shim — builds the physical-resource-id reference the AWS SDK custom
- * resource expects for `onDelete.parameters.*Identifier` lookups. We just pass
- * the stable physical id string (same value used in `PhysicalResourceId.of`)
- * because the onCreate call uses a stable id; AgentCore's gateway-identifier
- * is itself the returned gatewayId, which is retained as the physical id.
- *
- * Kept as a class (not an inline string) so future refactors can swap in
- * `PhysicalResourceIdReference.fromAttribute(...)` without churn across
- * three call sites.
+ * Provider handler for Gateway PolicyEngine association, mode, detach, and
+ * target-readiness convergence. Managed association resources retry only the
+ * live-proven transient GetPolicyEngine propagation denial; all verification
+ * paths remain read-only.
  */
+const POLICY_ENGINE_GATEWAY_STATE_HANDLER = `
+const https = require('https');
+const crypto = require('crypto');
+function hmac(key, value) { return crypto.createHmac('sha256', key).update(value, 'utf8').digest(); }
+function hash(value) { return crypto.createHash('sha256').update(value, 'utf8').digest('hex'); }
+async function signedGet(path) {
+  const region = process.env.AWS_REGION;
+  const host = 'bedrock-agentcore-control.' + region + '.amazonaws.com';
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\\.\\d{3}/g, '');
+  const dateStamp = amzDate.substring(0, 8);
+  const headers = {
+    host,
+    'x-amz-date': amzDate,
+    'x-amz-security-token': process.env.AWS_SESSION_TOKEN,
+  };
+  const keys = Object.keys(headers).sort();
+  const canonicalHeaders = keys.map(k => k + ':' + headers[k] + '\\n').join('');
+  const signedHeaders = keys.join(';');
+  const canonicalRequest =
+    'GET\\n' + path + '\\n\\n' + canonicalHeaders + '\\n' + signedHeaders + '\\n' + hash('');
+  const scope = dateStamp + '/' + region + '/bedrock-agentcore/aws4_request';
+  const stringToSign =
+    'AWS4-HMAC-SHA256\\n' + amzDate + '\\n' + scope + '\\n' + hash(canonicalRequest);
+  const kDate = hmac('AWS4' + process.env.AWS_SECRET_ACCESS_KEY, dateStamp);
+  const kRegion = hmac(kDate, region);
+  const kService = hmac(kRegion, 'bedrock-agentcore');
+  const kSigning = hmac(kService, 'aws4_request');
+  const signature = crypto.createHmac('sha256', kSigning).update(stringToSign, 'utf8').digest('hex');
+  headers.authorization =
+    'AWS4-HMAC-SHA256 Credential=' + process.env.AWS_ACCESS_KEY_ID + '/' + scope +
+    ', SignedHeaders=' + signedHeaders + ', Signature=' + signature;
+  return new Promise((resolve, reject) => {
+    const req = https.request({ host, path, method: 'GET', headers }, res => {
+      let body = '';
+      res.on('data', chunk => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode || 0, body }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+async function getGateway(gatewayIdentifier) {
+  return signedGet('/gateways/' + encodeURIComponent(gatewayIdentifier));
+}
+async function getGatewayTarget(gatewayIdentifier, targetIdentifier) {
+  // The API constrains Gateway/target IDs to opaque path-safe patterns. Encode
+  // each segment once and preserve the modeled trailing slash in both the
+  // canonical request and the transmitted URI.
+  return signedGet(
+    '/gateways/' + encodeURIComponent(gatewayIdentifier) +
+    '/targets/' + encodeURIComponent(targetIdentifier) + '/',
+  );
+}
+async function updateGateway(gatewayIdentifier, payload) {
+  const region = process.env.AWS_REGION;
+  const host = 'bedrock-agentcore-control.' + region + '.amazonaws.com';
+  const path = '/gateways/' + encodeURIComponent(gatewayIdentifier) + '/';
+  const body = JSON.stringify(payload);
+  const payloadHash = hash(body);
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\\.\\d{3}/g, '');
+  const dateStamp = amzDate.substring(0, 8);
+  const headers = {
+    'content-length': String(Buffer.byteLength(body, 'utf8')),
+    'content-type': 'application/json',
+    host,
+    'x-amz-content-sha256': payloadHash,
+    'x-amz-date': amzDate,
+    'x-amz-security-token': process.env.AWS_SESSION_TOKEN,
+  };
+  const keys = Object.keys(headers).sort();
+  const canonicalHeaders = keys.map(k => k + ':' + headers[k] + '\\n').join('');
+  const signedHeaders = keys.join(';');
+  const canonicalRequest =
+    'PUT\\n' + path + '\\n\\n' + canonicalHeaders + '\\n' + signedHeaders + '\\n' + payloadHash;
+  const scope = dateStamp + '/' + region + '/bedrock-agentcore/aws4_request';
+  const stringToSign =
+    'AWS4-HMAC-SHA256\\n' + amzDate + '\\n' + scope + '\\n' + hash(canonicalRequest);
+  const kDate = hmac('AWS4' + process.env.AWS_SECRET_ACCESS_KEY, dateStamp);
+  const kRegion = hmac(kDate, region);
+  const kService = hmac(kRegion, 'bedrock-agentcore');
+  const kSigning = hmac(kService, 'aws4_request');
+  const signature = crypto.createHmac('sha256', kSigning).update(stringToSign, 'utf8').digest('hex');
+  headers.authorization =
+    'AWS4-HMAC-SHA256 Credential=' + process.env.AWS_ACCESS_KEY_ID + '/' + scope +
+    ', SignedHeaders=' + signedHeaders + ', Signature=' + signature;
+  return new Promise((resolve, reject) => {
+    const req = https.request({ host, path, method: 'PUT', headers }, res => {
+      let responseBody = '';
+      res.on('data', chunk => { responseBody += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode || 0, body: responseBody }));
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+function isRetryablePolicyEnginePropagation(response) {
+  if (response.status !== 400) return false;
+  const message = String(response.body || '').toLowerCase();
+  return message.includes('access denied while calling getpolicyengine') &&
+    message.includes('gateway role');
+}
+// onEvent only validates and preserves resource identity. Association and
+// detach mutations intentionally run in isComplete so each attempt first reads
+// live state and the Provider can retry the one proven propagation response.
+exports.onEvent = async (event) => {
+  const props = event.ResourceProperties || {};
+  const gatewayIdentifier = String(props.GatewayIdentifier || '');
+  const targets = props.Targets;
+  if (Array.isArray(targets)) {
+    const normalized = targets.map(target => ({
+      id: String((target || {}).TargetIdentifier || ''),
+      name: String((target || {}).ExpectedName || ''),
+    }));
+    if (!gatewayIdentifier || normalized.length === 0 ||
+        normalized.some(target => !target.id || !target.name) ||
+        new Set(normalized.map(target => target.id)).size !== normalized.length ||
+        new Set(normalized.map(target => target.name)).size !== normalized.length) {
+      throw new Error('PolicyEngine target readiness check has invalid properties');
+    }
+    return {
+      PhysicalResourceId:
+        event.PhysicalResourceId ||
+        'policy-engine-targets-ready-' + String(event.LogicalResourceId || gatewayIdentifier),
+    };
+  }
+  const expectedMode = String(props.ExpectedMode || '');
+  const checkOn = String(props.CheckOn || '');
+  const manageAssociation = String(props.ManageAssociation || 'false') === 'true';
+  if (!gatewayIdentifier || !['DETACHED', 'LOG_ONLY', 'ENFORCE'].includes(expectedMode)) {
+    throw new Error('PolicyEngine Gateway state check has invalid properties');
+  }
+  if (!['CREATE_UPDATE', 'DELETE'].includes(checkOn)) {
+    throw new Error('PolicyEngine Gateway state check has invalid CheckOn');
+  }
+  if (manageAssociation && (!props.GatewayUpdateParameters || typeof props.GatewayUpdateParameters !== 'object')) {
+    throw new Error('Managed PolicyEngine association requires GatewayUpdateParameters');
+  }
+  return {
+    PhysicalResourceId:
+      event.PhysicalResourceId ||
+      String(props.PhysicalResourceId || '') ||
+      'policy-engine-state-' + String(event.LogicalResourceId || gatewayIdentifier),
+  };
+};
+exports.isComplete = async (event) => {
+  const props = event.ResourceProperties || {};
+  const targets = props.Targets;
+  if (Array.isArray(targets)) {
+    if (event.RequestType === 'Delete') return { IsComplete: true };
+    const gatewayIdentifier = String(props.GatewayIdentifier || '');
+    for (const target of targets) {
+      const targetIdentifier = String((target || {}).TargetIdentifier || '');
+      const expectedName = String((target || {}).ExpectedName || '');
+      const response = await getGatewayTarget(gatewayIdentifier, targetIdentifier);
+      if (response.status === 404) return { IsComplete: false };
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error('GetGatewayTarget HTTP ' + response.status + ': ' + response.body);
+      }
+      let current;
+      try { current = JSON.parse(response.body); }
+      catch (error) { throw new Error('GetGatewayTarget returned invalid JSON'); }
+      if (String(current.targetId || '') !== targetIdentifier ||
+          String(current.name || '') !== expectedName) {
+        throw new Error('Gateway target identity changed before PolicyEngine policy creation');
+      }
+      const status = String(current.status || '');
+      if (['CREATE_PENDING_AUTH', 'UPDATE_PENDING_AUTH', 'SYNCHRONIZE_PENDING_AUTH'].includes(status)) {
+        throw new Error(
+          'Gateway target ' + expectedName + ' entered unsupported authorization state ' + status,
+        );
+      }
+      if (['FAILED', 'UPDATE_UNSUCCESSFUL', 'SYNCHRONIZE_UNSUCCESSFUL'].includes(status)) {
+        throw new Error('Gateway target ' + expectedName + ' entered terminal state ' + status);
+      }
+      if (status !== 'READY') return { IsComplete: false };
+    }
+    return { IsComplete: true };
+  }
+  const checkOn = String(props.CheckOn || '');
+  const manageAssociation = String(props.ManageAssociation || 'false') === 'true';
+  const shouldCheck = manageAssociation || (checkOn === 'DELETE'
+    ? event.RequestType === 'Delete'
+    : event.RequestType !== 'Delete');
+  if (!shouldCheck) return { IsComplete: true };
+  const gatewayIdentifier = String(props.GatewayIdentifier || '');
+  const configuredMode = String(props.ExpectedMode || '');
+  const desiredMode = manageAssociation && event.RequestType === 'Delete'
+    ? 'DETACHED'
+    : configuredMode;
+  const expectedArn = String(props.PolicyEngineArn || '');
+  const response = await getGateway(gatewayIdentifier);
+  if (response.status === 404) {
+    if (desiredMode === 'DETACHED') return { IsComplete: true };
+    throw new Error('Gateway disappeared before PolicyEngine mode converged');
+  }
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error('GetGateway HTTP ' + response.status + ': ' + response.body);
+  }
+  let gateway;
+  try { gateway = JSON.parse(response.body); }
+  catch (error) { throw new Error('GetGateway returned invalid JSON'); }
+  const status = String(gateway.status || '');
+  if (['FAILED', 'UPDATE_UNSUCCESSFUL', 'SYNCHRONIZE_UNSUCCESSFUL'].includes(status)) {
+    throw new Error('Gateway entered terminal state ' + status);
+  }
+  if (status !== 'READY') return { IsComplete: false };
+  const configuration = gateway.policyEngineConfiguration || {};
+  const converged = desiredMode === 'DETACHED'
+    ? !configuration.arn
+    : String(configuration.arn || '') === expectedArn &&
+      String(configuration.mode || '') === desiredMode;
+  if (converged) return { IsComplete: true };
+  if (!manageAssociation) return { IsComplete: false };
+
+  const payload = JSON.parse(JSON.stringify(props.GatewayUpdateParameters));
+  delete payload.gatewayIdentifier;
+  if (desiredMode === 'DETACHED') {
+    delete payload.policyEngineConfiguration;
+  } else {
+    payload.policyEngineConfiguration = { arn: expectedArn, mode: desiredMode };
+  }
+  const update = await updateGateway(gatewayIdentifier, payload);
+  if (update.status >= 200 && update.status < 300) {
+    return { IsComplete: false };
+  }
+  if (desiredMode !== 'DETACHED' && isRetryablePolicyEnginePropagation(update)) {
+    return { IsComplete: false };
+  }
+  if (desiredMode === 'DETACHED' && update.status === 404) {
+    return { IsComplete: true };
+  }
+  throw new Error('UpdateGateway HTTP ' + update.status + ': ' + update.body);
+};
+`;
+
+/**
+ * Provider handler for the deletion-order barrier between Gateway targets and
+ * the Gateway itself. Target delete APIs are asynchronous: CloudFormation can
+ * mark their custom resources deleted before ListGatewayTargets is empty.
+ */
+const TARGET_DELETION_BARRIER_HANDLER = `
+const https = require('https');
+const crypto = require('crypto');
+function hmac(key, value) { return crypto.createHmac('sha256', key).update(value, 'utf8').digest(); }
+function hash(value) { return crypto.createHash('sha256').update(value, 'utf8').digest('hex'); }
+async function listTargets(gatewayIdentifier) {
+  const region = process.env.AWS_REGION;
+  const host = 'bedrock-agentcore-control.' + region + '.amazonaws.com';
+  const path = '/gateways/' + encodeURIComponent(gatewayIdentifier) + '/targets/';
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\\.\\d{3}/g, '');
+  const dateStamp = amzDate.substring(0, 8);
+  const headers = {
+    host,
+    'x-amz-date': amzDate,
+    'x-amz-security-token': process.env.AWS_SESSION_TOKEN,
+  };
+  const keys = Object.keys(headers).sort();
+  const canonicalHeaders = keys.map(k => k + ':' + headers[k] + '\\n').join('');
+  const signedHeaders = keys.join(';');
+  const canonicalRequest =
+    'GET\\n' + path + '\\n\\n' + canonicalHeaders + '\\n' + signedHeaders + '\\n' + hash('');
+  const scope = dateStamp + '/' + region + '/bedrock-agentcore/aws4_request';
+  const stringToSign =
+    'AWS4-HMAC-SHA256\\n' + amzDate + '\\n' + scope + '\\n' + hash(canonicalRequest);
+  const kDate = hmac('AWS4' + process.env.AWS_SECRET_ACCESS_KEY, dateStamp);
+  const kRegion = hmac(kDate, region);
+  const kService = hmac(kRegion, 'bedrock-agentcore');
+  const kSigning = hmac(kService, 'aws4_request');
+  const signature = crypto.createHmac('sha256', kSigning).update(stringToSign, 'utf8').digest('hex');
+  headers.authorization =
+    'AWS4-HMAC-SHA256 Credential=' + process.env.AWS_ACCESS_KEY_ID + '/' + scope +
+    ', SignedHeaders=' + signedHeaders + ', Signature=' + signature;
+  return new Promise((resolve, reject) => {
+    const req = https.request({ host, path, method: 'GET', headers }, res => {
+      let body = '';
+      res.on('data', chunk => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode || 0, body }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+exports.onEvent = async (event) => {
+  const gatewayIdentifier = String(event.ResourceProperties.GatewayIdentifier || '');
+  if (!gatewayIdentifier) throw new Error('TargetDeleteBarrier requires GatewayIdentifier');
+  return { PhysicalResourceId: 'target-delete-barrier-' + gatewayIdentifier };
+};
+exports.isComplete = async (event) => {
+  if (event.RequestType !== 'Delete') return { IsComplete: true };
+  const gatewayIdentifier = String(event.ResourceProperties.GatewayIdentifier || '');
+  const response = await listTargets(gatewayIdentifier);
+  if (response.status === 404) return { IsComplete: true };
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error('ListGatewayTargets HTTP ' + response.status + ': ' + response.body);
+  }
+  let parsed;
+  try { parsed = JSON.parse(response.body); }
+  catch (error) { throw new Error('ListGatewayTargets returned invalid JSON'); }
+  const items = Array.isArray(parsed.items) ? parsed.items : [];
+  return { IsComplete: items.length === 0 && !parsed.nextToken };
+};
+`;
+
 /**
  * Inline handler for the AgentCore CR IAM-propagation gate. `onEvent` stamps a
- * completion deadline (now + ~30s) into the physical id; `isComplete` reports
- * done once that deadline passes. This deterministically delays the first
- * AgentCore mutate call until the shared CR role's inline policy has
- * propagated (live-verified: the same policy authorizes CreateGateway after a
- * short propagation window but is denied if called immediately).
+ * completion deadline into the physical id; `isComplete` reports done once
+ * that deadline passes. This deterministically delays the first AgentCore
+ * mutate call until the shared CR role's inline policy has propagated.
  */
 const IAM_PROP_GATE_HANDLER = `
 // Fresh IAM role → AgentCore control-plane authorization propagation was
@@ -839,7 +1963,11 @@ const IAM_PROP_GATE_HANDLER = `
 const WAIT_MS = 300000;
 exports.onEvent = async (event) => {
   if (event.RequestType === 'Delete') return { PhysicalResourceId: event.PhysicalResourceId };
-  const deadline = Date.now() + WAIT_MS;
+  const configured = Number(event.ResourceProperties.WaitMs || WAIT_MS);
+  if (!Number.isFinite(configured) || configured < 0 || configured > 600000) {
+    throw new Error('IAM propagation WaitMs must be between 0 and 600000');
+  }
+  const deadline = Date.now() + configured;
   return { PhysicalResourceId: 'iam-prop-gate-' + deadline };
 };
 exports.isComplete = async (event) => {
@@ -850,37 +1978,24 @@ exports.isComplete = async (event) => {
 };
 `;
 
-class PhysicalResourceIdReferenceShim {
-  readonly value: string;
-  constructor(id: string) {
-    this.value = id;
-  }
-}
-
 /**
- * Inline Lambda handler — deploy-time AgentCore Registry record validator.
+ * Inline Lambda handler — deploy-time GA Agent Registry record validator.
  *
- * Calls `bedrock-agentcore-control:GetRegistryRecord` for the (registryId,
- * recordId) pair passed in `ResourceProperties`, asserts that the record's
- * `status` is exactly `APPROVED`, and returns the metadata fields the
- * workstream Gateway stack pins as CFN attribute tokens.
+ * Calls `agent-registry:GetRegistryRecord` through the R1 reader role for the
+ * exact Registry/record pair, requires `APPROVED`, and compares the complete
+ * custom descriptor SHA-256 to the pipeline-synth value. Target ARN, MCP schema,
+ * Cedar policy, entitlement, and ownership drift therefore fail CloudFormation
+ * before any Gateway target is created.
  *
- * Failure modes (each surfaces an actionable error to the developer in the
- * CFN event log):
- *   - record does not exist            → "registry record <id> not found"
- *   - status !== 'APPROVED'            → "registry record <id> has status <X>; only APPROVED records may be subscribed"
- *   - metadata.gatewayTargetArn missing→ "registry record <id> is missing metadata.gatewayTargetArn"
- *
- * Idempotent across CFN event types — Create/Update both validate; Delete
- * is a no-op (returns Status=SUCCESS) so stack rollback completes cleanly.
+ * Idempotent across CloudFormation event types: Create/Update validate, while
+ * Delete is a no-op because the Workstream stack never owns Registry records.
  */
 const REGISTRY_RECORD_VALIDATOR_HANDLER = `
-// AgentCore control-plane REST shape:
-//   GET https://bedrock-agentcore-control.<region>.amazonaws.com/registries/<rid>/records/<recId>
-// Signing service: bedrock-agentcore (not -control). Built-in SigV4 below
-// avoids any @aws-sdk dependency — Node 20 Lambda runtimes do not ship the
-// preview AgentCore client and we must not bundle node_modules in an inline
-// handler.
+// GA Agent Registry control-plane REST shape:
+//   GET https://agent-registry-control.<region>.api.aws/registries/<rid>/records/<recId>
+// Signing service: agent-registry. Built-in SigV4 below avoids any @aws-sdk
+// dependency because the inline Lambda must not depend on the runtime's SDK
+// version for this newly released service.
 const https = require('https');
 const crypto = require('crypto');
 
@@ -890,7 +2005,7 @@ function hash(str) { return crypto.createHash('sha256').update(str, 'utf8').dige
 // Self-contained STS AssumeRole call. The Lambda's execution role has
 // sts:AssumeRole on the cross-account RegistryReader role; we sign an
 // AssumeRole call with the execution role's task creds and capture the
-// returned temporary creds for use against bedrock-agentcore-control.
+// returned temporary creds for use against agent-registry-control.
 async function sigv4PostForm(opts) {
   const { region, host, body, accessKeyId, secretAccessKey, sessionToken, service } = opts;
   const now = new Date();
@@ -942,15 +2057,16 @@ async function assumeRole(roleArn, externalId, region) {
     Action: 'AssumeRole',
     Version: '2011-06-15',
     RoleArn: roleArn,
-    RoleSessionName: 'agenticai-registry-validator',
+    RoleSessionName: process.env.REGISTRY_READER_SESSION_NAME || 'registry-validator',
     DurationSeconds: '900',
   });
   if (externalId) params.set('ExternalId', externalId);
-  // STS uses a global endpoint; sign for us-east-1 (default region for STS).
-  const stsRegion = 'us-east-1';
+  // Regional STS, as AWS recommends: the global endpoint is served from
+  // us-east-1 for opt-in Regions and its session tokens are valid only in
+  // Regions enabled by default; Regional tokens are valid everywhere.
   const resp = await sigv4PostForm({
-    region: stsRegion,
-    host: 'sts.amazonaws.com',
+    region,
+    host: 'sts.' + region + '.amazonaws.com',
     body: params.toString(),
     service: 'sts',
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
@@ -972,7 +2088,7 @@ async function assumeRole(roleArn, externalId, region) {
 
 async function sigv4Get(opts) {
   const { region, host, path, accessKeyId, secretAccessKey, sessionToken } = opts;
-  const service = 'bedrock-agentcore';
+  const service = 'agent-registry';
   const now = new Date();
   const amzDate = now.toISOString().replace(/[:-]|\\.\\d{3}/g, '');
   const dateStamp = amzDate.substring(0, 8);
@@ -1017,16 +2133,33 @@ async function sigv4Get(opts) {
 
 exports.handler = async (event) => {
   const props = event.ResourceProperties || {};
-  const { registryId, recordId, tenantId, agentId } = props;
+  const {
+    registryId,
+    recordId,
+    expectedToolId,
+    expectedTargetArn,
+    expectedDescriptorSha256,
+    validationRevision,
+    tenantId,
+    agentId,
+  } = props;
   if (event.RequestType === 'Delete') {
     // No-op delete — the workstream stack never owns the record.
     return { PhysicalResourceId: event.PhysicalResourceId || ('reg-validator-' + recordId) };
   }
-  if (!registryId || !recordId) {
-    throw new Error('RegistryRecordValidator: missing registryId or recordId in ResourceProperties');
+  if (!registryId || !recordId || !expectedToolId || !expectedTargetArn || !expectedDescriptorSha256 || !validationRevision) {
+    throw new Error(
+      'RegistryRecordValidator: registryId, recordId, expectedToolId, expectedTargetArn, expectedDescriptorSha256, and validationRevision are required'
+    );
+  }
+  if (!/^[0-9a-f]{64}$/.test(expectedDescriptorSha256)) {
+    throw new Error('RegistryRecordValidator: expectedDescriptorSha256 is invalid');
+  }
+  if (!/^[0-9a-f]{40}$/.test(validationRevision)) {
+    throw new Error('RegistryRecordValidator: validationRevision must be a full Git SHA');
   }
   const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
-  const host = 'bedrock-agentcore-control.' + region + '.amazonaws.com';
+  const host = 'agent-registry-control.' + region + '.api.aws';
   const path = '/registries/' + encodeURIComponent(registryId) + '/records/' + encodeURIComponent(recordId);
   // When the platform Registry lives in a different account, assume the
   // cross-account RegistryReader role and use its temporary creds.
@@ -1075,89 +2208,107 @@ exports.handler = async (event) => {
       '(tenant=' + tenantId + ' agent=' + agentId + ')'
     );
   }
-  // Metadata extraction. The AgentCore preview Registry stores opaque
-  // server JSON inside descriptors.mcp.server.inlineContent. We embed
-  // platform metadata (gatewayTargetArn, cedarPolicy, ownerTeam, costCentre)
-  // under an 'agenticai' key in that JSON at seed time. We accept three
-  // shapes for forward/backwards compatibility:
-  //   1. descriptors.mcp.server.inlineContent (string) → JSON.parse → agenticai sub-object (preview shape)
-  //   2. descriptors.mcp.server.metadata (object)      → direct (future schema)
-  //   3. descriptors[0].metadata (object)              → legacy schema
-  let metadata = {};
-  if (parsed.descriptors && parsed.descriptors.mcp && parsed.descriptors.mcp.server) {
-    const srv = parsed.descriptors.mcp.server;
-    if (typeof srv.inlineContent === 'string') {
-      try {
-        const inline = JSON.parse(srv.inlineContent);
-        if (inline && typeof inline === 'object' && inline.agenticai && typeof inline.agenticai === 'object') {
-          metadata = inline.agenticai;
-        } else if (inline && typeof inline === 'object' && inline.metadata && typeof inline.metadata === 'object') {
-          metadata = inline.metadata;
-        }
-      } catch (e) { /* fall through */ }
-    }
-    if (Object.keys(metadata).length === 0 && srv.metadata && typeof srv.metadata === 'object') {
-      metadata = srv.metadata;
-    }
-  }
-  if (Object.keys(metadata).length === 0 && Array.isArray(parsed.descriptors) && parsed.descriptors[0] && parsed.descriptors[0].metadata) {
-    metadata = parsed.descriptors[0].metadata;
-  }
-  const gatewayTargetArn = metadata.gatewayTargetArn;
-  const cedarPolicy = metadata.cedarPolicy;
-  if (!gatewayTargetArn || typeof gatewayTargetArn !== 'string') {
+  if (parsed.recordId !== recordId || parsed.name !== expectedToolId) {
     throw new Error(
-      'AgentCore Registry record \\'' + recordId + '\\' is missing metadata.gatewayTargetArn. ' +
-      'Re-publish the record with the resolved Lambda alias ARN. (tenant=' + tenantId + ' agent=' + agentId + ')'
+      'GA Registry record identity differs from the pipeline-resolved context for record ' + recordId
     );
   }
-  if (!cedarPolicy || typeof cedarPolicy !== 'string') {
+  if (parsed.recordType !== 'CUSTOM') {
+    throw new Error('GA Registry record ' + recordId + ' is not CUSTOM');
+  }
+  const descriptors = parsed.descriptors;
+  const custom = descriptors && descriptors.custom;
+  const data = custom && custom.data;
+  if (typeof data !== 'string' || data.length === 0) {
+    throw new Error('GA Registry record ' + recordId + ' has no custom descriptor data');
+  }
+  const actualDigest = hash(data);
+  if (actualDigest !== expectedDescriptorSha256) {
     throw new Error(
-      'AgentCore Registry record \\'' + recordId + '\\' is missing metadata.cedarPolicy. ' +
-      'Re-publish the record with the per-tool Cedar snippet. (tenant=' + tenantId + ' agent=' + agentId + ')'
+      'GA Registry record ' + recordId + ' descriptor digest changed after pipeline synth'
     );
   }
-  // Phase Q (v0.6.0): per-developer entitlement. allowedGroups, when present,
-  // pins the Cognito group names whose JWTs may invoke this tool. The Gateway
-  // stack uses it to (a) require CUSTOM_JWT mode and (b) bind the composed
-  // Cedar bundle to principal-in-group permits. We serialise as JSON so it
-  // travels through the CFN custom-resource Data map (string-only) safely.
-  let allowedGroupsJson = '';
-  let composedCedar = cedarPolicy;
-  if (Array.isArray(metadata.allowedGroups) && metadata.allowedGroups.length > 0) {
-    const groups = metadata.allowedGroups.filter(function (g) { return typeof g === 'string' && g.length > 0; });
-    if (groups.length === 0) {
-      throw new Error(
-        'AgentCore Registry record \\'' + recordId + '\\' has metadata.allowedGroups but no valid string entries. ' +
-        '(tenant=' + tenantId + ' agent=' + agentId + ')'
-      );
-    }
-    if (process.env.GATEWAY_AUTHORIZER_MODE !== 'CUSTOM_JWT') {
-      throw new Error(
-        'AgentCore Registry record \\'' + recordId + '\\' carries metadata.allowedGroups but the workstream ' +
-        'Gateway is configured with authorizerType=AWS_IAM. Per-developer entitlement requires CUSTOM_JWT — ' +
-        'supply cognitoDiscoveryUrl on D03WorkstreamGatewayStackProps. (tenant=' + tenantId + ' agent=' + agentId + ')'
-      );
-    }
-    allowedGroupsJson = JSON.stringify(groups);
-    // Build principal-bound permits so the composed Cedar bundle binds the
-    // tool to a Cognito group set rather than 'any authenticated principal'.
-    const headerLine =
-      '// Tool: ' + recordId + ' (Q-entitlement: principal-bound; only members of [' + groups.join(', ') + '] may invoke.)';
-    const permits = groups.map(function (g) {
-      return 'permit(principal in CognitoGroup::"' + g + '", action == Action::"InvokeTool", resource == Tool::"' + recordId + '");';
-    }).join('\\n');
-    composedCedar = headerLine + '\\n' + permits;
+  let governance;
+  try { governance = JSON.parse(data); }
+  catch (e) { throw new Error('GA Registry record ' + recordId + ' descriptor is not JSON'); }
+  if (!governance || typeof governance !== 'object' || Array.isArray(governance)) {
+    throw new Error('GA Registry record ' + recordId + ' governance document is not an object');
+  }
+  const documentKeys = [
+    'authorization', 'catalogueVersion', 'description', 'desiredApprovalStatus',
+    'mcp', 'ownership', 'schemaVersion', 'target', 'toolId'
+  ];
+  if (JSON.stringify(Object.keys(governance).sort()) !== JSON.stringify(documentKeys)) {
+    throw new Error('GA Registry record ' + recordId + ' governance keys changed');
+  }
+  if (
+    governance.schemaVersion !== 'agenticai.tool-governance/1.0' ||
+    typeof governance.catalogueVersion !== 'string' ||
+    !/^[1-9][0-9]*$/.test(governance.catalogueVersion) ||
+    parsed.recordVersion !== governance.catalogueVersion + '.0.0' ||
+    governance.toolId !== expectedToolId ||
+    governance.desiredApprovalStatus !== 'approved'
+  ) {
+    throw new Error('GA Registry record ' + recordId + ' governance identity/status changed');
+  }
+  const target = governance.target;
+  if (
+    !target || target.type !== 'lambda' ||
+    typeof target.arn !== 'string' || target.arn.length === 0
+  ) {
+    throw new Error('GA Registry record ' + recordId + ' target is invalid');
+  }
+  if (target.arn !== expectedTargetArn) {
+    throw new Error(
+      'GA Registry record ' + recordId + ' target ARN differs from the Gateway target'
+    );
+  }
+  const mcp = governance.mcp;
+  if (
+    !mcp || mcp.toolName !== expectedToolId ||
+    typeof mcp.description !== 'string' ||
+    !mcp.inputSchema || typeof mcp.inputSchema !== 'object' || Array.isArray(mcp.inputSchema)
+  ) {
+    throw new Error('GA Registry record ' + recordId + ' MCP contract is invalid');
+  }
+  const authorization = governance.authorization;
+  if (
+    !authorization || authorization.defaultDecision !== 'DENY' ||
+    typeof authorization.cedarPolicy !== 'string' ||
+    authorization.cedarPolicy.indexOf('permit') < 0 ||
+    !Array.isArray(authorization.allowedSubjects) ||
+    authorization.allowedSubjects.length !== 0 ||
+    !Array.isArray(authorization.allowedGroups)
+  ) {
+    throw new Error('GA Registry record ' + recordId + ' authorization contract is invalid');
+  }
+  const groups = authorization.allowedGroups;
+  if (groups.some(function (group) { return typeof group !== 'string' || group.length === 0; })) {
+    throw new Error('GA Registry record ' + recordId + ' allowedGroups is invalid');
+  }
+  const expectedCombination = groups.length > 0 ? 'GROUP_ONLY' : 'AUTHENTICATED';
+  if (authorization.combination !== expectedCombination) {
+    throw new Error('GA Registry record ' + recordId + ' authorization combination changed');
+  }
+  const ownership = governance.ownership;
+  if (
+    !ownership || typeof ownership.ownerTeam !== 'string' || !ownership.ownerTeam ||
+    typeof ownership.costCentre !== 'string' || !ownership.costCentre
+  ) {
+    throw new Error('GA Registry record ' + recordId + ' ownership contract is invalid');
+  }
+  if (groups.length > 0 && process.env.GATEWAY_AUTHORIZER_MODE !== 'CUSTOM_JWT') {
+    throw new Error(
+      'GA Registry record ' + recordId + ' carries allowedGroups but the Workstream Gateway is not CUSTOM_JWT'
+    );
   }
   return {
     PhysicalResourceId: 'AgenticAI-RegistryValidator-' + tenantId + '-' + agentId + '-' + recordId,
     Data: {
-      gatewayTargetArn,
-      cedarPolicy: composedCedar,
-      ownerTeam: metadata.ownerTeam || '',
-      costCentre: metadata.costCentre || '',
-      allowedGroups: allowedGroupsJson,
+      toolId: expectedToolId,
+      descriptorSha256: actualDigest,
       status,
+      validationRevision,
     },
   };
 };

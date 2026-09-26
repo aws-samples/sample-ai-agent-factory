@@ -3,10 +3,10 @@
  * agenticai — workstream developer CLI binary.
  *
  * Subcommands (Phase N — v0.5.0):
- *   agenticai init <tenantId> <agentId> [--workstream <id>] [--registry <id>] [--kind <task|chatbot|...>]
- *   agenticai registry search [--query <text>] [--registry <id>]
- *   agenticai registry subscribe <recordId>
- *   agenticai registry unsubscribe <recordId>
+ *   agenticai init <tenantId> <agentId> [--workstream <id>] [--kind <task|chatbot|...>]
+ *   agenticai registry search [--query <text>]
+ *   agenticai registry subscribe <toolId>
+ *   agenticai registry unsubscribe <toolId>
  *   agenticai registry list
  *   agenticai dev eval [--input <runResults.jsonl>]
  *   agenticai context validate
@@ -19,9 +19,9 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { argv, exit, stderr, stdout } from 'node:process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { argv, exit, stderr, stdout } from "node:process";
 
 import {
   appendSubscription,
@@ -38,7 +38,7 @@ import {
   type EvalRunRow,
   type RegistrySearchResult,
   type ScaffoldKind,
-} from './index';
+} from "./index";
 
 interface CliArgs {
   readonly positional: readonly string[];
@@ -50,11 +50,11 @@ function parseArgs(raw: readonly string[]): CliArgs {
   const flags = new Map<string, string>();
   for (let i = 0; i < raw.length; i++) {
     const tok = raw[i];
-    if (tok.startsWith('--')) {
+    if (tok.startsWith("--")) {
       const name = tok.slice(2);
       const next = raw[i + 1];
-      if (next === undefined || next.startsWith('--')) {
-        flags.set(name, 'true');
+      if (next === undefined || next.startsWith("--")) {
+        flags.set(name, "true");
       } else {
         flags.set(name, next);
         i++;
@@ -67,17 +67,19 @@ function parseArgs(raw: readonly string[]): CliArgs {
 }
 
 function loadCdkContext(repoRoot: string): AgenticAiContext {
-  const path = join(repoRoot, 'cdk.context.json');
+  const path = join(repoRoot, "cdk.context.json");
   if (!existsSync(path)) {
-    throw new Error(`cdk.context.json not found at ${path}. Run \`agenticai init\` first.`);
+    throw new Error(
+      `cdk.context.json not found at ${path}. Run \`agenticai init\` first.`,
+    );
   }
-  const parsed: unknown = JSON.parse(readFileSync(path, 'utf-8'));
+  const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
   return readAgenticContext(parsed);
 }
 
 function saveCdkContext(repoRoot: string, ctx: AgenticAiContext): void {
-  const path = join(repoRoot, 'cdk.context.json');
-  writeFileSync(path, JSON.stringify(ctx, null, 2) + '\n');
+  const path = join(repoRoot, "cdk.context.json");
+  writeFileSync(path, JSON.stringify(ctx, null, 2) + "\n");
 }
 
 function writeFiles(rootDir: string, files: ReadonlyMap<string, string>): void {
@@ -91,26 +93,21 @@ function writeFiles(rootDir: string, files: ReadonlyMap<string, string>): void {
 async function cmdInit(args: CliArgs): Promise<number> {
   const [tenantId, agentId] = args.positional;
   if (!tenantId || !agentId) {
-    stderr.write('agenticai init: usage `agenticai init <tenantId> <agentId>`\n');
-    return 2;
-  }
-  const workstreamId = args.flags.get('workstream') ?? tenantId;
-  const registryId = args.flags.get('registry');
-  if (!registryId) {
     stderr.write(
-      'agenticai init: --registry <id> is required (the platform AgentCore Registry id).\n',
+      "agenticai init: usage `agenticai init <tenantId> <agentId>`\n",
     );
     return 2;
   }
-  const kind = (args.flags.get('kind') ?? 'task') as ScaffoldKind;
-  const targetDir = resolve(args.flags.get('out') ?? `${tenantId}-${agentId}`);
+  const workstreamId = args.flags.get("workstream") ?? tenantId;
+  const kind = (args.flags.get("kind") ?? "task") as ScaffoldKind;
+  const targetDir = resolve(args.flags.get("out") ?? `${tenantId}-${agentId}`);
 
   const files = scaffoldAgentRepo({
     tenantId,
     agentId,
     workstreamId,
-    platformRegistryId: registryId,
-    platformAccountId: args.flags.get('platform-account'),
+    platformRegistryId: args.flags.get("registry"),
+    platformAccountId: args.flags.get("platform-account"),
     kind,
   });
   writeFiles(targetDir, files);
@@ -119,190 +116,214 @@ async function cmdInit(args: CliArgs): Promise<number> {
 }
 
 async function cmdRegistrySubscribe(args: CliArgs): Promise<number> {
-  const [, recordId] = args.positional;
-  if (!recordId) {
-    stderr.write('agenticai registry subscribe: usage `agenticai registry subscribe <recordId>`\n');
+  const [, toolId] = args.positional;
+  if (!toolId) {
+    stderr.write(
+      "agenticai registry subscribe: usage `agenticai registry subscribe <toolId>`\n",
+    );
     return 2;
   }
-  const repo = resolve(args.flags.get('cwd') ?? '.');
+  const repo = resolve(args.flags.get("cwd") ?? ".");
   const ctx = loadCdkContext(repo);
-  const next = appendSubscription(ctx, recordId);
+  const next = appendSubscription(ctx, toolId);
   saveCdkContext(repo, next);
-  stdout.write(`Subscribed to ${recordId}. Subscriptions now: ${listSubscriptions(next).join(', ')}\n`);
+  stdout.write(
+    `Subscribed to ${toolId}. Tools now: ${listSubscriptions(next).join(", ")}\n`,
+  );
   return 0;
 }
 
 async function cmdRegistryUnsubscribe(args: CliArgs): Promise<number> {
-  const [, recordId] = args.positional;
-  if (!recordId) {
-    stderr.write('agenticai registry unsubscribe: usage `agenticai registry unsubscribe <recordId>`\n');
+  const [, toolId] = args.positional;
+  if (!toolId) {
+    stderr.write(
+      "agenticai registry unsubscribe: usage `agenticai registry unsubscribe <toolId>`\n",
+    );
     return 2;
   }
-  const repo = resolve(args.flags.get('cwd') ?? '.');
+  const repo = resolve(args.flags.get("cwd") ?? ".");
   const ctx = loadCdkContext(repo);
-  const next = removeSubscription(ctx, recordId);
+  const next = removeSubscription(ctx, toolId);
   saveCdkContext(repo, next);
-  stdout.write(`Unsubscribed from ${recordId}.\n`);
+  stdout.write(`Unsubscribed from ${toolId}.\n`);
   return 0;
 }
 
 async function cmdRegistryList(args: CliArgs): Promise<number> {
-  const repo = resolve(args.flags.get('cwd') ?? '.');
+  const repo = resolve(args.flags.get("cwd") ?? ".");
   const ctx = loadCdkContext(repo);
   const subs = listSubscriptions(ctx);
-  stdout.write(subs.length === 0 ? '(no subscriptions)\n' : subs.join('\n') + '\n');
+  stdout.write(
+    subs.length === 0 ? "(no subscriptions)\n" : subs.join("\n") + "\n",
+  );
   return 0;
 }
 
 async function cmdRegistrySearch(args: CliArgs): Promise<number> {
   // The actual SDK call is intentionally not bundled into this CLI in the
-  // OSS blueprint — operators wire it up against their own bedrock-agentcore
+  // OSS blueprint — operators wire it up against their pinned agent-registry
   // SDK version. We accept a JSON results file via --results so the renderer
   // is exercised in CI without requiring AWS creds.
-  const resultsPath = args.flags.get('results');
+  const resultsPath = args.flags.get("results");
   if (!resultsPath) {
     stderr.write(
-      'agenticai registry search: --results <path> is required in this build (live SDK wiring is operator-supplied; see README).\n',
+      "agenticai registry search: --results <path> is required in this build (live SDK wiring is operator-supplied; see README).\n",
     );
     return 2;
   }
-  const results = JSON.parse(readFileSync(resolve(resultsPath), 'utf-8')) as RegistrySearchResult[];
-  stdout.write(formatSearchResults(results) + '\n');
+  const results = JSON.parse(
+    readFileSync(resolve(resultsPath), "utf-8"),
+  ) as RegistrySearchResult[];
+  stdout.write(formatSearchResults(results) + "\n");
   return 0;
 }
 
 async function cmdDevEval(args: CliArgs): Promise<number> {
-  const inputPath = args.flags.get('input');
+  const inputPath = args.flags.get("input");
   if (!inputPath) {
-    stderr.write('agenticai dev eval: --input <runResults.jsonl> is required\n');
+    stderr.write(
+      "agenticai dev eval: --input <runResults.jsonl> is required\n",
+    );
     return 2;
   }
-  const rows: EvalRunRow[] = readFileSync(resolve(inputPath), 'utf-8')
-    .split('\n')
+  const rows: EvalRunRow[] = readFileSync(resolve(inputPath), "utf-8")
+    .split("\n")
     .filter((l) => l.trim().length > 0)
     .map((l) => JSON.parse(l) as EvalRunRow);
   const report = runLocalEval(rows);
-  stdout.write(formatEvalReport(report) + '\n');
+  stdout.write(formatEvalReport(report) + "\n");
   return report.overallPassed ? 0 : 1;
 }
 
 async function cmdContextValidate(args: CliArgs): Promise<number> {
-  const repo = resolve(args.flags.get('cwd') ?? '.');
+  const repo = resolve(args.flags.get("cwd") ?? ".");
   const ctx = loadCdkContext(repo);
   const errors = validateForSynth(ctx);
   if (errors.length > 0) {
-    stderr.write(errors.map((e) => `[INVALID] ${e}`).join('\n') + '\n');
+    stderr.write(errors.map((e) => `[INVALID] ${e}`).join("\n") + "\n");
     return 1;
   }
-  stdout.write('[OK] cdk.context.json is valid for Registry-mode synth\n');
+  stdout.write("[OK] cdk.context.json is valid for Registry-mode synth\n");
   return 0;
 }
 
 async function cmdSubmit(args: CliArgs): Promise<number> {
-  const repo = resolve(args.flags.get('cwd') ?? '.');
+  const repo = resolve(args.flags.get("cwd") ?? ".");
   const ctx = loadCdkContext(repo);
   const errors = validateForSynth(ctx);
   if (errors.length > 0) {
     stderr.write(
-      'agenticai submit: cdk.context.json is incomplete:\n' +
-        errors.map((e) => `  - ${e}`).join('\n') +
-        '\n',
+      "agenticai submit: cdk.context.json is incomplete:\n" +
+        errors.map((e) => `  - ${e}`).join("\n") +
+        "\n",
     );
     return 2;
   }
-  const evalInputPath = args.flags.get('eval-input');
+  const evalInputPath = args.flags.get("eval-input");
   if (!evalInputPath) {
-    stderr.write('agenticai submit: --eval-input <runResults.jsonl> is required\n');
+    stderr.write(
+      "agenticai submit: --eval-input <runResults.jsonl> is required\n",
+    );
     return 2;
   }
-  const evalRows: EvalRunRow[] = readFileSync(resolve(evalInputPath), 'utf-8')
-    .split('\n')
+  const evalRows: EvalRunRow[] = readFileSync(resolve(evalInputPath), "utf-8")
+    .split("\n")
     .filter((l) => l.trim().length > 0)
     .map((l) => JSON.parse(l) as EvalRunRow);
   const evalReport = runLocalEval(evalRows);
-  const prev = args.flags.get('prev-eval');
+  const prev = args.flags.get("prev-eval");
   const previousEvalReport = prev
-    ? (JSON.parse(readFileSync(resolve(prev), 'utf-8')) as ReturnType<typeof runLocalEval>)
+    ? (JSON.parse(readFileSync(resolve(prev), "utf-8")) as ReturnType<
+        typeof runLocalEval
+      >)
     : undefined;
-  const tenantId = ctx['agenticai/tenantId'] as string;
-  const agentId = ctx['agenticai/agentId'] as string;
-  const workstreamId = (ctx['agenticai/workstreamId'] as string | undefined) ?? tenantId;
-  const subscribedRecordIds = listSubscriptions(ctx);
-  const registryId = ctx['agenticai/d03RegistryId'] as string;
+  const tenantId = ctx["agenticai/tenantId"] as string;
+  const agentId = ctx["agenticai/agentId"] as string;
+  const workstreamId =
+    (ctx["agenticai/workstreamId"] as string | undefined) ?? tenantId;
+  const subscribedToolIds = listSubscriptions(ctx);
   const body = renderPullRequestBody({
     tenantId,
     agentId,
     workstreamId,
-    subscribedRecordIds,
+    subscribedToolIds,
     evalReport,
     previousEvalReport,
-    registryId,
   });
-  const outPath = args.flags.get('out') ?? 'PR_BODY.md';
+  const outPath = args.flags.get("out") ?? "PR_BODY.md";
   writeFileSync(resolve(outPath), body);
-  stdout.write(`Wrote PR body to ${outPath} (eval ${evalReport.overallPassed ? 'PASS' : 'FAIL'})\n`);
+  stdout.write(
+    `Wrote PR body to ${outPath} (eval ${evalReport.overallPassed ? "PASS" : "FAIL"})\n`,
+  );
   return evalReport.overallPassed ? 0 : 1;
 }
 
 function printHelp(): void {
   stdout.write(
     [
-      'agenticai — workstream developer CLI',
-      '',
-      'Usage:',
-      '  agenticai init <tenantId> <agentId> --registry <id> [--workstream <id>] [--kind task|chatbot|langgraph|crewai|multi-agent]',
-      '  agenticai registry search --results <path>',
-      '  agenticai registry subscribe <recordId>',
-      '  agenticai registry unsubscribe <recordId>',
-      '  agenticai registry list',
-      '  agenticai dev eval --input <runResults.jsonl>',
-      '  agenticai context validate',
-      '  agenticai submit --eval-input <runResults.jsonl> [--prev-eval <path>] [--out <PR_BODY.md>]',
-      '',
-    ].join('\n'),
+      "agenticai — workstream developer CLI",
+      "",
+      "Usage:",
+      "  agenticai init <tenantId> <agentId> [--workstream <id>] [--kind task|chatbot|langgraph|crewai|multi-agent]",
+      "  agenticai registry search --results <path>",
+      "  agenticai registry subscribe <toolId>",
+      "  agenticai registry unsubscribe <toolId>",
+      "  agenticai registry list",
+      "  agenticai dev eval --input <runResults.jsonl>",
+      "  agenticai context validate",
+      "  agenticai submit --eval-input <runResults.jsonl> [--prev-eval <path>] [--out <PR_BODY.md>]",
+      "",
+    ].join("\n"),
   );
 }
 
 async function main(): Promise<number> {
   const raw = argv.slice(2);
-  if (raw.length === 0 || raw[0] === '-h' || raw[0] === '--help') {
+  if (raw.length === 0 || raw[0] === "-h" || raw[0] === "--help") {
     printHelp();
     return 0;
   }
   const cmd = raw[0];
   const args = parseArgs(raw.slice(1));
-  if (cmd === 'init') return cmdInit(args);
-  if (cmd === 'registry') {
+  if (cmd === "init") return cmdInit(args);
+  if (cmd === "registry") {
     const sub = args.positional[0];
-    if (sub === 'search') return cmdRegistrySearch(args);
-    if (sub === 'subscribe') return cmdRegistrySubscribe(args);
-    if (sub === 'unsubscribe') return cmdRegistryUnsubscribe(args);
-    if (sub === 'list') return cmdRegistryList(args);
-    stderr.write(`agenticai registry: unknown sub-command '${sub ?? ''}'.\n`);
+    if (sub === "search") return cmdRegistrySearch(args);
+    if (sub === "subscribe") return cmdRegistrySubscribe(args);
+    if (sub === "unsubscribe") return cmdRegistryUnsubscribe(args);
+    if (sub === "list") return cmdRegistryList(args);
+    stderr.write(`agenticai registry: unknown sub-command '${sub ?? ""}'.\n`);
     return 2;
   }
-  if (cmd === 'dev') {
+  if (cmd === "dev") {
     const sub = args.positional[0];
-    if (sub === 'eval') return cmdDevEval(args);
-    stderr.write(`agenticai dev: unknown sub-command '${sub ?? ''}'.\n`);
+    if (sub === "eval") return cmdDevEval(args);
+    stderr.write(`agenticai dev: unknown sub-command '${sub ?? ""}'.\n`);
     return 2;
   }
-  if (cmd === 'context') {
+  if (cmd === "context") {
     const sub = args.positional[0];
-    if (sub === 'validate') return cmdContextValidate(args);
-    stderr.write(`agenticai context: unknown sub-command '${sub ?? ''}'.\n`);
+    if (sub === "validate") return cmdContextValidate(args);
+    stderr.write(`agenticai context: unknown sub-command '${sub ?? ""}'.\n`);
     return 2;
   }
-  if (cmd === 'submit') return cmdSubmit(args);
-  stderr.write(`agenticai: unknown command '${cmd}'. Run \`agenticai --help\`.\n`);
+  if (cmd === "submit") return cmdSubmit(args);
+  stderr.write(
+    `agenticai: unknown command '${cmd}'. Run \`agenticai --help\`.\n`,
+  );
   return 2;
 }
 
 if (require.main === module) {
-  main().then((code) => exit(code), (err) => {
-    stderr.write(`agenticai: ${err instanceof Error ? err.message : String(err)}\n`);
-    exit(1);
-  });
+  main().then(
+    (code) => exit(code),
+    (err) => {
+      stderr.write(
+        `agenticai: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+      exit(1);
+    },
+  );
 }
 
 export { parseArgs, main };

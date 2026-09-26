@@ -1,0 +1,7 @@
+# The compatibility handshake agent imports only bedrock_agentcore (plus the
+# Python stdlib). LiteLLMModel (LLM Gateway), MCPClient (Tools Gateway) and
+# AgentCore Memory wiring are the NEXT pipeline slice, deliberately not wired
+# here, so strands-agents / strands-agents-tools / litellm are intentionally
+# absent -- adding them would falsely imply an integration this probe does not
+# exercise. Keep an exact pin for every dependency actually installed.
+bedrock-agentcore==1.23.1

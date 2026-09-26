@@ -18,7 +18,7 @@
  * SPDX-License-Identifier: MIT-0
  */
 import { App, Stack } from 'aws-cdk-lib';
-import { Template, Match } from 'aws-cdk-lib/assertions';
+import { Template } from 'aws-cdk-lib/assertions';
 import { Topic } from 'aws-cdk-lib/aws-sns';
 
 import { AgentCoreRegistryConstruct } from '@agenticai/agentcore-registry';
@@ -81,6 +81,8 @@ describe('Phase 21 — Z7-B: Pipeline canary stage', () => {
       costCentre: 'engineering',
       workloadNonprodEnv: { account: '444444444444', region: 'us-west-2' },
       workloadProdEnv: { account: '555555555555', region: 'us-west-2' },
+      workloadNonprodAvailabilityZones: ['us-west-2a', 'us-west-2b', 'us-west-2c'],
+      workloadProdAvailabilityZones: ['us-west-2a', 'us-west-2b', 'us-west-2c'],
     });
     const t = Template.fromStack(stack);
     const cbProjects = t.findResources('AWS::CodeBuild::Project');
