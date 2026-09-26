@@ -61,6 +61,31 @@ describe('EMEA Region resolution', () => {
   });
 });
 
+describe('EMEA legacy component boundary', () => {
+  it.each([
+    [
+      'packages/evaluation-gates/src/evaluation-gates-construct.ts',
+      'EvaluationGatesConstruct',
+    ],
+    [
+      'packages/online-evaluation/src/online-evaluation-construct.ts',
+      'OnlineEvaluationConstruct',
+    ],
+    [
+      'packages/litellm-gateway/src/litellm-gateway-construct.ts',
+      'LiteLLMGatewayConstruct',
+    ],
+    [
+      'packages/agent-resilience/src/inference-circuit-breaker-construct.ts',
+      'InferenceCircuitBreakerConstruct',
+    ],
+  ])('%s fails through the shared EMEA guard', (path, component) => {
+    const source = readFileSync(resolve(ROOT, path), 'utf8');
+    expect(source).toContain('assertEmeaProfilePathSupported');
+    expect(source).toContain(`'${component}'`);
+  });
+});
+
 describe('EMEA AgentCore VPC Availability Zones', () => {
   it('filters AgenticVpcConstruct subnets to Ireland-supported AZ IDs', () => {
     const app = new App();

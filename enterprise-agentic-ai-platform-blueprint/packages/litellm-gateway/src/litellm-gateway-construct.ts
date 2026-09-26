@@ -46,7 +46,10 @@ import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
-import { allowedBedrockResources } from '@agenticai/platform-baselines';
+import {
+  allowedBedrockResources,
+  assertEmeaProfilePathSupported,
+} from '@agenticai/platform-baselines';
 
 export interface LiteLLMGatewayConstructProps {
   /** Workload VPC (from AgenticVpcConstruct). Required. */
@@ -94,6 +97,7 @@ export class LiteLLMGatewayConstruct extends Construct {
     super(scope, id);
 
     const stack = Stack.of(this);
+    assertEmeaProfilePathSupported(stack.region, 'LiteLLMGatewayConstruct');
 
     // ---- CMK for logs + secrets at rest ----
     this.kmsKey = new Key(this, 'Key', {
