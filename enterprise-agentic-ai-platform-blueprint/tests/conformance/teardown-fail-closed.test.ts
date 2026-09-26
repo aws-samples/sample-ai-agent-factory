@@ -122,6 +122,7 @@ function runTeardown(
       ...baseEnv(),
       PATH: `${stubBin}${path.delimiter}${process.env.PATH ?? ""}`,
       STUB_LOG: stubLog,
+      CDK_DEFAULT_REGION: "us-west-2",
       ...(options.env ?? {}),
     },
   });
@@ -534,6 +535,19 @@ describe("Round 1B — teardown refuses to call failure success", () => {
     });
     expect(run.status).toBe(EXIT.configError);
     expect(run.stderr).toContain("AGENTICAI_WORKLOAD_ACCOUNT_ID");
+    expect(run.npxCalls).toEqual([]);
+  });
+
+  it("refuses a missing deployment Region before inspection", () => {
+    const run = runTeardown(["--dry-run"], {
+      env: {
+        CDK_DEFAULT_REGION: "",
+        AWS_REGION: "",
+        AWS_DEFAULT_REGION: "",
+      },
+    });
+    expect(run.status).toBe(EXIT.configError);
+    expect(run.stderr).toContain("explicit teardown Region");
     expect(run.npxCalls).toEqual([]);
   });
 
