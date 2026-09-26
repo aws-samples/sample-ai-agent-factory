@@ -22,8 +22,18 @@
 # SPDX-License-Identifier: MIT-0
 set -euo pipefail
 
-REGION="${AWS_REGION:-us-west-2}"
+REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
 QUALIFIER="hnb659fds"
+PARTITION="${AWS_PARTITION:-aws}"
+
+if [[ -z "$REGION" ]]; then
+  echo "ERROR: set AWS_REGION or AWS_DEFAULT_REGION to the explicit bootstrap Region" >&2
+  exit 1
+fi
+if [[ ! "$REGION" =~ ^[a-z]{2}(-[a-z0-9]+)+-[0-9]+$ ]]; then
+  echo "ERROR: invalid AWS Region '$REGION'" >&2
+  exit 1
+fi
 
 # SEC (security review) — LEAST PRIVILEGE: the CloudFormation execution policy sets
 # the permissions CloudFormation uses to create EVERY resource in every
@@ -31,7 +41,8 @@ QUALIFIER="hnb659fds"
 # every deployed stack admin-equivalent. Supply a customer-managed policy ARN
 # scoped to exactly the services these stacks provision (IAM, Lambda, DynamoDB,
 # S3, KMS, ECS, Bedrock/AgentCore, CloudWatch, EventBridge, Step Functions,
-# SNS/SQS, EC2/VPC) via CFN_EXECUTION_POLICY_ARN.
+# SNS/SQS, EC2/VPC). Prefer CFN_EXECUTION_POLICY_NAME for multi-account runs;
+# use CFN_EXECUTION_POLICY_ARN only for a single-account context.
 #
 # The policy attached to the Platform account's CloudFormation execution role
 # must also allow iam:PassRole on every target account's exact
@@ -85,13 +96,28 @@ QUALIFIER="hnb659fds"
 # iam:PassedToService=lambda.amazonaws.com, and Lambda lifecycle actions only on
 # the matching function-name prefix.
 # The default below is intentionally NOT AdministratorAccess so a copy-paste
-# run fails safe and forces an explicit choice.
+# run fails safe and forces an explicit choice. For a multi-account bootstrap,
+# prefer CFN_EXECUTION_POLICY_NAME: the runner constructs the same local policy
+# name under each target account. CFN_EXECUTION_POLICY_ARN is accepted only for
+# a single target because a customer-managed policy ARN is account-scoped.
+CFN_EXECUTION_POLICY_NAME="${CFN_EXECUTION_POLICY_NAME:-}"
 CFN_EXECUTION_POLICY_ARN="${CFN_EXECUTION_POLICY_ARN:-}"
-if [[ -z "$CFN_EXECUTION_POLICY_ARN" ]]; then
-  echo "ERROR: set CFN_EXECUTION_POLICY_ARN to a scoped customer-managed policy ARN" >&2
-  echo "       for the CDK CloudFormation execution role. Do NOT use" >&2
-  echo "       arn:aws:iam::aws:policy/AdministratorAccess in production." >&2
-  echo "       See README §9 for the scoping guidance." >&2
+if [[ -n "$CFN_EXECUTION_POLICY_NAME" && -n "$CFN_EXECUTION_POLICY_ARN" ]]; then
+  echo "ERROR: set only one of CFN_EXECUTION_POLICY_NAME or CFN_EXECUTION_POLICY_ARN" >&2
+  exit 1
+fi
+if [[ -z "$CFN_EXECUTION_POLICY_NAME" && -z "$CFN_EXECUTION_POLICY_ARN" ]]; then
+  echo "ERROR: set CFN_EXECUTION_POLICY_NAME (multi-account) or CFN_EXECUTION_POLICY_ARN (single-account)" >&2
+  echo "       to a scoped customer-managed policy. Do NOT use AdministratorAccess." >&2
+  echo "       Generate role-specific documents with render-cfn-execution-policy.py." >&2
+  exit 1
+fi
+if [[ -n "$CFN_EXECUTION_POLICY_NAME" && ! "$CFN_EXECUTION_POLICY_NAME" =~ ^[A-Za-z0-9+=,.@_/-]+$ ]]; then
+  echo "ERROR: invalid CFN_EXECUTION_POLICY_NAME" >&2
+  exit 1
+fi
+if [[ "$CFN_EXECUTION_POLICY_ARN" == "arn:aws:iam::aws:policy/AdministratorAccess" ]]; then
+  echo "ERROR: AdministratorAccess is not an accepted CloudFormation execution policy" >&2
   exit 1
 fi
 
@@ -129,6 +155,21 @@ for acct in "$PLATFORM_NP" "$PLATFORM_PR" "$LOG_ARCHIVE" "$AUDIT" "$SANDBOX" "$W
   TARGET_ACCOUNTS+=("$acct")
 done
 
+if [[ -n "$CFN_EXECUTION_POLICY_ARN" ]]; then
+  if [[ ${#TARGET_ACCOUNTS[@]} -ne 1 ]]; then
+    echo "ERROR: CFN_EXECUTION_POLICY_ARN is account-scoped and can bootstrap only one target; use CFN_EXECUTION_POLICY_NAME for multiple accounts" >&2
+    exit 1
+  fi
+  if [[ ! "$CFN_EXECUTION_POLICY_ARN" =~ ^arn:${PARTITION}:iam::([0-9]{12}):policy/.+ ]]; then
+    echo "ERROR: invalid customer-managed CFN_EXECUTION_POLICY_ARN" >&2
+    exit 1
+  fi
+  if [[ "${BASH_REMATCH[1]}" != "${TARGET_ACCOUNTS[0]}" ]]; then
+    echo "ERROR: CFN_EXECUTION_POLICY_ARN belongs to ${BASH_REMATCH[1]}, not target ${TARGET_ACCOUNTS[0]}" >&2
+    exit 1
+  fi
+fi
+
 for acct in "${TARGET_ACCOUNTS[@]}"; do
   echo ""
   echo "-> Bootstrap aws://${acct}/${REGION}"
@@ -137,10 +178,14 @@ for acct in "${TARGET_ACCOUNTS[@]}"; do
   # bootstrap roles + KMS key. This is the human's bootstrapping identity and
   # is separate from the CloudFormation EXECUTION policy set below (which must
   # be scoped, not AdministratorAccess — see the header warning).
+  execution_policy_arn="$CFN_EXECUTION_POLICY_ARN"
+  if [[ -n "$CFN_EXECUTION_POLICY_NAME" ]]; then
+    execution_policy_arn="arn:${PARTITION}:iam::${acct}:policy/${CFN_EXECUTION_POLICY_NAME}"
+  fi
   npx cdk bootstrap "aws://${acct}/${REGION}" \
     --trust "$PLATFORM_NP" \
     --trust-for-lookup "$PLATFORM_NP" \
-    --cloudformation-execution-policies "$CFN_EXECUTION_POLICY_ARN" \
+    --cloudformation-execution-policies "$execution_policy_arn" \
     --qualifier "$QUALIFIER"
 done
 

@@ -70,6 +70,8 @@ npx cdk deploy --context stage=management \
 #    (Control Tower creates + enrolls; run from the management account.)
 
 # 7. Bootstrap every new account with trust to platform-nonprod.
+export AWS_REGION=us-west-2
+export CFN_EXECUTION_POLICY_NAME=AgenticAICdkExecutionPolicy
 bash ../../pipelines/bootstrap/bootstrap-cross-account.sh
 
 # 8. Deploy the platform + workload pipelines from platform-nonprod.

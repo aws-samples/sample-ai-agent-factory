@@ -458,6 +458,15 @@ describe("Phase 7 — cross-account bootstrap role contract", () => {
       '"$PLATFORM_NP" "$PLATFORM_PR" "$LOG_ARCHIVE" "$AUDIT"',
     );
     expect(bootstrapSource).toContain('TARGET_ACCOUNTS+=("$acct")');
+    expect(bootstrapSource).toContain(
+      'REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"',
+    );
+    expect(bootstrapSource).not.toContain('AWS_REGION:-us-west-2');
+    expect(bootstrapSource).toContain('CFN_EXECUTION_POLICY_NAME');
+    expect(bootstrapSource).toContain(
+      'execution_policy_arn="arn:${PARTITION}:iam::${acct}:policy/${CFN_EXECUTION_POLICY_NAME}"',
+    );
+    expect(bootstrapSource).toContain('render-cfn-execution-policy.py');
   });
 });
 
