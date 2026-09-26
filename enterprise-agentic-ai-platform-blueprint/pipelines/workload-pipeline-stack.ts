@@ -70,7 +70,10 @@ import {
   createPipelineArtifactBucket,
   type PipelineResourceTags,
 } from "./pipeline-artifacts";
-import { stageAwareSynthCommands } from "./synth-commands";
+import {
+  enterBlueprintSourceDirectory,
+  stageAwareSynthCommands,
+} from "./synth-commands";
 
 export interface WorkloadGaRegistryConfig {
   readonly nonprod: GaRegistryConsumerContext;
@@ -852,6 +855,7 @@ export class WorkloadPipelineStack extends Stack {
     const evalStep = new CodeBuildStep("EvaluationGate", {
       commands: [
         "set -eu",
+        enterBlueprintSourceDirectory(),
         'echo "Evaluation gate thresholds:"',
         `echo "  regression_pass_rate_min_pct    = ${props.evalRegressionPassRate ?? 95}"`,
         `echo "  guardrail_violation_rate_max_pct = ${props.evalGuardrailViolationRate ?? 1}"`,

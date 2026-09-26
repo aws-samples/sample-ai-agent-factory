@@ -73,7 +73,7 @@ const BLUEPRINT_SOURCE_DIRECTORY = "enterprise-agentic-ai-platform-blueprint";
  * this package at the checkout root. Reject every other layout rather than
  * letting npm run against an unrelated package.json.
  */
-function enterBlueprintSourceDirectory(): string {
+export function enterBlueprintSourceDirectory(): string {
   const nestedPackage = `${BLUEPRINT_SOURCE_DIRECTORY}/package.json`;
   return (
     `if [ -f package.json ]; then :; ` +

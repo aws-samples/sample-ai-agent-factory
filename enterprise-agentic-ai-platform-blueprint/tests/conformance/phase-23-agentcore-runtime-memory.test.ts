@@ -1391,6 +1391,23 @@ describe("Phase 23 — opt-in pipeline graph", () => {
     expect(rendered).toContain("0.0006");
     expect(rendered).toContain("boto3==1.43.98");
     expect(rendered).toContain("python3 scripts/evaluation_gate.py");
+    const evaluationProject = Object.values(
+      template.findResources("AWS::CodeBuild::Project"),
+    ).find((resource: any) =>
+      String(resource.Properties.Source.BuildSpec).includes(
+        "scripts/evaluation_gate.py",
+      ),
+    ) as any;
+    const evaluationCommands = JSON.parse(
+      evaluationProject.Properties.Source.BuildSpec,
+    ).phases.build.commands as string[];
+    expect(evaluationCommands[0]).toBe("set -eu");
+    expect(evaluationCommands[1]).toContain(
+      "enterprise-agentic-ai-platform-blueprint",
+    );
+    expect(
+      evaluationCommands.indexOf("python3 scripts/evaluation_gate.py"),
+    ).toBeGreaterThan(1);
     const pipelineResource = Object.values(
       template.findResources("AWS::CodePipeline::Pipeline"),
     )[0] as any;
