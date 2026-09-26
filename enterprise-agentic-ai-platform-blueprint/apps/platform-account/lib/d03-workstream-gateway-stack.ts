@@ -2061,11 +2061,12 @@ async function assumeRole(roleArn, externalId, region) {
     DurationSeconds: '900',
   });
   if (externalId) params.set('ExternalId', externalId);
-  // STS uses a global endpoint; sign for us-east-1 (default region for STS).
-  const stsRegion = 'us-east-1';
+  // Regional STS: the call stays in the deploy Region (no us-east-1
+  // dependency for an EU deployment) and returns session tokens that are
+  // valid in every Region, opt-in Regions included.
   const resp = await sigv4PostForm({
-    region: stsRegion,
-    host: 'sts.amazonaws.com',
+    region,
+    host: 'sts.' + region + '.amazonaws.com',
     body: params.toString(),
     service: 'sts',
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,

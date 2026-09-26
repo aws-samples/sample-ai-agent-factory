@@ -412,6 +412,7 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
   async function executeValidator(
     expectedDigest?: string,
     expectedTargetArn?: string,
+    region: string = "us-west-2",
   ) {
     const context = gaRegistryContext(["tool-echo"]);
     const resolved = context.records[0];
@@ -476,7 +477,7 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
       },
       process: {
         env: {
-          AWS_REGION: "us-west-2",
+          AWS_REGION: region,
           AWS_ACCESS_KEY_ID: "test-access",
           AWS_SECRET_ACCESS_KEY: "test-secret",
           AWS_SESSION_TOKEN: "test-session",
@@ -584,11 +585,33 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
       status: "APPROVED",
     });
     expect(requests).toHaveLength(2);
-    expect(requests[0].host).toBe("sts.amazonaws.com");
+    expect(requests[0].host).toBe("sts.us-west-2.amazonaws.com");
+    expect(requests[0].headers.Authorization).toContain(
+      "/us-west-2/sts/aws4_request",
+    );
     expect(requests[1].host).toBe("agent-registry-control.us-west-2.api.aws");
     expect(requests[1].headers.Authorization).toContain(
       "/agent-registry/aws4_request",
     );
+  });
+
+  it("keeps every validator call in the deploy Region (eu-west-1 twin)", async () => {
+    // The global STS endpoint is served from us-east-1 and its session tokens
+    // are not valid in opt-in Regions; an EU deployment must not depend on it.
+    const { result, requests } = await executeValidator(
+      undefined,
+      undefined,
+      "eu-west-1",
+    );
+    expect(result.Data).toMatchObject({ status: "APPROVED" });
+    expect(requests.map((r) => r.host)).toEqual([
+      "sts.eu-west-1.amazonaws.com",
+      "agent-registry-control.eu-west-1.api.aws",
+    ]);
+    expect(requests[0].headers.Authorization).toContain(
+      "/eu-west-1/sts/aws4_request",
+    );
+    expect(JSON.stringify(requests)).not.toMatch(/us-east-1|sts\.amazonaws\.com/);
   });
 
   it("rejects a descriptor changed after pipeline synth", async () => {
