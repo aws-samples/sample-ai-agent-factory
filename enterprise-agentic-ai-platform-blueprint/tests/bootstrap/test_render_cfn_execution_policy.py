@@ -14,6 +14,17 @@ PLATFORM = "111111111111"
 WORKSTREAM = "222222222222"
 MANAGEMENT = "333333333333"
 CONNECTION = "arn:aws:codeconnections:us-west-2:111111111111:connection/example"
+OAM_SOURCE_LINK_ACTIONS = {
+    "oam:CreateLink",
+    "oam:DeleteLink",
+    "oam:GetLink",
+    "oam:ListLinks",
+    "oam:ListTagsForResource",
+    "oam:TagResource",
+    "oam:UntagResource",
+    "oam:UpdateLink",
+    "xray:Link",
+}
 
 
 def render(role: str, *args: str) -> dict:
@@ -80,10 +91,18 @@ def test_platform_policy_scopes_ireland_resources_and_cross_account_roles() -> N
     assert "iam:ListEntitiesForPolicy" in actions(
         by_sid(policy, "ManageNamedDeploymentPolicies")
     )
+    provision = actions(by_sid(policy, "ProvisionBlueprintResourceFamilies"))
+    assert OAM_SOURCE_LINK_ACTIONS <= provision
+    assert {"cloudwatch:*", "logs:*"} <= provision
+    assert "oam:*" not in provision
 
 
 def test_workstream_policy_retains_bounded_pass_role_and_delete_read() -> None:
     policy = render("workstream")
+    provision = actions(by_sid(policy, "ProvisionWorkstreamResourceFamilies"))
+    assert OAM_SOURCE_LINK_ACTIONS <= provision
+    assert {"cloudwatch:*", "logs:*"} <= provision
+    assert "oam:*" not in provision
     pass_role = by_sid(policy, "PassNamedDeploymentRolesToServices")
     assert pass_role["Condition"]["StringEquals"]["iam:PassedToService"] == [
         "bedrock-agentcore.amazonaws.com",

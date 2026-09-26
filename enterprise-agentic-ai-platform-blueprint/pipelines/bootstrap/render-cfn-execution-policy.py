@@ -144,6 +144,19 @@ def service_linked_role_statement(services: Sequence[str]) -> dict[str, Any]:
     }
 
 
+OAM_SOURCE_LINK_ACTIONS = [
+    "oam:CreateLink",
+    "oam:DeleteLink",
+    "oam:GetLink",
+    "oam:ListLinks",
+    "oam:ListTagsForResource",
+    "oam:TagResource",
+    "oam:UntagResource",
+    "oam:UpdateLink",
+    "xray:Link",
+]
+
+
 def workstream_policy(account: str) -> dict[str, Any]:
     return {
         "Version": "2012-10-17",
@@ -166,6 +179,7 @@ def workstream_policy(account: str) -> dict[str, Any]:
                     "kms:*",
                     "lambda:*",
                     "logs:*",
+                    *OAM_SOURCE_LINK_ACTIONS,
                     "s3:*",
                     "secretsmanager:*",
                     "servicequotas:*",
@@ -243,7 +257,7 @@ def platform_policy(
                     "kms:*",
                     "lambda:*",
                     "logs:*",
-                    "oam:*",
+                    *OAM_SOURCE_LINK_ACTIONS,
                     "s3:*",
                     "secretsmanager:*",
                     "servicequotas:*",
