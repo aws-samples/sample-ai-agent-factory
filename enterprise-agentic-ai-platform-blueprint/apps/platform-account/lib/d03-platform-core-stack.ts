@@ -1099,8 +1099,8 @@ exports.handler = async (event, context) => {
     // tool with the resolved Lambda alias ARN substituted in. Records start
     // in DRAFT (or APPROVED if `registryAutoApproveOnSeed=true`).
     //
-    // The catalogue's `${PLATFORM_ACCOUNT_ID}` placeholder is resolved here
-    // (via `this.account`) so the Registry stores the concrete ARN; the
+    // The catalogue's `${PLATFORM_REGION}` and `${PLATFORM_ACCOUNT_ID}`
+    // placeholders are resolved here so the Registry stores a concrete ARN; the
     // workstream Gateway synth then reads it back as the truth source.
     if (props.enableAgentRegistry) {
       if (!props.registryName) {
@@ -1124,10 +1124,12 @@ exports.handler = async (event, context) => {
           recordSpec.descriptorType === 'MCP'
             ? {
                 ...recordSpec,
-                gatewayTargetArn: recordSpec.gatewayTargetArn.replace(
-                  '${PLATFORM_ACCOUNT_ID}',
-                  recordSpec.targetAccountId ?? this.account,
-                ),
+                gatewayTargetArn: recordSpec.gatewayTargetArn
+                  .replace('${PLATFORM_REGION}', this.region)
+                  .replace(
+                    '${PLATFORM_ACCOUNT_ID}',
+                    recordSpec.targetAccountId ?? this.account,
+                  ),
               }
             : recordSpec;
         const rec = new RegistryRecordConstruct(this, `AgentRegistryRecord-${recordSpec.recordId}`, {

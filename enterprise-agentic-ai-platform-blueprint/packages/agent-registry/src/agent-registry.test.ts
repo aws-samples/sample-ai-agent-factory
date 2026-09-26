@@ -30,7 +30,7 @@ const validMcp: McpRegistryRecordSpec = {
   ownerTeam: 'platform-ai',
   costCentre: 'platform',
   gatewayTargetArn:
-    'arn:aws:lambda:us-east-1:${PLATFORM_ACCOUNT_ID}:function:agenticai-d03-tool-echo:PROD',
+    'arn:aws:lambda:${PLATFORM_REGION}:${PLATFORM_ACCOUNT_ID}:function:agenticai-d03-tool-echo:PROD',
   cedarPolicy: 'permit(principal, action == Action::"InvokeTool", resource == Tool::"tool-echo");',
 };
 
@@ -95,11 +95,12 @@ describe('validateRegistryRecordSpec — A2A', () => {
 });
 
 describe('resolveGatewayTargetArn', () => {
-  it('substitutes ${PLATFORM_ACCOUNT_ID} when targetAccountId is undefined', () => {
-    const arn = resolveGatewayTargetArn(validMcp, '111111111111');
+  it('substitutes Platform Region and account placeholders', () => {
+    const arn = resolveGatewayTargetArn(validMcp, '111111111111', 'eu-west-1');
     expect(arn).toBe(
-      'arn:aws:lambda:us-east-1:111111111111:function:agenticai-d03-tool-echo:PROD',
+      'arn:aws:lambda:eu-west-1:111111111111:function:agenticai-d03-tool-echo:PROD',
     );
+    expect(arn).not.toContain('${PLATFORM_REGION}');
     expect(arn).not.toContain('${PLATFORM_ACCOUNT_ID}');
   });
 
@@ -107,8 +108,9 @@ describe('resolveGatewayTargetArn', () => {
     const arn = resolveGatewayTargetArn(
       { ...validMcp, targetAccountId: '999999999999' },
       '111111111111',
+      'eu-west-1',
     );
-    expect(arn).toContain('999999999999');
+    expect(arn).toContain('eu-west-1:999999999999');
     expect(arn).not.toContain('111111111111');
   });
 });

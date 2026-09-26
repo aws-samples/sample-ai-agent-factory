@@ -612,20 +612,29 @@ describe("buildGaToolGovernanceDocument", () => {
     const governance = buildGaToolGovernanceDocument(
       source,
       PLATFORM_ACCOUNT_ID,
+      "eu-west-1",
     );
 
     expect(governance.catalogueVersion).toBe("2");
-    expect(governance.target.arn).toContain(`:${PLATFORM_ACCOUNT_ID}:`);
+    expect(governance.target.arn).toContain(
+      `:eu-west-1:${PLATFORM_ACCOUNT_ID}:`,
+    );
+    expect(governance.target.arn).not.toContain("${PLATFORM_REGION}");
     expect(governance.target.arn).not.toContain("${PLATFORM_ACCOUNT_ID}");
     const override = `arn:aws:lambda:us-west-2:${PLATFORM_ACCOUNT_ID}:function:agenticai-platform-nonprod-tool-echo:PROD`;
     expect(
-      buildGaToolGovernanceDocument(source, PLATFORM_ACCOUNT_ID, override)
-        .target.arn,
+      buildGaToolGovernanceDocument(
+        source,
+        PLATFORM_ACCOUNT_ID,
+        "eu-west-1",
+        override,
+      ).target.arn,
     ).toBe(override);
     expect(() =>
       buildGaToolGovernanceDocument(
         { ...source, approvalStatus: "invalid" } as unknown as ToolSpec,
         PLATFORM_ACCOUNT_ID,
+        "eu-west-1",
       ),
     ).toThrow(/approvalStatus/);
   });

@@ -91,6 +91,7 @@ export interface GaToolGovernanceDocument {
 export function buildGaToolGovernanceDocument(
   tool: ToolSpec,
   platformAccountId: string,
+  platformRegion: string,
   targetArnOverride?: string,
 ): GaToolGovernanceDocument {
   validateToolSpec(tool);
@@ -103,7 +104,9 @@ export function buildGaToolGovernanceDocument(
     desiredApprovalStatus: tool.approvalStatus,
     target: {
       type: tool.toolType ?? "lambda",
-      arn: targetArnOverride ?? resolveTargetArn(tool, platformAccountId),
+      arn:
+        targetArnOverride ??
+        resolveTargetArn(tool, platformAccountId, platformRegion),
     },
     mcp: {
       toolName: tool.toolId,
@@ -252,6 +255,7 @@ export class GaPlatformRegistryConstruct extends Construct {
       const governance = buildGaToolGovernanceDocument(
         tool,
         stack.account,
+        stack.region,
         props.toolTargetArns?.[tool.toolId],
       );
       const generation = recordGenerations[tool.toolId];

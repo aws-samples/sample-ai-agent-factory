@@ -85,7 +85,6 @@ describe('Phase L — Registry opt-in seed', () => {
     expect(Object.keys(submits)).toHaveLength(0);
     expect(Object.keys(approves)).toHaveLength(0);
   });
-
   it('emits Submit + Approve per record when registryAutoApproveOnSeed is true', () => {
     const { template } = synth({
       enableAgentRegistry: true,

@@ -49,7 +49,8 @@ export interface ToolSpec {
   readonly toolId: ToolId; // unique within catalogue; kebab-case pattern
   /** Z7-K: kind of tool. Defaults to 'lambda'. 'agent-a2a' targets a peer-agent A2A endpoint. */
   readonly toolType?: ToolType;
-  readonly targetArn: string; // Lambda ARN, MUST end with :<alias> — validate at synth
+  /** Lambda alias ARN. Platform-owned targets use both `${PLATFORM_REGION}` and `${PLATFORM_ACCOUNT_ID}` placeholders. */
+  readonly targetArn: string;
   readonly targetAccountId?: string; // optional; when present the tool lives cross-account (platform-workload or workload-workload)
   readonly cedarPolicy: string; // per-tool Cedar snippet, union-ed into Gateway policy at synth
   readonly ownerTeam: string; // e.g. 'platform-ai', 'retail', 'hr'
@@ -99,7 +100,7 @@ export const PLATFORM_TOOL_CATALOGUE: Readonly<Record<ToolId, ToolSpec>> = {
   "tool-echo": {
     toolId: "tool-echo",
     targetArn:
-      "arn:aws:lambda:us-east-1:${PLATFORM_ACCOUNT_ID}:function:agenticai-d03-tool-echo:PROD",
+      "arn:aws:lambda:${PLATFORM_REGION}:${PLATFORM_ACCOUNT_ID}:function:agenticai-d03-tool-echo:PROD",
     cedarPolicy:
       'permit(principal, action == Action::"InvokeTool", resource == Tool::"tool-echo");',
     ownerTeam: "platform-ai",
@@ -115,7 +116,7 @@ export const PLATFORM_TOOL_CATALOGUE: Readonly<Record<ToolId, ToolSpec>> = {
   "tool-ping": {
     toolId: "tool-ping",
     targetArn:
-      "arn:aws:lambda:us-east-1:${PLATFORM_ACCOUNT_ID}:function:agenticai-d03-tool-ping:PROD",
+      "arn:aws:lambda:${PLATFORM_REGION}:${PLATFORM_ACCOUNT_ID}:function:agenticai-d03-tool-ping:PROD",
     cedarPolicy:
       'permit(principal, action == Action::"InvokeTool", resource == Tool::"tool-ping");',
     ownerTeam: "platform-ai",
@@ -131,7 +132,7 @@ export const PLATFORM_TOOL_CATALOGUE_VERSION = "2";
 
 // Pattern matchers:
 const LAMBDA_ARN_WITH_ALIAS =
-  /^arn:aws:lambda:[a-z0-9-]+:(?:\$\{PLATFORM_ACCOUNT_ID\}|\d{12}):function:[a-zA-Z0-9-_]+:[a-zA-Z0-9-_$]+$/;
+  /^arn:aws:lambda:(?:\$\{PLATFORM_REGION\}|[a-z0-9-]+):(?:\$\{PLATFORM_ACCOUNT_ID\}|\d{12}):function:[a-zA-Z0-9-_]+:[a-zA-Z0-9-_$]+$/;
 
 /** Validate a ToolSpec at synth; throws with actionable message. */
 export function validateToolSpec(spec: ToolSpec): void {
@@ -234,16 +235,18 @@ export function resolveSubscribedTools(
 
 /**
  * Resolve a ToolSpec's targetArn into a concrete ARN by substituting
- * ${PLATFORM_ACCOUNT_ID} when the tool lives in the platform account
- * (targetAccountId is undefined). Cross-account tools use their explicit
- * account id literally.
+ * `${PLATFORM_REGION}` and `${PLATFORM_ACCOUNT_ID}`. Platform-owned tools use
+ * the supplied account; cross-account tools use their explicit account id.
  */
 export function resolveTargetArn(
   spec: ToolSpec,
   platformAccountId: string,
+  platformRegion: string,
 ): string {
   const acct = spec.targetAccountId ?? platformAccountId;
-  return spec.targetArn.replace("${PLATFORM_ACCOUNT_ID}", acct);
+  return spec.targetArn
+    .replace("${PLATFORM_REGION}", platformRegion)
+    .replace("${PLATFORM_ACCOUNT_ID}", acct);
 }
 
 /**

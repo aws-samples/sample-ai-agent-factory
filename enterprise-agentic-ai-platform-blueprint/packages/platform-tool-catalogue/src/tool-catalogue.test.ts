@@ -98,12 +98,13 @@ describe('resolveSubscribedTools', () => {
 });
 
 describe('resolveTargetArn', () => {
-  it('substitutes ${PLATFORM_ACCOUNT_ID} when targetAccountId is undefined', () => {
+  it('substitutes platform Region and account placeholders', () => {
     const spec = PLATFORM_TOOL_CATALOGUE['tool-echo'];
-    const arn = resolveTargetArn(spec, '111111111111');
+    const arn = resolveTargetArn(spec, '111111111111', 'eu-west-1');
     expect(arn).toBe(
-      'arn:aws:lambda:us-east-1:111111111111:function:agenticai-d03-tool-echo:PROD',
+      'arn:aws:lambda:eu-west-1:111111111111:function:agenticai-d03-tool-echo:PROD',
     );
+    expect(arn).not.toContain('${PLATFORM_REGION}');
     expect(arn).not.toContain('${PLATFORM_ACCOUNT_ID}');
   });
 
@@ -113,7 +114,7 @@ describe('resolveTargetArn', () => {
       targetArn: 'arn:aws:lambda:us-east-1:${PLATFORM_ACCOUNT_ID}:function:agenticai-d03-tool-echo:PROD',
       targetAccountId: '999999999999',
     };
-    const arn = resolveTargetArn(spec, '111111111111');
+    const arn = resolveTargetArn(spec, '111111111111', 'eu-west-1');
     expect(arn).toBe(
       'arn:aws:lambda:us-east-1:999999999999:function:agenticai-d03-tool-echo:PROD',
     );
