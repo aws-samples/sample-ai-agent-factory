@@ -780,3 +780,69 @@ def test_split_history_never_starts_with_an_assistant_prompt() -> None:
     )
     assert prompt == ""
     assert [h["role"] for h in history] == ["user", "assistant"]
+
+
+def _adapter_raising(error: Exception) -> agent_mod._LiteLlmAdapter:
+    class FakeModel:
+        def __init__(self, **_kwargs):
+            pass
+
+    class FakeAgent:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __call__(self, _prompt):
+            raise error
+
+    adapter = agent_mod._LiteLlmAdapter.__new__(agent_mod._LiteLlmAdapter)
+    adapter._Agent = FakeAgent
+    adapter._LiteLLMModel = FakeModel
+    adapter._base = "https://example.test/inference/v1"
+    adapter._model_id = "target/openai.gpt-oss-120b"
+    adapter._bearer = "token"
+    return adapter
+
+
+class FakeGatewayError(RuntimeError):
+    def __init__(self, *, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.message = message
+
+
+def test_exact_gateway_guardrail_error_becomes_terminal_response():
+    error = FakeGatewayError(
+        status_code=403,
+        message=agent_mod.GUARDRAIL_INTERVENTION_MESSAGE,
+    )
+    response = _adapter_raising(error).complete(
+        [{"role": "user", "content": "adversarial"}],
+        guardrail_identifier="gr-1",
+        stream=True,
+    )
+    assert response == agent_mod.LlmResponse(
+        text="",
+        guardrail_intervened=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("status_code", "message"),
+    [
+        (401, agent_mod.GUARDRAIL_INTERVENTION_MESSAGE),
+        (403, "Authentication failed"),
+        (500, "Service failure"),
+    ],
+)
+def test_non_guardrail_gateway_errors_propagate(
+    status_code: int,
+    message: str,
+):
+    error = FakeGatewayError(status_code=status_code, message=message)
+    with pytest.raises(FakeGatewayError) as raised:
+        _adapter_raising(error).complete(
+            [{"role": "user", "content": "request"}],
+            guardrail_identifier="gr-1",
+            stream=True,
+        )
+    assert raised.value is error

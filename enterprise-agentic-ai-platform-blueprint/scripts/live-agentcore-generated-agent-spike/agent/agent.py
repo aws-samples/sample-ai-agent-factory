@@ -67,7 +67,12 @@ HANDSHAKE_MARKER = "agentcore-generated-agent-ok"
 #: which revision is serving without reading container digests. Bump it on
 #: every behaviour-changing agent release; the deployment-continuity probe
 #: gates on the observed transition.
-AGENT_VERSION = "1.3.0"
+AGENT_VERSION = "1.3.1"
+#: Exact public error text emitted by the Platform Guardrail interceptor. A
+#: 403 with any other message is an auth/permission failure and must propagate.
+GUARDRAIL_INTERVENTION_MESSAGE = (
+    "Your input violates our AI usage policy and cannot be processed."
+)
 #: Environment variables the container reads its AWS Region from, in order.
 #: The Runtime stack sets ``AGENTCORE_REGION`` to the Region it deploys into;
 #: the other two are the ambient AWS variables boto3 itself honours.
@@ -453,6 +458,16 @@ def _inference_base_url(gateway_url: str) -> str:
     return f"{trimmed[: -len('/mcp')].rstrip('/')}/inference/v1"
 
 
+def _is_guardrail_intervention(error: Exception) -> bool:
+    """Recognize only the Platform Gateway's exact Guardrail 403 contract."""
+
+    return (
+        getattr(error, "status_code", None) == 403
+        and GUARDRAIL_INTERVENTION_MESSAGE
+        in str(getattr(error, "message", ""))
+    )
+
+
 class _LiteLlmAdapter:
     """Adapts a Strands ``LiteLLMModel`` to the :class:`LlmClient` Protocol."""
 
@@ -508,7 +523,12 @@ class _LiteLlmAdapter:
             system_prompt=system_prompt,
             messages=history,
         )
-        result = agent(prompt or "Reply with exactly the word verified.")
+        try:
+            result = agent(prompt or "Reply with exactly the word verified.")
+        except Exception as error:
+            if _is_guardrail_intervention(error):
+                return LlmResponse(text="", guardrail_intervened=True)
+            raise
         message = result.message
         guardrail_intervened = getattr(result, "stop_reason", None) == "guardrail_intervened"
         if (
