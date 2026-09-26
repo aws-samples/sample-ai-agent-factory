@@ -74,6 +74,12 @@ def build_plan(tenant: str, agent: str) -> dict[str, list[str]]:
             f"{prefix}-nonprod-ToolGateway",
             f"{prefix}-prod-RegistryRoles",
             f"{prefix}-nonprod-RegistryRoles",
+            # Same-account validation profiles emit the shared name; account-
+            # isolated profiles emit one environment-specific name per account.
+            # Listing all exact alternatives is safe: absent stacks are skipped.
+            f"{prefix}-Observability",
+            f"{prefix}-prod-Observability",
+            f"{prefix}-nonprod-Observability",
         ],
         "platform": [
             "AgenticAI-WorkloadPipelineStack",

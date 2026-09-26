@@ -176,6 +176,8 @@ def test_plan_orders_consumers_before_producers():
     for env in ("prod", "nonprod"):
         assert ws.index(f"AgenticAI-demo-primary-{env}-RuntimeMemory") < ws.index(f"AgenticAI-demo-primary-{env}-ToolGateway")
         assert ws.index(f"AgenticAI-demo-primary-{env}-ToolGateway") < ws.index(f"AgenticAI-demo-primary-{env}-RegistryRoles")
+        assert ws.index(f"AgenticAI-demo-primary-{env}-RegistryRoles") < ws.index(f"AgenticAI-demo-primary-{env}-Observability")
+    assert "AgenticAI-demo-primary-Observability" in ws
     pf = plan["platform"]
     assert pf[:2] == ["AgenticAI-WorkloadPipelineStack", "AgenticAI-PlatformPipelineStack"]
     for env in ("Prod", "Nonprod"):

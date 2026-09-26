@@ -74,6 +74,7 @@ import {
   enterBlueprintSourceDirectory,
   stageAwareSynthCommands,
 } from "./synth-commands";
+import { WorkstreamObservabilityStack } from "./workstream-observability-stack";
 
 export interface WorkloadGaRegistryConfig {
   readonly nonprod: GaRegistryConsumerContext;
@@ -261,6 +262,8 @@ export interface WorkstreamRegistryRolesStageProps extends StageProps {
   readonly gatewayRegion: string;
   readonly workloadNonprodAccountId: string;
   readonly workloadProdAccountId: string;
+  /** Regional Management/Governance OAM sink shared by distinct Workstream accounts. */
+  readonly auditOamSinkArn?: string;
   readonly nonprodContext: GaRegistryConsumerContext;
   readonly prodContext: GaRegistryConsumerContext;
   readonly enablePipelineRuntimeMemory?: boolean;
@@ -279,6 +282,7 @@ export interface WorkstreamRegistryRolesStageProps extends StageProps {
 export class WorkstreamRegistryRolesStage extends Stage {
   readonly nonprod: D03WorkstreamRegistryRolesStack;
   readonly prod: D03WorkstreamRegistryRolesStack;
+  readonly observability: readonly WorkstreamObservabilityStack[];
 
   constructor(
     scope: Construct,
@@ -286,6 +290,50 @@ export class WorkstreamRegistryRolesStage extends Stage {
     props: WorkstreamRegistryRolesStageProps,
   ) {
     super(scope, id, props);
+
+    const accountTargets = [
+      {
+        account: props.workloadNonprodAccountId,
+        environment: "nonprod" as const,
+      },
+      {
+        account: props.workloadProdAccountId,
+        environment: "prod" as const,
+      },
+    ];
+    const distinctTargets = accountTargets.filter(
+      (candidate, index, targets) =>
+        targets.findIndex((target) => target.account === candidate.account) ===
+        index,
+    );
+    const sharedAccount = distinctTargets.length === 1;
+    const auditOamSinkArn = props.auditOamSinkArn;
+    this.observability = auditOamSinkArn
+      ? distinctTargets.map((target) => {
+          const environment = sharedAccount ? "shared" : target.environment;
+          const constructId = sharedAccount
+            ? "SharedObservability"
+            : `${target.environment === "nonprod" ? "Nonprod" : "Prod"}Observability`;
+          return new WorkstreamObservabilityStack(this, constructId, {
+            stackName: sharedAccount
+              ? `AgenticAI-${props.tenantId}-${props.agentId}-Observability`
+              : `AgenticAI-${props.tenantId}-${props.agentId}-${target.environment}-Observability`,
+            env: {
+              account: target.account,
+              region: props.gatewayRegion,
+            },
+            sinkArn: auditOamSinkArn,
+            resourceTags: {
+              applicationId: props.applicationId,
+              agentId: props.agentId,
+              tenantId: props.tenantId,
+              costCentre: props.costCentre,
+              environment,
+            },
+          });
+        })
+      : [];
+
     this.nonprod = new D03WorkstreamRegistryRolesStack(this, "NonprodRoles", {
       stackName: `AgenticAI-${props.tenantId}-${props.agentId}-nonprod-RegistryRoles`,
       env: {
@@ -771,6 +819,7 @@ export class WorkloadPipelineStack extends Stack {
           gatewayRegion: props.gaRegistry.gatewayRegion,
           workloadNonprodAccountId: props.workloadNonprodEnv.account,
           workloadProdAccountId: props.workloadProdEnv.account,
+          auditOamSinkArn: props.auditOamSinkArn,
           nonprodContext: props.gaRegistry.nonprod,
           prodContext: props.gaRegistry.prod,
           enablePipelineRuntimeMemory: props.enablePipelineRuntimeMemory,

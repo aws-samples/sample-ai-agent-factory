@@ -68,7 +68,7 @@ HANDSHAKE_MARKER = "agentcore-generated-agent-ok"
 #: which revision is serving without reading container digests. Bump it on
 #: every behaviour-changing agent release; the deployment-continuity probe
 #: gates on the observed transition.
-AGENT_VERSION = "1.3.2"
+AGENT_VERSION = "1.3.3"
 #: Exact public error text emitted by the Platform Guardrail interceptor. A
 #: 403 with any other message is an auth/permission failure and must propagate.
 GUARDRAIL_INTERVENTION_MESSAGE = (

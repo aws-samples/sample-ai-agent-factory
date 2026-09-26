@@ -90,6 +90,7 @@ function createPlatformPipeline(
   gaRegistryRecordGenerations?: Readonly<
     Partial<Record<"nonprod" | "prod", Readonly<Record<string, number>>>>
   >,
+  auditOamSinkArn?: string,
 ): PlatformPipelineStack {
   return new PlatformPipelineStack(app, "PP", {
     env: { account: "111111111111", region: "us-west-2" },
@@ -117,6 +118,7 @@ function createPlatformPipeline(
     tenantId: "shared",
     agentId: "shared",
     costCentre: "platform",
+    auditOamSinkArn,
     inferenceModelRateLimits: [
       {
         qualifiedModelId: "openai.gpt-oss-120b",
@@ -154,11 +156,18 @@ function synthWorkload() {
   return Template.fromStack(stack);
 }
 
-function synthWorkloadGa(policyEngine?: {
-  readonly mode: "LOG_ONLY" | "ENFORCE";
-  readonly nonprodIamRoleArns: readonly string[];
-  readonly prodIamRoleArns: readonly string[];
-}): {
+function synthWorkloadGa(
+  policyEngine?: {
+    readonly mode: "LOG_ONLY" | "ENFORCE";
+    readonly nonprodIamRoleArns: readonly string[];
+    readonly prodIamRoleArns: readonly string[];
+  },
+  options?: {
+    readonly workloadNonprodAccountId?: string;
+    readonly workloadProdAccountId?: string;
+    readonly auditOamSinkArn?: string;
+  },
+): {
   readonly stack: WorkloadPipelineStack;
   readonly template: Template;
 } {
@@ -171,14 +180,21 @@ function synthWorkloadGa(policyEngine?: {
     agentId: "primary",
     applicationId: "demo",
     costCentre: "engineering",
-    workloadNonprodEnv: { account: "444444444444", region: "us-west-2" },
-    workloadProdEnv: { account: "555555555555", region: "us-west-2" },
+    workloadNonprodEnv: {
+      account: options?.workloadNonprodAccountId ?? "444444444444",
+      region: "us-west-2",
+    },
+    workloadProdEnv: {
+      account: options?.workloadProdAccountId ?? "555555555555",
+      region: "us-west-2",
+    },
     workloadNonprodAvailabilityZones: [
       "us-west-2a",
       "us-west-2b",
       "us-west-2c",
     ],
     workloadProdAvailabilityZones: ["us-west-2a", "us-west-2b", "us-west-2c"],
+    auditOamSinkArn: options?.auditOamSinkArn,
     gaRegistry: {
       nonprod: gaConsumerContext("nonprod"),
       prod: gaConsumerContext("prod"),
@@ -461,12 +477,12 @@ describe("Phase 7 — cross-account bootstrap role contract", () => {
     expect(bootstrapSource).toContain(
       'REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"',
     );
-    expect(bootstrapSource).not.toContain('AWS_REGION:-us-west-2');
-    expect(bootstrapSource).toContain('CFN_EXECUTION_POLICY_NAME');
+    expect(bootstrapSource).not.toContain("AWS_REGION:-us-west-2");
+    expect(bootstrapSource).toContain("CFN_EXECUTION_POLICY_NAME");
     expect(bootstrapSource).toContain(
       'execution_policy_arn="arn:${PARTITION}:iam::${acct}:policy/${CFN_EXECUTION_POLICY_NAME}"',
     );
-    expect(bootstrapSource).toContain('render-cfn-execution-policy.py');
+    expect(bootstrapSource).toContain("render-cfn-execution-policy.py");
   });
 });
 
@@ -491,6 +507,61 @@ describe("Phase 7 — Workload pipeline has mandatory stages + eval gate", () =>
 });
 
 describe("Phase 7 — R2 GA Registry Workload pipeline", () => {
+  it("emits OAM links once per distinct source account and deduplicates shared accounts", () => {
+    const sinkArn = "arn:aws:oam:us-west-2:666666666666:sink/example";
+    const platform = Template.fromStack(
+      createPlatformPipeline(new App(), "222222222222", undefined, sinkArn),
+    );
+    platform.resourceCountIs("AWS::Oam::Link", 1);
+    platform.hasResourceProperties("AWS::Oam::Link", {
+      SinkIdentifier: sinkArn,
+    });
+
+    const split = synthWorkloadGa(undefined, { auditOamSinkArn: sinkArn });
+    const splitStage = split.stack.node.findChild(
+      "RegistryRoles",
+    ) as WorkstreamRegistryRolesStage;
+    expect(splitStage.observability.map((stack) => stack.stackName)).toEqual([
+      "AgenticAI-demo-primary-nonprod-Observability",
+      "AgenticAI-demo-primary-prod-Observability",
+    ]);
+    for (const stack of splitStage.observability) {
+      const template = Template.fromStack(stack);
+      template.resourceCountIs("AWS::Oam::Link", 1);
+      template.hasResourceProperties("AWS::Oam::Link", {
+        SinkIdentifier: sinkArn,
+      });
+    }
+
+    const shared = synthWorkloadGa(undefined, {
+      workloadNonprodAccountId: "444444444444",
+      workloadProdAccountId: "444444444444",
+      auditOamSinkArn: sinkArn,
+    });
+    const sharedStage = shared.stack.node.findChild(
+      "RegistryRoles",
+    ) as WorkstreamRegistryRolesStage;
+    expect(sharedStage.observability).toHaveLength(1);
+    expect(sharedStage.observability[0].stackName).toBe(
+      "AgenticAI-demo-primary-Observability",
+    );
+    Template.fromStack(sharedStage.observability[0]).hasResourceProperties(
+      "AWS::Oam::Link",
+      {
+        SinkIdentifier: sinkArn,
+        Tags: Match.objectLike({
+          environment: "shared",
+        }),
+      },
+    );
+
+    const absent = synthWorkloadGa();
+    const absentStage = absent.stack.node.findChild(
+      "RegistryRoles",
+    ) as WorkstreamRegistryRolesStage;
+    expect(absentStage.observability).toEqual([]);
+  });
+
   it("creates one named synth role that may assume only the two reader roles", () => {
     const { template } = synthWorkloadGa();
     const roles = template.findResources("AWS::IAM::Role");

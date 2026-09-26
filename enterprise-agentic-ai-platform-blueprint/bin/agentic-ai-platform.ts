@@ -143,7 +143,9 @@ function parseGeneratedAgentInferenceContext(
       );
     }
   }
-  const requireEnv = (envName: "nonprod" | "prod"): GeneratedAgentInferenceInputs => {
+  const requireEnv = (
+    envName: "nonprod" | "prod",
+  ): GeneratedAgentInferenceInputs => {
     const obj = (parsed as Record<string, unknown>)?.[envName] as
       | Record<string, unknown>
       | undefined;
@@ -430,10 +432,14 @@ switch (stage) {
           "Platform stage requires non-empty context 'agenticai/workloadAccountIds' for the GA Registry reader trust.",
         );
       }
-      const guardrailStack = new GuardrailStack(app, "AgenticAI-Platform-GuardrailStack", {
-        env: { account: platformAccount, region },
-        pipelineRoleArn,
-      });
+      const guardrailStack = new GuardrailStack(
+        app,
+        "AgenticAI-Platform-GuardrailStack",
+        {
+          env: { account: platformAccount, region },
+          pipelineRoleArn,
+        },
+      );
       new RegistryStack(app, "AgenticAI-Platform-RegistryStack", {
         env: { account: platformAccount, region },
         envName: platformEnvName,
@@ -902,8 +908,10 @@ switch (stage) {
         ? "generated-agent"
         : "compatibility";
     // Per-env Platform inference inputs for the generated-agent variant.
-    const generatedAgentInference =
-      parseGeneratedAgentInferenceContext(app, agentImageVariant);
+    const generatedAgentInference = parseGeneratedAgentInferenceContext(
+      app,
+      agentImageVariant,
+    );
     const gatewayPolicyEngineMode = gatewayPolicyEngineModeContext(
       "agenticai/gatewayPolicyEngineMode",
     );
@@ -1172,6 +1180,8 @@ switch (stage) {
         tenantId: String(tenantId),
         agentId: String(agentId),
         costCentre: String(costCentre),
+        auditOamSinkArn:
+          typeof auditOamSinkArn === "string" ? auditOamSinkArn : undefined,
         inferenceModelRateLimits,
         grantGatewayInvokePermissions: enableGaGatewayInvokePermissions,
         gatewayServiceRoleArns: gaGatewayServiceRoleArns,

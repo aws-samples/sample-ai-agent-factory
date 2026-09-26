@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Regional CloudWatch OAM wiring for the GA pipeline topology: the Platform pipeline root links once to the Audit sink, while the Workload prerequisite stage emits one tagged observability stack per distinct Workstream account/Region and deduplicates same-account nonproduction/production profiles. Fail-closed teardown includes the shared and account-isolated exact stack names.
 - Pipeline-owned `InferenceGatewayStack` in both Platform deployment stages.
 - Native `AWS::BedrockAgentCore::Gateway` with Cognito client-credentials JWT authentication and the MCP `2025-11-25` protocol.
 - Native Bedrock Mantle inference target using `GATEWAY_IAM_ROLE` and a source-account/source-Gateway constrained service role.

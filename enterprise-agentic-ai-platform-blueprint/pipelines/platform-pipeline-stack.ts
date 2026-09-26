@@ -28,6 +28,7 @@ import { LogArchiveStack } from "../apps/platform-account/lib/log-archive-stack"
 import { AuditStack } from "../apps/platform-account/lib/audit-stack";
 import { InferenceGatewayStack } from "../apps/platform-account/lib/inference-gateway-stack";
 import type { InferenceModelRateLimit } from "@agenticai/platform-inference-gateway";
+import { OamSourceLinkConstruct } from "@agenticai/observability";
 import {
   applyPipelineResourceTags,
   createPipelineArtifactBucket,
@@ -59,6 +60,8 @@ export interface PlatformPipelineStackProps extends StackProps {
   readonly agentId: string;
   readonly tenantId: string;
   readonly costCentre: string;
+  /** Regional Management/Governance OAM sink for Platform telemetry. */
+  readonly auditOamSinkArn?: string;
   readonly inferenceModelRateLimits: readonly InferenceModelRateLimit[];
   readonly grantGatewayInvokePermissions?: boolean;
   readonly gatewayServiceRoleArns?: readonly string[];
@@ -154,25 +157,29 @@ export class PlatformDeploymentStage extends Stage {
       tenantId: props.tenantId,
       costCentre: props.costCentre,
     });
-    const inferenceGateway = new InferenceGatewayStack(this, "InferenceGateway", {
-      env: props.env,
-      envName: props.envName,
-      applicationId: props.applicationId,
-      agentId: props.agentId,
-      tenantId: props.tenantId,
-      costCentre: props.costCentre,
-      modelRateLimits: props.inferenceModelRateLimits,
-      // The stage's own baseline guardrail is enforced server-side on every
-      // inference request by the Gateway REQUEST interceptor.
-      inputGuardrail: {
-        guardrailIdentifier: guardrail.baseline.guardrail.attrGuardrailId,
-        guardrailVersion: guardrail.baseline.guardrail.attrVersion,
-        guardrailArn: guardrail.baseline.guardrail.attrGuardrailArn,
+    const inferenceGateway = new InferenceGatewayStack(
+      this,
+      "InferenceGateway",
+      {
+        env: props.env,
+        envName: props.envName,
+        applicationId: props.applicationId,
+        agentId: props.agentId,
+        tenantId: props.tenantId,
+        costCentre: props.costCentre,
+        modelRateLimits: props.inferenceModelRateLimits,
+        // The stage's own baseline guardrail is enforced server-side on every
+        // inference request by the Gateway REQUEST interceptor.
+        inputGuardrail: {
+          guardrailIdentifier: guardrail.baseline.guardrail.attrGuardrailId,
+          guardrailVersion: guardrail.baseline.guardrail.attrVersion,
+          guardrailArn: guardrail.baseline.guardrail.attrGuardrailArn,
+        },
+        m2mSecretReaderAccountIds: props.gatewayWorkloadAccountId
+          ? [props.gatewayWorkloadAccountId]
+          : undefined,
       },
-      m2mSecretReaderAccountIds: props.gatewayWorkloadAccountId
-        ? [props.gatewayWorkloadAccountId]
-        : undefined,
-    });
+    );
     inferenceGateway.addDependency(guardrail);
   }
 }
@@ -191,6 +198,11 @@ export class PlatformPipelineStack extends Stack {
       environment: "pipeline",
     };
     applyPipelineResourceTags(this, resourceTags);
+    if (props.auditOamSinkArn) {
+      new OamSourceLinkConstruct(this, "OamSourceLink", {
+        sinkArn: props.auditOamSinkArn,
+      });
+    }
     const artifactBucket = createPipelineArtifactBucket(
       this,
       "PlatformPipelineArtifacts",

@@ -125,7 +125,7 @@ Per workload account (`packages/agentic-vpc/`): VPC with 3 AZs, **private-isolat
 - **RAG** (`packages/rag/`) — per-tenant CMK source bucket, versioned + access-logged + SSL-enforced, scoped `kbs/<tenant>/<kb>/` prefix, bucket policy denies any request not arriving via the workload VPCE.
 - **LiteLLM (D-01)** (`packages/litellm-gateway/`) — per-account ECS Fargate behind an internal ALB, task-role allow-list + deny-on-null-guardrail, master key from Secrets Manager (CMK, injected via ECS `secrets:`).
 - **Tenancy** (`packages/agentic-app/`) — per-app IAM role, per-app SG, memory namespace locked at synth, cost-allocation tags for per-app CUR.
-- **Observability** (`packages/observability/`) — OAM source link to the Audit account, per-app dashboard + guardrail/latency alarms.
+- **Observability** (`packages/observability/`) — OAM source links connect the Platform pipeline root and every distinct GA Workstream account/Region to the regional Audit sink; same-account nonproduction/production profiles deliberately share one link to avoid a CloudWatch OAM collision. Legacy application stacks retain their per-app dashboard plus guardrail/latency alarms.
 - **Cost** (`packages/cost-allocation/`) — per-app Budget filtered by `application-id`, alerts at 80 % ACTUAL + 100 % FORECASTED.
 - **CI/CD** (`pipelines/`) — self-mutating platform pipeline + per-app workload pipeline with the mandatory sequence _Source → Synth → Deploy(nonprod) → Evaluation Gate → Manual Approval → Deploy(prod)_.
 
@@ -524,17 +524,17 @@ Report security issues privately via the [AWS vulnerability reporting page](http
 
 A customer should never have to fork the repo to make a supported variant. Every recognised override:
 
-| Decision                           | Default                    | Override                                                                         |
-| ---------------------------------- | -------------------------- | -------------------------------------------------------------------------------- |
-| Identity provider                  | Cognito                    | `agenticai/customJwtIssuer` + `customJwtAudience` (corporate OIDC)               |
-| Guardrail profile (per agent)      | Baseline                   | per-agent `blueprints/<name>/bedrock.config.yaml`                                |
-| Model allow-list                   | Sonnet 4.5 + Haiku 4.5     | `PLATFORM_ALLOWED_MODELS` constant (forces platform review)                      |
+| Decision                           | Default                                            | Override                                                                                                                                                  |
+| ---------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Identity provider                  | Cognito                                            | `agenticai/customJwtIssuer` + `customJwtAudience` (corporate OIDC)                                                                                        |
+| Guardrail profile (per agent)      | Baseline                                           | per-agent `blueprints/<name>/bedrock.config.yaml`                                                                                                         |
+| Model allow-list                   | Sonnet 4.5 + Haiku 4.5                             | `PLATFORM_ALLOWED_MODELS` constant (forces platform review)                                                                                               |
 | Region                             | No implicit default; `CDK_DEFAULT_REGION` required | `agenticai/defaultRegion` only when no ambient Region; governed allow-list in `packages/platform-baselines/src/approved-regions.ts` + SCP-06 sandbox-soak |
-| Eval thresholds                    | see §2.5                   | `agenticai/eval*` context keys                                                   |
-| Gateway fronting                   | API Gateway (§08 Option A) | hard default                                                                     |
-| Gateway PolicyEngine migration     | `OFF`                      | `agenticai/gatewayPolicyEngineMode` (`LOG_ONLY` before `ENFORCE`)                |
-| Pipeline Runtime/Memory foundation | Off                        | `agenticai/enablePipelineRuntimeMemory=true` (BETA; `PUBLIC`, inert agent only)  |
-| Browser egress / Lattice endpoints | Off                        | `agenticai/enableBrowserInternetEgress` / `enableLatticePrivateEndpoints` (BETA) |
+| Eval thresholds                    | see §2.5                                           | `agenticai/eval*` context keys                                                                                                                            |
+| Gateway fronting                   | API Gateway (§08 Option A)                         | hard default                                                                                                                                              |
+| Gateway PolicyEngine migration     | `OFF`                                              | `agenticai/gatewayPolicyEngineMode` (`LOG_ONLY` before `ENFORCE`)                                                                                         |
+| Pipeline Runtime/Memory foundation | Off                                                | `agenticai/enablePipelineRuntimeMemory=true` (BETA; `PUBLIC`, inert agent only)                                                                           |
+| Browser egress / Lattice endpoints | Off                                                | `agenticai/enableBrowserInternetEgress` / `enableLatticePrivateEndpoints` (BETA)                                                                          |
 
 An override that breaks a spec MUST (e.g. adding a non-Claude model) becomes a new deviation in §3.
 
