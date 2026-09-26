@@ -139,6 +139,7 @@ function runTeardown(extraEnv: Record<string, string> = {}): RunResult {
       ...cleanEnv(),
       PATH: `${stubBin}${path.delimiter}${process.env.PATH ?? ""}`,
       STUB_SEQUENCE_LOG: sequenceLog,
+      CDK_DEFAULT_REGION: "us-west-2",
       AGENTICAI_WORKLOAD_ACCOUNT_ID: "111111111111",
       ...extraEnv,
     },
