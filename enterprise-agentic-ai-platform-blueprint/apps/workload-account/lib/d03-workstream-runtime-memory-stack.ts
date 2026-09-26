@@ -1511,7 +1511,10 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
           statements: [
             new PolicyStatement({
               actions: ["bedrock-agentcore:InvokeAgentRuntime"],
-              resources: [this.runtime.attrAgentRuntimeArn],
+              resources: [
+                this.runtime.attrAgentRuntimeArn,
+                `${this.runtime.attrAgentRuntimeArn}/runtime-endpoint/DEFAULT`,
+              ],
             }),
           ],
         }),

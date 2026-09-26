@@ -241,13 +241,20 @@ def _agent_runtime_invoke_factory(
                 ).encode("utf-8"),
             )
         except ClientError as error:
+            error_code = str(
+                error.response.get("Error", {}).get("Code", "ClientError")
+            )
+            print(
+                f"InvokeAgentRuntime failed with {error_code}",
+                file=sys.stderr,
+            )
             return {
                 "text": "",
                 "latency_ms": int((time.time() - started) * 1000),
                 "cost_usd": 0.0,
                 "guardrail_triggered": False,
                 "runtime_valid": False,
-                "error_type": str(error.response.get("Error", {}).get("Code", "ClientError")),
+                "error_type": error_code,
             }
 
         stream = response.get("response")

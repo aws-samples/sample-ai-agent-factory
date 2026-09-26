@@ -303,3 +303,57 @@ def test_evaluation_prices_fail_closed(monkeypatch):
     monkeypatch.setenv("EVAL_PRICE_IN_PER_1K", "not-a-number")
     with pytest.raises(EnvironmentError, match="must be a number"):
         _evalmod._required_positive_price("EVAL_PRICE_IN_PER_1K")
+
+
+def test_runtime_invoker_logs_only_sanitized_error_code(monkeypatch, capsys):
+    from botocore.exceptions import ClientError
+
+    class Sts:
+        @staticmethod
+        def assume_role(**_kwargs):
+            return {
+                "Credentials": {
+                    "AccessKeyId": "example-access-key",
+                    "SecretAccessKey": "example-secret-key",
+                    "SessionToken": "example-session-token",
+                }
+            }
+
+    class Runtime:
+        @staticmethod
+        def invoke_agent_runtime(**_kwargs):
+            raise ClientError(
+                {
+                    "Error": {
+                        "Code": "AccessDeniedException",
+                        "Message": "sensitive prompt must not be logged",
+                    },
+                    "ResponseMetadata": {"HTTPStatusCode": 403},
+                },
+                "InvokeAgentRuntime",
+            )
+
+    class Session:
+        def __init__(self, **kwargs):
+            self.assumed = "aws_access_key_id" in kwargs
+
+        def client(self, _service, **_kwargs):
+            return Runtime() if self.assumed else Sts()
+
+    monkeypatch.setitem(sys.modules, "boto3", type("Boto3", (), {"Session": Session}))
+    monkeypatch.setenv("EVAL_PRICE_IN_PER_1K", "0.003")
+    monkeypatch.setenv("EVAL_PRICE_OUT_PER_1K", "0.015")
+    invoke = _evalmod._agent_runtime_invoke_factory(
+        "arn:aws:bedrock-agentcore:eu-west-1:111111111111:runtime/example",
+        "eu-west-1",
+        "arn:aws:iam::111111111111:role/AgenticAI-Evaluation",
+    )
+
+    result = invoke("sensitive prompt")
+    captured = capsys.readouterr()
+    assert captured.err.strip() == (
+        "InvokeAgentRuntime failed with AccessDeniedException"
+    )
+    assert "sensitive prompt" not in captured.err
+    assert result["error_type"] == "AccessDeniedException"
+    assert result["runtime_valid"] is False

@@ -395,12 +395,15 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
     const statements = role.Properties.Policies.flatMap(
       (policy: any) => policy.PolicyDocument.Statement,
     );
-    expect(statements).toContainEqual(
-      expect.objectContaining({
-        Action: "bedrock-agentcore:InvokeAgentRuntime",
-        Resource: { "Fn::GetAtt": [expect.any(String), "AgentRuntimeArn"] },
-      }),
+    const invokeStatement = statements.find(
+      (statement: any) =>
+        statement.Action === "bedrock-agentcore:InvokeAgentRuntime",
     );
+    expect(invokeStatement.Resource).toHaveLength(2);
+    const invokeResources = JSON.stringify(invokeStatement.Resource);
+    expect(invokeResources).toContain("AgentRuntimeArn");
+    expect(invokeResources).toContain("/runtime-endpoint/DEFAULT");
+    expect(invokeResources).not.toContain("*");
   });
 
   it("initializes only the default token vault and tags Identity resources", () => {
