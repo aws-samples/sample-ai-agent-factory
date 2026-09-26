@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, Sequence
 
@@ -67,7 +68,7 @@ HANDSHAKE_MARKER = "agentcore-generated-agent-ok"
 #: which revision is serving without reading container digests. Bump it on
 #: every behaviour-changing agent release; the deployment-continuity probe
 #: gates on the observed transition.
-AGENT_VERSION = "1.3.1"
+AGENT_VERSION = "1.3.2"
 #: Exact public error text emitted by the Platform Guardrail interceptor. A
 #: 403 with any other message is an auth/permission failure and must propagate.
 GUARDRAIL_INTERVENTION_MESSAGE = (
@@ -131,6 +132,7 @@ class LlmResponse:
     input_tokens: int = 0
     output_tokens: int = 0
     latency_ms: int = 0
+    first_token_ms: int = 0
     guardrail_intervened: bool = False
 
 
@@ -226,6 +228,7 @@ class AgentResult:
     input_tokens: int = 0
     output_tokens: int = 0
     inference_latency_ms: int = 0
+    inference_first_token_ms: int = 0
     guardrail_intervened: bool = False
 
 
@@ -290,6 +293,7 @@ class ReferenceAgentCore:
         input_tokens = 0
         output_tokens = 0
         inference_latency_ms = 0
+        inference_first_token_ms = 0
         guardrail_intervened = False
         stop_reason = STOP_MAX_ITERATIONS
         for _ in range(self.config.max_iterations):
@@ -303,6 +307,11 @@ class ReferenceAgentCore:
                 input_tokens += raw_response.input_tokens
                 output_tokens += raw_response.output_tokens
                 inference_latency_ms += raw_response.latency_ms
+                if (
+                    inference_first_token_ms == 0
+                    and raw_response.first_token_ms > 0
+                ):
+                    inference_first_token_ms = raw_response.first_token_ms
                 guardrail_intervened = raw_response.guardrail_intervened
             else:
                 reply = raw_response
@@ -368,6 +377,7 @@ class ReferenceAgentCore:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             inference_latency_ms=inference_latency_ms,
+            inference_first_token_ms=inference_first_token_ms,
             guardrail_intervened=guardrail_intervened,
         )
 
@@ -517,9 +527,28 @@ class _LiteLlmAdapter:
         # PROMPT_ATTACK LOW only when joined). Tool results are user-role input
         # in this text protocol, which also keeps user/assistant alternation.
         history, prompt = _split_history(messages)
+        first_token_ms = 0
+        started = time.monotonic()
+
+        def capture_first_token(**event: Any) -> None:
+            nonlocal first_token_ms
+            chunk = event.get("event")
+            if (
+                first_token_ms == 0
+                and isinstance(chunk, Mapping)
+                and (
+                    "contentBlockStart" in chunk
+                    or "contentBlockDelta" in chunk
+                )
+            ):
+                first_token_ms = max(
+                    1,
+                    int((time.monotonic() - started) * 1000),
+                )
+
         agent = self._Agent(
             model=model,
-            callback_handler=None,
+            callback_handler=capture_first_token,
             system_prompt=system_prompt,
             messages=history,
         )
@@ -550,6 +579,7 @@ class _LiteLlmAdapter:
             input_tokens=int(usage.get("inputTokens", 0)),
             output_tokens=int(usage.get("outputTokens", 0)),
             latency_ms=int(performance.get("latencyMs", 0)),
+            first_token_ms=first_token_ms,
             guardrail_intervened=guardrail_intervened,
         )
 
@@ -860,6 +890,7 @@ def _load_entrypoint():  # pragma: no cover - exercised only in the live contain
             "inputTokens": result.input_tokens,
             "outputTokens": result.output_tokens,
             "inferenceLatencyMs": result.inference_latency_ms,
+            "inferenceFirstTokenMs": result.inference_first_token_ms,
             "guardrailIntervened": result.guardrail_intervened,
         }
 

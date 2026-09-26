@@ -141,12 +141,14 @@ def test_measured_responses_accumulate_usage_and_latency():
                 input_tokens=10,
                 output_tokens=5,
                 latency_ms=40,
+                first_token_ms=17,
             ),
             agent_mod.LlmResponse(
                 "final answer <done/>",
                 input_tokens=20,
                 output_tokens=7,
                 latency_ms=60,
+                first_token_ms=19,
             ),
         ]
     )
@@ -157,6 +159,7 @@ def test_measured_responses_accumulate_usage_and_latency():
     assert out.input_tokens == 30
     assert out.output_tokens == 12
     assert out.inference_latency_ms == 100
+    assert out.inference_first_token_ms == 17
     assert out.guardrail_intervened is False
 
 
@@ -175,6 +178,7 @@ def test_guardrail_intervention_is_terminal_and_measured():
     assert out.guardrail_intervened is True
     assert out.content_blocks == 1
     assert out.input_tokens == 11
+    assert out.inference_first_token_ms == 0
 
 
 # --------------------------------------------------------------------------
@@ -575,12 +579,17 @@ def test_inference_token_bound_leaves_reasoning_headroom_and_stays_bounded(
     class FakeAgent:
         def __init__(self, *, model, callback_handler, system_prompt=None, messages=None):
             self.model = model
+            self.callback_handler = callback_handler
             captured["system_prompt"] = system_prompt
             captured["history"] = messages
 
         def __call__(self, prompt):
             captured["prompt"] = prompt
+            self.callback_handler(event={"contentBlockStart": {"start": {}}})
             return FakeResult()
+
+    monotonic = iter([100.0, 100.123, 200.0, 200.125])
+    monkeypatch.setattr(agent_mod.time, "monotonic", lambda: next(monotonic))
 
     adapter = agent_mod._LiteLlmAdapter.__new__(agent_mod._LiteLlmAdapter)
     adapter._Agent = FakeAgent
@@ -602,6 +611,7 @@ def test_inference_token_bound_leaves_reasoning_headroom_and_stays_bounded(
     assert response.input_tokens == 0
     assert response.output_tokens == 0
     assert response.latency_ms == 0
+    assert response.first_token_ms == 123
     # Live-proven gap (fourth invoke, toolCalls=[]): the system turn used to be
     # dropped, so the model never saw the TOOL protocol.
     assert captured["system_prompt"] == "protocol: TOOL <name> <json>"

@@ -228,6 +228,7 @@ def test_runtime_invoker_assumes_exact_role_and_scores_measured_response(monkeyp
         "inputTokens": 100,
         "outputTokens": 20,
         "inferenceLatencyMs": 123,
+        "inferenceFirstTokenMs": 47,
         "toolCalls": ["target-tool-echo___tool-echo"],
         "guardrailIntervened": False,
     }
@@ -275,7 +276,7 @@ def test_runtime_invoker_assumes_exact_role_and_scores_measured_response(monkeyp
     assert json.loads(runtime_call["payload"])["prompt"] == "What is the platform?"
     assert result == {
         "text": "AgenticAI platform answer <done/>",
-        "latency_ms": 123,
+        "latency_ms": 47,
         "cost_usd": pytest.approx(0.0006),
         "guardrail_triggered": False,
         "runtime_valid": True,

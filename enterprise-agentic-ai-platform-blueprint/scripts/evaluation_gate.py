@@ -273,25 +273,29 @@ def _agent_runtime_invoke_factory(
             body.get("guardrailIntervened") is True
             or stop_reason == "guardrail_intervened"
         )
-        runtime_valid = marker_valid and stop_reason in {
-            "done",
-            "guardrail_intervened",
-        }
+        measured_first_token = int(body.get("inferenceFirstTokenMs", 0) or 0)
+        runtime_valid = (
+            marker_valid
+            and stop_reason in {"done", "guardrail_intervened"}
+            and (guardrail_intervened or measured_first_token > 0)
+        )
+        if marker_valid and stop_reason == "done" and measured_first_token <= 0:
+            print(
+                "Runtime response missing inferenceFirstTokenMs",
+                file=sys.stderr,
+            )
         input_tokens = int(body.get("inputTokens", 0) or 0)
         output_tokens = int(body.get("outputTokens", 0) or 0)
         cost_usd = (
             input_tokens / 1000.0 * input_price
             + output_tokens / 1000.0 * output_price
         )
-        measured_latency = int(body.get("inferenceLatencyMs", 0) or 0)
         tool_calls = body.get("toolCalls")
         tool_calls = tool_calls if isinstance(tool_calls, list) else []
         reply = body.get("reply")
         return {
             "text": reply if runtime_valid and isinstance(reply, str) else "",
-            "latency_ms": measured_latency
-            if measured_latency > 0
-            else int((time.time() - started) * 1000),
+            "latency_ms": 0 if guardrail_intervened else measured_first_token,
             "cost_usd": cost_usd,
             "guardrail_triggered": guardrail_intervened,
             "runtime_valid": runtime_valid,
