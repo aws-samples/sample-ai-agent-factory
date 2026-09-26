@@ -96,6 +96,7 @@ export interface PlatformDeploymentStageProps extends StageProps {
   readonly envName: "nonprod" | "prod";
   readonly organizationId: string;
   readonly workloadAccountIds: readonly string[];
+  readonly oamTrustedAccountIds: readonly string[];
   readonly registrySynthAccountId: string;
   readonly pipelineRoleArn: string;
   readonly auditEnv: Required<Environment>;
@@ -135,6 +136,7 @@ export class PlatformDeploymentStage extends Stage {
       new AuditStack(this, "Audit", {
         env: props.auditEnv,
         organizationId: props.organizationId,
+        trustedAccountIds: props.oamTrustedAccountIds,
       });
     }
     const guardrail = new GuardrailStack(this, "Guardrail", {
@@ -244,12 +246,20 @@ export class PlatformPipelineStack extends Stack {
       publishAssetsInParallel: false,
     });
 
+    const oamTrustedAccountIds = [
+      ...new Set([
+        props.platformNonprod.env.account,
+        props.platformProd.env.account,
+        ...props.workloadAccountIds,
+      ]),
+    ];
     const sharedGatewayProps = {
       applicationId: props.applicationId,
       agentId: props.agentId,
       tenantId: props.tenantId,
       costCentre: props.costCentre,
       inferenceModelRateLimits: props.inferenceModelRateLimits,
+      oamTrustedAccountIds,
       registrySynthAccountId: props.platformNonprod.env.account,
       grantGatewayInvokePermissions: props.grantGatewayInvokePermissions,
       gatewayServiceRoleArns: props.gatewayServiceRoleArns,

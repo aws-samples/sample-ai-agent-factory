@@ -15,6 +15,7 @@ import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 
 import { GuardrailStack } from "../../apps/platform-account/lib/guardrail-stack";
+import { AuditStack } from "../../apps/platform-account/lib/audit-stack";
 import { RegistryStack } from "../../apps/platform-account/lib/registry-stack";
 import {
   PlatformDeploymentStage,
@@ -509,13 +510,33 @@ describe("Phase 7 — Workload pipeline has mandatory stages + eval gate", () =>
 describe("Phase 7 — R2 GA Registry Workload pipeline", () => {
   it("emits OAM links once per distinct source account and deduplicates shared accounts", () => {
     const sinkArn = "arn:aws:oam:us-west-2:666666666666:sink/example";
-    const platform = Template.fromStack(
-      createPlatformPipeline(new App(), "222222222222", undefined, sinkArn),
+    const platformRoot = createPlatformPipeline(
+      new App(),
+      "222222222222",
+      undefined,
+      sinkArn,
     );
+    const platform = Template.fromStack(platformRoot);
     platform.resourceCountIs("AWS::Oam::Link", 1);
     platform.hasResourceProperties("AWS::Oam::Link", {
       SinkIdentifier: sinkArn,
     });
+    const platformNonprod = platformRoot.node.findChild(
+      "Nonprod",
+    ) as PlatformDeploymentStage;
+    const audit = platformNonprod.node.findChild("Audit") as AuditStack;
+    const auditSink = Object.values(
+      Template.fromStack(audit).findResources("AWS::Oam::Sink"),
+    )[0] as any;
+    const explicitTrust = auditSink.Properties.Policy.Statement.find(
+      (statement: any) => statement.Sid === "AllowOamExplicitAccountLinks",
+    );
+    expect(explicitTrust.Principal.AWS).toEqual([
+      "arn:aws:iam::111111111111:root",
+      "arn:aws:iam::222222222222:root",
+      "arn:aws:iam::444444444444:root",
+      "arn:aws:iam::555555555555:root",
+    ]);
 
     const split = synthWorkloadGa(undefined, { auditOamSinkArn: sinkArn });
     const splitStage = split.stack.node.findChild(
