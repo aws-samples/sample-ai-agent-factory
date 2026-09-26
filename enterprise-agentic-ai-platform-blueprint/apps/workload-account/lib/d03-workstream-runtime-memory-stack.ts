@@ -869,6 +869,10 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
       AGENTCORE_TENANT_ID: props.tenantId,
       AGENTCORE_AGENT_ID: props.agentId,
       AGENTCORE_ENV_NAME: props.envName,
+      // The agent signs tool calls and reaches Memory and Identity in this
+      // Region and has no default, so the deploy Region is passed explicitly
+      // instead of relying on the Runtime to inject AWS_REGION.
+      AGENTCORE_REGION: this.region,
       AGENTCORE_GUARDRAIL_ID: cfg.guardrailId,
       AGENTCORE_MODEL_ID: cfg.modelId,
       AGENTCORE_GATEWAY_URL: cfg.mcpGatewayUrl,

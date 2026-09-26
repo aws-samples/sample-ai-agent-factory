@@ -67,7 +67,11 @@ HANDSHAKE_MARKER = "agentcore-generated-agent-ok"
 #: which revision is serving without reading container digests. Bump it on
 #: every behaviour-changing agent release; the deployment-continuity probe
 #: gates on the observed transition.
-AGENT_VERSION = "1.2.1"
+AGENT_VERSION = "1.2.2"
+#: Environment variables the container reads its AWS Region from, in order.
+#: The Runtime stack sets ``AGENTCORE_REGION`` to the Region it deploys into;
+#: the other two are the ambient AWS variables boto3 itself honours.
+REGION_ENV_VARS = ("AGENTCORE_REGION", "AWS_REGION", "AWS_DEFAULT_REGION")
 # Protocol terminator the model emits when the task is complete.
 DONE_MARKER = "<done/>"
 #: Corrective turns the loop may spend on replies that carry neither a TOOL
@@ -498,7 +502,7 @@ class _McpToolAdapter:
         gateway_url: str,
         auth_mode: str = "sigv4",
         bearer_token: str | None = None,
-        region: str = "us-west-2",
+        region: str,
     ) -> None:
         # Lazy: only needed on the live path.
         from mcp.client.streamable_http import streamablehttp_client  # noqa: E402
@@ -703,6 +707,24 @@ def build_production_core(
 # --------------------------------------------------------------------------
 
 
+def _resolve_region() -> str:
+    """Return the AWS Region for the SigV4 tool client, Memory and Identity.
+
+    There is deliberately no hard-coded default. A wrong Region signs tool
+    calls for the wrong endpoint and looks up Memory and the workload identity
+    where they do not exist, and a default equal to the reference Region hides
+    that on every run made there. A missing Region therefore fails closed.
+    """
+    for name in REGION_ENV_VARS:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    raise AgentError(
+        "no AWS Region configured: set AGENTCORE_REGION (the Runtime stack does) "
+        "or AWS_REGION"
+    )
+
+
 def _load_entrypoint():  # pragma: no cover - exercised only in the live container
     """Construct the BedrockAgentCoreApp entrypoint. Imported lazily so the
     offline test suite never needs bedrock_agentcore."""
@@ -742,7 +764,7 @@ def _load_entrypoint():  # pragma: no cover - exercised only in the live contain
             inference_gateway_url=inference_gateway_url,
             inference_bearer_token=inference_bearer,
             memory_id=os.environ.get("AGENTCORE_MEMORY_ID"),
-            region=os.environ.get("AWS_REGION", "us-west-2"),
+            region=_resolve_region(),
             mcp_auth=mcp_auth,
             mcp_bearer_token=os.environ.get("AGENTCORE_GATEWAY_BEARER"),
         )
@@ -790,7 +812,7 @@ def _fetch_inference_bearer() -> str:  # pragma: no cover - live path only
     provider_name = os.environ["AGENTCORE_INFERENCE_CREDENTIAL_PROVIDER"]
     workload_name = os.environ["AGENTCORE_WORKLOAD_IDENTITY_NAME"]
     scope = os.environ["AGENTCORE_INFERENCE_SCOPE"]
-    region = os.environ.get("AWS_REGION", "us-west-2")
+    region = _resolve_region()
 
     import boto3  # noqa: E402 lazy
 

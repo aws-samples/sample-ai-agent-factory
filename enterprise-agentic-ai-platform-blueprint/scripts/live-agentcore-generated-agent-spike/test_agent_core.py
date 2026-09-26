@@ -351,6 +351,107 @@ def test_mcp_protocol_version_pinned():
     assert "2025-06-18" in _SRC
 
 # --------------------------------------------------------------------------
+# AWS Region resolution (no default: a wrong Region must fail closed)
+# --------------------------------------------------------------------------
+
+_REGION_VARS = ("AGENTCORE_REGION", "AWS_REGION", "AWS_DEFAULT_REGION")
+
+
+def _clear_region_env(monkeypatch):
+    for name in _REGION_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_region_vars_are_read_in_stack_first_order():
+    assert agent_mod.REGION_ENV_VARS == _REGION_VARS
+
+
+def test_resolve_region_prefers_the_stack_region_over_ambient(monkeypatch):
+    _clear_region_env(monkeypatch)
+    monkeypatch.setenv("AGENTCORE_REGION", "eu-west-1")
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    assert agent_mod._resolve_region() == "eu-west-1"
+
+
+@pytest.mark.parametrize("ambient", ["AWS_REGION", "AWS_DEFAULT_REGION"])
+def test_resolve_region_falls_back_to_the_ambient_region(monkeypatch, ambient):
+    _clear_region_env(monkeypatch)
+    monkeypatch.setenv("AGENTCORE_REGION", "   ")  # blank counts as unset
+    monkeypatch.setenv(ambient, "eu-west-1")
+    assert agent_mod._resolve_region() == "eu-west-1"
+
+
+def test_resolve_region_fails_closed_without_a_region(monkeypatch):
+    _clear_region_env(monkeypatch)
+    with pytest.raises(agent_mod.AgentError, match="no AWS Region configured"):
+        agent_mod._resolve_region()
+
+
+def test_mcp_adapter_requires_an_explicit_region():
+    # The keyword is bound before the adapter imports anything, so a missing
+    # Region is a TypeError here rather than a silently defaulted endpoint.
+    with pytest.raises(TypeError, match="region"):
+        agent_mod._McpToolAdapter(gateway_url="https://example.invalid/mcp")
+
+
+def test_agent_source_hard_codes_no_aws_region():
+    # Region-neutral image: every Region comes from the environment. A literal
+    # such as us-west-2 would silently misroute every call made elsewhere.
+    literals = re.findall(r"\b(?:us|eu|ap|ca|sa|me|af|il|mx)-[a-z]+-\d\b", _SRC)
+    assert literals == []
+
+
+def test_inference_bearer_uses_the_stack_region(monkeypatch):
+    seen = []
+
+    class FakeIdentity:
+        def get_workload_access_token(self, **kwargs):
+            return {"workloadAccessToken": "workload-token"}
+
+        def get_resource_oauth2_token(self, **kwargs):
+            return {"accessToken": "resource-token"}
+
+    class FakeBoto3:
+        @staticmethod
+        def client(service, region_name=None):
+            seen.append((service, region_name))
+            return FakeIdentity()
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "boto3", FakeBoto3())
+    _clear_region_env(monkeypatch)
+    monkeypatch.delenv("AGENTCORE_INFERENCE_BEARER", raising=False)
+    monkeypatch.setenv("AGENTCORE_INFERENCE_CREDENTIAL_PROVIDER", "provider-nonprod")
+    monkeypatch.setenv("AGENTCORE_WORKLOAD_IDENTITY_NAME", "workload-nonprod")
+    monkeypatch.setenv("AGENTCORE_INFERENCE_SCOPE", "inference/invoke")
+    monkeypatch.setenv("AGENTCORE_REGION", "eu-west-1")
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+
+    assert agent_mod._fetch_inference_bearer() == "resource-token"
+    assert seen == [("bedrock-agentcore", "eu-west-1")]
+
+
+def test_inference_bearer_fails_closed_without_a_region(monkeypatch):
+    class FailBoto3:
+        @staticmethod
+        def client(*_args, **_kwargs):
+            raise AssertionError("no AWS client may be built without a Region")
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "boto3", FailBoto3())
+    _clear_region_env(monkeypatch)
+    monkeypatch.delenv("AGENTCORE_INFERENCE_BEARER", raising=False)
+    monkeypatch.setenv("AGENTCORE_INFERENCE_CREDENTIAL_PROVIDER", "provider-nonprod")
+    monkeypatch.setenv("AGENTCORE_WORKLOAD_IDENTITY_NAME", "workload-nonprod")
+    monkeypatch.setenv("AGENTCORE_INFERENCE_SCOPE", "inference/invoke")
+
+    with pytest.raises(agent_mod.AgentError, match="no AWS Region configured"):
+        agent_mod._fetch_inference_bearer()
+
+# --------------------------------------------------------------------------
 # AgentCore Identity M2M bearer exchange
 # --------------------------------------------------------------------------
 
@@ -385,6 +486,7 @@ def test_inference_bearer_mints_workload_token_then_resource_token(monkeypatch):
     )
     monkeypatch.setenv("AGENTCORE_WORKLOAD_IDENTITY_NAME", "workload-nonprod")
     monkeypatch.setenv("AGENTCORE_INFERENCE_SCOPE", "inference/invoke")
+    monkeypatch.delenv("AGENTCORE_REGION", raising=False)
     monkeypatch.setenv("AWS_REGION", "us-west-2")
 
     assert agent_mod._fetch_inference_bearer() == "resource-token"

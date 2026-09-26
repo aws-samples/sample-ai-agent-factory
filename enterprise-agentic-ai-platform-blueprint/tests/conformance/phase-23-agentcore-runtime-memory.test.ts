@@ -96,12 +96,13 @@ function singleResource(template: Template, type: string): Record<string, any> {
 function runtimeMemoryTemplate(
   envName: "nonprod" | "prod" = "nonprod",
   agentImageVariant?: "compatibility" | "generated-agent",
+  region: string = REGION,
 ): Template {
   const app = new App();
   const account = envName === "nonprod" ? NONPROD_ACCOUNT : PROD_ACCOUNT;
   return Template.fromStack(
     new D03WorkstreamRuntimeMemoryStack(app, `RuntimeMemory-${envName}`, {
-      env: { account, region: REGION },
+      env: { account, region },
       envName,
       applicationId: "demo",
       agentId: "primary",
@@ -112,16 +113,16 @@ function runtimeMemoryTemplate(
       generatedAgentRuntimeConfig:
         agentImageVariant === "generated-agent"
           ? {
-              mcpGatewayUrl: `https://gw-${envName}.gateway.bedrock-agentcore.${REGION}.amazonaws.com/mcp`,
-              inferenceGatewayUrl: `https://inf-${envName}.gateway.bedrock-agentcore.${REGION}.amazonaws.com/mcp`,
+              mcpGatewayUrl: `https://gw-${envName}.gateway.bedrock-agentcore.${region}.amazonaws.com/mcp`,
+              inferenceGatewayUrl: `https://inf-${envName}.gateway.bedrock-agentcore.${region}.amazonaws.com/mcp`,
               modelId: `agenticai-inference-${envName}-bedrock/openai.gpt-oss-120b`,
-              guardrailId: `arn:aws:bedrock:${REGION}:${PLATFORM_ACCOUNT}:guardrail/example`,
+              guardrailId: `arn:aws:bedrock:${region}:${PLATFORM_ACCOUNT}:guardrail/example`,
               subscribedTools: [
                 "target-tool-echo___echo",
                 "target-tool-ping___ping",
               ],
               inferenceScope: `agenticai-inference-${envName}-api/invoke`,
-              m2mSecretArn: `arn:aws:secretsmanager:${REGION}:${PLATFORM_ACCOUNT}:secret:agenticai/inference-m2m/agenticai-inference-${envName}-abc`,
+              m2mSecretArn: `arn:aws:secretsmanager:${region}:${PLATFORM_ACCOUNT}:secret:agenticai/inference-m2m/agenticai-inference-${envName}-abc`,
             }
           : undefined,
     }),
@@ -306,6 +307,7 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
       "AGENTCORE_TENANT_ID",
       "AGENTCORE_AGENT_ID",
       "AGENTCORE_ENV_NAME",
+      "AGENTCORE_REGION",
       "AGENTCORE_GUARDRAIL_ID",
       "AGENTCORE_MODEL_ID",
       "AGENTCORE_GATEWAY_URL",
@@ -318,6 +320,7 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
     expect(env.AGENTCORE_TENANT_ID).toBe("demo");
     expect(env.AGENTCORE_AGENT_ID).toBe("primary");
     expect(env.AGENTCORE_ENV_NAME).toBe("nonprod");
+    expect(env.AGENTCORE_REGION).toBe(REGION);
     // MCP (tools) and inference URLs are distinct Gateways, not the same value.
     expect(env.AGENTCORE_GATEWAY_URL).not.toEqual(
       env.AGENTCORE_INFERENCE_GATEWAY_URL,
@@ -335,6 +338,27 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
     const rendered = JSON.stringify(template.toJSON());
     expect(rendered).toContain("get_oauth2_credential_provider");
     expect(rendered).toContain("did not reach READY within 250 seconds");
+  });
+
+  it("generated-agent Region follows the deploy Region, not the reference one", () => {
+    // The agent has no Region default (it fails closed), so the stack must
+    // hand it the Region it deploys into. A fixed value would sign tool calls
+    // and reach Memory/Identity in the wrong Region outside us-west-2.
+    const template = runtimeMemoryTemplate("nonprod", "generated-agent", "eu-west-1");
+    const runtime = singleResource(template, "AWS::BedrockAgentCore::Runtime");
+    const env = runtime.Properties.EnvironmentVariables as Record<
+      string,
+      unknown
+    >;
+    expect(env.AGENTCORE_REGION).toBe("eu-west-1");
+    // The compatibility handler reads no Region and keeps its single var.
+    const compat = singleResource(
+      runtimeMemoryTemplate("nonprod", "compatibility", "eu-west-1"),
+      "AWS::BedrockAgentCore::Runtime",
+    );
+    expect(
+      Object.keys(compat.Properties.EnvironmentVariables as Record<string, unknown>),
+    ).toEqual(["AGENTCORE_MEMORY_ID"]);
   });
 
   it("initializes only the default token vault and tags Identity resources", () => {
