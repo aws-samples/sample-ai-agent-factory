@@ -197,13 +197,19 @@ def run_bootstrap(tmp_path: Path, **overrides: str) -> subprocess.CompletedProce
     bootstrap_context(context)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    calls = tmp_path / "npx-calls.log"
-    npx = bin_dir / "npx"
-    npx.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$NPX_CALLS"\n')
-    npx.chmod(0o755)
+    calls = tmp_path / "cdk-calls.log"
+    work_dir = tmp_path / "cdk-work"
+    cdk = bin_dir / "cdk"
+    cdk.write_text(
+        '#!/usr/bin/env bash\nprintf "pwd=%s tmpdir=%s cdkhome=%s args=%s\\n" '
+        '"$PWD" "$TMPDIR" "$CDK_HOME" "$*" >> "$CDK_CALLS"\n'
+    )
+    cdk.chmod(0o755)
     env = {
-        "PATH": f"{bin_dir}:{__import__('os').environ['PATH']}",
-        "NPX_CALLS": str(calls),
+        "PATH": __import__('os').environ['PATH'],
+        "CDK_CLI": str(cdk),
+        "CDK_BOOTSTRAP_WORK_DIR": str(work_dir),
+        "CDK_CALLS": str(calls),
         "AWS_REGION": REGION,
         "CFN_EXECUTION_POLICY_NAME": "AgenticAICdkExecutionPolicyEuWest1",
     }
@@ -219,7 +225,7 @@ def run_bootstrap(tmp_path: Path, **overrides: str) -> subprocess.CompletedProce
         capture_output=True,
         text=True,
     )
-    result.npx_calls = calls.read_text().splitlines() if calls.exists() else []  # type: ignore[attr-defined]
+    result.cdk_calls = calls.read_text().splitlines() if calls.exists() else []  # type: ignore[attr-defined]
     return result
 
 
@@ -228,10 +234,15 @@ def test_bootstrap_resolves_the_local_policy_arn_in_each_account(
 ) -> None:
     result = run_bootstrap(tmp_path)
     assert result.returncode == 0, result.stderr
-    calls = result.npx_calls  # type: ignore[attr-defined]
+    calls = result.cdk_calls  # type: ignore[attr-defined]
     assert len(calls) == 3
+    work_dir = tmp_path / "cdk-work"
     for account in (PLATFORM, MANAGEMENT, WORKSTREAM):
         call = next(item for item in calls if f"aws://{account}/{REGION}" in item)
+        assert f"pwd={work_dir}" in call
+        assert f"tmpdir={work_dir}" in call
+        assert f"cdkhome={work_dir / 'cdk-home'}" in call
+        assert "args=bootstrap " in call
         assert (
             f"arn:aws:iam::{account}:policy/AgenticAICdkExecutionPolicyEuWest1" in call
         )
@@ -241,7 +252,7 @@ def test_bootstrap_refuses_a_missing_region(tmp_path: Path) -> None:
     result = run_bootstrap(tmp_path, AWS_REGION="", AWS_DEFAULT_REGION="")
     assert result.returncode != 0
     assert "set AWS_REGION or AWS_DEFAULT_REGION" in result.stderr
-    assert result.npx_calls == []  # type: ignore[attr-defined]
+    assert result.cdk_calls == []  # type: ignore[attr-defined]
 
 
 def test_bootstrap_refuses_one_account_arn_for_multiple_accounts(
@@ -256,4 +267,14 @@ def test_bootstrap_refuses_one_account_arn_for_multiple_accounts(
     )
     assert result.returncode != 0
     assert "can bootstrap only one target" in result.stderr
-    assert result.npx_calls == []  # type: ignore[attr-defined]
+    assert result.cdk_calls == []  # type: ignore[attr-defined]
+
+
+def test_bootstrap_refuses_application_work_directory(tmp_path: Path) -> None:
+    app_dir = tmp_path / "application"
+    app_dir.mkdir()
+    (app_dir / "cdk.json").write_text('{"app":"must-not-run"}')
+    result = run_bootstrap(tmp_path, CDK_BOOTSTRAP_WORK_DIR=str(app_dir))
+    assert result.returncode != 0
+    assert "must not contain cdk.json" in result.stderr
+    assert result.cdk_calls == []  # type: ignore[attr-defined]

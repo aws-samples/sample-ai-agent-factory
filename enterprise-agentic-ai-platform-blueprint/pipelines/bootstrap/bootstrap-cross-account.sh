@@ -170,6 +170,20 @@ if [[ -n "$CFN_EXECUTION_POLICY_ARN" ]]; then
   fi
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CDK_CLI="${CDK_CLI:-$REPO_ROOT/node_modules/.bin/cdk}"
+CDK_BOOTSTRAP_WORK_DIR="${CDK_BOOTSTRAP_WORK_DIR:-$REPO_ROOT/node_modules/.cache/cdk-bootstrap}"
+if [[ ! -x "$CDK_CLI" ]]; then
+  echo "ERROR: CDK CLI not found at $CDK_CLI; run npm ci in $REPO_ROOT" >&2
+  exit 1
+fi
+if [[ -f "$CDK_BOOTSTRAP_WORK_DIR/cdk.json" ]]; then
+  echo "ERROR: CDK_BOOTSTRAP_WORK_DIR must not contain cdk.json; bootstrap must not synthesize application stacks" >&2
+  exit 1
+fi
+mkdir -p "$CDK_BOOTSTRAP_WORK_DIR/cdk-home"
+
 for acct in "${TARGET_ACCOUNTS[@]}"; do
   echo ""
   echo "-> Bootstrap aws://${acct}/${REGION}"
@@ -182,11 +196,16 @@ for acct in "${TARGET_ACCOUNTS[@]}"; do
   if [[ -n "$CFN_EXECUTION_POLICY_NAME" ]]; then
     execution_policy_arn="arn:${PARTITION}:iam::${acct}:policy/${CFN_EXECUTION_POLICY_NAME}"
   fi
-  npx cdk bootstrap "aws://${acct}/${REGION}" \
-    --trust "$PLATFORM_NP" \
-    --trust-for-lookup "$PLATFORM_NP" \
-    --cloudformation-execution-policies "$execution_policy_arn" \
-    --qualifier "$QUALIFIER"
+  (
+    cd "$CDK_BOOTSTRAP_WORK_DIR"
+    TMPDIR="$CDK_BOOTSTRAP_WORK_DIR" \
+      CDK_HOME="$CDK_BOOTSTRAP_WORK_DIR/cdk-home" \
+      "$CDK_CLI" bootstrap "aws://${acct}/${REGION}" \
+        --trust "$PLATFORM_NP" \
+        --trust-for-lookup "$PLATFORM_NP" \
+        --cloudformation-execution-policies "$execution_policy_arn" \
+        --qualifier "$QUALIFIER"
+  )
 done
 
 echo ""
