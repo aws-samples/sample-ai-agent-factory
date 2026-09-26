@@ -596,8 +596,9 @@ describe("Phase 10 — R2 GA Registry subscription path", () => {
   });
 
   it("keeps every validator call in the deploy Region (eu-west-1 twin)", async () => {
-    // The global STS endpoint is served from us-east-1 and its session tokens
-    // are not valid in opt-in Regions; an EU deployment must not depend on it.
+    // AWS serves the global STS endpoint from us-east-1 for opt-in Regions and
+    // its session tokens are valid only in default-enabled Regions, so the
+    // validator must use the Regional endpoint of the Region it runs in.
     const { result, requests } = await executeValidator(
       undefined,
       undefined,
