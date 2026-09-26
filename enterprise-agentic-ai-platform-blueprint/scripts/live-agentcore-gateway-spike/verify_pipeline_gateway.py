@@ -51,11 +51,13 @@ class PipelineGatewayVerifier(CognitoLiteLLMSpike):
         *,
         stack_name: str,
         expected_git_head: str,
+        expected_environment: str,
     ) -> None:
         super().__init__(config)
         self.cloudformation = self.session.client("cloudformation")
         self.stack_name = stack_name
         self.expected_git_head = expected_git_head
+        self.expected_environment = expected_environment
         self._oauth_scope = ""
         self._token_endpoint = ""
         self.outputs: dict[str, str] = {}
@@ -145,8 +147,10 @@ class PipelineGatewayVerifier(CognitoLiteLLMSpike):
             raise SpikeError(
                 f"Gateway is missing allocation tags: {', '.join(missing_tags)}"
             )
-        if tags.get("environment") != "prod":
-            raise SpikeError("Gateway environment tag is not 'prod'")
+        if tags.get("environment") != self.expected_environment:
+            raise SpikeError(
+                "Gateway environment tag differs from the explicit expected environment"
+            )
 
         target = self.control.get_gateway_target(
             gatewayIdentifier=gateway_id,
@@ -229,6 +233,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--account-id", required=True)
     parser.add_argument("--git-head", required=True)
     parser.add_argument("--stack-name", default="Prod-InferenceGateway")
+    parser.add_argument("--environment", required=True, choices=("nonprod", "prod"))
     parser.add_argument("--region", required=True)
     parser.add_argument("--prefix", default="pipeline-gateway-verify")
     parser.add_argument(
@@ -264,6 +269,7 @@ def main() -> int:
             config,
             stack_name=args.stack_name,
             expected_git_head=args.git_head,
+            expected_environment=args.environment,
         )
         verifier.verify_deployed()
         verifier.evidence.finish("passed")
