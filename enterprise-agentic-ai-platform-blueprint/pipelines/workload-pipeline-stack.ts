@@ -64,6 +64,7 @@ import {
 import { D03WorkstreamRegistryRolesStack } from "../apps/workload-account/lib/d03-workstream-registry-roles-stack";
 import { D03WorkstreamRuntimeMemoryStack } from "../apps/workload-account/lib/d03-workstream-runtime-memory-stack";
 import type { GaRegistryConsumerContext } from "@agenticai/agent-registry";
+import { gatewayModelPrice } from "@agenticai/platform-baselines";
 import {
   applyPipelineResourceTags,
   createPipelineArtifactBucket,
@@ -106,6 +107,7 @@ export interface WorkloadStageProps extends StageProps {
    * and mandatory Guardrail id.
    */
   readonly generatedAgentInference?: GeneratedAgentInferenceInputs;
+  readonly evaluationInvokerPrincipalArn?: string;
   readonly auditOamSinkArn?: string;
   readonly notificationEmail?: string;
 }
@@ -175,6 +177,7 @@ export class WorkloadDeploymentStage extends Stage {
               props.agentImageVariant === "generated-agent"
                 ? this.buildGeneratedAgentRuntimeConfig(props)
                 : undefined,
+            evaluationInvokerPrincipalArn: props.evaluationInvokerPrincipalArn,
           },
         );
         this.runtimeMemoryStack.addDependency(this.gatewayStack);
@@ -215,9 +218,7 @@ export class WorkloadDeploymentStage extends Stage {
    * (MCP URL + subscribed qualified tool names, cross-stack tokens) and the
    * Platform inference inputs. Fails closed if the inference inputs are absent.
    */
-  private buildGeneratedAgentRuntimeConfig(
-    props: WorkloadStageProps,
-  ): {
+  private buildGeneratedAgentRuntimeConfig(props: WorkloadStageProps): {
     mcpGatewayUrl: string;
     inferenceGatewayUrl: string;
     modelId: string;
@@ -298,14 +299,16 @@ export class WorkstreamRegistryRolesStage extends Stage {
       generatedAgentGrants: props.generatedAgentM2mSecretArns
         ? {
             m2mSecretArn: props.generatedAgentM2mSecretArns.nonprod,
-            credentialProviderName: `AgenticAI_D03_nonprod_${props.tenantId}_${props.agentId}_inference`.replace(
-              /-/g,
-              "_",
-            ),
-            workloadIdentityName: `AgenticAI_D03_nonprod_${props.tenantId}_${props.agentId}`.replace(
-              /-/g,
-              "_",
-            ),
+            credentialProviderName:
+              `AgenticAI_D03_nonprod_${props.tenantId}_${props.agentId}_inference`.replace(
+                /-/g,
+                "_",
+              ),
+            workloadIdentityName:
+              `AgenticAI_D03_nonprod_${props.tenantId}_${props.agentId}`.replace(
+                /-/g,
+                "_",
+              ),
           }
         : undefined,
     });
@@ -325,14 +328,16 @@ export class WorkstreamRegistryRolesStage extends Stage {
       generatedAgentGrants: props.generatedAgentM2mSecretArns
         ? {
             m2mSecretArn: props.generatedAgentM2mSecretArns.prod,
-            credentialProviderName: `AgenticAI_D03_prod_${props.tenantId}_${props.agentId}_inference`.replace(
-              /-/g,
-              "_",
-            ),
-            workloadIdentityName: `AgenticAI_D03_prod_${props.tenantId}_${props.agentId}`.replace(
-              /-/g,
-              "_",
-            ),
+            credentialProviderName:
+              `AgenticAI_D03_prod_${props.tenantId}_${props.agentId}_inference`.replace(
+                /-/g,
+                "_",
+              ),
+            workloadIdentityName:
+              `AgenticAI_D03_prod_${props.tenantId}_${props.agentId}`.replace(
+                /-/g,
+                "_",
+              ),
           }
         : undefined,
     });
@@ -483,7 +488,7 @@ function registryResolverCommands(
       // Re-enter the blueprint package here, matching enterBlueprintSourceDirectory:
       // no-op when the package is already at the checkout root, else cd into the
       // nested blueprint directory; fail closed on any other layout.
-      'if [ -f package.json ] && [ -d pipelines ]; then :; ' +
+      "if [ -f package.json ] && [ -d pipelines ]; then :; " +
         "elif [ -f enterprise-agentic-ai-platform-blueprint/package.json ]; then " +
         "cd enterprise-agentic-ai-platform-blueprint; " +
         'else echo "ERROR: blueprint package not found for GA resolver"; exit 1; fi',
@@ -519,6 +524,29 @@ function registrySynthRoleName(tenantId: string, agentId: string): string {
   if (name.length > 64 || !/^[A-Za-z0-9+=,.@_-]+$/.test(name)) {
     throw new Error(
       "WorkloadPipelineStack: tenantId/agentId produce an invalid Registry synth role name.",
+    );
+  }
+  return name;
+}
+
+function evaluationCodeBuildRoleName(
+  tenantId: string,
+  agentId: string,
+): string {
+  const name = `AgenticAI-WLP-${tenantId}-${agentId}-Evaluation`;
+  if (name.length > 64 || !/^[A-Za-z0-9+=,.@_-]+$/.test(name)) {
+    throw new Error(
+      "WorkloadPipelineStack: tenantId/agentId produce an invalid evaluation role name.",
+    );
+  }
+  return name;
+}
+
+function evaluationInvokerRoleName(tenantId: string, agentId: string): string {
+  const name = `AgenticAI-D03-nonprod-${tenantId}-${agentId}-evaluation`;
+  if (name.length > 64 || !/^[A-Za-z0-9+=,.@_-]+$/.test(name)) {
+    throw new Error(
+      "WorkloadPipelineStack: tenantId/agentId produce an invalid evaluation invoker role name.",
     );
   }
   return name;
@@ -591,6 +619,52 @@ export class WorkloadPipelineStack extends Stack {
       environment: "pipeline",
     };
     applyPipelineResourceTags(this, resourceTags);
+    const evaluationEnabled =
+      props.enablePipelineRuntimeMemory === true &&
+      props.agentImageVariant === "generated-agent";
+    const pipelineAccount = props.env?.account;
+    if (
+      evaluationEnabled &&
+      (typeof pipelineAccount !== "string" || !/^\d{12}$/.test(pipelineAccount))
+    ) {
+      throw new Error(
+        "WorkloadPipelineStack: generated-agent evaluation requires a concrete 12-digit pipeline account.",
+      );
+    }
+    const evaluationRoleName = evaluationCodeBuildRoleName(
+      props.tenantId,
+      props.agentId,
+    );
+    const evaluationRoleArn = evaluationEnabled
+      ? `arn:aws:iam::${pipelineAccount}:role/${evaluationRoleName}`
+      : "";
+    const evaluationInvokerArn = `arn:aws:iam::${props.workloadNonprodEnv.account}:role/${evaluationInvokerRoleName(
+      props.tenantId,
+      props.agentId,
+    )}`;
+    const evaluationRole = evaluationEnabled
+      ? new Role(this, "EvaluationCodeBuildRole", {
+          roleName: evaluationRoleName,
+          assumedBy: new ServicePrincipal("codebuild.amazonaws.com"),
+          description:
+            "Platform pipeline role that assumes only the nonproduction Workstream evaluation invoker.",
+        })
+      : undefined;
+    if (evaluationRole) {
+      evaluationRole.addToPolicy(
+        new PolicyStatement({
+          actions: ["sts:AssumeRole"],
+          resources: [evaluationInvokerArn],
+        }),
+      );
+      NagSuppressions.addResourceSuppressions(evaluationRole, [
+        {
+          id: "NIST.800.53.R5-IAMNoInlinePolicy",
+          reason:
+            "SEC-005: one pipeline-owned statement assumes only the exact Workstream evaluation role; a shared policy would widen the boundary.",
+        },
+      ]);
+    }
     const artifactBucket = createPipelineArtifactBucket(
       this,
       "WorkloadPipelineArtifacts",
@@ -748,13 +822,33 @@ export class WorkloadPipelineStack extends Stack {
       enablePipelineRuntimeMemory: props.enablePipelineRuntimeMemory,
       agentImageVariant: props.agentImageVariant,
       generatedAgentInference: props.generatedAgentInference?.nonprod,
+      evaluationInvokerPrincipalArn: evaluationEnabled
+        ? evaluationRoleArn
+        : undefined,
       auditOamSinkArn: props.auditOamSinkArn,
       notificationEmail: props.notificationEmail,
     });
     this.pipeline.addStage(nonprodStage);
 
+    const evaluationRuntimeStack = evaluationEnabled
+      ? nonprodStage.runtimeMemoryStack
+      : undefined;
+    if (evaluationEnabled && !evaluationRuntimeStack) {
+      throw new Error(
+        "WorkloadPipelineStack: generated-agent evaluation requires the nonproduction RuntimeMemory stack.",
+      );
+    }
+    const evaluationRegion =
+      props.gaRegistry?.gatewayRegion ?? props.workloadNonprodEnv.region;
+    const evaluationPrice = evaluationEnabled
+      ? gatewayModelPrice(
+          evaluationRegion,
+          props.generatedAgentInference?.nonprod.modelId ?? "",
+        )
+      : undefined;
+
     // Evaluation gate — CodeBuild step running the regression suite against
-    // the just-deployed non-prod app. Fails if any threshold is breached.
+    // the just-deployed non-prod agent Runtime. Fails if any threshold is breached.
     const evalStep = new CodeBuildStep("EvaluationGate", {
       commands: [
         "set -eu",
@@ -768,11 +862,26 @@ export class WorkloadPipelineStack extends Stack {
         `echo "  cost_per_prompt_max_usd         = ${props.evalCostPerPromptMaxUsd ?? 0.05}"`,
         // A missing harness is a failed gate, not a skipped one.
         'if [ ! -f scripts/evaluation_gate.py ]; then echo "ERROR: scripts/evaluation_gate.py is missing; evaluation gate cannot pass"; exit 1; fi',
-        // Invoke the eval harness (ships under blueprints/*/eval/). The harness
-        // reads the thresholds above, invokes the deployed agent against the
-        // regression corpus, and exits non-zero if any metric fails.
-        "python3 scripts/evaluation_gate.py",
+        // Invoke the deployed generated agent, never Bedrock directly. A
+        // legacy pipeline shape without a generated Runtime cannot pass this
+        // mandatory production-promotion gate.
+        ...(evaluationRuntimeStack
+          ? [
+              'python3 -m pip install --disable-pip-version-check "boto3==1.43.98"',
+              "python3 scripts/evaluation_gate.py",
+            ]
+          : [
+              'echo "ERROR: evaluation requires enablePipelineRuntimeMemory=true and agentImageVariant=generated-agent" >&2; exit 1',
+            ]),
       ],
+      ...(evaluationRole ? { role: evaluationRole } : {}),
+      ...(evaluationRuntimeStack
+        ? {
+            envFromCfnOutputs: {
+              EVAL_RUNTIME_ARN: evaluationRuntimeStack.runtimeArnOutput,
+            },
+          }
+        : {}),
       partialBuildSpec: BuildSpec.fromObject({
         version: "0.2",
         env: {
@@ -795,6 +904,14 @@ export class WorkloadPipelineStack extends Stack {
             EVAL_TENANT: props.tenantId,
             EVAL_AGENT: props.agentId,
             EVAL_ENV: "nonprod",
+            EVAL_REGION: evaluationRegion,
+            EVAL_INVOKER_ROLE_ARN: evaluationInvokerArn,
+            EVAL_PRICE_IN_PER_1K: evaluationPrice
+              ? String(evaluationPrice.inputUsdPer1kTokens)
+              : "",
+            EVAL_PRICE_OUT_PER_1K: evaluationPrice
+              ? String(evaluationPrice.outputUsdPer1kTokens)
+              : "",
           },
         },
       }),
@@ -879,16 +996,20 @@ export class WorkloadPipelineStack extends Stack {
     });
 
     if (props.gaRegistry) {
+      const gaApproval = new ManualApprovalStep("ProdGatewayApproval", {
+        comment: props.policyEngine
+          ? `Approve only after nonproduction Registry/MCP denial twins and PolicyEngine ${props.policyEngine.mode} behavior match the retained Lambda wrapper. Production must not lead nonproduction mode evidence.`
+          : evaluationEnabled
+            ? "The generated-agent evaluation gate passed through the nonproduction Runtime. Approve only after its Registry, MCP, guardrail, Memory, and denial evidence is attached."
+            : props.enablePipelineRuntimeMemory
+              ? "Approve only after nonproduction Gateway targets pass live Registry, tools/list, tools/call, and denial twins, and the native Runtime+Memory compatibility foundation reached Runtime READY / Memory ACTIVE."
+              : "Approve only after nonproduction Gateway targets pass live Registry, tools/list, tools/call, and denial twins. No agent runtime/canary exists in the R2 Gateway-only slice.",
+      });
+      if (evaluationEnabled) {
+        gaApproval.addStepDependency(evalStep);
+      }
       this.pipeline.addStage(prodStage, {
-        pre: [
-          new ManualApprovalStep("ProdGatewayApproval", {
-            comment: props.policyEngine
-              ? `Approve only after nonproduction Registry/MCP denial twins and PolicyEngine ${props.policyEngine.mode} behavior match the retained Lambda wrapper. Production must not lead nonproduction mode evidence.`
-              : props.enablePipelineRuntimeMemory
-                ? "Approve only after nonproduction Gateway targets pass live Registry, tools/list, tools/call, and denial twins, and the native Runtime+Memory foundation reached Runtime READY / Memory ACTIVE. The Runtime runs the inert proven agent; generated-agent LiteLLMModel/MCPClient integration is NOT yet wired."
-                : "Approve only after nonproduction Gateway targets pass live Registry, tools/list, tools/call, and denial twins. No agent runtime/canary exists in the R2 Gateway-only slice.",
-          }),
-        ],
+        pre: evaluationEnabled ? [evalStep, gaApproval] : [gaApproval],
       });
     } else {
       const approvalStep = new ManualApprovalStep("ProdApproval", {

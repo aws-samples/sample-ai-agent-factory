@@ -21,8 +21,16 @@ export {
   SYSTEM_INFERENCE_PROFILE_PREFIXES,
   allowedModelArns,
   allowedBedrockResources,
-} from './allowed-models';
-export { PLATFORM_APPROVED_REGIONS } from './approved-regions';
-export { resolveDeploymentRegion } from './deployment-region';
-export { assertEmeaProfilePathSupported } from './emea-support';
-export { GUARDRAIL_PROFILES, type GuardrailProfile } from './guardrail-profiles';
+} from "./allowed-models";
+export { PLATFORM_APPROVED_REGIONS } from "./approved-regions";
+export { resolveDeploymentRegion } from "./deployment-region";
+export { assertEmeaProfilePathSupported } from "./emea-support";
+export {
+  GATEWAY_MODEL_PRICES,
+  gatewayModelPrice,
+  type GatewayModelPrice,
+} from "./gateway-model-pricing";
+export {
+  GUARDRAIL_PROFILES,
+  type GuardrailProfile,
+} from "./guardrail-profiles";

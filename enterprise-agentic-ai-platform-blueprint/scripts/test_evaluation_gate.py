@@ -5,8 +5,11 @@ SPDX-License-Identifier: MIT-0
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -97,9 +100,6 @@ def test_multiple_failures_reported():
 
 
 # G-1: corpus loader + scorer tests.
-
-import json
-import tempfile
 
 load_corpus = _evalmod.load_corpus
 score_corpus = _evalmod.score_corpus
@@ -209,3 +209,97 @@ def test_score_corpus_guardrail_violation_counted():
         return next(answers)
     r = score_corpus(cases, fake_invoke)
     assert r.guardrail_violation_pct == 50.0  # 1 of 2 cases triggered guardrail
+
+
+class _Body:
+    def __init__(self, payload: dict):
+        self.payload = payload
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode("utf-8")
+
+
+def test_runtime_invoker_assumes_exact_role_and_scores_measured_response(monkeypatch):
+    calls: list[tuple[str, dict]] = []
+    body = {
+        "marker": "agentcore-generated-agent-ok",
+        "stopReason": "done",
+        "reply": "AgenticAI platform answer <done/>",
+        "inputTokens": 100,
+        "outputTokens": 20,
+        "inferenceLatencyMs": 123,
+        "toolCalls": ["target-tool-echo___tool-echo"],
+        "guardrailIntervened": False,
+    }
+
+    class Sts:
+        def assume_role(self, **kwargs):
+            calls.append(("assume_role", kwargs))
+            return {
+                "Credentials": {
+                    "AccessKeyId": "example-access-key",
+                    "SecretAccessKey": "example-secret-key",
+                    "SessionToken": "example-session-token",
+                }
+            }
+
+    class Runtime:
+        def invoke_agent_runtime(self, **kwargs):
+            calls.append(("invoke_agent_runtime", kwargs))
+            return {"statusCode": 200, "response": _Body(body)}
+
+    class Session:
+        def __init__(self, **kwargs):
+            self.assumed = "aws_access_key_id" in kwargs
+
+        def client(self, service, **kwargs):
+            return Runtime() if self.assumed else Sts()
+
+    monkeypatch.setitem(sys.modules, "boto3", type("Boto3", (), {"Session": Session}))
+    monkeypatch.setenv("EVAL_PRICE_IN_PER_1K", "0.003")
+    monkeypatch.setenv("EVAL_PRICE_OUT_PER_1K", "0.015")
+    invoke = _evalmod._agent_runtime_invoke_factory(
+        "arn:aws:bedrock-agentcore:eu-west-1:111111111111:runtime/example",
+        "eu-west-1",
+        "arn:aws:iam::111111111111:role/AgenticAI-Evaluation",
+    )
+    result = invoke("What is the platform?")
+
+    assert calls[0][0] == "assume_role"
+    assert calls[0][1]["RoleArn"].endswith("role/AgenticAI-Evaluation")
+    runtime_call = calls[1][1]
+    assert runtime_call["agentRuntimeArn"].startswith(
+        "arn:aws:bedrock-agentcore:eu-west-1:"
+    )
+    assert len(runtime_call["runtimeSessionId"]) >= 33
+    assert json.loads(runtime_call["payload"])["prompt"] == "What is the platform?"
+    assert result == {
+        "text": "AgenticAI platform answer <done/>",
+        "latency_ms": 123,
+        "cost_usd": pytest.approx(0.0006),
+        "guardrail_triggered": False,
+        "runtime_valid": True,
+        "tool_calls_total": 1,
+        "tool_calls_ok": 1,
+    }
+
+
+def test_evaluation_source_never_calls_bedrock_directly():
+    source = (Path(__file__).with_name("evaluation_gate.py")).read_text()
+    assert "bedrock-runtime" not in source
+    assert ".converse(" not in source
+    assert "invoke_agent_runtime" in source
+    assert "EVAL_RUNTIME_ARN" in source
+    assert "EVAL_INVOKER_ROLE_ARN" in source
+
+
+def test_evaluation_prices_fail_closed(monkeypatch):
+    monkeypatch.delenv("EVAL_PRICE_IN_PER_1K", raising=False)
+    with pytest.raises(EnvironmentError, match="must be set"):
+        _evalmod._required_positive_price("EVAL_PRICE_IN_PER_1K")
+    monkeypatch.setenv("EVAL_PRICE_IN_PER_1K", "0")
+    with pytest.raises(EnvironmentError, match="greater than zero"):
+        _evalmod._required_positive_price("EVAL_PRICE_IN_PER_1K")
+    monkeypatch.setenv("EVAL_PRICE_IN_PER_1K", "not-a-number")
+    with pytest.raises(EnvironmentError, match="must be a number"):
+        _evalmod._required_positive_price("EVAL_PRICE_IN_PER_1K")

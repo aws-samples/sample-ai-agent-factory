@@ -113,6 +113,13 @@ export interface D03WorkstreamRuntimeMemoryStackProps
    * tool names. `tenantId`/`agentId`/`envName` come from the props above.
    */
   readonly generatedAgentRuntimeConfig?: GeneratedAgentRuntimeConfig;
+  /**
+   * Exact Platform-account CodeBuild role ARN for the mandatory evaluation
+   * step. When supplied with the generated-agent image, this stack creates a
+   * Workstream-local invoker role trusted only by that principal and allowed
+   * to invoke only this Runtime.
+   */
+  readonly evaluationInvokerPrincipalArn?: string;
 }
 
 /** Runtime container environment for the generated-agent image variant. */
@@ -666,6 +673,7 @@ def is_complete(event, _context):
 export class D03WorkstreamRuntimeMemoryStack extends Stack {
   readonly memory: CfnMemory;
   readonly runtime: CfnRuntime;
+  readonly runtimeArnOutput: CfnOutput;
   readonly memoryKey: Key;
   /**
    * Deploy-time preflight gate. Completes only when the exact asset digest has
@@ -809,8 +817,14 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     if (identityProvider) {
       this.runtime.node.addDependency(identityProvider);
     }
+    if (props.evaluationInvokerPrincipalArn) {
+      this.buildEvaluationInvokerRole(
+        props,
+        props.evaluationInvokerPrincipalArn,
+      );
+    }
 
-    this.emitOutputs(runtimeRoleArn);
+    this.runtimeArnOutput = this.emitOutputs(runtimeRoleArn);
   }
 
   /**
@@ -1468,6 +1482,51 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
    * The stable, prior-stage Runtime execution role ARN. Derived from the exact
    * name family unless an override is supplied.
    */
+  private buildEvaluationInvokerRole(
+    props: D03WorkstreamRuntimeMemoryStackProps,
+    principalArn: string,
+  ): Role {
+    const principalMatch =
+      /^arn:(?:aws|aws-cn|aws-us-gov):iam::\d{12}:role\/[A-Za-z0-9+=,.@_/-]+$/.exec(
+        principalArn,
+      );
+    if (!principalMatch) {
+      throw new Error(
+        "D03WorkstreamRuntimeMemoryStack: evaluationInvokerPrincipalArn must be an IAM role ARN.",
+      );
+    }
+    const roleName = `AgenticAI-D03-${props.envName}-${props.tenantId}-${props.agentId}-evaluation`;
+    if (roleName.length > 64) {
+      throw new Error(
+        "D03WorkstreamRuntimeMemoryStack: evaluation invoker role name exceeds 64 characters.",
+      );
+    }
+    const role = new Role(this, "EvaluationInvokerRole", {
+      roleName,
+      assumedBy: new ArnPrincipal(principalArn),
+      description:
+        "Workstream-local role used only by the Platform pipeline evaluation gate.",
+      inlinePolicies: {
+        InvokeThisRuntime: new PolicyDocument({
+          statements: [
+            new PolicyStatement({
+              actions: ["bedrock-agentcore:InvokeAgentRuntime"],
+              resources: [this.runtime.attrAgentRuntimeArn],
+            }),
+          ],
+        }),
+      },
+    });
+    NagSuppressions.addResourceSuppressions(role, [
+      {
+        id: "NIST.800.53.R5-IAMNoInlinePolicy",
+        reason:
+          "SEC-005: one stack-owned statement invokes only this Runtime; a shared managed policy would widen the evaluation boundary.",
+      },
+    ]);
+    return role;
+  }
+
   private runtimeExecutionRoleArn(
     props: D03WorkstreamRuntimeMemoryStackProps,
   ): string {
@@ -1487,9 +1546,9 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
     return `arn:${this.partition}:iam::${this.account}:role/${roleName}`;
   }
 
-  private emitOutputs(runtimeRoleArn: string): void {
+  private emitOutputs(runtimeRoleArn: string): CfnOutput {
     // Non-secret identity/status outputs only — never a secret.
-    new CfnOutput(this, "RuntimeArn", {
+    const runtimeArnOutput = new CfnOutput(this, "RuntimeArn", {
       description: "AgentCore Runtime ARN (non-secret).",
       value: this.runtime.attrAgentRuntimeArn,
     });
@@ -1517,5 +1576,6 @@ export class D03WorkstreamRuntimeMemoryStack extends Stack {
       description: "Imported stable Runtime execution role ARN.",
       value: runtimeRoleArn,
     });
+    return runtimeArnOutput;
   }
 }

@@ -128,8 +128,53 @@ def test_single_shot_reply_sets_guardrail_and_marker():
     assert out.discovered_tools == ["target-demo___tool-echo"]
     # Guardrail was set on the inference call.
     assert llm.guardrails == ["gd-123"]
-    # Reply is fingerprinted, never returned verbatim.
+    # Authorized callers receive the final answer; Memory/evidence still stores only its fingerprint.
+    assert out.reply == "done, here is the answer <done/>"
     assert re.fullmatch(r"[0-9a-f]{32}", out.reply_fingerprint)
+
+
+def test_measured_responses_accumulate_usage_and_latency():
+    llm = FakeLlm(
+        [
+            agent_mod.LlmResponse(
+                'TOOL target-demo___tool-echo {"message":"hi"}',
+                input_tokens=10,
+                output_tokens=5,
+                latency_ms=40,
+            ),
+            agent_mod.LlmResponse(
+                "final answer <done/>",
+                input_tokens=20,
+                output_tokens=7,
+                latency_ms=60,
+            ),
+        ]
+    )
+    out = ReferenceAgentCore(
+        _cfg(), llm, FakeTools(["target-demo___tool-echo"])
+    ).run("echo hi", actor_id="a", session_id="s")
+    assert out.reply == "final answer <done/>"
+    assert out.input_tokens == 30
+    assert out.output_tokens == 12
+    assert out.inference_latency_ms == 100
+    assert out.guardrail_intervened is False
+
+
+def test_guardrail_intervention_is_terminal_and_measured():
+    response = agent_mod.LlmResponse(
+        "",
+        input_tokens=11,
+        output_tokens=0,
+        latency_ms=25,
+        guardrail_intervened=True,
+    )
+    out = ReferenceAgentCore(_cfg(), FakeLlm([response]), FakeTools([])).run(
+        "blocked", actor_id="a", session_id="s"
+    )
+    assert out.stop_reason == agent_mod.STOP_GUARDRAIL_INTERVENED
+    assert out.guardrail_intervened is True
+    assert out.content_blocks == 1
+    assert out.input_tokens == 11
 
 
 # --------------------------------------------------------------------------
@@ -544,7 +589,7 @@ def test_inference_token_bound_leaves_reasoning_headroom_and_stays_bounded(
     adapter._model_id = "target/openai.gpt-oss-120b"
     adapter._bearer = "token"
 
-    text = adapter.complete(
+    response = adapter.complete(
         [
             {"role": "system", "content": "protocol: TOOL <name> <json>"},
             {"role": "user", "content": "hi"},
@@ -553,7 +598,10 @@ def test_inference_token_bound_leaves_reasoning_headroom_and_stays_bounded(
         stream=False,
     )
 
-    assert text == "verified"
+    assert response.text == "verified"
+    assert response.input_tokens == 0
+    assert response.output_tokens == 0
+    assert response.latency_ms == 0
     # Live-proven gap (fourth invoke, toolCalls=[]): the system turn used to be
     # dropped, so the model never saw the TOOL protocol.
     assert captured["system_prompt"] == "protocol: TOOL <name> <json>"

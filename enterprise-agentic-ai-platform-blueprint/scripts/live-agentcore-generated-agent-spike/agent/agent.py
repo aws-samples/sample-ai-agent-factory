@@ -67,7 +67,7 @@ HANDSHAKE_MARKER = "agentcore-generated-agent-ok"
 #: which revision is serving without reading container digests. Bump it on
 #: every behaviour-changing agent release; the deployment-continuity probe
 #: gates on the observed transition.
-AGENT_VERSION = "1.2.2"
+AGENT_VERSION = "1.3.0"
 #: Environment variables the container reads its AWS Region from, in order.
 #: The Runtime stack sets ``AGENTCORE_REGION`` to the Region it deploys into;
 #: the other two are the ambient AWS variables boto3 itself honours.
@@ -91,6 +91,7 @@ PROTOCOL_NOTICE = (
 )
 #: Why the bounded loop stopped, reported as ``stopReason``.
 STOP_DONE = "done"
+STOP_GUARDRAIL_INTERVENED = "guardrail_intervened"
 STOP_PROTOCOL_VIOLATION = "protocol_violation"
 STOP_MAX_ITERATIONS = "max_iterations"
 
@@ -117,6 +118,17 @@ class AgentError(RuntimeError):
     """Raised for any contract or wiring violation in the reference agent."""
 
 
+@dataclass(frozen=True)
+class LlmResponse:
+    """One Gateway inference response with the metrics needed by eval gates."""
+
+    text: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    latency_ms: int = 0
+    guardrail_intervened: bool = False
+
+
 # --------------------------------------------------------------------------
 # Injected client Protocols — the only surface the pure core depends on
 # --------------------------------------------------------------------------
@@ -132,7 +144,7 @@ class LlmClient(Protocol):
         *,
         guardrail_identifier: str,
         stream: bool,
-    ) -> str: ...
+    ) -> LlmResponse | str: ...
 
 
 class ToolClient(Protocol):
@@ -198,6 +210,7 @@ class ReferenceAgentConfig:
 @dataclass
 class AgentResult:
     marker: str
+    reply: str
     reply_fingerprint: str
     tool_calls: list[str] = field(default_factory=list)
     discovered_tools: list[str] = field(default_factory=list)
@@ -205,6 +218,10 @@ class AgentResult:
     content_blocks: int = 0
     stop_reason: str = STOP_DONE
     protocol_repairs: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    inference_latency_ms: int = 0
+    guardrail_intervened: bool = False
 
 
 class ReferenceAgentCore:
@@ -265,14 +282,29 @@ class ReferenceAgentCore:
         reply = ""
         content_blocks = 0
         repairs = 0
+        input_tokens = 0
+        output_tokens = 0
+        inference_latency_ms = 0
+        guardrail_intervened = False
         stop_reason = STOP_MAX_ITERATIONS
         for _ in range(self.config.max_iterations):
-            reply = self.llm.complete(
+            raw_response = self.llm.complete(
                 messages,
                 guardrail_identifier=self.config.guardrail_identifier,
                 stream=self.config.stream,
             )
+            if isinstance(raw_response, LlmResponse):
+                reply = raw_response.text
+                input_tokens += raw_response.input_tokens
+                output_tokens += raw_response.output_tokens
+                inference_latency_ms += raw_response.latency_ms
+                guardrail_intervened = raw_response.guardrail_intervened
+            else:
+                reply = raw_response
             content_blocks += 1
+            if guardrail_intervened:
+                stop_reason = STOP_GUARDRAIL_INTERVENED
+                break
             tool_request = self._parse_tool_request(reply)
             if tool_request is None:
                 if DONE_MARKER in reply:
@@ -320,6 +352,7 @@ class ReferenceAgentCore:
 
         return AgentResult(
             marker=HANDSHAKE_MARKER,
+            reply=reply,
             reply_fingerprint=self._fingerprint(reply),
             tool_calls=tool_calls,
             discovered_tools=discovered,
@@ -327,6 +360,10 @@ class ReferenceAgentCore:
             content_blocks=content_blocks,
             stop_reason=stop_reason,
             protocol_repairs=repairs,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            inference_latency_ms=inference_latency_ms,
+            guardrail_intervened=guardrail_intervened,
         )
 
     @staticmethod
@@ -435,7 +472,7 @@ class _LiteLlmAdapter:
         *,
         guardrail_identifier: str,
         stream: bool,
-    ) -> str:
+    ) -> LlmResponse:
         if not guardrail_identifier:
             raise AgentError("guardrail_identifier must be set on every inference call")
         model = self._LiteLLMModel(
@@ -473,14 +510,27 @@ class _LiteLlmAdapter:
         )
         result = agent(prompt or "Reply with exactly the word verified.")
         message = result.message
-        if not message or not message.get("content"):
+        guardrail_intervened = getattr(result, "stop_reason", None) == "guardrail_intervened"
+        if (
+            not guardrail_intervened
+            and (not message or not message.get("content"))
+        ):
             raise AgentError("LiteLLMModel returned no Strands message content")
-        blocks = message["content"]
-        # Return the concatenated text content. An empty reply stays empty: the
-        # core treats it as a protocol violation instead of a completed task
-        # (it used to be replaced by the done marker, which hid the failure).
-        return "".join(
-            b.get("text", "") for b in blocks if isinstance(b, Mapping)
+        blocks = message.get("content", []) if message else []
+        text = "".join(
+            block.get("text", "")
+            for block in blocks
+            if isinstance(block, Mapping)
+        )
+        metrics = getattr(result, "metrics", None)
+        usage = getattr(metrics, "accumulated_usage", {}) if metrics else {}
+        performance = getattr(metrics, "accumulated_metrics", {}) if metrics else {}
+        return LlmResponse(
+            text=text,
+            input_tokens=int(usage.get("inputTokens", 0)),
+            output_tokens=int(usage.get("outputTokens", 0)),
+            latency_ms=int(performance.get("latencyMs", 0)),
+            guardrail_intervened=guardrail_intervened,
         )
 
 
@@ -778,6 +828,7 @@ def _load_entrypoint():  # pragma: no cover - exercised only in the live contain
         return {
             "marker": result.marker,
             "agentVersion": AGENT_VERSION,
+            "reply": result.reply,
             "replyFingerprint": result.reply_fingerprint,
             "toolCalls": result.tool_calls,
             "discoveredToolCount": len(result.discovered_tools),
@@ -786,6 +837,10 @@ def _load_entrypoint():  # pragma: no cover - exercised only in the live contain
             "stopReason": result.stop_reason,
             "protocolRepairs": result.protocol_repairs,
             "memoryConfigured": bool(os.environ.get("AGENTCORE_MEMORY_ID")),
+            "inputTokens": result.input_tokens,
+            "outputTokens": result.output_tokens,
+            "inferenceLatencyMs": result.inference_latency_ms,
+            "guardrailIntervened": result.guardrail_intervened,
         }
 
     return app

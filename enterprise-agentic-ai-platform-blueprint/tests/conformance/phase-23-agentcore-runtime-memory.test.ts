@@ -97,6 +97,7 @@ function runtimeMemoryTemplate(
   envName: "nonprod" | "prod" = "nonprod",
   agentImageVariant?: "compatibility" | "generated-agent",
   region: string = REGION,
+  withEvaluationRole = false,
 ): Template {
   const app = new App();
   const account = envName === "nonprod" ? NONPROD_ACCOUNT : PROD_ACCOUNT;
@@ -110,6 +111,9 @@ function runtimeMemoryTemplate(
       costCentre: "engineering",
       runtimeExecutionRoleArnOverride: `arn:aws:iam::${account}:role/AgenticAI-D03-${envName}-demo-primary-runtime`,
       agentImageVariant,
+      evaluationInvokerPrincipalArn: withEvaluationRole
+        ? `arn:aws:iam::${PLATFORM_ACCOUNT}:role/AgenticAI-WLP-demo-primary-Evaluation`
+        : undefined,
       generatedAgentRuntimeConfig:
         agentImageVariant === "generated-agent"
           ? {
@@ -344,7 +348,11 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
     // The agent has no Region default (it fails closed), so the stack must
     // hand it the Region it deploys into. A fixed value would sign tool calls
     // and reach Memory/Identity in the wrong Region outside us-west-2.
-    const template = runtimeMemoryTemplate("nonprod", "generated-agent", "eu-west-1");
+    const template = runtimeMemoryTemplate(
+      "nonprod",
+      "generated-agent",
+      "eu-west-1",
+    );
     const runtime = singleResource(template, "AWS::BedrockAgentCore::Runtime");
     const env = runtime.Properties.EnvironmentVariables as Record<
       string,
@@ -357,8 +365,42 @@ describe("Phase 23 — native Runtime and Memory resources", () => {
       "AWS::BedrockAgentCore::Runtime",
     );
     expect(
-      Object.keys(compat.Properties.EnvironmentVariables as Record<string, unknown>),
+      Object.keys(
+        compat.Properties.EnvironmentVariables as Record<string, unknown>,
+      ),
     ).toEqual(["AGENTCORE_MEMORY_ID"]);
+  });
+
+  it("creates an exact-principal evaluation role scoped to this Runtime", () => {
+    const template = runtimeMemoryTemplate(
+      "nonprod",
+      "generated-agent",
+      REGION,
+      true,
+    );
+    const role = Object.values(template.findResources("AWS::IAM::Role")).find(
+      (resource: any) =>
+        resource.Properties.RoleName ===
+        "AgenticAI-D03-nonprod-demo-primary-evaluation",
+    ) as any;
+    expect(role).toBeDefined();
+    expect(role.Properties.AssumeRolePolicyDocument.Statement).toContainEqual(
+      expect.objectContaining({
+        Principal: {
+          AWS: `arn:aws:iam::${PLATFORM_ACCOUNT}:role/AgenticAI-WLP-demo-primary-Evaluation`,
+        },
+        Action: "sts:AssumeRole",
+      }),
+    );
+    const statements = role.Properties.Policies.flatMap(
+      (policy: any) => policy.PolicyDocument.Statement,
+    );
+    expect(statements).toContainEqual(
+      expect.objectContaining({
+        Action: "bedrock-agentcore:InvokeAgentRuntime",
+        Resource: { "Fn::GetAtt": [expect.any(String), "AgentRuntimeArn"] },
+      }),
+    );
   });
 
   it("initializes only the default token vault and tags Identity resources", () => {
@@ -1331,6 +1373,44 @@ describe("Phase 23 — opt-in pipeline graph", () => {
     );
     expect(rendered).toContain("agenticai/inference-m2m/nonprod");
     expect(rendered).toContain("agenticai/agentImageVariant");
+  });
+
+  it("evaluates only through the nonproduction generated-agent Runtime", () => {
+    const { template } = pipeline(true, true);
+    const rendered = JSON.stringify(template.toJSON());
+    expect(rendered).toContain("AgenticAI-WLP-demo-primary-Evaluation");
+    expect(rendered).toContain(
+      `arn:aws:iam::${NONPROD_ACCOUNT}:role/AgenticAI-D03-nonprod-demo-primary-evaluation`,
+    );
+    expect(rendered).toContain("EVAL_RUNTIME_ARN");
+    expect(rendered).toContain("EVAL_INVOKER_ROLE_ARN");
+    expect(rendered).toContain("EVAL_REGION");
+    expect(rendered).toContain("EVAL_PRICE_IN_PER_1K");
+    expect(rendered).toContain("0.00015");
+    expect(rendered).toContain("EVAL_PRICE_OUT_PER_1K");
+    expect(rendered).toContain("0.0006");
+    expect(rendered).toContain("boto3==1.43.98");
+    expect(rendered).toContain("python3 scripts/evaluation_gate.py");
+    const pipelineResource = Object.values(
+      template.findResources("AWS::CodePipeline::Pipeline"),
+    )[0] as any;
+    const prodStage = pipelineResource.Properties.Stages.find(
+      (stage: any) => stage.Name === "Prod",
+    );
+    const evaluation = prodStage.Actions.find(
+      (action: any) => action.Name === "EvaluationGate",
+    );
+    const approval = prodStage.Actions.find(
+      (action: any) => action.Name === "ProdGatewayApproval",
+    );
+    expect(evaluation).toBeDefined();
+    expect(approval).toBeDefined();
+    expect(evaluation.RunOrder).toBeLessThan(approval.RunOrder);
+  });
+
+  it("keeps evaluation absent from the Gateway-only compatibility shape", () => {
+    const { template } = pipeline(true, false);
+    expect(JSON.stringify(template.toJSON())).not.toContain("EvaluationGate");
   });
 
   it("rejects Runtime/Memory pipeline configuration without GA Registry mode", () => {

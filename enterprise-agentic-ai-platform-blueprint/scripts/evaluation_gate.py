@@ -26,11 +26,9 @@ SPDX-License-Identifier: MIT-0
 from __future__ import annotations
 
 import json
-import logging
 import os
 import sys
 
-_LOGGER = logging.getLogger(__name__)
 from dataclasses import dataclass
 
 
@@ -105,9 +103,9 @@ def load_corpus(path: str) -> list[dict]:
 def score_corpus(cases: list[dict], invoke) -> EvalResult:
     """G-1: real scorer. `invoke(prompt:str) -> {text:str, latency_ms:int, cost_usd:float, guardrail_triggered:bool}`.
 
-    The injected `invoke` callable lets us unit-test against a fake Bedrock
-    client and run the same code path against a real `bedrock-runtime`
-    `Converse` invocation in production.
+    The injected `invoke` callable keeps scoring pure for unit tests while the
+    production path invokes the deployed AgentCore Runtime through its
+    Workstream-local evaluation role.
     """
     factual = [c for c in cases if c.get("category") == "factual"]
     refusal = [c for c in cases if c.get("category") == "refusal" or c.get("must_refuse")]
@@ -179,55 +177,119 @@ def score_corpus(cases: list[dict], invoke) -> EvalResult:
     )
 
 
-def _bedrock_invoke_factory(model_id: str, region: str, guardrail_id: str, guardrail_version: str):
-    """Build a real Bedrock Converse invoker. Imports boto3 lazily."""
-    import boto3
-    import time
+def _required_positive_price(name: str) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        raise EnvironmentError(f"{name} must be set from the reviewed model pricing SSOT")
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise EnvironmentError(f"{name} must be a number") from error
+    if value <= 0:
+        raise EnvironmentError(f"{name} must be greater than zero")
+    return value
 
-    client = boto3.client("bedrock-runtime", region_name=region)
+
+def _agent_runtime_invoke_factory(
+    runtime_arn: str,
+    region: str,
+    invoker_role_arn: str,
+    timeout: int = 300,
+):
+    """Build an invoker for the pipeline-deployed generated agent Runtime."""
+    import time
+    import uuid
+
+    import boto3
+    from botocore.config import Config
+    from botocore.exceptions import ClientError
+
+    input_price = _required_positive_price("EVAL_PRICE_IN_PER_1K")
+    output_price = _required_positive_price("EVAL_PRICE_OUT_PER_1K")
+    base = boto3.Session(region_name=region)
+    assumed = base.client("sts", region_name=region).assume_role(
+        RoleArn=invoker_role_arn,
+        RoleSessionName=f"agenticai-eval-{uuid.uuid4().hex[:16]}",
+    )["Credentials"]
+    session = boto3.Session(
+        aws_access_key_id=assumed["AccessKeyId"],
+        aws_secret_access_key=assumed["SecretAccessKey"],
+        aws_session_token=assumed["SessionToken"],
+        region_name=region,
+    )
+    client = session.client(
+        "bedrock-agentcore",
+        region_name=region,
+        config=Config(
+            connect_timeout=20,
+            read_timeout=timeout,
+            retries={"max_attempts": 0},
+        ),
+    )
 
     def invoke(prompt: str) -> dict:
-        start = time.time()
+        started = time.time()
+        session_id = f"evaluation-{uuid.uuid4()}-{int(started)}"
         try:
-            resp = client.converse(
-                modelId=model_id,
-                messages=[{"role": "user", "content": [{"text": prompt}]}],
-                guardrailConfig={
-                    "guardrailIdentifier": guardrail_id,
-                    "guardrailVersion": guardrail_version,
-                    "trace": "enabled",
-                },
+            response = client.invoke_agent_runtime(
+                agentRuntimeArn=runtime_arn,
+                runtimeSessionId=session_id,
+                contentType="application/json",
+                accept="application/json",
+                payload=json.dumps(
+                    {"prompt": prompt, "actorId": f"evaluation-{uuid.uuid4()}"}
+                ).encode("utf-8"),
             )
-        except Exception as exc:  # noqa: BLE001
-            # SEC (security review): a Bedrock error body can echo the user prompt.
-            # Log ONLY the exception type — never the message/traceback, which
-            # can contain the prompt. (Do not use _LOGGER.exception(): it emits
-            # the full traceback + message.)
-            _LOGGER.error("Bedrock invoke failed during evaluation: %s", type(exc).__name__)
+        except ClientError as error:
             return {
                 "text": "",
-                "latency_ms": int((time.time() - start) * 1000),
+                "latency_ms": int((time.time() - started) * 1000),
                 "cost_usd": 0.0,
-                "error_type": type(exc).__name__,
+                "guardrail_triggered": False,
+                "runtime_valid": False,
+                "error_type": str(error.response.get("Error", {}).get("Code", "ClientError")),
             }
-        latency_ms = int((time.time() - start) * 1000)
-        text = ""
-        for block in (resp.get("output", {}).get("message", {}).get("content") or []):
-            if "text" in block:
-                text += block["text"]
-        usage = resp.get("usage", {}) or {}
-        # Sonnet 4.5 pricing — adjust per model. Read from env if customer overrides.
-        in_per_1k = float(os.environ.get("EVAL_PRICE_IN_PER_1K", "0.003"))
-        out_per_1k = float(os.environ.get("EVAL_PRICE_OUT_PER_1K", "0.015"))
-        cost_usd = (usage.get("inputTokens", 0) / 1000.0) * in_per_1k + (
-            usage.get("outputTokens", 0) / 1000.0
-        ) * out_per_1k
-        guardrail_triggered = (resp.get("stopReason") == "guardrail_intervened")
+
+        stream = response.get("response")
+        raw = stream.read() if hasattr(stream, "read") else (stream or b"")
+        text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        try:
+            body = json.loads(text)
+        except json.JSONDecodeError:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+
+        marker_valid = body.get("marker") == "agentcore-generated-agent-ok"
+        stop_reason = body.get("stopReason")
+        guardrail_intervened = (
+            body.get("guardrailIntervened") is True
+            or stop_reason == "guardrail_intervened"
+        )
+        runtime_valid = marker_valid and stop_reason in {
+            "done",
+            "guardrail_intervened",
+        }
+        input_tokens = int(body.get("inputTokens", 0) or 0)
+        output_tokens = int(body.get("outputTokens", 0) or 0)
+        cost_usd = (
+            input_tokens / 1000.0 * input_price
+            + output_tokens / 1000.0 * output_price
+        )
+        measured_latency = int(body.get("inferenceLatencyMs", 0) or 0)
+        tool_calls = body.get("toolCalls")
+        tool_calls = tool_calls if isinstance(tool_calls, list) else []
+        reply = body.get("reply")
         return {
-            "text": text,
-            "latency_ms": latency_ms,
+            "text": reply if runtime_valid and isinstance(reply, str) else "",
+            "latency_ms": measured_latency
+            if measured_latency > 0
+            else int((time.time() - started) * 1000),
             "cost_usd": cost_usd,
-            "guardrail_triggered": guardrail_triggered,
+            "guardrail_triggered": guardrail_intervened,
+            "runtime_valid": runtime_valid,
+            "tool_calls_total": len(tool_calls),
+            "tool_calls_ok": len(tool_calls) if runtime_valid else 0,
         }
 
     return invoke
@@ -238,8 +300,9 @@ def run_evaluation(_: EvalThresholds) -> EvalResult:
 
     G-1: real implementation. Reads the corpus path from $EVAL_CORPUS_PATH,
     or auto-discovers `<blueprint>/eval/golden_corpus.jsonl` when running
-    inside a blueprint directory. Calls Bedrock Converse for each case and
-    derives the 7 scoring categories from real responses.
+    inside a blueprint directory. Calls the pipeline-deployed AgentCore Runtime
+    for each case; the agent reaches inference only through the Platform Gateway.
+    Derives the seven scoring categories from the authorized Runtime response.
     """
     corpus_path = os.environ.get("EVAL_CORPUS_PATH")
     if not corpus_path:
@@ -257,15 +320,26 @@ def run_evaluation(_: EvalThresholds) -> EvalResult:
             "EVAL_CORPUS_PATH not set and no auto-discoverable corpus found under blueprints/*/eval/"
         )
     cases = load_corpus(corpus_path)
-    model_id = os.environ.get("EVAL_MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
-    region = os.environ.get("AWS_REGION", "us-east-1")
-    guardrail_id = os.environ.get("EVAL_GUARDRAIL_ID")
-    guardrail_version = os.environ.get("EVAL_GUARDRAIL_VERSION", "DRAFT")
-    if not guardrail_id:
+    runtime_arn = os.environ.get("EVAL_RUNTIME_ARN")
+    if not runtime_arn:
         raise EnvironmentError(
-            "EVAL_GUARDRAIL_ID must be set — guardrail required (R-BED-028 + SCP-02)"
+            "EVAL_RUNTIME_ARN must identify the deployed nonproduction AgentCore Runtime"
         )
-    invoke = _bedrock_invoke_factory(model_id, region, guardrail_id, guardrail_version)
+    region = os.environ.get("EVAL_REGION")
+    if not region:
+        raise EnvironmentError(
+            "EVAL_REGION must identify the deployed nonproduction Runtime Region"
+        )
+    invoker_role_arn = os.environ.get("EVAL_INVOKER_ROLE_ARN")
+    if not invoker_role_arn:
+        raise EnvironmentError(
+            "EVAL_INVOKER_ROLE_ARN must identify the Workstream evaluation role"
+        )
+    invoke = _agent_runtime_invoke_factory(
+        runtime_arn,
+        region,
+        invoker_role_arn,
+    )
     return score_corpus(cases, invoke)
 
 
