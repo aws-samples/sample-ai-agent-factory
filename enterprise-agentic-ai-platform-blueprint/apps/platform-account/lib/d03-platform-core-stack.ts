@@ -565,11 +565,9 @@ export class D03PlatformCoreStack extends Stack {
 
     // H-A: scope cross-account DDB access to runtime-role ARNs only via
     // identity-policy condition on the calling principal's IAM policy.
-    // (Previous attempt to put this in the DDB resource policy hit a CFN
-    // circular dep across the three tables. Defence-in-depth via the
-    // workload-side runtime role's identity policy + dynamodb:LeadingKeys
-    // continues to enforce tenant isolation; security-agent F-01 closure
-    // is documented in CHANGELOG.md as scope-narrowed in v0.4.1.)
+    // Workload-side runtime role identity policies and
+    // dynamodb:LeadingKeys enforce tenant isolation without introducing a
+    // circular dependency across these tables.
     for (const acct of props.workloadAccountIds) {
       for (const table of [this.agentTable, this.toolTable, this.experimentTable]) {
         table.grantReadData(new AccountPrincipal(acct));

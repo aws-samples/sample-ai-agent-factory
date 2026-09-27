@@ -4,7 +4,7 @@ agenticai-task-agent — Strands blueprint, task-agent pattern.
 Spec §4.1 task-agent defaults:
   * Deterministic tool-use (no stochastic tool selection in hot path)
   * Max-iteration guard (default 10)
-  * Streaming invocation via LiteLLM (D-01)
+  * Streaming invocation via LiteLLMModel through the Platform Inference Gateway
   * Baseline guardrail attached (R-BED-028 GuardrailIdentifier always set)
   * Memory actor-scoped; no real end-user identity in session tags (§3.4.6)
 
@@ -168,7 +168,7 @@ class TaskAgent:
         return f"<hitl-escalation-pending execution=\"{execution}\"/>"
 
     def _system_prompt(self) -> str:
-        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "system.md")
+        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "system.txt")
         if os.path.exists(prompt_path):
             with open(prompt_path, encoding="utf-8") as f:
                 return f.read()

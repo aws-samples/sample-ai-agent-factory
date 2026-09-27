@@ -8,7 +8,7 @@ machine with no credentials never touches the network.
 Markers are registered here rather than in ``pytest.ini`` so that this subtree
 owns its own configuration.
 
-Environment contract (see ``README.md`` in this directory):
+Environment contract (see section 10.2 of the repository root ``README.md``):
 
   AGENTICAI_ADVERSARIAL_LIVE=1            enable live cases
   AGENTICAI_ADVERSARIAL_REQUIRE_LIVE=1    fail the run if live is unavailable
