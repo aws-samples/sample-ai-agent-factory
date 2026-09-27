@@ -11,7 +11,7 @@ This is not a single-agent deployment example. It separates an **enterprise cont
 
 This blueprint is the governed platform foundation in [AWS Samples — Sample AI Agent Factory](https://github.com/aws-samples/sample-ai-agent-factory).
 
-> **Status:** Sample and reference content published under MIT-0. It is not an AWS service, an AppSec-reviewed product, a compliance attestation, or proof of load at a particular organizational size. It deploys real, billable AWS resources. Review the architecture, IAM policies, quotas, data handling, operating model, and costs before using it with production or regulated workloads.
+> **Status:** Sample and reference content published under MIT-0. It is not an AWS service. It deploys real, billable AWS resources. Review the architecture, IAM policies, quotas, data handling, operating model, and costs before using it with production or regulated workloads.
 >
 > **Architecture versus implementation:** Labels such as LLM Gateway, Tool Gateway, agent runtime, memory, identity, registry, policy engine, delivery pipeline, and observability describe architectural capabilities. AgentCore Gateway inference targets, LiteLLM, AgentCore Runtime, AgentCore Memory, AgentCore Identity, AWS Agent Registry, CodePipeline, and CloudWatch are implementation choices. Customers can select alternatives that fit their standards, but each replacement must preserve the stated security, identity, tenancy, lifecycle, and evidence contracts. The live support envelope applies only to the exact reference implementation that was tested.
 
