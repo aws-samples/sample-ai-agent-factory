@@ -1,0 +1,66 @@
+/* Mirrors the Start section rail (.jump / .chips / .chip in src/pages/start/start.module.css). */
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-4) 0;
+  min-width: 0;
+}
+
+.label {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  margin-right: var(--space-1);
+}
+
+/* Below 640px the chips form one row that scrolls inside the list. */
+.chips {
+  list-style: none;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: var(--space-2);
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  padding-bottom: var(--space-1);
+  scrollbar-width: thin;
+}
+
+@media (min-width: 640px) {
+  .chips {
+    flex-wrap: wrap;
+    overflow: visible;
+    padding-bottom: 0;
+  }
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 32px;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  font-size: 0.875rem;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.chip:hover {
+  color: var(--color-blue-hover);
+  border-color: var(--color-blue);
+  text-decoration: underline;
+}
+
+.chip[aria-current='page'] {
+  color: var(--color-blue-hover);
+  border-color: var(--color-blue);
+  font-weight: 600;
+}

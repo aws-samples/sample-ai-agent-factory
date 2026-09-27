@@ -13,7 +13,10 @@ const root = join(__dirname, '..');
 // Known generated paths only - no wildcards
 const GENERATED_PATHS = [
   'dist',
+  'dist-ssr',
   'coverage',
+  'test-results',
+  'playwright-report',
   'node_modules/.vite',
   'tsconfig.node.tsbuildinfo',
   'vite.config.js',

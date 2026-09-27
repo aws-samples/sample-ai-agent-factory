@@ -27,7 +27,7 @@ The projects share architectural concepts expressed as capability contracts. A *
 | Capability | Purpose | Reference Implementation |
 |------------|---------|-------------------------|
 | LLM Gateway | Governed model access with auth, routing, and attribution | AgentCore Gateway inference targets, LiteLLM |
-| Tool Gateway | Authenticated MCP discovery/invocation with policy | AgentCore Gateway with AWS_IAM |
+| Tool Gateway | Authenticated MCP discovery/invocation with policy | AgentCore Gateway (AWS_IAM in the Blueprint; Cognito JWT authorizer in the Workshop, Self-Service and MCP Gateway) |
 | Agent Runtime | Immutable deployable execution with identity and scaling | AgentCore Runtime |
 | Agent Memory | Actor-scoped storage with encryption and retention | AgentCore Memory with CMK |
 | Identity | Short-lived credentials with tenant binding | AgentCore Identity, Cognito M2M |
@@ -63,6 +63,8 @@ Multi-module workshop composing AgentCore with an LLM Gateway (LiteLLM), MCP Gat
 
 **Prerequisites:** AWS CLI v2, basic AWS familiarity, Bedrock access. See README for supported regions.
 
+**Take it online:** [Open the workshop](https://catalog.us-east-1.prod.workshops.aws/workshops/3f49be39-c62b-40a2-975b-be9bf626526a) in the AWS workshop catalog, listed on [AWS Builder Center](https://builder.aws.com/build/workshops?tab=discover).
+
 → [workshop-building-agentic-ai-platform/README.md](workshop-building-agentic-ai-platform/README.md)
 
 ### Self-Service — Build Agents Fast
@@ -83,7 +85,7 @@ Deployable governance layer placing AgentCore Gateway in front of MCP tool serve
 
 ### Blueprint — Enterprise-Scale Reference
 
-Multi-account CDK reference blueprint with AWS Organizations, SCPs, per-tenant Application Inference Profiles, PrivateLink egress, AgentCore Runtime/Gateway/Memory, Registry integration, CDK Pipelines with evaluation gates, and CloudWatch OAM observability.
+Multi-account CDK reference blueprint with AWS Organizations, SCPs, per-tenant Application Inference Profiles, a private VPC with interface endpoints, AgentCore Runtime/Gateway/Memory, Registry integration, CDK Pipelines with evaluation gates, and CloudWatch OAM observability.
 
 This is an enterprise-scale reference blueprint with a bounded reviewed support envelope — not universal readiness for all environments. See the project README for tested configurations and known limitations.
 
@@ -95,7 +97,7 @@ This is an enterprise-scale reference blueprint with a bounded reviewed support 
 
 ### Costs
 
-All projects deploy **real, billable AWS resources** including ECS Fargate, DocumentDB, Aurora, NAT Gateways, Load Balancers, Lambda functions, and Amazon Bedrock invocations. **Tear down resources when finished** using each project's cleanup commands.
+All projects deploy **real, billable AWS resources** and every project invokes Amazon Bedrock models. The workshop runs ECS Fargate, Amazon DocumentDB, NAT Gateways, load balancers, CloudFront and an EC2-hosted IDE. The Self-Service platform is serverless (API Gateway, Lambda, Step Functions, DynamoDB, CloudFront, AWS WAF). The MCP Gateway uses Lambda, Cognito and AgentCore Gateway. The Blueprint spans AgentCore, VPC interface endpoints, CodePipeline and CloudWatch across several accounts. **Tear down resources when finished** using each project's cleanup commands.
 
 ### Security
 

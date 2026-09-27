@@ -1,0 +1,68 @@
+.header {
+  background: var(--color-midnight);
+  color: var(--color-text-inverse);
+  padding: var(--section-padding-y) 0;
+}
+
+.inner {
+  display: grid;
+  gap: var(--space-8);
+  align-items: center;
+}
+
+.copy {
+  min-width: 0;
+}
+
+.eyebrow {
+  margin: 0 0 var(--space-2);
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-inverse-muted);
+}
+
+.badge {
+  margin-bottom: var(--space-3);
+}
+
+.title {
+  margin: 0;
+  max-width: 30ch;
+  color: var(--color-cloud);
+}
+
+.lead {
+  margin: var(--space-4) 0 0;
+  max-width: 65ch;
+  font-size: 1.125rem;
+  line-height: 1.6;
+  color: var(--color-text-inverse-muted);
+}
+
+.meta {
+  margin-top: var(--space-4);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-6);
+}
+
+/* Figure slot: full width under the copy on small screens, second column from 1024px. */
+.figure {
+  min-width: 0;
+}
+
+.figure > * {
+  max-width: 100%;
+}
+
+@media (min-width: 1024px) {
+  .hasFigure {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  }
+}

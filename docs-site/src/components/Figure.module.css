@@ -1,0 +1,18 @@
+.figure {
+  margin: var(--space-6) 0;
+  padding: var(--space-4);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.figure img {
+  margin: 0 auto;
+}
+
+.caption {
+  margin-top: var(--space-3);
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+  text-align: center;
+}

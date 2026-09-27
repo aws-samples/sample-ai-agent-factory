@@ -7,7 +7,7 @@
   --color-mist: #D7DEE8;
   --color-slate: #475569;
 
-  /* Journey stage colors */
+  /* Journey stage colours (tints: borders and decorative strokes only) */
   --color-amber: #EA580C;
   --color-amber-light: #f97316;
   --color-green: #16A34A;
@@ -16,6 +16,42 @@
   --color-violet-light: #8b5cf6;
   --color-blue: #2563EB;
   --color-blue-light: #3b82f6;
+
+  /* Stage ink: text and filled badges on light backgrounds (all 4.5:1 or better on white) */
+  --stage-learn-ink: #C2410C;
+  --stage-build-ink: #15803D;
+  --stage-govern-ink: #6D28D9;
+  --stage-scale-ink: #1D4ED8;
+
+  /* Stage on-dark: text and filled badges inside dark containers */
+  --stage-learn-on-dark: #FDBA74;
+  --stage-build-on-dark: #86EFAC;
+  --stage-govern-on-dark: #C4B5FD;
+  --stage-scale-on-dark: #93C5FD;
+
+  /* Stage tints: decorative borders and strokes (keep the original hues) */
+  --stage-learn-tint: var(--color-amber);
+  --stage-build-tint: var(--color-green);
+  --stage-govern-tint: var(--color-violet);
+  --stage-scale-tint: var(--color-blue);
+
+  /* Resolved stage colours: ink by default, on-dark inside `.on-dark` containers */
+  --stage-learn: var(--stage-learn-ink);
+  --stage-build: var(--stage-build-ink);
+  --stage-govern: var(--stage-govern-ink);
+  --stage-scale: var(--stage-scale-ink);
+  /* Text colour on a filled stage badge */
+  --stage-fill-text: #ffffff;
+
+  /* Tinted surfaces and their heading colours */
+  --tint-amber: #FFF7ED;
+  --tint-green: #F0FDF4;
+  --tint-violet: #F5F3FF;
+  --tint-blue: #EFF6FF;
+  --tint-heading-amber: #9A3412;
+  --tint-heading-green: #166534;
+  --tint-heading-violet: #5B21B6;
+  --tint-heading-blue: #1E40AF;
 
   /* Semantic tokens */
   --color-text-primary: var(--color-midnight);
@@ -33,6 +69,12 @@
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
 
+  /* Fluid type scale */
+  --font-size-h1: clamp(1.75rem, 5vw, 3rem);
+  --font-size-h2: clamp(1.375rem, 3.5vw, 2rem);
+  --font-size-h3: clamp(1.125rem, 2.5vw, 1.5rem);
+  --font-size-h4: 1.125rem;
+
   /* Spacing scale */
   --space-1: 0.25rem;
   --space-2: 0.5rem;
@@ -45,6 +87,11 @@
   --space-12: 3rem;
   --space-16: 4rem;
   --space-20: 5rem;
+
+  /* Section rhythm: vertical padding for page sections (40 px on mobile) */
+  --section-padding-y: var(--space-16);
+  /* Horizontal page padding */
+  --page-padding-x: var(--space-4);
 
   /* Border radius */
   --radius-sm: 0.25rem;
@@ -64,6 +111,36 @@
   /* Layout */
   --max-width: 1200px;
   --header-height: 64px;
+  --target-min: 24px; /* WCAG 2.2 minimum target size */
+}
+
+@media (max-width: 640px) {
+  :root {
+    --section-padding-y: 40px;
+  }
+}
+
+@media (min-width: 1024px) {
+  :root {
+    --page-padding-x: var(--space-8);
+  }
+}
+
+/*
+ * Dark containers: add the global class `on-dark` to any element with a dark
+ * background (heroes, atlas sections, header and footer dark areas). Inside it
+ * the resolved stage colours switch to the on-dark set and default text
+ * becomes light.
+ */
+.on-dark {
+  --stage-learn: var(--stage-learn-on-dark);
+  --stage-build: var(--stage-build-on-dark);
+  --stage-govern: var(--stage-govern-on-dark);
+  --stage-scale: var(--stage-scale-on-dark);
+  --stage-fill-text: var(--color-midnight);
+  --color-text-primary: var(--color-cloud);
+  --color-text-secondary: var(--color-text-inverse-muted);
+  color: var(--color-text-inverse);
 }
 
 /* Reset and base */
@@ -75,6 +152,8 @@
 
 html {
   scroll-behavior: smooth;
+  /* Anchor targets and focused headings land below the sticky header. */
+  scroll-padding-top: calc(var(--header-height) + var(--space-4));
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -97,6 +176,9 @@ body {
   background-color: var(--color-bg-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* Long unbroken tokens (paths, identifiers, URLs) wrap at the line end instead of
+     widening the page at narrow widths. Inherited; pre keeps white-space: pre. */
+  overflow-wrap: break-word;
 }
 
 #root {
@@ -109,20 +191,15 @@ body {
 h1, h2, h3, h4, h5, h6 {
   line-height: 1.25;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
-h1 { font-size: 2.5rem; }
-h2 { font-size: 2rem; }
-h3 { font-size: 1.5rem; }
-h4 { font-size: 1.25rem; }
-h5 { font-size: 1.125rem; }
+h1 { font-size: var(--font-size-h1); }
+h2 { font-size: var(--font-size-h2); }
+h3 { font-size: var(--font-size-h3); }
+h4 { font-size: var(--font-size-h4); }
+h5 { font-size: 1rem; }
 h6 { font-size: 1rem; }
-
-@media (max-width: 640px) {
-  h1 { font-size: 2rem; }
-  h2 { font-size: 1.5rem; }
-  h3 { font-size: 1.25rem; }
-}
 
 a {
   color: var(--color-blue);
@@ -131,8 +208,22 @@ a {
 }
 
 a:hover {
-  color: var(--color-blue-light);
+  color: var(--color-blue-hover);
   text-decoration: underline;
+}
+
+/* Links inside text blocks are underlined so they never rely on colour alone: link blue
+   against secondary text measures 1.5:1. `:where()` keeps the rule at element specificity,
+   so any class (buttons, cards, tabs) overrides it with its own text-decoration. */
+:where(p, li, dd, dt, td, th, figcaption, blockquote, small, span, em, strong, label, summary) a {
+  text-decoration: underline;
+  text-decoration-thickness: from-font;
+  text-underline-offset: 0.15em;
+}
+
+/* Navigation lists and headings are link groups, not prose. */
+:where(nav, h1, h2, h3, h4, h5, h6) a {
+  text-decoration: none;
 }
 
 a:focus-visible {
@@ -141,12 +232,48 @@ a:focus-visible {
   border-radius: var(--radius-sm);
 }
 
+/* Defaults for links on dark surfaces. `:where()` keeps them at element specificity so any
+   class (buttons, footer links) overrides them without having to know about `.on-dark`. */
+:where(.on-dark) a {
+  color: var(--stage-scale-on-dark);
+}
+
+:where(.on-dark) a:hover {
+  color: var(--color-cloud);
+}
+
+:where(.on-dark) a:focus-visible {
+  outline-color: var(--color-cloud);
+}
+
 code {
   font-family: var(--font-mono);
   font-size: 0.875em;
   background: var(--color-mist);
   padding: 0.125em 0.375em;
   border-radius: var(--radius-sm);
+}
+
+/* Inline code inside a link: link blue on the mist chip measures 3.8:1; the darker
+   link blue clears 4.5:1 on mist and on cloud. On dark surfaces the chip stays light,
+   so the code text goes midnight. */
+a code {
+  color: var(--color-blue-hover);
+}
+
+:where(.on-dark) a code {
+  color: var(--color-midnight);
+}
+
+pre code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+/* The main landmark receives programmatic focus on route change and via the skip link. */
+#main-content:focus {
+  outline: none;
 }
 
 /* Skip link for accessibility */
@@ -186,11 +313,18 @@ code {
   width: 100%;
   max-width: var(--max-width);
   margin: 0 auto;
-  padding: 0 var(--space-4);
+  padding: 0 var(--page-padding-x);
 }
 
-@media (min-width: 1024px) {
-  .container {
-    padding: 0 var(--space-8);
-  }
+/* Vertical rhythm for a page section */
+.page-section {
+  padding: var(--section-padding-y) 0;
+}
+
+.placeholder-page h1 {
+  margin-bottom: var(--space-4);
+}
+
+.placeholder-page p {
+  color: var(--color-text-secondary);
 }

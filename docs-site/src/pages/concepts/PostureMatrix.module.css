@@ -1,0 +1,171 @@
+/* PostureMatrix.module.css: capability-by-project and control-by-project tables */
+
+.scrollHint {
+  margin: var(--space-4) 0 calc(-1 * var(--space-2));
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+}
+
+@media (min-width: 1100px) {
+  .scrollHint {
+    display: none;
+  }
+}
+
+.table {
+  min-width: 960px;
+  font-size: 0.9375rem;
+}
+
+.caption {
+  text-align: left;
+  font-weight: 600;
+  padding: var(--space-3);
+  caption-side: top;
+}
+
+.rowHeader {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 9rem;
+  background: var(--color-cloud);
+  font-weight: 600;
+  vertical-align: top;
+  box-shadow: 1px 0 0 var(--color-border);
+}
+
+.colHeader {
+  min-width: 13rem;
+  vertical-align: top;
+}
+
+.colHeader a {
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.stageLabel {
+  display: block;
+  margin-top: var(--space-1);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.stageLabel[data-stage='learn'] {
+  color: var(--stage-learn);
+}
+
+.stageLabel[data-stage='build'] {
+  color: var(--stage-build);
+}
+
+.stageLabel[data-stage='govern'] {
+  color: var(--stage-govern);
+}
+
+.stageLabel[data-stage='scale'] {
+  color: var(--stage-scale);
+}
+
+.cell {
+  vertical-align: top;
+}
+
+.cellText {
+  margin: var(--space-2) 0 0;
+  line-height: 1.5;
+}
+
+.cellSource {
+  margin: var(--space-2) 0 0;
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+
+.cellSource a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+/* Posture badges: icon plus text; tinted surfaces with dark heading colours (4.5:1 or better). */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--target-min);
+  padding: 0 var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.badgeIcon {
+  flex-shrink: 0;
+}
+
+.enforced {
+  background: var(--tint-green);
+  color: var(--tint-heading-green);
+  border-color: var(--stage-build-tint);
+}
+
+.advisory {
+  background: var(--tint-amber);
+  color: var(--tint-heading-amber);
+  border-color: var(--stage-learn-tint);
+  border-style: dashed;
+}
+
+.illustrative {
+  background: var(--tint-blue);
+  color: var(--tint-heading-blue);
+  border-color: var(--stage-scale-tint);
+  border-style: dotted;
+}
+
+.outsideEnvelope {
+  background: var(--tint-violet);
+  color: var(--tint-heading-violet);
+  border-color: var(--stage-govern-tint);
+  border-style: double;
+}
+
+.notApplicable {
+  background: var(--color-bg-secondary);
+  color: var(--color-text-secondary);
+  border-color: var(--color-border);
+}
+
+/* Legend */
+.legend {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
+  gap: var(--space-3) var(--space-6);
+  margin: var(--space-4) 0;
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-secondary);
+}
+
+.legendItem {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: flex-start;
+}
+
+.legendMeaning {
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+}

@@ -1,0 +1,146 @@
+/* AgentFactoryPage.module.css */
+
+.page {
+  width: 100%;
+  padding-bottom: var(--section-padding-y);
+}
+
+.section {
+  padding: var(--space-10) 0 0;
+}
+
+.section h2 {
+  margin-bottom: var(--space-4);
+}
+
+.prose {
+  max-width: 72ch;
+  color: var(--color-text-primary);
+}
+
+.prose + .prose {
+  margin-top: var(--space-4);
+}
+
+/* How this site groups the four projects */
+.partsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
+  gap: var(--space-4);
+}
+
+.partCard {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-6);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.partCard h3 {
+  font-size: 1.25rem;
+}
+
+.partNumber {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 999px;
+  background: var(--color-midnight);
+  color: var(--color-cloud);
+  font-weight: 700;
+}
+
+.partProjects {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: auto;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+  font-size: 0.9375rem;
+}
+
+.partProjectsLabel {
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.partProjectLink {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--target-min);
+  font-weight: 600;
+}
+
+/* Eight steps */
+.stepsList {
+  max-width: 72ch;
+  margin: var(--space-4) 0;
+  padding-left: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.stepsList li::marker {
+  font-weight: 700;
+  color: var(--stage-scale-ink);
+}
+
+/* Per-project shipping */
+.shipList {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(18rem, 100%), 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+.shipItem {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.shipHeading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.shipHeading h3 {
+  font-size: 1.25rem;
+}
+
+.shipFact {
+  margin-top: auto;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+  font-size: 0.9375rem;
+  color: var(--color-text-secondary);
+}
+
+.shipFactLabel {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+/* Links inside secondary-coloured text need more than colour to stand out. */
+.shipFact a,
+.partProjectsLabel a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}

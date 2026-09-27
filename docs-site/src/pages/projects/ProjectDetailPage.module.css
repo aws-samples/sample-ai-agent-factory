@@ -1,0 +1,267 @@
+/* ProjectDetailPage.module.css */
+
+.page {
+  width: 100%;
+}
+
+.body {
+  max-width: 900px;
+  margin: 0 auto;
+  padding-bottom: var(--section-padding-y);
+}
+
+/* Header actions */
+
+.actionPrimary,
+.actionSecondary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: var(--space-2) var(--space-5);
+  border-radius: var(--radius-md);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+a.actionPrimary,
+:global(.on-dark) a.actionPrimary {
+  background: var(--color-blue);
+  color: #ffffff;
+}
+
+a.actionPrimary:hover,
+:global(.on-dark) a.actionPrimary:hover {
+  background: var(--color-blue-hover);
+  color: #ffffff;
+  text-decoration: underline;
+}
+
+a.actionSecondary {
+  border: 1px solid var(--color-blue);
+  color: var(--color-blue);
+  background: transparent;
+}
+
+:global(.on-dark) a.actionSecondary {
+  border-color: var(--color-cloud);
+  color: var(--color-cloud);
+}
+
+a.actionSecondary:hover,
+:global(.on-dark) a.actionSecondary:hover {
+  text-decoration: underline;
+}
+
+/* Status */
+
+.statusList {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+@media (min-width: 640px) {
+  .statusList {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.statusItem {
+  padding: var(--space-4);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.statusItem dt {
+  margin-bottom: var(--space-1);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.statusItem dd {
+  margin: 0;
+}
+
+.advisories > * + * {
+  margin-top: var(--space-4);
+}
+
+.note {
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+}
+
+/* Quickstart */
+
+.quickstart + .quickstart {
+  margin-top: var(--space-8);
+  padding-top: var(--space-6);
+  border-top: 1px dashed var(--color-border);
+}
+
+.steps {
+  padding-left: var(--space-6);
+  margin-top: var(--space-4);
+}
+
+.steps > li {
+  margin-bottom: var(--space-5);
+}
+
+.steps > li > p + p {
+  margin-top: var(--space-2);
+}
+
+.stepTitle {
+  font-weight: 600;
+}
+
+/* Limitations and docs */
+
+.limitations {
+  list-style: none;
+}
+
+.limitations > li {
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.limitations > li:last-child {
+  border-bottom: 0;
+}
+
+.docList {
+  padding-left: var(--space-6);
+}
+
+.docList > li + li {
+  margin-top: var(--space-2);
+}
+
+/* Other projects */
+
+.others {
+  margin-top: var(--space-8);
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--color-border);
+}
+
+.others h2 {
+  margin-bottom: var(--space-4);
+}
+
+.othersList {
+  list-style: none;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-3);
+}
+
+@media (min-width: 640px) {
+  .othersList {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.otherLink {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  height: 100%;
+  padding: var(--space-4);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  text-decoration: none;
+}
+
+.otherLink:hover {
+  border-color: var(--color-blue);
+  color: var(--color-text-primary);
+  text-decoration: none;
+}
+
+.otherName {
+  font-weight: 600;
+  color: var(--color-blue);
+}
+
+.otherLink:hover .otherName {
+  color: var(--color-blue-hover);
+  text-decoration: underline;
+}
+
+.otherTagline {
+  font-size: 0.9375rem;
+  color: var(--color-text-secondary);
+}
+
+/* Forced-colors mode draws borders but not backgrounds; give the filled button an outline to keep. */
+a.actionPrimary {
+  border: 1px solid transparent;
+}
+
+/* Hero fact rows on the dark band. Hidden below 640px so a phone hero fits in about one viewport;
+   the same facts are repeated with sources in the "At a glance" table further down the page. */
+
+.heroFacts {
+  display: none;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.heroFact {
+  display: grid;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+}
+
+@media (min-width: 640px) {
+  .heroFacts {
+    display: grid;
+  }
+
+  .heroFact {
+    grid-template-columns: minmax(11rem, max-content) 1fr;
+  }
+}
+
+.heroFactLabel {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-cloud);
+  align-self: baseline;
+}
+
+.heroFactValue {
+  margin: 0;
+  color: var(--color-text-inverse);
+}
+
+.heroFactValue em {
+  color: var(--color-cloud);
+}
+
+.heroSource {
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
+.validated {
+  margin-top: var(--space-6);
+}
+
+.validated h3 {
+  margin: 0 0 var(--space-2);
+}

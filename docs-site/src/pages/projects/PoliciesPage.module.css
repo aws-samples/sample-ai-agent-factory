@@ -1,0 +1,16 @@
+/* PoliciesPage.module.css */
+
+.page {
+  width: 100%;
+}
+
+.body {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: var(--space-6) 0 var(--section-padding-y);
+}
+
+.fileHeading code {
+  font-size: 0.85em;
+  padding: 0.125em 0.5em;
+}
