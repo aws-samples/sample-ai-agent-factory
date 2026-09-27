@@ -1,39 +1,14 @@
-import { HashRouter, Route, Routes } from 'react-router-dom';
-import { Layout } from './components/Layout';
-import { HomePage } from './pages/HomePage';
-import { JourneyPage } from './pages/JourneyPage';
-import { HowItWorksPage } from './pages/HowItWorksPage';
-import { ProjectsPage } from './pages/ProjectsPage';
-import { ProjectDetailPage } from './pages/ProjectDetailPage';
-import { CapabilitiesPage } from './pages/CapabilitiesPage';
-import { ArchitecturePage } from './pages/ArchitecturePage';
-import { SecurityPage } from './pages/SecurityPage';
-import { GettingStartedPage } from './pages/GettingStartedPage';
-import { NotFoundPage } from './pages/NotFoundPage';
+import type { ComponentProps } from 'react';
+import { RouterProvider } from 'react-router-dom';
+import { MetaProvider } from './components/PageMeta';
 
-export function AppRoutes() {
-  return (
-    <Routes>
-      <Route path="/" element={<Layout />}>
-        <Route index element={<HomePage />} />
-        <Route path="choose-a-path" element={<JourneyPage />} />
-        <Route path="how-it-works" element={<HowItWorksPage />} />
-        <Route path="projects" element={<ProjectsPage />} />
-        <Route path="projects/:projectId" element={<ProjectDetailPage />} />
-        <Route path="capabilities" element={<CapabilitiesPage />} />
-        <Route path="architecture" element={<ArchitecturePage />} />
-        <Route path="security" element={<SecurityPage />} />
-        <Route path="getting-started" element={<GettingStartedPage />} />
-        <Route path="*" element={<NotFoundPage />} />
-      </Route>
-    </Routes>
-  );
-}
+export type AppRouter = ComponentProps<typeof RouterProvider>['router'];
 
-export function App() {
+/** Client and test root: a data router wrapped in the page-meta provider. */
+export function App({ router }: { router: AppRouter }) {
   return (
-    <HashRouter>
-      <AppRoutes />
-    </HashRouter>
+    <MetaProvider>
+      <RouterProvider router={router} />
+    </MetaProvider>
   );
 }

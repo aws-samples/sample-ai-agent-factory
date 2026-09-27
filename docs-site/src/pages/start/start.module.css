@@ -1,0 +1,542 @@
+/*
+ * Shared styles for the Home and Start pages: one band (section) style, one
+ * tile style, buttons, chips, quickstart steps and the comparison matrix.
+ * Colours come from tokens.css only; text inside `.on-dark` bands inherits the
+ * on-dark token set.
+ */
+
+/* Bands: full-width sections with the token rhythm */
+.band {
+  padding: var(--section-padding-y) 0;
+}
+
+.bandAlt {
+  background: var(--color-bg-secondary);
+  border-top: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.bandDark {
+  background: var(--color-midnight);
+}
+
+.bandTight {
+  padding-top: var(--space-6);
+}
+
+.sectionHead {
+  max-width: 72ch;
+  margin-bottom: var(--space-4);
+}
+
+@media (min-width: 640px) {
+  .sectionHead {
+    margin-bottom: var(--space-6);
+  }
+}
+
+.sectionHead h2 {
+  margin-bottom: var(--space-2);
+}
+
+.lead {
+  color: var(--color-text-secondary);
+  max-width: 72ch;
+}
+
+.prose {
+  max-width: 72ch;
+}
+
+.prose > * + * {
+  margin-top: var(--space-3);
+}
+
+/* Links inside running text carry an underline, not just a colour */
+.lead a,
+.meta a,
+.prose a,
+.stepNote a,
+.stepTitle a,
+.bulletList a,
+.plainList a,
+.tileText a,
+.matrixHint a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+/* In-page section navigation (jump chips) */
+.jump {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-4) 0;
+}
+
+.jumpLabel {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  margin-right: var(--space-1);
+}
+
+/* Chips: compact inline links or labels */
+.chips {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 32px;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  font-size: 0.875rem;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.chip:hover {
+  color: var(--color-blue-hover);
+  border-color: var(--color-blue);
+  text-decoration: underline;
+}
+
+/* Buttons (links styled as buttons) */
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.btnPrimary,
+.btnSecondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-md);
+  font-weight: 600;
+  font-size: 1rem;
+  text-decoration: none;
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.btnPrimary {
+  background: var(--color-blue);
+  color: #ffffff;
+  border: 1px solid var(--color-blue);
+}
+
+.btnPrimary:hover {
+  background: var(--color-blue-hover);
+  border-color: var(--color-blue-hover);
+  color: #ffffff;
+  text-decoration: none;
+}
+
+.btnSecondary {
+  background: transparent;
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-slate);
+}
+
+.btnSecondary:hover {
+  color: var(--color-blue-hover);
+  border-color: var(--color-blue-hover);
+  text-decoration: none;
+}
+
+:global(.on-dark) .btnSecondary {
+  color: var(--color-cloud);
+  border-color: var(--color-mist);
+}
+
+:global(.on-dark) .btnSecondary:hover {
+  color: var(--color-cloud);
+  border-color: var(--color-cloud);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+:global(.on-dark) .btnPrimary:focus-visible,
+:global(.on-dark) .btnSecondary:focus-visible {
+  outline-color: var(--color-cloud);
+}
+
+/* Tile grid: the one card style used by Home and the Start section */
+.tileGrid {
+  list-style: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+}
+
+@media (min-width: 640px) {
+  .tileGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1100px) {
+  .tileGrid4 {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  line-height: 1.4;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-top: 4px solid var(--tile-accent, var(--color-border));
+  border-radius: var(--radius-lg);
+}
+
+.tile[data-stage='learn'] {
+  --tile-accent: var(--stage-learn-tint);
+}
+
+.tile[data-stage='build'] {
+  --tile-accent: var(--stage-build-tint);
+}
+
+.tile[data-stage='govern'] {
+  --tile-accent: var(--stage-govern-tint);
+}
+
+.tile[data-stage='scale'] {
+  --tile-accent: var(--stage-scale-tint);
+}
+
+.tileHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.tileTitle {
+  font-size: 1.0625rem;
+  line-height: 1.3;
+}
+
+.tileTagline {
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+}
+
+.tileText {
+  font-size: 0.875rem;
+}
+
+@media (min-width: 640px) {
+  .tile {
+    gap: var(--space-2);
+    padding: var(--space-4);
+    line-height: 1.45;
+  }
+
+  .tileTitle {
+    font-size: 1.125rem;
+  }
+}
+
+.tileFoot {
+  margin-top: auto;
+  padding-top: var(--space-2);
+}
+
+.tileLink {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--target-min);
+  font-weight: 600;
+}
+
+/* Compact facts inside tiles and table cells */
+.facts {
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-1) 0 0;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+  font-size: 0.8125rem;
+}
+
+@media (min-width: 640px) {
+  .facts {
+    gap: var(--space-2);
+    font-size: 0.875rem;
+  }
+}
+
+.fact {
+  margin: 0;
+}
+
+.factLabel {
+  display: inline;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.factLabel::after {
+  content: ': ';
+}
+
+.factValue {
+  display: inline;
+  margin: 0;
+}
+
+.notDocumented {
+  color: var(--color-text-secondary);
+}
+
+/* A fact's caveat, shown under the value in muted text */
+.factNote {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+}
+
+/* Opt-in variant for the Home tiles: the same caveats appear on the comparison table and the project pages, so keep them for wider screens only */
+.factNote.factNoteCompact {
+  display: none;
+}
+
+@media (min-width: 640px) {
+  .factNote.factNoteCompact {
+    display: block;
+  }
+}
+
+/* Compact row of related links under a quickstart */
+.linkRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  margin-top: var(--space-3);
+  list-style: none;
+  font-size: 0.9375rem;
+}
+
+.linkRow a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--target-min);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.sourceSmall {
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
+.meta {
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+}
+
+/* Project sections on the Start pages */
+.projectSection {
+  padding: var(--space-8) 0;
+  border-top: 1px solid var(--color-border);
+  scroll-margin-top: calc(var(--header-height) + var(--space-4));
+}
+
+.projectSection:first-of-type {
+  border-top: none;
+}
+
+.projectHeading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.subSection {
+  margin-top: var(--space-6);
+}
+
+.subSection > h3 {
+  margin-bottom: var(--space-2);
+}
+
+.subSection > h4 {
+  margin: var(--space-4) 0 var(--space-2);
+}
+
+.subSection > p + p {
+  margin-top: var(--space-2);
+}
+
+/* Quickstart steps */
+.steps {
+  list-style: none;
+  counter-reset: step;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
+}
+
+.step {
+  counter-increment: step;
+  position: relative;
+  min-width: 0;
+  padding-left: var(--space-10);
+}
+
+.step::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--color-midnight);
+  color: var(--color-cloud);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.stepTitle {
+  font-weight: 600;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+}
+
+.stepNote {
+  font-size: 0.9375rem;
+  color: var(--color-text-secondary);
+  margin-top: var(--space-1);
+}
+
+.step :global(pre) {
+  margin: var(--space-2) 0;
+}
+
+/* Plain lists with a bold lead-in per item */
+.bulletList {
+  display: grid;
+  gap: var(--space-3);
+  padding-left: 1.25rem;
+}
+
+.plainList {
+  list-style: none;
+  display: grid;
+  gap: var(--space-3);
+}
+
+.twoCol {
+  display: grid;
+  gap: var(--space-4) var(--space-8);
+}
+
+@media (min-width: 768px) {
+  .twoCol {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/*
+ * Comparison matrix: columns are the four projects, rows are the facts. Fixed
+ * layout gives the four project columns equal widths; the fact label column is
+ * sticky so it stays in view when the table scrolls on narrow screens. At the
+ * container's maximum width the table fits without horizontal scrolling.
+ */
+.matrix {
+  width: 100%;
+  min-width: 860px;
+  table-layout: fixed;
+  font-size: 0.875rem;
+}
+
+/*
+ * The caption belongs to the table, which can be wider than its scroll wrapper on
+ * narrow screens. Capping it at the wrapper's visible width (the container minus the
+ * wrapper border) and pinning it to the left keeps the whole sentence readable.
+ */
+.matrix caption {
+  caption-side: top;
+  position: sticky;
+  left: 0;
+  max-width: calc(100vw - 2 * var(--page-padding-x) - 2px);
+  text-align: left;
+  padding: var(--space-3);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.matrix th,
+.matrix td {
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.matrix thead th:first-child,
+.matrix tbody th {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  width: 150px;
+  background: var(--color-bg-secondary);
+  box-shadow: 1px 0 0 var(--color-border);
+}
+
+.matrix thead th:first-child {
+  background: var(--color-cloud);
+}
+
+.matrixProject {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+}
+
+.matrixHint {
+  margin-top: var(--space-2);
+}
+
+/* Table cells hold a value plus a small source link */
+.cell {
+  display: block;
+}
+
+.cell .sourceSmall {
+  display: inline-block;
+  margin-top: var(--space-1);
+}

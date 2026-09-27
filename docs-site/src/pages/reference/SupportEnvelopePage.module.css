@@ -1,0 +1,185 @@
+/* SupportEnvelopePage.module.css */
+
+.page {
+  width: 100%;
+  padding-bottom: var(--section-padding-y);
+}
+
+.intro {
+  max-width: 72ch;
+  margin: var(--space-6) 0;
+}
+
+/* Jump navigation */
+.jumpNav {
+  margin-bottom: var(--space-4);
+}
+
+.jumpList {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.jumpLink {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 2.25rem;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg-secondary);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.jumpLink:hover {
+  border-color: var(--color-blue);
+  text-decoration: underline;
+}
+
+/* Per-project sections */
+.projectSection {
+  padding: var(--space-10) 0 0;
+  scroll-margin-top: calc(var(--header-height) + var(--space-4));
+}
+
+.projectSection + .projectSection {
+  margin-top: var(--space-6);
+  border-top: 1px solid var(--color-border);
+}
+
+.projectHeading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.projectLinks {
+  margin-bottom: var(--space-4);
+}
+
+.projectLinks a {
+  display: inline-block;
+  min-height: var(--target-min);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.noAdvisories {
+  margin: var(--space-4) 0;
+  color: var(--color-text-secondary);
+}
+
+.advisoryList {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.advisoryList a {
+  font-weight: 600;
+}
+
+.advisorySummary {
+  margin-top: var(--space-1);
+}
+
+.advisorySource {
+  margin-top: var(--space-1);
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+}
+
+/* Limitations */
+.limitationsHeading {
+  margin: var(--space-6) 0 var(--space-3);
+}
+
+.limitationList {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(20rem, 100%), 1fr));
+  gap: var(--space-4);
+}
+
+.limitation {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  scroll-margin-top: calc(var(--header-height) + var(--space-4));
+}
+
+.limitationTitle {
+  font-size: 0.9375rem;
+}
+
+.limitationText {
+  margin: 0;
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--color-mist);
+  font-size: 0.9375rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+/* Validated-envelope bullets (only projects that publish such a list render them). */
+.validatedIntro {
+  margin: var(--space-2) 0 var(--space-3);
+  font-size: 0.9375rem;
+  color: var(--color-text-secondary);
+}
+
+.validatedIntro a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.validatedList {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(20rem, 100%), 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-6);
+}
+
+.validatedItem {
+  padding: var(--space-3);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  scroll-margin-top: calc(var(--header-height) + var(--space-4));
+}
+
+.limitationSource {
+  margin-top: auto;
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.footerNote {
+  margin-top: var(--space-10);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+}
+
+/* Links inside secondary-coloured text need more than colour to stand out. */
+.footerNote a,
+.advisorySource a,
+.limitationSource a,
+.noAdvisories a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}

@@ -1,0 +1,46 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--target-min);
+  padding: 0 var(--space-3);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.badge[data-stage='learn'] {
+  --stage-color: var(--stage-learn);
+  --stage-tint: var(--stage-learn-tint);
+}
+
+.badge[data-stage='build'] {
+  --stage-color: var(--stage-build);
+  --stage-tint: var(--stage-build-tint);
+}
+
+.badge[data-stage='govern'] {
+  --stage-color: var(--stage-govern);
+  --stage-tint: var(--stage-govern-tint);
+}
+
+.badge[data-stage='scale'] {
+  --stage-color: var(--stage-scale);
+  --stage-tint: var(--stage-scale-tint);
+}
+
+.filled {
+  background: var(--stage-color);
+  color: var(--stage-fill-text);
+  /* Transparent border so forced-colors mode still draws a box. */
+  border: 1px solid transparent;
+}
+
+.outline {
+  background: transparent;
+  color: var(--stage-color);
+  border: 1px solid var(--stage-tint);
+}

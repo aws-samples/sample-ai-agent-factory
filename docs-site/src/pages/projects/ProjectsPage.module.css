@@ -1,0 +1,126 @@
+/* ProjectsPage.module.css */
+
+.page {
+  width: 100%;
+}
+
+.grid {
+  list-style: none;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-6);
+}
+
+@media (min-width: 900px) {
+  .grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.card {
+  --card-stage: var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-6);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-top: 4px solid var(--card-stage);
+  border-radius: var(--radius-lg);
+}
+
+.card[data-stage='learn'] {
+  --card-stage: var(--stage-learn-tint);
+}
+
+.card[data-stage='build'] {
+  --card-stage: var(--stage-build-tint);
+}
+
+.card[data-stage='govern'] {
+  --card-stage: var(--stage-govern-tint);
+}
+
+.card[data-stage='scale'] {
+  --card-stage: var(--stage-scale-tint);
+}
+
+.cardTitle {
+  margin: 0;
+  font-size: var(--font-size-h3);
+}
+
+.tagline {
+  color: var(--color-text-secondary);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.facts > div {
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-cloud);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.facts dt {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.facts dd {
+  margin: 0;
+  font-size: 0.9375rem;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: auto;
+  padding-top: var(--space-3);
+}
+
+.primary,
+.secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-md);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+a.primary {
+  background: var(--color-blue);
+  color: #ffffff;
+}
+
+a.primary:hover {
+  background: var(--color-blue-hover);
+  color: #ffffff;
+  text-decoration: underline;
+}
+
+a.secondary {
+  border: 1px solid var(--color-blue);
+  color: var(--color-blue);
+}
+
+a.secondary:hover {
+  text-decoration: underline;
+}
+
+.compare {
+  margin-top: var(--space-8);
+}

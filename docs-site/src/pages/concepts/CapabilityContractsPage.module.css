@@ -1,0 +1,134 @@
+/* CapabilityContractsPage.module.css */
+
+.page {
+  width: 100%;
+  padding-bottom: var(--section-padding-y);
+}
+
+.section {
+  padding: var(--space-10) 0 0;
+}
+
+.section h2 {
+  margin-bottom: var(--space-4);
+}
+
+.prose {
+  max-width: 72ch;
+  margin-bottom: var(--space-4);
+}
+
+/* Canonical contract statement */
+.contractBox {
+  max-width: 80ch;
+  padding: var(--space-6);
+  background: var(--tint-blue);
+  border-left: 4px solid var(--stage-scale-tint);
+  border-radius: var(--radius-md);
+}
+
+.contractBox p + p {
+  margin-top: var(--space-4);
+}
+
+.contractSource {
+  font-size: 0.9375rem;
+  color: var(--color-text-secondary);
+}
+
+.contractSource a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+/* Capability cards */
+.capabilitiesGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(17rem, 100%), 1fr));
+  gap: var(--space-4);
+}
+
+.capabilityCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.capabilityName {
+  font-size: 1.25rem;
+}
+
+.capabilityDescription {
+  color: var(--color-text-primary);
+}
+
+.capabilityMeta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.capabilityMeta dt {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.capabilityMeta dd {
+  margin: 0 0 var(--space-2);
+  font-size: 0.9375rem;
+}
+
+.implTags {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.implTag {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--target-min);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-cloud);
+  border: 1px solid var(--color-border);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+}
+
+.matrixLink {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--target-min);
+  margin-top: auto;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+/* Replacement checklist */
+.checklistBox {
+  max-width: 80ch;
+  padding: var(--space-6);
+  background: var(--tint-amber);
+  border-left: 4px solid var(--stage-learn-tint);
+  border-radius: var(--radius-md);
+}
+
+.checklistBox ul {
+  margin: var(--space-3) 0;
+  padding-left: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}

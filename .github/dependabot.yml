@@ -1,0 +1,13 @@
+# Keeps the SHA-pinned actions in .github/workflows fresh.
+# Only the github-actions ecosystem is covered on purpose; npm and pip updates
+# for the sub-projects are out of scope for this repository configuration.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci

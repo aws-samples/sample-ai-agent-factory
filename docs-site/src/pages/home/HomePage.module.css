@@ -1,0 +1,194 @@
+.page {
+  width: 100%;
+}
+
+/* Atlas band: image from 1024 px, typed stage list below */
+.atlas {
+  padding-top: var(--space-4);
+}
+
+.atlasHeading {
+  margin-bottom: var(--space-3);
+}
+
+.atlasImage {
+  display: none;
+  width: 100%;
+  height: auto;
+}
+
+.stageList {
+  list-style: none;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.atlas .stageLink {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 44px;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-midnight-light);
+  border-radius: var(--radius-md);
+  background: var(--color-midnight-light);
+  color: var(--color-cloud);
+  text-decoration: none;
+}
+
+.atlas .stageLink:hover {
+  border-color: var(--color-mist);
+  color: var(--color-cloud);
+  text-decoration: none;
+}
+
+.atlas .stageLink:hover strong {
+  text-decoration: underline;
+}
+
+.stageLink svg {
+  flex-shrink: 0;
+}
+
+.stageText {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+}
+
+.stageTagline {
+  display: none;
+  color: var(--color-text-inverse-muted);
+  font-size: 0.875rem;
+}
+
+@media (min-width: 640px) {
+  .stageTagline {
+    display: inline;
+  }
+}
+
+@media (min-width: 1024px) {
+  .atlas {
+    padding-top: var(--space-8);
+  }
+
+  .atlasImage {
+    display: block;
+  }
+
+  .stageList {
+    display: none;
+  }
+}
+
+/* Personas: plain text blocks, no card chrome */
+.personas {
+  list-style: none;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.persona {
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+@media (min-width: 640px) {
+  .persona {
+    font-size: 0.9375rem;
+  }
+}
+
+.persona p {
+  color: var(--color-text-secondary);
+}
+
+.personaRole {
+  font-size: 1rem;
+  margin-bottom: var(--space-1);
+}
+
+/* Flows with the sentence so long labels wrap inside narrow columns */
+.personaLink {
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.personaLink svg {
+  vertical-align: middle;
+  margin-left: 2px;
+}
+
+@media (min-width: 640px) {
+  .personas {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-6) var(--space-8);
+  }
+}
+
+@media (min-width: 1100px) {
+  .personas {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: var(--space-6);
+  }
+}
+
+/* Advisories and disclaimer */
+.noticesHeading {
+  margin-bottom: var(--space-2);
+}
+
+.notices :global([role='note']) {
+  margin: var(--space-3) 0 0;
+  font-size: 0.875rem;
+}
+
+@media (min-width: 640px) {
+  .notices :global([role='note']) {
+    font-size: 1rem;
+  }
+}
+
+.advisoryList {
+  padding-left: 1.25rem;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.advisoryList a,
+.notices :global([role='note']) p a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.noticeLinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  list-style: none;
+}
+
+.noticeLinks a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--target-min);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+/* Closing call to action */
+.closing {
+  text-align: center;
+}
+
+.closing h2 {
+  margin-bottom: var(--space-4);
+}
+
+.closingActions {
+  justify-content: center;
+}

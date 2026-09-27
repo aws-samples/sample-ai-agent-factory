@@ -1,27 +1,27 @@
-import { Link } from 'react-router-dom';
 import { Home, ArrowLeft } from 'lucide-react';
+import { HomeLink } from '../components/HomeLink';
+import { PageMeta } from '../components/PageMeta';
 import styles from './NotFoundPage.module.css';
 
 export function NotFoundPage() {
   return (
     <div className={styles.page}>
+      <PageMeta
+        title="Page not found"
+        description="The page you requested does not exist on the AI Agent Factory site."
+        status={404}
+      />
       <div className={styles.content}>
-        <h1 className={styles.title}>Page Not Found</h1>
-        <p className={styles.message}>
-          The page you're looking for doesn't exist or has been moved.
-        </p>
+        <h1 className={styles.title}>Page not found</h1>
+        <p className={styles.message}>The page you are looking for does not exist or has moved.</p>
         <div className={styles.actions}>
-          <Link to="/" className={styles.homeLink}>
+          <HomeLink className={styles.homeLink}>
             <Home size={18} aria-hidden="true" />
             Go to Home
-          </Link>
-          <button
-            type="button"
-            onClick={() => window.history.back()}
-            className={styles.backButton}
-          >
+          </HomeLink>
+          <button type="button" onClick={() => window.history.back()} className={styles.backButton}>
             <ArrowLeft size={18} aria-hidden="true" />
-            Go Back
+            Go back
           </button>
         </div>
       </div>

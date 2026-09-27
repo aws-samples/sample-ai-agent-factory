@@ -1,0 +1,143 @@
+/* GlossaryPage.module.css */
+
+.page {
+  width: 100%;
+  padding-bottom: var(--section-padding-y);
+}
+
+.intro {
+  max-width: 72ch;
+  margin: var(--space-6) 0 var(--space-6);
+}
+
+/* Letter navigation */
+.letterNav {
+  position: sticky;
+  top: var(--header-height);
+  z-index: 5;
+  margin: 0 calc(-1 * var(--page-padding-x));
+  padding: var(--space-2) var(--page-padding-x);
+  background: var(--color-bg-primary);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.letterList {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.letterLink {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  min-height: 2rem;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.letterLink:hover {
+  border-color: var(--color-blue);
+  text-decoration: underline;
+}
+
+/* Letter sections */
+.letterSection {
+  padding-top: var(--space-8);
+}
+
+.letterHeading {
+  padding-bottom: var(--space-2);
+  border-bottom: 2px solid var(--color-midnight);
+  margin-bottom: var(--space-4);
+}
+
+.termList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: 0;
+}
+
+.termEntry {
+  padding: var(--space-5);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  /* Keep the term visible below the sticky letter nav and site header when jumped to. */
+  scroll-margin-top: calc(var(--header-height) + 4rem);
+}
+
+.term {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin-bottom: var(--space-2);
+  scroll-margin-top: calc(var(--header-height) + 4rem);
+}
+
+.definition {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.meaningList {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) 0 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.meaning {
+  display: grid;
+  grid-template-columns: minmax(9rem, auto) 1fr;
+  gap: var(--space-3);
+  align-items: start;
+}
+
+@media (max-width: 640px) {
+  .meaning {
+    grid-template-columns: 1fr;
+    gap: var(--space-1);
+  }
+}
+
+.meaningProject {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.meaningProjectLink {
+  display: inline-block;
+  min-height: var(--target-min);
+  font-weight: 600;
+}
+
+.meaningText {
+  font-size: 0.9375rem;
+}
+
+.seeAlso {
+  font-size: 0.9375rem;
+  color: var(--color-text-secondary);
+}
+
+.seeAlsoLabel {
+  font-weight: 600;
+}
+
+/* Links inside secondary-coloured text need more than colour to stand out. */
+.seeAlso a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}

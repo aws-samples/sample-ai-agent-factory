@@ -1,0 +1,263 @@
+/* Shared styles for the per-project sections and the policies page. */
+
+.section {
+  padding: var(--space-8) 0;
+  border-top: 1px solid var(--color-border);
+  /* In-page links (for example the hero's Quickstart action) land below the sticky header. */
+  scroll-margin-top: calc(var(--header-height) + var(--space-4));
+}
+
+.section:first-child {
+  border-top: 0;
+  padding-top: var(--space-4);
+}
+
+.section h2 {
+  margin-bottom: var(--space-4);
+}
+
+.section h3 {
+  margin: var(--space-6) 0 var(--space-3);
+}
+
+.section p + p,
+.section p + ul,
+.section p + ol,
+.section ul + p,
+.section ol + p {
+  margin-top: var(--space-3);
+}
+
+.prose {
+  max-width: 72ch;
+}
+
+.sources {
+  margin-top: var(--space-2);
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+}
+
+.caption {
+  caption-side: top;
+  padding: var(--space-3);
+  text-align: left;
+  font-weight: 600;
+}
+
+.table code {
+  white-space: nowrap;
+}
+
+.list {
+  padding-left: var(--space-6);
+}
+
+.list > li + li {
+  margin-top: var(--space-2);
+}
+
+.plainList {
+  list-style: none;
+}
+
+.plainList > li {
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.plainList > li:last-child {
+  border-bottom: 0;
+}
+
+.muted {
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+}
+
+.ok,
+.no {
+  font-weight: 600;
+}
+
+.ok {
+  color: var(--stage-build-ink);
+}
+
+.no {
+  color: var(--stage-learn-ink);
+}
+
+.callouts > * + * {
+  margin-top: var(--space-4);
+}
+
+/* Request-flow strip (MCP Gateway hero) */
+
+.flow {
+  --flow-bg: var(--color-bg-secondary);
+  --flow-border: var(--color-border);
+  margin: 0;
+  /* Sized by the header figure slot, so the grid follows the slot width, not the viewport. */
+  container-type: inline-size;
+}
+
+:global(.on-dark) .flow {
+  --flow-bg: rgba(255, 255, 255, 0.06);
+  --flow-border: rgba(255, 255, 255, 0.28);
+}
+
+.flowList {
+  list-style: none;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-2);
+}
+
+@container (min-width: 340px) {
+  .flowList {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@container (min-width: 720px) {
+  .flowList {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.flowStep {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border: 1px solid var(--flow-border);
+  border-radius: var(--radius-md);
+  background: var(--flow-bg);
+}
+
+.flowIndex {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  font-size: 0.75rem;
+  font-weight: 700;
+  background: var(--stage-govern);
+  color: var(--stage-fill-text);
+}
+
+.flowName {
+  font-weight: 600;
+}
+
+.flowDetail {
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+}
+
+/* On phones the strip stacks under the header copy; keep it to the six step names so the
+   hero stays within one viewport. The README link in the caption has the full diagram. */
+@media (max-width: 639.98px) {
+  .flowDetail {
+    display: none;
+  }
+}
+
+.flowCaption {
+  margin-top: var(--space-3);
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+}
+
+/* Notebook groups */
+
+.notebookGroup + .notebookGroup {
+  margin-top: var(--space-4);
+}
+
+.notebookPath {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+}
+
+/* Repository map */
+
+.groups {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-4);
+}
+
+@media (min-width: 640px) {
+  .groups {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 1024px) {
+  .groups {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.group {
+  padding: var(--space-4);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.group h3 {
+  margin: 0 0 var(--space-2);
+  font-size: 1rem;
+}
+
+.group ul {
+  list-style: none;
+}
+
+.group li {
+  padding: var(--space-1) 0;
+}
+
+/* Hero figure wrappers */
+
+.heroFigure {
+  padding: var(--space-2);
+  background: #ffffff;
+  border-radius: var(--radius-md);
+}
+
+.heroFigure img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.heroDownload {
+  margin-top: var(--space-2);
+  font-size: 0.875rem;
+}
+
+/* Evidence section */
+
+.evidenceItem {
+  margin-top: var(--space-6);
+}
+
+.evidenceItem h3 {
+  margin: 0 0 var(--space-2);
+}
+
+/* One-line note under a list item (for example the Module 3b note on the workshop page). */
+.moduleNote {
+  display: block;
+  margin-top: var(--space-1);
+  font-size: 0.9375rem;
+  color: var(--color-text-secondary);
+}
