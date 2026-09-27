@@ -1,6 +1,7 @@
 # AI Agent Factory
 
 Enterprise samples for building, governing, and operating **agentic AI on AWS** — centered on Amazon Bedrock and Amazon Bedrock AgentCore.
+**[Open the Journey documentation](https://aws-samples.github.io/sample-ai-agent-factory/)** — browsing requires no local setup or commands.
 
 ![AI Agent Factory Atlas Journey](assets/repository-atlas-journey.svg)
 
@@ -112,7 +113,7 @@ Each project documents its tested regions, prerequisites, and known limitations.
 
 ## Documentation Site
 
-**[Open the Atlas Journey documentation](https://aws-samples.github.io/sample-ai-agent-factory/)** — browsing requires no local setup or commands.
+**[Open the Journey documentation](https://aws-samples.github.io/sample-ai-agent-factory/)** — browsing requires no local setup or commands.
 
 GitHub Pages publishes the site automatically from `main` after a repository maintainer selects **GitHub Actions** once under **Settings → Pages**. Contributors who want to preview changes locally can follow [`docs-site/README.md`](docs-site/README.md).
 
