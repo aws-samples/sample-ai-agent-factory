@@ -112,20 +112,9 @@ Each project documents its tested regions, prerequisites, and known limitations.
 
 ## Documentation Site
 
-Run the documentation site locally:
+**[Open the Atlas Journey documentation](https://aws-samples.github.io/sample-ai-agent-factory/)** — browsing requires no local setup or commands.
 
-```bash
-cd docs-site
-npm ci
-npm run dev
-# Opens at http://127.0.0.1:5173/sample-ai-agent-factory/
-```
-
-Build:
-```bash
-npm run build    # Output in dist/
-npm run clean    # Remove generated files
-```
+GitHub Pages publishes the site automatically from `main` after a repository maintainer selects **GitHub Actions** once under **Settings → Pages**. Contributors who want to preview changes locally can follow [`docs-site/README.md`](docs-site/README.md).
 
 ## Contributing
 
