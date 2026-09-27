@@ -1,5 +1,6 @@
 import type { Html, Paragraph, Root, RootContent } from 'mdast';
 import type { Plugin } from 'unified';
+import { stripTags } from './stripTags';
 
 const SUMMARY = /<summary(?:\s[^>]*)?>([\s\S]*?)<\/summary>/i;
 const DETAILS_TAGS = /<\/?details(?:\s[^>]*)?>/gi;
@@ -28,7 +29,7 @@ function convert(node: Html): RootContent[] {
   const out: RootContent[] = [];
   const summary = node.value.match(SUMMARY);
   if (summary) {
-    const text = summary[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    const text = stripTags(summary[1]).replace(/\s+/g, ' ').trim();
     if (text) {
       const paragraph: Paragraph = {
         type: 'paragraph',

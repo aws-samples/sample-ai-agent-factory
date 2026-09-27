@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { Plugin } from 'vite';
 import type { DocEntry } from '../content/docs';
 import { normaliseDashes } from '../mdx/normaliseDashes';
+import { stripTags } from '../mdx/stripTags';
 
 const VIRTUAL_ID = 'virtual:repo-index';
 const RESOLVED_ID = '\0' + VIRTUAL_ID;
@@ -147,12 +148,11 @@ function siteText(text: string): string {
 
 /** Removes inline code, emphasis and link syntax from heading text. */
 export function stripInlineMarkdown(text: string): string {
-  return text
+  const withoutMarkdown = text
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/`([^`]*)`/g, '$1')
     .replace(/(\*\*|__)(.*?)\1/g, '$2')
-    .replace(/(\*|_)(.*?)\1/g, '$2')
-    .replace(/<[^>]+>/g, '')
-    .trim();
+    .replace(/(\*|_)(.*?)\1/g, '$2');
+  return stripTags(withoutMarkdown).trim();
 }
