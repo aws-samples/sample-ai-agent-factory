@@ -1,127 +1,274 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
-  <title id="title">Enterprise Agentic AI Platform two-Gateway architecture</title>
-  <desc id="desc">A generated agent in a Workstream account uses MCPClient with AWS IAM authentication to call a Workstream Tool Gateway and LiteLLMModel with Cognito authentication to call a Platform Inference Gateway. A Management and Governance account receives observability through OAM.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1260" viewBox="0 0 1800 1260" role="img" aria-labelledby="title desc">
+  <title id="title">Enterprise Agent Factory architecture at organizational scale</title>
+  <desc id="desc">A layered architecture for hundreds of engineering teams. An enterprise governance foundation spans a shared Agent Factory control plane and many repeatable Workstream cells. The diagram separates software delivery, inference, tool, telemetry, and governance flows and identifies engineering, platform, security, operations, FinOps, and approval ownership.</desc>
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
-    </marker>
-    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
-      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-opacity="0.16"/>
+    <filter id="shadow" x="-15%" y="-15%" width="130%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.12"/>
     </filter>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#15803d"/>
+    </marker>
+    <marker id="arrow-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#c2410c"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrow-slate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#475569"/>
+    </marker>
     <style>
-      .title { font: 700 34px system-ui, sans-serif; fill: #0f172a; }
-      .subtitle { font: 500 18px system-ui, sans-serif; fill: #475569; }
-      .account { fill: #f8fafc; stroke: #64748b; stroke-width: 2; rx: 20; filter: url(#shadow); }
-      .account-title { font: 700 23px system-ui, sans-serif; fill: #0f172a; }
-      .box { fill: #ffffff; stroke: #2563eb; stroke-width: 2; rx: 14; }
-      .gateway { fill: #eff6ff; stroke: #1d4ed8; stroke-width: 3; rx: 16; }
-      .security { fill: #fff7ed; stroke: #c2410c; stroke-width: 2; rx: 14; }
-      .governance { fill: #f0fdf4; stroke: #15803d; stroke-width: 2; rx: 14; }
-      .label { font: 650 18px system-ui, sans-serif; fill: #0f172a; }
-      .small { font: 500 15px system-ui, sans-serif; fill: #334155; }
-      .tiny { font: 500 13px system-ui, sans-serif; fill: #475569; }
-      .arrow { stroke: #334155; stroke-width: 3; fill: none; marker-end: url(#arrow); }
-      .dashed { stroke-dasharray: 9 7; }
-      .tool-path { stroke: #15803d; }
-      .model-path { stroke: #1d4ed8; }
-      .obs-path { stroke: #7c3aed; }
+      text { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .page-title { font-size: 34px; font-weight: 750; fill: #0f172a; }
+      .page-subtitle { font-size: 17px; font-weight: 500; fill: #475569; }
+      .eyebrow { font-size: 13px; font-weight: 750; letter-spacing: 1.5px; fill: #475569; }
+      .section-title { font-size: 22px; font-weight: 750; fill: #0f172a; }
+      .section-subtitle { font-size: 14px; font-weight: 500; fill: #526277; }
+      .card-title { font-size: 17px; font-weight: 700; fill: #14213d; }
+      .card-text { font-size: 13px; font-weight: 500; fill: #44546a; }
+      .small { font-size: 12px; font-weight: 500; fill: #526277; }
+      .tiny { font-size: 11px; font-weight: 600; fill: #526277; }
+      .white-title { font-size: 17px; font-weight: 720; fill: #ffffff; }
+      .white-text { font-size: 12px; font-weight: 520; fill: #e2e8f0; }
+      .org { fill: #f8fafc; stroke: #94a3b8; stroke-width: 2; }
+      .people-rail { fill: #ffffff; stroke: #64748b; stroke-width: 2; }
+      .foundation { fill: #eef2ff; stroke: #4f46e5; stroke-width: 2; }
+      .platform { fill: #eff6ff; stroke: #2563eb; stroke-width: 2.5; }
+      .fleet { fill: #f8fafc; stroke: #16a34a; stroke-width: 2.5; }
+      .person-card { fill: #f8fafc; stroke: #94a3b8; stroke-width: 1.5; }
+      .foundation-card { fill: #ffffff; stroke: #818cf8; stroke-width: 1.5; }
+      .platform-card { fill: #ffffff; stroke: #60a5fa; stroke-width: 1.5; }
+      .inference-card { fill: #1d4ed8; stroke: #1e40af; stroke-width: 2; }
+      .ops-card { fill: #6d28d9; stroke: #5b21b6; stroke-width: 2; }
+      .cell { fill: #ffffff; stroke: #22c55e; stroke-width: 2; }
+      .pipeline-chip { fill: #fff7ed; stroke: #f97316; stroke-width: 1.5; }
+      .runtime-card { fill: #eff6ff; stroke: #3b82f6; stroke-width: 1.5; }
+      .tool-card { fill: #f0fdf4; stroke: #22c55e; stroke-width: 1.5; }
+      .data-card { fill: #f8fafc; stroke: #94a3b8; stroke-width: 1.3; }
+      .scale-strip { fill: #ecfdf5; stroke: #16a34a; stroke-width: 1.5; }
+      .flow-blue { fill: none; stroke: #2563eb; stroke-width: 3; marker-end: url(#arrow-blue); }
+      .flow-green { fill: none; stroke: #15803d; stroke-width: 3; marker-end: url(#arrow-green); }
+      .flow-orange { fill: none; stroke: #c2410c; stroke-width: 3; marker-end: url(#arrow-orange); }
+      .flow-purple { fill: none; stroke: #7c3aed; stroke-width: 3; stroke-dasharray: 9 7; marker-end: url(#arrow-purple); }
+      .flow-slate { fill: none; stroke: #475569; stroke-width: 2.5; stroke-dasharray: 8 7; marker-end: url(#arrow-slate); }
+      .bus-orange { fill: none; stroke: #c2410c; stroke-width: 2.5; }
+      .bus-blue { fill: none; stroke: #2563eb; stroke-width: 2.5; }
+      .legend { font-size: 12px; font-weight: 650; fill: #334155; }
     </style>
   </defs>
 
-  <rect width="1600" height="980" fill="#eef2f7"/>
-  <text x="800" y="54" text-anchor="middle" class="title">Enterprise Agentic AI Platform — D-03 two-Gateway path</text>
-  <text x="800" y="86" text-anchor="middle" class="subtitle">One governed inference boundary; one workstream-owned tools boundary</text>
+  <rect width="1800" height="1260" fill="#f1f5f9"/>
+  <text x="50" y="48" class="page-title">Enterprise Agent Factory — governed self-service at scale</text>
+  <text x="50" y="79" class="page-subtitle">One enterprise control plane · repeatable isolated Workstream cells · hundreds of engineers and many agentic use cases</text>
 
-  <rect x="40" y="125" width="500" height="700" class="account"/>
-  <text x="70" y="166" class="account-title">Workstream account</text>
-  <text x="70" y="194" class="small">Application execution and per-agent state</text>
+  <rect x="24" y="108" width="1752" height="1065" rx="24" class="org"/>
+  <text x="52" y="143" class="eyebrow">AWS ORGANIZATION / ENTERPRISE LANDING ZONE</text>
 
-  <rect x="80" y="235" width="420" height="135" class="box"/>
-  <text x="290" y="272" text-anchor="middle" class="label">AgentCore Runtime</text>
-  <text x="290" y="302" text-anchor="middle" class="small">Generated Strands agent</text>
-  <text x="290" y="329" text-anchor="middle" class="small">Memory + scoped execution role</text>
-  <text x="290" y="354" text-anchor="middle" class="tiny">Only LiteLLMModel and MCPClient</text>
+  <!-- People and ownership rail -->
+  <rect x="52" y="174" width="238" height="927" rx="18" class="people-rail" filter="url(#shadow)"/>
+  <text x="171" y="211" text-anchor="middle" class="section-title">People &amp; ownership</text>
+  <text x="171" y="235" text-anchor="middle" class="small">Federated teams · shared standards</text>
 
-  <rect x="80" y="435" width="190" height="90" class="governance"/>
-  <text x="175" y="471" text-anchor="middle" class="label">MCPClient</text>
-  <text x="175" y="499" text-anchor="middle" class="small">SigV4 / AWS_IAM</text>
+  <rect x="73" y="264" width="196" height="142" rx="13" class="person-card"/>
+  <text x="171" y="299" text-anchor="middle" class="card-title">Hundreds of engineers</text>
+  <text x="171" y="326" text-anchor="middle" class="card-text">Product teams</text>
+  <text x="171" y="348" text-anchor="middle" class="card-text">Domain &amp; data teams</text>
+  <text x="171" y="370" text-anchor="middle" class="card-text">Agent builders</text>
+  <text x="171" y="391" text-anchor="middle" class="tiny">Own use cases and outcomes</text>
 
-  <rect x="310" y="435" width="190" height="90" class="box"/>
-  <text x="405" y="471" text-anchor="middle" class="label">LiteLLMModel</text>
-  <text x="405" y="499" text-anchor="middle" class="small">OpenAI-compatible API</text>
+  <rect x="73" y="432" width="196" height="112" rx="13" class="person-card"/>
+  <text x="171" y="468" text-anchor="middle" class="card-title">Platform engineering</text>
+  <text x="171" y="495" text-anchor="middle" class="card-text">Golden paths · APIs</text>
+  <text x="171" y="518" text-anchor="middle" class="card-text">Shared services · upgrades</text>
 
-  <rect x="80" y="590" width="420" height="125" class="gateway"/>
-  <text x="290" y="629" text-anchor="middle" class="label">AgentCore Tool Gateway</text>
-  <text x="290" y="660" text-anchor="middle" class="small">Workstream-owned · AWS_IAM</text>
-  <text x="290" y="687" text-anchor="middle" class="small">Registry-approved tools · PolicyEngine-ready</text>
+  <rect x="73" y="570" width="196" height="112" rx="13" class="person-card"/>
+  <text x="171" y="606" text-anchor="middle" class="card-title">Security &amp; risk</text>
+  <text x="171" y="633" text-anchor="middle" class="card-text">Policy · threat model</text>
+  <text x="171" y="656" text-anchor="middle" class="card-text">Exceptions · assurance</text>
 
-  <rect x="80" y="748" width="420" height="48" class="governance"/>
-  <text x="290" y="779" text-anchor="middle" class="small">AgentCore Memory — actor-scoped events with customer-managed KMS key</text>
+  <rect x="73" y="708" width="196" height="112" rx="13" class="person-card"/>
+  <text x="171" y="744" text-anchor="middle" class="card-title">SRE &amp; operations</text>
+  <text x="171" y="771" text-anchor="middle" class="card-text">Shared service SLOs</text>
+  <text x="171" y="794" text-anchor="middle" class="card-text">Fleet health · incidents</text>
 
-  <rect x="580" y="125" width="670" height="700" class="account"/>
-  <text x="610" y="166" class="account-title">Platform account</text>
-  <text x="610" y="194" class="small">Shared governance, inference, Registry, and pipelines</text>
+  <rect x="73" y="846" width="196" height="112" rx="13" class="person-card"/>
+  <text x="171" y="882" text-anchor="middle" class="card-title">FinOps</text>
+  <text x="171" y="909" text-anchor="middle" class="card-text">Budgets · allocation</text>
+  <text x="171" y="932" text-anchor="middle" class="card-text">Portfolio economics</text>
 
-  <rect x="620" y="235" width="270" height="90" class="security"/>
-  <text x="755" y="271" text-anchor="middle" class="label">AgentCore Identity</text>
-  <text x="755" y="299" text-anchor="middle" class="small">Workload token → Cognito M2M</text>
+  <rect x="73" y="984" width="196" height="88" rx="13" class="person-card"/>
+  <text x="171" y="1019" text-anchor="middle" class="card-title">Human approvers</text>
+  <text x="171" y="1046" text-anchor="middle" class="card-text">Evidence-based release</text>
 
-  <rect x="930" y="235" width="280" height="90" class="governance"/>
-  <text x="1070" y="271" text-anchor="middle" class="label">AWS Agent Registry</text>
-  <text x="1070" y="299" text-anchor="middle" class="small">Approved tool governance records</text>
+  <!-- Enterprise foundation -->
+  <rect x="318" y="174" width="1428" height="158" rx="18" class="foundation" filter="url(#shadow)"/>
+  <text x="346" y="207" class="section-title">Enterprise governance foundation</text>
+  <text x="346" y="231" class="section-subtitle">Preventive controls and shared assurance applied across Platform and every Workstream cell</text>
 
-  <rect x="620" y="390" width="590" height="135" class="gateway"/>
-  <text x="915" y="431" text-anchor="middle" class="label">AgentCore Inference Gateway</text>
-  <text x="915" y="462" text-anchor="middle" class="small">Platform-owned · CUSTOM_JWT</text>
-  <text x="915" y="490" text-anchor="middle" class="small">Native model allocation + zero-rate fallback</text>
+  <rect x="346" y="250" width="310" height="60" rx="11" class="foundation-card"/>
+  <text x="501" y="276" text-anchor="middle" class="card-title">Organizations &amp; Identity Center</text>
+  <text x="501" y="297" text-anchor="middle" class="small">OUs · SCPs · workforce access</text>
 
-  <rect x="620" y="590" width="275" height="125" class="security"/>
-  <text x="757" y="627" text-anchor="middle" class="label">REQUEST interceptor</text>
-  <text x="757" y="658" text-anchor="middle" class="small">Bedrock ApplyGuardrail</text>
-  <text x="757" y="685" text-anchor="middle" class="small">Fail closed before inference</text>
+  <rect x="678" y="250" width="310" height="60" rx="11" class="foundation-card"/>
+  <text x="833" y="276" text-anchor="middle" class="card-title">Security baseline</text>
+  <text x="833" y="297" text-anchor="middle" class="small">IAM · KMS · Guardrails · posture</text>
 
-  <rect x="935" y="590" width="275" height="125" class="box"/>
-  <text x="1072" y="627" text-anchor="middle" class="label">Bedrock Mantle target</text>
-  <text x="1072" y="658" text-anchor="middle" class="small">In-region model route</text>
-  <text x="1072" y="685" text-anchor="middle" class="small">Gateway IAM role allow-list</text>
+  <rect x="1010" y="250" width="310" height="60" rx="11" class="foundation-card"/>
+  <text x="1165" y="276" text-anchor="middle" class="card-title">Audit &amp; observability</text>
+  <text x="1165" y="297" text-anchor="middle" class="small">CloudTrail · log archive · OAM</text>
 
-  <rect x="620" y="748" width="590" height="48" class="governance"/>
-  <text x="915" y="779" text-anchor="middle" class="small">Platform + Workload pipelines — synth, evaluation, approval, rollback, teardown</text>
+  <rect x="1342" y="250" width="376" height="60" rx="11" class="foundation-card"/>
+  <text x="1530" y="276" text-anchor="middle" class="card-title">Portfolio governance</text>
+  <text x="1530" y="297" text-anchor="middle" class="small">Risk tiers · budgets · ownership · lifecycle</text>
 
-  <rect x="1290" y="125" width="270" height="700" class="account"/>
-  <text x="1425" y="166" text-anchor="middle" class="account-title">Management</text>
-  <text x="1425" y="194" text-anchor="middle" class="small">Governance and audit</text>
+  <!-- Platform control plane -->
+  <rect x="318" y="364" width="1428" height="300" rx="20" class="platform" filter="url(#shadow)"/>
+  <text x="346" y="400" class="section-title">Agent Factory control plane</text>
+  <text x="346" y="425" class="section-subtitle">Built and operated once per supported Platform environment; consumed through versioned interfaces, not deployment tickets</text>
 
-  <rect x="1325" y="255" width="200" height="105" class="governance"/>
-  <text x="1425" y="293" text-anchor="middle" class="label">CloudWatch OAM</text>
-  <text x="1425" y="322" text-anchor="middle" class="small">Logs · Metrics · Traces</text>
+  <rect x="346" y="450" width="240" height="145" rx="14" class="platform-card"/>
+  <text x="466" y="481" text-anchor="middle" class="card-title">Self-service &amp; golden paths</text>
+  <text x="466" y="510" text-anchor="middle" class="card-text">Templates · CLI · portal</text>
+  <text x="466" y="533" text-anchor="middle" class="card-text">Repository bootstrap</text>
+  <text x="466" y="556" text-anchor="middle" class="card-text">Supported versions</text>
+  <text x="466" y="579" text-anchor="middle" class="tiny">Paved road for every team</text>
 
-  <rect x="1325" y="420" width="200" height="105" class="security"/>
-  <text x="1425" y="458" text-anchor="middle" class="label">Organizations</text>
-  <text x="1425" y="487" text-anchor="middle" class="small">SCPs + account guardrails</text>
+  <rect x="608" y="450" width="240" height="145" rx="14" class="platform-card"/>
+  <text x="728" y="481" text-anchor="middle" class="card-title">Governance catalog</text>
+  <text x="728" y="510" text-anchor="middle" class="card-text">AWS Agent Registry</text>
+  <text x="728" y="533" text-anchor="middle" class="card-text">Models · tools · Guardrails</text>
+  <text x="728" y="556" text-anchor="middle" class="card-text">Owners · lifecycle states</text>
+  <text x="728" y="579" text-anchor="middle" class="tiny">Approved capability contracts</text>
 
-  <rect x="1325" y="585" width="200" height="105" class="box"/>
-  <text x="1425" y="623" text-anchor="middle" class="label">Audit archive</text>
-  <text x="1425" y="652" text-anchor="middle" class="small">CloudTrail + log archive</text>
+  <rect x="870" y="450" width="270" height="145" rx="14" class="platform-card"/>
+  <text x="1005" y="481" text-anchor="middle" class="card-title">Software supply chain</text>
+  <text x="1005" y="510" text-anchor="middle" class="card-text">CodeConnections · pipelines</text>
+  <text x="1005" y="533" text-anchor="middle" class="card-text">Policy · image · evaluation gates</text>
+  <text x="1005" y="556" text-anchor="middle" class="card-text">Approval · rollback · teardown</text>
+  <text x="1005" y="579" text-anchor="middle" class="tiny">One release contract</text>
 
-  <path d="M 290 370 L 175 435" class="arrow tool-path"/>
-  <path d="M 290 370 L 405 435" class="arrow model-path"/>
-  <path d="M 175 525 L 175 590" class="arrow tool-path"/>
-  <path d="M 405 435 C 470 350, 560 285, 620 280" class="arrow model-path"/>
-  <path d="M 755 325 L 835 390" class="arrow model-path"/>
-  <path d="M 915 525 L 757 590" class="arrow model-path"/>
-  <path d="M 895 652 L 935 652" class="arrow model-path"/>
-  <path d="M 500 652 C 610 652, 845 345, 1070 325" class="arrow tool-path dashed"/>
-  <path d="M 1210 458 C 1260 400, 1270 330, 1325 310" class="arrow obs-path dashed"/>
-  <path d="M 500 715 C 850 865, 1190 810, 1325 340" class="arrow obs-path dashed"/>
+  <rect x="1162" y="450" width="250" height="145" rx="14" class="inference-card"/>
+  <text x="1287" y="481" text-anchor="middle" class="white-title">Shared inference</text>
+  <text x="1287" y="510" text-anchor="middle" class="white-text">AgentCore Identity</text>
+  <text x="1287" y="533" text-anchor="middle" class="white-text">Cognito M2M</text>
+  <text x="1287" y="556" text-anchor="middle" class="white-text">Inference Gateway + Guardrail</text>
+  <text x="1287" y="579" text-anchor="middle" class="white-text">Allow-listed Bedrock targets</text>
 
-  <text x="575" y="576" class="small" fill="#15803d">tools/list + tools/call</text>
-  <text x="516" y="338" class="small" fill="#1d4ed8">short-lived inference token</text>
-  <text x="802" y="570" class="small" fill="#1d4ed8">guarded inference</text>
-  <text x="1185" y="355" class="tiny" fill="#15803d">approved descriptors and exact alias ARNs</text>
-  <text x="1235" y="785" class="small" fill="#7c3aed">OAM links</text>
+  <rect x="1434" y="450" width="284" height="145" rx="14" class="ops-card"/>
+  <text x="1576" y="481" text-anchor="middle" class="white-title">Fleet operations</text>
+  <text x="1576" y="510" text-anchor="middle" class="white-text">Logs · metrics · traces</text>
+  <text x="1576" y="533" text-anchor="middle" class="white-text">Quotas · security signals</text>
+  <text x="1576" y="556" text-anchor="middle" class="white-text">Cost · support · SLOs</text>
+  <text x="1576" y="579" text-anchor="middle" class="white-text">Cross-account OAM views</text>
 
-  <rect x="40" y="870" width="1520" height="70" fill="#ffffff" stroke="#94a3b8" rx="14"/>
-  <text x="70" y="901" class="small">Security boundary: no direct Bedrock or Lambda invocation from generated agents.</text>
-  <text x="70" y="928" class="small">Promotion boundary: every Workstream mutation flows through GitHub → Workload pipeline → nonproduction evaluation → approval → production.</text>
+  <rect x="346" y="614" width="1372" height="30" rx="10" fill="#dbeafe" stroke="#60a5fa"/>
+  <text x="1032" y="634" text-anchor="middle" class="small">Platform owns standards, compatibility and shared services · product teams own agents, tools, data and outcomes</text>
+
+  <!-- Workstream fleet -->
+  <rect x="318" y="708" width="1428" height="402" rx="20" class="fleet" filter="url(#shadow)"/>
+  <text x="346" y="744" class="section-title">Workstream fleet — repeatable isolated cells (1 … N)</text>
+  <text x="346" y="769" class="section-subtitle">Scale horizontally by product, domain, regulatory boundary or portfolio; each cell retains independent release and failure boundaries</text>
+
+  <!-- Cell A -->
+  <rect x="346" y="792" width="424" height="282" rx="16" class="cell"/>
+  <text x="370" y="824" class="card-title">Product / domain A</text>
+  <text x="745" y="824" text-anchor="end" class="tiny">TEAM OWNED</text>
+  <rect x="370" y="842" width="376" height="43" rx="10" class="pipeline-chip"/>
+  <text x="558" y="869" text-anchor="middle" class="card-title">Workload pipeline · nonprod → evidence → prod</text>
+  <rect x="370" y="913" width="170" height="80" rx="12" class="runtime-card"/>
+  <text x="455" y="942" text-anchor="middle" class="card-title">Runtime + Memory</text>
+  <text x="455" y="966" text-anchor="middle" class="small">Agent identities · state</text>
+  <text x="455" y="985" text-anchor="middle" class="tiny">LiteLLMModel · MCPClient</text>
+  <rect x="568" y="913" width="178" height="80" rx="12" class="tool-card"/>
+  <text x="657" y="942" text-anchor="middle" class="card-title">Tool Gateway</text>
+  <text x="657" y="966" text-anchor="middle" class="small">AWS_IAM · PolicyEngine</text>
+  <text x="657" y="985" text-anchor="middle" class="tiny">Exact approved aliases</text>
+  <rect x="568" y="1010" width="178" height="43" rx="10" class="data-card"/>
+  <text x="657" y="1037" text-anchor="middle" class="card-text">Tools · APIs · data</text>
+
+  <!-- Cell B -->
+  <rect x="794" y="792" width="424" height="282" rx="16" class="cell"/>
+  <text x="818" y="824" class="card-title">Product / domain B</text>
+  <text x="1193" y="824" text-anchor="end" class="tiny">TEAM OWNED</text>
+  <rect x="818" y="842" width="376" height="43" rx="10" class="pipeline-chip"/>
+  <text x="1006" y="869" text-anchor="middle" class="card-title">Workload pipeline · nonprod → evidence → prod</text>
+  <rect x="818" y="913" width="170" height="80" rx="12" class="runtime-card"/>
+  <text x="903" y="942" text-anchor="middle" class="card-title">Runtime + Memory</text>
+  <text x="903" y="966" text-anchor="middle" class="small">Agent identities · state</text>
+  <text x="903" y="985" text-anchor="middle" class="tiny">LiteLLMModel · MCPClient</text>
+  <rect x="1016" y="913" width="178" height="80" rx="12" class="tool-card"/>
+  <text x="1105" y="942" text-anchor="middle" class="card-title">Tool Gateway</text>
+  <text x="1105" y="966" text-anchor="middle" class="small">AWS_IAM · PolicyEngine</text>
+  <text x="1105" y="985" text-anchor="middle" class="tiny">Exact approved aliases</text>
+  <rect x="1016" y="1010" width="178" height="43" rx="10" class="data-card"/>
+  <text x="1105" y="1037" text-anchor="middle" class="card-text">Tools · APIs · data</text>
+
+  <!-- Cell N -->
+  <rect x="1242" y="792" width="476" height="282" rx="16" class="cell"/>
+  <text x="1266" y="824" class="card-title">Additional Workstream cells</text>
+  <text x="1693" y="824" text-anchor="end" class="tiny">REPEAT 1 … N</text>
+  <rect x="1266" y="842" width="428" height="43" rx="10" class="pipeline-chip"/>
+  <text x="1480" y="869" text-anchor="middle" class="card-title">Same versioned baseline and release contract</text>
+  <rect x="1266" y="913" width="188" height="80" rx="12" class="runtime-card"/>
+  <text x="1360" y="942" text-anchor="middle" class="card-title">Runtime + Memory</text>
+  <text x="1360" y="966" text-anchor="middle" class="small">Cell-scoped identity</text>
+  <text x="1360" y="985" text-anchor="middle" class="tiny">Independent lifecycle</text>
+  <rect x="1480" y="913" width="214" height="80" rx="12" class="tool-card"/>
+  <text x="1587" y="942" text-anchor="middle" class="card-title">Tool Gateway</text>
+  <text x="1587" y="966" text-anchor="middle" class="small">Approved capability set</text>
+  <text x="1587" y="985" text-anchor="middle" class="tiny">Bounded blast radius</text>
+  <rect x="1480" y="1010" width="214" height="43" rx="10" class="data-card"/>
+  <text x="1587" y="1037" text-anchor="middle" class="card-text">Team-owned tools &amp; data</text>
+
+  <!-- People flows routed through the ownership gutter -->
+  <path d="M269 335 H300 V522 H346" class="flow-slate"/>
+  <path d="M269 1028 H300 V680 H858 V522 H870" class="flow-orange"/>
+  <text x="312" y="674" class="tiny">evidence-based approval</text>
+
+  <!-- Governance foundation flows -->
+  <path d="M1718 310 V348 Q1718 360 1706 364" class="flow-slate"/>
+  <path d="M1730 332 V688 Q1730 700 1718 708" class="flow-slate"/>
+  <text x="1739" y="525" transform="rotate(90 1739 525)" class="tiny">enterprise controls</text>
+
+  <!-- Delivery bus lands on every cell pipeline -->
+  <path d="M1005 595 V780" class="bus-orange"/>
+  <path d="M558 780 H1480" class="bus-orange"/>
+  <path d="M558 780 V842" class="flow-orange"/>
+  <path d="M1006 780 V842" class="flow-orange"/>
+  <path d="M1480 780 V842" class="flow-orange"/>
+  <text x="1022" y="675" class="tiny">versioned software delivery</text>
+
+  <!-- Fleet-level inference and telemetry aggregation -->
+  <path d="M1338 708 V686 H1287 V595" class="flow-blue"/>
+  <text x="1180" y="681" class="tiny">all cell inference traffic</text>
+  <path d="M1662 708 V668 H1576 V595" class="flow-purple"/>
+  <text x="1587" y="662" class="tiny">fleet telemetry</text>
+
+  <!-- Tool flows stay inside each Workstream cell -->
+  <path d="M540 953 H568" class="flow-green"/>
+  <path d="M657 993 V1010" class="flow-green"/>
+  <path d="M988 953 H1016" class="flow-green"/>
+  <path d="M1105 993 V1010" class="flow-green"/>
+  <path d="M1454 953 H1480" class="flow-green"/>
+  <path d="M1587 993 V1010" class="flow-green"/>
+
+  <!-- Scale strip -->
+  <rect x="318" y="1125" width="1428" height="33" rx="10" class="scale-strip"/>
+  <text x="1032" y="1147" text-anchor="middle" class="card-text">Scale unit: repeatable Workstream cell · delegated ownership · account-level isolation · central policy · fleet visibility · chargeback</text>
+
+  <!-- Legend -->
+  <line x1="58" y1="1212" x2="104" y2="1212" stroke="#c2410c" stroke-width="3" marker-end="url(#arrow-orange)"/>
+  <text x="116" y="1217" class="legend">software delivery</text>
+  <line x1="280" y1="1212" x2="326" y2="1212" stroke="#2563eb" stroke-width="3" marker-end="url(#arrow-blue)"/>
+  <text x="338" y="1217" class="legend">inference</text>
+  <line x1="458" y1="1212" x2="504" y2="1212" stroke="#15803d" stroke-width="3" marker-end="url(#arrow-green)"/>
+  <text x="516" y="1217" class="legend">tool calls</text>
+  <line x1="650" y1="1212" x2="696" y2="1212" stroke="#7c3aed" stroke-width="3" stroke-dasharray="9 7" marker-end="url(#arrow-purple)"/>
+  <text x="708" y="1217" class="legend">telemetry</text>
+  <line x1="828" y1="1212" x2="874" y2="1212" stroke="#475569" stroke-width="2.5" stroke-dasharray="8 7" marker-end="url(#arrow-slate)"/>
+  <text x="886" y="1217" class="legend">governance &amp; ownership</text>
+  <text x="1742" y="1217" text-anchor="end" class="small">Logical reference architecture · replicate Regions only after independent validation</text>
 </svg>
