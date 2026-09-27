@@ -1,0 +1,252 @@
+/* HowItWorksPage.module.css */
+
+.page {
+  width: 100%;
+}
+
+.header {
+  background: var(--color-midnight);
+  color: var(--color-text-inverse);
+  padding: var(--space-12) var(--space-4);
+  text-align: center;
+}
+
+.headerContent {
+  max-width: 700px;
+  margin: 0 auto;
+}
+
+.header h1 {
+  font-size: 2.5rem;
+  margin-bottom: var(--space-4);
+}
+
+.header p {
+  font-size: 1.125rem;
+  color: var(--color-mist);
+}
+
+.content {
+  padding: var(--space-12) var(--space-4);
+  background: var(--color-bg-primary);
+}
+
+.contentContent {
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.section {
+  margin-bottom: var(--space-12);
+}
+
+.section h2 {
+  font-size: 1.75rem;
+  margin-bottom: var(--space-4);
+}
+
+.section p {
+  font-size: 1rem;
+  color: var(--color-text-secondary);
+  line-height: 1.7;
+  margin-bottom: var(--space-4);
+}
+
+.section p strong {
+  color: var(--color-text-primary);
+}
+
+.partsGrid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-6);
+}
+
+@media (min-width: 768px) {
+  .partsGrid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.partCard {
+  position: relative;
+  padding: var(--space-6);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.partNumber {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: var(--color-blue);
+  color: white;
+  font-weight: 700;
+  font-size: 0.875rem;
+  border-radius: 50%;
+  margin-bottom: var(--space-3);
+}
+
+.partCard h3 {
+  font-size: 1.125rem;
+  margin-bottom: var(--space-2);
+}
+
+.partCard p {
+  font-size: 0.875rem;
+  margin-bottom: var(--space-2);
+}
+
+.partProjects {
+  font-size: 0.8125rem;
+  color: var(--color-blue);
+}
+
+.contractBox {
+  padding: var(--space-6);
+  background: rgba(37, 99, 235, 0.05);
+  border: 1px solid rgba(37, 99, 235, 0.2);
+  border-radius: var(--radius-lg);
+}
+
+.contractBox h4 {
+  font-size: 1rem;
+  color: var(--color-blue);
+  margin-bottom: var(--space-3);
+}
+
+.contractBox p {
+  font-size: 0.9375rem;
+  margin-bottom: var(--space-3);
+}
+
+.contractBox p:last-child {
+  margin-bottom: 0;
+}
+
+.contractBox em {
+  color: var(--color-text-primary);
+  font-style: normal;
+  font-weight: 600;
+}
+
+.stepsList {
+  counter-reset: step-counter;
+  list-style: none;
+}
+
+.stepsList li {
+  counter-increment: step-counter;
+  position: relative;
+  padding: var(--space-4) 0 var(--space-4) var(--space-12);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.stepsList li:last-child {
+  border-bottom: none;
+}
+
+.stepsList li::before {
+  content: counter(step-counter);
+  position: absolute;
+  left: 0;
+  top: var(--space-4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: var(--color-midnight);
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 700;
+  border-radius: 50%;
+}
+
+.stepsList li strong {
+  color: var(--color-text-primary);
+}
+
+.bulletList {
+  list-style: none;
+}
+
+.bulletList li {
+  position: relative;
+  padding: var(--space-3) 0 var(--space-3) var(--space-6);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.bulletList li:last-child {
+  border-bottom: none;
+}
+
+.bulletList li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: calc(var(--space-3) + 0.5em);
+  width: 8px;
+  height: 8px;
+  background: var(--color-blue);
+  border-radius: 50%;
+}
+
+.bulletList li strong {
+  color: var(--color-text-primary);
+}
+
+.ctaSection {
+  text-align: center;
+  padding: var(--space-12);
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-xl);
+}
+
+.ctaSection h2 {
+  margin-bottom: var(--space-6);
+}
+
+.ctaButtons {
+  display: flex;
+  gap: var(--space-4);
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.ctaPrimary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-6);
+  font-weight: 600;
+  color: white;
+  background: var(--color-blue);
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast);
+}
+
+.ctaPrimary:hover {
+  background: var(--color-blue-light);
+  text-decoration: none;
+}
+
+.ctaSecondary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-6);
+  font-weight: 500;
+  color: var(--color-text-primary);
+  background: var(--color-mist);
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast);
+}
+
+.ctaSecondary:hover {
+  background: var(--color-border);
+  text-decoration: none;
+}

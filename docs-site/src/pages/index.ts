@@ -1,0 +1,10 @@
+export { HomePage } from './HomePage';
+export { JourneyPage } from './JourneyPage';
+export { HowItWorksPage } from './HowItWorksPage';
+export { ProjectsPage } from './ProjectsPage';
+export { ProjectDetailPage } from './ProjectDetailPage';
+export { CapabilitiesPage } from './CapabilitiesPage';
+export { ArchitecturePage } from './ArchitecturePage';
+export { SecurityPage } from './SecurityPage';
+export { GettingStartedPage } from './GettingStartedPage';
+export { NotFoundPage } from './NotFoundPage';

@@ -1,0 +1,201 @@
+/* CapabilitiesPage.module.css */
+
+.page {
+  width: 100%;
+}
+
+.header {
+  background: var(--color-midnight);
+  color: var(--color-text-inverse);
+  padding: var(--space-12) var(--space-4);
+  text-align: center;
+}
+
+.headerContent {
+  max-width: 700px;
+  margin: 0 auto;
+}
+
+.header h1 {
+  font-size: 2.5rem;
+  margin-bottom: var(--space-4);
+}
+
+.header p {
+  font-size: 1.125rem;
+  color: var(--color-mist);
+}
+
+.content {
+  padding: var(--space-12) var(--space-4);
+  background: var(--color-bg-primary);
+}
+
+.contentContent {
+  max-width: var(--max-width);
+  margin: 0 auto;
+}
+
+.introSection {
+  margin-bottom: var(--space-12);
+}
+
+.introBox {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: var(--space-6);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.introBox h2 {
+  font-size: 1.25rem;
+  margin-bottom: var(--space-4);
+}
+
+.introBox p {
+  font-size: 0.9375rem;
+  color: var(--color-text-secondary);
+  line-height: 1.7;
+  margin-bottom: var(--space-3);
+}
+
+.introBox p:last-child {
+  margin-bottom: 0;
+}
+
+.introBox strong {
+  color: var(--color-text-primary);
+}
+
+.capabilitiesSection {
+  margin-bottom: var(--space-12);
+}
+
+.capabilitiesGrid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-6);
+}
+
+@media (min-width: 768px) {
+  .capabilitiesGrid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.capabilityCard {
+  padding: var(--space-6);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.capabilityName {
+  font-size: 1.25rem;
+  margin-bottom: var(--space-2);
+  color: var(--color-blue);
+}
+
+.capabilityDescription {
+  font-size: 0.9375rem;
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-4);
+  line-height: 1.6;
+}
+
+.capabilityMeta {
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.metaItem {
+  margin-bottom: var(--space-4);
+}
+
+.metaItem h4 {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-2);
+}
+
+.implTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.implTag {
+  display: inline-block;
+  padding: var(--space-1) var(--space-2);
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  background: var(--color-mist);
+  border-radius: var(--radius-sm);
+}
+
+.contractNote {
+  margin-top: var(--space-3);
+}
+
+.contractNote h4 {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-2);
+}
+
+.contractNote p {
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.noticeSection {
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.noticeBox {
+  padding: var(--space-6);
+  background: rgba(234, 88, 12, 0.05);
+  border: 1px solid rgba(234, 88, 12, 0.2);
+  border-radius: var(--radius-lg);
+}
+
+.noticeBox h3 {
+  font-size: 1rem;
+  color: var(--color-amber);
+  margin-bottom: var(--space-4);
+}
+
+.noticeBox p {
+  font-size: 0.9375rem;
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-3);
+}
+
+.noticeBox ul {
+  list-style: none;
+}
+
+.noticeBox li {
+  position: relative;
+  padding: var(--space-2) 0 var(--space-2) var(--space-5);
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+}
+
+.noticeBox li::before {
+  content: '•';
+  position: absolute;
+  left: 0;
+  color: var(--color-amber);
+  font-weight: bold;
+}

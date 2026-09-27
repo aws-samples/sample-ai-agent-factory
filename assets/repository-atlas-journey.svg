@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 700" role="img" aria-labelledby="atlas-title atlas-desc">
+  <title id="atlas-title">AI Agent Factory Atlas Journey</title>
+  <desc id="atlas-desc">A visual map showing four complementary projects that together form a complete AI Agent Factory: Learn (Workshop), Build (Self-Service), Govern (MCP Gateway), and Scale (Enterprise Blueprint). Each project addresses a different stage of the enterprise journey from learning to production-scale operations.</desc>
+
+  <defs>
+    <!-- Semantic color tokens as CSS variables equivalent -->
+    <!-- midnight: #0B1220, cloud: #F5F7FB, blue: #2563EB, green: #16A34A, violet: #6D28D9, amber: #EA580C, slate: #475569, mist: #D7DEE8 -->
+
+    <linearGradient id="midnight-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0B1220;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1a2744;stop-opacity:1" />
+    </linearGradient>
+
+    <linearGradient id="amber-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#EA580C;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#f97316;stop-opacity:1" />
+    </linearGradient>
+
+    <linearGradient id="green-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#16A34A;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#22c55e;stop-opacity:1" />
+    </linearGradient>
+
+    <linearGradient id="violet-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6D28D9;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#8b5cf6;stop-opacity:1" />
+    </linearGradient>
+
+    <linearGradient id="blue-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#2563EB;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3b82f6;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Grid pattern for technical aesthetic -->
+    <pattern id="grid-pattern" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e3a5f" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+
+    <!-- Node connection markers -->
+    <marker id="arrow-amber" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#EA580C"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#16A34A"/>
+    </marker>
+    <marker id="arrow-violet" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#6D28D9"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#2563EB"/>
+    </marker>
+
+    <!-- Drop shadow filter -->
+    <filter id="card-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="700" fill="url(#midnight-gradient)"/>
+  <rect width="1200" height="700" fill="url(#grid-pattern)"/>
+
+  <!-- Title area -->
+  <text x="600" y="50" text-anchor="middle" fill="#F5F7FB" font-family="system-ui, -apple-system, sans-serif" font-size="28" font-weight="600">AI Agent Factory Atlas</text>
+  <text x="600" y="78" text-anchor="middle" fill="#D7DEE8" font-family="system-ui, -apple-system, sans-serif" font-size="14">Four complementary projects for enterprise agentic AI on AWS</text>
+
+  <!-- Central capability hub -->
+  <g transform="translate(600,380)">
+    <circle cx="0" cy="0" r="90" fill="#1a2744" stroke="#475569" stroke-width="2"/>
+    <text x="0" y="-25" text-anchor="middle" fill="#F5F7FB" font-family="system-ui, sans-serif" font-size="14" font-weight="600">Agent Factory</text>
+    <text x="0" y="-5" text-anchor="middle" fill="#F5F7FB" font-family="system-ui, sans-serif" font-size="14" font-weight="600">Capabilities</text>
+    <text x="0" y="20" text-anchor="middle" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">LLM Gateway</text>
+    <text x="0" y="34" text-anchor="middle" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">Tool Gateway</text>
+    <text x="0" y="48" text-anchor="middle" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">Identity + Registry</text>
+    <text x="0" y="62" text-anchor="middle" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">Policy + Observability</text>
+  </g>
+
+  <!-- Connection paths from center to cards -->
+  <!-- Learn path -->
+  <path d="M 510 350 Q 350 300 200 250" fill="none" stroke="#EA580C" stroke-width="2" stroke-dasharray="8,4" opacity="0.7"/>
+  <!-- Build path -->
+  <path d="M 510 410 Q 350 460 200 520" fill="none" stroke="#16A34A" stroke-width="2" stroke-dasharray="8,4" opacity="0.7"/>
+  <!-- Govern path -->
+  <path d="M 690 410 Q 850 460 1000 520" fill="none" stroke="#6D28D9" stroke-width="2" stroke-dasharray="8,4" opacity="0.7"/>
+  <!-- Scale path -->
+  <path d="M 690 350 Q 850 300 1000 250" fill="none" stroke="#2563EB" stroke-width="2" stroke-dasharray="8,4" opacity="0.7"/>
+
+  <!-- Stage 1: LEARN - Workshop (Amber) - Top Left -->
+  <g transform="translate(50,130)" filter="url(#card-shadow)">
+    <rect width="260" height="180" rx="12" fill="#0f1a2e" stroke="url(#amber-gradient)" stroke-width="2"/>
+
+    <!-- Stage badge -->
+    <rect x="10" y="10" width="60" height="24" rx="4" fill="#EA580C"/>
+    <text x="40" y="26" text-anchor="middle" fill="#fff" font-family="system-ui, sans-serif" font-size="11" font-weight="600">LEARN</text>
+
+    <!-- Number -->
+    <text x="240" y="30" text-anchor="end" fill="#EA580C" font-family="system-ui, sans-serif" font-size="24" font-weight="700" opacity="0.6">1</text>
+
+    <!-- Content -->
+    <text x="15" y="55" fill="#F5F7FB" font-family="system-ui, sans-serif" font-size="14" font-weight="600">Workshop</text>
+    <text x="15" y="75" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="11">Hands-on platform patterns</text>
+
+    <line x1="15" y1="88" x2="245" y2="88" stroke="#475569" stroke-width="1" opacity="0.5"/>
+
+    <text x="15" y="108" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">LLM Gateway with LiteLLM</text>
+    <text x="15" y="124" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">MCP Gateway and Registry</text>
+    <text x="15" y="140" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">Strands Agents + FAST</text>
+    <text x="15" y="156" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">Observability patterns</text>
+
+    <text x="15" y="172" fill="#EA580C" font-family="system-ui, sans-serif" font-size="10">workshop-building-agentic-ai-platform/</text>
+  </g>
+
+  <!-- Stage 2: BUILD - Self-Service (Green) - Bottom Left -->
+  <g transform="translate(50,400)" filter="url(#card-shadow)">
+    <rect width="260" height="180" rx="12" fill="#0f1a2e" stroke="url(#green-gradient)" stroke-width="2"/>
+
+    <!-- Stage badge -->
+    <rect x="10" y="10" width="60" height="24" rx="4" fill="#16A34A"/>
+    <text x="40" y="26" text-anchor="middle" fill="#fff" font-family="system-ui, sans-serif" font-size="11" font-weight="600">BUILD</text>
+
+    <!-- Number -->
+    <text x="240" y="30" text-anchor="end" fill="#16A34A" font-family="system-ui, sans-serif" font-size="24" font-weight="700" opacity="0.6">2</text>
+
+    <!-- Content -->
+    <text x="15" y="55" fill="#F5F7FB" font-family="system-ui, sans-serif" font-size="14" font-weight="600">Visual Workflow Platform</text>
+    <text x="15" y="75" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="11">Drag-and-drop agent builder</text>
+
+    <line x1="15" y1="88" x2="245" y2="88" stroke="#475569" stroke-width="1" opacity="0.5"/>
+
+    <text x="15" y="108" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">AgentCore canvas editor</text>
+    <text x="15" y="124" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">Template gallery + export</text>
+    <text x="15" y="140" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">Multiple model options</text>
+    <text x="15" y="156" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">Versioning and rollback</text>
+
+    <text x="15" y="172" fill="#16A34A" font-family="system-ui, sans-serif" font-size="10">Agentic-ai-self-service/</text>
+  </g>
+
+  <!-- Stage 3: GOVERN - MCP Gateway (Violet) - Bottom Right -->
+  <g transform="translate(890,400)" filter="url(#card-shadow)">
+    <rect width="260" height="180" rx="12" fill="#0f1a2e" stroke="url(#violet-gradient)" stroke-width="2"/>
+
+    <!-- Stage badge -->
+    <rect x="10" y="10" width="72" height="24" rx="4" fill="#6D28D9"/>
+    <text x="46" y="26" text-anchor="middle" fill="#fff" font-family="system-ui, sans-serif" font-size="11" font-weight="600">GOVERN</text>
+
+    <!-- Number -->
+    <text x="240" y="30" text-anchor="end" fill="#6D28D9" font-family="system-ui, sans-serif" font-size="24" font-weight="700" opacity="0.6">3</text>
+
+    <!-- Content -->
+    <text x="15" y="55" fill="#F5F7FB" font-family="system-ui, sans-serif" font-size="14" font-weight="600">MCP Governance Gateway</text>
+    <text x="15" y="75" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="11">Per-tool-call authorization</text>
+
+    <line x1="15" y1="88" x2="245" y2="88" stroke="#475569" stroke-width="1" opacity="0.5"/>
+
+    <text x="15" y="108" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">Cedar policy enforcement</text>
+    <text x="15" y="124" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">JWT authentication</text>
+    <text x="15" y="140" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">Bedrock Guardrail screening</text>
+    <text x="15" y="156" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">Request/response interceptors</text>
+
+    <text x="15" y="172" fill="#6D28D9" font-family="system-ui, sans-serif" font-size="10">enterprise-mcp-governance-gateway/</text>
+  </g>
+
+  <!-- Stage 4: SCALE - Enterprise Blueprint (Blue) - Top Right -->
+  <g transform="translate(890,130)" filter="url(#card-shadow)">
+    <rect width="260" height="180" rx="12" fill="#0f1a2e" stroke="url(#blue-gradient)" stroke-width="2"/>
+
+    <!-- Stage badge -->
+    <rect x="10" y="10" width="56" height="24" rx="4" fill="#2563EB"/>
+    <text x="38" y="26" text-anchor="middle" fill="#fff" font-family="system-ui, sans-serif" font-size="11" font-weight="600">SCALE</text>
+
+    <!-- Number -->
+    <text x="240" y="30" text-anchor="end" fill="#2563EB" font-family="system-ui, sans-serif" font-size="24" font-weight="700" opacity="0.6">4</text>
+
+    <!-- Content -->
+    <text x="15" y="55" fill="#F5F7FB" font-family="system-ui, sans-serif" font-size="14" font-weight="600">Enterprise Blueprint</text>
+    <text x="15" y="75" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="11">Multi-account reference blueprint</text>
+
+    <line x1="15" y1="88" x2="245" y2="88" stroke="#475569" stroke-width="1" opacity="0.5"/>
+
+    <text x="15" y="108" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">AWS Organizations + SCPs</text>
+    <text x="15" y="124" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">AgentCore Runtime/Gateway/Memory</text>
+    <text x="15" y="140" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">CDK Pipelines + evaluation gates</text>
+    <text x="15" y="156" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="10">Cost attribution + observability</text>
+
+    <text x="15" y="172" fill="#2563EB" font-family="system-ui, sans-serif" font-size="10">enterprise-agentic-ai-platform-blueprint/</text>
+  </g>
+
+  <!-- Journey flow arrows between stages -->
+  <g opacity="0.8">
+    <!-- 1 to 2 -->
+    <path d="M 180 320 C 180 360 180 360 180 390" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow-green)"/>
+    <!-- 2 to 3 -->
+    <path d="M 320 500 C 500 550 700 550 880 500" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow-violet)"/>
+    <!-- 3 to 4 -->
+    <path d="M 1020 390 C 1020 360 1020 360 1020 320" fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow-blue)"/>
+    <!-- Alternative: 1 to 4 direct -->
+    <path d="M 320 220 C 500 180 700 180 880 220" fill="none" stroke="#475569" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.5"/>
+  </g>
+
+  <!-- Legend -->
+  <g transform="translate(440,630)">
+    <text x="0" y="0" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="11">Journey path:</text>
+    <line x1="80" y1="-4" x2="120" y2="-4" stroke="#475569" stroke-width="2"/>
+    <text x="130" y="0" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="11">Sequential</text>
+    <line x1="210" y1="-4" x2="250" y2="-4" stroke="#475569" stroke-width="1.5" stroke-dasharray="4,4"/>
+    <text x="260" y="0" fill="#D7DEE8" font-family="system-ui, sans-serif" font-size="11">Skip-ahead</text>
+  </g>
+
+  <!-- Footer note -->
+  <text x="600" y="680" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="10">Each project is self-contained. Start anywhere based on your role and goals.</text>
+</svg>
