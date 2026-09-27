@@ -20,9 +20,9 @@
  *     the AgentCore service treats as opaque pass-through: `gatewayTargetArn`,
  *     `cedarPolicy`, `ownerTeam`, `costCentre`, `targetAccountId`. These are
  *     the synth-time pin points; the service never inspects them.
- *   - `${PLATFORM_ACCOUNT_ID}` placeholder is preserved through the spec and
- *     resolved at synth via `resolveTargetArn()` (same convention as the
- *     legacy `ToolSpec`).
+ *   - `${PLATFORM_REGION}` and `${PLATFORM_ACCOUNT_ID}` placeholders are
+ *     preserved through the spec and resolved at synth via
+ *     `resolveTargetArn()` (same convention as the legacy `ToolSpec`).
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
@@ -118,7 +118,7 @@ export type RegistryRecordSpec =
 
 const RECORD_ID_PATTERN = /^[a-z0-9-]{3,80}$/;
 const LAMBDA_ARN_WITH_ALIAS =
-  /^arn:aws:lambda:[a-z0-9-]+:(?:\$\{PLATFORM_ACCOUNT_ID\}|\d{12}):function:[a-zA-Z0-9-_]+:[a-zA-Z0-9-_$]+$/;
+  /^arn:aws:lambda:(?:\$\{PLATFORM_REGION\}|[a-z0-9-]+):(?:\$\{PLATFORM_ACCOUNT_ID\}|\d{12}):function:[a-zA-Z0-9-_]+:[a-zA-Z0-9-_$]+$/;
 const TWELVE_DIGITS = /^\d{12}$/;
 const HTTPS_URL = /^https:\/\/[^\s]+$/;
 
@@ -198,16 +198,18 @@ export function validateRegistryRecordSpec(spec: RegistryRecordSpec): void {
 }
 
 /**
- * Substitute `${PLATFORM_ACCOUNT_ID}` in an MCP record's `gatewayTargetArn`
- * with the resolved platform-account id (or the explicit cross-account
- * `targetAccountId` if set). Mirrors the legacy `resolveTargetArn` helper.
+ * Substitute `${PLATFORM_REGION}` and `${PLATFORM_ACCOUNT_ID}` in an MCP
+ * record's `gatewayTargetArn`. Cross-account tools keep their explicit account.
  */
 export function resolveGatewayTargetArn(
   spec: McpRegistryRecordSpec,
   platformAccountId: string,
+  platformRegion: string,
 ): string {
   const acct = spec.targetAccountId ?? platformAccountId;
-  return spec.gatewayTargetArn.replace('${PLATFORM_ACCOUNT_ID}', acct);
+  return spec.gatewayTargetArn
+    .replace('${PLATFORM_REGION}', platformRegion)
+    .replace('${PLATFORM_ACCOUNT_ID}', acct);
 }
 
 /**

@@ -12,9 +12,9 @@
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { Stack } from 'aws-cdk-lib';
-import { CfnSink } from 'aws-cdk-lib/aws-oam';
-import { Construct } from 'constructs';
+import { Stack } from "aws-cdk-lib";
+import { CfnSink } from "aws-cdk-lib/aws-oam";
+import { Construct } from "constructs";
 
 export interface AuditConstructProps {
   /**
@@ -36,55 +36,61 @@ export class AuditConstruct extends Construct {
   constructor(scope: Construct, id: string, props: AuditConstructProps) {
     super(scope, id);
 
-    if (!props.organizationId && !props.trustedAccountIds) {
+    const trustedAccountIds = [...new Set(props.trustedAccountIds ?? [])];
+    if (!props.organizationId && trustedAccountIds.length === 0) {
       throw new Error(
-        'AuditConstruct requires either organizationId or trustedAccountIds to scope the OAM sink policy.',
+        "AuditConstruct requires either organizationId or trustedAccountIds to scope the OAM sink policy.",
       );
     }
+    for (const accountId of trustedAccountIds) {
+      if (!/^\d{12}$/.test(accountId)) {
+        throw new Error(
+          `AuditConstruct trusted account id '${accountId}' must contain exactly 12 digits.`,
+        );
+      }
+    }
 
-    // Build sink-policy principal set.
-    // SEC (security review): the `{ AWS: '*' }` branch is used ONLY together with
-    // the `aws:PrincipalOrgID` Condition below — it is the standard,
-    // AWS-recommended pattern for organization-wide OAM sink sharing. The
-    // wildcard principal is NOT open: only accounts belonging to the specified
-    // AWS Organization can link to this sink. Never copy `Principal: '*'`
-    // without an equivalent org/account Condition. When an explicit
-    // `trustedAccountIds` list is supplied we scope to those account roots
-    // instead and drop the wildcard entirely.
-    const policyPrincipal: Record<string, unknown> = props.trustedAccountIds
-      ? {
-          AWS: props.trustedAccountIds.map(
-            (acct) => `arn:aws:iam::${acct}:root`,
-          ),
-        }
-      : { AWS: '*' };
-
-    const policyCondition: Record<string, unknown> | undefined = props.organizationId
-      ? {
-          'ForAnyValue:StringEquals': {
-            'aws:PrincipalOrgID': props.organizationId,
+    const actions = ["oam:CreateLink", "oam:UpdateLink"];
+    const statements: Record<string, unknown>[] = [];
+    if (props.organizationId) {
+      // The wildcard principal is constrained by PrincipalOrgID. Never emit it
+      // without this condition.
+      statements.push({
+        Sid: "AllowOamOrganizationLinks",
+        Effect: "Allow",
+        Principal: { AWS: "*" },
+        Action: actions,
+        Resource: "*",
+        Condition: {
+          "ForAnyValue:StringEquals": {
+            "aws:PrincipalOrgID": props.organizationId,
           },
-        }
-      : undefined;
+        },
+      });
+    }
+    if (trustedAccountIds.length > 0) {
+      // Standalone validation accounts are an independent allow path. Do not
+      // attach the Organization condition: these principals may deliberately
+      // sit outside the configured Organization.
+      statements.push({
+        Sid: "AllowOamExplicitAccountLinks",
+        Effect: "Allow",
+        Principal: {
+          AWS: trustedAccountIds.map(
+            (accountId) => `arn:aws:iam::${accountId}:root`,
+          ),
+        },
+        Action: actions,
+        Resource: "*",
+      });
+    }
 
     const sinkPolicy: Record<string, unknown> = {
-      Version: '2012-10-17',
-      Statement: [
-        {
-          Sid: 'AllowOamCrossAccountPut',
-          Effect: 'Allow',
-          Principal: policyPrincipal,
-          Action: [
-            'oam:CreateLink',
-            'oam:UpdateLink',
-          ],
-          Resource: '*',
-          ...(policyCondition ? { Condition: policyCondition } : {}),
-        },
-      ],
+      Version: "2012-10-17",
+      Statement: statements,
     };
 
-    this.oamSink = new CfnSink(this, 'AgenticAiOamSink', {
+    this.oamSink = new CfnSink(this, "AgenticAiOamSink", {
       name: `agenticai-audit-oam-sink-${Stack.of(this).region}`,
       policy: sinkPolicy,
     });

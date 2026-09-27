@@ -32,6 +32,9 @@ function synthApp() {
     workloadSubnetIds: net.vpc.vpc
       .selectSubnets({ subnetGroupName: 'workload' })
       .subnetIds,
+    workloadSubnetRouteTableIds: net.vpc.vpc
+      .selectSubnets({ subnetGroupName: 'workload' })
+      .subnets.map((subnet) => subnet.routeTable.routeTableId),
     vpcCidr: net.vpc.vpc.vpcCidrBlock,
     availabilityZones: net.vpc.vpc.availabilityZones,
     bedrockRuntimeVpceId: net.vpc.endpoints.bedrockRuntime.vpcEndpointId,

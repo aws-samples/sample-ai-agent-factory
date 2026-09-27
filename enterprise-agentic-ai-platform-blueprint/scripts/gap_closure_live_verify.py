@@ -30,10 +30,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
-from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
@@ -301,7 +299,7 @@ def verify_phase_i(r: Result) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stack-name", default="AgenticAI-GapClosureStack")
-    parser.add_argument("--region", default=os.environ.get("AWS_REGION", "us-east-1"))
+    parser.add_argument("--region", required=True)
     args = parser.parse_args()
 
     session = boto3.Session(region_name=args.region)

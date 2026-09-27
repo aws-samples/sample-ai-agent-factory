@@ -18,6 +18,8 @@ import { BedrockInvocationLoggingConstruct } from '@agenticai/bedrock-invocation
 export interface WorkloadNetworkStackProps extends StackProps {
   readonly vpcCidr?: string;
   readonly enableBrowserInternetEgress?: boolean;
+  /** Account-specific AZ names resolved during read-only preflight. */
+  readonly availabilityZones?: readonly string[];
 }
 
 export class WorkloadNetworkStack extends Stack {
@@ -30,6 +32,7 @@ export class WorkloadNetworkStack extends Stack {
     this.vpc = new AgenticVpcConstruct(this, 'Vpc', {
       vpcCidr: props.vpcCidr,
       enableBrowserInternetEgress: props.enableBrowserInternetEgress,
+      availabilityZones: props.availabilityZones,
     });
 
     this.invocationLogging = new BedrockInvocationLoggingConstruct(this, 'InvocationLogging');

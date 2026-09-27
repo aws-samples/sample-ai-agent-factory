@@ -1,0 +1,141 @@
+{
+  "schemaVersion": "1.0",
+  "partition": "aws",
+  "regions": {
+    "primary": "us-east-1",
+    "additional": []
+  },
+  "accounts": {
+    "management-governance": {
+      "alias": "MANAGEMENT",
+      "purpose": "Organizations, SCPs, Identity Center, Security Hub, GuardDuty, Config aggregation, OAM, organization CloudTrail, invocation-log archive, CUR and immutable compliance evidence.",
+      "accountIdEnv": "AGENTICAI_ACCOUNT_MANAGEMENT",
+      "credentialSource": {
+        "type": "env-prefix",
+        "value": "MANAGEMENT"
+      },
+      "roles": {
+        "org_admin": {
+          "roleName": "AgenticAI-Governance-OrgAdmin",
+          "purpose": "Attach and detach service control policies and manage OUs.",
+          "privilege": "privileged"
+        },
+        "audit_reader": {
+          "roleName": "AgenticAI-Governance-AuditReader",
+          "purpose": "Read the organization trail, invocation-log archive and compliance evidence to corroborate every adversarial case.",
+          "privilege": "least-privilege"
+        },
+        "evidence_archive_writer": {
+          "roleName": "AgenticAI-Governance-EvidenceWriter",
+          "purpose": "Write sanitized evidence bundles into the retained archive.",
+          "privilege": "least-privilege"
+        },
+        "unprivileged_probe": {
+          "roleName": "AgenticAI-Governance-UnprivilegedProbe",
+          "purpose": "Deliberately low-privilege attacker identity for negative cases in this account.",
+          "privilege": "unprivileged"
+        }
+      }
+    },
+    "platform": {
+      "alias": "PLATFORM",
+      "purpose": "AgentCore Registry, the central AgentCore Inference Gateway, inference targets, native rate limits, platform identity, pipelines and the three sanctioned control-plane surfaces.",
+      "accountIdEnv": "AGENTICAI_ACCOUNT_PLATFORM",
+      "credentialSource": {
+        "type": "env-prefix",
+        "value": "PLATFORM"
+      },
+      "roles": {
+        "platform_admin": {
+          "roleName": "AgenticAI-Platform-Admin",
+          "purpose": "Own the inference Gateway, guardrails and rate-limit profiles.",
+          "privilege": "privileged"
+        },
+        "inference_gateway_invoker": {
+          "roleName": "AgenticAI-Platform-InferenceGatewayInvoker",
+          "purpose": "Cross-account role a workstream runtime assumes to reach the central inference Gateway.",
+          "privilege": "least-privilege",
+          "assumableBy": ["workstream.agent_runtime"]
+        },
+        "registry_admin": {
+          "roleName": "AgenticAI-Platform-RegistryAdmin",
+          "purpose": "Sole writer of the AgentCore Registry. Submits registration requests but must not approve its own.",
+          "privilege": "privileged"
+        },
+        "registry_approver": {
+          "roleName": "AgenticAI-Platform-RegistryApprover",
+          "purpose": "Approves AgentCore Registry registration requests. Separation of duties: the submitter must not also approve.",
+          "privilege": "privileged"
+        },
+        "registry_reader": {
+          "roleName": "AgenticAI-Platform-RegistryReader",
+          "purpose": "Sanctioned read surface (RegistryReaderRole).",
+          "privilege": "least-privilege",
+          "assumableBy": ["workstream.agent_runtime", "workstream.developer_readonly"]
+        },
+        "agent_builder_inspect": {
+          "roleName": "AgenticAI-Platform-AgentBuilderInspect",
+          "purpose": "Sanctioned read-only inspection surface (AgentBuilderInspectRole).",
+          "privilege": "least-privilege"
+        },
+        "pipeline_deploy": {
+          "roleName": "AgenticAI-Platform-PipelineDeploy",
+          "purpose": "Platform pipeline deployment role.",
+          "privilege": "privileged"
+        },
+        "unprivileged_probe": {
+          "roleName": "AgenticAI-Platform-UnprivilegedProbe",
+          "purpose": "Deliberately low-privilege attacker identity for negative cases in this account.",
+          "privilege": "unprivileged"
+        }
+      }
+    },
+    "workstream": {
+      "alias": "WORKSTREAM",
+      "purpose": "AgentCore Runtime, the per-workstream Tool Gateway, Memory, application data and per-agent operations.",
+      "accountIdEnv": "AGENTICAI_ACCOUNT_WORKSTREAM",
+      "credentialSource": {
+        "type": "env-prefix",
+        "value": "WORKSTREAM",
+        "externalIdEnv": "AGENTICAI_ADVERSARIAL_EXTERNAL_ID"
+      },
+      "roles": {
+        "workstream_admin": {
+          "roleName": "AgenticAI-Workstream-Admin",
+          "purpose": "Workstream owner identity. Must not be able to mutate platform-owned resources or deploy out of band.",
+          "privilege": "privileged"
+        },
+        "agent_runtime": {
+          "roleName": "AgenticAI-Workstream-AgentRuntime",
+          "purpose": "AgentCore Runtime execution role. Reaches models only through the Gateway and tools only through MCPClient.",
+          "privilege": "least-privilege"
+        },
+        "tool_gateway_invoker": {
+          "roleName": "AgenticAI-Workstream-ToolGatewayInvoker",
+          "purpose": "Calls the per-workstream Tool Gateway over MCP.",
+          "privilege": "least-privilege"
+        },
+        "memory_client": {
+          "roleName": "AgenticAI-Workstream-MemoryClient",
+          "purpose": "Reads and writes AgentCore Memory within a static namespace template.",
+          "privilege": "least-privilege"
+        },
+        "cicd_deploy": {
+          "roleName": "AgenticAI-Workstream-CicdDeploy",
+          "purpose": "The only identity permitted to change workstream infrastructure, and only from the workload pipeline.",
+          "privilege": "privileged"
+        },
+        "developer_readonly": {
+          "roleName": "AgenticAI-Workstream-DeveloperReadOnly",
+          "purpose": "Human developer access. Read-only by construction; used as the attacker for every no-fast-path case.",
+          "privilege": "unprivileged"
+        },
+        "unprivileged_probe": {
+          "roleName": "AgenticAI-Workstream-UnprivilegedProbe",
+          "purpose": "Deliberately low-privilege attacker identity for negative cases in this account.",
+          "privilege": "unprivileged"
+        }
+      }
+    }
+  }
+}

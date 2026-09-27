@@ -18,7 +18,8 @@
  * SPDX-License-Identifier: MIT-0
  */
 import { Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
-import { Effect, PolicyStatement, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
+import { Effect, PolicyStatement, Role, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
+import { Stream, StreamEncryption, StreamMode } from 'aws-cdk-lib/aws-kinesis';
 import { Key } from 'aws-cdk-lib/aws-kms';
 import { CfnDestination } from 'aws-cdk-lib/aws-logs';
 import { BlockPublicAccess, Bucket, BucketEncryption, ObjectOwnership } from 'aws-cdk-lib/aws-s3';
@@ -51,6 +52,8 @@ export class LogArchiveConstruct extends Construct {
   readonly encryptionKey: Key;
   readonly cloudTrailBucket: Bucket;
   readonly curBucket: Bucket;
+  readonly centralLogStream: Stream;
+  readonly cloudWatchLogsDestinationRole: Role;
   readonly cloudWatchLogsDestination: CfnDestination;
 
   constructor(scope: Construct, id: string, props: LogArchiveConstructProps) {
@@ -253,23 +256,44 @@ export class LogArchiveConstruct extends Construct {
 
     // ---- CloudWatch Logs cross-account destination (R-ARCH-023) ----
     // Per spec §2.1.4 L357-358, workload accounts ship logs via subscription
-    // filters to a centralised destination. We publish a Kinesis-Firehose-free
-    // destination wired through an inline role so workload accounts can
-    // subscribe directly (see AWS docs: CrossAccountDestination).
-    //
-    // The destination policy below enumerates workload account principals.
-    // Principals are added incrementally as workloads onboard; this list is
-    // the day-1 set supplied via props.
-    const destinationRoleRef = `arn:aws:iam::${Stack.of(this).account}:role/AgenticAI-LogArchive-CWLDestinationRole`;
+    // filters to a central destination. CloudWatch Logs validates the stream
+    // and role by writing a test record when the destination is created, so
+    // both dependencies are provisioned here rather than represented by ARNs.
+    this.centralLogStream = new Stream(this, 'CentralLogStream', {
+      streamName: 'agenticai-central-logs',
+      streamMode: StreamMode.ON_DEMAND,
+      encryption: StreamEncryption.KMS,
+      encryptionKey: this.encryptionKey,
+      retentionPeriod: Duration.hours(24),
+      removalPolicy,
+    });
+
+    const recipientAccount = Stack.of(this).account;
+    const sourceAccounts = [...new Set([...props.workloadAccountIds, recipientAccount])];
+    const allowedSourceArns = sourceAccounts.map(
+      (account) =>
+        `arn:${Stack.of(this).partition}:logs:${Stack.of(this).region}:${account}:*`,
+    );
+
+    this.cloudWatchLogsDestinationRole = new Role(this, 'CloudWatchLogsDestinationRole', {
+      roleName: 'AgenticAI-LogArchive-CWLDestinationRole',
+      assumedBy: new ServicePrincipal('logs.amazonaws.com', {
+        conditions: {
+          ArnLike: {
+            'aws:SourceArn': allowedSourceArns,
+          },
+        },
+      }),
+      description: 'Allows CloudWatch Logs from approved accounts to write to the central Kinesis stream.',
+    });
+    const destinationWriteGrant = this.centralLogStream.grantWrite(
+      this.cloudWatchLogsDestinationRole,
+    );
 
     this.cloudWatchLogsDestination = new CfnDestination(this, 'CrossAccountLogDestination', {
       destinationName: 'AgenticAI-CentralLogs',
-      roleArn: destinationRoleRef,
-      // TargetArn is set after the Kinesis stream is provisioned by a
-      // follow-on stack. Until then, callers set it via propertyOverride or
-      // deploy a placeholder `arn:aws:kinesis:...`-style target. Here we
-      // emit a deliberate placeholder so synth produces a concrete template.
-      targetArn: `arn:aws:kinesis:${Stack.of(this).region}:${Stack.of(this).account}:stream/agenticai-central-logs`,
+      roleArn: this.cloudWatchLogsDestinationRole.roleArn,
+      targetArn: this.centralLogStream.streamArn,
       destinationPolicy: JSON.stringify({
         Version: '2012-10-17',
         Statement: [
@@ -277,7 +301,10 @@ export class LogArchiveConstruct extends Construct {
             Sid: 'AllowWorkloadSubscribeFilterPut',
             Effect: 'Allow',
             Principal: {
-              AWS: props.workloadAccountIds.map((acct) => `arn:aws:iam::${acct}:root`),
+              // CloudWatch Logs destination policies require 12-digit account
+              // IDs here; unlike general IAM resource policies, root ARNs are
+              // rejected by PutDestinationPolicy.
+              AWS: props.workloadAccountIds,
             },
             Action: 'logs:PutSubscriptionFilter',
             Resource: `arn:aws:logs:${Stack.of(this).region}:${Stack.of(this).account}:destination:AgenticAI-CentralLogs`,
@@ -285,5 +312,9 @@ export class LogArchiveConstruct extends Construct {
         ],
       }),
     });
+    // CreateDestination immediately assumes the role and writes a test record.
+    // Depend on the generated IAM policy, not only the role resource, so that
+    // CloudFormation cannot race destination validation against policy attachment.
+    destinationWriteGrant.applyBefore(this.cloudWatchLogsDestination);
   }
 }

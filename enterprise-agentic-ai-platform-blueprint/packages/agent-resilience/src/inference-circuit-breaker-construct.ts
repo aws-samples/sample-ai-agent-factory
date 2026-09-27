@@ -43,7 +43,10 @@ import { ITopic } from 'aws-cdk-lib/aws-sns';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
-import { allowedBedrockResources } from '@agenticai/platform-baselines';
+import {
+  allowedBedrockResources,
+  assertEmeaProfilePathSupported,
+} from '@agenticai/platform-baselines';
 
 import {
   DEFAULT_CIRCUIT_THRESHOLDS,
@@ -86,6 +89,10 @@ export class InferenceCircuitBreakerConstruct extends Construct {
     super(scope, id);
 
     const stack = Stack.of(this);
+    assertEmeaProfilePathSupported(
+      stack.region,
+      'InferenceCircuitBreakerConstruct',
+    );
     this.retryPolicy = props.retryPolicy ?? DEFAULT_RETRY_POLICY;
     this.thresholds = props.thresholds ?? DEFAULT_CIRCUIT_THRESHOLDS;
     this.fallbackChain = props.fallbackChain ?? defaultFallbackChain();

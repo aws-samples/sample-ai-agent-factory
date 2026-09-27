@@ -14,11 +14,15 @@ import { GuardrailStack } from '../../apps/platform-account/lib/guardrail-stack'
 
 const PIPELINE_ROLE_ARN = 'arn:aws:iam::111111111111:role/AgenticAI-PlatformPipelineRole';
 
-function synth() {
+function synth(options: {
+  existingAdminRoleArn?: string;
+  baselineGuardrailName?: string;
+} = {}) {
   const app = new App();
   const stack = new GuardrailStack(app, 'TestGuardrailStack', {
     env: { account: '111111111111', region: 'us-west-2' },
     pipelineRoleArn: PIPELINE_ROLE_ARN,
+    ...options,
   });
   return Template.fromStack(stack);
 }
@@ -29,6 +33,21 @@ describe('Phase 3 — GuardrailAdminRole segregation (R-BED-011/012)', () => {
     t.hasResourceProperties('AWS::IAM::Role', {
       RoleName: 'AgenticAI-GuardrailAdmin',
     });
+  });
+
+  it('reuses the shared admin role and isolates the production guardrail name', () => {
+    const sharedRoleArn =
+      'arn:aws:iam::111111111111:role/AgenticAI-GuardrailAdmin';
+    const t = synth({
+      existingAdminRoleArn: sharedRoleArn,
+      baselineGuardrailName: 'agenticai-guardrail-baseline-prod',
+    });
+
+    t.resourceCountIs('AWS::IAM::Role', 0);
+    t.hasResourceProperties('AWS::Bedrock::Guardrail', {
+      Name: 'agenticai-guardrail-baseline-prod',
+    });
+    t.hasOutput('GuardrailAdminRoleArn', { Value: sharedRoleArn });
   });
 
   it('admin role trust policy trusts only the pipeline role ARN', () => {
