@@ -1,113 +1,136 @@
-# Sample AI Agent Factory
+# AI Agent Factory
 
-A curated collection of end-to-end samples for building, governing, and operating
-**Agentic AI on AWS** — anchored on Amazon Bedrock and Amazon Bedrock AgentCore.
+Enterprise samples for building, governing, and operating **agentic AI on AWS** — centered on Amazon Bedrock and Amazon Bedrock AgentCore.
 
-## Our vision
+![AI Agent Factory Atlas Journey](assets/repository-atlas-journey.svg)
 
-Enterprises are moving past one-off chatbots and proof-of-concept agents. The hard part is
-no longer picking a model — it's everything *around* the model: governed access, reusable
-tools, security and authorization, observability, and a repeatable way to ship agents to
-production. We call that capability an **AI Agent Factory**: the people, patterns, and
-platform that let an organization turn ideas into production agents *reliably and at scale*.
+## What This Is
 
-This repository gathers complementary samples that, together, show three parts of that story:
+Four complementary projects that together show how enterprises move from learning to agent operations at scale. Each project is self-contained with its own deployment instructions and can be adopted independently.
 
-1. **A platform foundation** — the governed, enterprise-grade landing zone an organization
-   stands up *once* so every team can build on shared, secured infrastructure.
-2. **A builder experience** — the low-code / no-code surface that lets engineers (and
-   non-engineers) design, deploy, and operate agents *on top of* that foundation without
-   hand-writing infrastructure.
-3. **A governed front door** — the enforcement layer that decides, for each individual tool
-   call, whether an agent may reach a given internal tool or SaaS system, and what comes back.
+> **Sample code** — MIT-0 License. Not an AWS service, AppSec-reviewed product, or compliance attestation. Review architecture, security, and costs before use.
 
-The goal is to make the path from "I have an idea for an agent" to "it's running, governed,
-and observable in production" as short and as safe as possible.
+## The Journey: Learn → Build → Govern → Scale
 
-## What's included
+| Stage | Project | What It Does | Best For |
+|-------|---------|--------------|----------|
+| **1. Learn** | [Workshop](workshop-building-agentic-ai-platform/) | Hands-on modules for building enterprise platform patterns | Platform engineers learning the foundation |
+| **2. Build** | [Self-Service](Agentic-ai-self-service/) | Visual drag-and-drop canvas for designing and deploying agents | Engineers shipping agents fast |
+| **3. Govern** | [MCP Gateway](enterprise-mcp-governance-gateway/) | Per-tool-call authorization with [Cedar](https://www.cedarpolicy.com/) policies and Bedrock Guardrails | Security teams implementing tool governance |
+| **4. Scale** | [Blueprint](enterprise-agentic-ai-platform-blueprint/) | Multi-account CDK reference with Organizations, SCPs, and CI/CD gates | Platform teams building enterprise infrastructure |
 
-| Folder | What it is | Best for |
-|--------|------------|----------|
-| [`workshop-building-agentic-ai-platform/`](workshop-building-agentic-ai-platform/) | A hands-on AWS **workshop** for building an enterprise landing-zone pattern for agentic AI on Amazon Bedrock AgentCore — governed model access (LLM Gateway), a tool/agent registry (MCP Gateway & Registry), security controls, and observability. | Platform & ML engineers and solutions architects who want to **understand and build the foundation**. |
-| [`Agentic-ai-self-service/`](Agentic-ai-self-service/) | The **AgentCore Visual Workflow Platform** — an n8n-style drag-and-drop builder to design, configure, and deploy AgentCore agents from a canvas, with templates, CloudFormation/Python export, and an enterprise feature set (versioning, Cedar policy, evaluation, observability, registry). | Engineers who want to **build and ship agents fast** on top of AgentCore. |
-| [`enterprise-mcp-governance-gateway/`](enterprise-mcp-governance-gateway/) | A deployable **MCP governance layer** built on Amazon Bedrock AgentCore Gateway — one governed MCP endpoint where every tool call is authenticated with a Cognito JWT, authorized by **Cedar** policies in a policy engine (`ENFORCE` mode), inspected by request/response Lambda interceptors, and screened by a managed **Amazon Bedrock Guardrail**. Includes an optional per-user OAuth 3LO connector for Atlassian. | Platform & security engineers who need **per-tool-call authorization and audit** in front of internal tools and SaaS. |
-| [`enterprise-agentic-ai-platform-blueprint/`](enterprise-agentic-ai-platform-blueprint/) | A **multi-account AWS CDK blueprint** for the governed landing zone itself — AWS Organizations OUs with twelve service control policies, guardrailed-only Bedrock access, per-tenant Application Inference Profiles, PrivateLink-only egress, an AgentCore Runtime/Gateway/Memory stack, a tool registry as single source of truth, CDK Pipelines with an evaluation gate, and per-application cost attribution. | Platform & security engineers who need to **stand up the production foundation** other teams deploy agents onto. |
+## Capability Architecture
 
-Each folder is self-contained and keeps **its own `README.md`** with the full architecture,
-prerequisites, and deploy instructions for that project. Start there once you've picked a track.
+The projects share architectural concepts expressed as capability contracts. A **capability contract** defines the outcomes and controls that any chosen implementation must preserve, regardless of product. The table below shows **what each capability does** and **one reference implementation** — alternatives are valid when those contracts are preserved.
 
-### `workshop-building-agentic-ai-platform/` — build the foundation
+| Capability | Purpose | Reference Implementation |
+|------------|---------|-------------------------|
+| LLM Gateway | Governed model access with auth, routing, and attribution | AgentCore Gateway inference targets, LiteLLM |
+| Tool Gateway | Authenticated MCP discovery/invocation with policy | AgentCore Gateway with AWS_IAM |
+| Agent Runtime | Immutable deployable execution with identity and scaling | AgentCore Runtime |
+| Agent Memory | Actor-scoped storage with encryption and retention | AgentCore Memory with CMK |
+| Identity | Short-lived credentials with tenant binding | AgentCore Identity, Cognito M2M |
+| Registry | Ownership, lifecycle, and approval for agents/tools | AWS Agent Registry |
+| Policy Engine | Fail-closed authorization with versioning | AgentCore PolicyEngine, Cedar |
+| Delivery | Reviewed source, build, scan, gates, and rollback | CodePipeline, CodeBuild, ECR |
+| Observability | Correlated logs/metrics/traces with fleet views | CloudWatch, X-Ray, OAM |
+| Cost | Attribution by app/agent/tenant with budgets | Allocation tags, Budgets, CUR |
 
-A 300-level, multi-module workshop that composes Amazon Bedrock AgentCore with an LLM Gateway
-(LiteLLM for governed, cost-attributed model access), an MCP Gateway & Registry (tool and agent
-discovery), and Strands Agents — then deploys a real agent on top using FAST. It runs either at
-an AWS event (Workshop Studio) or self-paced in your own account via a single deploy script.
-See [`workshop-building-agentic-ai-platform/README.md`](workshop-building-agentic-ai-platform/README.md).
+> **Replacements:** LiteLLM, AgentCore Gateway targets, and other components are reference choices. Substitutes must preserve the security, identity, tenancy, lifecycle, and evidence contracts. The support envelope applies only to the exact tested implementation.
 
-### `Agentic-ai-self-service/` — build agents on the canvas
+## Quick Start
 
-A visual workflow builder for AWS Bedrock AgentCore deployed with API Gateway, Lambda, Step
-Functions, DynamoDB, and CloudFront. Drag-and-drop AgentCore components onto a canvas, pick from
-13 model providers, deploy through a Step Functions orchestration, and test agents in-canvas —
-plus enterprise capabilities like agent versioning & rollback, Cedar policy enforcement,
-evaluation, cost analytics, a two-persona agent registry, and CloudFormation / Python export.
-Deploys to any region, and can optionally use **your own LiteLLM proxy** as an MCP gateway and/or
-as the agent catalog instead of the built-in ones.
-See [`Agentic-ai-self-service/README.md`](Agentic-ai-self-service/README.md).
+```bash
+git clone https://github.com/aws-samples/sample-ai-agent-factory.git
+cd sample-ai-agent-factory/<chosen-project>
+# Example: cd sample-ai-agent-factory/workshop-building-agentic-ai-platform
 
-### `enterprise-mcp-governance-gateway/` — govern every tool call
+# Follow the project's README for prerequisites and deployment
+```
 
-An AWS CDK (Python) sample that places an Amazon Bedrock AgentCore Gateway in front of MCP tool
-servers, so agents and IDEs (for example Kiro or Claude Code) connect to a single governed MCP
-endpoint instead of holding their own credentials. Every tool call passes JWT authentication
-(Amazon Cognito), Cedar policy evaluation in `ENFORCE` mode — forbidden tools are filtered out of
-`tools/list` entirely — request and response interceptor Lambdas, and a managed Amazon Bedrock
-Guardrail for prompt-attack filtering inbound and PII anonymization outbound. It ships live
-integration tests plus a hands-on walkthrough that demonstrates allow, deny, block and redact
-against the deployed gateway. An optional connector shows per-user OAuth 3LO delegation to
-Atlassian, where reads are permitted for all callers and writes are role-gated.
+**Choose your project** (folder names are exact and case-sensitive):
+- `workshop-building-agentic-ai-platform/` — Learn the patterns
+- `Agentic-ai-self-service/` — Build agents visually
+- `enterprise-mcp-governance-gateway/` — Govern tool access
+- `enterprise-agentic-ai-platform-blueprint/` — Enterprise-scale reference
 
-This project is complementary to the Cedar policy enforcement in `Agentic-ai-self-service/`: that
-governs **agent configuration**, whereas this evaluates Cedar per **tool call** in the request
-path. See
-[`enterprise-mcp-governance-gateway/README.md`](enterprise-mcp-governance-gateway/README.md).
+## Project Summaries
 
-### `enterprise-agentic-ai-platform-blueprint/` — run the foundation in production
+### Workshop — Learn the Foundation
 
-An AWS CDK (TypeScript) blueprint for the multi-account platform an enterprise stands up once.
-It provisions the AWS Organizations structure and twelve service control policies that make the
-guarantees non-bypassable at the org level — Bedrock is reachable only with a guardrail attached
-and only for allow-listed models, in approved regions, over PrivateLink. On top of that sit
-per-tenant Application Inference Profiles for cost attribution, an AgentCore Runtime / Gateway /
-Memory stack with customer-managed keys, a platform tool catalogue that is validated at synth
-time, Cedar per-tool entitlement, RAG and observability constructs, and CDK Pipelines with a
-mandatory *Deploy(nonprod) → Evaluation Gate → Manual Approval → canary → Prod* sequence. Two
-deployment patterns are supported: a distributed one where each workload account owns its agent
-stack, and a centralised one where the platform account governs a per-workstream AgentCore
-Gateway at synth, deploy, and runtime. It ships 500 tests, a NIST 800-53 Rev 5 derivation, a
-register of every cdk-nag suppression, and an honest account of what has and has not been
-verified against live AWS.
+Multi-module workshop composing AgentCore with an LLM Gateway (LiteLLM), MCP Gateway & Registry, and Strands Agents. Three tracks: Fast Path (1.5-2 hrs), Build the Platform (2-3 hrs), Full Journey (3-4 hrs).
 
-Where `workshop-building-agentic-ai-platform/` teaches the foundation in a single account, this
-is the multi-account, SCP-governed, CI/CD-gated form of it. See
-[`enterprise-agentic-ai-platform-blueprint/README.md`](enterprise-agentic-ai-platform-blueprint/README.md).
+**Prerequisites:** AWS CLI v2, basic AWS familiarity, Bedrock access. See README for supported regions.
 
+→ [workshop-building-agentic-ai-platform/README.md](workshop-building-agentic-ai-platform/README.md)
 
-## Getting started
+### Self-Service — Build Agents Fast
 
-1. Pick a folder above based on whether you want to **build the platform**, **build agents**, or
-   **govern how agents reach tools**.
-2. Open that folder's `README.md` and follow its prerequisites and deploy steps.
-3. All four deploy real, billable AWS resources — read each project's cost notice and tear
-   resources down when finished.
+Visual workflow builder for AgentCore: drag-and-drop canvas, template gallery, CloudFormation export, versioning/rollback, Cedar policy, and cost analytics.
 
-## Security
+**Prerequisites:** AWS CLI v2, Node.js 20+, Python 3.12+. See README for supported regions.
 
-See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information. Each
-subproject also documents its own security posture in its `README.md`.
+→ [Agentic-ai-self-service/README.md](Agentic-ai-self-service/README.md)
+
+### MCP Gateway — Govern Every Tool Call
+
+Deployable governance layer placing AgentCore Gateway in front of MCP tool servers. JWT authentication (Cognito), Cedar policy evaluation in ENFORCE mode, Bedrock Guardrail screening, and request/response Lambda interceptors.
+
+**Prerequisites:** Node.js + AWS CDK, Python 3.12+, AWS credentials.
+
+→ [enterprise-mcp-governance-gateway/README.md](enterprise-mcp-governance-gateway/README.md)
+
+### Blueprint — Enterprise-Scale Reference
+
+Multi-account CDK reference blueprint with AWS Organizations, SCPs, per-tenant Application Inference Profiles, PrivateLink egress, AgentCore Runtime/Gateway/Memory, Registry integration, CDK Pipelines with evaluation gates, and CloudWatch OAM observability.
+
+This is an enterprise-scale reference blueprint with a bounded reviewed support envelope — not universal readiness for all environments. See the project README for tested configurations and known limitations.
+
+**Prerequisites:** AWS Organizations, Node.js 20+, Python 3.12+, CDK experience.
+
+→ [enterprise-agentic-ai-platform-blueprint/README.md](enterprise-agentic-ai-platform-blueprint/README.md)
+
+## Important Notices
+
+### Costs
+
+All projects deploy **real, billable AWS resources** including ECS Fargate, DocumentDB, Aurora, NAT Gateways, Load Balancers, Lambda functions, and Amazon Bedrock invocations. **Tear down resources when finished** using each project's cleanup commands.
+
+### Security
+
+Each project documents its security posture in its README. Before use:
+- Review IAM policies and trust relationships
+- Understand network configuration and egress patterns
+- Verify data classification and retention requirements
+- Check compliance obligations for your organization
+
+See [CONTRIBUTING.md](CONTRIBUTING.md#security-issue-notifications) for reporting security issues.
+
+### Support Envelope
+
+Each project documents its tested regions, prerequisites, and known limitations. The support envelope applies to the exact reference implementations tested — replacements require independent validation.
+
+## Documentation Site
+
+Run the documentation site locally:
+
+```bash
+cd docs-site
+npm ci
+npm run dev
+# Opens at http://127.0.0.1:5173/sample-ai-agent-factory/
+```
+
+Build:
+```bash
+npm run build    # Output in dist/
+npm run clean    # Remove generated files
+```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
 
 ## License
 
-This library is licensed under the MIT-0 License. See the [LICENSE](LICENSE) file. Bundled
-subprojects retain their own licenses and notices — see the `LICENSE`/`NOTICE` files inside each
-folder.
+MIT-0 License. See [LICENSE](LICENSE). Bundled subprojects retain their own licenses — see LICENSE/NOTICE files in each folder.

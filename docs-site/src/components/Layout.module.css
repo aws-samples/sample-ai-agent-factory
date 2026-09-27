@@ -1,0 +1,350 @@
+/* Layout.module.css */
+
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-border);
+  height: var(--header-height);
+}
+
+.headerContent {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 0 var(--space-4);
+  height: 100%;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 600;
+  font-size: 1.125rem;
+  color: var(--color-text-primary);
+  text-decoration: none;
+}
+
+.logo:hover {
+  text-decoration: none;
+}
+
+.logoIcon {
+  font-size: 1.5rem;
+  color: var(--color-blue);
+}
+
+.logoText {
+  display: none;
+}
+
+@media (min-width: 640px) {
+  .logoText {
+    display: inline;
+  }
+}
+
+/* Desktop Navigation */
+.desktopNav {
+  display: none;
+}
+
+@media (min-width: 1024px) {
+  .desktopNav {
+    display: flex;
+    flex: 1;
+    justify-content: center;
+  }
+}
+
+.navList {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  list-style: none;
+}
+
+.navItem {
+  position: relative;
+}
+
+.navLink {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  border-radius: var(--radius-md);
+  border: none;
+  background: none;
+  cursor: pointer;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.navLink:hover {
+  color: var(--color-text-primary);
+  background: var(--color-mist);
+  text-decoration: none;
+}
+
+.navLink.active {
+  color: var(--color-blue);
+}
+
+.navLink:focus-visible {
+  outline: 2px solid var(--color-blue);
+  outline-offset: 2px;
+}
+
+.chevron {
+  transition: transform var(--transition-fast);
+}
+
+.chevronOpen {
+  transform: rotate(180deg);
+}
+
+/* Dropdown */
+.dropdown {
+  position: relative;
+}
+
+.dropdownMenu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  min-width: 180px;
+  margin-top: var(--space-1);
+  padding: var(--space-2);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  list-style: none;
+  z-index: 50;
+}
+
+.dropdownLink {
+  display: block;
+  padding: var(--space-2) var(--space-3);
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  border-radius: var(--radius-md);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.dropdownLink:hover {
+  color: var(--color-text-primary);
+  background: var(--color-mist);
+  text-decoration: none;
+}
+
+.dropdownLink.active {
+  color: var(--color-blue);
+  background: rgba(37, 99, 235, 0.1);
+}
+
+/* GitHub link */
+.githubLink {
+  display: none;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  border-radius: var(--radius-md);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.githubLink:hover {
+  color: var(--color-text-primary);
+  background: var(--color-mist);
+  text-decoration: none;
+}
+
+@media (min-width: 768px) {
+  .githubLink {
+    display: flex;
+  }
+}
+
+.githubText {
+  display: none;
+}
+
+@media (min-width: 1024px) {
+  .githubText {
+    display: inline;
+  }
+}
+
+/* Mobile menu button */
+.mobileMenuButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.mobileMenuButton:hover {
+  background: var(--color-mist);
+}
+
+.mobileMenuButton:focus-visible {
+  outline: 2px solid var(--color-blue);
+  outline-offset: 2px;
+}
+
+@media (min-width: 1024px) {
+  .mobileMenuButton {
+    display: none;
+  }
+}
+
+/* Mobile Navigation */
+.mobileNav {
+  position: fixed;
+  top: var(--header-height);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--color-bg-secondary);
+  overflow-y: auto;
+  z-index: 90;
+}
+
+.mobileNavList {
+  padding: var(--space-4);
+  list-style: none;
+}
+
+.mobileNavLink {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--color-text-primary);
+  text-decoration: none;
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast);
+}
+
+.mobileNavLink:hover {
+  background: var(--color-mist);
+  text-decoration: none;
+}
+
+.mobileNavButton {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--color-text-primary);
+  background: none;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.mobileNavButton:hover {
+  background: var(--color-mist);
+}
+
+.mobileSubmenu {
+  padding-left: var(--space-4);
+  list-style: none;
+}
+
+.mobileSubmenu .mobileNavLink {
+  font-weight: 400;
+  color: var(--color-text-secondary);
+}
+
+/* Main content */
+.main {
+  flex: 1;
+  width: 100%;
+}
+
+/* Footer */
+.footer {
+  background: var(--color-midnight);
+  color: var(--color-text-inverse);
+  padding: var(--space-8) 0;
+}
+
+.footerContent {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 0 var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+@media (min-width: 768px) {
+  .footerContent {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: flex-start;
+  }
+}
+
+.footerSection {
+  max-width: 600px;
+}
+
+.footerText {
+  font-size: 0.875rem;
+  color: var(--color-mist);
+  margin-bottom: var(--space-2);
+}
+
+.footerText a {
+  color: var(--color-cloud);
+}
+
+.footerNote {
+  font-size: 0.75rem;
+  color: var(--color-text-inverse-muted);
+}
+
+.footerLinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.footerLinks a {
+  font-size: 0.875rem;
+  color: var(--color-mist);
+  transition: color var(--transition-fast);
+}
+
+.footerLinks a:hover {
+  color: var(--color-cloud);
+}
