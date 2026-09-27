@@ -302,11 +302,9 @@ silently worked around.
    - The residue sweep treats a still-present tracked secret id (or any
      uncertainty) as residue, so cleanup cannot report a false clean pass.
 
-   The AgentCore Identity M2M → CUSTOM_JWT → `LiteLLMModel` path itself is
-   independently live-verified by the sibling central-inference-Gateway spike
-   (`evidence/live/2026-09-18-agentcore-gateway-spike.md`); this spike adds the
-   credential-provider-specific proof. Live `deploy`/`verify` for this spike
-   remains pending a clean live run.
+   The AgentCore Identity M2M → CUSTOM_JWT → `LiteLLMModel` path is exercised
+   independently by the sibling central-inference-Gateway probe; this spike adds
+   the credential-provider-specific proof.
 
 3. **`ListUserPoolClientSecrets` does not accept `MaxResults` — FIXED.** Unlike
    the AgentCore Control list ops (which take a capped `maxResults`), the

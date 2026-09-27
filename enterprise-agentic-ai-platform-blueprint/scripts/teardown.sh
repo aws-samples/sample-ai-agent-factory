@@ -5,7 +5,7 @@
 # account closures — Control Tower accounts enter a 90-day SUSPENDED state.
 # See README section 16 (Cleanup) for the full teardown order and caveats.
 #
-# Round 1B fail-closed behaviour (tasks/todo.md §Round 1 B):
+# Fail-closed teardown behaviour:
 #
 #   * Every stack is mapped to the `bin/agentic-ai-platform.ts` stage that
 #     declares it, and `cdk destroy` is invoked with that stage (plus the

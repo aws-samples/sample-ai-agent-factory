@@ -459,10 +459,9 @@ export function composeAgentCorePolicyDefinitions(
         const groupConditions = tool.allowedGroups.map((group) => {
           cedarString(group, `Cognito group for '${tool.toolId}'`);
           // AgentCore exposes this list-valued claim as JSON array text. The
-          // isolated PolicyEngine campaign live-proved quote-delimited element
+          // isolated PolicyEngine testing proved quote-delimited element
           // matching; do not weaken this to a bare substring, which lets one
-          // group name collide with another. See evidence/live/2026-09-19-
-          // policyengine-compatibility-spike.md.
+          // group name collide with another.
           const slash = String.fromCharCode(92);
           const quotedGroup = `${slash}"${group}${slash}"`;
           return (

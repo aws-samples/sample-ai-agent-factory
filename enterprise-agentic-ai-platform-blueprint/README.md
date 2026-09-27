@@ -1,663 +1,371 @@
 # Enterprise Agentic AI Platform Blueprint on AWS
 
-![version](https://img.shields.io/badge/version-1.0.0-blue) ![tests](https://img.shields.io/badge/tests-passing-brightgreen) ![packages](https://img.shields.io/badge/packages-35-blue) ![cdk-nag](https://img.shields.io/badge/cdk--nag-clean-brightgreen) ![license](https://img.shields.io/badge/license-MIT--0-blue)
+[![license](https://img.shields.io/badge/license-MIT--0-blue)](LICENSE)
+[![AWS CDK](https://img.shields.io/badge/AWS%20CDK-TypeScript-orange)](https://aws.amazon.com/cdk/)
 
-A multi-account AWS CDK blueprint for running enterprise agentic AI workloads on **Amazon Bedrock AgentCore**, with org-level guardrails, tenant isolation, guardrailed inference, per-tool Cedar authorisation, and per-application cost attribution.
+A multi-account AWS CDK reference architecture for deploying governed generative-AI agents with Amazon Bedrock AgentCore. It provides a central inference boundary, workstream-owned tool execution, AWS Agent Registry governance, pipeline promotion gates, tenant isolation, guardrails, centralized observability, and dependency-ordered cleanup.
 
-This is one of the samples in [`aws-samples/sample-ai-agent-factory`](https://github.com/aws-samples/sample-ai-agent-factory) — it is the **governed platform foundation** an organisation stands up once, so that agent-building teams have a secured landing zone to deploy onto. See [§1.2](#12-how-this-fits-with-the-other-samples-in-this-repository) for how it relates to the sibling samples.
+> **Important:** This repository is sample code, not an AWS service or an AppSec-reviewed product. It deploys real, billable AWS resources. Review the architecture, IAM policies, data handling, quotas, and costs for your organization before using it with production or regulated workloads.
 
-> **Status.** Sample / reference content published under MIT-0. It is **not** an AppSec-reviewed product — run your own security review before deploying to any regulated or customer-facing environment, and read [§15](#15-known-limitations-and-honest-disclaimers) for what has and has not been verified against live AWS. The repository includes Jest conformance tests, an AWS-free adversarial harness, offline evaluation tests, integration suites, and fail-closed teardown tests. The D-03 v3 + gap-closure surface was verified end-to-end on a real two-account deploy in `us-east-1` (MCP `tools/list` + `tools/call` through the CUSTOM_JWT gateway, per-developer Cedar entitlement allow/deny), then torn down to zero residuals. Full history in [`CHANGELOG.md`](CHANGELOG.md).
->
-> **This deploys real, billable AWS resources** across multiple accounts — see [§8 Cost](#8-cost) before deploying and [§16 Cleanup](#16-cleanup) when you are done.
+![D-03 two-Gateway architecture](assets/d03-two-gateway.svg)
 
-> **Accepted target state — implementation in progress.** The revamp converges D-01 and D-03 into one topology: one consolidated Management/Governance account, environment-isolated Platform accounts, and per-workstream accounts. The golden-path inference boundary is Amazon Bedrock AgentCore Gateway with a Bedrock Mantle inference target; generated agents use `LiteLLMModel` against its OpenAI-compatible endpoint. The `us-west-2` inference compatibility spike and reviewed Platform pipeline both passed Cognito M2M, 49-model discovery, streaming and non-streaming inference; the isolated spike also proved exact HTTP 429 rate limiting and zero-residue cleanup. The pipeline-created production inference Gateway and target reached `READY`, its rate limit reached `ACTIVE`, its baseline Guardrail reached `READY`, and the Management/Governance Log Archive is live. An isolated PolicyEngine run on exact commit `46c3a62` passed eight strict policies, a 20-case `sub`/group matrix, filtered `tools/list`, direct-call denial, exact JWT rejection statuses, mode rollback, and independent zero-residual inventory. The GA Agent Registry API contract passed on exact commit `8e66dc3`; pipeline-owned R1 then deployed and explicitly approved both environments. On 2026-09-21 pipeline-owned R2 commit `3870e0e` completed cross-account Registry resolution, exact role/permission handoff, nonproduction and production Tool Gateway deployment, MCP positives and denial twins, no-op redeployment, fail-closed status drift, terminal-record recovery, and dependency-ordered teardown. Teardown hardening commit `7774299` removed every exact service-created log group, and independent inventory found zero unintended residue. Pipeline-owned Gateway PolicyEngine commit `f45a12c` passed nonproduction and production deployment, positive and direct-policy-denial twins, in-place semantic-search removal, mode rollback, exact principal restoration, fail-closed teardown, grant retirement, and zero unintended residue; the Lambda Cedar wrapper remains intentionally retained. An isolated Runtime and Memory compatibility campaign on exact commit `88d5381` passed a zero-finding digest-pinned ARM64 image build, Memory `ACTIVE`, Runtime `READY`, exact invocation and short-term event round trips, Runtime-before-Memory teardown, grant retirement, and independent zero-active-residue inventory. Pipeline-owned Runtime/Memory commit `442de00` then passed environment-qualified role and permission handoff, exact-digest zero-finding image admission, nonproduction and production Gateway/Runtime/Memory deployment, Runtime and Memory round trips, MCP and bypass twins, live content-address rejection, full no-op redeployment, dependency-ordered teardown, grant retirement, exact log/image cleanup, and zero unintended residue. The deployed Runtime intentionally remained an inert compatibility handler until 2026-09-23, when pipeline-owned generated-agent commit `172f78f` passed the nonproduction and production deployment-and-invoke gates: in each environment one `InvokeAgentRuntime` returned HTTP 200 with the exact marker, SigV4 MCP `tools/list` and a governed `tools/call` of the subscribed echo tool, two inference content blocks over AgentCore Identity M2M → Cognito → inference Gateway → `LiteLLMModel` on the rated model behind the baseline Guardrail, and an independently verified Memory round trip; a wrong-account twin and an unsubscribed-tool twin held in both environments, every Runtime-role IAM/KMS grant was simulated positive and negative before each approval, and the production role was proven isolated from nonproduction Memory and CMK resources. Twelve live-only defects were fixed along the way (see the runbook table). The same day, a deliberately outdated base image pushed through the same pipeline was refused live by the `AgentImageScanGate` with 13 CRITICAL / 79 HIGH findings (matching ECR's own scan), CloudFormation rolled the nonproduction RuntimeMemory stack back, the prior Runtime kept serving the positive probe, and the production stage was never entered -- closing the induced-rollback and live High-finding image-rejection gates. See [`evidence/live/2026-09-23-pipeline-generated-agent.md`](evidence/live/2026-09-23-pipeline-generated-agent.md), [`evidence/live/2026-09-21-agentcore-runtime-memory-compatibility-spike.md`](evidence/live/2026-09-21-agentcore-runtime-memory-compatibility-spike.md), [`evidence/live/2026-09-22-pipeline-agentcore-runtime-memory.md`](evidence/live/2026-09-22-pipeline-agentcore-runtime-memory.md), and [`evidence/live/2026-09-21-pipeline-agentcore-policyengine.md`](evidence/live/2026-09-21-pipeline-agentcore-policyengine.md). On 2026-09-24 the whole generated-agent revision was torn down in dependency order to zero residue in both accounts (stacks, roles, Runtimes, Memories, Gateways, identities, providers, managed secrets, all 50 service log groups and all six agent image digests including the rejected fixture; every CMK pending deletion), surfacing two teardown-only defects fixed in `6c42395`, `0994732` and `8ecc88e`: the provider role lacked `secretsmanager:DeleteSecret` for its own managed secret, and `teardown.sh` could destroy the `RegistryRoles` stack that a still-existing `ToolGateway` imports by name — the script now blocks such producers after a consumer fails, and `scripts/recover-stranded-toolgateway.sh` performs the fail-closed recovery (see [`evidence/live/2026-09-24-generated-agent-teardown.md`](evidence/live/2026-09-24-generated-agent-teardown.md)). On 2026-09-24 the redeploy after teardown surfaced and repaired stale Platform tool-alias grants through the two-phase retire/regrant contract, redeployed both environments on `d2186b9` with the positive invoke and the wrong-account and unsubscribed-tool twins passing again, and proved the matching-principal wrong-ExternalId and wrong-session-name reader-trust twins as exact STS `403 AccessDenied` through the deployed validator role in both environments (`evidence/live/2026-09-24-redeploy-grant-retirement.md`). The same day's load, chaos and dependency-failure campaigns (`evidence/live/2026-09-24-load-rate-limit.md`, `evidence/live/2026-09-24-chaos-dependency-failure.md`) proved authentication and Runtime input handling fail closed and 8-way concurrency plus a soak green, measured the native rate limit as approximate traffic shaping, and found an **open defect**: the Gateway inference path did not enforce Bedrock Guardrails (a bogus or absent `guardrail_identifier` still returned HTTP 200, because the Gateway invokes Mantle under its own role, the parameter is not part of the OpenAI contract, `bedrock-mantle` has no guardrail condition key, and AgentCore Policy guardrail providers accept only string data paths, not the OpenAI `messages` set — proven against the live schema validator). The fix is a Gateway REQUEST interceptor (`packages/platform-inference-gateway/lambda/guardrail-interceptor/`) that runs `bedrock:ApplyGuardrail` with the stage's baseline Guardrail on every request body before the model is called and fails closed (403 on intervention, 503 when the guardrail is unavailable, 413 above the evaluation budget), plus a `bedrock-mantle:Model` allow-list on the Gateway role so unallocated models are denied by IAM rather than by the fail-open limiter. The interceptor is required by construction and passed its live proof in both environments on 2026-09-24/25 ([`evidence/live/2026-09-24-guardrail-enforcement.md`](evidence/live/2026-09-24-guardrail-enforcement.md)): six tripping prompts (prompt attack, denied credential topic, blocked PII, each sent with and without the client parameter) returned exact HTTP 403 `guardrail_intervened` with the tripped policy types, benign requests returned 200, the generated agent's positive session and unsubscribed-tool twin passed with the interceptor in the inference path, and the interceptor's own decision log corroborated every count; two earlier revisions were rejected at `SecurityReview` (guarding the system prompt made the baseline score the agent's own protocol prompt `PROMPT_ATTACK` HIGH; scoring a benign user request and a benign tool result as one string produced a false positive), so each untrusted turn is scored on its own `ApplyGuardrail` call and the agent's Strands adapter keeps turns separate. On 2026-09-25 the upgrade and interrupted-deployment campaign passed ([`evidence/live/2026-09-25-upgrade-interrupted-deploy.md`](evidence/live/2026-09-25-upgrade-interrupted-deploy.md)): Platform and Workload no-op redeploys changed no stack and no resource identity, sampled upgrades switched version exactly once in both environments, a nonproduction deployment cancelled both before and during the Runtime update rolled back to the prior revision with zero failed sessions, and re-running the stage deployed the revision to both environments; its first sampled upgrade found that the generated agent reported a reply carrying neither a `TOOL` directive nor the done marker as success (4 of 74 pre-fix sessions), fixed in agent 1.2.0 (`13153b4`) with a bounded protocol repair and an explicit `stopReason` (0 failures in 181 sessions afterwards). The same day the legacy `allowedToolIds` consumer path was retired instead of being redeployed for a rollback proof: the Workstream Gateway stack now accepts only the pipeline-resolved GA Registry context, and a before/after synthesis of every GA configuration differs only in one output description. Gateway OTEL rate-limit spans were correlated one-to-one with real allowed and throttled requests on the pipeline-owned nonproduction Gateway ([`evidence/live/2026-09-25-gateway-otel-span-correlation.md`](evidence/live/2026-09-25-gateway-otel-span-correlation.md)). SCPs 01–12 were evaluated with IAM Access Analyzer and the IAM policy evaluator and soaked live in the project's Organization; twelve defects were fixed, three of them lockouts and one a guardrail bypass ([`evidence/live/2026-09-25-scp-live-evaluation.md`](evidence/live/2026-09-25-scp-live-evaluation.md)). Remaining release gates: EMEA coverage; a measured 24-hour cost baseline; and a final dependency-ordered teardown of the redeployed revision. See [`docs/architecture/target-state-architecture.md`](docs/architecture/target-state-architecture.md), [ADR-0016](docs/adr/ADR-0016-agentcore-gateway-inference-supersedes-litellm-proxy.md), [`evidence/live/2026-09-18-agentcore-gateway-spike.md`](evidence/live/2026-09-18-agentcore-gateway-spike.md), [`evidence/live/2026-09-19-platform-pipeline-deployment.md`](evidence/live/2026-09-19-platform-pipeline-deployment.md), [`evidence/live/2026-09-19-policyengine-compatibility-spike.md`](evidence/live/2026-09-19-policyengine-compatibility-spike.md), [`evidence/live/2026-09-19-agent-registry-compatibility-spike.md`](evidence/live/2026-09-19-agent-registry-compatibility-spike.md), [`evidence/live/2026-09-20-pipeline-ga-agent-registry-r1.md`](evidence/live/2026-09-20-pipeline-ga-agent-registry-r1.md), and [`evidence/live/2026-09-21-pipeline-ga-agent-registry-r2.md`](evidence/live/2026-09-21-pipeline-ga-agent-registry-r2.md).
+## What this blueprint provides
 
-![Architecture](assets/architecture-diagram.png)
+The supported reference path uses three account roles:
 
-> _Drawio source: [`assets/architecture-diagram.drawio`](assets/architecture-diagram.drawio)._
+| Account role              | Responsibilities                                                                                                           |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Management and Governance | AWS Organizations controls, CloudWatch OAM sink, centralized audit and log archive                                         |
+| Platform                  | AWS Agent Registry, the shared AgentCore inference Gateway, Bedrock Guardrails, Cognito M2M, and both deployment pipelines |
+| Workstream                | AgentCore Runtime, Memory, a workstream Tool Gateway, per-agent roles, and application execution                           |
 
----
+Generated agents have exactly two outbound application paths:
 
-## Table of Contents
+1. `MCPClient` signs requests with AWS SigV4 to the workstream-owned AgentCore Tool Gateway. The Gateway exposes only Registry-approved tools and invokes exact Platform Lambda aliases through its service role.
+2. `LiteLLMModel` obtains a short-lived token through AgentCore Identity and Cognito M2M, then calls the Platform AgentCore Inference Gateway. A mandatory request interceptor applies the stage Guardrail before the Bedrock Mantle target is invoked.
 
-1. [Overview](#1-overview)
-2. [Architecture](#2-architecture)
-3. [Deviations](#3-deviations)
-4. [AWS Services Used](#4-aws-services-used)
-5. [Prerequisites](#5-prerequisites)
-6. [Deployment](#6-deployment)
-7. [Running the Guidance](#7-running-the-guidance)
-8. [Cost](#8-cost)
-9. [Operations](#9-operations)
-10. [Security](#10-security)
-11. [Choice architecture](#11-choice-architecture)
-12. [Compliance](#12-compliance)
-13. [Multi-account topology](#13-multi-account-topology)
-14. [Architecture Decision Records](#14-architecture-decision-records)
-15. [Known limitations and honest disclaimers](#15-known-limitations-and-honest-disclaimers)
-16. [Cleanup](#16-cleanup)
-17. [Contributors and License](#17-contributors-and-license)
+Generated-agent code must not invoke Bedrock or Lambda directly.
 
----
+## Support envelope
 
-## 1. Overview
+The complete reference flow is live-validated in `eu-west-1` (Ireland), including:
 
-Agentic AI platforms at enterprise scale need the same controls ordinary systems need — identity, network isolation, audit, cost attribution, tenancy — plus agentic-specific ones: model allow-listing, Bedrock Guardrails on every inference call, Cedar micro-policies on AgentCore Gateway, memory-namespace isolation, and evaluation gates before promotion.
+- Platform and Workload pipelines through production.
+- AWS Agent Registry record resolution and approval checks.
+- `LiteLLMModel`, `MCPClient`, AgentCore Identity, Runtime, Memory, and both Gateways.
+- Benign and adversarial Guardrail requests.
+- Exact HTTP 429 behavior for an unallocated model.
+- Cross-account Runtime denial.
+- Runtime update cancellation, rollback to the prior agent version, and re-run to green with no failed sampled sessions.
+- Evaluation thresholds for regression, response quality, tool success, refusal behavior, first-token latency, and per-prompt cost.
+- CloudWatch OAM access to linked Platform and Workstream logs and metrics.
+- Gateway application-log and OTEL span correlation for admitted and throttled requests when Transaction Search is enabled.
+- Dependency-ordered teardown and independent zero-residual inventories.
 
-This blueprint delivers all of the above as a deployable AWS CDK app spanning a real AWS Organization, in two mutually-exclusive deployment patterns.
+Ireland is the current EMEA reference Region because AWS Agent Registry is available there. Treat every other Region as unvalidated until you run the same service-availability, policy, pipeline, adversarial, rollback, observability, and teardown gates independently.
 
-**Default distributed pattern (D-01)** — `apps/workload-account/`. Everything lives in the workload account: baseline SCPs 01–08 at the OU, per-account VPC (11 interface VPCEs + 1 S3 gateway, no IGW/NAT), baseline Bedrock Guardrail, LiteLLM in the inference path with a triple-gate guardrail enforcement (SCP + IAM deny + VPCE policy), AgentCore Runtime/Gateway/Identity/Memory/Registry, API Gateway as the primary auth boundary, CloudWatch cross-account observability, CDK Pipelines with a mandatory evaluation gate, and three Strands agent blueprints.
+The following remain outside the Ireland support envelope:
 
-**Centralised-platform alternative (D-03 v3)** — `apps/platform-account/` + `apps/workload-account/lib/d03-workload-agent-stack.ts`. A platform-governed, per-workstream AgentCore Gateway is deployed **into** the workstream account, removing the cross-account Runtime→Gateway hop while keeping platform governance via three layers:
+- Legacy direct-Bedrock evaluation, online-evaluation, ECS LiteLLM, and direct circuit-breaker paths that rely on cross-Region inference profiles.
+- VPC Lattice private endpoints.
+- Automatic retirement of the Lambda Cedar wrapper; it remains a rollback and defense-in-depth control.
+- Transaction Search as a default. It is account-wide and billable, so customers opt in deliberately.
 
-1. **Synth** — the target SSOT is the GA AWS Agent Registry (`packages/agent-registry/`). R1 added native `AWS::AgentRegistry::Registry` and `RegistryRecord` resources, custom governance documents, a conditioned `RegistryReaderRole`, and versioned SSM discovery parameters alongside the unchanged DynamoDB rollback path. R2 is now pipeline/live-verified in both environments: developers commit stable tool IDs, the Workload synth resolves approved records cross-account, and deploy-time validation pins status, descriptor digest, and target ARN before Gateway targets are created. The retained legacy consumer has passed strict rollback synthesis but has not yet been redeployed live from the R2 revision.
-2. **Deploy** — SCP-09 denies Gateway creation and every Gateway/target mutation (`bedrock-agentcore:CreateGateway` on `*`, the rest on Gateway ARNs) from every principal except environment-qualified, pipeline-created `AgenticAI-D03-*-GatewayAdmin` roles in the configured Workstream accounts.
-3. **Runtime** — the Gateway service role's identity policy lists the exact N subscribed tool ARNs (no wildcards); SCP-10 denies runtime roles `lambda:InvokeFunction` on any non-catalogued ARN.
+## Prerequisites
 
-SCP-09 to SCP-12 are rendered, evaluator-proven and were soaked live (attached to the Workstream OU, 2026-09-25 — see [`evidence/live/2026-09-25-scp-live-evaluation.md`](evidence/live/2026-09-25-scp-live-evaluation.md)), but the reference `OrganizationConstruct` attaches only SCP-01/02/05/06/08 (plus SCP-03/04/07 when explicit VPC endpoint ids are supplied): AWS Organizations allows at most 10 SCPs per OU including `FullAWSAccess`, and SCP-09/10 need the Workstream account ids and tool ARNs of your deployment. Until they are attached, IAM identity policies are the enforcing layer for those two controls.
+- Node.js 20 or later.
+- Python 3.12 or later.
+- AWS CLI v2.
+- AWS CDK v2.
+- Three AWS accounts or equivalent isolated account roles.
+- AWS Organizations or explicit trusted-account configuration for the OAM sink.
+- A GitHub repository and AWS CodeConnections connection.
+- Access to the selected Bedrock Mantle model in the target Region.
+- Administrator access for initial bootstrap only. Pipeline deployments use generated scoped execution policies.
 
-Cross-account Bedrock calls go through a `BedrockCallerRole` (`sts:ExternalId` + `aws:PrincipalArn` + `RoleSessionName` trust conditions); per-tenant Application Inference Profiles carry CUR attribution tags in place of `sts:TagSession` (which does not propagate across role chains — `BUG-005`).
-
-### 1.1 Day-in-the-life — how a developer ships an agent
-
-Workstream accounts are the developer's primary surface; the platform account holds governance + the central Registry and developers do not log into it.
-
-1. **Onboarding (platform team, one-time).** `D03PlatformCoreStack` provisions three Identity Center permission sets per workstream — `AgenticAI-WS-Dev-<ws>` (deploy + observability + Registry consumer), `-Ro-` (read-only), `-Apv-` (pipeline approve).
-2. **Discover + subscribe.** `agenticai registry search` / `subscribe` appends stable tool ids to `cdk.context.json`; the Workload synth resolves each environment's generated RegistryRecord ID through versioned SSM parameters, requires `APPROVED`, and emits exact cross-account Lambda alias ARNs into the service role (no wildcards).
-3. **Build + eval + submit.** `agenticai dev eval` runs the same 7-category scoring the CI gate runs; `agenticai submit` renders the PR body. The pipeline runs Source → Synth → Deploy(nonprod) → Evaluation Gate → Manual Approval → 5 % canary + soak → Prod.
-4. **Per-developer entitlement.** A Curator can pin `metadata.allowedGroups` on a record; the Gateway then runs in `CUSTOM_JWT` mode and the per-tool Lambda's Cedar wrapper (`@agenticai/tool-cedar-wrapper`) denies on `cognito:groups` mismatch before user code runs. The pipeline-owned AgentCore Gateway PolicyEngine path has now passed IAM-principal behavior parity, rollback, production deployment, and zero-residual teardown. The legacy wrapper remains intentionally active as a rollback and defense-in-depth control until maintainers make a separate retirement decision.
-
-### 1.2 How this fits with the other samples in this repository
-
-`sample-ai-agent-factory` collects complementary samples covering different layers of an AI Agent Factory. This one is the **platform foundation** — the multi-account landing zone, org guardrails, and governance surface. It is deliberately infrastructure-heavy and assumes a real AWS Organization.
-
-| Sample                                                                                | Layer                | Relationship to this blueprint                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| ------------------------------------------------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`workshop-building-agentic-ai-platform/`](../workshop-building-agentic-ai-platform/) | Learn the foundation | Closest neighbour. A guided 300-level workshop over the same building blocks (LLM Gateway via LiteLLM, MCP Gateway + Registry, Strands agents) in a **single account**. **Start there** if you want to understand the pattern hands-on; come here when you need the multi-account, SCP-governed, CI/CD-gated production form of it.                                                                                                                                                                                                                                                            |
-| [`Agentic-ai-self-service/`](../Agentic-ai-self-service/)                             | Build agents         | The builder experience that sits **on top of** a foundation like this one. It gives teams a visual canvas for authoring and deploying AgentCore agents; this blueprint provides the governed accounts, model allow-list, guardrails, and cost attribution those agents deploy into.                                                                                                                                                                                                                                                                                                            |
-| [`enterprise-mcp-governance-gateway/`](../enterprise-mcp-governance-gateway/)         | Govern tool calls    | Overlapping but distinct depth on per-tool-call authorisation. That sample evaluates Cedar in the AgentCore Gateway's **PolicyEngine in `ENFORCE` mode** and is the better reference for the request-path interceptor and OAuth 3LO connector patterns. This blueprint now has pipeline/live-verified native PolicyEngine enforcement and intentionally retains Cedar **inside each tool Lambda** as a rollback and defense-in-depth control (§3.3); it also adds the org-level layers around that boundary — SCP-09/10/11, the Registry as tool SSOT, and synth-time subscription validation. |
-
-Pick this sample if your question is _"how do I govern agentic AI across many accounts and many teams?"_. Pick one of the others if your question is _"how do I learn this?"_, _"how do I ship an agent quickly?"_, or _"how do I authorise a single tool call?"_.
-
----
-
-## 2. Architecture
-
-See `assets/architecture-diagram.png` (editable `.drawio` source alongside). Control-level detail below.
-
-### 2.1 Account topology
-
-| Role                     | OU                  | Purpose                                                                                                              |
-| ------------------------ | ------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| Management               | Root                | AWS Organization, OUs, SCPs 01-12 (01-08 baseline; 09-10 D-03 Gateway; 11 Registry; 12 developer permission sets)    |
-| Log Archive              | Security            | CloudTrail org trail + CUR + CWL cross-account destination                                                           |
-| Audit                    | Security            | CloudWatch OAM sink, Security Hub master                                                                             |
-| Platform non-prod / prod | AgenticAI-Platform  | Guardrail Admin, Registry, CDK Pipelines, central AgentCore inference Gateway, Cognito M2M, native model rate limits |
-| Workload non-prod / prod | AgenticAI-Workloads | Per-application agent stacks                                                                                         |
-| SCP Sandbox              | AgenticAI-Sandbox   | Soaks new SCPs before promotion                                                                                      |
-
-CloudWatch Logs destination access policies are service-specific: `Principal.AWS` lists each sender's 12-digit account ID. IAM root ARNs are not equivalent here and are rejected by `PutDestinationPolicy`.
-
-### 2.2 Network
-
-Per workload account (`packages/agentic-vpc/`): VPC with 3 AZs, **private-isolated subnets only** (no IGW/NAT); interface VPCEs for AgentCore (data/control/gateway), Bedrock (runtime/management), ECR, CloudWatch, STS, KMS + S3 gateway endpoint (11 interface + 1 gateway). Endpoint policies scoped to the local account root; the Bedrock Runtime endpoint restricts `InvokeModel`/`Converse` to the allow-listed model ARNs and denies when `GuardrailIdentifier` is Null. VPC Flow Logs → CMK-encrypted log group.
-
-### 2.3 Bedrock governance
-
-- **Model allow-list SSOT** — `PLATFORM_ALLOWED_MODELS` (`packages/platform-baselines/`) = Claude Sonnet 4.5 + Haiku 4.5, flowing into SCP-01, the Bedrock VPCE policy, the LiteLLM router config, and AgentCore execution-role IAM. A conformance test diffs all four for drift.
-- **Guardrail triple-gate** — every invocation carries a `GuardrailIdentifier`, enforced by SCP-02 (org), an IAM identity-policy deny (`Null: bedrock:GuardrailIdentifier` twinned with `ForAnyValue:StringNotEquals` positive allow-list), and the Bedrock VPCE policy.
-- **Guardrail profiles** — Baseline (mandatory default: HIGH content filters, prompt-attack detection, AU TFN/Medicare/BSB regex, PII BLOCK/ANONYMIZE), Internal Tool, Customer-Facing (both opt-in, platform-approved).
-- **Segregation of duties** — `GuardrailAdminRole` in the platform account only; SCP-05 (`ArnNotLike` on role + assumed-role session forms) denies guardrail mutation everywhere else.
-- **Model Invocation Logging** — CMK-encrypted `/agenticai/bedrock-invocations`, text-only delivery; under D-03 the record carries the per-tenant `inferenceProfileArn`.
-
-### 2.4 AgentCore stack
-
-- **Runtime** (`packages/agentcore-runtime/`) — per-agent execution role, immutable-tag ECR repo, CMK log group. Under D-03 the role is trusted by `bedrock-agentcore.amazonaws.com`.
-- **Central inference Gateway** (`packages/platform-inference-gateway/`) — native `AWS::BedrockAgentCore::Gateway`, Bedrock Mantle inference target, Cognito client-credentials JWT authorizer, explicit model RPM/TPM entries, and a zero-rate wildcard fallback. `LiteLLMModel` calls `<GatewayUrl>/inference/v1` with `<InferenceTargetName>/<provider-qualified-model-id>`; the Cognito client secret is never output.
-- **Workstream tool Gateway — legacy placeholder** (`packages/agentcore-gateway/`) — API Gateway HTTP v2 + Cognito JWT authorizer + WAFv2 + VPC Link and an internal ALB. It remains architectural debt until replaced by a real per-workstream AgentCore Gateway in the next vertical-slice stage.
-- **Identity** (`packages/agentcore-identity/`) — Cognito User Pool + Token Vault CMK; 12-char password minimum, email verification, deletion protection, 1h access-token TTL.
-- **Memory** (`packages/agentcore-memory/`) — per-tenant CMK; namespace template static at synth (only `{actorId}`/`{memoryStrategyId}`/`{sessionId}` vary at runtime); confused-deputy grant closed with `aws:SourceAccount` + `aws:SourceArn`.
-- **Registry — tool SSOT migration** (`packages/agent-registry/`) — the Platform pipeline synthesizes environment-isolated GA Registries, versioned `CUSTOM` governance records, pipeline-owned tool aliases, a conditioned `RegistryReaderRole`, and versioned SSM discovery parameters alongside the unchanged DynamoDB rollback path. R2's stable tool-ID subscriptions, Platform-side context resolution, stable Workstream role stage, explicit Lambda-permission handoff, and deploy-time `APPROVED` + descriptor-digest + target-ARN validation are pipeline/live-verified in nonproduction and production. The legacy consumer and DynamoDB tables remain available for rollback until a live rollback deployment passes.
-- **Per-developer entitlement** (`packages/tool-cedar-wrapper/`) — a record may carry `metadata.allowedGroups`; when set the Gateway is forced into `CUSTOM_JWT` and the per-tool Cedar bundle binds each permit to a `CognitoGroup`. The pipeline-owned AgentCore Gateway PolicyEngine path has passed IAM-principal behavior parity, rollback, production deployment, and zero-residual teardown. The Lambda wrapper remains active as a deliberate rollback and defense-in-depth control pending a separate maintainer retirement decision.
-
-### 2.5 Other constructs
-
-- **RAG** (`packages/rag/`) — per-tenant CMK source bucket, versioned + access-logged + SSL-enforced, scoped `kbs/<tenant>/<kb>/` prefix, bucket policy denies any request not arriving via the workload VPCE.
-- **LiteLLM (D-01)** (`packages/litellm-gateway/`) — per-account ECS Fargate behind an internal ALB, task-role allow-list + deny-on-null-guardrail, master key from Secrets Manager (CMK, injected via ECS `secrets:`).
-- **Tenancy** (`packages/agentic-app/`) — per-app IAM role, per-app SG, memory namespace locked at synth, cost-allocation tags for per-app CUR.
-- **Observability** (`packages/observability/`) — OAM source links connect the Platform pipeline root and every distinct GA Workstream account/Region to the regional Audit sink; the sink policy unions Organization membership with the explicit Platform/Workstream account set so standalone validation accounts do not inherit an inapplicable `PrincipalOrgID` condition, and the scoped Workstream CDK execution policy includes exact source-link lifecycle plus the `cloudwatch:Link`, `logs:Link`, and `xray:Link` dependent permissions. Same-account nonproduction/production profiles deliberately share one link to avoid a CloudWatch OAM collision. Legacy application stacks retain their per-app dashboard plus guardrail/latency alarms.
-- **Cost** (`packages/cost-allocation/`) — per-app Budget filtered by `application-id`, alerts at 80 % ACTUAL + 100 % FORECASTED.
-- **CI/CD** (`pipelines/`) — self-mutating platform pipeline + per-app workload pipeline with the mandatory sequence _Source → Synth → Deploy(nonprod) → Evaluation Gate → Manual Approval → Deploy(prod)_.
-
-Evaluation-gate thresholds (defaults, overridable via `cdk.context.json`): regression pass ≥ 95 %, guardrail violation ≤ 1 %, LLM-as-judge quality ≥ 85 %, tool success ≥ 98 %, first-token p99 ≤ 1500 ms.
-
----
-
-## 3. Deviations
-
-Every conscious divergence from the source spec is recorded with the affected clauses, rationale, residual risks, and compensating controls. All three are publishable.
-
-### 3.1 D-01 — LiteLLM in the inference path
-
-Agents call Bedrock through a per-workload-account LiteLLM deployment rather than directly. The inference boundary shifts inside the account; the per-account quota/CUR/audit boundary is preserved.
-
-- **Rationale.** Virtual-key per-team budgets (429-on-exceed), per-team cost attribution, unified observability, reuse of mature existing code.
-- **Compensating controls.** Guardrails enforced three ways (LiteLLM `default_on` + IAM deny-on-null + VPCE policy); model allow-list SSOT; agent identity forwarded via Bedrock session tags for CloudTrail attribution; per-account deployment enforced at synth; PrivateLink-only; CMK everywhere.
-
-### 3.2 D-02 — IaC authored in AWS CDK, not Terraform
-
-Infrastructure is authored in AWS CDK (TypeScript + Python), synthesising CloudFormation. The spec's Terraform examples are re-implemented as CDK constructs with equivalent control semantics — same SCP bodies, VPCE policies, resource-based policies, Cedar policies, CMK wiring, guardrail attachment.
-
-- **Compensating controls.** Every deviating construct cites the spec § it implements; cdk-nag `AwsSolutionsChecks` + `NIST80053R5Checks` Aspects mandatory; build-time SCP-size check; every suppression carries an inline `SEC-0NN` marker with owner, rationale and compensating control.
-
-### 3.3 D-03 — Centralised-platform pattern
-
-LiteLLM, API Gateway, WAF, Cognito, AgentCore Gateway, Registry, shared base-image ECR, and experiment-tracking DynamoDB live in the platform account and are consumed cross-account by agents on AgentCore Runtime in workload accounts. Memory stays in the workload account.
-
-- **Rationale.** Central AI Platform team owns LiteLLM/Gateway/guardrails; product teams own agents. One deployment to upgrade; faster workload onboarding; consolidated guardrail enforcement.
-- **Residual risks + compensating controls.** Platform SPOF → multi-AZ + per-env isolation + evaluation-gate-gated pipeline; per-workload quota → LiteLLM virtual-key budgets; **per-workload CUR** → platform-owned per-tenant Application Inference Profiles (the real fix for `BUG-005`: `sts:TagSession` does not survive role chaining); cross-account AssumeRole → `ExternalId` + `PrincipalArn`/`RoleSessionName` conditions; JWT replay → `tenantId` claim asserted against `sts:SourceAccount`; shared Registry/ECR tampering → per-tenant scoping + platform-pipeline-only writes; **per-developer scoping** → Cedar entitlement (`allowedGroups` + `CUSTOM_JWT` + `@agenticai/tool-cedar-wrapper`, fail-closed). **Gateway PolicyEngine migration**: the Workload pipeline's opt-in `LOG_ONLY`/`ENFORCE` path passed behavior parity, mode rollback, production deployment, in-place semantic-search removal, fail-closed teardown, and zero unintended residue on exact commit `f45a12c`. The wrapper remains intentionally active until a separate maintainer decision retires that rollback and defense-in-depth control.
-- **Equivalence obligations.** Guardrail-on-every-call, per-workload cost attribution, per-workload audit trail, model allow-list SSOT, tenancy isolation, and network isolation are all preserved and CI-asserted. Two-account live verification (2026-05-01): 12/12 behavioural assertions PASS; re-verified end-to-end 2026-07-02.
-
-New deviations require product-owner sign-off documenting: affected spec clauses, rationale, residual risks, compensating controls, equivalence obligations, and the CI conformance tests that assert them.
-
----
-
-## 4. AWS Services Used
-
-Amazon Bedrock · Amazon Bedrock AgentCore (Runtime, Gateway, Identity, Memory, Registry) · Bedrock Guardrails · Bedrock Application Inference Profiles · AWS Organizations · AWS Control Tower · AWS IAM · IAM Identity Center · AWS STS · Amazon API Gateway · AWS WAF · Amazon Cognito · Amazon VPC + PrivateLink · Amazon ECR · AWS KMS · AWS CloudTrail · Amazon CloudWatch (+ cross-account OAM) · Amazon S3 (+ S3 Vectors) · AWS Service Quotas · AWS CodePipeline / CodeBuild · AWS Lambda · AWS Step Functions · AWS Cost and Usage Report · AWS Security Hub · Amazon GuardDuty · AWS Config · Amazon Inspector · AWS Secrets Manager · Amazon DynamoDB · Amazon ECS (Fargate, Graviton) · AWS Certificate Manager · AWS Budgets · Amazon Verified Permissions (Cedar).
-
----
-
-## 5. Prerequisites
-
-- **AWS Control Tower** landing zone (documented hard prerequisite).
-- **AWS CLI** ≥ 2.15, **Node.js** ≥ 20 LTS, **Python** ≥ 3.12, **AWS CDK** ≥ 2.150.0.
-- Bedrock model access approved for Claude Sonnet 4.5 + Haiku 4.5 in the target account(s).
-- IAM Identity Center user with management-account access for the initial deploy.
-- A GitHub repo + AWS CodeStar Connections V2 connection (CI/CD only).
-- Corporate VPC CIDR allocation (or accept defaults `10.20.0.0/16`, `10.21.0.0/16`).
-
----
-
-## 6. Deployment
-
-### 6.1 One-time setup
+## Install and validate
 
 ```bash
-git clone https://github.com/aws-samples/sample-ai-agent-factory.git
-cd sample-ai-agent-factory/enterprise-agentic-ai-platform-blueprint
 npm ci
 npm run build
-npm test     # full Jest suite must pass
+npm test
+npm run lint
+npm run scrub
+```
 
-# Populate cdk.context.json with your account IDs + emails + CIDRs, then bootstrap.
-# AWS_REGION/AWS_DEFAULT_REGION select the CDK CLI's SDK Region; the CLI then
-# supplies CDK_DEFAULT_REGION to the app. Set all three so a profile's Region
-# cannot silently override the intended deployment Region.
-export CDK_DEFAULT_ACCOUNT=<MGMT_ACCT>
-export AWS_REGION=us-west-2
+For infrastructure changes, also synthesize the exact topology you intend to deploy:
+
+```bash
+export AWS_REGION=eu-west-1
 export AWS_DEFAULT_REGION="$AWS_REGION"
 export CDK_DEFAULT_REGION="$AWS_REGION"
-npx cdk bootstrap "aws://$CDK_DEFAULT_ACCOUNT/$CDK_DEFAULT_REGION" --qualifier hnb659fds
+
+npx cdk synth --strict \
+  --context stage=pipeline \
+  --context agenticai/pipelineSelection=platform \
+  ...
 ```
 
-> **Region selection.** Before every local `cdk bootstrap`, `cdk synth`, or `cdk deploy`, set `AWS_REGION` and `AWS_DEFAULT_REGION` to the intended Region and set `CDK_DEFAULT_REGION` to the same value. The CDK CLI derives the child app's `CDK_DEFAULT_REGION` from its SDK session; setting only `CDK_DEFAULT_REGION` can therefore be replaced by the active profile's Region. Pipeline CodeBuild executions inherit the pipeline's explicit Region.
+Set all three Region variables. The CDK CLI derives the child process Region from its SDK session, so setting only `CDK_DEFAULT_REGION` is not sufficient.
 
-> **Least privilege.** Set the CDK CloudFormation execution policy to a customer-managed policy scoped to the services these stacks provision — do **not** use `AdministratorAccess`. Generate one role-specific document per account with `pipelines/bootstrap/render-cfn-execution-policy.py`, validate it with IAM Access Analyzer, create it under the same local name in each target account, then run `pipelines/bootstrap/bootstrap-cross-account.sh` with explicit `AWS_REGION` and `CFN_EXECUTION_POLICY_NAME`. The runner constructs the local policy ARN for each account; an explicit `CFN_EXECUTION_POLICY_ARN` is accepted only for a single-account context, preventing accidental reuse of one account's ARN across the fleet. The required scope is documented inline in both scripts. The Platform-account execution policy must additionally allow `iam:PassRole` on each target account's exact `cdk-hnb659fds-deploy-role-<account>-<region>` ARN with `iam:PassedToService=codepipeline.amazonaws.com`, and its exact `cdk-hnb659fds-cfn-exec-role-<account>-<region>` ARN with `iam:PassedToService=cloudformation.amazonaws.com`; CodePipeline validates both role classes when the cross-account pipeline is created. The Workstream execution policy must allow `iam:PassRole` on its exact pipeline-created/CDK Provider waiter roles with `iam:PassedToService=states.amazonaws.com`; this enables bounded Step Functions waiters without granting arbitrary service pass-through. When pipeline-owned Runtime/Memory is enabled, the Workstream execution policy must also allow native Runtime/Memory create, read, tag, and delete actions on the exact environment-qualified resource families; `iam:PassRole` only on the exact `AgenticAI-D03-<environment>-<tenant>-<agent>-runtime` role with `iam:PassedToService=bedrock-agentcore.amazonaws.com`; and Memory cryptography/grant actions only on the exact Memory CMK with `kms:ViaService=bedrock-agentcore.<region>.amazonaws.com`. The same pipeline-owned Runtime/Memory path also needs `iam:PassRole` on the exact `AgenticAI-D03-<environment>-<tenant>-<agent>-imgscan` image-scan-gate role with `iam:PassedToService=lambda.amazonaws.com`; that role's own policy is limited to `ecr:DescribeImages`, `ecr:StartImageScan`, and `ecr:DescribeImageScanFindings` on the exact bootstrap container-assets repository, and grants no image, tag, or repository deletion. When Gateway PolicyEngine is enabled, the same execution role also needs `kms:CreateGrant`, `kms:Decrypt`, `kms:GenerateDataKey`, and `kms:DescribeKey` on the exact PolicyEngine CMK, constrained by `kms:ViaService=bedrock-agentcore.<region>.amazonaws.com` and the `aws:bedrock-agentcore-policy:policy-engine-arn` encryption context. The Management execution policy must allow Kinesis stream provisioning, lifecycle management of the exact `AgenticAI-LogArchive-CWLDestinationRole`, and `iam:PassRole` on that role only with `iam:PassedToService=logs.amazonaws.com`. For reversible nonproduction buckets, scope IAM role lifecycle plus managed-policy attach/detach to `Nonprod-LogArchive-CustomS3AutoDeleteObjects*`, pass that generated role only to `lambda.amazonaws.com`, and scope Lambda lifecycle actions to the matching function prefix.
+## Configuration
 
-> **Worked example.** [`examples/reference-deployment-us-west-2/`](examples/reference-deployment-us-west-2/) is a complete 7-account `us-west-2` walkthrough with a fully populated `cdk.context.json` template (placeholder account ids), the Phase 1 → 8 deploy sequence, and the matching teardown. Use it as the concrete reference for the abstract steps below.
+The CDK application reads `agenticai/*` context values. Never commit real account IDs, secret ARNs, tokens, or generated Registry context files to a public repository.
 
-### 6.2 Path A — Default distributed (D-01)
+Core Platform context:
 
-1. Deploy Org + OUs + SCPs sandbox-first; run `bash scripts/scp-sandbox-soak.sh` (all four denial tests must pass) before attaching SCPs to the Workloads OU.
-2. Provision accounts via Control Tower Account Factory (Log Archive, Audit, Sandbox, platform ×2, workload ×2).
-3. Generate and Access-Analyzer-validate the role-specific execution policies, create them under one local name in each target account, then run `AWS_REGION=<region> CFN_EXECUTION_POLICY_NAME=<name> bash pipelines/bootstrap/bootstrap-cross-account.sh`.
-4. Set `agenticai/inferenceModelRateLimits` to a JSON array of provider-qualified model IDs and positive RPM/TPM allocations. Example: `[{"qualifiedModelId":"openai.gpt-oss-120b","requestsPerMinute":10,"tokensPerMinute":10000}]`. The construct appends a zero-rate `*` fallback; omit the Gateway target-name prefix from each rate-limit key and use the `InferenceTargetName` output to construct target-qualified invocation routes.
-5. `npx cdk deploy --context stage=pipeline ... AgenticAI-PlatformPipelineStack AgenticAI-WorkloadPipelineStack` — the pipeline self-mutates and deploys platform + workload stacks with the evaluation gate + manual approval.
+- `agenticai/githubRepo`
+- `agenticai/githubBranch`
+- `agenticai/githubConnectionArn`
+- `agenticai/organizationId`
+- `agenticai/auditAccountId`
+- `agenticai/logArchiveAccountId`
+- `agenticai/platformNonprodAccountId`
+- `agenticai/platformProdAccountId`
+- `agenticai/workloadAccountIds`
+- `agenticai/inferenceModelRateLimits`
+- `agenticai/auditOamSinkArn`
 
-The CodeConnections source is the parent `aws-samples/sample-ai-agent-factory` repository. Each pipeline synth step therefore enters `enterprise-agentic-ai-platform-blueprint/` before running npm/CDK commands; it also accepts a standalone checkout where this blueprint is already the repository root, and fails closed for any other source layout. After validating every nested stage assembly, a nested checkout moves the completed `cdk.out` back to the CodeBuild source root expected by `ShellStep`.
+Core Workload context:
 
-Both root pipelines use explicit CMK-encrypted artifact buckets with key rotation, five allocation tags, 30-day object expiry, seven-day incomplete-upload cleanup, and automatic object deletion on stack rollback or teardown. The Platform root also owns and uses the stable `AgenticAI-PlatformPipelineRole`; its ARN is wired directly into `GuardrailAdminRole` trust, so pipeline mode never depends on a pre-created or placeholder principal. When upgrading an existing pipeline that used CDK's generated role, review the root change set and repoint any external trust, KMS, or SCP references from the generated ARN before it is retired; one Platform pipeline per account is the supported cardinality. KMS keys use AWS's minimum seven-day pending-deletion window. The first Platform stage owns the shared Audit and Log Archive stacks; the production Platform stage does not create a second copy in the same Management/Governance account. If Platform nonproduction and production deliberately map to one account, nonproduction owns the stable `AgenticAI-GuardrailAdmin` role, production imports it, and only the regional production guardrail name gains a `-prod` suffix. Normal separate-account deployments retain the stable unsuffixed names in each account.
+- `agenticai/tenantId`
+- `agenticai/agentId`
+- `agenticai/applicationId`
+- `agenticai/costCentre`
+- `agenticai/workloadNonprodAccountId`
+- `agenticai/workloadProdAccountId`
+- `agenticai/workloadNonprodAvailabilityZones`
+- `agenticai/workloadProdAvailabilityZones`
+- `agenticai/enableGaRegistryConsumer=true`
+- `agenticai/gaRegistryExpectedToolIds`
+- `agenticai/gaRegistryNonprodContextFile`
+- `agenticai/gaRegistryProdContextFile`
+- `agenticai/workstreamGatewayRegion`
+- `agenticai/enablePipelineRuntimeMemory=true`
+- `agenticai/agentImageVariant=generated-agent`
+- `agenticai/generatedAgentInference`
 
-### 6.3 Path B — Centralised platform (D-03)
+Keep environment-specific context outside source control and inject it from your deployment system.
 
-All Platform and Workstream mutations flow through their pipelines. Do **not**
-run `cdk deploy` against a Workstream Gateway stack directly.
+## Bootstrap with scoped policies
 
-1. Deploy the Platform pipeline with R2 code and
-   `agenticai/enableGaGatewayInvokePermissions=false` (the default). This
-   creates environment-qualified tool Lambdas/aliases, updates Registry records
-   to version `2.0.0`, and extends `RegistryReaderRole`; it deliberately does
-   not reference Workstream role principals that do not exist yet.
-2. Explicitly approve the updated Registry records after the template-bound
-   preflight passes.
-3. Resolve one non-secret context file per Platform environment. For separate
-   Platform accounts, run each command with credentials for that environment:
+Generate one execution policy per account and Region:
 
 ```bash
-python3 -m venv "$KIROCREW_SCRATCH/ga-registry-resolver"
-"$KIROCREW_SCRATCH/ga-registry-resolver/bin/pip" install \
-  --disable-pip-version-check \
-  -r pipelines/requirements-ga-registry-resolver.txt
+python3 pipelines/bootstrap/render-cfn-execution-policy.py platform \
+  --account-id <PLATFORM_ACCOUNT> \
+  --region eu-west-1 \
+  --target-account-id <PLATFORM_ACCOUNT> \
+  --target-account-id <WORKSTREAM_ACCOUNT> \
+  --target-account-id <MANAGEMENT_ACCOUNT> \
+  --connection-arn <CODECONNECTIONS_ARN> \
+  > platform-policy.json
 
-HEAD="$(git rev-parse HEAD)"
-"$KIROCREW_SCRATCH/ga-registry-resolver/bin/python" \
-  pipelines/resolve_ga_registry_context.py \
-  --account-id '<PLATFORM_NONPROD_ACCOUNT>' --region us-west-2 \
-  --environment nonprod --application-id demo --agent-id primary \
-  --tenant-id demo --cost-centre engineering \
-  --expected-tool-id tool-echo --expected-tool-id tool-ping \
-  --source-revision "$HEAD" \
-  --output "$KIROCREW_SCRATCH/ga-registry-nonprod.json"
+python3 pipelines/bootstrap/render-cfn-execution-policy.py workstream \
+  --account-id <WORKSTREAM_ACCOUNT> \
+  --region eu-west-1 \
+  > workstream-policy.json
 
-"$KIROCREW_SCRATCH/ga-registry-resolver/bin/python" \
-  pipelines/resolve_ga_registry_context.py \
-  --account-id '<PLATFORM_PROD_ACCOUNT>' --region us-west-2 \
-  --environment prod --application-id demo --agent-id primary \
-  --tenant-id demo --cost-centre engineering \
-  --expected-tool-id tool-echo --expected-tool-id tool-ping \
-  --source-revision "$HEAD" \
-  --output "$KIROCREW_SCRATCH/ga-registry-prod.json"
+python3 pipelines/bootstrap/render-cfn-execution-policy.py management \
+  --account-id <MANAGEMENT_ACCOUNT> \
+  --region eu-west-1 \
+  > management-policy.json
 ```
 
-4. Create/update the Workload pipeline root with
-   `agenticai/pipelineSelection=workload`,
-   `agenticai/enableGaRegistryConsumer=true`, stable tool IDs, both context-file
-   paths, both Workstream account/AZ tuples, and the Platform account IDs. This
-   root-stack operation creates the pipeline only; the pipeline owns every
-   Workstream mutation.
-5. The Workload pipeline deploys three stable roles per environment in its
-   `RegistryRoles` stage, exposes each exact `GatewayServiceRoleArn` (and, as a
-   diagnostic, its current `GatewayServiceRoleId`) as stack outputs, then stops
-   at `GatewayPermissionReady`.
-6. Read the two `GatewayServiceRoleArn` outputs from the deployed nonproduction
-   and production role stacks. Re-run the Platform pipeline with
-   `agenticai/enableGaGatewayInvokePermissions=true` and
-   `agenticai/gaGatewayServiceRoleArns` set to a JSON array containing exactly
-   those two ARNs (one `AgenticAI-D03-nonprod-*-gw-svc` and one
-   `AgenticAI-D03-prod-*-gw-svc`). The Platform synth validates their accounts,
-   role-name shapes, uniqueness, and environment cardinality, then adds each
-   permission only to its matching environment aliases; it never reconstructs
-   a principal from Platform-side tenant or agent settings. Before approving
-   the handoff, confirm each alias policy names the role ARN:
-   `aws lambda get-policy --function-name <alias function> --qualifier PROD`.
-
-   **Grants are bound to the role instance, so retire them before the roles
-   go away.** Lambda stores a role principal as its IAM RoleId. If a granted
-   Workstream role is deleted (teardown, rollback) while its Platform grant
-   remains, the alias policy keeps naming the old RoleId (`get-policy` shows
-   an `AROA...` principal that differs from the new `GatewayServiceRoleId`
-   output), the recreated role is denied, and Lambda rejects every further
-   `AddPermission` on that alias with `The provided principal was invalid`
-   (live-proven 2026-09-24). Because CloudFormation replaces a permission
-   create-before-delete, there is no single-phase repair: always run the
-   Platform pipeline with `agenticai/enableGaGatewayInvokePermissions=false`
-   (removing the four statements) **before** deleting `RegistryRoles`, and use
-   the same two-phase toggle — off, verify each alias has no policy, then on
-   with the current ARNs — to recover from a stale grant.
-
-7. Approve `GatewayPermissionReady`. The Workload pipeline then deploys the
-   nonproduction Gateway. Its validator assumes `RegistryReaderRole`, requires
-   `APPROVED`, and compares both the live descriptor SHA-256 and the live target
-   ARN to the exact synth-wired values before any target is created. After live
-   nonproduction `tools/list` and `tools/call` proof, approve the dedicated
-   `ProdGatewayApproval` action. GA mode deliberately omits the app evaluation,
-   canary, and soak actions that require stacks it does not deploy; legacy/full
-   agent mode retains those gates unchanged.
-
-Gateway PolicyEngine migration is opt-in and defaults to `OFF`, which emits the
-exact R2 rollback template. For the current `AWS_IAM` Workload pipeline path,
-configure exact pathless caller-role ARNs separately for each environment and
-start in `LOG_ONLY`:
-
-```json
-{
-  "agenticai/gatewayPolicyEngineMode": "LOG_ONLY",
-  "agenticai/gatewayPolicyEngineNonprodIamRoleArns": [
-    "arn:aws:iam::<WORKLOAD_NONPROD_ACCOUNT>:role/<EXACT_RUNTIME_ROLE>"
-  ],
-  "agenticai/gatewayPolicyEngineProdIamRoleArns": [
-    "arn:aws:iam::<WORKLOAD_PROD_ACCOUNT>:role/<EXACT_RUNTIME_ROLE>"
-  ]
-}
-```
-
-The stack converts each IAM role to the stable
-`AgentCore::IamEntity::"arn:aws:sts::<account>:assumed-role/<role>"` principal,
-compiles one strict `FAIL_ON_ANY_FINDINGS` / `ACTIVE` policy per tool against
-its exact `<TargetName>___<ToolName>` action and Gateway ARN, and encrypts the
-engine and child policies with a rotating customer-managed KMS key. Creation
-orders exact Gateway-role permissions → six-minute propagation gate →
-`LOG_ONLY` association → targets → exact target readiness → policies → requested
-mode. AgentCore validates Cedar actions against the Gateway's live target schema,
-so policies cannot precede their targets. The readiness waiter signs the modeled
-trailing-slash `GetGatewayTarget` URI for each service-minted ID, requires its
-exact expected name and `READY` status, and fails immediately on identity drift,
-terminal status, or any `*_PENDING_AUTH` state. Optional semantic search is
-kept only in the exact `OFF` rollback template: live `ENFORCE` testing showed
-`tools/list` empty and direct calls policy-denied for an unpermitted principal,
-while the search tool still returned both unauthorized schemas. Exact commit
-`f45a12c` then proved that an in-place `UpdateGateway` removed the existing
-search configuration without replacing any Gateway, engine, target, policy, or
-CMK. In both environments the built-in search action was absent for permitted
-and unpermitted principals and disclosed zero tool metadata. Association uses a
-signed, idempotent convergence loop that retries only the live-proven transient
-`Access denied while calling GetPolicyEngine` validation response; unrelated
-validation errors fail immediately. The Gateway role scopes both KMS actions to
-the exact PolicyEngine CMK. `kms:Decrypt` omits the FAS-oriented condition block
-because live `GenesisPolicyEngineCheck` calls proved it did not authorize the
-runtime decrypt; metadata-only `kms:DescribeKey` retains `kms:ViaService`. The
-CMK key policy retains service conditions on grant creation, cryptography, and
-validation, source and encryption-context conditions on cryptography, and an
-operation/context-constrained grant-creation boundary. AgentCore's two
-service-created grants are independently operation- and context-constrained.
-Deletion holds the requested mode while policies delete, then reverses through
-target deletion → zero-target barrier → `LOG_ONLY` → detach → Gateway and engine
-deletion. In `ENFORCE`, removing permits before targets is default-deny; in
-`LOG_ONLY`, the retained Lambda wrapper remains the enforcement backstop.
-`CUSTOM_JWT` group policies use the separately live-proven
-quoted-element candidate when a discovery URL is supplied directly to the
-Gateway stack; pipeline JWT-authorizer wiring remains a later gate.
-
-Start in `LOG_ONLY` and do not switch to `ENFORCE` until live decisions match
-the Lambda wrapper. The reference campaign passed parity, mode rollback,
-production deployment, and zero-residual teardown on exact commit `f45a12c`.
-The wrapper remains active as an intentional rollback and defense-in-depth
-control, and `OFF` remains the supported native-PolicyEngine rollback.
-
-The Workload synth project uses the named
-`AgenticAI-WLP-<tenant>-<agent>-RegistrySynth` role and assumes only the two
-Registry reader roles. Its future executions resolve SSM/Registry context
-just-in-time; developers commit stable tool IDs, never environment-specific
-RegistryRecord IDs. The legacy `allowedToolIds` catalogue path was retired on
-2026-09-25 (maintainer decision): `D03WorkstreamGatewayStack` now refuses to
-synthesize without a pipeline-resolved GA Registry context, and a stray
-`allowedToolIds` value fails the synth. Roll back a subscription change by
-reverting the commit and letting the same pipeline redeploy the prior
-revision (the path proven by the 2026-09-25 interrupted-deployment campaign).
-
-`DEPRECATED` Registry records are terminal and cannot be updated or approved
-again. Recover one without replacing the Registry, its reader role, tools, or
-the retained DynamoDB rollback path by setting
-`agenticai/gaRegistryRecordGenerations` to an environment-scoped, monotonically
-increasing generation such as `{"nonprod":{"tool-echo":2}}`. First remove only
-the terminal record through the governed cleanup path, then update the Platform
-pipeline root with the generation and let the Platform pipeline create the new
-record plus update its SSM pointer. Explicitly approve the replacement `DRAFT`
-record before resuming Workload deployments. Never decrease or reuse a
-generation, and never apply a generation to production without its own review.
-
-The reference R2 Gateway stays in the pipeline Region (`us-west-2`) so no
-uncontrolled CDK cross-region artifact support stack appears. A region override
-requires its own secure replication-bucket design and independent live proof.
-
-### 6.4 Validation
+Validate each document before creating or updating it:
 
 ```bash
-python3 tests/smoke/smoke.py            # read-only sanity checks
-pytest tests/integration/ -v            # full D-03 harness (needs live creds)
+aws accessanalyzer validate-policy \
+  --region eu-west-1 \
+  --policy-type IDENTITY_POLICY \
+  --policy-document file://platform-policy.json
 ```
 
-Fast checks: `npm test` green; `npm run synth` emits the credential-free Management stack and is cdk-nag-clean with only the documented `SEC-0NN` suppressions. To validate the full pipeline topology, populate every required `agenticai/*` context value and run `npx cdk synth --strict --context stage=pipeline`. In a deployed environment, confirm SCPs are attached, VPCEs are present, `bedrock:InvokeModel` without a `GuardrailIdentifier` returns `AccessDenied`, and a non-allow-listed model returns `AccessDenied`.
-
-Repository hygiene gates, runnable locally and suitable for wiring into CI: `npm run scrub` (fails on any AWS account ID, internal reference, or hardcoded developer path in the tree) and `gitleaks detect --config .gitleaks.toml`.
-
-### 6.5 Common issues
-
-| Symptom                                                                                                                                                                                                                                                                                                                                                         | Cause                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cdk bootstrap` `sts:AssumeRole` denied                                                                                                                                                                                                                                                                                                                         | Target not set up for cross-account trust                                                                                                                                                                                                                                                                                                                                                                                                                                | Assume admin in the target first, re-run                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| Bedrock `AccessDenied`                                                                                                                                                                                                                                                                                                                                          | SCP-01/02 not matched                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Confirm model on allow-list + `GuardrailIdentifier` supplied                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Cross-account KMS decrypt fails                                                                                                                                                                                                                                                                                                                                 | Bootstrap `aws-cdk-lib` < 2.150                                                                                                                                                                                                                                                                                                                                                                                                                                          | Re-bootstrap ≥ 2.150                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| D-03 `CreateGateway` `not authorized`                                                                                                                                                                                                                                                                                                                           | Fresh CR role IAM not yet propagated to AgentCore                                                                                                                                                                                                                                                                                                                                                                                                                        | Use the pipeline-created `RegistryRoles` stage; legacy standalone mode must rely on the built-in propagation gate                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| D-03 `CreateGatewayTarget` "role lacks permission to invoke Lambda"                                                                                                                                                                                                                                                                                             | `GatewayPermissionReady` was approved before the Platform permission phase completed, or the alias grant still names an earlier RoleId of a recreated Workstream role (`aws lambda get-policy` shows an `AROA...` principal that differs from the `GatewayServiceRoleId` output)                                                                                                                                                                                         | Keep the Workload pipeline paused. If the grant is missing, run the Platform pipeline with `agenticai/enableGaGatewayInvokePermissions=true` and both `GatewayServiceRoleArn` outputs; if it is stale, run the two-phase repair below first. Verify each alias policy names the role ARN, then approve the handoff                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| Platform `Registry.Deploy` fails with `AWS::Lambda::Permission` `CREATE_FAILED` "The provided principal was invalid" although the Workstream role exists (live-proven 2026-09-24, both environments)                                                                                                                                                            | The alias policy still holds a statement for a deleted role instance (stale `AROA...` principal); Lambda rejects every further `AddPermission` on that alias while it remains, and CloudFormation replaces permissions create-before-delete, so no single-phase update can repair it                                                                                                                                                                                     | Two-phase toggle through the Platform pipeline: run with `agenticai/enableGaGatewayInvokePermissions=false` (the four statements are removed; `get-policy` then reports no policy on each alias), then run again with `true` and the current `GatewayServiceRoleArn` outputs. Prevent it by retiring the grants this way before any `RegistryRoles` deletion                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| RuntimeMemory `CreateOauth2CredentialProvider` denies `CreateTokenVault`                                                                                                                                                                                                                                                                                        | The provider creator lacks AgentCore's dependent permission to initialize the account's `default` token vault                                                                                                                                                                                                                                                                                                                                                            | Grant `bedrock-agentcore:CreateTokenVault` only on the exact `token-vault/default` ARN; include `TagResource` when passing mandatory tags; keep lifecycle actions in the scoped custom-resource role                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| RuntimeMemory `CreateWorkloadIdentity` reports `already exists` as `ValidationException` for a name that `GetWorkloadIdentity` reports not-found; `TagResource` on an existing identity returns `InternalServerErrorException`                                                                                                                                  | A fixed deterministic WorkloadIdentity name is not a safe dependency: AgentCore cannot tag an existing identity in place (deterministic service 500), and a deleted name is tombstoned for an extended window (Get says not-found, Create says already-exists; CLI-reproduced) -- five consecutive nonprod rollbacks on 2026-09-23                                                                                                                                       | Mint a fresh identity per Create (`<prefix>_<12 hex from the CloudFormation RequestId>`), surface it as the custom resource's `WorkloadName` attribute into the Runtime env, record it in the PhysicalResourceId so Update/Delete touch only the owned identity, scope IAM to the `<prefix>_*` family, and never adopt, tag, or delete a retained fixed name                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| RuntimeMemory identity custom resource denies `TagResource` on `.../workload-identity/*`, then `ListTagsForResource` on `workload-identity-directory/default`                                                                                                                                                                                                   | Per the `bedrock-agentcore` service reference, every WorkloadIdentity / Oauth2CredentialProvider action authorizes on both the named resource and its parent container, and create-time tags are evaluated as `TagResource` against the LITERAL family string `.../workload-identity/*` (a `<prefix>_*` narrowing was denied live); exact-ARN or narrowed scoping fails closed one call at a time                                                                        | Grant the handler's complete action set on the two default containers plus the two literal families -- never a bare `*` -- keep prefix narrowing on the Runtime role's token grant only, rely on the handler's PhysicalResourceId ownership check as the compensating control for same-directory identities, and prove every (action, resource) pair including the literal-wildcard request shape with `iam:SimulateCustomPolicy` before redeploying (`scripts/live-agentcore-generated-agent-spike/simulate_idprov_policy.py`)                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| RuntimeMemory `CreateOauth2CredentialProvider` denies `secretsmanager:CreateSecret`; a failed custom-resource Create orphans the identity it minted                                                                                                                                                                                                             | A MANAGED client secret is stored in a Secrets Manager secret the service creates on the caller's behalf (dependent permission not listed in the action's own reference); when Create fails, CloudFormation's rollback Delete carries a service-generated PhysicalResourceId, so the handler cannot recognise its own minted identity                                                                                                                                    | Grant `secretsmanager:CreateSecret`/`TagResource` only on the service's `bedrock-agentcore-identity!*` family in this account/region, and make the handler delete the identity it minted in the same request when the provider step fails before re-raising                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| Teardown: RuntimeMemory stack ends `DELETE_FAILED` on `InferenceCredProvider`; the custom resource reports `DeleteOauth2CredentialProvider ... not authorized to perform: secretsmanager:DeleteSecret` (live-proven 2026-09-24, both environments)                                                                                                              | The mirror image of the `CreateSecret` dependency: deleting the provider deletes its MANAGED secret AS THE CALLER, and the provider role granted only the create-time actions on the reserved family. Everything else in the stack (Runtime, Memory, scan gate, nonprod CMK) had already deleted cleanly; the ToolGateway delete is then _cancelled_ by CloudFormation (`Cannot delete export ... in use by ...-RuntimeMemory`) until this stack finishes                | Grant `secretsmanager:DeleteSecret` on exactly this provider's secret (`bedrock-agentcore-identity!default/oauth2/<providerName>-*` -- the name is known at delete time, unlike create), prove own-secret allowed and other-environment/Platform secrets denied with `simulate_idprov_policy.py`, then retry `delete-stack` on RuntimeMemory and only afterwards on ToolGateway. For an already-deployed revision, repair the stack-owned `SeedCredentialProvider` inline policy in place with the same document before retrying                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| Teardown: ToolGateway stack sits `DELETE_IN_PROGRESS` on its `GatewayTarget*` custom resources for a full hour, then ends `DELETE_FAILED` with `CloudFormation did not receive a response from your Custom Resource`; the singleton Lambda's log group stays empty and the targets are still `READY` in the service (live-proven 2026-09-24, both environments) | The ToolGateway stack IMPORTS its custom-resource execution role (`AgenticAI-D03-<env>-GatewayAdmin`) and the validator role (`...-RegistryValidator`) from the `RegistryRoles` stack **by name**, so CloudFormation sees no dependency between the two stacks. Deleting `RegistryRoles` first removes the execution roles; Lambda then fails every invoke before the handler runs (no log stream, no `cfn-response`), and CloudFormation waits out its one-hour timeout | The correct teardown order is RuntimeMemory -> ToolGateway -> **then** RegistryRoles; never delete the role stack while a Gateway stack still exists. If the roles are already gone: delete the orphaned targets and Gateways directly (`DeleteGatewayTarget`, wait until `ListGatewayTargets` is empty, `DeleteGateway`), recreate the two roles Lambda-trusted with only the delete-path grants (`bedrock-agentcore:DeleteGatewayTarget` -- the `DELETE_FAILED` target resources are retried first, live-proven -- plus `DeleteGateway`, `GetGateway`, `ListGatewayTargets` and `AWSLambdaBasicExecutionRole`; the validator role needs only the basic-execution policy because its Delete is a no-op), retry `delete-stack`, and delete the temporary roles afterwards. Retaining the failed targets (`--retain-resources`) does not help: the barrier, Gateway and validator custom resources sit on the same missing roles and would each time out in turn |
-| Generated agent invoke returns HTTP 424 `RuntimeClientError`; container log shows `GetWorkloadAccessToken` denied on `workload-identity-directory/default`                                                                                                                                                                                                      | The data-plane token calls authorize on the parent containers as well as the named identity/provider, exactly like the control-plane create actions; a grant limited to the named-identity family and exact provider fails closed at first invoke                                                                                                                                                                                                                        | Add the two fixed containers (`workload-identity-directory/default`, `token-vault/default`) to the Runtime role's `GetWorkloadAccessToken`/`GetResourceOauth2Token` statement, keep the `<prefix>_*` identity family and exact provider, and prove it with `scripts/live-agentcore-generated-agent-spike/simulate_runtime_identity_grant.py` before redeploying                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| Generated agent invoke returns HTTP 424; container log shows `GetResourceOauth2Token` denied `secretsmanager:GetSecretValue` on `bedrock-agentcore-identity!default/oauth2/<provider>-<suffix>`                                                                                                                                                                 | AgentCore Identity reads the provider's MANAGED client secret as the calling Runtime role when exchanging the workload token; the Runtime role had only the (unneeded) Platform M2M secret grant                                                                                                                                                                                                                                                                         | Grant the Runtime role `secretsmanager:GetSecretValue` on exactly that provider's managed secret (`...!default/oauth2/<provider>-*`), remove the Platform secret + KMS grants from the Runtime role (only the RuntimeMemory custom resource reads the Platform secret), and prove both exact denied pairs with `simulate_runtime_identity_grant.py`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Generated agent invoke returns HTTP 424 after ~5 s; container log shows Strands `MaxTokensReachedException` although `tools/list` and the Identity M2M exchange succeeded                                                                                                                                                                                       | The rated `openai.gpt-oss-120b` is a reasoning model whose hidden reasoning counts toward `max_tokens`; the 256-token cap that fit the spike's one-word prompt starved the reference agent's tool-selection turn before any visible output                                                                                                                                                                                                                               | Raise the per-turn bound to a still-hard 2048 (`INFERENCE_MAX_TOKENS`), keep the six-iteration loop guard, and pin the bound plus its propagation into the `LiteLLMModel` params with a regression test; never tune the cap against a one-word smoke prompt                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| Generated agent invoke returns HTTP 424 after ~9 s; container log shows `ParamValidationError: Missing required parameter in input: "eventTimestamp"` from `CreateEvent`, and the Runtime role has no Memory data-plane grant                                                                                                                                   | Memory `CreateEvent` REQUIRES `eventTimestamp` and its `blob` payload member is a `document` (structured JSON, not a string); `ListEvents` ordering is unspecified so a "latest event" read is not a valid round trip; the RegistryRoles stage never granted the Runtime role any `bedrock-agentcore:CreateEvent`/`GetEvent`                                                                                                                                             | Send a timezone-aware `eventTimestamp` and a document blob, read back the exact `eventId` with `GetEvent`, grant the Runtime role `CreateEvent` + `GetEvent` on exactly `memory/AgenticAI_D03_<env>_<tenant>_<agent>_memory-*` (never `memory/*`), and prove the exact live memory ARN plus foreign-env/tenant, `DeleteEvent` and `ListEvents` negatives with `simulate_runtime_identity_grant.py` against `scripts/render-registry-roles-template.ts` output                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| Generated agent invoke returns HTTP 424 after ~14 s; container log shows `CreateEvent` `AccessDeniedException: Unable to perform KMS operations` although the Memory IAM grant is allowed                                                                                                                                                                       | The Memory data plane encrypts and decrypts events AS THE CALLING IDENTITY (per the Memory encryption guide); the workstream CMK trusted only the `bedrock-agentcore` service principal, and the Runtime role held no KMS identity grant, so KMS dual authorization failed on both sides                                                                                                                                                                                 | Trust exactly the prior-stage Runtime role in the CMK key policy (`kms:Decrypt`, `DescribeKey`, `GenerateDataKey*`, `ReEncrypt*`; no `CreateGrant`) constrained by `kms:ViaService=bedrock-agentcore.<region>.amazonaws.com`, mirror it on the role's identity policy pinned by the CMK's request alias plus `ViaService` (the key id is minted later), and prove the pair with `ContextEntries` in `simulate_runtime_identity_grant.py` including foreign-alias, Secrets-Manager-path and direct-call negatives                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| Generated agent invoke returns HTTP 200 with exact marker, `discoveredToolCount>0` and `contentBlocks>0`, but `memoryRoundTrip=false` and `toolCalls=[]`                                                                                                                                                                                                        | Two independent defects: (1) the Memory `blob` document member is returned by `GetEvent`/`ListEvents` as a lossy `{k=v, ...}` rendering, so a structured record cannot round-trip through it; (2) the LiteLLM adapter joined only `user`/`tool` turns and silently dropped the `system` role, so the model never saw the `TOOL <name> <json>` protocol                                                                                                                   | Carry the per-turn record as canonical JSON text in a `conversational` payload (the member that round-trips byte-exact live) and parse it back from the exact `eventId`; pass the system turn to Strands as `system_prompt` and state the protocol plus subscribed names in it; reproduce model compliance standalone through the real inference Gateway with `inference_prompt_probe.py` (4/4 exact `TOOL` directive then exact `<done/>` at temperature 0) before spending a pipeline cycle                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| A commit pins the agent image to an outdated base; Nonprod `RuntimeMemory.Deploy` fails with `AgentImageScanGate: refusing Runtime creation for digest … with blocking findings {"CRITICAL": n, "HIGH": m}` and the stack shows `UPDATE_ROLLBACK_COMPLETE`                                                                                                      | This is the gate working as designed (live-proven 2026-09-23 with a deliberately outdated Debian base: 13 CRITICAL / 79 HIGH, matching ECR's own basic-scan counts). The Runtime depends on the gate's digest attribute, so it is never updated; the prior version keeps serving and the Prod stage is never entered                                                                                                                                                     | Do not weaken the gate or the scan policy: fix the base image (or wait for the base to be patched), push, and re-run. The rejected image stays in the shared asset repository -- the gate deliberately never deletes -- so remove that exact digest during teardown. A stack in `UPDATE_ROLLBACK_COMPLETE` is stable and probe-able (`live_invoke_probe.py` accepts it)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| Platform R2 `Registry.Deploy` denies `iam:CreateRole` for a generated `ServiceRole-*` name                                                                                                                                                                                                                                                                      | Tool Lambdas were relying on CDK auto-generated role names outside the scoped `AgenticAI*` deployment boundary                                                                                                                                                                                                                                                                                                                                                           | Use the explicit `AgenticAI-Platform-<environment>-<tool>-exec` roles emitted by the R2 tools construct; do not widen the execution policy to arbitrary role names                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| Workload Synth denies `agent-registry:ListTagsForResource`                                                                                                                                                                                                                                                                                                      | `RegistryReaderRole` can read records but cannot verify their five ownership tags                                                                                                                                                                                                                                                                                                                                                                                        | Deploy the R2 reader policy that scopes `ListTagsForResource` to the exact Registry and its `/record/*` family before retrying the Workload pipeline                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| Registry validator reports `getaddrinfo ENOTFOUND agent-registry-control.<region>.amazonaws.com`                                                                                                                                                                                                                                                                | GA Agent Registry resolves on its `api.aws` hostname from Lambda                                                                                                                                                                                                                                                                                                                                                                                                         | Use `agent-registry-control.<region>.api.aws` while retaining SigV4 service name `agent-registry`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| ToolGateway rollback cannot delete `GatewayResource` and CloudTrail shows a friendly `AgenticAI-D03-Gateway-*` identifier                                                                                                                                                                                                                                       | The custom resource retained a synthetic physical ID instead of the service-minted Gateway ID                                                                                                                                                                                                                                                                                                                                                                            | Persist `CreateGateway.gatewayId` with `PhysicalResourceId.fromResponse("gatewayId")` and use `PhysicalResourceIdReference` for update/delete                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| ToolGateway stack reaches `DELETE_COMPLETE` but the Gateway remains and CloudTrail says targets are still associated                                                                                                                                                                                                                                            | `DeleteGatewayTarget` is asynchronous even after its custom resource reports complete                                                                                                                                                                                                                                                                                                                                                                                    | Keep a dependency-ordered `TargetDeleteBarrier` between targets and Gateway; its waiter polls `ListGatewayTargets` to empty before `DeleteGateway` runs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| A GA Registry record is `DEPRECATED` and status/update calls report a terminal state                                                                                                                                                                                                                                                                            | `DEPRECATED` records cannot return to `DRAFT` or `APPROVED`                                                                                                                                                                                                                                                                                                                                                                                                              | Remove only the terminal record through governed cleanup, increment its environment-specific `agenticai/gaRegistryRecordGenerations` value, and let the Platform pipeline recreate it and update the SSM pointer; explicitly approve the new record                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Pipeline M2M token endpoint cannot resolve                                                                                                                                                                                                                                                                                                                      | Hosted-domain URL was built with the AWS API suffix                                                                                                                                                                                                                                                                                                                                                                                                                      | Derive it from `UserPoolDomain.baseUrl()`; Cognito managed domains use the `amazoncognito.com` suffix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `subnets in unsupported AZ`                                                                                                                                                                                                                                                                                                                                     | AgentCore supports only `use1-az1/az2/az4` in `us-east-1`                                                                                                                                                                                                                                                                                                                                                                                                                | Filter subnets by AZ ID (`AgentcoreCompatibleSubnetIdFirst` output)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Inference Gateway returns HTTP 200 with model content for a bogus or absent `guardrail_identifier` (live-proven 2026-09-24, both environments)                                                                                                                                                                                                                  | The Gateway invokes Bedrock Mantle under its own role; the guardrail parameter is not part of the OpenAI contract and `bedrock-mantle` has no guardrail condition key, so the client-side "guardrail on every call" promise is never enforced server-side; AgentCore Policy cannot express it either (`messages` is a `Set<record>`, guardrail providers take only `string`)                                                                                             | Required `inputGuardrail` plus the Gateway REQUEST interceptor (`packages/platform-inference-gateway/lambda/guardrail-interceptor/`) running `bedrock:ApplyGuardrail` before the model and failing closed (403 `guardrail_intervened`, 503, 413, 400); `bedrock-mantle:Model` pinned on the Gateway role; live 403/200 twins in both environments (`evidence/live/2026-09-24-guardrail-enforcement.md`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| After enabling the interceptor every governed session returns HTTP 424 while raw tripping/benign probes behave; the interceptor log shows `blocked` with `contentPolicy.PROMPT_ATTACK` on the first inference call (live-proven 2026-09-24, nonproduction)                                                                                                      | The first interceptor revision guarded every text segment including the pipeline-owned `system` prompt, and the baseline Guardrail scores the reference agent's own tool-protocol instructions `PROMPT_ATTACK` HIGH                                                                                                                                                                                                                                                      | Guard untrusted turns only (`user`, `tool`/`function`, role-less, bare `input`/`prompt`); never evaluate `system`/`developer`/`assistant` content or top-level `system`/`instructions` (Bedrock's guarded-content convention); the revision was rejected at `SecurityReview`, never promoted                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| With role scoping the first turn passes but the follow-up (user request + tool result) returns 403 `PROMPT_ATTACK` although each text alone scores NONE (live-proven 2026-09-24, nonproduction)                                                                                                                                                                 | The classifier scores the concatenation of unrelated turns differently from each turn alone: a benign request plus a benign tool result evaluated as one string scored `PROMPT_ATTACK` LOW                                                                                                                                                                                                                                                                               | Score each untrusted turn on its own `ApplyGuardrail` call (concurrent; chunk within a turn, never across turns) and keep the agent's Strands history split into separate turns (`_split_history`); `test_each_untrusted_turn_is_scored_on_its_own_call` pins it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| Generated agent returns HTTP 424 with the interceptor allowing every call; container log shows the tool-protocol parser rejecting `TOOL <name> {...}<done/>`                                                                                                                                                                                                    | The rated model appends the `<done/>` marker after the `TOOL` line's JSON arguments in roughly two of three runs                                                                                                                                                                                                                                                                                                                                                         | The parser accepts only the exact done marker after the JSON object (`DONE_MARKER`), nothing else; positive session 8/8 in both environments afterwards                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| A governed session intermittently returns HTTP 200 with the success marker but `toolCalls: []` and one content block; the interceptor logged a single completion for it (live-proven 2026-09-25, both environments, agent 1.1.0)                                                                                                                                | The rated reasoning model occasionally glues a reasoning fragment in front of the directive (`We need to output the TOOL line.TOOL <name> {...}`); the line-start grammar rightly refuses to execute it, but agents before 1.2.0 treated any non-directive reply as task completion                                                                                                                                                                                      | Agent 1.2.0 (`13153b4`): only a directive or a reply containing `<done/>` ends a turn; anything else gets a plain runtime notice as a user turn (at most twice), a buried directive is never executed, and `stopReason`/`protocolRepairs` are reported; the continuity sampler records `failedChecks` per sample. 0 failures in 109 sampled 1.2.x sessions, one of them repaired live                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| A RuntimeMemory deployment was cancelled or failed mid-update; the pipeline shows `Failed to execute change set. Current stack status: UPDATE_ROLLBACK_COMPLETE`                                                                                                                                                                                                | A cancelled `AWS::BedrockAgentCore::Runtime` update rolls back by creating a new Runtime version with the prior container; the endpoint may serve either revision for the ~15 s of the rollback                                                                                                                                                                                                                                                                          | Nothing to repair by hand: `aws codepipeline retry-stage-execution --stage-name Nonprod --retry-mode ALL_ACTIONS` (Platform account, the Workload pipeline) re-creates both change sets from `UPDATE_ROLLBACK_COMPLETE` and deploys the revision; `FAILED_ACTIONS` cannot work because the executed change set no longer exists                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-
-Rollback: `npx cdk destroy <stack>` per-stack, or `bash scripts/teardown.sh` for the full sweep.
-
----
-
-## 7. Running the Guidance
-
-Three Strands blueprints ship at v1 under `blueprints/` (plus LangGraph + CrewAI reference agents):
-
-| Blueprint                 | Model mix                         | Pattern                                                   |
-| ------------------------- | --------------------------------- | --------------------------------------------------------- |
-| `agenticai-task-agent`    | Haiku 4.5                         | Deterministic single-shot; max-iteration guard; streaming |
-| `agenticai-chatbot-agent` | Sonnet 4.5 / Haiku 4.5            | Multi-turn; HITL escalation; Customer-Facing guardrail    |
-| `agenticai-multi-agent`   | Sonnet supervisor + Haiku workers | Supervisor + N-worker dispatch                            |
-
-Under D-01 you invoke via the per-workload LiteLLM endpoint fronted by API Gateway. Under D-03 agents run on AgentCore Runtime and reach tools through the workstream MCP Gateway and Bedrock via cross-account AssumeRole. Next steps: add a workload app (§13), swap the guardrail profile (§11), tune eval thresholds (§11), or add a region (§11).
-
----
-
-## 8. Cost
-
-Rough estimates (no measured 24-hour baseline yet — see §15). `us-west-2` pricing, 2026.
-
-| Traffic profile                          | Monthly (USD, approx) |
-| ---------------------------------------- | --------------------- |
-| Dev / low (10K invocations/day, 500 tok) | ~$280                 |
-| Moderate (100K/day, 1K tok)              | ~$1,100               |
-| High (1M/day, 1.5K tok)                  | ~$9,000               |
-
-At moderate traffic the largest lines are Bedrock inference (~$600, Haiku ≈ 4× cheaper than Sonnet) and the 11 interface VPCEs across 3 AZs (~$240). Optimisation levers: route tolerant workloads to Haiku, Flex tier for dev/test, batch inference, Provisioned Throughput for sustained steady-state, and tuning CloudWatch retention. Per-app Budgets (filtered by `application-id`) alert at 80 % ACTUAL / 100 % FORECASTED; override via `agenticai/monthlyBudgetUsd` + `agenticai/notificationEmail`.
-
-LiteLLM's virtual-key spend view is the budget-alert source of truth; CUR is the chargeback source of truth. They diverge for retries, cached responses, and guardrail short-circuits — reconcile monthly (target drift ≤ 1 %).
-
----
-
-## 9. Operations
-
-**SLOs.** First-token p99 ≤ 1500 ms; guardrail violations ≤ 1 %; tool-call success ≥ 98 %; session success ≥ 95 %; API Gateway 5xx ≤ 0.1 %. Each has a CloudWatch alarm feeding a CMK-encrypted SNS topic.
-
-**Runbooks** (`scripts/` + dashboards). Key incident classes and first moves:
-
-- **Guardrail-violation spike** — inspect the dashboard, pull offending prompts from `/agenticai/bedrock-invocations`, classify (content / prompt-attack / PII / denied-topic), mitigate (WAF rule, pause agent via ECS scale-to-0 + API GW throttle, upgrade guardrail profile), add a regression case to the blueprint's `eval/cases.jsonl`.
-- **Prompt injection** (OWASP LLM01) — capture sessions, isolate source (Cognito block for direct; S3 version-revert for poisoned RAG), add adversarial regression cases.
-- **Tool-call spiral** — pull the session trace, identify the loop, cancel in-flight runs; prefer better termination signals over raising the max-iteration ceiling.
-- **Bedrock throttling (429)** — check `ThrottledCount` vs quota, shed load via WAF rate-limit / route to Haiku, then request a quota increase or move to Provisioned Throughput.
-- **LiteLLM p99 regression** — check ECS CPU/memory + Bedrock-side latency + VPCE/ALB health; scale the service or cycle tasks.
-- **MCP target outage** — identify the failing target in the Gateway logs, circuit-break its Cedar route, activate fallbacks.
-- **Cross-account KMS / SelfMutate failures** — usually a bootstrap `aws-cdk-lib` gap or a direct `cdk deploy` against the pipeline stack; re-bootstrap ≥ 2.150 or always flow changes through the pipeline.
-
-**Change management.** All prod changes flow through the pipeline (evaluation gate + manual approval); no out-of-band `cdk deploy` to prod. Reviews: Well-Architected quarterly, cost monthly, security-exception expiry monthly, SCP drift quarterly, dependency/SBOM monthly, red-team quarterly. Quarterly chaos experiments (Bedrock throttling, VPCE failure, ECS task kill, KMS pending-delete) each carry a hypothesis + stop criteria.
-
----
-
-## 10. Security
-
-### 10.1 Threat model
-
-STRIDE + OWASP LLM Top 10 + MITRE ATLAS applied to blueprint-authored controls (customer deployments extend it). Highlights:
-
-- **Spoofing** — Cognito JWT authorizer at API Gateway; RBPs with `aws:SourceArn`/`aws:SourceAccount`; LiteLLM forwards agent identity for CloudTrail attribution.
-- **Tampering** — SCPs inherited from the OU (workload IAM cannot override); SCP-05 guardrail-mutation deny; immutable-tag ECR + scan-on-push; config rendered from SSOT at synth.
-- **Information disclosure** — Guardrail PII BLOCK/ANONYMIZE + AU regex; per-tenant IAM + SG + memory namespace + `dynamodb:LeadingKeys`; public-access-block + CMK on every bucket; `kms:ViaService` + `kms:CallerAccount` on cross-account grants; `scripts/scrub-security-leakage.sh` + gitleaks on every change.
-- **Denial of service** — WAF rate limit at API Gateway; per-account Bedrock quotas; agent max-iteration guard; circuit breaker on MCP targets. The native inference-Gateway rate limit is traffic shaping only: live 2026-09-24 it was approximate (short bursts pass; roughly 15–23 requests and 22k–41k input tokens per minute were admitted against 10 RPM / 10,000 TPM before scattered 429s) and it fails open by design, so it is never counted as the quota or abuse control.
-- **Elevation of privilege** — ExternalId + `PrincipalArn`/`RoleSessionName` conditions on cross-account roles; pipeline role scoped to bootstrap roles; AgentRuntime trust is service-principal-only (`allowLocalRootAssume` opt-in, hard-disabled in prod).
-
-**OWASP LLM Top 10** — prompt injection (guardrail PROMPT_ATTACK + pinned system prompts), insecure output (guardrail output filters + eval quality score), model DoS (per-account Bedrock quotas and SCP/IAM scoping; the native Gateway rate limit is approximate, fail-open traffic shaping — measured live 2026-09-24 admitting up to 23 requests and 40,870 input tokens in one minute against a 10 RPM / 10,000 TPM allocation, while the zero-rate wildcard returned exact HTTP 429), supply chain (Dependabot + license-check + SBOM + pinned SDK + image scan), sensitive-info disclosure (PII filters + Memory actor-scoping), insecure plugin design (Registry-declared tools + scoped Gateway targets), excessive agency (max-iteration + HITL), overreliance (evaluation gate + human review).
-
-### 10.2 Security exceptions
-
-Every cdk-nag / cfn-nag suppression carries an inline `SEC-0NN` marker recording the requirement, the justification, and the compensating control — 24 in total (`SEC-001`..`SEC-016`, `SEC-022`..`SEC-029`), each visible on the suppression itself in the CDK source. Suppressions without a marker fail CI. The markers distinguish **service-limitation** exceptions (e.g. AgentCore's action-family evaluator rejecting narrow per-action lists; Bedrock guardrail admin APIs lacking resource-level ARNs — reviewed when the upstream service adds support) from **framework** exceptions (CDK custom-resource / Provider internals — reviewed on each `aws-cdk-lib` major bump).
-
-### 10.3 Shared responsibility
-
-- **AWS** — managed services under the Shared Responsibility Model.
-- **Platform team** — blueprint code, platform-account stacks, SCPs, base guardrail, CI/CD, Registry, shared ECR.
-- **Delivery team** — per-application workload code (agent container, tools, prompts, eval corpus, inference-profile tagging, guardrail-profile selection from the approved list) and privacy compliance for any personal data they store (see the note in `packages/developer-access/src/workstream-roster.ts`).
-
-Report security issues privately via the [AWS vulnerability reporting page](https://aws.amazon.com/security/vulnerability-reporting/) — **not** public GitHub issues.
-
----
-
-## 11. Choice architecture
-
-A customer should never have to fork the repo to make a supported variant. Every recognised override:
-
-| Decision                           | Default                                            | Override                                                                                                                                                  |
-| ---------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Identity provider                  | Cognito                                            | `agenticai/customJwtIssuer` + `customJwtAudience` (corporate OIDC)                                                                                        |
-| Guardrail profile (per agent)      | Baseline                                           | per-agent `blueprints/<name>/bedrock.config.yaml`                                                                                                         |
-| Model allow-list                   | Sonnet 4.5 + Haiku 4.5                             | `PLATFORM_ALLOWED_MODELS` constant (forces platform review)                                                                                               |
-| Region                             | No implicit default; `CDK_DEFAULT_REGION` required | `agenticai/defaultRegion` only when no ambient Region; governed allow-list in `packages/platform-baselines/src/approved-regions.ts` + SCP-06 sandbox-soak |
-| Eval thresholds                    | see §2.5                                           | `agenticai/eval*` context keys                                                                                                                            |
-| Gateway fronting                   | API Gateway (§08 Option A)                         | hard default                                                                                                                                              |
-| Gateway PolicyEngine migration     | `OFF`                                              | `agenticai/gatewayPolicyEngineMode` (`LOG_ONLY` before `ENFORCE`)                                                                                         |
-| Pipeline Runtime/Memory foundation | Off                                                | `agenticai/enablePipelineRuntimeMemory=true` (BETA; `PUBLIC`, inert agent only)                                                                           |
-| Browser egress / Lattice endpoints | Off                                                | `agenticai/enableBrowserInternetEgress` / `enableLatticePrivateEndpoints` (BETA)                                                                          |
-
-An override that breaks a spec MUST (e.g. adding a non-Claude model) becomes a new deviation in §3.
-
----
-
-## 12. Compliance
-
-### 12.1 Well-Architected + GenAI Lens
-
-The blueprint maps to all six pillars: **Operational Excellence** (dashboards + OAM + self-mutating pipeline + eval gate + runbooks), **Security** (Identity/SCPs/RBPs/VPCE/WAF/Cedar, PrivateLink-only, CMK everywhere, CloudTrail + GuardDuty + Security Hub), **Reliability** (quota requests, 3-AZ, per-account isolation, versioning), **Performance** (Sonnet/Haiku per-agent, `ConverseStream`, eval p99 gate), **Cost** (per-app Budgets + CUR attribution + allow-list caps), **Sustainability** (Graviton, on-demand, Haiku for low-stakes, TTLs). The GenAI Lens considerations (model governance, RAG, evaluation, responsible-AI guardrails, observability, spiral detection, HITL, red-team) each map to a named construct.
-
-### 12.2 NIST 800-53 Rev 5
-
-**First-pass derivation** — the blueprint maintainers' interpretation, **not** an authoritative attestation. Customers under formal regimes (FedRAMP, IRAP, ISM, HIPAA, PCI-DSS) must validate against their own catalogue and run their ATO process. Heavy coverage in AC (SCPs, per-app IAM, tenant RBPs, VPCE, Cognito, Cedar) and SC (PrivateLink-only, VPCEs, CMK, TLS 1.2+, region allow-list); AU (CloudTrail + Model Invocation Logging), SI (guardrails + eval gate), SR (pinned deps + SBOM), PT (PII filters + Memory scoping). PE/PS inherited. For each control the blueprint emits the CFN template, cdk-nag `NagReport.csv`, CloudTrail events, and a conformance-test assertion.
-
-### 12.3 EU AI Act
-
-`ConformityAssessmentConstruct` (`@agenticai/eu-ai-act-compliance`) wires Article-by-Article controls. Default risk classes (Article 6): chatbot=`limited`, task=`limited`, multi-agent=`high`. It auto-generates `technical-documentation.md` / `risk-assessment.md` / `human-oversight-protocol.md` at deploy into an Object-Lock COMPLIANCE 7-year record-keeping bucket. Article 9 (risk management) → online-evaluation watchdog; Article 10 (data governance) → eval-corpus GOVERNANCE bucket + manifest SHA envelope; Article 14 (human oversight) → `HumanInTheLoopConstruct`; Article 15 (accuracy/robustness) → evaluation gate + kill-switch + circuit breaker. High-risk Articles 9–17 take effect August 2026.
-
----
-
-## 13. Multi-account topology
-
-**Adding a workload application** (per workstream): provision two accounts via Account Factory (`agenticai-<ws>-nonprod` / `-prod` under `AgenticAI-Workloads`), bootstrap both with trust to platform-nonprod, deploy `D03PlatformCoreStack` (which also emits the workstream's Identity Center permission sets + `RegistryConsumerGrant` + roster row), then a `WorkloadPipelineStack` instance. The developer then works entirely from the workstream account via the `agenticai` CLI (§1.1).
-
-**Account closure.** `bash scripts/teardown.sh` destroys stacks in reverse dependency order (`RETAIN` resources remain by design; `scripts/sweep_orphans.py` removes them, see §16). Manual remaining steps: empty and delete retained S3 buckets that are not under Object Lock, cancel KMS keys pending deletion, `aws organizations close-account`. A COMPLIANCE-mode Object Lock bucket holding records cannot be emptied until its retention ends; closing the account is the only way to remove it earlier. Accounts enter `SUSPENDED` for ≥ 90 days before Organizations deletes them.
-
-**Edge cases.** No-Control-Tower fallback (advanced; replace Account Factory with `organizations:CreateAccount` + manual baseline). Existing Log Archive/Audit via `agenticai/adoptExistingLogArchive`. Shared-services TGW via `agenticai/transitGatewayId`. CIDR conflicts via `agenticai/vpcCidr`.
-
----
-
-## 14. Architecture Decision Records
-
-MADR-lite records for the non-obvious decisions (full text in Git history / earlier tags):
-
-- **ADR-0001** — LiteLLM in the inference path (D-01); triple-gate guardrail preserved.
-- **ADR-0002** — CDK + CloudFormation, not Terraform (D-02); AFT explicitly rejected.
-- **ADR-0003** — API Gateway fronts AgentCore Gateway as the primary auth boundary (§08 Option A).
-- **ADR-0004** — Memory namespaces static at synth (only `{actorId}`/`{memoryStrategyId}`/`{sessionId}` vary).
-- **ADR-0005** — Model allow-list as a single TypeScript constant flowing into four enforcement surfaces.
-- **ADR-0006** — EU AI Act posture: Object-Lock COMPLIANCE 7-year bucket + auto-generated conformity docs.
-- **ADR-0007** — Evaluation gates as platform infrastructure; 7-category scoring SSOT shared by the offline gate + online watchdog.
-- **ADR-0008** — Agent lifecycle: versioned manifests (SHA-256 envelope) + canary + auto-rollback.
-- **ADR-0009** — Protocol-native MCP + A2A; `MCP_PROTOCOL_VERSION = 2025-06-18` locked; qualified tool names.
-- **ADR-0010** — Kill-switch + circuit breaker as real runtime constructs (four live revoke branches; retry+fallback chain).
-- **ADR-0011** — HITL reference construct: Step Functions `WaitForTaskToken` + Cedar approver scoping.
-- **ADR-0012** — Multi-framework support (Strands / LangGraph / CrewAI) via lazy-imported adapters.
-- **ADR-0013** — AgentCore Registry as tool SSOT (replaces the TypeScript catalogue truth claim).
-- **ADR-0014** — Identity Center permission sets per workstream (`AgenticAI-WS-Dev-/Ro-/Apv-`; 16-char workstream-id cap).
-- **ADR-0015** — Developer CLI as pure-function helpers sharing the eval-scoring SSOT.
-
----
-
-## 15. Known limitations and honest disclaimers
-
-Know what **has** been live-verified and what **has not** before adopting.
-
-**Live-verified on real AWS.**
-
-- **Central AgentCore inference Gateway U-1** (`us-west-2`, 2026-09-18): Bedrock Mantle target reached `READY`; model discovery returned 49 models; IAM and Cognito M2M inbound authentication worked; Strands `LiteLLMModel` 1.44.0 passed streaming and non-streaming; the same positive-twin model returned exact HTTP 429 under a zero-rate `qualifiedModelId` rule; teardown and independent inventory found zero Gateway/IAM/Cognito residue. See [`evidence/live/2026-09-18-agentcore-gateway-spike.md`](evidence/live/2026-09-18-agentcore-gateway-spike.md).
-- **Platform pipeline deployment and invocation** (`us-west-2`, 2026-09-19): exact commits `f037b4e`, `2ca8272`, and `0ef7f50` completed reviewed Platform pipeline executions through production. The Management/Governance Log Archive is live; the production Guardrail, AgentCore Gateway, and inference target are `READY`; the native rate limit is `ACTIVE`; Cognito M2M and 49-model discovery passed; and Strands `LiteLLMModel` passed streaming and non-streaming against the pipeline-owned endpoint. See [`evidence/live/2026-09-19-platform-pipeline-deployment.md`](evidence/live/2026-09-19-platform-pipeline-deployment.md).
-- **Gateway PolicyEngine compatibility** (`us-west-2`, 2026-09-19): exact commit `46c3a62` passed eight `FAIL_ON_ANY_FINDINGS` Cedar policies, 20 subject/group decisions, four filtered tool lists, direct-call denial, exact 401/403 JWT negatives, expired-token denial, `ENFORCE → LOG_ONLY → ENFORCE`, terminal evidence preservation, and direct independent zero-residual inventory. This is the isolated API-contract proof that preceded the Workload pipeline migration. See [`evidence/live/2026-09-19-policyengine-compatibility-spike.md`](evidence/live/2026-09-19-policyengine-compatibility-spike.md).
-- **Pipeline-owned Gateway PolicyEngine** (`us-west-2`, 2026-09-21): exact commit `f45a12c` passed nonproduction and production deployment, IAM-principal positive and direct-policy-denial twins, `LOG_ONLY → ENFORCE → LOG_ONLY → ENFORCE`, in-place semantic-search removal with zero metadata disclosure, exact principal restoration, fail-closed policy → target → zero-target → `LOG_ONLY` → detach teardown, service-grant retirement, exact log cleanup, and independent zero-unintended-residue inventory. The Lambda Cedar wrapper remains intentionally retained. See [`evidence/live/2026-09-21-pipeline-agentcore-policyengine.md`](evidence/live/2026-09-21-pipeline-agentcore-policyengine.md).
-- **AgentCore Runtime and Memory compatibility** (`us-west-2`, 2026-09-21): exact commit `88d5381` passed a zero-finding, digest-pinned `linux/arm64` image build, Memory `ACTIVE`, Runtime `READY`, exact `InvokeAgentRuntime` handshake, exact short-term `CreateEvent`/`GetEvent` round trip, Runtime-before-Memory cleanup, service-grant retirement, exact service-log cleanup, and independent zero-active-residue inventory. This is an isolated nonproduction Platform-account API-contract proof, not Workload-pipeline integration. See [`evidence/live/2026-09-21-agentcore-runtime-memory-compatibility-spike.md`](evidence/live/2026-09-21-agentcore-runtime-memory-compatibility-spike.md).
-- **Pipeline-owned AgentCore Runtime and Memory foundation** (`us-west-2`, 2026-09-22): exact commit `442de00` passed exact role/permission handoff, digest-bound zero-finding image admission and content-address drift rejection, nonproduction and production Gateway/Runtime/Memory deployment, Runtime and Memory round trips, MCP and bypass twins, live content-address rejection, complete no-op redeployment, access retirement, dependency-ordered teardown, grant retirement, exact log/image cleanup, and independent zero-unintended-residue inventory. The deployed Runtime intentionally remained an inert compatibility handler; generated-agent integration is not claimed. See [`evidence/live/2026-09-22-pipeline-agentcore-runtime-memory.md`](evidence/live/2026-09-22-pipeline-agentcore-runtime-memory.md).
-- **GA Agent Registry compatibility** (`us-west-2`, 2026-09-19): exact commit `8e66dc3` passed native `AWS::AgentRegistry` resource creation, custom governance-document round trip, observed `DRAFT`, explicit submission to `APPROVED`, data-plane discovery, deterministic `UPDATE_ROLLBACK_COMPLETE`, original-record restoration, normal cleanup, and direct independent zero-residual inventory. This is an isolated API-contract proof, not the pipeline-owned migration. See [`evidence/live/2026-09-19-agent-registry-compatibility-spike.md`](evidence/live/2026-09-19-agent-registry-compatibility-spike.md).
-- **Pipeline-owned GA Agent Registry R1** (`us-west-2`, 2026-09-20): exact producer commit `f3ec7d6` deployed through both Platform environments; exact utility commit `39a13ab` bound all four live records to their processed templates, observed `DRAFT`, submitted each explicitly, and independently verified `APPROVED` status, exact descriptor digests, and exact discovery sets. The legacy DynamoDB path remained active; wrong-principal and wrong-account trust twins were denied. See [`evidence/live/2026-09-20-pipeline-ga-agent-registry-r1.md`](evidence/live/2026-09-20-pipeline-ga-agent-registry-r1.md).
-- **Pipeline-owned GA Agent Registry R2 consumer and Tool Gateway** (`us-west-2`, 2026-09-21): exact deployed commit `3870e0e` passed stable-ID cross-account resolution, exact Workstream role and Lambda-permission handoff, `APPROVED` + descriptor-digest + target-ARN validation, nonproduction and production Gateway deployment, MCP `tools/list` and `tools/call`, denial twins, no-op redeployment, fail-closed status drift, terminal-record generation recovery, and target → barrier → Gateway teardown. Teardown-hardening commit `7774299` recovered exact resources from deleted-stack history and removed 39 empty service-created log groups; independent inventory found zero unintended residue. See [`evidence/live/2026-09-21-pipeline-ga-agent-registry-r2.md`](evidence/live/2026-09-21-pipeline-ga-agent-registry-r2.md).
-- **D-03 v3 full end-to-end tool-call round-trip** (2026-05-05, re-verified 2026-07-02): IAM user → AssumeRole → runtime role → MCP over the CUSTOM_JWT gateway → Gateway service role → cross-account `lambda:InvokeFunction` → tool Lambda → MCP `tools/call` reply, for both demo tools; unauthenticated gateway calls return `401`.
-- **Per-developer Cedar entitlement** (2026-07-02): non-member JWT denied (`CedarDeniedError` before user code), member JWT allowed.
-- **Gap-closure surface** (2026-05-15, re-verified 2026-07-02): eval-gates GOVERNANCE bucket, EU AI Act COMPLIANCE 7-year bucket + 3 conformity docs, agent-version GSIs + rollback Step Function, MCP probe, kill-switch Step Function (4 revoke branches), chargeback bucket, HITL Step Function, online-eval watchdog.
-- **D-03 guardrail triple-gate, `dynamodb:LeadingKeys` tenant isolation, `kms:ViaService` cross-account scoping**. The earlier "clean teardown to zero residuals" result for these campaigns was measured only against `AgenticAI-D03-` names and KMS aliases; the 2026-09-25 inventory found alias-less keys, service log groups and stub user pools those checks could not see (see §16 and the final-teardown evidence).
-
-**Not live-verified or deliberately deferred.**
-
-- **Lambda-wrapper retirement** — the pipeline-owned native PolicyEngine path passed parity, production deployment, rollback, and teardown, but `@agenticai/tool-cedar-wrapper` remains intentionally active as a rollback and defense-in-depth control. Retirement requires a separate maintainer decision and behavior-changing review cycle.
-- **Exact 429 twin against the pipeline-owned production rate limit** — proven on 2026-09-25 without mutating the configuration: a model outside the production allocation returned exactly HTTP 429 with a rate-limit body, and the allow-listed model paced below its allocation returned HTTP 200 ([`evidence/live/2026-09-24-load-rate-limit.md`](evidence/live/2026-09-24-load-rate-limit.md)). The per-model RPM/TPM limits themselves are approximate traffic shaping, not hard ceilings (same evidence).
-- **Gateway OTEL rate-limit spans require Transaction Search** — proven on 2026-09-25 on the pipeline-owned nonproduction inference Gateway ([`evidence/live/2026-09-25-gateway-otel-span-correlation.md`](evidence/live/2026-09-25-gateway-otel-span-correlation.md)): with Transaction Search on and `TRACES` + `APPLICATION_LOGS` deliveries attached, 3 allowed and 3 throttled requests produced exactly six decision spans in `aws/spans`, each matched one-to-one. Throttled spans carry the request id, limit key, matched entry and metric; allowed spans carry none of them, so per-request correlation of admitted calls needs the application-log `request_id` → `trace_id` join. The blueprint does not enable Transaction Search (account-wide, billable); a `TRACES` delivery is refused without it.
-- **SCPs 01–12** — evaluated on 2026-09-25 with AWS's own policy evaluators, not only unit tests ([`evidence/live/2026-09-25-scp-live-evaluation.md`](evidence/live/2026-09-25-scp-live-evaluation.md)): IAM Access Analyzer `SERVICE_CONTROL_POLICY` validation plus 49 allow/deny twins on the IAM evaluator (including the direct-Mantle twins). That campaign found and fixed twelve defects, three of them lockouts: SCP-01 keyed on a condition key that does not exist and would have denied every model; SCP-03 compared against a comma-joined SSM list and would have denied every AgentCore call; SCP-07 would have denied the pipeline's own PUBLIC-network Runtime deployments. It also closed a guardrail bypass (a workload could call Bedrock Mantle directly; HTTP 200 before, 403 after) and an empty-guardrail-id bypass. A live Organization soak then attached the nine applicable SCPs to the Workstream OU: 12/12 real-call twins, the governed agent sessions in both environments and a full Workload pipeline run passed, and the policies were removed afterwards. `scripts/scp-sandbox-soak.sh` runs allow and deny twins and accepts only explicit SCP denies.
-- **Generated-agent integration through pipeline-owned Runtime/Memory** — the first isolated and pipeline-owned Runtime/Memory foundation campaign used an intentionally inert compatibility handler. On 2026-09-23 the generated-agent variant then proved secure AgentCore Identity M2M token acquisition, `LiteLLMModel`, `MCPClient`, and application-level Memory behavior through that pipeline in both environments, and the live High-finding image rejection induced a clean RuntimeMemory rollback with prior-version continuity. Generated agent 1.3.0 now exposes its authorized final reply plus Strands token/latency/guardrail metrics, and the pipeline's mandatory evaluation step assumes an exact Workstream-local role to invoke the nonproduction Runtime before GA production approval; this revision is offline-validated but still requires the `eu-west-1` live campaign. The 2026-09-26 final teardown then removed every deletable project resource across the Workstream, Platform and Management accounts in `us-west-2` and historical `us-east-1` campaigns. Terminal inventory is zero except keys in their seven-day pending-deletion window, nine protected Object Lock/legal-hold buckets and their keys, and one AWS service-linked workload identity that the service refuses to delete; the temporary teardown grant was removed and independently verified absent ([`evidence/live/2026-09-26-final-teardown.md`](evidence/live/2026-09-26-final-teardown.md)).
-- **No measured 24-hour cost baseline.** **Control Tower landing zone** — documented prerequisite, tested on standalone accounts.
-- **Regions** — `us-east-1` remains live-verified for the earlier D-03 tool-Gateway path. `us-west-2` is live-verified for the central inference Gateway, Platform pipeline, isolated and pipeline-owned PolicyEngine campaigns, isolated and pipeline-owned Runtime/Memory campaigns, pipeline-owned R2 Registry/Tool Gateway slice, and Gateway OTEL span correlation (with Transaction Search on). `eu-west-1` is now in `PLATFORM_APPROVED_REGIONS` and passes offline Region-precedence, SCP/IAM scoping, and both network stacks' documented `euw1-az1/az2/az3` filters; all live probes, smoke/evaluation gates, bootstrap and teardown/recovery tools now require an explicit Region and never fall back to a US Region. It remains **not live-verified** until the independent EMEA pipeline, positive/adversarial, rollback and teardown matrix passes. Ireland is the only current EMEA onboarding target because it is the only European AgentCore Region with AWS Agent Registry. The optional evaluation/online-evaluation/LiteLLM/circuit-breaker paths fail synthesis in EU Regions and remain outside the EMEA support envelope because EU cross-Region profiles can route beyond the single approved Region and the judge models are US-profile-prefixed. APAC remains outside `PLATFORM_APPROVED_REGIONS`.
-- **VPC Lattice** private endpoints (AWS BETA, opt-in); **Entra Agent Identity** deferred to v2.
-
-**Operational findings baked into the blueprint** (full detail in `CHANGELOG.md`): AgentCore supports only specific AZ IDs (`use1-az1/az2/az4` in `us-east-1`, `usw2-az1/az2/az3` in `us-west-2`, and `euw1-az1/az2/az3` in `eu-west-1`; both network stacks fail closed outside the reviewed map unless an explicit set is supplied); the `MCP-Protocol-Version: 2025-06-18` header is required after `initialize`; the Gateway service role must exist before its ARN is added to tool Lambda resource policies (R2 creates it in `RegistryRoles`, pauses, then lets the Platform pipeline grant it); fresh custom-resource IAM roles take minutes to propagate to the AgentCore control plane (propagation gate + stable role stage provided); Lambda cross-account resource policies for Gateway targets must name the exact service-role ARN; `CreateRegistry`/`CreateRegistryRecord` return only ARNs (ids derived from them) and require descriptor `inlineContent` valid against the MCP/A2A schema.
-
-The 35 packages under `packages/` are enumerated in [`CHANGELOG.md`](CHANGELOG.md) under the development phase that introduced each one (19 in the initial build-out, 8 gap-closure + 4 self-audit, 3 developer-experience, 1 entitlement).
-
----
-
-## 16. Cleanup
-
-**Pipeline topology (the reference deployment).** The Platform and Workload pipelines deploy stage stacks (`Nonprod-/Prod-{Registry,InferenceGateway,Guardrail}`, `Nonprod-Audit`, `Nonprod-LogArchive`) that `cdk destroy` in `scripts/teardown.sh` does not map. Tear those down with `scripts/final_teardown.py`, one account at a time with that account's credentials, in the order Workstream → Platform → Management. It is a dry run unless you pass `--apply`. It deletes stacks in dependency order, stops at the first failure, and cleans what each stack retained (Registry records, then Registry, DynamoDB tables, SSM parameters, Cognito pools, log groups, image digests, and customer-managed keys last, as 7-day scheduled deletions). The plan is saved to `~/.agenticai-teardown/` before every delete, so an interrupted run finishes with `--resume-residue`:
+Create the documents under the same local managed-policy name in each account, then run:
 
 ```bash
-python3 scripts/final_teardown.py --account-role workstream --expected-account <workstream-id> --region <region>            # dry run
-python3 scripts/final_teardown.py --account-role workstream --expected-account <workstream-id> --region <region> --apply
-python3 scripts/final_teardown.py --account-role platform   --expected-account <platform-id>   --region <region> --apply
-python3 scripts/final_teardown.py --account-role management --expected-account <management-id> --region <region> --apply
+export AWS_REGION=eu-west-1
+export AWS_DEFAULT_REGION="$AWS_REGION"
+export CDK_DEFAULT_REGION="$AWS_REGION"
+export CFN_EXECUTION_POLICY_NAME=AgenticAICdkExecutionPolicyEuWest1
+
+bash pipelines/bootstrap/bootstrap-cross-account.sh
 ```
 
-Earlier deployments and rolled-back creates can leave residue that no stack owns any more (service log groups, `RETAIN` keys, stub user pools). `scripts/sweep_orphans.py` finds it with the same matchers as the inventory and removes it in two reviewed steps: `--plan-out plan.json` (read-only), then `--apply plan.json`. Apply acts only on plan entries and re-checks each one live. The sweep refuses to run while project stacks are live, and never empties a bucket holding Object-Locked data or schedules a key that encrypts one.
+Do not use `AdministratorAccess` as the CloudFormation execution policy.
 
-**Measure, don't assume.** Run `scripts/residue_inventory.py --expected-account <id> --region <r> --global` before and after, in every account and every Region you deployed to. Every surface must read zero except customer-managed keys in `PendingDeletion`. The older `pytest tests/teardown/` suite only checks `AgenticAI-D03-` names and KMS aliases, so it cannot see alias-less keys or log groups.
+## Deployment sequence
 
-**Object Lock is permanent.** The EU AI Act record-keeping bucket (`ConformityAssessmentConstruct`, gap-closure stack) uses Object Lock in COMPLIANCE mode for 7 years. Once it holds a record, nobody can delete it before that date, including the account root; neither can the key that encrypts it (the sweep protects both). Deploy the gap-closure stack only into an account you intend to keep for that period. The evaluation corpus bucket uses GOVERNANCE mode (90 days), which an administrator with `s3:BypassGovernanceRetention` can clear.
+### 1. Deploy the Platform producer
 
-**Direct stages.** For stages deployed without the pipelines:
+Create or update `AgenticAI-PlatformPipelineStack` with Gateway invoke permissions disabled:
+
+```text
+agenticai/enableGaGatewayInvokePermissions=false
+```
+
+Run the Platform pipeline. It creates the environment Registries, governance records, tool aliases, Guardrails, inference Gateways, and Management stacks.
+
+### 2. Approve Registry records
+
+Use the ownership-checking utility after reviewing the processed CloudFormation descriptors:
 
 ```bash
-export AGENTICAI_INFERENCE_MODEL_RATE_LIMITS='[{"qualifiedModelId":"openai.gpt-oss-120b","requestsPerMinute":10,"tokensPerMinute":10000}]'
-bash scripts/teardown.sh     # reverse-dependency stack sweep of the directly-deployed stages
+python3 scripts/live-agent-registry-spike/approve_pipeline_registry.py verify ...
+python3 scripts/live-agent-registry-spike/approve_pipeline_registry.py apply ...
 ```
 
-The teardown refuses to synthesize a present Platform Gateway or pipeline stack without the model-rate allocation and its account/role context. For an R2 Workload deployment, also provide both resolved GA context files, stable tool IDs, Workstream account/AZ tuples, and the Gateway Region. If pipeline Runtime/Memory is enabled, export `AGENTICAI_ENABLE_PIPELINE_RUNTIME_MEMORY=true` so destroy synthesizes the native Runtime/Memory stacks and captures their exact service-created Runtime logs. If PolicyEngine is enabled, export `AGENTICAI_GATEWAY_POLICY_ENGINE_MODE` plus both environment-specific IAM-role JSON arrays so destroy synthesizes the deployed graph rather than the default `OFF` graph. **Retire the Platform grants first:** before destroying an R2/GA Workload deployment, run the Platform pipeline with `agenticai/enableGaGatewayInvokePermissions=false` and confirm each tool alias has no resource policy; Lambda binds the grants to the Workstream roles' RoleIds, and a grant left behind after the roles are deleted blocks every later re-grant on that alias until the same two-phase toggle removes it (§6.3). The script destroys production/nonproduction ToolGateway stacks before their RegistryRoles stacks and then removes the Workload pipeline root. A PolicyEngine CMK enters its configured seven-day pending-deletion window after the service retires both grants; this is intentional. Before each stack deletion, the script snapshots the exact physical IDs of its CodeBuild projects and Lambda functions; after a successful `cdk destroy`, it verifies those resources are absent and deletes only their exact service-created default CloudWatch log groups. A rerun against an already-absent stack recovers exact IDs from CloudFormation's deleted-stack event history, so failed cleanup and prior deployment generations remain recoverable without prefix-wide deletion. Missing groups are idempotent, while discovery, resource-absence, or deletion errors fail the teardown. A direct `cdk destroy` bypasses this cleanup and can leave empty `/aws/codebuild/*` or `/aws/lambda/*` groups. `cdk destroy` runs dependency-ordered. The EU AI Act Object-Lock COMPLIANCE 7-year bucket cannot be deleted before its retention expires — this is intentional and documented.
+The utility requires all records to match their templates before it submits or approves any record.
 
----
+### 3. Resolve Workload Registry context
 
-## 17. Contributors and License
+Resolve one non-secret context file per environment:
 
-Maintained by the AI Platform team. Issues and pull requests are welcome — see the [contribution guidelines](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/CONTRIBUTING.md) and [code of conduct](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/CODE_OF_CONDUCT.md) in the parent repository. Distributed under **MIT-0** — see [`LICENSE`](LICENSE). Report security issues privately via the [AWS vulnerability reporting page](https://aws.amazon.com/security/vulnerability-reporting/), not a public issue.
+```bash
+python3 pipelines/resolve_ga_registry_context.py \
+  --account-id <PLATFORM_ACCOUNT> \
+  --region eu-west-1 \
+  --environment nonprod \
+  --application-id <APPLICATION_ID> \
+  --agent-id <AGENT_ID> \
+  --tenant-id <TENANT_ID> \
+  --cost-centre <COST_CENTRE> \
+  --expected-tool-id tool-echo \
+  --expected-tool-id tool-ping \
+  --source-revision "$(git rev-parse HEAD)" \
+  --output <NONPROD_CONTEXT_FILE>
+```
 
----
+Repeat for production. The resolver is read-only and fails if ownership tags, record state, descriptor digests, or target ARNs differ.
 
-Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.  
-SPDX-License-Identifier: MIT-0
+### 4. Create the Workload pipeline
+
+Deploy only the Workload pipeline root. The pipeline—not a local developer command—owns every Workstream mutation.
+
+The first stage creates stable Workstream roles and pauses at `GatewayPermissionReady`.
+
+### 5. Grant exact tool-alias permissions
+
+Read the nonproduction and production `GatewayServiceRoleArn` outputs. Update the Platform pipeline root with:
+
+```text
+agenticai/enableGaGatewayInvokePermissions=true
+agenticai/gaGatewayServiceRoleArns=[<NONPROD_ROLE_ARN>,<PROD_ROLE_ARN>]
+```
+
+Run the Platform pipeline and verify each Lambda alias policy names its matching role ARN. Only then approve `GatewayPermissionReady`.
+
+### 6. Promote the generated agent
+
+The Workload pipeline deploys nonproduction, invokes the deployed Runtime through the mandatory evaluation gate, and pauses before production. Review the evaluation output and adversarial evidence before approving production.
+
+## Security controls
+
+- Scoped CDK execution policies generated per account and Region.
+- AWS Organizations SCPs for model, Region, Guardrail, Registry, Gateway, and deployment boundaries.
+- Mandatory Bedrock Guardrail request interceptor on the inference Gateway.
+- Model allow-list on the Gateway execution role.
+- Cognito M2M and AgentCore Identity short-lived credentials.
+- AWS_IAM authentication for the workstream Tool Gateway.
+- Registry-approved tool descriptors and exact alias ARNs.
+- Exact Workstream role principals on Platform Lambda alias policies.
+- Actor-scoped AgentCore Memory and customer-managed KMS keys.
+- Digest-bound ECR image scanning that blocks every Critical or High finding.
+- Human approval after deployed-runtime evaluation.
+- Five allocation tags on taggable resources: `application-id`, `agent-id`, `tenant-id`, `cost-centre`, and `environment`.
+- CloudWatch OAM links for centralized Logs, Metrics, and Traces.
+
+Native AgentCore Gateway rate limits are approximate, fail-open traffic shaping. They are not an authorization or hard-quota boundary. Use IAM/SCP controls and account-level Bedrock quotas for those guarantees.
+
+## Testing
+
+Common local gates:
+
+```bash
+npm run build
+npm test
+npm run lint
+npm run scrub
+
+python3 -m pytest tests/adversarial/unit -q
+python3 -m pytest scripts/test_final_teardown.py scripts/test_residue_inventory.py -q
+```
+
+Live gates are intentionally fail-closed. A missing credential, probe, resource, or expected denial cannot be reported as success.
+
+For any behavior-changing revision, validate at minimum:
+
+1. strict synth and clean cdk-nag reports;
+2. deployment through the reviewed pipelines;
+3. authorized positive calls;
+4. exact adversarial denials;
+5. a mutation proving the test catches removal of the control;
+6. rollback and re-run to green;
+7. centralized logs/metrics/traces;
+8. final dependency-ordered teardown and independent inventory.
+
+## Observability
+
+The Platform pipeline root and each distinct Workstream account/Region create one OAM source link to the Management sink. A same-account nonproduction/production profile shares one link to avoid OAM cardinality conflicts.
+
+Gateway application logs require a CloudWatch Logs delivery. Gateway spans require Transaction Search and a `TRACES` delivery. Transaction Search changes account-wide settings and incurs cost; enable it deliberately, verify ingestion, and restore or retain it according to your operating model.
+
+## Cost
+
+Costs depend on model traffic, Runtime duration, log retention, VPC endpoints, and account-level security services. Use cost-allocation tags and Cost and Usage Reports for attribution. Cost Explorer account totals are not automatically blueprint costs when accounts host unrelated workloads.
+
+Recommended controls:
+
+- per-application AWS Budgets;
+- account-level Bedrock quotas;
+- model routing by quality/latency need;
+- bounded CloudWatch retention;
+- monthly CUR reconciliation by allocation tags.
+
+## Cleanup
+
+Always retire Platform alias grants before deleting Workstream roles:
+
+1. Update the Platform pipeline with `agenticai/enableGaGatewayInvokePermissions=false`.
+2. Run it through production.
+3. Verify all four alias policies no longer name a current or stale Workstream role principal.
+
+Then run the fail-closed teardown in this order:
+
+```bash
+python3 scripts/final_teardown.py \
+  --account-role workstream \
+  --expected-account <WORKSTREAM_ACCOUNT> \
+  --region eu-west-1
+
+# After reviewing the dry run:
+python3 scripts/final_teardown.py \
+  --account-role workstream \
+  --expected-account <WORKSTREAM_ACCOUNT> \
+  --region eu-west-1 \
+  --apply
+
+python3 scripts/final_teardown.py \
+  --account-role platform \
+  --expected-account <PLATFORM_ACCOUNT> \
+  --region eu-west-1 \
+  --apply
+
+python3 scripts/final_teardown.py \
+  --account-role management \
+  --expected-account <MANAGEMENT_ACCOUNT> \
+  --region eu-west-1 \
+  --apply
+```
+
+Finally, measure each account directly:
+
+```bash
+python3 scripts/residue_inventory.py \
+  --expected-account <ACCOUNT_ID> \
+  --region eu-west-1 \
+  --global
+```
+
+Expected terminal state is zero live project resources. Customer-managed keys can remain in AWS's seven-day pending-deletion window. Object Lock can make data intentionally undeletable until its retention period expires; inspect the plan before deploying those optional constructs.
+
+## Repository layout
+
+```text
+apps/          account and deployment-stage stacks
+bin/           CDK application entry point
+blueprints/    reference agent applications
+packages/      reusable constructs and governance modules
+pipelines/     Platform and Workload pipelines plus bootstrap helpers
+scripts/       verification, recovery, and cleanup utilities
+tests/         conformance, adversarial, integration, smoke, and teardown tests
+assets/        architecture diagrams
+```
+
+## Contributing
+
+See the repository-level [contribution guidelines](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/CONTRIBUTING.md) and [code of conduct](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/CODE_OF_CONDUCT.md). Report security issues through the [AWS vulnerability reporting process](https://aws.amazon.com/security/vulnerability-reporting/), not a public issue.
+
+## License
+
+This project is licensed under the MIT-0 License. See [LICENSE](LICENSE).

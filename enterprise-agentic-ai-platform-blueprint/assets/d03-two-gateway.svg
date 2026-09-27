@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+  <title id="title">Enterprise Agentic AI Platform two-Gateway architecture</title>
+  <desc id="desc">A generated agent in a Workstream account uses MCPClient with AWS IAM authentication to call a Workstream Tool Gateway and LiteLLMModel with Cognito authentication to call a Platform Inference Gateway. A Management and Governance account receives observability through OAM.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-opacity="0.16"/>
+    </filter>
+    <style>
+      .title { font: 700 34px system-ui, sans-serif; fill: #0f172a; }
+      .subtitle { font: 500 18px system-ui, sans-serif; fill: #475569; }
+      .account { fill: #f8fafc; stroke: #64748b; stroke-width: 2; rx: 20; filter: url(#shadow); }
+      .account-title { font: 700 23px system-ui, sans-serif; fill: #0f172a; }
+      .box { fill: #ffffff; stroke: #2563eb; stroke-width: 2; rx: 14; }
+      .gateway { fill: #eff6ff; stroke: #1d4ed8; stroke-width: 3; rx: 16; }
+      .security { fill: #fff7ed; stroke: #c2410c; stroke-width: 2; rx: 14; }
+      .governance { fill: #f0fdf4; stroke: #15803d; stroke-width: 2; rx: 14; }
+      .label { font: 650 18px system-ui, sans-serif; fill: #0f172a; }
+      .small { font: 500 15px system-ui, sans-serif; fill: #334155; }
+      .tiny { font: 500 13px system-ui, sans-serif; fill: #475569; }
+      .arrow { stroke: #334155; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .dashed { stroke-dasharray: 9 7; }
+      .tool-path { stroke: #15803d; }
+      .model-path { stroke: #1d4ed8; }
+      .obs-path { stroke: #7c3aed; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="980" fill="#eef2f7"/>
+  <text x="800" y="54" text-anchor="middle" class="title">Enterprise Agentic AI Platform — D-03 two-Gateway path</text>
+  <text x="800" y="86" text-anchor="middle" class="subtitle">One governed inference boundary; one workstream-owned tools boundary</text>
+
+  <rect x="40" y="125" width="500" height="700" class="account"/>
+  <text x="70" y="166" class="account-title">Workstream account</text>
+  <text x="70" y="194" class="small">Application execution and per-agent state</text>
+
+  <rect x="80" y="235" width="420" height="135" class="box"/>
+  <text x="290" y="272" text-anchor="middle" class="label">AgentCore Runtime</text>
+  <text x="290" y="302" text-anchor="middle" class="small">Generated Strands agent</text>
+  <text x="290" y="329" text-anchor="middle" class="small">Memory + scoped execution role</text>
+  <text x="290" y="354" text-anchor="middle" class="tiny">Only LiteLLMModel and MCPClient</text>
+
+  <rect x="80" y="435" width="190" height="90" class="governance"/>
+  <text x="175" y="471" text-anchor="middle" class="label">MCPClient</text>
+  <text x="175" y="499" text-anchor="middle" class="small">SigV4 / AWS_IAM</text>
+
+  <rect x="310" y="435" width="190" height="90" class="box"/>
+  <text x="405" y="471" text-anchor="middle" class="label">LiteLLMModel</text>
+  <text x="405" y="499" text-anchor="middle" class="small">OpenAI-compatible API</text>
+
+  <rect x="80" y="590" width="420" height="125" class="gateway"/>
+  <text x="290" y="629" text-anchor="middle" class="label">AgentCore Tool Gateway</text>
+  <text x="290" y="660" text-anchor="middle" class="small">Workstream-owned · AWS_IAM</text>
+  <text x="290" y="687" text-anchor="middle" class="small">Registry-approved tools · PolicyEngine-ready</text>
+
+  <rect x="80" y="748" width="420" height="48" class="governance"/>
+  <text x="290" y="779" text-anchor="middle" class="small">AgentCore Memory — actor-scoped events with customer-managed KMS key</text>
+
+  <rect x="580" y="125" width="670" height="700" class="account"/>
+  <text x="610" y="166" class="account-title">Platform account</text>
+  <text x="610" y="194" class="small">Shared governance, inference, Registry, and pipelines</text>
+
+  <rect x="620" y="235" width="270" height="90" class="security"/>
+  <text x="755" y="271" text-anchor="middle" class="label">AgentCore Identity</text>
+  <text x="755" y="299" text-anchor="middle" class="small">Workload token → Cognito M2M</text>
+
+  <rect x="930" y="235" width="280" height="90" class="governance"/>
+  <text x="1070" y="271" text-anchor="middle" class="label">AWS Agent Registry</text>
+  <text x="1070" y="299" text-anchor="middle" class="small">Approved tool governance records</text>
+
+  <rect x="620" y="390" width="590" height="135" class="gateway"/>
+  <text x="915" y="431" text-anchor="middle" class="label">AgentCore Inference Gateway</text>
+  <text x="915" y="462" text-anchor="middle" class="small">Platform-owned · CUSTOM_JWT</text>
+  <text x="915" y="490" text-anchor="middle" class="small">Native model allocation + zero-rate fallback</text>
+
+  <rect x="620" y="590" width="275" height="125" class="security"/>
+  <text x="757" y="627" text-anchor="middle" class="label">REQUEST interceptor</text>
+  <text x="757" y="658" text-anchor="middle" class="small">Bedrock ApplyGuardrail</text>
+  <text x="757" y="685" text-anchor="middle" class="small">Fail closed before inference</text>
+
+  <rect x="935" y="590" width="275" height="125" class="box"/>
+  <text x="1072" y="627" text-anchor="middle" class="label">Bedrock Mantle target</text>
+  <text x="1072" y="658" text-anchor="middle" class="small">In-region model route</text>
+  <text x="1072" y="685" text-anchor="middle" class="small">Gateway IAM role allow-list</text>
+
+  <rect x="620" y="748" width="590" height="48" class="governance"/>
+  <text x="915" y="779" text-anchor="middle" class="small">Platform + Workload pipelines — synth, evaluation, approval, rollback, teardown</text>
+
+  <rect x="1290" y="125" width="270" height="700" class="account"/>
+  <text x="1425" y="166" text-anchor="middle" class="account-title">Management</text>
+  <text x="1425" y="194" text-anchor="middle" class="small">Governance and audit</text>
+
+  <rect x="1325" y="255" width="200" height="105" class="governance"/>
+  <text x="1425" y="293" text-anchor="middle" class="label">CloudWatch OAM</text>
+  <text x="1425" y="322" text-anchor="middle" class="small">Logs · Metrics · Traces</text>
+
+  <rect x="1325" y="420" width="200" height="105" class="security"/>
+  <text x="1425" y="458" text-anchor="middle" class="label">Organizations</text>
+  <text x="1425" y="487" text-anchor="middle" class="small">SCPs + account guardrails</text>
+
+  <rect x="1325" y="585" width="200" height="105" class="box"/>
+  <text x="1425" y="623" text-anchor="middle" class="label">Audit archive</text>
+  <text x="1425" y="652" text-anchor="middle" class="small">CloudTrail + log archive</text>
+
+  <path d="M 290 370 L 175 435" class="arrow tool-path"/>
+  <path d="M 290 370 L 405 435" class="arrow model-path"/>
+  <path d="M 175 525 L 175 590" class="arrow tool-path"/>
+  <path d="M 405 435 C 470 350, 560 285, 620 280" class="arrow model-path"/>
+  <path d="M 755 325 L 835 390" class="arrow model-path"/>
+  <path d="M 915 525 L 757 590" class="arrow model-path"/>
+  <path d="M 895 652 L 935 652" class="arrow model-path"/>
+  <path d="M 500 652 C 610 652, 845 345, 1070 325" class="arrow tool-path dashed"/>
+  <path d="M 1210 458 C 1260 400, 1270 330, 1325 310" class="arrow obs-path dashed"/>
+  <path d="M 500 715 C 850 865, 1190 810, 1325 340" class="arrow obs-path dashed"/>
+
+  <text x="575" y="576" class="small" fill="#15803d">tools/list + tools/call</text>
+  <text x="516" y="338" class="small" fill="#1d4ed8">short-lived inference token</text>
+  <text x="802" y="570" class="small" fill="#1d4ed8">guarded inference</text>
+  <text x="1185" y="355" class="tiny" fill="#15803d">approved descriptors and exact alias ARNs</text>
+  <text x="1235" y="785" class="small" fill="#7c3aed">OAM links</text>
+
+  <rect x="40" y="870" width="1520" height="70" fill="#ffffff" stroke="#94a3b8" rx="14"/>
+  <text x="70" y="901" class="small">Security boundary: no direct Bedrock or Lambda invocation from generated agents.</text>
+  <text x="70" y="928" class="small">Promotion boundary: every Workstream mutation flows through GitHub → Workload pipeline → nonproduction evaluation → approval → production.</text>
+</svg>

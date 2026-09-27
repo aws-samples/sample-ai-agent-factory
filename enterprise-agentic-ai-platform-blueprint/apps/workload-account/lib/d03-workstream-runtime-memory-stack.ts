@@ -2,20 +2,17 @@
  * D03WorkstreamRuntimeMemoryStack — opt-in, pipeline-owned native AgentCore
  * Runtime + Memory foundation for a workstream.
  *
- * This stack stands up the two native GA resources whose API contracts were
- * live-proven on exact commit `88d5381` (see
- * `evidence/live/2026-09-21-agentcore-runtime-memory-compatibility-spike.md`):
+ * This stack owns the native AgentCore Runtime and Memory resources exercised by
+ * the compatibility and generated-agent live test suites:
  *
  *   - `AWS::BedrockAgentCore::Memory`  — short/long-term memory store, CMK-
  *     encrypted, event-expiry bounded.
- *   - `AWS::BedrockAgentCore::Runtime` — the ARM64 container the inert proven
- *     agent runs under, addressed by an exact `@sha256` image digest.
+ *   - `AWS::BedrockAgentCore::Runtime` — digest-bound ARM64 container with an
+ *     environment-qualified execution role.
  *
- * It is deliberately a FOUNDATION, not the generated-agent integration: the
- * Runtime carries only `AGENTCORE_MEMORY_ID` and nothing that wires LLM
- * inference or MCP tools. Generated-agent `LiteLLMModel`/`MCPClient` remains
- * the NEXT gate and is intentionally left unwired here — faking it would report
- * success for behaviour never exercised.
+ * The compatibility variant provides a deterministic API-contract handshake.
+ * The generated-agent variant wires `LiteLLMModel`, `MCPClient`, AgentCore
+ * Identity, and actor-scoped Memory through the Workload pipeline.
  *
  * Network posture: `networkMode = PUBLIC`, matching the live commit. A VPC
  * (`VPC` network mode) network configuration remains a documented next gate;

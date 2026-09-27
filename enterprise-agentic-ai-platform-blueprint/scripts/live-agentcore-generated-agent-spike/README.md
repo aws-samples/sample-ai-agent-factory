@@ -52,10 +52,9 @@ exercises the three platform integrations the blueprint mandates.
 - **Live-verified through the pipeline.** `live_invoke_probe.py` proved the
   real `InvokeAgentRuntime` round-trip (`LiteLLMModel` inference + `MCPClient`
   `tools/list`/`tools/call` + a Memory event round-trip) in both environments on
-  2026-09-23, again after the 2026-09-24 teardown and redeploy, plus the
-  wrong-account and unsubscribed-tool twins; see
-  `../../evidence/live/2026-09-23-pipeline-generated-agent.md` and
-  `../../evidence/live/2026-09-24-redeploy-grant-retirement.md`.
+  2026-09-23 and again after teardown/redeploy, plus the wrong-account and
+  unsubscribed-tool twins. The same probes were later exercised through the
+  complete Ireland pipeline, including rollback and production promotion.
 
 - **RegistryReader trust twins.** `registry_reader_trust_twins.py` drives the
   deployed Workstream validator Lambda — the only principal the reader trust
@@ -71,9 +70,9 @@ exercises the three platform integrations the blueprint mandates.
   inference Gateway with the agent's exact OpenAI-compatible request shape
   (bearer re-minted in memory before Cognito's five-minute validity lapses),
   and `concurrency` / `soak` against the Runtime by fanning out the positive
-  live probe. Live 2026-09-24: zero-rate exact 429; RPM/TPM approximate
-  (traffic shaping, not a ceiling); 8-way concurrency and a 30-minute soak
-  green. See `../../evidence/live/2026-09-24-load-rate-limit.md`.
+  live probe. Live validation found an exact zero-rate 429, approximate RPM/TPM
+  behavior (traffic shaping, not a ceiling), green 8-way concurrency, and a
+  30-minute soak.
 
 - **Chaos and dependency failure.** `chaos_dependency_probe.py` runs
   `inference-auth` (no / malformed / forged bearer -> 401), `runtime-fuzz`
@@ -84,17 +83,13 @@ exercises the three platform integrations the blueprint mandates.
   interceptor in `packages/platform-inference-gateway/lambda/guardrail-interceptor/`;
   the probe's pass gate expects HTTP 403 `guardrail_intervened` for every
   tripping prompt, with and without the client parameter, and 200 for the
-  benign controls). Live 2026-09-24/25: PASS in both environments, with the
-  interceptor's own decision log corroborating every count. See
-  `../../evidence/live/2026-09-24-chaos-dependency-failure.md` (the failing
-  pre-interceptor run) and
-  `../../evidence/live/2026-09-24-guardrail-enforcement.md`. Offline tests:
+  benign controls). The interceptor's own decision log must corroborate every
+  count. Offline tests:
   `python -m pytest test_load_rate_limit_probe.py test_chaos_dependency_probe.py -q`.
 
 The bearer token is acquired by the Runtime via AgentCore Identity M2M (workload
-identity → OAuth2 credential provider → `GetResourceOauth2Token`), the recipe
-live-proven by `../live-agentcore-identity-m2m-spike` and recorded in
-`../../evidence/live/2026-09-22-agentcore-identity-m2m-compatibility-spike.md`.
+identity → OAuth2 credential provider → `GetResourceOauth2Token`), the same
+bounded recipe exercised by `../live-agentcore-identity-m2m-spike`.
 
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0

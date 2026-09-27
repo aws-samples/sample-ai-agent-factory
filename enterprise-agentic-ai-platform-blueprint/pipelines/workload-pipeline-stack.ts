@@ -11,7 +11,7 @@
  *
  * Spec: §1.3.5 L210-212 mandatory stage sequence (R-DEVX-002).
  *
- * Round 1B fail-closed invariants (tasks/todo.md §Round 1 B):
+ * Fail-closed pipeline invariants:
  *   1. The synth command is stage-aware. `bin/agentic-ai-platform.ts` routes on
  *      the `stage` context value. The app rejects a missing stage, and this
  *      synth step also passes it explicitly before asserting that the assembly
@@ -475,7 +475,7 @@ export interface WorkloadPipelineStackProps extends StackProps {
    *
    * Left unset, `CanaryDeploy` is an explicit fail-closed placeholder that
    * exits non-zero: no AgentCore traffic-shifting call is implemented yet
-   * (tasks/todo.md Round 4), and a placeholder must never report success.
+   * remains intentionally fail-closed until a real traffic-shift API is wired,
    */
   readonly canaryDeployCommands?: readonly string[];
 }

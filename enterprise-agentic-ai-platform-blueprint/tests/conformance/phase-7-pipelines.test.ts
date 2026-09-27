@@ -993,7 +993,7 @@ describe("Phase 7 — environment-backed synth context", () => {
 });
 
 /**
- * Round 1B — false-green regressions (tasks/todo.md §Round 1 B).
+ * Fail-closed pipeline regressions.
  *
  * Each expectation below fails against the pre-Round-1B implementation:
  *   - synth ran a bare `npx cdk synth`, which the app answers with an EMPTY

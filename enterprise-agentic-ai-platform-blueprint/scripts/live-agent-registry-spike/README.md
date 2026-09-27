@@ -4,10 +4,9 @@ This cleanup-first probe validates the **GA AWS Agent Registry** namespace befor
 
 The public-preview `bedrock-agentcore` Registry namespace reached its documented support deadline on 2026-09-17. New platform code must use `agent-registry-control`, `agent-registry`, `AWS::AgentRegistry::Registry`, and `AWS::AgentRegistry::RegistryRecord` instead.
 
-> **Live proof.** Exact product commit `8e66dc3` passed the complete bounded
-> `us-west-2` contract on 2026-09-19, including explicit approval, discovery,
-> rollback, normal cleanup, and direct independent zero-residual inventory. See
-> [`../../evidence/live/2026-09-19-agent-registry-compatibility-spike.md`](../../evidence/live/2026-09-19-agent-registry-compatibility-spike.md).
+> **Validation boundary.** The bounded compatibility run covers explicit approval,
+> discovery, rollback, normal cleanup, and direct independent zero-residual
+> inventory in the selected account and Region.
 
 ## What it proves
 
@@ -85,7 +84,8 @@ Finally run cleanup independently with the same prefix:
   --git-head "$GIT_HEAD"
 ```
 
-The runner prints the evidence path. Raw evidence stays in session scratch. Only a sanitized, account-redacted exact-commit summary may be committed under `evidence/live/`.
+The runner prints the evidence path. Raw evidence stays in session scratch and
+must not be committed to a public repository.
 
 ## Offline guards
 
@@ -245,9 +245,8 @@ with no AWS SDK present; and end-to-end CLI behaviour.
 ## What it does NOT prove
 
 Passing offline tests or one green `approve` run is **not** evidence for the
-complete migration. The separate pipeline-owned R2 run has now passed the
-bounded Workstream Registry and Tool Gateway envelope in `us-west-2`; see
-[`../../evidence/live/2026-09-21-pipeline-ga-agent-registry-r2.md`](../../evidence/live/2026-09-21-pipeline-ga-agent-registry-r2.md).
-This utility still proves one Platform account, Region, and environment per run;
-it does not by itself prove the Workstream consumer, authorization twins,
-rollback, teardown, or any EMEA AgentCore region.
+complete migration. The separate pipeline-owned R2 suite covers the bounded
+Workstream Registry and Tool Gateway envelope. This utility still proves one
+Platform account, Region, and environment per run; it does not by itself prove
+the Workstream consumer, authorization twins, rollback, teardown, or another
+Region.

@@ -98,33 +98,22 @@ qualified Platform tool Lambdas and Gateway roles. The old `allowedToolIds`
 catalogue consumer path was retired on 2026-09-25; the GA Registry context is
 the only subscription source.
 
-## Current proof boundary
+## Validation boundary
 
-The isolated API contract passed in `us-west-2` on exact product commit
-`8e66dc3`; see
-[`../../evidence/live/2026-09-19-agent-registry-compatibility-spike.md`](../../evidence/live/2026-09-19-agent-registry-compatibility-spike.md).
+The Registry test suites cover:
 
-The pipeline-owned R1 producer passed reviewed Platform pipeline deployment in
-both environments on exact producer commit `f3ec7d6`. The template-bound
-approval utility on exact commit `39a13ab` observed every record in `DRAFT`,
-submitted each explicitly, and independently verified both records as
-`APPROVED` and exactly discoverable. Live trust negatives denied the existing
-Workstream Admin principal and an external account. See
-[`../../evidence/live/2026-09-20-pipeline-ga-agent-registry-r1.md`](../../evidence/live/2026-09-20-pipeline-ga-agent-registry-r1.md).
+- native Registry and `CUSTOM` governance-record creation;
+- observed `DRAFT`, explicit submission, approval, and discovery;
+- byte-semantic descriptor and allocation-tag verification;
+- conditioned `RegistryReaderRole` trust;
+- stable tool-ID resolution through versioned SSM parameters;
+- deploy-time `APPROVED`, version, digest, and target-ARN checks;
+- wrong-account, wrong-ExternalId, and wrong-session-name denials;
+- terminal-record generation recovery;
+- target → barrier → Gateway teardown and residual inventory.
 
-The pipeline-owned R2 consumer passed in `us-west-2` on exact deployed commit
-`3870e0e`. The reviewed Platform and Workload pipelines proved stable-ID
-cross-account resolution, exact role and alias-permission handoff, approved
-record/version/descriptor/target validation, nonproduction and production
-Gateway deployment, MCP positives and denial twins, no-op redeployment,
-fail-closed status drift, and terminal-record generation recovery. Both
-Gateway stacks then deleted in target → barrier → Gateway order. Teardown-
-hardening commit `7774299` removed every exact service-created log group, and
-independent inventory found zero unintended residue. See
-[`../../evidence/live/2026-09-21-pipeline-ga-agent-registry-r2.md`](../../evidence/live/2026-09-21-pipeline-ga-agent-registry-r2.md).
-
-The matching-principal wrong-ExternalId and wrong-session-name reader-trust
-twins passed live on 2026-09-24 through the deployed validator role in both
-environments (exact STS `403 AccessDenied`; positive access before and after).
-EMEA regions and final placeholder retirement remain release gates (the legacy
-consumer path was retired on 2026-09-25 instead of being redeployed).
+The complete producer/consumer flow has been exercised through nonproduction
+and production pipelines in the supported Ireland reference topology. A
+customer deployment must repeat the same checks in its own accounts and Region.
+The retained DynamoDB placeholder is a migration rollback surface, not the tool
+governance source of truth.

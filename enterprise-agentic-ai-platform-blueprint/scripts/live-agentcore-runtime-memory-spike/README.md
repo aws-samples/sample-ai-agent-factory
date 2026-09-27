@@ -213,33 +213,23 @@ for the service-model contract tests (never touching IMDS), every consumed input
 and output field is pinned, Runtime/Memory/event/invocation requests serialize
 through botocore, and every orchestration test drives a fake API recorder.
 
-## Reference live campaign
+## Validation boundary
 
-Exact product commit `88d5381d371944a4dfdc31d424917bf767a92c17`
-passed the bounded `us-west-2` compatibility campaign: zero-finding digest-pinned
-ARM64 image, Memory `ACTIVE`, Runtime `READY`, exact invocation handshake, exact
-short-term event round trip, Runtime-before-Memory cleanup, grant retirement,
-and independent zero-active-residue inventory. See
-[`../../evidence/live/2026-09-21-agentcore-runtime-memory-compatibility-spike.md`](../../evidence/live/2026-09-21-agentcore-runtime-memory-compatibility-spike.md).
+The bounded compatibility suite covers a zero-finding digest-pinned ARM64
+image, Memory `ACTIVE`, Runtime `READY`, exact invocation and event round trips,
+Runtime-before-Memory cleanup, grant retirement, and independent residual
+inventory.
 
-This remains an isolated Platform-account API-contract proof. Pipeline-owned
-Workstream Runtime/Memory and generated-agent `LiteLLMModel`/`MCPClient`
-integration are not yet proven.
+The complete Workstream pipeline additionally exercises the generated-agent
+`LiteLLMModel`/`MCPClient`, Identity, Guardrail, rollback, and production paths.
 
 ## Honest limitations
 
-- **No live evidence is produced by this code.** The probe records only what a
-  live run exercises; running the tests proves the _contract_, not live AWS
-  behaviour. A live run's evidence file is the only live proof.
-- **Region list is documentation-derived**, not a live-verified matrix. The
-  EMEA subset is called out explicitly (`EMEA_REGIONS`) but each region must be
-  proven by an actual run before any regional claim is made.
-- **Integrations are the next pipeline slice.** The agent imports only
-  `bedrock-agentcore` and answers a deterministic handshake. `LiteLLMModel` (LLM
-  Gateway), `MCPClient` (Tools Gateway), and AgentCore Memory wiring are
-  deliberately **not** present — their packages are intentionally absent from
-  `agent/requirements.txt` so the image cannot imply an integration this probe
-  does not exercise.
+- Offline tests prove the probe contract, not a customer's live AWS account.
+- Every Region requires its own service-availability, policy, deployment,
+  adversarial, rollback, observability, and teardown execution.
+- The compatibility image intentionally implements only the deterministic API
+  handshake. Use the generated-agent variant for the supported integrated path.
 
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
