@@ -1,12 +1,14 @@
 import { Link } from 'react-router-dom';
+import { Card } from '../../components/Card';
+import { ChipNav } from '../../components/ChipNav';
 import { PageHeader } from '../../components/PageHeader';
 import { PageMeta } from '../../components/PageMeta';
-import { ConceptsNav } from './ConceptsNav';
-import { SourceLink } from '../../components/SourceLink';
+import { SmallSource } from '../../components/Sources';
 import { StageBadge } from '../../components/StageBadge';
 import { getProjectById } from '../../content/data';
 import { glossary, type GlossaryTerm } from '../../content/glossary';
 import { projectPath } from '../../paths';
+import { ConceptsNav } from './ConceptsNav';
 import styles from './GlossaryPage.module.css';
 
 /** First letter (A to Z or 0 to 9) a term sorts under. */
@@ -38,6 +40,7 @@ function groupAlphabetically(terms: readonly GlossaryTerm[]): LetterGroup[] {
 
 const GROUPS = groupAlphabetically(glossary);
 const TERMS_BY_ID = new Map(glossary.map((term) => [term.id, term]));
+const LETTER_ITEMS = GROUPS.map((group) => ({ label: group.letter, href: `#letter-${group.letter}` }));
 
 export function GlossaryPage() {
   return (
@@ -63,17 +66,7 @@ export function GlossaryPage() {
           from.
         </p>
 
-        <nav aria-label="Glossary sections" className={styles.letterNav}>
-          <ul className={styles.letterList}>
-            {GROUPS.map((group) => (
-              <li key={group.letter}>
-                <a href={`#letter-${group.letter}`} className={styles.letterLink}>
-                  {group.letter}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </nav>
+        <ChipNav label="Glossary letters" size="sm" sticky overflow="wrap" items={LETTER_ITEMS} className={styles.letterNav} />
 
         {GROUPS.map((group) => (
           <section key={group.letter} className={styles.letterSection} aria-labelledby={`letter-${group.letter}`}>
@@ -82,7 +75,7 @@ export function GlossaryPage() {
             </h2>
             <dl className={styles.termList}>
               {group.terms.map((term) => (
-                <div key={term.id} className={styles.termEntry}>
+                <Card key={term.id} className={styles.termEntry}>
                   <dt id={term.id} className={styles.term}>
                     {term.term}
                   </dt>
@@ -92,7 +85,7 @@ export function GlossaryPage() {
                       {term.source && (
                         <>
                           {' '}
-                          (<SourceLink source={term.source}>source</SourceLink>)
+                          <SmallSource source={term.source} context={term.term} />
                         </>
                       )}
                     </p>
@@ -110,7 +103,8 @@ export function GlossaryPage() {
                                 </Link>
                               </span>
                               <span className={styles.meaningText}>
-                                {meaning.meaning} (<SourceLink source={meaning.source}>source</SourceLink>)
+                                {meaning.meaning}{' '}
+                                <SmallSource source={meaning.source} context={`${term.term} in ${project.shortName}`} />
                               </span>
                             </li>
                           );
@@ -133,7 +127,7 @@ export function GlossaryPage() {
                       </p>
                     )}
                   </dd>
-                </div>
+                </Card>
               ))}
             </dl>
           </section>

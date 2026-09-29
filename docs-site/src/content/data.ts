@@ -407,3 +407,57 @@ export function getProjectByStage(stage: JourneyStage): Project | undefined {
 export function getProjectById(id: string): Project | undefined {
   return projects.find(p => p.id === id);
 }
+
+/** Icon key for a persona card; the Home page maps it to a lucide icon. */
+export type PersonaIcon = 'server' | 'bot' | 'shield' | 'compass' | 'briefcase';
+
+/** A reader role on the Home page and the one place that role should start. */
+export interface Persona {
+  /** Role name, rendered as the card heading. */
+  role: string;
+  /** One sentence on what that role gets from the projects. */
+  text: string;
+  /** Visible text of the start link. */
+  linkLabel: string;
+  /** Site route with a trailing slash. */
+  to: string;
+  icon: PersonaIcon;
+}
+
+export const personas: Persona[] = [
+  {
+    role: 'Platform engineer',
+    text: 'Build the LLM Gateway, registries and Tools Gateway module by module.',
+    linkLabel: 'Start with the Workshop',
+    to: '/projects/workshop/',
+    icon: 'server',
+  },
+  {
+    role: 'AI/ML engineer',
+    text: 'Ship an agent on Amazon Bedrock AgentCore from a template on a visual canvas.',
+    linkLabel: 'Start with Self-Service',
+    to: '/projects/self-service/',
+    icon: 'bot',
+  },
+  {
+    role: 'Security engineer',
+    text: 'See Cedar ENFORCE, JWT authentication, interceptors and a Guardrail on a live MCP endpoint.',
+    linkLabel: 'Start with the MCP Gateway',
+    to: '/projects/mcp-gateway/',
+    icon: 'shield',
+  },
+  {
+    role: 'Solutions architect',
+    text: 'Compare regions, deploy time, cost and topology before recommending a project.',
+    linkLabel: 'Start with the comparison',
+    to: '/start/which-project/',
+    icon: 'compass',
+  },
+  {
+    role: 'Engineering director',
+    text: 'Know what each sample is and is not before committing a team.',
+    linkLabel: 'Start with the support envelope',
+    to: '/reference/support-envelope/',
+    icon: 'briefcase',
+  },
+];

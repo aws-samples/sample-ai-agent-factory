@@ -1,7 +1,9 @@
+import { Card } from '../../components/Card';
+import { ChipNav } from '../../components/ChipNav';
 import { PageHeader } from '../../components/PageHeader';
 import { PageMeta } from '../../components/PageMeta';
 import { SmartLink } from '../../components/SmartLink';
-import { SourceLink } from '../../components/SourceLink';
+import { Sources } from '../../components/Sources';
 import { StageBadge } from '../../components/StageBadge';
 import { getProjectById } from '../../content/data';
 import { faq } from '../../content/faq';
@@ -23,59 +25,56 @@ export function FaqPage() {
       <div className="container">
         <StartNav />
 
-        <nav aria-label="Questions" className={styles.projectSection}>
-          <ol className={styles.bulletList}>
-            {faq.map((entry) => (
-              <li key={entry.id}>
-                <a href={`#${entry.id}`}>{entry.question}</a>
-              </li>
-            ))}
-          </ol>
-        </nav>
+        <ChipNav
+          label="Questions"
+          lead="Questions:"
+          overflow="wrap"
+          className={styles.faqNav}
+          items={faq.map((entry) => ({ href: `#${entry.id}`, label: entry.question }))}
+        />
 
-        {faq.map((entry) => (
-          <section
-            key={entry.id}
-            id={entry.id}
-            className={styles.projectSection}
-            aria-labelledby={`${entry.id}-heading`}
-          >
-            <h2 id={`${entry.id}-heading`}>{entry.question}</h2>
-            {entry.projectIds.length > 0 && (
-              <ul className={styles.chips} aria-label="Projects concerned">
-                {entry.projectIds.map((projectId) => {
-                  const project = getProjectById(projectId);
-                  return project ? (
-                    <li key={projectId}>
-                      <StageBadge stage={project.stage} label={project.shortName} variant="outline" />
-                    </li>
-                  ) : null;
-                })}
-              </ul>
-            )}
-            <div className={`${styles.prose} ${styles.subSection}`}>
-              <p>{entry.answer}</p>
-              {entry.links && entry.links.length > 0 && (
-                <ul className={styles.bulletList}>
-                  {entry.links.map((link) => (
-                    <li key={link.href}>
-                      <SmartLink href={link.href}>{link.label}</SmartLink>
-                    </li>
-                  ))}
+        <div className={styles.faqList}>
+          {faq.map((entry) => (
+            <Card
+              as="section"
+              key={entry.id}
+              id={entry.id}
+              aria-labelledby={`${entry.id}-heading`}
+              reveal
+              padding="lg"
+              className={styles.faqCard}
+            >
+              <h2 id={`${entry.id}-heading`} className={styles.faqQuestion}>
+                {entry.question}
+              </h2>
+              {entry.projectIds.length > 0 && (
+                <ul className={styles.badgeRow} aria-label="Projects concerned">
+                  {entry.projectIds.map((projectId) => {
+                    const project = getProjectById(projectId);
+                    return project ? (
+                      <li key={projectId}>
+                        <StageBadge stage={project.stage} label={project.shortName} variant="outline" />
+                      </li>
+                    ) : null;
+                  })}
                 </ul>
               )}
-              <p className={styles.meta}>
-                {entry.sources.length === 1 ? 'Source: ' : 'Sources: '}
-                {entry.sources.map((source, index) => (
-                  <span key={`${source.file}-${source.heading ?? ''}-${source.quote ?? index}`}>
-                    {index > 0 && '; '}
-                    <SourceLink source={source} />
-                  </span>
-                ))}
-              </p>
-            </div>
-          </section>
-        ))}
+              <div className={styles.prose}>
+                <p>{entry.answer}</p>
+                {entry.links && entry.links.length > 0 && (
+                  <ul className={styles.bulletList}>
+                    {entry.links.map((link) => (
+                      <li key={link.href}>
+                        <SmartLink href={link.href}>{link.label}</SmartLink>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <Sources sources={entry.sources} label={entry.sources.length === 1 ? 'Source' : 'Sources'} />
+              </div>
+            </Card>
+          ))}
+        </div>
       </div>
     </>
   );

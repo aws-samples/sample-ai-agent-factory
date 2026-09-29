@@ -1,6 +1,8 @@
+/* Breadcrumb trail. It renders inside the page header's `.on-dark` band, where
+   `--color-text-primary` and `--color-text-secondary` are already remapped to the
+   light set, so only semantic tokens are used here and nothing is hard-coded. */
 .nav {
-  font-size: 0.875rem;
-  margin-bottom: var(--space-4);
+  font-size: var(--text-sm);
 }
 
 .list {
@@ -20,6 +22,7 @@
 .link {
   color: var(--color-text-secondary);
   text-decoration: underline;
+  text-decoration-thickness: from-font;
   text-underline-offset: 0.15em;
   display: inline-flex;
   align-items: center;
@@ -28,6 +31,11 @@
 
 .link:hover {
   color: var(--color-text-primary);
+}
+
+.link:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
 }
 
 .current {

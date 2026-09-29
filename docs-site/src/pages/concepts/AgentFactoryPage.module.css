@@ -5,43 +5,25 @@
   padding-bottom: var(--section-padding-y);
 }
 
-.section {
-  padding: var(--space-10) 0 0;
-}
-
-.section h2 {
-  margin-bottom: var(--space-4);
-}
-
 .prose {
   max-width: 72ch;
   color: var(--color-text-primary);
 }
 
-.prose + .prose {
-  margin-top: var(--space-4);
-}
-
 /* How this site groups the four projects */
 .partsGrid {
+  list-style: none;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
   gap: var(--space-4);
+  margin: 0;
+  padding: 0;
 }
 
 .partCard {
-  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-6);
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-}
-
-.partCard h3 {
-  font-size: 1.25rem;
 }
 
 .partNumber {
@@ -50,10 +32,17 @@
   justify-content: center;
   width: 2.25rem;
   height: 2.25rem;
-  border-radius: 999px;
-  background: var(--color-midnight);
-  color: var(--color-cloud);
+  border-radius: var(--radius-pill);
+  background: var(--color-band);
+  color: var(--color-text-inverse);
   font-weight: 700;
+  /* Transparent border so forced-colors mode still draws the circle. */
+  border: 1px solid transparent;
+}
+
+.partsGrid .partTitle {
+  font-size: 1.25rem;
+  margin: 0;
 }
 
 .partProjects {
@@ -81,18 +70,8 @@
 }
 
 /* Eight steps */
-.stepsList {
+.steps {
   max-width: 72ch;
-  margin: var(--space-4) 0;
-  padding-left: var(--space-6);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.stepsList li::marker {
-  font-weight: 700;
-  color: var(--stage-scale-ink);
 }
 
 /* Per-project shipping */
@@ -101,46 +80,35 @@
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(18rem, 100%), 1fr));
   gap: var(--space-4);
-  margin-bottom: var(--space-6);
+  margin: 0 0 var(--space-6);
+  padding: 0;
 }
 
 .shipItem {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-5);
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
 }
 
 .shipHeading {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--space-2) var(--space-3);
 }
 
-.shipHeading h3 {
+.shipIcon {
+  flex-shrink: 0;
+  color: var(--stage-color);
+}
+
+.shipList .shipTitle {
   font-size: 1.25rem;
+  margin: 0;
 }
 
-.shipFact {
+.shipFacts {
   margin-top: auto;
   padding-top: var(--space-3);
   border-top: 1px solid var(--color-border);
-  font-size: 0.9375rem;
-  color: var(--color-text-secondary);
-}
-
-.shipFactLabel {
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-/* Links inside secondary-coloured text need more than colour to stand out. */
-.shipFact a,
-.partProjectsLabel a {
-  text-decoration: underline;
-  text-underline-offset: 0.15em;
 }

@@ -1,9 +1,55 @@
 .header {
   position: relative;
   overflow: hidden;
-  background: var(--color-midnight);
+  background: var(--color-band);
   color: var(--color-text-inverse);
   padding: var(--section-padding-y) 0;
+}
+
+/* Compact band for document pages: tighter padding, smaller title. */
+.header[data-variant='compact'] {
+  padding: var(--space-8) 0;
+}
+
+.header[data-variant='compact'] .title {
+  font-size: var(--font-size-h2);
+}
+
+.header[data-variant='compact'] .lead {
+  margin-top: var(--space-2);
+  font-size: var(--text-base);
+}
+
+.header[data-variant='compact'] .actions {
+  margin-top: var(--space-4);
+}
+
+/* Centred copy (Home). */
+.header[data-align='center'] .copy {
+  text-align: center;
+  margin-inline: auto;
+  max-width: 60rem;
+}
+
+.header[data-align='center'] .title {
+  max-width: none;
+}
+
+.header[data-align='center'] .lead {
+  margin-inline: auto;
+}
+
+.header[data-align='center'] .actions,
+.header[data-align='center'] .meta {
+  justify-content: center;
+}
+
+.header[data-align='center'] .meta {
+  display: flex;
+}
+
+.breadcrumbs {
+  margin-bottom: var(--space-3);
 }
 
 /* Decorative layer behind the copy; empty (and invisible) unless a page passes `backdrop`. */
@@ -28,9 +74,9 @@
 
 .eyebrow {
   margin: 0 0 var(--space-2);
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
   font-weight: 600;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--label-tracking);
   text-transform: uppercase;
   color: var(--color-text-inverse-muted);
 }
@@ -48,7 +94,7 @@
 .lead {
   margin: var(--space-4) 0 0;
   max-width: 65ch;
-  font-size: 1.125rem;
+  font-size: var(--text-lg);
   line-height: 1.6;
   color: var(--color-text-inverse-muted);
 }
@@ -79,17 +125,18 @@
   }
 }
 
-/* Entrance: fade in and rise 12px, once, title first then the rest 60ms apart. Only inside the
-   no-preference query so reduced-motion visitors (and no-JavaScript renders) see the final state
-   straight away; opacity and transform never affect layout. */
+/* Entrance: rise 12px, once, title first then the rest 60ms apart. A rise without a fade:
+   content painted at opacity 0 is never reported as a Largest Contentful Paint candidate
+   (the compositor-driven fade triggers no new paint record), which made Lighthouse report
+   no LCP at all on pages whose hero fills the viewport. Only inside the no-preference query
+   so reduced-motion visitors (and no-JavaScript renders) see the final state straight away;
+   a transform never affects layout or contrast. */
 @keyframes header-rise {
   from {
-    opacity: 0;
     transform: translateY(12px);
   }
 
   to {
-    opacity: 1;
     transform: none;
   }
 }

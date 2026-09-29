@@ -4,12 +4,13 @@ import { CodeBlock } from '../../components/CodeBlock';
 import { FactsTable } from '../../components/FactsTable';
 import { PageHeader } from '../../components/PageHeader';
 import { PageMeta } from '../../components/PageMeta';
+import { Section } from '../../components/Section';
 import { SourceLink } from '../../components/SourceLink';
 import { projects } from '../../content/data';
 import { FACT_LABELS, getFacts } from '../../content/facts';
 import { getQuickstarts } from '../../content/quickstarts';
 import { PATHS, projectPath } from '../../paths';
-import { JumpLinks, ProjectHeading, SmallSource, StartNav } from './shared';
+import { JumpLinks, ProjectBadge, SmallSource, StartNav } from './shared';
 import styles from './start.module.css';
 
 const ROOT_COSTS = { file: 'README.md', heading: 'Costs' };
@@ -50,13 +51,7 @@ export function CostsAndCleanupPage() {
           const facts = getFacts(project.id);
           const quickstarts = getQuickstarts(project.id);
           return (
-            <section
-              key={project.id}
-              id={project.id}
-              className={styles.projectSection}
-              aria-labelledby={`${project.id}-heading`}
-            >
-              <ProjectHeading project={project} id={`${project.id}-heading`} />
+            <Section key={project.id} id={project.id} title={project.name} badge={<ProjectBadge project={project} />}>
               <FactsTable
                 caption={`${project.shortName}: cost and teardown`}
                 rows={[
@@ -79,7 +74,7 @@ export function CostsAndCleanupPage() {
                 <Link to={`${PATHS.start}#${project.id}`}>first ten minutes with {project.shortName}</Link>, and the{' '}
                 <SourceLink source={facts.teardown.source ?? project.sources.features}>README</SourceLink>.
               </p>
-            </section>
+            </Section>
           );
         })}
       </div>

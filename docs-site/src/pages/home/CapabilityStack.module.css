@@ -1,0 +1,183 @@
+.stack {
+  display: grid;
+  gap: var(--space-5);
+}
+
+/* Legend: dot fills on the left, project order (as stage badges) on the right. */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2) var(--space-8);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.legendList {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2) var(--space-4);
+  list-style: none;
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--target-min);
+}
+
+.legendProject {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+/* Layer panels */
+.layers {
+  list-style: none;
+  display: grid;
+  gap: var(--space-3);
+}
+
+.layer {
+  display: grid;
+  gap: var(--space-2);
+  overflow: hidden;
+}
+
+/* 3 px rule in the four stage tints along the top of each panel. */
+.layer::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  background: linear-gradient(
+    90deg,
+    var(--stage-learn-tint),
+    var(--stage-build-tint),
+    var(--stage-govern-tint),
+    var(--stage-scale-tint)
+  );
+}
+
+.layerName {
+  font-size: var(--text-base);
+  font-weight: 700;
+}
+
+.capabilities {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+@media (min-width: 640px) {
+  .layer {
+    grid-template-columns: 11rem minmax(0, 1fr);
+    align-items: center;
+    column-gap: var(--space-4);
+  }
+}
+
+/* Capability chip: icon, name, four dots; the whole chip links to the matrix row. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 2.5rem;
+  padding: 0 var(--space-3) 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-sunken);
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-decoration: none;
+  transition:
+    border-color var(--transition-fast),
+    background-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.chip:hover {
+  border-color: var(--color-link);
+  color: var(--color-link-hover);
+  text-decoration: none;
+}
+
+.chip:hover .chipName {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.chip:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.chipIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+
+.chipIcon > svg {
+  display: block;
+}
+
+.chipName {
+  white-space: nowrap;
+}
+
+.dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: var(--space-1);
+}
+
+/* Posture dots: solid = enforced, outline = advisory or illustrative, none = not part of the project. */
+.dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  flex-shrink: 0;
+}
+
+.dot[data-stage='learn'] {
+  --stage-color: var(--stage-learn);
+}
+
+.dot[data-stage='build'] {
+  --stage-color: var(--stage-build);
+}
+
+.dot[data-stage='govern'] {
+  --stage-color: var(--stage-govern);
+}
+
+.dot[data-stage='scale'] {
+  --stage-color: var(--stage-scale);
+}
+
+.dot[data-fill='solid'] {
+  background: var(--stage-color, var(--color-text-secondary));
+  border: 1px solid var(--stage-color, var(--color-text-secondary));
+}
+
+.dot[data-fill='outline'] {
+  border: 2px solid var(--stage-color, var(--color-text-secondary));
+}
+
+.dot[data-fill='none'] {
+  border: 1px solid var(--color-border);
+}

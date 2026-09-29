@@ -1,13 +1,18 @@
 import { Link } from 'react-router-dom';
-import { ExternalLink } from '../../components/ExternalLink';
+import { ArrowRight } from 'lucide-react';
+import { Button } from '../../components/Button';
+import { Card } from '../../components/Card';
 import { PageHeader } from '../../components/PageHeader';
 import { PageMeta } from '../../components/PageMeta';
 import { StageBadge } from '../../components/StageBadge';
+import { StageJourney } from '../../components/StageJourney';
+import { FactStat } from '../../components/StatTile';
 import { projects } from '../../content/data';
 import { FACT_LABELS, getFacts, type ProjectFacts } from '../../content/facts';
 import { tree } from '../../content/links';
 import { PATHS, projectPath } from '../../paths';
-import { FactItem } from '../start/shared';
+import { STAGE_ICONS } from '../../stage';
+import { factIcon } from '../start/factIcons';
 import styles from './ProjectsPage.module.css';
 
 /** Facts shown on each directory card, each with its source link. */
@@ -24,34 +29,57 @@ export function ProjectsPage() {
         eyebrow="Directory"
         title="Projects"
         lead="Four projects, one per stage. Each card links to the project page on this site and to its source folder on GitHub."
+        meta={<StageJourney label="Journey stages" size="sm" />}
       />
 
-      <div className="container page-section">
+      <div className={`container ${styles.body}`}>
         <ul className={styles.grid}>
           {projects.map((project) => {
             const projectFacts = getFacts(project.id);
+            const Icon = STAGE_ICONS[project.stage];
             return (
-              <li key={project.id} className={styles.card} data-stage={project.stage} data-reveal data-lift>
-                <StageBadge stage={project.stage} label={`${project.stageNumber}. ${project.stageLabel}`} />
+              <Card
+                as="li"
+                key={project.id}
+                variant="accent"
+                stage={project.stage}
+                interactive
+                reveal
+                padding="lg"
+                className={styles.projectCard}
+              >
+                <div className={styles.head}>
+                  <span className={styles.stageIcon} aria-hidden="true">
+                    <Icon size={20} />
+                  </span>
+                  <StageBadge stage={project.stage} label={`${project.stageNumber}. ${project.stageLabel}`} />
+                </div>
                 <h2 className={styles.cardTitle}>{project.name}</h2>
                 <p className={styles.tagline}>{project.tagline}</p>
                 <p>
                   <strong>Best for:</strong> {project.bestFor}
                 </p>
-                <dl className={styles.facts}>
+                <dl className={styles.factList}>
                   {CHIP_KEYS.map((key) => (
-                    <FactItem key={key} label={FACT_LABELS[key]} fact={projectFacts[key]} />
+                    <FactStat
+                      key={key}
+                      label={FACT_LABELS[key]}
+                      fact={projectFacts[key]}
+                      project={project.shortName}
+                      icon={factIcon(key)}
+                      noteMode="collapsed"
+                    />
                   ))}
                 </dl>
                 <div className={styles.actions}>
-                  <Link to={projectPath(project.id)} className={styles.primary}>
+                  <Button to={projectPath(project.id)} iconEnd={<ArrowRight size={16} />}>
                     {project.shortName} project page
-                  </Link>
-                  <ExternalLink href={tree(project.folder)} className={styles.secondary}>
+                  </Button>
+                  <Button href={tree(project.folder)} external variant="secondary">
                     Source on GitHub
-                  </ExternalLink>
+                  </Button>
                 </div>
-              </li>
+              </Card>
             );
           })}
         </ul>

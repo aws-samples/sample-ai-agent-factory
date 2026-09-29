@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FocusEvent, type MouseEv
 import { flushSync } from 'react-dom';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { ChevronDown, Github, Hexagon, Menu, X } from 'lucide-react';
+import { navigation, type NavItem } from '../content/data';
 import { ISSUES_URL, REPO_URL, VULN_REPORT_URL } from '../content/links';
 import { siteNav } from '../nav';
 import { PATHS } from '../paths';
@@ -9,6 +10,26 @@ import { ExternalLink } from './ExternalLink';
 import { HomeLink } from './HomeLink';
 import { RouteChange } from './RouteChange';
 import styles from './Layout.module.css';
+
+/**
+ * The Start section has a single entry in the main navigation, so the footer lists
+ * its five pages here (same labels as the Start section chip nav).
+ */
+const START_LINKS: NavItem[] = [
+  { path: PATHS.start, label: 'Get started' },
+  { path: PATHS.whichProject, label: 'Which project fits?' },
+  { path: PATHS.prerequisites, label: 'Prerequisites' },
+  { path: PATHS.costsAndCleanup, label: 'Costs and cleanup' },
+  { path: PATHS.faq, label: 'FAQ' },
+];
+
+/** Footer columns: one per top-level navigation entry, each with at least one link. */
+const FOOTER_COLUMNS = navigation
+  .map((item) => ({
+    ...item,
+    children: item.children && item.children.length > 0 ? item.children : item.path === PATHS.start ? START_LINKS : [],
+  }))
+  .filter((item) => item.children.length > 0);
 
 const MOBILE_MENU_ID = 'mobile-menu';
 const NEW_ISSUE_URL = `${ISSUES_URL}/new`;
@@ -303,36 +324,58 @@ export function Layout() {
 
       <footer className={`${styles.footer} on-dark`} {...inertWhenMenuOpen}>
         <div className={styles.footerContent}>
-          <p className={styles.footerText}>
-            This is sample code released under the MIT-0 License, not an AWS service. Review the architecture,
-            security posture, and costs before you use it.
-          </p>
-          <ul className={styles.footerLinks} aria-label="Footer links">
-            <li>
-              <ExternalLink href={REPO_URL} className={styles.footerLink}>
-                Repository
-              </ExternalLink>
-            </li>
-            <li>
-              <Link to={PATHS.contributing} className={styles.footerLink}>
-                Contributing
-              </Link>
-            </li>
-            <li>
-              <ExternalLink href={NEW_ISSUE_URL} className={styles.footerLink}>
-                Report an issue
-              </ExternalLink>
-            </li>
-            <li>
-              <ExternalLink href={VULN_REPORT_URL} className={styles.footerLink}>
-                Security reporting
-              </ExternalLink>
-            </li>
-          </ul>
-          <p className={styles.buildStamp}>
-            Built from <code className={styles.sha}>{__BUILD_SHA__}</code> on{' '}
-            <time dateTime={__BUILD_DATE__}>{__BUILD_DATE__}</time>
-          </p>
+          <nav className={styles.footerNav} aria-label="Footer navigation">
+            {FOOTER_COLUMNS.map((item) => (
+              <div key={item.path} className={styles.footerColumn}>
+                <h2 className={styles.footerHeading}>
+                  <Link to={item.path} className={styles.footerHeadingLink}>
+                    {item.label}
+                  </Link>
+                </h2>
+                <ul className={styles.footerColumnLinks}>
+                  {item.children.map((child) => (
+                    <li key={child.path}>
+                      <Link to={child.path} className={styles.footerNavLink}>
+                        {child.label}
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </nav>
+          <div className={styles.footerMeta}>
+            <p className={styles.footerText}>
+              This is sample code released under the MIT-0 License, not an AWS service. Review the architecture,
+              security posture, and costs before you use it.
+            </p>
+            <ul className={styles.footerLinks} aria-label="Footer links">
+              <li>
+                <ExternalLink href={REPO_URL} className={styles.footerLink}>
+                  Repository
+                </ExternalLink>
+              </li>
+              <li>
+                <Link to={PATHS.contributing} className={styles.footerLink}>
+                  Contributing
+                </Link>
+              </li>
+              <li>
+                <ExternalLink href={NEW_ISSUE_URL} className={styles.footerLink}>
+                  Report an issue
+                </ExternalLink>
+              </li>
+              <li>
+                <ExternalLink href={VULN_REPORT_URL} className={styles.footerLink}>
+                  Security reporting
+                </ExternalLink>
+              </li>
+            </ul>
+            <p className={styles.buildStamp}>
+              Built from <code className={styles.sha}>{__BUILD_SHA__}</code> on{' '}
+              <time dateTime={__BUILD_DATE__}>{__BUILD_DATE__}</time>
+            </p>
+          </div>
         </div>
       </footer>
     </>

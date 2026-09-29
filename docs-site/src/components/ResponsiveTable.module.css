@@ -27,7 +27,7 @@
 }
 
 .table th {
-  background: var(--color-cloud);
+  background: var(--color-surface-sunken);
   font-weight: 600;
 }
 

@@ -46,4 +46,22 @@ describe('PageHeader', () => {
     expect(container.querySelector('p')).toBeNull();
     expect(container.querySelector('[data-stage]')).toBeNull();
   });
+
+  it('renders a static glow backdrop by default and exposes align and variant', () => {
+    const { container } = render(<PageHeader title="Docs" stage="govern" align="center" variant="compact" />);
+    const header = container.querySelector('[data-page-header]');
+    expect(header).toHaveAttribute('data-align', 'center');
+    expect(header).toHaveAttribute('data-variant', 'compact');
+    expect(container.querySelector('[data-hue="govern"]')).toHaveAttribute('aria-hidden', 'true');
+  });
+
+  it('replaces the default glow when a backdrop is passed and renders breadcrumbs first', () => {
+    const { container } = render(
+      <PageHeader title="Home" backdrop={<canvas data-testid="canvas" />} breadcrumbs={<nav aria-label="Breadcrumb">Home</nav>} />,
+    );
+    expect(container.querySelector('[data-hue]')).toBeNull();
+    expect(screen.getByTestId('canvas')).toBeInTheDocument();
+    const copy = screen.getByRole('heading', { level: 1 }).parentElement!;
+    expect(copy.firstElementChild).toContainElement(screen.getByRole('navigation', { name: 'Breadcrumb' }));
+  });
 });

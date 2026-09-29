@@ -1,11 +1,15 @@
+import { ArrowRight } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { Card } from '../../components/Card';
 import { PageHeader } from '../../components/PageHeader';
 import { PageMeta } from '../../components/PageMeta';
-import { ConceptsNav } from './ConceptsNav';
-import { SourceLink } from '../../components/SourceLink';
+import { Section } from '../../components/Section';
+import { Sources } from '../../components/Sources';
 import { capabilities } from '../../content/data';
 import { CAPABILITY_CONTRACT_SOURCE, capabilityMatrix } from '../../content/matrix';
 import { PATHS } from '../../paths';
+import { capabilityIcon } from './capabilityIcons';
+import { ConceptsNav } from './ConceptsNav';
 import { PostureLegend, PostureMatrix } from './PostureMatrix';
 import styles from './CapabilityContractsPage.module.css';
 
@@ -34,9 +38,8 @@ export function CapabilityContractsPage() {
       <div className="container">
         <ConceptsNav />
 
-        <section className={styles.section} aria-labelledby="contracts">
-          <h2 id="contracts">Contracts versus implementations</h2>
-          <div className={styles.contractBox}>
+        <Section id="contracts" title="Contracts versus implementations" flush>
+          <Card variant="tinted" tint="blue" padding="lg" className={styles.tintedBox}>
             <p>
               Labels like LLM Gateway, Tool Gateway, agent runtime, memory, identity, registry, policy engine, delivery
               pipeline, and observability describe <strong>architectural capabilities</strong>. A capability contract
@@ -50,64 +53,68 @@ export function CapabilityContractsPage() {
               after the same positive and adversarial, mutation, load, rollback, observability, and teardown obligations
               pass for that implementation.
             </p>
-            <p className={styles.contractSource}>
-              Source: <SourceLink source={CAPABILITY_CONTRACT_SOURCE} />
-            </p>
-          </div>
-        </section>
+            <Sources sources={[CAPABILITY_CONTRACT_SOURCE]} />
+          </Card>
+        </Section>
 
-        <section className={styles.section} aria-labelledby="capabilities">
-          <h2 id="capabilities">The capabilities</h2>
-          <p className={styles.prose}>
-            The root README lists {capabilities.length} capabilities. Each card names the capability, what it does,
-            the reference implementations in this repository, and what a replacement must keep.
-          </p>
+        <Section
+          id="capabilities"
+          title="The capabilities"
+          lead={`The root README lists ${capabilities.length} capabilities. Each card names the capability, what it does, the reference implementations in this repository, and what a replacement must keep.`}
+        >
           <div className={styles.capabilitiesGrid}>
-            {capabilities.map((cap) => (
-              <article key={cap.id} className={styles.capabilityCard} id={`capability-${cap.id}`} data-reveal data-lift>
-                <h3 className={styles.capabilityName}>{cap.name}</h3>
-                <p className={styles.capabilityDescription}>{cap.description}</p>
-                <dl className={styles.capabilityMeta}>
-                  <dt>Reference implementations</dt>
-                  <dd>
-                    <ul className={styles.implTags}>
-                      {cap.implementations.map((impl) => (
-                        <li key={impl} className={styles.implTag}>
-                          {impl}
-                        </li>
-                      ))}
-                    </ul>
-                  </dd>
-                  {cap.contractNote && (
-                    <>
-                      <dt>Contract</dt>
-                      <dd>{cap.contractNote}</dd>
-                    </>
-                  )}
-                </dl>
-                <a href={`#matrix-${cap.id}`} className={styles.matrixLink}>
-                  See {cap.name} by project
-                </a>
-              </article>
-            ))}
+            {capabilities.map((cap) => {
+              const Icon = capabilityIcon(cap.id);
+              return (
+                <Card as="article" key={cap.id} id={`capability-${cap.id}`} interactive reveal className={styles.capabilityCard}>
+                  <div className={styles.capabilityHead}>
+                    <span className={styles.capabilityIcon} aria-hidden="true">
+                      <Icon size={20} />
+                    </span>
+                    <h3 className={styles.capabilityName}>{cap.name}</h3>
+                  </div>
+                  <p>{cap.description}</p>
+                  <dl className={styles.capabilityMeta}>
+                    <dt>Reference implementations</dt>
+                    <dd>
+                      <ul className={styles.implTags}>
+                        {cap.implementations.map((impl) => (
+                          <li key={impl} className={styles.implTag}>
+                            {impl}
+                          </li>
+                        ))}
+                      </ul>
+                    </dd>
+                    {cap.contractNote && (
+                      <>
+                        <dt>Contract</dt>
+                        <dd>{cap.contractNote}</dd>
+                      </>
+                    )}
+                  </dl>
+                  <a href={`#matrix-${cap.id}`} className={styles.matrixLink} data-stretch>
+                    See {cap.name} by project
+                    <ArrowRight size={16} aria-hidden="true" />
+                  </a>
+                </Card>
+              );
+            })}
           </div>
-        </section>
+        </Section>
 
-        <section className={styles.section} aria-labelledby="matrix">
-          <h2 id="matrix">Capability by project</h2>
-          <p className={styles.prose}>
-            The table states how strongly each project delivers each capability in its tested form. Postures are
-            coarse on purpose; the text in each cell carries the nuance and links to the file it comes from.
-          </p>
+        <Section
+          id="matrix"
+          title="Capability by project"
+          lead="The table states how strongly each project delivers each capability in its tested form. Postures are coarse on purpose; the text in each cell carries the nuance and links to the file it comes from."
+        >
           <PostureLegend />
           <PostureMatrix caption="Capability posture by project, with sources" rowHeader="Capability" rows={matrixRows} />
-        </section>
+        </Section>
 
-        <section className={styles.section} aria-labelledby="replacing">
-          <h2 id="replacing">Replacing an implementation</h2>
-          <div className={styles.checklistBox}>
+        <Section id="replacing" title="Replacing an implementation">
+          <Card variant="tinted" tint="amber" padding="lg" className={styles.tintedBox}>
             <p>When replacing a reference implementation with an alternative:</p>
-            <ul>
+            <ul className={styles.checklist}>
               {REPLACEMENT_CHECKLIST.map((item) => (
                 <li key={item}>{item}</li>
               ))}
@@ -116,8 +123,8 @@ export function CapabilityContractsPage() {
               The tested regions, versions and known limitations per project are collected on the{' '}
               <Link to={PATHS.referenceSupportEnvelope}>support envelope</Link> page.
             </p>
-          </div>
-        </section>
+          </Card>
+        </Section>
       </div>
     </div>
   );

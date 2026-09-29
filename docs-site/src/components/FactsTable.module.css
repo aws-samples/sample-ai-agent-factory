@@ -34,7 +34,7 @@
 }
 
 .table thead th {
-  background: var(--color-cloud);
+  background: var(--color-surface-sunken);
 }
 
 .table tbody th {

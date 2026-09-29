@@ -1,10 +1,12 @@
 import { Link } from 'react-router-dom';
+import { Check } from 'lucide-react';
 import { notebooks, type NotebookEntry } from 'virtual:repo-index';
 import architectureImg from '../../../../../workshop-building-agentic-ai-platform/static/img/module-1/agentic-ai-platform-architecture.png';
 import fastImg from '../../../../../workshop-building-agentic-ai-platform/static/img/module-4/fast-architecture.png';
 import { DocImage } from '../../../components/DocImage';
 import { ExternalLink } from '../../../components/ExternalLink';
 import { Figure } from '../../../components/Figure';
+import { NumberedSteps } from '../../../components/NumberedSteps';
 import { ResponsiveTable } from '../../../components/ResponsiveTable';
 import { SourceLink } from '../../../components/SourceLink';
 import {
@@ -48,49 +50,77 @@ export function WorkshopSections() {
         <p className={styles.prose}>
           The workshop has three tracks of its own. All tracks share Module 1, which ends with a track selector.
         </p>
-        <ResponsiveTable className={styles.table}>
-          <TableCaption>The three workshop tracks, from the README track table</TableCaption>
+        <ResponsiveTable className={`${styles.table} ${styles.trackMatrix}`}>
+          <TableCaption>The three workshop tracks and the modules each one includes, from the README track table</TableCaption>
           <thead>
             <tr>
-              <th scope="col">Track</th>
-              <th scope="col">Best for</th>
-              <th scope="col">You do</th>
-              <th scope="col">Duration</th>
+              <th scope="col">Module</th>
+              {workshopTracks.map((track) => (
+                <th scope="col" key={track.number}>
+                  <span className={styles.trackHead}>
+                    <span>
+                      {track.number}. {track.name}
+                    </span>
+                    <span className={styles.trackDuration}>{track.duration}</span>
+                  </span>
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
-            {workshopTracks.map((track) => (
-              <tr key={track.number}>
+            {workshopModules.map((module) => (
+              <tr key={module.id}>
                 <th scope="row">
-                  {track.number}. {track.name}
+                  {module.name}: {module.title}
                 </th>
-                <td>{track.bestFor}</td>
-                <td>{track.youDo}</td>
-                <td>{track.duration}</td>
+                {workshopTracks.map((track) => {
+                  const included = track.modules.includes(module.name);
+                  return (
+                    <td key={track.number} className={styles.trackCell} data-included={included ? '' : undefined}>
+                      {included ? (
+                        <>
+                          <Check size={18} aria-hidden="true" />
+                          <span className="visually-hidden">included</span>
+                        </>
+                      ) : (
+                        <span className="visually-hidden">not included</span>
+                      )}
+                    </td>
+                  );
+                })}
               </tr>
             ))}
+            <tr>
+              <th scope="row">Best for</th>
+              {workshopTracks.map((track) => (
+                <td key={track.number}>{track.bestFor}</td>
+              ))}
+            </tr>
+            <tr>
+              <th scope="row">You do</th>
+              {workshopTracks.map((track) => (
+                <td key={track.number}>{track.youDo}</td>
+              ))}
+            </tr>
           </tbody>
         </ResponsiveTable>
         <Sources sources={[CHOOSE_YOUR_TRACK]} />
       </Section>
 
       <Section id="modules" title="Modules">
-        <ol className={styles.list}>
+        <NumberedSteps stage="learn" dense>
           {workshopModules.map((module) => (
-            <li key={module.id}>
-              <strong>
-                {module.name}: {module.title}.
-              </strong>{' '}
-              {module.summary}
+            <NumberedSteps.Item key={module.id} title={`${module.name}: ${module.title}`}>
+              <p>{module.summary}</p>
               {module.id === 'module-3b' && (
-                <span className={styles.moduleNote}>
+                <p className={styles.moduleNote}>
                   {module3bNote.text} See <Link to={`${PATHS.conceptsGlossary}#mcp-gateway`}>MCP Gateway in the glossary</Link>.{' '}
                   <Sources inline sources={module3bNote.sources} />
-                </span>
+                </p>
               )}
-            </li>
+            </NumberedSteps.Item>
           ))}
-        </ol>
+        </NumberedSteps>
         <Sources sources={[WHAT_YOULL_BUILD]} />
       </Section>
 

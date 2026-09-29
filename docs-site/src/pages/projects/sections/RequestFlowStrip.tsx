@@ -1,3 +1,4 @@
+import { Card } from '../../../components/Card';
 import { SourceLink } from '../../../components/SourceLink';
 import { requestFlow, VERIFIED_ARCHITECTURE } from '../../../content/projects/mcp-gateway-demo';
 import styles from './ProjectSections.module.css';
@@ -11,13 +12,13 @@ export function RequestFlowStrip() {
     <figure className={styles.flow} aria-labelledby="request-flow-caption">
       <ol className={styles.flowList}>
         {requestFlow.map((step, index) => (
-          <li key={step.id} className={styles.flowStep}>
+          <Card as="li" key={step.id} padding="sm" className={styles.flowStep}>
             <span className={styles.flowIndex} aria-hidden="true">
               {index + 1}
             </span>
             <span className={styles.flowName}>{step.name}</span>
             <span className={styles.flowDetail}>{step.detail}</span>
-          </li>
+          </Card>
         ))}
       </ol>
       <figcaption id="request-flow-caption" className={styles.flowCaption}>

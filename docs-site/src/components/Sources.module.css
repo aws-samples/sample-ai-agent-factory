@@ -1,0 +1,10 @@
+.sources {
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.small {
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}

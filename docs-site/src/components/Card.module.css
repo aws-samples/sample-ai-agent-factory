@@ -1,0 +1,113 @@
+/* The site's single card surface. Variants and padding are data attributes. */
+.card {
+  position: relative;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  min-width: 0;
+}
+
+.card[data-padding='sm'] {
+  padding: var(--space-3) var(--space-4);
+}
+
+.card[data-padding='md'] {
+  padding: var(--space-5);
+}
+
+.card[data-padding='lg'] {
+  padding: var(--space-6);
+}
+
+/* Stage accent: a 4 px top rule in the stage hue. */
+.card[data-variant='accent'] {
+  border-top: 4px solid var(--card-accent, var(--color-border));
+}
+
+.card[data-stage='learn'] {
+  --card-accent: var(--stage-learn-tint);
+  --stage-color: var(--stage-learn);
+}
+
+.card[data-stage='build'] {
+  --card-accent: var(--stage-build-tint);
+  --stage-color: var(--stage-build);
+}
+
+.card[data-stage='govern'] {
+  --card-accent: var(--stage-govern-tint);
+  --stage-color: var(--stage-govern);
+}
+
+.card[data-stage='scale'] {
+  --card-accent: var(--stage-scale-tint);
+  --stage-color: var(--stage-scale);
+}
+
+/* Tinted: soft surface with a left rule, for contract and checklist boxes. */
+.card[data-variant='tinted'] {
+  background: var(--card-tint-bg);
+  border-color: transparent;
+  border-left: 4px solid var(--card-tint-rule);
+  box-shadow: none;
+}
+
+.card[data-tint='amber'] {
+  --card-tint-bg: var(--tint-amber);
+  --card-tint-rule: var(--stage-learn-tint);
+  --card-tint-heading: var(--tint-heading-amber);
+}
+
+.card[data-tint='green'] {
+  --card-tint-bg: var(--tint-green);
+  --card-tint-rule: var(--stage-build-tint);
+  --card-tint-heading: var(--tint-heading-green);
+}
+
+.card[data-tint='violet'] {
+  --card-tint-bg: var(--tint-violet);
+  --card-tint-rule: var(--stage-govern-tint);
+  --card-tint-heading: var(--tint-heading-violet);
+}
+
+.card[data-tint='blue'] {
+  --card-tint-bg: var(--tint-blue);
+  --card-tint-rule: var(--stage-scale-tint);
+  --card-tint-heading: var(--tint-heading-blue);
+}
+
+.card[data-variant='tinted'] :is(h2, h3, h4) {
+  color: var(--card-tint-heading);
+}
+
+/* Interactive cards: the border picks up the link colour on hover; the lift itself
+   comes from the shared [data-lift] rule in tokens.css. */
+.card[data-lift] {
+  transition:
+    border-color var(--transition-normal),
+    translate var(--transition-normal),
+    box-shadow var(--transition-normal);
+}
+
+.card[data-lift]:hover,
+.card[data-lift]:focus-within {
+  border-color: var(--color-link);
+}
+
+/* One inner link can stretch over the whole card. */
+.card [data-stretch]::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+.card [data-stretch]:focus-visible {
+  outline: none;
+}
+
+.card:has([data-stretch]:focus-visible) {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}

@@ -122,6 +122,18 @@ The Home hero band carries an ambient constellation drawn on a `<canvas>`: drift
 - **Atlas SVG.** `assets/repository-atlas-journey.svg` draws itself on load (hub, project cards, shared-capability links, then each journey line with its arrowhead) through a `<style>` block inside the SVG, so it also animates when embedded with `<img>`. Every rule sits behind `prefers-reduced-motion: no-preference`; the file contains no script.
 - **Tests.** `tests/browser/motion.spec.ts` checks the running, paused and static states, the pause control, layout shift, the chunk size budget, and that no keyframe animation runs under reduced motion.
 
+## Design system
+
+Every page is built from a small set of shared primitives in `src/components/`, and every colour comes from a semantic token in `src/styles/tokens.css`. That is what keeps the pages consistent and what makes the dark theme a token remap rather than a second stylesheet.
+
+- **Tokens.** Surfaces and roles (`--color-surface`, `--color-surface-sunken`, `--color-band`, `--color-link`, `--color-accent`, `--color-on-accent`, `--color-focus`, `--focus-ring`, `--color-overlay-hover`), text scale (`--text-xs` to `--text-lg`), `--label-tracking`, `--radius-pill`, `--shadow-card`. The raw palette (`--color-cloud`, `--color-mist`, `--color-midnight`) is for tokens.css only. Three breakpoints: 640, 1024 and 1280 px.
+- **Primitives.** `Button` (primary, secondary, ghost; renders a router link, an external link or a button), `Card` (plain, stage accent or tinted; `interactive` adds the hover lift, `reveal` the scroll rise), `SectionHeading` and `Section` (one heading rhythm, left or centred), `ChipNav` (section navigation, jump links, letter navigation), `NumberedSteps` (stage-coloured counters with an optional connector), `StatTile` and `FactStat` (a fact with its source and an optional collapsed caveat), `Sources`, `StageJourney` (the four stages as linked pills), `HeaderGlow` (the static gradient behind every page header).
+- **Page headers.** `PageHeader` renders the single dark band per page: `align="center"` on Home, `variant="compact"` on document pages, a `hue` for the glow, and a `backdrop` slot (Home passes the constellation). Every route, including rendered READMEs and the 404 page, uses it, so every page has exactly one h1 inside one dark header.
+- **Dark theme.** `tokens.css` sets `color-scheme: light dark` and remaps the semantic tokens under `@media (prefers-color-scheme: dark)`. There is no toggle and nothing is stored: the site follows the operating system. `index.html` carries `color-scheme` and two `theme-color` metas, and `validate_static.py` checks the meta on every prerendered page.
+- **Design lint.** `src/styles/designLint.test.ts` scans every CSS module and fails on hex literals, the `white` keyword, `rgba(`, `999px`, raw palette backgrounds and button-like class names outside `Button.module.css`. Run it with `DESIGN_LINT=1 npm test`.
+- **Browser structure checks.** `tests/browser/structure.spec.ts` asserts one dark page header with the single h1 on every route, icon plus text in every posture cell, the text alternative behind the Home capability dots, and the doc-page progress bar. The `desktop-dark` and `mobile-dark` Playwright projects run the axe sweep, reflow and structure checks with the OS preference set to dark.
+- **Screenshots.** `SCREENSHOTS=1 SHOT_DIR=/tmp/shots npx playwright test screenshots` captures a curated route list in every project (light and dark, desktop and mobile) for review; the files are not a gate and are git-ignored.
+
 ## Validation
 
 Before committing:

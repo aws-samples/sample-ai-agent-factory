@@ -1,0 +1,101 @@
+.tile {
+  margin: 0;
+  min-width: 0;
+}
+
+.label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.icon {
+  display: inline-flex;
+  color: var(--stage-color, var(--color-text-secondary));
+}
+
+.icon > svg {
+  display: block;
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+.value {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+/* Inline layout: "Label: value" on one line, for compact fact rows. */
+.tile[data-layout='inline'] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+}
+
+.tile[data-layout='inline'] .label {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.tile[data-layout='inline'] .label::after {
+  content: ':';
+}
+
+.tile[data-layout='inline'] .value {
+  margin-top: 0;
+}
+
+.muted {
+  color: var(--color-text-secondary);
+}
+
+.source {
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
+.note {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+}
+
+.details {
+  margin-top: var(--space-1);
+}
+
+.summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--target-min);
+  font-size: 0.8125rem;
+  color: var(--color-link);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.summary:hover {
+  color: var(--color-link-hover);
+}
+
+.summary:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.details[open] .summary {
+  margin-bottom: var(--space-1);
+}

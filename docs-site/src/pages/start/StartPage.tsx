@@ -1,14 +1,19 @@
 import { Link } from 'react-router-dom';
+import { Timer } from 'lucide-react';
 import { CodeBlock } from '../../components/CodeBlock';
 import { ExternalLink } from '../../components/ExternalLink';
+import { NumberedSteps } from '../../components/NumberedSteps';
 import { PageHeader } from '../../components/PageHeader';
 import { PageMeta } from '../../components/PageMeta';
+import { Section } from '../../components/Section';
 import { SourceLink } from '../../components/SourceLink';
+import { StatTile } from '../../components/StatTile';
 import { projects, type Project } from '../../content/data';
+import { factText, getFacts } from '../../content/facts';
 import { ISSUES_URL, REPO_URL, VULN_REPORT_URL } from '../../content/links';
 import { getQuickstarts, type Quickstart, type QuickstartStep } from '../../content/quickstarts';
 import { PATHS, projectPath } from '../../paths';
-import { FactValue, JumpLinks, ProjectHeading, SmallSource, StartNav } from './shared';
+import { FactValue, JumpLinks, ProjectBadge, SmallSource, StartNav } from './shared';
 import styles from './start.module.css';
 
 /** Root README wording for the clone step; the folder line is per project. */
@@ -46,20 +51,28 @@ function cloneStepFor(project: Project, quickstart: Quickstart): QuickstartStep 
 
 function StepItem({ step }: { step: QuickstartStep }) {
   const linkIsTitle = Boolean(step.href) && step.hrefLabel === step.title;
+  const hasBody = Boolean(step.command || step.note || (step.href && !linkIsTitle));
   return (
-    <li className={styles.step}>
-      <p className={styles.stepTitle}>
-        {linkIsTitle && step.href ? <ExternalLink href={step.href}>{step.title}</ExternalLink> : step.title}
-        <SmallSource source={step.source} context={`step: ${step.title}`} />
-      </p>
-      {step.command && <CodeBlock code={step.command} language="bash" />}
-      {step.note && <p className={styles.stepNote}>{step.note}</p>}
-      {step.href && !linkIsTitle && (
-        <p className={styles.stepNote}>
-          <ExternalLink href={step.href}>{step.hrefLabel ?? 'Open the README section'}</ExternalLink>
-        </p>
+    <NumberedSteps.Item
+      title={
+        <span className={styles.stepTitle}>
+          {linkIsTitle && step.href ? <ExternalLink href={step.href}>{step.title}</ExternalLink> : step.title}{' '}
+          <SmallSource source={step.source} context={`step: ${step.title}`} />
+        </span>
+      }
+    >
+      {hasBody && (
+        <>
+          {step.command && <CodeBlock code={step.command} language="bash" />}
+          {step.note && <p className={styles.stepNote}>{step.note}</p>}
+          {step.href && !linkIsTitle && (
+            <p className={styles.stepNote}>
+              <ExternalLink href={step.href}>{step.hrefLabel ?? 'Open the README section'}</ExternalLink>
+            </p>
+          )}
+        </>
       )}
-    </li>
+    </NumberedSteps.Item>
   );
 }
 
@@ -81,12 +94,12 @@ function QuickstartBlock({ project, quickstart }: { project: Project; quickstart
         <strong>Expected time:</strong>{' '}
         <FactValue fact={quickstart.expectedTime} label="expected time" project={quickstart.name} />
       </p>
-      <ol className={styles.steps}>
+      <NumberedSteps stage={project.stage} connector>
         {clone && <StepItem step={clone} />}
         {firstSteps.map((step) => (
           <StepItem key={step.title} step={step} />
         ))}
-      </ol>
+      </NumberedSteps>
       <ul className={styles.linkRow}>
         <li>
           <Link to={`${projectPath(project.id)}#quickstart`}>
@@ -108,15 +121,42 @@ function QuickstartBlock({ project, quickstart }: { project: Project; quickstart
 function ProjectSection({ project }: { project: Project }) {
   const quickstarts = getQuickstarts(project.id);
   return (
-    <section id={project.id} className={styles.projectSection} aria-labelledby={`${project.id}-heading`}>
-      <ProjectHeading project={project} id={`${project.id}-heading`} />
-      <p className={styles.lead}>
-        {project.tagline}. <Link to={projectPath(project.id)}>{project.shortName} project page</Link>.
-      </p>
+    <Section
+      id={project.id}
+      title={project.name}
+      badge={<ProjectBadge project={project} />}
+      lead={
+        <>
+          {project.tagline}. <Link to={projectPath(project.id)}>{project.shortName} project page</Link>.
+        </>
+      }
+    >
       {quickstarts.map((quickstart) => (
         <QuickstartBlock key={quickstart.id} project={project} quickstart={quickstart} />
       ))}
-    </section>
+    </Section>
+  );
+}
+
+/** First-deploy time per project, shown on the header band. The notes and caveats follow in each section. */
+function FirstDeployRow() {
+  return (
+    <dl className={styles.heroFacts}>
+      {projects.map((project) => {
+        const fact = getFacts(project.id).firstDeploy;
+        return (
+          <StatTile
+            key={project.id}
+            label={project.shortName}
+            value={fact.notDocumented ? <em>{factText(fact)}</em> : factText(fact)}
+            muted={Boolean(fact.notDocumented)}
+            source={fact.source}
+            context={`first deploy, ${project.shortName}`}
+            icon={<Timer size={14} aria-hidden="true" />}
+          />
+        );
+      })}
+    </dl>
   );
 }
 
@@ -131,17 +171,23 @@ export function StartPage() {
         eyebrow="Start"
         title="Get started"
         lead="Pick one of the four samples for agentic AI on Amazon Bedrock and Amazon Bedrock AgentCore, clone the repository, and take its first steps here. The full quickstart and the teardown live on each project page; every path deploys real AWS resources."
+        meta={<FirstDeployRow />}
       />
       <div className="container">
         <StartNav />
 
-        <section className={styles.projectSection} aria-labelledby="first-heading">
-          <h2 id="first-heading">First ten minutes by project</h2>
-          <p className={styles.prose}>
-            Each section gives the clone and folder lines, the expected time and the first two steps of one project,
-            then hands over to the project page for the rest.{' '}
-            <SmallSource source={ROOT_QUICK_START} context="the clone command" />
-          </p>
+        <Section
+          id="first"
+          title="First ten minutes by project"
+          flush
+          lead={
+            <>
+              Each section gives the clone and folder lines, the expected time and the first two steps of one project,
+              then hands over to the project page for the rest.{' '}
+              <SmallSource source={ROOT_QUICK_START} context="the clone command" />
+            </>
+          }
+        >
           <JumpLinks
             label="First ten minutes by project"
             lead="Jump to:"
@@ -150,14 +196,13 @@ export function StartPage() {
               label: project.shortName,
             }))}
           />
-        </section>
+        </Section>
 
         {projects.map((project) => (
           <ProjectSection key={project.id} project={project} />
         ))}
 
-        <section className={styles.projectSection} aria-labelledby="support-heading">
-          <h2 id="support-heading">Support and feedback</h2>
+        <Section id="support" title="Support and feedback">
           <ul className={styles.bulletList}>
             <li>
               <strong>Questions, bugs, and feature requests:</strong>{' '}
@@ -187,7 +232,7 @@ export function StartPage() {
               <Link to={PATHS.faq}>FAQ</Link>.
             </li>
           </ul>
-        </section>
+        </Section>
       </div>
     </>
   );

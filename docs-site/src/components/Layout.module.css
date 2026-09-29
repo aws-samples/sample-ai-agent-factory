@@ -4,7 +4,7 @@
   position: sticky;
   top: 0;
   z-index: 100;
-  background: var(--color-bg-secondary);
+  background: var(--color-surface);
   border-bottom: 1px solid var(--color-border);
   height: var(--header-height);
 }
@@ -39,7 +39,7 @@
 }
 
 .logoIcon {
-  color: var(--color-blue);
+  color: var(--color-link);
 }
 
 .logoText {
@@ -101,18 +101,18 @@
 
 .navLink:hover {
   color: var(--color-text-primary);
-  background: var(--color-mist);
+  background: var(--color-overlay-hover);
   text-decoration: none;
 }
 
 .navLink.active {
-  color: var(--color-blue-hover);
-  box-shadow: inset 0 -2px 0 var(--color-blue);
+  color: var(--color-link-hover);
+  box-shadow: inset 0 -2px 0 var(--color-link);
   border-radius: var(--radius-md) var(--radius-md) 0 0;
 }
 
 .navLink:focus-visible {
-  outline: 2px solid var(--color-blue);
+  outline: var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -136,7 +136,7 @@
   min-width: 200px;
   margin-top: var(--space-1);
   padding: var(--space-2);
-  background: var(--color-bg-secondary);
+  background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
@@ -158,13 +158,13 @@
 
 .dropdownLink:hover {
   color: var(--color-text-primary);
-  background: var(--color-mist);
+  background: var(--color-overlay-hover);
   text-decoration: none;
 }
 
 .dropdownLink.active {
-  color: var(--color-blue-hover);
-  background: rgba(37, 99, 235, 0.1);
+  color: var(--color-link-hover);
+  background: color-mix(in srgb, var(--color-link) 10%, transparent);
   font-weight: 600;
 }
 
@@ -187,7 +187,7 @@
 
 .githubLink:hover {
   color: var(--color-text-primary);
-  background: var(--color-mist);
+  background: var(--color-overlay-hover);
   text-decoration: none;
 }
 
@@ -238,11 +238,11 @@
 }
 
 .mobileMenuButton:hover {
-  background: var(--color-mist);
+  background: var(--color-overlay-hover);
 }
 
 .mobileMenuButton:focus-visible {
-  outline: 2px solid var(--color-blue);
+  outline: var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -259,7 +259,7 @@
   left: 0;
   right: 0;
   bottom: 0;
-  background: var(--color-bg-secondary);
+  background: var(--color-surface);
   overflow-y: auto;
   z-index: 90;
 }
@@ -281,11 +281,11 @@
 }
 
 .mobileClose:hover {
-  background: var(--color-mist);
+  background: var(--color-overlay-hover);
 }
 
 .mobileClose:focus-visible {
-  outline: 2px solid var(--color-blue);
+  outline: var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -309,12 +309,12 @@
 }
 
 .mobileNavLink:hover {
-  background: var(--color-mist);
+  background: var(--color-overlay-hover);
   text-decoration: none;
 }
 
 .mobileNavLink[aria-current='page'] {
-  color: var(--color-blue-hover);
+  color: var(--color-link-hover);
   font-weight: 600;
 }
 
@@ -344,34 +344,118 @@
   width: 100%;
 }
 
-/* Footer */
+/* Footer: four link columns from the content model, then the repository links, the
+   disclaimer and the build stamp. Colours are semantic tokens resolved inside `.on-dark`. */
 .footer {
-  background: var(--color-midnight);
-  padding: var(--space-8) 0;
+  background: var(--color-band);
+  border-top: 1px solid var(--color-band-raised);
+  padding: var(--space-10) 0 var(--space-8);
 }
 
 .footerContent {
   max-width: var(--max-width);
   margin: 0 auto;
   padding: 0 var(--page-padding-x);
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  gap: var(--space-8);
+}
+
+.footerNav {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-6);
 }
 
-@media (min-width: 768px) {
-  .footerContent {
-    flex-direction: row;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    align-items: flex-start;
+@media (min-width: 640px) {
+  .footerNav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1024px) {
+  .footerNav {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.footerColumn {
+  min-width: 0;
+}
+
+.footerHeading {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+  line-height: 1.25;
+}
+
+.footer .footerHeadingLink {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--target-min);
+  color: var(--color-text-primary);
+  text-decoration: none;
+}
+
+.footer .footerHeadingLink:hover {
+  color: var(--color-text-primary);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.footerColumnLinks {
+  list-style: none;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.footer .footerNavLink {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--target-min);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+
+.footer .footerNavLink:hover {
+  color: var(--color-text-primary);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.footer .footerHeadingLink:focus-visible,
+.footer .footerNavLink:focus-visible,
+.footer .footerLink:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.footerMeta {
+  display: grid;
+  gap: var(--space-4);
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--color-band-raised);
+}
+
+@media (min-width: 1024px) {
+  .footerMeta {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+  }
+
+  .buildStamp {
+    grid-column: 1 / -1;
   }
 }
 
 .footerText {
-  max-width: 600px;
-  font-size: 0.875rem;
-  color: var(--color-mist);
+  max-width: 60ch;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
 }
 
 .footerLinks {
@@ -385,29 +469,23 @@
   display: inline-flex;
   align-items: center;
   min-height: var(--target-min);
-  font-size: 0.875rem;
-  color: var(--color-mist);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
   text-decoration: underline;
   text-underline-offset: 0.15em;
   transition: color var(--transition-fast);
 }
 
 .footer .footerLink:hover {
-  color: var(--color-cloud);
-}
-
-.footer .footerLink:focus-visible {
-  outline: 2px solid var(--color-cloud);
-  outline-offset: 2px;
+  color: var(--color-text-primary);
 }
 
 .buildStamp {
-  flex-basis: 100%;
-  font-size: 0.75rem;
-  color: var(--color-text-inverse-muted);
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
 }
 
 .sha {
-  background: var(--color-midnight-light);
-  color: var(--color-mist);
+  background: var(--color-band-raised);
+  color: var(--color-text-primary);
 }

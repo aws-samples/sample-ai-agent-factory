@@ -93,6 +93,11 @@ HEAD_PATTERN = re.compile(r"<head[^>]*>(.*?)</head>", re.IGNORECASE | re.DOTALL)
 TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 CANONICAL_PATTERN = re.compile(r"<link[^>]+rel=[\"']canonical[\"']", re.IGNORECASE)
 OG_TITLE_PATTERN = re.compile(r"<meta[^>]+property=[\"']og:title[\"']", re.IGNORECASE)
+COLOR_SCHEME_PATTERN = re.compile(
+    r"<meta[^>]+name=[\"']color-scheme[\"'][^>]+content=[\"']light dark[\"']"
+    r"|<meta[^>]+content=[\"']light dark[\"'][^>]+name=[\"']color-scheme[\"']",
+    re.IGNORECASE,
+)
 NOINDEX_PATTERN = re.compile(
     r"<meta[^>]+name=[\"']robots[\"'][^>]+content=[\"'][^\"']*noindex"
     r"|<meta[^>]+content=[\"'][^\"']*noindex[^\"']*[\"'][^>]+name=[\"']robots[\"']",
@@ -360,6 +365,8 @@ def validate_prerender() -> None:
         if not is_stub:
             if not OG_TITLE_PATTERN.search(head):
                 fail(f"{relative} is missing <meta property=\"og:title\">")
+            if not COLOR_SCHEME_PATTERN.search(head):
+                fail(f"{relative} is missing <meta name=\"color-scheme\" content=\"light dark\"> (dark theme support)")
             continue
 
         # Outside the sitemap only the known redirect stubs may exist, and each must send the

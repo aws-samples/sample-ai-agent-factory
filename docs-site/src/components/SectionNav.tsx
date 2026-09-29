@@ -1,5 +1,4 @@
-import { Link, useLocation } from 'react-router-dom';
-import styles from './SectionNav.module.css';
+import { ChipNav } from './ChipNav';
 
 export interface SectionNavItem {
   label: string;
@@ -14,28 +13,10 @@ export interface SectionNavProps {
   className?: string;
 }
 
-const normalise = (path: string) => path.replace(/\/+$/, '') || '/';
-
 /**
- * "In this section" chip rail linking the pages of one hub section. The current
- * page is marked with aria-current. Below 640px the chips scroll horizontally
- * inside the list; from 640px they wrap. Styled like the Start section's rail.
+ * "In this section" chip rail linking the pages of one hub section. A thin wrapper
+ * over `ChipNav`, which marks the current page with aria-current.
  */
 export function SectionNav({ label = 'In this section', items, className }: SectionNavProps) {
-  const { pathname } = useLocation();
-  const current = normalise(pathname);
-  return (
-    <nav aria-label={label} className={[styles.nav, className].filter(Boolean).join(' ')}>
-      <span className={styles.label}>In this section:</span>
-      <ul className={styles.chips}>
-        {items.map(({ to, label: itemLabel }) => (
-          <li key={to}>
-            <Link to={to} className={styles.chip} aria-current={normalise(to) === current ? 'page' : undefined}>
-              {itemLabel}
-            </Link>
-          </li>
-        ))}
-      </ul>
-    </nav>
-  );
+  return <ChipNav label={label} lead="In this section:" items={items} className={className} />;
 }

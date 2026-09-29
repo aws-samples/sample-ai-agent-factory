@@ -1,9 +1,18 @@
 .figure {
   margin: var(--space-6) 0;
   padding: var(--space-4);
-  background: var(--color-bg-secondary);
+  background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+/* Only the image sits on the white panel: raster diagrams have white interiors, so the
+   panel keeps them framed in the dark theme while caption and controls stay on the surface. */
+.panel {
+  padding: var(--space-2);
+  background: var(--color-figure-panel);
+  border-radius: var(--radius-md);
 }
 
 .figure img {
@@ -12,7 +21,64 @@
 
 .caption {
   margin-top: var(--space-3);
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
   color: var(--color-text-secondary);
   text-align: center;
+}
+
+/* Links inside the secondary-coloured caption need more than colour. */
+.caption a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.actions {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--space-2);
+}
+
+/* Lightbox: a native modal dialog. No padding on the box itself, so a click that lands on
+   the element (not on the bar or the image) is a backdrop click. The global reset zeroes
+   margins, so the UA's centring margin is restored here. */
+.dialog {
+  margin: auto;
+  width: fit-content;
+  max-width: calc(100vw - var(--space-8));
+  max-height: calc(100vh - var(--space-8));
+  padding: 0;
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-lg);
+}
+
+.dialog::backdrop {
+  background: color-mix(in srgb, var(--color-band) 72%, transparent);
+}
+
+.dialogBar {
+  position: sticky;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-2);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.dialogBody {
+  padding: var(--space-4);
+  background: var(--color-figure-panel);
+}
+
+/* The whole point of the dialog: the image at its natural width, scrolled inside the box. */
+.fullImage {
+  display: block;
+  max-width: none;
+  height: auto;
 }
