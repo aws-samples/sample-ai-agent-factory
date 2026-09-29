@@ -31,7 +31,7 @@ export function ProjectsPage() {
           {projects.map((project) => {
             const projectFacts = getFacts(project.id);
             return (
-              <li key={project.id} className={styles.card} data-stage={project.stage}>
+              <li key={project.id} className={styles.card} data-stage={project.stage} data-reveal data-lift>
                 <StageBadge stage={project.stage} label={`${project.stageNumber}. ${project.stageLabel}`} />
                 <h2 className={styles.cardTitle}>{project.name}</h2>
                 <p className={styles.tagline}>{project.tagline}</p>

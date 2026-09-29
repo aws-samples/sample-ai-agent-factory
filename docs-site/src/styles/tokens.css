@@ -328,3 +328,44 @@ pre code {
 .placeholder-page p {
   color: var(--color-text-secondary);
 }
+
+/* ---------------------------------------------------------------------------
+   Motion utilities. Everything here is progressive enhancement: content is fully
+   visible without JavaScript, in browsers without scroll-driven animations, and
+   for users who prefer reduced motion (the rule above zeroes every duration).
+   --------------------------------------------------------------------------- */
+
+/* Scroll reveal: elements marked data-reveal rise into place as they enter the viewport.
+   Uses CSS scroll-driven animations only (no JavaScript, no hidden initial state), so
+   browsers that lack animation-timeline simply show the content as normal. The reveal
+   moves but never fades: text keeps its full contrast at every scroll position, so
+   automated contrast checks (axe, Lighthouse) see the same colours as the reader. */
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    [data-reveal] {
+      animation: aaf-reveal cubic-bezier(0.2, 0.7, 0.2, 1) both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 45%;
+    }
+    @keyframes aaf-reveal {
+      from {
+        translate: 0 18px;
+      }
+      to {
+        translate: 0 0;
+      }
+    }
+  }
+}
+
+/* Hover lift for interactive cards and tiles: pointer devices only, never for
+   reduced-motion users. Focus styles are unaffected. */
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  [data-lift] {
+    transition: translate var(--transition-normal), box-shadow var(--transition-normal);
+  }
+  [data-lift]:hover {
+    translate: 0 -3px;
+    box-shadow: var(--shadow-lg);
+  }
+}

@@ -119,7 +119,7 @@ export function WhichProjectPage() {
               const first = getProjectById(path.projects[0]);
               if (!first) return null;
               return (
-                <li key={path.id} className={styles.tile} data-stage={first.stage}>
+                <li key={path.id} className={styles.tile} data-stage={first.stage} data-reveal data-lift>
                   <div className={styles.tileHead}>
                     <StageBadge stage={first.stage} label={`${first.stageNumber}. ${first.stageLabel}`} />
                     <Link to={path.startRoute} className={styles.tileLink}>

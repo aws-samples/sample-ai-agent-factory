@@ -107,6 +107,21 @@ docs-site/
     types/                Ambient declarations (*.md, virtual module, inert, build constants)
 ```
 
+## Hero background animation
+
+The Home hero band carries an ambient constellation drawn on a `<canvas>`: drifting nodes in the four stage colours, edges that fade with distance, and an occasional pulse travelling along an edge. It is decorative only (`aria-hidden`), capped at 30 fps, makes no network requests and writes no storage.
+
+- **Loading.** `HomePage` passes `backdrop={<HeroBackdrop />}` to `PageHeader`. The backdrop lazily imports `src/components/Constellation.tsx` after first paint, so the prerendered HTML contains only an empty wrapper and the chunk never delays the largest contentful paint.
+- **Pause control.** A visible "Pause background" / "Play background" button (bottom-right of the band, `aria-pressed`) satisfies WCAG 2.2.2. The choice lasts for the page session (module scope, not storage). The animation also pauses while the hero is off-screen or the tab is hidden.
+- **Reduced motion.** With `prefers-reduced-motion: reduce` the component draws one static frame (`data-motion="static"`) and only animates if the visitor presses "Play background". The hero entrance animation in `PageHeader.module.css` likewise applies only under `prefers-reduced-motion: no-preference`.
+- **Disabling.** Remove the `backdrop` prop from the `PageHeader` call in `src/pages/home/HomePage.tsx`; nothing else depends on the component. The pure simulation lives in `src/components/constellation/` and is unit-tested with a seeded PRNG.
+
+### Other motion
+
+- **Scroll reveal and hover lift.** Add `data-reveal` to a block to have it rise into place as it scrolls into view, and `data-lift` to a card or tile for a hover lift with a shadow. Both are defined in `src/styles/tokens.css`. The reveal uses CSS scroll-driven animations behind `@supports (animation-timeline: view())` and moves without fading, so text contrast is identical at every scroll position; browsers without support show content at rest. The lift applies only on pointer devices. Both apply only under `prefers-reduced-motion: no-preference`.
+- **Atlas SVG.** `assets/repository-atlas-journey.svg` draws itself on load (hub, project cards, shared-capability links, then each journey line with its arrowhead) through a `<style>` block inside the SVG, so it also animates when embedded with `<img>`. Every rule sits behind `prefers-reduced-motion: no-preference`; the file contains no script.
+- **Tests.** `tests/browser/motion.spec.ts` checks the running, paused and static states, the pause control, layout shift, the chunk size budget, and that no keyframe animation runs under reduced motion.
+
 ## Validation
 
 Before committing:

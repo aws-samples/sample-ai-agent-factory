@@ -64,7 +64,7 @@ export function CapabilityContractsPage() {
           </p>
           <div className={styles.capabilitiesGrid}>
             {capabilities.map((cap) => (
-              <article key={cap.id} className={styles.capabilityCard} id={`capability-${cap.id}`}>
+              <article key={cap.id} className={styles.capabilityCard} id={`capability-${cap.id}`} data-reveal data-lift>
                 <h3 className={styles.capabilityName}>{cap.name}</h3>
                 <p className={styles.capabilityDescription}>{cap.description}</p>
                 <dl className={styles.capabilityMeta}>

@@ -1,10 +1,22 @@
 .header {
+  position: relative;
+  overflow: hidden;
   background: var(--color-midnight);
   color: var(--color-text-inverse);
   padding: var(--section-padding-y) 0;
 }
 
+/* Decorative layer behind the copy; empty (and invisible) unless a page passes `backdrop`. */
+.backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
 .inner {
+  position: relative;
+  z-index: 1;
   display: grid;
   gap: var(--space-8);
   align-items: center;
@@ -64,5 +76,53 @@
 @media (min-width: 1024px) {
   .hasFigure {
     grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  }
+}
+
+/* Entrance: fade in and rise 12px, once, title first then the rest 60ms apart. Only inside the
+   no-preference query so reduced-motion visitors (and no-JavaScript renders) see the final state
+   straight away; opacity and transform never affect layout. */
+@keyframes header-rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .title,
+  .eyebrow,
+  .badge,
+  .lead,
+  .meta,
+  .actions,
+  .figure {
+    animation: header-rise 420ms ease-out both;
+  }
+
+  .eyebrow,
+  .badge {
+    animation-delay: 60ms;
+  }
+
+  .lead {
+    animation-delay: 120ms;
+  }
+
+  .meta {
+    animation-delay: 180ms;
+  }
+
+  .actions {
+    animation-delay: 240ms;
+  }
+
+  .figure {
+    animation-delay: 300ms;
   }
 }
