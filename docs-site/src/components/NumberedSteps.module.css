@@ -1,0 +1,84 @@
+.steps {
+  --step-size: 1.75rem;
+  --step-gap: var(--space-6);
+  list-style: none;
+  counter-reset: step;
+  display: grid;
+  gap: var(--step-gap);
+  margin: var(--space-4) 0;
+  padding: 0;
+}
+
+.steps[data-dense] {
+  --step-gap: var(--space-3);
+}
+
+.steps[data-stage='learn'] {
+  --stage-color: var(--stage-learn);
+}
+
+.steps[data-stage='build'] {
+  --stage-color: var(--stage-build);
+}
+
+.steps[data-stage='govern'] {
+  --stage-color: var(--stage-govern);
+}
+
+.steps[data-stage='scale'] {
+  --stage-color: var(--stage-scale);
+}
+
+.item {
+  position: relative;
+  padding-left: calc(var(--step-size) + var(--space-3));
+  counter-increment: step;
+  min-width: 0;
+}
+
+.item::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--step-size);
+  height: var(--step-size);
+  border-radius: var(--radius-pill);
+  background: var(--stage-color, var(--color-text-primary));
+  color: var(--stage-fill-text);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  line-height: 1;
+  /* Transparent border so forced-colors mode still draws the circle. */
+  border: 1px solid transparent;
+}
+
+/* Connector line between counters. */
+.steps[data-connector] .item:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  left: calc(var(--step-size) / 2 - 1px);
+  top: calc(var(--step-size) + var(--space-1));
+  bottom: calc(-1 * var(--step-gap) + var(--space-1));
+  width: 2px;
+  background: var(--color-border);
+}
+
+.title {
+  min-height: var(--step-size);
+  display: flex;
+  align-items: center;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.body {
+  margin-top: var(--space-2);
+}
+
+.body > * + * {
+  margin-top: var(--space-2);
+}

@@ -1,0 +1,111 @@
+/* The site's single button style. Variants and sizes are data attributes so tests
+   and pages never depend on hashed class names. Colours are tokens only, which is
+   what makes the same button work on light surfaces, inside `.on-dark` bands and
+   in the dark theme. */
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 2.75rem;
+  padding: 0 var(--space-5);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font: inherit;
+  font-size: var(--text-base);
+  font-weight: 600;
+  line-height: 1.2;
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast),
+    border-color var(--transition-fast),
+    translate var(--transition-fast);
+}
+
+.button:hover {
+  text-decoration: none;
+}
+
+.button:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.button[data-size='sm'] {
+  min-height: 2rem;
+  padding: 0 var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.button[data-size='lg'] {
+  min-height: 3rem;
+  padding: 0 var(--space-6);
+  font-size: 1.0625rem;
+}
+
+/* Primary: accent fill on every surface. */
+.button[data-variant='primary'] {
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+.button[data-variant='primary']:hover {
+  background: var(--color-blue-hover);
+  color: var(--color-on-accent);
+}
+
+/* Secondary: outline in the current text colour, so it adapts to dark bands by inheritance. */
+.button[data-variant='secondary'] {
+  background: transparent;
+  color: var(--color-text-primary);
+  border-color: currentColor;
+}
+
+.button[data-variant='secondary']:hover {
+  background: var(--color-overlay-hover);
+  color: var(--color-text-primary);
+}
+
+/* Ghost: link-coloured text, no border, quiet hover. */
+.button[data-variant='ghost'] {
+  background: transparent;
+  color: var(--color-link);
+  padding-inline: var(--space-3);
+}
+
+.button[data-variant='ghost']:hover {
+  background: var(--color-overlay-hover);
+  color: var(--color-link-hover);
+  text-decoration: underline;
+}
+
+.icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.icon > svg {
+  display: block;
+}
+
+.label {
+  min-width: 0;
+}
+
+/* Micro-interactions: pointer devices only, never under reduced motion. */
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .iconEnd {
+    transition: translate var(--transition-fast);
+  }
+
+  .button:hover .iconEnd,
+  .button:focus-visible .iconEnd {
+    translate: 2px 0;
+  }
+
+  .button:active {
+    translate: 0 1px;
+  }
+}

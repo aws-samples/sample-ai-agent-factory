@@ -1,4 +1,6 @@
-/* CSS Design Tokens - Atlas Journey Theme */
+/* CSS Design Tokens - Atlas Journey Theme
+   Breakpoints used across the site: 640px (one to two columns), 1024px (desktop nav,
+   header figure column), 1280px (doc page rails). Component styles use these three only. */
 :root {
   /* Primary palette */
   --color-midnight: #0B1220;
@@ -65,6 +67,24 @@
   --color-border: var(--color-mist);
   --color-blue-hover: #1d4ed8;
 
+  /* Surfaces and roles. Components use these, never the raw palette above, so the
+     dark theme (see the prefers-color-scheme block) only has to remap this list. */
+  --color-surface: #ffffff;                 /* cards, tables, chips */
+  --color-surface-sunken: var(--color-cloud); /* table heads, inset fact boxes */
+  --color-band: var(--color-midnight);      /* page headers, footer, dark bands, code blocks */
+  --color-band-raised: var(--color-midnight-light);
+  --color-link: var(--color-blue);
+  --color-link-hover: var(--color-blue-hover);
+  --color-accent: var(--color-blue);        /* primary buttons */
+  --color-on-accent: #ffffff;
+  --color-focus: var(--color-blue);
+  --color-code-bg: var(--color-mist);
+  --color-code-text: inherit;
+  --color-overlay-hover: rgba(37, 99, 235, 0.06);
+  --color-overlay-strong: rgba(255, 255, 255, 0.12);
+  --color-figure-panel: #ffffff;            /* raster diagrams have white interiors */
+  --focus-ring: 2px solid var(--color-focus);
+
   /* Typography */
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
@@ -74,6 +94,13 @@
   --font-size-h2: clamp(1.375rem, 3.5vw, 2rem);
   --font-size-h3: clamp(1.125rem, 2.5vw, 1.5rem);
   --font-size-h4: 1.125rem;
+
+  /* Body text scale and the tracking used by every uppercase label */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --label-tracking: 0.06em;
 
   /* Spacing scale */
   --space-1: 0.25rem;
@@ -98,11 +125,14 @@
   --radius-md: 0.5rem;
   --radius-lg: 0.75rem;
   --radius-xl: 1rem;
+  --radius-pill: 999px;
 
   /* Shadows */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
   --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
   --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1);
+  /* Resting shadow for cards, so a hover lift starts from something */
+  --shadow-card: 0 1px 2px rgba(11, 18, 32, 0.06);
 
   /* Transitions */
   --transition-fast: 150ms ease;
@@ -140,6 +170,10 @@
   --stage-fill-text: var(--color-midnight);
   --color-text-primary: var(--color-cloud);
   --color-text-secondary: var(--color-text-inverse-muted);
+  --color-link: var(--stage-scale-on-dark);
+  --color-link-hover: var(--color-cloud);
+  --color-focus: var(--color-cloud);
+  --color-overlay-hover: rgba(255, 255, 255, 0.08);
   color: var(--color-text-inverse);
 }
 
@@ -314,19 +348,6 @@ pre code {
   max-width: var(--max-width);
   margin: 0 auto;
   padding: 0 var(--page-padding-x);
-}
-
-/* Vertical rhythm for a page section */
-.page-section {
-  padding: var(--section-padding-y) 0;
-}
-
-.placeholder-page h1 {
-  margin-bottom: var(--space-4);
-}
-
-.placeholder-page p {
-  color: var(--color-text-secondary);
 }
 
 /* ---------------------------------------------------------------------------

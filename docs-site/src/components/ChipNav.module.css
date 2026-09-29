@@ -1,0 +1,98 @@
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-4) 0;
+  min-width: 0;
+}
+
+.nav[data-sticky] {
+  position: sticky;
+  top: var(--header-height);
+  z-index: 5;
+  margin: 0;
+  padding: var(--space-2) 0;
+  background: var(--color-bg-primary);
+}
+
+.lead {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  margin-right: var(--space-1);
+}
+
+.chips {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Below 640 px the scroll variant forms one row that scrolls inside the list. */
+.nav[data-overflow='scroll'] .chips {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding-bottom: var(--space-1);
+  scrollbar-width: thin;
+}
+
+@media (min-width: 640px) {
+  .nav[data-overflow='scroll'] .chips {
+    flex-wrap: wrap;
+    overflow: visible;
+    padding-bottom: 0;
+  }
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 2rem;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  transition:
+    border-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.nav[data-size='sm'] .chip {
+  min-height: var(--target-min);
+  min-width: var(--target-min);
+  padding: 0 var(--space-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.chip:hover {
+  color: var(--color-link-hover);
+  border-color: var(--color-link);
+  text-decoration: underline;
+}
+
+.chip:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.chip[aria-current='page'] {
+  color: var(--color-link-hover);
+  border-color: var(--color-link);
+  font-weight: 600;
+}
+
+.badge {
+  display: inline-flex;
+}
