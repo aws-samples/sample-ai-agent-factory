@@ -88,10 +88,6 @@ a.actionSecondary:hover,
   margin: 0;
 }
 
-.advisories > * + * {
-  margin-top: var(--space-4);
-}
-
 .note {
   color: var(--color-text-secondary);
   font-size: 0.875rem;

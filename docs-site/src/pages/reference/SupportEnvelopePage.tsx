@@ -1,7 +1,5 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { Callout } from '../../components/Callout';
-import { ExternalLink } from '../../components/ExternalLink';
 import { FactsTable } from '../../components/FactsTable';
 import { PageHeader } from '../../components/PageHeader';
 import { PageMeta } from '../../components/PageMeta';
@@ -9,7 +7,7 @@ import { ReferenceNav } from './ReferenceNav';
 import { SourceLink } from '../../components/SourceLink';
 import { StageBadge } from '../../components/StageBadge';
 import { projects } from '../../content/data';
-import { FACT_LABELS, getAdvisories, getFacts, type ProjectFacts, type Source } from '../../content/facts';
+import { FACT_LABELS, getFacts, type ProjectFacts, type Source } from '../../content/facts';
 import { getLimitations, validated } from '../../content/limitations';
 import { PATHS, projectPath } from '../../paths';
 import styles from './SupportEnvelopePage.module.css';
@@ -41,12 +39,12 @@ export function SupportEnvelopePage() {
     <div className={styles.page}>
       <PageMeta
         title="Support envelope"
-        description="Validated regions, status, open advisories and the known limitations each of the four AI Agent Factory projects documents, quoted from the project READMEs with source links."
+        description="Validated regions, status and the known limitations each of the four AI Agent Factory projects documents, quoted from the project READMEs with source links."
       />
       <PageHeader
         eyebrow="Reference"
         title="Support envelope"
-        lead="Validated regions, status, open advisories and the known limitations each project documents, collected in one place for four samples centered on Amazon Bedrock and Amazon Bedrock AgentCore."
+        lead="Validated regions, status and the known limitations each project documents, collected in one place for four samples centered on Amazon Bedrock and Amazon Bedrock AgentCore."
       />
 
       <div className="container">
@@ -74,7 +72,6 @@ export function SupportEnvelopePage() {
 
         {projects.map((project) => {
           const facts = getFacts(project.id);
-          const advisories = getAdvisories(project.id);
           const limitations = getLimitations(project.id);
           const validatedItems = validated[project.id];
           const validatedHeading = validatedItems[0]?.source.heading ?? 'Validated reference envelope';
@@ -92,28 +89,6 @@ export function SupportEnvelopePage() {
                 caption={`${project.shortName}: validated regions and status`}
                 rows={ENVELOPE_FACT_KEYS.map((key) => ({ label: FACT_LABELS[key], fact: facts[key] }))}
               />
-
-              {advisories.length > 0 ? (
-                <Callout kind="warning" title="Open advisories">
-                  <ul className={styles.advisoryList}>
-                    {advisories.map((advisory) => (
-                      <li key={advisory.id}>
-                        <ExternalLink href={advisory.url}>
-                          Issue #{advisory.issue}: {advisory.title}
-                        </ExternalLink>
-                        <p className={styles.advisorySummary}>{advisory.summary}</p>
-                        {advisory.source && (
-                          <p className={styles.advisorySource}>
-                            Evidence: <SourceLink source={advisory.source} />
-                          </p>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                </Callout>
-              ) : (
-                <p className={styles.noAdvisories}>No open advisories are recorded for this project.</p>
-              )}
 
               {validatedItems.length > 0 && (
                 <>

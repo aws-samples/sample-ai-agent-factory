@@ -1,5 +1,4 @@
 import { Link, useParams } from 'react-router-dom';
-import { Callout } from '../../components/Callout';
 import { CodeBlock } from '../../components/CodeBlock';
 import { ExternalLink } from '../../components/ExternalLink';
 import { FactsTable } from '../../components/FactsTable';
@@ -13,7 +12,6 @@ import {
   FACT_KEYS,
   FACT_LABELS,
   factText,
-  getAdvisories,
   getFacts,
   type Fact,
   type ProjectFacts,
@@ -111,7 +109,6 @@ export function ProjectDetailPage() {
 
   const id = project.id as ProjectId;
   const projectFacts = getFacts(id);
-  const projectAdvisories = getAdvisories(id);
   const projectQuickstarts = getQuickstarts(id);
   const projectLimitations = limitations[id];
   const projectValidated = validated[id];
@@ -179,21 +176,6 @@ export function ProjectDetailPage() {
             <p>
               <ExternalLink href={commitsUrl}>Recent changes: commit history for {project.folder} on GitHub</ExternalLink>
             </p>
-            {projectAdvisories.length === 0 ? (
-              <p className={styles.note}>No open advisories are tracked for this project.</p>
-            ) : (
-              <div className={styles.advisories}>
-                {projectAdvisories.map((advisory) => (
-                  <Callout key={advisory.id} kind="warning" title={`Advisory: GitHub issue #${advisory.issue}`}>
-                    <p>{advisory.summary}</p>
-                    <p>
-                      <ExternalLink href={advisory.url}>{advisory.title}</ExternalLink>
-                    </p>
-                    {advisory.source && <Sources label="Evidence" sources={[advisory.source]} />}
-                  </Callout>
-                ))}
-              </div>
-            )}
           </Section>
 
           <Section id="at-a-glance" title="At a glance">

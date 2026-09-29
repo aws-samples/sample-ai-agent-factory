@@ -51,15 +51,6 @@ export function tree(path: string): string {
   const clean = path.replace(/^\/+/, '').replace(/\/+$/, '');
   return clean ? `${REPO_URL}/tree/${DEFAULT_BRANCH}/${clean}` : `${REPO_URL}/tree/${DEFAULT_BRANCH}`;
 }
-
-/**
- * Build the URL of a GitHub issue in this repository.
- * @param number issue number
- */
-export function issueUrl(number: number): string {
-  return `${ISSUES_URL}/${number}`;
-}
-
 /**
  * Convert a Markdown heading to the fragment GitHub generates for it.
  * Rules: trim, lowercase, drop every character that is not a letter, number,

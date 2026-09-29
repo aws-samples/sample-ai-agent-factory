@@ -7,7 +7,7 @@ import { PageHeader } from '../../components/PageHeader';
 import { PageMeta } from '../../components/PageMeta';
 import { StageBadge } from '../../components/StageBadge';
 import { capabilities, projects } from '../../content/data';
-import { FACT_LABELS, getAdvisories, getFacts } from '../../content/facts';
+import { FACT_LABELS, getFacts } from '../../content/facts';
 import { blob, REPO_URL } from '../../content/links';
 import { PATHS, projectPath } from '../../paths';
 import { FactItem } from '../start/shared';
@@ -88,10 +88,6 @@ const personas: Persona[] = [
 ];
 
 export function HomePage() {
-  const openAdvisories = projects.flatMap((project) =>
-    getAdvisories(project.id).map((advisory) => ({ project, advisory })),
-  );
-
   return (
     <div className={styles.page}>
       <PageMeta
@@ -231,30 +227,11 @@ export function HomePage() {
         </div>
       </section>
 
-      {/* Advisories and a short pre-deploy notice (the footer carries the disclaimer). A plain div,
-          not a labelled section, so the callouts are not nested inside a region landmark. */}
+      {/* A short pre-deploy notice (the footer carries the disclaimer). A plain div,
+          not a labelled section, so the callout is not nested inside a region landmark. */}
       <div className={`${shared.band} ${shared.bandAlt} ${styles.notices}`}>
         <div className="container">
           <h2 className={styles.noticesHeading}>Before you deploy</h2>
-          {openAdvisories.length > 0 && (
-            <div data-reveal>
-              <Callout kind="warning" title="Open advisories">
-                <ul className={styles.advisoryList}>
-                  {openAdvisories.map(({ project, advisory }) => (
-                    <li key={advisory.id}>
-                      <strong>{project.shortName}:</strong>{' '}
-                      <ExternalLink href={advisory.url}>
-                        Issue #{advisory.issue}: {advisory.title}
-                      </ExternalLink>
-                    </li>
-                  ))}
-                </ul>
-                <p>
-                  <Link to={PATHS.referenceSupportEnvelope}>What each advisory means for you</Link>
-                </p>
-              </Callout>
-            </div>
-          )}
           <div data-reveal>
             <Callout kind="important" title="Real resources, real costs">
               <p>
