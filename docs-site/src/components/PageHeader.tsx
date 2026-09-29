@@ -45,7 +45,7 @@ export interface PageHeaderProps {
  * optional meta row (fact chips), optional actions row and optional figure slot. It is the only dark band a page
  * needs; sections below it sit on the light surface. Pages still render <PageMeta>.
  *
- * On load the eyebrow, badge, title, lead, meta, actions and figure fade in and rise 12px with a
+ * On load the eyebrow, badge, title, lead, meta, actions and figure rise 12px with a
  * short stagger (title first). The animation is CSS-only, applies inside
  * `@media (prefers-reduced-motion: no-preference)` and runs once, so reduced-motion visitors and
  * no-JavaScript renders see the final state immediately and nothing shifts layout.

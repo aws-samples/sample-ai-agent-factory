@@ -52,12 +52,12 @@ export default defineConfig({
     // preference set to dark, so every route is contrast-checked in both schemes.
     {
       name: 'desktop-dark',
-      testMatch: /(a11y|reflow|structure|motion)\.spec\.ts$/,
+      testMatch: /(a11y|reflow|structure|motion|screenshots)\.spec\.ts$/,
       use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 }, colorScheme: 'dark' },
     },
     {
       name: 'mobile-dark',
-      testMatch: /(a11y|reflow|structure)\.spec\.ts$/,
+      testMatch: /(a11y|reflow|structure|screenshots)\.spec\.ts$/,
       use: { ...devices['Desktop Chrome'], viewport: { width: 390, height: 844 }, colorScheme: 'dark' },
     },
   ],

@@ -125,17 +125,18 @@
   }
 }
 
-/* Entrance: fade in and rise 12px, once, title first then the rest 60ms apart. Only inside the
-   no-preference query so reduced-motion visitors (and no-JavaScript renders) see the final state
-   straight away; opacity and transform never affect layout. */
+/* Entrance: rise 12px, once, title first then the rest 60ms apart. A rise without a fade:
+   content painted at opacity 0 is never reported as a Largest Contentful Paint candidate
+   (the compositor-driven fade triggers no new paint record), which made Lighthouse report
+   no LCP at all on pages whose hero fills the viewport. Only inside the no-preference query
+   so reduced-motion visitors (and no-JavaScript renders) see the final state straight away;
+   a transform never affects layout or contrast. */
 @keyframes header-rise {
   from {
-    opacity: 0;
     transform: translateY(12px);
   }
 
   to {
-    opacity: 1;
     transform: none;
   }
 }
