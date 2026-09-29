@@ -403,35 +403,35 @@ class TestDeploymentGenerateAgentCodePreservation:
 
 
 class TestSystemPromptEscapingPreservation:
-    """_escape_triple_quotes() handles special characters correctly in both
+    """_as_triple_quoted_body() handles special characters correctly in both
     code generation paths.
 
     **Validates: Requirements 3.10**
     """
 
-    def test_escape_triple_quotes_basic(self):
+    def test_as_triple_quoted_body_basic(self):
         """**Validates: Requirements 3.10**
 
-        _escape_triple_quotes MUST replace triple double-quotes.
+        _as_triple_quoted_body MUST replace triple double-quotes.
         """
-        result = code_generator._escape_triple_quotes('Hello """world"""')
+        result = code_generator._as_triple_quoted_body('Hello """world"""')
         assert '"""' not in result
         assert '\\"\\"\\"' in result
 
-    def test_escape_triple_quotes_no_change_for_safe_text(self):
+    def test_as_triple_quoted_body_no_change_for_safe_text(self):
         """**Validates: Requirements 3.10**
 
-        _escape_triple_quotes MUST not alter text without triple quotes.
+        _as_triple_quoted_body MUST not alter text without triple quotes.
         """
         text = "Hello world, this is safe."
-        assert code_generator._escape_triple_quotes(text) == text
+        assert code_generator._as_triple_quoted_body(text) == text
 
-    def test_escape_triple_quotes_empty_string(self):
+    def test_as_triple_quoted_body_empty_string(self):
         """**Validates: Requirements 3.10**
 
-        _escape_triple_quotes MUST handle empty string.
+        _as_triple_quoted_body MUST handle empty string.
         """
-        assert code_generator._escape_triple_quotes("") == ""
+        assert code_generator._as_triple_quoted_body("") == ""
 
     @given(system_prompt=_safe_text)
     @settings(max_examples=10)
@@ -441,7 +441,7 @@ class TestSystemPromptEscapingPreservation:
         For ANY safe system prompt, code_generator._generate_default_agent()
         MUST produce syntactically valid Python.
         """
-        escaped = code_generator._escape_triple_quotes(system_prompt)
+        escaped = code_generator._as_triple_quoted_body(system_prompt)
         code = code_generator._generate_default_agent(
             escaped,
             "us.anthropic.claude-sonnet-5",

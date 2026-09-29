@@ -1,0 +1,16 @@
+# Test-only dependencies for the CDK assertion suite under tests/.
+#
+# Kept out of requirements.txt on purpose: that file is the set of packages the
+# stack is synthesized with, pinned exactly because cdk-nag is import-fragile
+# across minor releases. pytest is not part of the stack and should not be able
+# to force a resolver change in something that is.
+#
+# The CI job that runs `python3 -m pytest tests/` installed only requirements.txt
+# and therefore failed with `No module named pytest` on every run since it was
+# added — a red check that said nothing about the 118 assertions it was meant to
+# be gating. Declaring the dependency is what makes that job a real gate.
+-r requirements.txt
+
+# Floor matched to backend/pyproject.toml's dev extras so one repo does not need
+# two pytest majors.
+pytest>=8.3.0

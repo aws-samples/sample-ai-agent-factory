@@ -26,12 +26,35 @@ repos:
     rev: v1.5.0
     hooks:
       - id: detect-secrets
-        args: ['--baseline', '.secrets.baseline']
+        # Repo-root-relative on purpose. `sample-ai-agent-factory` is the git root and
+        # this sample is a subdirectory of it; pre-commit chdirs to the git root before
+        # running a hook, so the bare '.secrets.baseline' that sits next to this file
+        # resolved to a path that does not exist and detect-secrets died with
+        # "argument --baseline: Invalid path: .secrets.baseline" on every commit.
+        # That failure looked like a secret finding and was routinely worked around
+        # with --no-verify, which disabled every other hook here too.
+        #
+        # Fixing the argument was only half of it. The baseline's own result *keys* must
+        # be root-relative too, for the same reason: they were written by running
+        # detect-secrets from inside this directory, so they read 'backend/tests/x.py'
+        # while the hook scans 'Agentic-ai-self-service/backend/tests/x.py'. The baseline
+        # then loaded without error and matched nothing, so all 77 reviewed false
+        # positives were unsuppressed and any commit touching one of those 42 files went
+        # red. Proven with one file: flagged when scanned from the git root, silent when
+        # scanned from here. Regenerate only from the git root:
+        #   detect-secrets scan --baseline Agentic-ai-self-service/.secrets.baseline \
+        #     Agentic-ai-self-service
+        args: ['--baseline', 'Agentic-ai-self-service/.secrets.baseline']
         exclude: '(package-lock\.json|\.lock)$'
 
   # --- Python linting ---
+  # Must stay equal to the `ruff==` pin in backend/pyproject.toml's dev extra and to
+  # the version installed by .github/workflows/agentic-ai-self-service-ci.yml. A
+  # formatter's output changes between minor releases, so a rev that drifts from those
+  # means this hook reformats a file and CI then rejects its own formatting — the two
+  # gates disagree while both report themselves satisfied.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.9.6
+    rev: v0.16.4
     hooks:
       - id: ruff
         args: ['--fix', '--exit-non-zero-on-fix']

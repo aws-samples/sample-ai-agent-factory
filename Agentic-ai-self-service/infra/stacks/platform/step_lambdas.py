@@ -595,10 +595,45 @@ def _create_step_role(
             # the *gateway* ARN — NOT CreatePolicy. Without it, create_policy
             # silently AccessDenied'd, the engine attached with ZERO policies,
             # and ENFORCE default-deny returned 0 tools (looked like a Cedar
-            # bug; it was a missing IAM grant). Grant the manage + read verbs.
+            # bug; it was a missing IAM grant).
+            #
+            # Only the Manage verb. The Get/List "resource scoped policy" verbs
+            # that used to sit on the next two lines are not AgentCore IAM actions
+            # at all — same class of mistake as GetLastKTurns/RetrieveMemories in
+            # build_shared_runtime_role: IAM accepts a nonexistent action without
+            # complaint and authorizes nothing, so they read as capability the role
+            # does not have.
+            #
+            # HOW TO DECIDE THIS. The oracles, in decreasing authority — and no
+            # single one of them is sufficient:
+            #   1. A live AccessDenied naming the action proves it exists AND is
+            #      enforced. Conclusive; nothing overrides it.
+            #   2. AWS's machine-readable Service Reference feed: the index at
+            #      https://servicereference.us-east-1.amazonaws.com/ then
+            #      /v1/<service>/<service>.json. Authoritative but it LAGS —
+            #      bedrock-agentcore lists 255 actions and omits CreateTokenVault,
+            #      which oracle 1 proves is real and enforced.
+            #   3. `aws accessanalyzer validate-policy --policy-type
+            #      IDENTITY_POLICY` -> INVALID_ACTION "does not exist". Agreed with
+            #      (2) on every action checked here, because it reads the SAME
+            #      dataset — so it inherits the same lag and is NOT an independent
+            #      second opinion.
+            #   4. botocore's service model: NOT an oracle at all.
+            #      ManageResourceScopedPolicy, ManageAdminPolicy, InvokeGateway and
+            #      CreateTokenVault are all real IAM actions with no SDK operation
+            #      behind them, so the model is silent on the real and the fake
+            #      alike. (It does carry Get/Put/DeleteResourcePolicy — resource-
+            #      BASED policies, an unrelated feature.)
+            #
+            # So absence from (2)/(3) is NOT grounds to delete a grant on its own.
+            # Removal is safe only when the action is absent from the reference AND
+            # nothing in the repo calls it AND no service-side implicit
+            # authorization needs it. The two Get/List verbs retired here clear all
+            # three. CreateTokenVault clears none of them: it is absent from the
+            # reference and from Access Analyzer, yet a fresh-account deploy fails
+            # with AccessDenied on it — which is exactly how the export path lost
+            # that grant once, by pruning on absence alone.
             "bedrock-agentcore:ManageResourceScopedPolicy",
-            "bedrock-agentcore:GetResourceScopedPolicy",
-            "bedrock-agentcore:ListResourceScopedPolicies",
             # The policy step reads the gateway it's about to attach the
             # engine to (and updates it). Without GetGateway, the bind
             # call fails with AccessDenied. See tasks/lessons.md Bug 70.
@@ -755,6 +790,57 @@ def _create_step_role(
                 # service wildcard (AgentCore also ignores `bedrock-agentcore:*`
                 # wildcards at authorization time — Bug 47).
                 resources=["*"],
+            )
+        )
+
+    # The policy step cannot create a gateway-scoped Cedar policy without being
+    # able to CALL the gateway. AgentCore resolves the gateway named in a
+    # statement AS THE CALLER, so `bedrock-agentcore:InvokeGateway` has to be on
+    # this role and not just on the engine or the agent runtime. Without it,
+    # create_policy fails with "Insufficient permissions to call gateway with
+    # ID <id>" in BOTH validation modes.
+    #
+    # Proven live on the customer-export path, same API, same account, same
+    # statement shape: gateway READY for many minutes, this action as the only
+    # variable — CREATE_FAILED without it, ACTIVE with it, under each mode. The
+    # export's equivalent grant is AgentCorePolicyGatewayResolution in
+    # backend/src/app/services/cfn_template_generator.py.
+    #
+    # The WILDCARD-ID resource below was then proven on its own, because the
+    # export's proof used one exact gateway ARN and AgentCore is known to ignore
+    # wildcards elsewhere (it ignores `bedrock-agentcore:*` ACTION wildcards —
+    # Bug 47), which would have made this statement a no-op. Two throwaway roles,
+    # identical but for this one statement, both creating the same
+    # `resource == AgentCore::Gateway::"<arn>"` permit on the same live engine:
+    # with `gateway/*` the policy reached ACTIVE with no statusReasons; without
+    # it, CREATE_FAILED "Insufficient permissions to call gateway with ID <id>".
+    # So the resource wildcard IS honored here and the id does not have to be
+    # known at synth time.
+    #
+    # What decides whether a deploy hits it is the SHAPE of the Cedar statement,
+    # not the mode: an unconstrained `resource is AgentCore::Gateway` resolves
+    # nothing and goes ACTIVE regardless. policy_step._cedar_* emits
+    # `resource == AgentCore::Gateway::"<arn>"` whenever a gateway ARN is known,
+    # which is the form that needs this. So a platform deploy could have gone
+    # green on the unconstrained branch and still never have created a
+    # gateway-scoped policy.
+    #
+    # Its own statement, ARN-scoped, rather than another entry in the
+    # `resources=["*"]` list above. ARCC cnt_BBrFTwAEgWxA30 (start from zero and
+    # add the minimum) and cnt_AGx9pUNpmdOVZB (specific actions on specific
+    # resources): unlike the Create*/List* verbs up there, InvokeGateway DOES
+    # have a resource form and the gateway ARN prefix IS knowable at synth time,
+    # so there is no excuse for `*`. Keeping a data-plane invoke verb out of the
+    # kitchen-sink control-plane statement also means this one can be deleted
+    # whole if AgentCore ever stops resolving the gateway as the caller.
+    if step_name == "policy":
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["bedrock-agentcore:InvokeGateway"],
+                # Gateways are created per user deploy, so the id stays
+                # wildcarded — but the account, region and resource type do not.
+                # An IAM `*` spans `/`, so this also covers a gateway's targets.
+                resources=[f"arn:aws:bedrock-agentcore:{stack.region}:{stack.account}:gateway/*"],
             )
         )
 

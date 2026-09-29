@@ -159,9 +159,13 @@ def build_shared_runtime_role(
                 "bedrock-agentcore:RetrieveMemoryRecords",
                 "bedrock-agentcore:GetMemoryRecord",
                 "bedrock-agentcore:ListMemoryRecords",
-                # Legacy memory data-plane verbs kept for older SDK paths.
-                "bedrock-agentcore:GetLastKTurns",
-                "bedrock-agentcore:RetrieveMemories",
+                # No "legacy verbs kept for older SDK paths" here. GetLastKTurns
+                # and RetrieveMemories used to sit on the two lines below this
+                # comment and are not AgentCore IAM actions at all -- IAM accepts a
+                # nonexistent action without complaint and authorizes nothing, so
+                # they never did anything. The real verbs are RetrieveMemoryRecords
+                # and ListEvents, both already above. Confirmed with IAM Access
+                # Analyzer (INVALID_ACTION) and botocore's service model.
                 "bedrock:ApplyGuardrail",
                 "bedrock:GetGuardrail",
                 # Knowledge Base retrieve (called by retrieve_from_kb tool
@@ -555,9 +559,17 @@ def build_deployment_lambda(
                 "bedrock-agentcore:GetPolicy",
                 # Bug 134: gateway-scoped policy create/delete is authorized as
                 # ManageResourceScopedPolicy on the gateway ARN (not CreatePolicy).
+                # Get/ListResourceScopedPolic* used to follow and were removed:
+                # neither is a real AgentCore IAM action, so they granted nothing
+                # and only implied capability. IAM Access Analyzer is what
+                # established that (INVALID_ACTION). Note that Access Analyzer
+                # alone is NOT sufficient to delete a grant — it also reports
+                # CreateTokenVault as nonexistent, and a live deploy fails with
+                # AccessDenied on exactly that action. Absence from the reference
+                # PLUS no caller in the repo PLUS no implicit service-side
+                # authorization is the bar. See the full oracle hierarchy in
+                # platform/step_lambdas.py.
                 "bedrock-agentcore:ManageResourceScopedPolicy",
-                "bedrock-agentcore:GetResourceScopedPolicy",
-                "bedrock-agentcore:ListResourceScopedPolicies",
                 # AgentCore's DeleteAgentRuntime cascades into deleting
                 # the runtime's auto-created workload-identity record;
                 # the caller principal must hold this verb too. Verified
@@ -596,6 +608,31 @@ def build_deployment_lambda(
             # (S3 Vectors / aoss / bedrock KB+guardrail verbs live in their own
             # ARN-scoped statements above.)
             resources=["*"],
+        )
+    )
+    # SEPARATE, ARN-SCOPED STATEMENT: creating a gateway-scoped Cedar policy
+    # requires being able to CALL the gateway, because AgentCore resolves the
+    # gateway named in the statement AS THE CALLER. This role creates policies on
+    # two paths — the direct (non-SFN) deploy in services/deployment.py and the
+    # lazy promoter in services/policy_promoter.py, which is the component that
+    # is supposed to RECOVER a permit that the SFN step left CREATE_FAILED. A
+    # promoter without this action can never finish that recovery, so the
+    # fail-closed engine stays deny-all forever.
+    #
+    # Same live proof and same reasoning as the policy step role in
+    # platform/step_lambdas.py; see the comment there, including the controlled
+    # two-role experiment that proved the wildcard gateway id below is honored
+    # (ACTIVE with the statement, CREATE_FAILED without it, same engine, same
+    # permit). ARCC cnt_AGx9pUNpmdOVZB:
+    # InvokeGateway has a resource form and the ARN prefix is knowable at synth
+    # time, so it does not belong in the `resources=["*"]` statement above.
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=["bedrock-agentcore:InvokeGateway"],
+            # Per-deploy gateway ids are unknowable at synth time; the account,
+            # region and type are not. An IAM `*` spans `/`, so a gateway's
+            # targets are covered too.
+            resources=[f"arn:aws:bedrock-agentcore:{stack.region}:{stack.account}:gateway/*"],
         )
     )
     # Phase 6 (Loom) — AWS Agent Registry federation (opt-in).

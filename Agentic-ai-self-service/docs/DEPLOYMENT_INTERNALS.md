@@ -21,7 +21,25 @@ How the platform deploys itself and your agents — the Step Functions pipeline,
 | AgentCore services | Bedrock AgentCore | Runtime, Gateway, Memory, Knowledge Base, Evaluation, Policy, Observability |
 | Configuration | SSM Parameter Store | Runtime config under `/agentcore-workflow/{env}/` |
 | Logging | CloudWatch Logs | Lambda and Step Functions execution logs |
-| Infrastructure | AWS CDK (Python) | Single stack, all resources defined as code |
+| Platform infrastructure | AWS CDK (Python) | Single stack under `infra/`, all platform resources defined as code |
+| Exported agent stacks | Raw CloudFormation YAML | Hand-built template emitted by `cfn_template_generator.py` — **not** CDK, no `cdk synth` |
+
+### Two different infrastructure-as-code surfaces
+
+These are frequently confused, so to be explicit:
+
+| | How the **platform** is deployed | What the platform **emits for customers** |
+|---|---|---|
+| Tooling | AWS CDK (Python), `infra/` | `CfnTemplateGenerator`, `backend/src/app/services/cfn_template_generator.py` |
+| Produced by | `npx cdk deploy` (synthesizes a template) | A hand-built Python `dict` serialized with `yaml.dump` |
+| Consumer | The team operating this platform | An external customer, with no access to this repo |
+| CDK bootstrap needed | Yes | No |
+| Custom resources | CDK-synthesized helpers (`Custom::LogRetention`, `Custom::S3AutoDeleteObjects`, `Custom::CDKBucketDeployment`) plus a Cognito user provisioner in `infra/stacks/platform/cognito_auth.py` | Exactly four, all served by `cfn_provider/handler.py` — see [CloudFormation Export](#cloudformation-export) |
+
+There is **no CDK path for the exported agent stack**, and none is planned. The export is
+deliberately plain CloudFormation so that customers can consume it with their own tooling
+(Terraform's `aws_cloudformation_stack`, CloudFormation StackSets, or the CLI) without
+taking a CDK dependency or needing a bootstrap stack.
 
 ## Deployment Flow
 
@@ -398,7 +416,7 @@ Any template or free-form diagram can be exported as a self-contained CloudForma
 |------|---------|
 | `template.yaml` | CloudFormation template with all AWS resources |
 | `agent-code/agent.py` | Generated agent code |
-| `cfn-provider.zip` | Custom Resource Lambda (merges agent code with dependency bundle at deploy time) |
+| `cfn-provider.zip` | Custom Resource Lambda backing all four custom resources (code packaging, runtime log group governance, OAuth2 credential provider, Cedar policy) |
 | `tool-lambdas.zip` | Gateway tool Lambda implementations (if gateway tools are used) |
 | `deploy.sh` | One-command deploy script (`./deploy.sh <stack-name> <region> <s3-bucket>`) |
 | `teardown.sh` | One-command teardown script (`./teardown.sh <stack-name> <region>`) |
@@ -413,11 +431,46 @@ Any template or free-form diagram can be exported as a self-contained CloudForma
 3. The download zip is returned to the browser
 4. The external user runs `./deploy.sh my-agent us-east-1 my-s3-bucket` to deploy
 
+### Custom Resources in the Exported Stack
+
+The exported template is plain CloudFormation and uses native `AWS::BedrockAgentCore::*`
+types wherever they exist. Four things cannot be expressed natively, so they are Custom
+Resources. All four are served by the **single** `cfn-provider.zip` Lambda that the
+template creates, and the dispatch lives in `backend/src/app/services/cfn_provider/handler.py`:
+
+| Custom resource | When emitted | What it does |
+|-----------------|--------------|--------------|
+| `Custom::AgentCodePackage` | Always | Downloads the prebuilt dependency bundle, merges the generated agent code into it, uploads the final `code.zip`. Deletes the object on stack delete. |
+| `Custom::RuntimeLogGroup` | Always, one per runtime | Applies `LogRetentionInDays` and, if set, `CustomerManagedKeyArn` to the CloudWatch log groups AgentCore creates for the runtime. Its Delete is deliberately a no-op. |
+| `Custom::OAuth2CredentialProvider` | MCP-server path only | Creates the AgentCore OAuth2 credential provider that authenticates the Gateway to the MCP Server Runtime, and computes the URL-encoded MCP endpoint (CFN has no url-encode intrinsic). |
+| `Custom::AgentCorePolicy` | When a policy is configured | Creates the Cedar policy attached to the PolicyEngine, with idempotent reuse if the policy already exists. |
+
+`Custom::RuntimeLogGroup` is the one that is not about a missing CFN type.
+`AWS::BedrockAgentCore::Runtime` has no logging or encryption properties at all, and the
+service creates `/aws/bedrock-agentcore/runtimes/<runtimeId>-<endpointName>` itself at
+stack-create time — one group per endpoint, including `-DEFAULT` — with no retention and
+no customer key. Those groups hold what the agent was asked and answered. They cannot be
+declared as `AWS::Logs::LogGroup` either: by the time the stack could adopt them they
+already exist and belong to nobody, which fails the create with "already exists". So the
+resource creates-or-adopts each group by name, and its Delete leaves them in place so that
+tearing a stack down does not destroy the audit trail (`teardown.sh` prints the
+`aws logs delete-log-group` command for removing them deliberately instead).
+
+That is the complete set. Anything else matching `Custom::` in this repository belongs to
+the platform's own CDK stack under `infra/` and is never shipped to a customer.
+
 ### Prerequisites for External Users
 
 - AWS CLI v2 configured with credentials
 - An S3 bucket to host deployment artifacts
 - Pre-built dependency bundle in S3: `agentcore-deps/base.zip` (for boto3 agents) or `agentcore-deps/strands-mcp.zip` (for Strands/MCP agents)
+
+> **Known gap:** the dependency bundle is **not** included in the download zip, and it is a
+> gitignored build artifact produced by `scripts/install-agentcore-deps.sh`. An external
+> recipient who only has the download therefore cannot satisfy the third prerequisite. Until
+> this is resolved, whoever hands over an export must also hand over the matching bundle, or
+> the recipient must build it themselves with that script (which requires PyPI access and
+> produces `aarch64` wheels).
 
 ### Supported Patterns
 
@@ -425,12 +478,12 @@ The CFN generator supports both built-in templates (all 7) and free-form diagram
 
 | Component | CFN Resources Created |
 |-----------|----------------------|
-| Runtime only | Runtime, Endpoint, IAM Role, Custom Resource (code packager) |
+| Runtime only | Runtime, Endpoint, IAM Role, `Custom::AgentCodePackage` |
 | + Gateway | MCP Gateway, Gateway Targets, Tool Lambda, Cognito User Pool/Client/Domain/ResourceServer |
 | + Memory | AgentCore Memory, Memory IAM Role |
 | + Evaluation | Online Evaluation Config, Evaluation IAM Role |
 | + Knowledge Base | Bedrock Knowledge Base, Data Source, KB IAM Role, KB Tool Lambda + Target |
-| + Policy Engine | Policy Engine (attached to Gateway) |
+| + Policy Engine | Policy Engine (attached to Gateway), `Custom::AgentCorePolicy` for each Cedar policy |
 | + MCP Server | Second Runtime (MCP protocol), MCP Server code, OAuth2 Credential Provider |
 
 ## Lambda Dependency Packaging
@@ -586,7 +639,7 @@ Policy --> Runtime, Gateway
 |   |   |   +-- iam_manager.py            # Scoped IAM role management for tools
 |   |   |   +-- tool_generator.py         # AI Tool Generator -- Claude Sonnet on Bedrock for Lambda code generation
 |   |   |   +-- cfn_template_generator.py # CloudFormation template generator (templates + free-form diagrams → CFN stacks)
-|   |   |   +-- cfn_provider/             # Custom Resource Lambda for CFN stacks (code packaging + OAuth2 credential provider)
+|   |   |   +-- cfn_provider/             # Custom Resource Lambda for CFN stacks (code packaging + runtime log groups + OAuth2 credential provider + Cedar policy)
 |   |   |   |   +-- handler.py            # CloudFormation Custom Resource handler
 |   |   |   |   +-- cfn_response.py       # CFN response helper
 |   |   |   +-- validation.py             # Connection compatibility + field validation

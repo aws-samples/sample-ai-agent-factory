@@ -111,6 +111,17 @@ def _get_model_id(config: RuntimeConfig) -> str:
     return _sanitize_identifier(to_regional_model_id(model_id))
 
 
+# Public alias. The CloudFormation exporter has to arrive at the *same* model the
+# generated agent code embeds, and it did not: it hardcoded
+# ``to_regional_model_id("us.anthropic.claude-sonnet-5")`` as the ModelId default and
+# ignored ``config.model`` entirely, so a canvas built on Opus 4.8 exported a template
+# that deployed Sonnet 5 — a silent substitution, with a CREATE_COMPLETE stack. Sharing
+# this function is what makes the two paths incapable of disagreeing; do not reimplement
+# the ``modelId`` lookup anywhere else. Note the key: it is ``modelId``, and the export
+# side had ``config.model.get("id", ...)``, which always missed.
+resolve_model_id = _get_model_id
+
+
 def _get_region() -> str:
     """Read AWS region from environment."""
     return region_models.current_region()
@@ -171,21 +182,35 @@ def _sanitize_string_literal(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
 
 
-def _escape_triple_quotes(text: str) -> str:
-    """Escape text for safe embedding inside triple-double-quoted Python strings.
+def _as_triple_quoted_body(text: str) -> str:
+    '''``text`` escaped so it is safe between a pair of ``"""``.
 
-    SECURITY: Prevents code injection by escaping backslashes first (to avoid
-    creating new escape sequences), then triple-double-quotes and curly braces
-    (to prevent f-string expression evaluation).
-    """
-    # Escape existing backslashes to prevent them from creating escape sequences
-    text = text.replace("\\", "\\\\")
-    # Escape triple-double-quotes
-    text = text.replace('"""', '\\"\\"\\"')
-    # Escape curly braces to prevent f-string injection
-    text = text.replace("{", "{{")
-    text = text.replace("}", "}}")
-    return text
+    Escaping the *sequence* ``"""`` is not enough, and this was live: a prompt
+    *ending* in a quote closes the literal one character early. Given
+    ``Answer only about "orders"`` the emitted line is
+    ``SYSTEM_PROMPT = """Answer only about "orders""""`` -- four quotes in a row, of
+    which the first three close the string and the fourth begins an unterminated one.
+    ``agent.py`` then fails to import, so a deployed runtime is dead on arrival and a
+    single stray quote in a prompt takes the whole agent with it.
+
+    So escape every backslash and then every quote, which is total: no run of
+    characters can terminate the literal early, whatever the canvas sends. Real
+    newlines are deliberately left alone -- a triple-quoted literal is allowed to
+    contain them, and a multi-line prompt stays readable in the emitted source. This
+    is ``_sanitize_string_literal`` minus the newline escaping, which is the only
+    reason the triple-quoted form is worth having.
+
+    Curly braces are *not* doubled, and used to be. That was justified as preventing
+    "f-string injection", which cannot happen: every template here is an f-string
+    evaluated in *this* module's source, and an interpolated value is never rescanned
+    for placeholders -- there is no ``.format()`` call anywhere in this module, in
+    ``a2a_codegen``, in ``deployment`` or in ``cfn_template_generator``. The doubling
+    protected against nothing and corrupted the commonest prompt there is: ``Return
+    JSON like {"id": 1}`` reached the model as ``Return JSON like {{"id": 1}}``. Note
+    that ``_sanitize_string_literal`` above, used for values interpolated into the
+    same templates, has never touched braces.
+    '''
+    return text.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _extract_gateway_credentials(gateway_config: dict | None) -> dict:
@@ -402,23 +427,111 @@ GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
 # token. "static_bearer" (a LiteLLM MCP Gateway) sends a long-lived virtual key.
 GATEWAY_AUTH_MODE = os.environ.get("GATEWAY_AUTH_MODE", "oauth2")
 GATEWAY_API_KEY = os.environ.get("GATEWAY_API_KEY", "")
+# The CloudFormation export passes the virtual key BY REFERENCE. See
+# _resolve_gateway_key below for why that is not the same as passing the value.
+GATEWAY_API_KEY_SECRET_ARN = os.environ.get("GATEWAY_API_KEY_SECRET_ARN", "")
 GATEWAY_MCP_SERVERS = os.environ.get("GATEWAY_MCP_SERVERS", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID") or os.environ.get("OAUTH_CLIENT_ID", "")
 COGNITO_CLIENT_SECRET = os.environ.get("COGNITO_CLIENT_SECRET") or os.environ.get("OAUTH_CLIENT_SECRET", "")
+# Set INSTEAD of COGNITO_CLIENT_SECRET by the CloudFormation export, which passes the
+# secret by reference for the same reason it does so for the gateway key. See
+# _resolve_client_secret below.
+COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_TOKEN_ENDPOINT = os.environ.get("COGNITO_TOKEN_ENDPOINT") or os.environ.get("OAUTH_TOKEN_ENDPOINT", "")
 COGNITO_SCOPE = os.environ.get("COGNITO_SCOPE") or os.environ.get("OAUTH_SCOPE", "")
+
+_gateway_key_cache = {{}}
+_client_secret_cache = {{}}
+
+
+def _resolve_gateway_key():
+    """The LiteLLM virtual key: from the environment, or from Secrets Manager.
+
+    The platform's own deploy path resolves the secret in the control plane and
+    injects the value as GATEWAY_API_KEY. The CloudFormation export cannot do
+    that: a template is a file people commit and paste into tickets, and a
+    CloudFormation dynamic reference would resolve the plaintext into this
+    runtime's own configuration, where DescribeAgentRuntime shows it and a
+    rotated key keeps serving the old value until the next stack update. So the
+    export hands over GATEWAY_API_KEY_SECRET_ARN and the key is read here, with
+    the runtime role scoped to that one secret.
+
+    Cached: every MCP transport needs it and the value does not change within a
+    container's life.
+    """
+    if GATEWAY_API_KEY:
+        return GATEWAY_API_KEY
+    if not GATEWAY_API_KEY_SECRET_ARN:
+        return ""
+    if "value" not in _gateway_key_cache:
+        import boto3
+        _sm = boto3.client("secretsmanager", region_name=REGION)
+        _raw = _sm.get_secret_value(SecretId=GATEWAY_API_KEY_SECRET_ARN)["SecretString"]
+        try:
+            _payload = json.loads(_raw)
+        except (ValueError, TypeError):
+            _payload = None
+        # The platform stores {{"apiKey": "..."}}; a secret a customer created by
+        # hand is usually just the key as plain text. Accept both rather than
+        # telling someone their own secret is the wrong shape.
+        if isinstance(_payload, dict):
+            _key = str(_payload.get("apiKey") or _payload.get("api_key") or "")
+        else:
+            _key = _raw.strip()
+        if not _key:
+            # Never echo the payload — only the fact and the ARN.
+            raise RuntimeError(
+                f"The gateway key secret {{GATEWAY_API_KEY_SECRET_ARN}} holds no key. "
+                'Expected either a plain-text key or {{"apiKey": "<key>"}}.'
+            )
+        _gateway_key_cache["value"] = _key
+    return _gateway_key_cache["value"]
+
+
+def _resolve_client_secret():
+    """The Cognito app client secret: from the environment, or read from Cognito.
+
+    The platform's own deploy path knows this secret in the control plane and injects
+    the value as COGNITO_CLIENT_SECRET. The CloudFormation export deliberately does
+    not, because a value that reaches a template resource's properties is copied
+    verbatim into the stack's EVENT stream — every status, retained 90 days, readable
+    by anyone holding cloudformation:DescribeStackEvents — and it then also sits in
+    this runtime's own configuration, where GetAgentRuntime returns it in plaintext.
+    Both were confirmed on a live stack: the secret was recovered from the events of
+    AgentCoreRuntime, which is a NATIVE resource, so this is not a custom-resource
+    quirk. A secret should be retrieved at runtime rather than held in an
+    environment variable: accidental logging and same-user process inspection both
+    expose it, and ``GetAgentRuntime`` returns runtime env vars in plaintext.
+
+    So the export hands over COGNITO_USER_POOL_ID instead and the secret is read
+    here, with the runtime role granted DescribeUserPoolClient on that one pool.
+
+    Cached: the token mint runs on every gateway call and the value cannot change
+    within a container's life.
+    """
+    if COGNITO_CLIENT_SECRET:
+        return COGNITO_CLIENT_SECRET
+    if not COGNITO_USER_POOL_ID or not COGNITO_CLIENT_ID:
+        return ""
+    if "value" not in _client_secret_cache:
+        import boto3
+        _idp = boto3.client("cognito-idp", region_name=REGION)
+        _resp = _idp.describe_user_pool_client(
+            UserPoolId=COGNITO_USER_POOL_ID, ClientId=COGNITO_CLIENT_ID)
+        _client_secret_cache["value"] = _resp["UserPoolClient"].get("ClientSecret", "")
+    return _client_secret_cache["value"]
 
 
 def _get_gateway_token():
     """Get OAuth2 access token from Cognito for Gateway authentication."""
     if GATEWAY_AUTH_MODE == "static_bearer":
         # LiteLLM: the virtual key IS the credential — no token exchange exists.
-        return GATEWAY_API_KEY
+        return _resolve_gateway_key()
     if not COGNITO_CLIENT_ID or not COGNITO_TOKEN_ENDPOINT:
         return ""
     try:
         form = {{"grant_type": "client_credentials", "client_id": COGNITO_CLIENT_ID,
-                "client_secret": COGNITO_CLIENT_SECRET}}
+                "client_secret": _resolve_client_secret()}}
         if COGNITO_SCOPE:
             form["scope"] = COGNITO_SCOPE
         data = urllib.parse.urlencode(form).encode()
@@ -1217,22 +1330,110 @@ GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
 # token. "static_bearer" (a LiteLLM MCP Gateway) sends a long-lived virtual key.
 GATEWAY_AUTH_MODE = os.environ.get("GATEWAY_AUTH_MODE", "oauth2")
 GATEWAY_API_KEY = os.environ.get("GATEWAY_API_KEY", "")
+# The CloudFormation export passes the virtual key BY REFERENCE. See
+# _resolve_gateway_key below for why that is not the same as passing the value.
+GATEWAY_API_KEY_SECRET_ARN = os.environ.get("GATEWAY_API_KEY_SECRET_ARN", "")
 GATEWAY_MCP_SERVERS = os.environ.get("GATEWAY_MCP_SERVERS", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID") or os.environ.get("OAUTH_CLIENT_ID", "")
 COGNITO_CLIENT_SECRET = os.environ.get("COGNITO_CLIENT_SECRET") or os.environ.get("OAUTH_CLIENT_SECRET", "")
+# Set INSTEAD of COGNITO_CLIENT_SECRET by the CloudFormation export, which passes the
+# secret by reference for the same reason it does so for the gateway key. See
+# _resolve_client_secret below.
+COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 COGNITO_TOKEN_ENDPOINT = os.environ.get("COGNITO_TOKEN_ENDPOINT") or os.environ.get("OAUTH_TOKEN_ENDPOINT", "")
-COGNITO_SCOPE = os.environ.get("COGNITO_SCOPE") or os.environ.get("OAUTH_SCOPE", "")"""
+COGNITO_SCOPE = os.environ.get("COGNITO_SCOPE") or os.environ.get("OAUTH_SCOPE", "")
+
+_gateway_key_cache = {}
+_client_secret_cache = {}"""
         gateway_functions = '''
+
+def _resolve_gateway_key():
+    """The LiteLLM virtual key: from the environment, or from Secrets Manager.
+
+    The platform's own deploy path resolves the secret in the control plane and
+    injects the value as GATEWAY_API_KEY. The CloudFormation export cannot do
+    that: a template is a file people commit and paste into tickets, and a
+    CloudFormation dynamic reference would resolve the plaintext into this
+    runtime's own configuration, where DescribeAgentRuntime shows it and a
+    rotated key keeps serving the old value until the next stack update. So the
+    export hands over GATEWAY_API_KEY_SECRET_ARN and the key is read here, with
+    the runtime role scoped to that one secret.
+
+    Cached: every MCP transport needs it and the value does not change within a
+    container's life.
+    """
+    if GATEWAY_API_KEY:
+        return GATEWAY_API_KEY
+    if not GATEWAY_API_KEY_SECRET_ARN:
+        return ""
+    if "value" not in _gateway_key_cache:
+        import boto3
+        _sm = boto3.client("secretsmanager", region_name=REGION)
+        _raw = _sm.get_secret_value(SecretId=GATEWAY_API_KEY_SECRET_ARN)["SecretString"]
+        try:
+            _payload = json.loads(_raw)
+        except (ValueError, TypeError):
+            _payload = None
+        # The platform stores {"apiKey": "..."}; a secret a customer created by
+        # hand is usually just the key as plain text. Accept both rather than
+        # telling someone their own secret is the wrong shape.
+        if isinstance(_payload, dict):
+            _key = str(_payload.get("apiKey") or _payload.get("api_key") or "")
+        else:
+            _key = _raw.strip()
+        if not _key:
+            # Never echo the payload — only the fact and the ARN.
+            raise RuntimeError(
+                f"The gateway key secret {GATEWAY_API_KEY_SECRET_ARN} holds no key. "
+                'Expected either a plain-text key or {"apiKey": "<key>"}.'
+            )
+        _gateway_key_cache["value"] = _key
+    return _gateway_key_cache["value"]
+
+
+def _resolve_client_secret():
+    """The Cognito app client secret: from the environment, or read from Cognito.
+
+    The platform's own deploy path knows this secret in the control plane and injects
+    the value as COGNITO_CLIENT_SECRET. The CloudFormation export deliberately does
+    not, because a value that reaches a template resource's properties is copied
+    verbatim into the stack's EVENT stream — every status, retained 90 days, readable
+    by anyone holding cloudformation:DescribeStackEvents — and it then also sits in
+    this runtime's own configuration, where GetAgentRuntime returns it in plaintext.
+    Both were confirmed on a live stack: the secret was recovered from the events of
+    AgentCoreRuntime, which is a NATIVE resource, so this is not a custom-resource
+    quirk. A secret should be retrieved at runtime rather than held in an
+    environment variable: accidental logging and same-user process inspection both
+    expose it, and ``GetAgentRuntime`` returns runtime env vars in plaintext.
+
+    So the export hands over COGNITO_USER_POOL_ID instead and the secret is read
+    here, with the runtime role granted DescribeUserPoolClient on that one pool.
+
+    Cached: the token mint runs on every gateway call and the value cannot change
+    within a container's life.
+    """
+    if COGNITO_CLIENT_SECRET:
+        return COGNITO_CLIENT_SECRET
+    if not COGNITO_USER_POOL_ID or not COGNITO_CLIENT_ID:
+        return ""
+    if "value" not in _client_secret_cache:
+        import boto3
+        _idp = boto3.client("cognito-idp", region_name=REGION)
+        _resp = _idp.describe_user_pool_client(
+            UserPoolId=COGNITO_USER_POOL_ID, ClientId=COGNITO_CLIENT_ID)
+        _client_secret_cache["value"] = _resp["UserPoolClient"].get("ClientSecret", "")
+    return _client_secret_cache["value"]
+
 
 def _get_gateway_token():
     if GATEWAY_AUTH_MODE == "static_bearer":
         # LiteLLM: the virtual key IS the credential — no token exchange exists.
-        return GATEWAY_API_KEY
+        return _resolve_gateway_key()
     if not COGNITO_CLIENT_ID or not COGNITO_TOKEN_ENDPOINT:
         return ""
     try:
         form = {"grant_type": "client_credentials", "client_id": COGNITO_CLIENT_ID,
-                "client_secret": COGNITO_CLIENT_SECRET}
+                "client_secret": _resolve_client_secret()}
         if COGNITO_SCOPE:
             form["scope"] = COGNITO_SCOPE
         data = urllib.parse.urlencode(form).encode()
@@ -1876,7 +2077,7 @@ def _generate_graph_agent(
     for ag in agents:
         ag_id = _sanitize_agent_id(ag["agentId"])
         _, ag_init = _get_model_init_code(ag.get("modelProvider", provider), ag.get("modelId", model_id), region)
-        ag_prompt = _escape_triple_quotes(ag.get("systemPrompt", "You are a helpful agent."))
+        ag_prompt = _as_triple_quoted_body(ag.get("systemPrompt", "You are a helpful agent."))
         safe_var = ag_id.replace("-", "_")
         agent_defs += f'''
     {ag_init.replace("model = ", f"model_{safe_var} = ")}
@@ -1958,7 +2159,7 @@ def _generate_swarm_agent(
     for ag in agents:
         ag_id = _sanitize_agent_id(ag["agentId"])
         _, ag_init = _get_model_init_code(ag.get("modelProvider", provider), ag.get("modelId", model_id), region)
-        ag_prompt = _escape_triple_quotes(ag.get("systemPrompt", "You are a helpful agent."))
+        ag_prompt = _as_triple_quoted_body(ag.get("systemPrompt", "You are a helpful agent."))
         safe = ag_id.replace("-", "_")
         # Strands Swarm requires unique agent names across nodes. Without an
         # explicit name= kwarg, Strands defaults all agents to "Strands Agents",
@@ -2027,7 +2228,7 @@ def _generate_workflow_agent(
     for ag in agents:
         ag_id = _sanitize_agent_id(ag["agentId"])
         _, ag_init = _get_model_init_code(ag.get("modelProvider", provider), ag.get("modelId", model_id), region)
-        ag_prompt = _escape_triple_quotes(ag.get("systemPrompt", "You are a helpful agent."))
+        ag_prompt = _as_triple_quoted_body(ag.get("systemPrompt", "You are a helpful agent."))
         safe = ag_id.replace("-", "_")
         agent_defs += f'''
     {ag_init.replace("model = ", f"model_{safe} = ")}
@@ -2720,7 +2921,7 @@ def generate_agent_code(
     provider = getattr(config, "model_provider", "bedrock") or "bedrock"
 
     model_id = _get_model_id(config)
-    system_prompt = _escape_triple_quotes(config.system_prompt)
+    system_prompt = _as_triple_quoted_body(config.system_prompt)
     region = _get_region()
     tools = tools or []
     gateway_tools = gateway_tools or []

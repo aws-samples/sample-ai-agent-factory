@@ -1831,8 +1831,14 @@ def _build_gateway_role_policy() -> dict:
             {
                 "Effect": "Allow",
                 "Action": [
+                    # `agent-credential-provider` is not an AWS service, so the
+                    # entry that used to sit here authorized nothing -- and it was
+                    # the only grant that made this role look like it could reach
+                    # the credential providers. It can: the real actions are
+                    # bedrock-agentcore:GetResourceOauth2Token and
+                    # GetResourceApiKey, covered by the wildcard below. See the
+                    # prefix note in services/per_agent_identity.py.
                     "bedrock-agentcore:*",
-                    "agent-credential-provider:*",
                 ],
                 "Resource": "*",
             },

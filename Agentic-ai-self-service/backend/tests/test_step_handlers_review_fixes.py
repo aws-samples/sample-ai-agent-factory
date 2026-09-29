@@ -223,7 +223,15 @@ def test_create_data_source_does_not_leak_bda_sentinel(deployment_store_stub, mo
         "kbRoleArn": "arn:aws:iam::123456789012:role/kb-role",
     }
 
-    with patch.object(knowledge_base_step.step_clients, "client", side_effect=_client):
+    # Patching ``client`` alone leaves ``account_id_for_event`` making a real STS
+    # call, which resolves to nothing under test. The handler now needs the
+    # account id because a geography-prefixed model is an inference profile and
+    # its ARN is account-qualified, so stub it rather than let the fallback
+    # produce an unusable ARN.
+    with (
+        patch.object(knowledge_base_step.step_clients, "client", side_effect=_client),
+        patch.object(knowledge_base_step.step_clients, "account_id_for_event", return_value="123456789012"),
+    ):
         knowledge_base_step.handler(
             {
                 "deployment_id": "dep-kb-test",
