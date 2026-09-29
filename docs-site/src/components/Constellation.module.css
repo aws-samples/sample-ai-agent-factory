@@ -1,5 +1,6 @@
-/* Fills PageHeader's backdrop slot. The header band keeps its own midnight background, so the
-   canvas only adds the constellation on top; without JavaScript nothing here exists. */
+/* Fills PageHeader's backdrop slot. The header band keeps its own background, so the canvas only
+   adds the constellation on top; without JavaScript nothing here exists. Colours are semantic
+   tokens resolved inside the header's `.on-dark` scope. */
 .root {
   position: absolute;
   inset: 0;
@@ -12,14 +13,14 @@
   height: 100%;
 }
 
-/* Bottom 40 percent fades back to midnight so the actions row and lead stay readable. */
+/* Bottom 40 percent fades back to the band colour so the actions row and lead stay readable. */
 .fade {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
   height: 40%;
-  background: linear-gradient(to bottom, rgba(11, 18, 32, 0), var(--color-midnight));
+  background: linear-gradient(to bottom, transparent, var(--color-band));
 }
 
 /* The WCAG 2.2.2 pause control: bottom-right, inside the band's padding so it never overlaps
@@ -33,10 +34,10 @@
   gap: var(--space-1);
   min-height: 28px;
   padding: 0 var(--space-3);
-  border: 1px solid rgba(245, 247, 251, 0.35);
-  border-radius: 999px;
-  background: rgba(11, 18, 32, 0.85);
-  color: var(--color-cloud);
+  border: 1px solid color-mix(in srgb, var(--color-text-primary) 35%, transparent);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--color-band) 85%, transparent);
+  color: var(--color-text-primary);
   font: inherit;
   font-size: 0.8125rem;
   font-weight: 600;
@@ -50,12 +51,12 @@
 }
 
 .toggle:hover {
-  border-color: var(--color-cloud);
-  background: var(--color-midnight-light);
+  border-color: var(--color-text-primary);
+  background: var(--color-band-raised);
 }
 
 .toggle:focus-visible {
-  outline: 2px solid var(--color-cloud);
+  outline: var(--focus-ring);
   outline-offset: 2px;
 }
 

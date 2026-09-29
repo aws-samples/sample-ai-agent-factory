@@ -1,92 +1,77 @@
 import type { ReactNode } from 'react';
+import { ChipNav } from '../../components/ChipNav';
+import { SectionHeading } from '../../components/SectionHeading';
 import { SectionNav, type SectionNavItem } from '../../components/SectionNav';
-import { SourceLink } from '../../components/SourceLink';
+import { SmallSource as SharedSmallSource } from '../../components/Sources';
 import { StageBadge } from '../../components/StageBadge';
+import { FactStat } from '../../components/StatTile';
 import type { Project } from '../../content/data';
 import { factText, type Fact } from '../../content/facts';
 import { PATHS } from '../../paths';
 import styles from './start.module.css';
 
 /**
- * A fact value followed by a small "source" link and, when the fact carries one,
- * its note in muted text. The link's accessible name names the fact and, when
- * given, the project as written ("source for cost, Self-Service") so repeated
- * links stay distinguishable. Facts marked `notDocumented` render the shared label.
+ * A fact value in running text or a table cell: the value, a small "source" link
+ * and, when the fact carries one, its note in muted text. The link's accessible
+ * name names the fact and, when given, the project as written ("source for cost,
+ * Self-Service") so repeated links stay distinguishable. Facts marked
+ * `notDocumented` render the shared label as a muted pill.
  */
-export function FactValue({
-  fact,
-  label,
-  project,
-  compactNote = false,
-}: {
-  fact: Fact;
-  label: string;
-  project?: string;
-  /** Show the note only from 640 px up (Home tiles, where the caveat repeats on the table and project pages). */
-  compactNote?: boolean;
-}) {
+export function FactValue({ fact, label, project }: { fact: Fact; label: string; project?: string }) {
   return (
     <>
       {fact.notDocumented ? <em className={styles.notDocumented}>{factText(fact)}</em> : factText(fact)}
       {fact.source && (
         <>
           {' '}
-          <SourceLink source={fact.source} className={styles.sourceSmall}>
-            source
-            <span className="visually-hidden">
-              {' '}
-              for {label.toLowerCase()}
-              {project ? `, ${project}` : ''}
-            </span>
-          </SourceLink>
+          <SharedSmallSource source={fact.source} context={`${label.toLowerCase()}${project ? `, ${project}` : ''}`} />
         </>
       )}
-      {fact.note && (
-        <span className={compactNote ? `${styles.factNote} ${styles.factNoteCompact}` : styles.factNote}>{fact.note}</span>
-      )}
+      {fact.note && <span className={styles.factNote}>{fact.note}</span>}
     </>
   );
 }
 
-/** One `dt`/`dd` pair for a compact facts list inside a tile. */
+/**
+ * One `dt`/`dd` pair for a compact facts list inside a tile. Delegates to the
+ * shared `FactStat`; `compactNote` (Home tiles) collapses the caveat behind the
+ * "Why this figure" disclosure.
+ */
 export function FactItem({
   label,
   fact,
   project,
   compactNote = false,
+  icon,
 }: {
   label: string;
   fact: Fact;
   project?: string;
   compactNote?: boolean;
+  icon?: ReactNode;
 }) {
-  return (
-    <div className={styles.fact}>
-      <dt className={styles.factLabel}>{label}</dt>
-      <dd className={styles.factValue}>
-        <FactValue fact={fact} label={label} project={project} compactNote={compactNote} />
-      </dd>
-    </div>
-  );
+  return <FactStat label={label} fact={fact} project={project} icon={icon} noteMode={compactNote ? 'collapsed' : 'inline'} />;
 }
 
 /** Section heading for a project: stage badge plus the full project name. */
 export function ProjectHeading({ project, id }: { project: Project; id: string }) {
   return (
-    <h2 id={id} className={styles.projectHeading}>
-      <StageBadge stage={project.stage} label={`${project.stageNumber}. ${project.stageLabel}`} />
-      <span>{project.name}</span>
-    </h2>
+    <SectionHeading
+      id={id}
+      title={project.name}
+      badge={<StageBadge stage={project.stage} label={`${project.stageNumber}. ${project.stageLabel}`} />}
+    />
   );
+}
+
+/** Stage badge used beside a project heading ("1. Learn"). */
+export function ProjectBadge({ project }: { project: Project }) {
+  return <StageBadge stage={project.stage} label={`${project.stageNumber}. ${project.stageLabel}`} />;
 }
 
 /** Small "source" link for a step or paragraph, with hidden context. */
 export function SmallSource({ source, context }: { source: Fact['source'] & object; context: string }) {
-  return (
-    <SourceLink source={source} className={styles.sourceSmall}>
-      source<span className="visually-hidden"> for {context}</span>
-    </SourceLink>
-  );
+  return <SharedSmallSource source={source} context={context} />;
 }
 
 const START_PAGES: SectionNavItem[] = [
@@ -102,7 +87,7 @@ export function StartNav() {
   return <SectionNav label="Start section" items={START_PAGES} />;
 }
 
-/** In-page jump links to sections further down the same page. */
+/** In-page jump links to sections further down the same page, as a chip rail. */
 export function JumpLinks({
   label,
   items,
@@ -113,17 +98,11 @@ export function JumpLinks({
   lead?: string;
 }) {
   return (
-    <nav aria-label={label} className={styles.jump}>
-      {lead && <span className={styles.jumpLabel}>{lead}</span>}
-      <ul className={styles.chips}>
-        {items.map(({ id, label: itemLabel }) => (
-          <li key={id}>
-            <a href={`#${id}`} className={styles.chip}>
-              {itemLabel}
-            </a>
-          </li>
-        ))}
-      </ul>
-    </nav>
+    <ChipNav
+      label={label}
+      lead={lead}
+      overflow="wrap"
+      items={items.map(({ id, label: itemLabel }) => ({ href: `#${id}`, label: itemLabel }))}
+    />
   );
 }

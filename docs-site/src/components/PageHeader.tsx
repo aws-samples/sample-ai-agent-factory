@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { JourneyStage } from '../content/data';
 import { STAGE_LABELS } from '../stage';
+import { HeaderGlow, type HeaderHue } from './HeaderGlow';
 import { StageBadge } from './StageBadge';
 import styles from './PageHeader.module.css';
 
@@ -28,6 +29,14 @@ export interface PageHeaderProps {
    *  off. Only interactive descendants that opt back into pointer events (the pause control) are
    *  reachable. */
   backdrop?: ReactNode;
+  /** Hue of the default gradient backdrop when no `backdrop` is passed. Defaults to the stage, else blue. */
+  hue?: HeaderHue;
+  /** start: copy left-aligned (every hub page); center: copy centred (Home). */
+  align?: 'start' | 'center';
+  /** default: full band; compact: tighter band with a smaller title (doc pages). */
+  variant?: 'default' | 'compact';
+  /** Breadcrumb trail rendered above the eyebrow, on the band. */
+  breadcrumbs?: ReactNode;
   className?: string;
 }
 
@@ -51,14 +60,25 @@ export function PageHeader({
   actions,
   figure,
   backdrop,
+  hue,
+  align = 'start',
+  variant = 'default',
+  breadcrumbs,
   className,
 }: PageHeaderProps) {
   const innerClass = [styles.inner, figure ? styles.hasFigure : undefined].filter(Boolean).join(' ');
+  const glowHue: HeaderHue = hue ?? stage ?? 'scale';
   return (
-    <header className={[styles.header, 'on-dark', className].filter(Boolean).join(' ')}>
-      {backdrop !== undefined && <div className={styles.backdrop}>{backdrop}</div>}
+    <header
+      className={[styles.header, 'on-dark', className].filter(Boolean).join(' ')}
+      data-page-header
+      data-align={align}
+      data-variant={variant}
+    >
+      <div className={styles.backdrop}>{backdrop !== undefined ? backdrop : <HeaderGlow hue={glowHue} />}</div>
       <div className={`container ${innerClass}`}>
-        <div className={styles.copy}>
+        <div className={styles.copy} data-copy>
+          {breadcrumbs && <div className={styles.breadcrumbs}>{breadcrumbs}</div>}
           {eyebrow && <p className={styles.eyebrow}>{eyebrow}</p>}
           {stage && (
             <StageBadge stage={stage} label={stageLabel ?? STAGE_LABELS[stage]} className={styles.badge} />

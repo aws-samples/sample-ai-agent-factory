@@ -29,6 +29,7 @@ Thumbs.db
 # Test artifacts
 test-results/
 playwright-report/
+screenshots/
 
 # Python bytecode from scripts/validate_static.py
 __pycache__/

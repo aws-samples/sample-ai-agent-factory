@@ -1,17 +1,22 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowRight } from 'lucide-react';
+import { ArrowRight, Bot, Briefcase, Coins, Compass, MapPin, Server, Shield, Timer, type LucideIcon } from 'lucide-react';
+import { Button } from '../../components/Button';
 import { Callout } from '../../components/Callout';
+import { Card } from '../../components/Card';
 import { ExternalLink } from '../../components/ExternalLink';
 import { PageHeader } from '../../components/PageHeader';
 import { PageMeta } from '../../components/PageMeta';
+import { SectionHeading } from '../../components/SectionHeading';
 import { StageBadge } from '../../components/StageBadge';
-import { capabilities, projects } from '../../content/data';
+import { StageJourney } from '../../components/StageJourney';
+import { FactStat } from '../../components/StatTile';
+import { personas, projects, type PersonaIcon } from '../../content/data';
 import { FACT_LABELS, getFacts } from '../../content/facts';
 import { blob, REPO_URL } from '../../content/links';
 import { PATHS, projectPath } from '../../paths';
-import { FactItem } from '../start/shared';
-import shared from '../start/start.module.css';
+import { STAGE_ICONS } from '../../stage';
+import { CapabilityStack } from './CapabilityStack';
 import styles from './HomePage.module.css';
 
 const BASE_URL = import.meta.env.BASE_URL || '/';
@@ -47,45 +52,14 @@ function HeroBackdrop() {
 const ATLAS_ALT =
   'AI Agent Factory Atlas: four complementary projects for enterprise agentic AI on AWS. In the centre sits a hub labelled Agent Factory Capabilities: LLM Gateway, Tool Gateway, Identity and Registry, Policy and Observability. Around it, four stages in order. Learn: Workshop, hands-on platform patterns. Build: Visual Workflow Platform, drag-and-drop agent builder. Govern: MCP Governance Gateway, per-tool-call authorization. Scale: Enterprise Blueprint, multi-account reference blueprint. A legend distinguishes the sequential journey path, a skip-ahead path, and the shared-capability links from each project to the hub. A footer reads: Each project is self-contained. Start anywhere based on your role and goals.';
 
-interface Persona {
-  role: string;
-  text: string;
-  startLabel: string;
-  to: string;
-}
-
-const personas: Persona[] = [
-  {
-    role: 'Platform engineer',
-    text: 'Build the LLM Gateway, registries and Tools Gateway module by module.',
-    startLabel: 'Start with the Workshop',
-    to: projectPath('workshop'),
-  },
-  {
-    role: 'AI/ML engineer',
-    text: 'Ship an agent on Amazon Bedrock AgentCore from a template on a visual canvas.',
-    startLabel: 'Start with Self-Service',
-    to: projectPath('self-service'),
-  },
-  {
-    role: 'Security engineer',
-    text: 'See Cedar ENFORCE, JWT authentication, interceptors and a Guardrail on a live MCP endpoint.',
-    startLabel: 'Start with the MCP Gateway',
-    to: projectPath('mcp-gateway'),
-  },
-  {
-    role: 'Solutions architect',
-    text: 'Compare regions, deploy time, cost and topology before recommending a project.',
-    startLabel: 'Start with the comparison',
-    to: PATHS.whichProject,
-  },
-  {
-    role: 'Engineering director',
-    text: 'Know what each sample is and is not before committing a team.',
-    startLabel: 'Start with the support envelope',
-    to: PATHS.referenceSupportEnvelope,
-  },
-];
+/** Role icons for the persona cards (always rendered aria-hidden beside the role name). */
+const PERSONA_ICONS: Record<PersonaIcon, LucideIcon> = {
+  server: Server,
+  bot: Bot,
+  shield: Shield,
+  compass: Compass,
+  briefcase: Briefcase,
+};
 
 export function HomePage() {
   return (
@@ -97,28 +71,31 @@ export function HomePage() {
       />
 
       <PageHeader
-        title="AI Agent Factory"
+        align="center"
+        title={
+          <>
+            AI Agent <span className={styles.titleAccent}>Factory</span>
+          </>
+        }
         lead="Enterprise samples for building, governing, and operating agentic AI on AWS with Amazon Bedrock and Amazon Bedrock AgentCore."
         backdrop={<HeroBackdrop />}
+        meta={<StageJourney label="Journey stages" />}
         actions={
           <>
-            <Link to={PATHS.whichProject} className={shared.btnPrimary}>
+            <Button to={PATHS.whichProject} iconEnd={<ArrowRight size={18} />}>
               Find your project
-              <ArrowRight size={18} aria-hidden="true" />
-            </Link>
-            <Link to={PATHS.start} className={shared.btnSecondary}>
+            </Button>
+            <Button to={PATHS.start} variant="secondary">
               Get started
-            </Link>
+            </Button>
           </>
         }
       />
 
-      {/* Atlas: image from 1024 px, typed list below */}
-      <section className={`${shared.band} ${shared.bandDark} on-dark ${styles.atlas}`} aria-labelledby="atlas-heading">
+      {/* Atlas: desktop only; the hero journey strip covers narrower screens */}
+      <section className={`${styles.band} ${styles.bandDark} on-dark ${styles.atlas}`} aria-labelledby="atlas-heading">
         <div className="container">
-          <h2 id="atlas-heading" className={styles.atlasHeading}>
-            One journey, four starting points
-          </h2>
+          <SectionHeading id="atlas-heading" eyebrow="Atlas" title="One journey, four starting points" align="center" />
           <img
             className={styles.atlasImage}
             src={`${BASE_URL}repository-atlas-journey.svg`}
@@ -126,57 +103,76 @@ export function HomePage() {
             width="1200"
             height="700"
           />
-          <ol className={styles.stageList}>
-            {projects.map((project) => (
-              <li key={project.id}>
-                <Link to={projectPath(project.id)} className={styles.stageLink}>
-                  <StageBadge stage={project.stage} label={`${project.stageNumber}. ${project.stageLabel}`} />
-                  <span className={styles.stageText}>
-                    <strong>{project.shortName}</strong>
-                    <span className={styles.stageTagline}>{project.tagline}</span>
-                  </span>
-                  <ArrowRight size={18} aria-hidden="true" />
-                </Link>
-              </li>
-            ))}
-          </ol>
         </div>
       </section>
 
       {/* Project tiles: the decision matrix */}
-      <section className={shared.band} aria-labelledby="tiles-heading">
+      <section className={styles.band} aria-labelledby="tiles-heading">
         <div className="container">
-          <div className={shared.sectionHead}>
-            <h2 id="tiles-heading">Pick a project</h2>
-            <p className={shared.lead}>
-              Stage, audience, validated regions, first deploy and cost, every fact linked to its source.{' '}
-              <Link to={PATHS.whichProject}>See the full comparison</Link>.
-            </p>
-          </div>
-          <ul className={`${shared.tileGrid} ${shared.tileGrid4}`}>
+          <SectionHeading
+            id="tiles-heading"
+            eyebrow="Projects"
+            title="Pick a project"
+            align="center"
+            lead={
+              <>
+                Stage, audience, validated regions, first deploy and cost, every fact linked to its source.{' '}
+                <Link to={PATHS.whichProject}>See the full comparison</Link>.
+              </>
+            }
+          />
+          <ul className={styles.tileGrid}>
             {projects.map((project) => {
               const facts = getFacts(project.id);
+              const Icon = STAGE_ICONS[project.stage];
               return (
-                <li key={project.id} className={shared.tile} data-stage={project.stage} data-reveal data-lift>
-                  <div className={shared.tileHead}>
+                <Card
+                  as="li"
+                  key={project.id}
+                  variant="accent"
+                  stage={project.stage}
+                  interactive
+                  reveal
+                  padding="sm"
+                  className={styles.tile}
+                >
+                  <div className={styles.tileHead}>
+                    <span className={styles.tileIcon} aria-hidden="true">
+                      <Icon size={18} />
+                    </span>
                     <StageBadge stage={project.stage} label={`${project.stageNumber}. ${project.stageLabel}`} />
-                    <Link to={projectPath(project.id)} className={shared.tileLink}>
-                      Details
-                      <span className="visually-hidden"> about {project.shortName}</span>
-                      <ArrowRight size={16} aria-hidden="true" />
-                    </Link>
                   </div>
-                  <h3 className={shared.tileTitle}>{project.name}</h3>
-                  <p className={shared.tileTagline}>{project.tagline}</p>
-                  <p className={shared.tileText}>
+                  <h3 className={styles.tileTitle}>
+                    <Link to={projectPath(project.id)}>{project.name}</Link>
+                  </h3>
+                  <p className={styles.tileTagline}>{project.tagline}</p>
+                  <p className={styles.tileText}>
                     <strong>Best for:</strong> {project.bestFor}
                   </p>
-                  <dl className={shared.facts}>
-                    <FactItem label={FACT_LABELS.regions} fact={facts.regions} project={project.shortName} compactNote />
-                    <FactItem label={FACT_LABELS.firstDeploy} fact={facts.firstDeploy} project={project.shortName} compactNote />
-                    <FactItem label={FACT_LABELS.cost} fact={facts.cost} project={project.shortName} compactNote />
+                  <dl className={styles.facts}>
+                    <FactStat
+                      label={FACT_LABELS.regions}
+                      fact={facts.regions}
+                      project={project.shortName}
+                      icon={<MapPin />}
+                      noteMode="collapsed"
+                    />
+                    <FactStat
+                      label={FACT_LABELS.firstDeploy}
+                      fact={facts.firstDeploy}
+                      project={project.shortName}
+                      icon={<Timer />}
+                      noteMode="collapsed"
+                    />
+                    <FactStat
+                      label={FACT_LABELS.cost}
+                      fact={facts.cost}
+                      project={project.shortName}
+                      icon={<Coins />}
+                      noteMode="collapsed"
+                    />
                   </dl>
-                </li>
+                </Card>
               );
             })}
           </ul>
@@ -184,54 +180,49 @@ export function HomePage() {
       </section>
 
       {/* Personas */}
-      <section className={`${shared.band} ${shared.bandAlt}`} aria-labelledby="personas-heading">
+      <section className={`${styles.band} ${styles.bandAlt}`} aria-labelledby="personas-heading">
         <div className="container">
-          <div className={shared.sectionHead}>
-            <h2 id="personas-heading">Who is this for?</h2>
-          </div>
+          <SectionHeading id="personas-heading" eyebrow="Roles" title="Who is this for?" align="center" />
           <ul className={styles.personas}>
-            {personas.map((persona) => (
-              <li key={persona.role} className={styles.persona} data-reveal>
-                <h3 className={styles.personaRole}>{persona.role}</h3>
-                <p>
-                  {persona.text}{' '}
-                  <Link to={persona.to} className={styles.personaLink}>
-                    {persona.startLabel}
-                    <ArrowRight size={14} aria-hidden="true" />
+            {personas.map((persona) => {
+              const Icon = PERSONA_ICONS[persona.icon];
+              return (
+                <Card as="li" key={persona.role} interactive reveal className={styles.persona}>
+                  <span className={styles.personaIcon} aria-hidden="true">
+                    <Icon size={20} />
+                  </span>
+                  <h3 className={styles.personaRole}>{persona.role}</h3>
+                  <p className={styles.personaText}>{persona.text}</p>
+                  <Link to={persona.to} className={styles.personaLink} data-stretch>
+                    {persona.linkLabel}
+                    <ArrowRight size={16} aria-hidden="true" />
                   </Link>
-                </p>
-              </li>
-            ))}
+                </Card>
+              );
+            })}
           </ul>
         </div>
       </section>
 
-      {/* Capability strip */}
-      <section className={shared.band} aria-labelledby="capabilities-heading">
+      {/* Capability stack */}
+      <section className={styles.band} aria-labelledby="capabilities-heading">
         <div className="container">
-          <div className={shared.sectionHead}>
-            <h2 id="capabilities-heading">Shared capabilities</h2>
-            <p className={shared.lead}>
-              Every project draws on the same capability contracts; the implementations are replaceable.
-            </p>
-          </div>
-          <ul className={shared.chips}>
-            {capabilities.slice(0, 6).map((capability) => (
-              <li key={capability.id}>
-                <Link to={PATHS.conceptsCapabilityContracts} className={shared.chip}>
-                  {capability.name}
-                </Link>
-              </li>
-            ))}
-          </ul>
+          <SectionHeading
+            id="capabilities-heading"
+            eyebrow="Capabilities"
+            title="Shared capabilities"
+            align="center"
+            lead="Every project draws on the same capability contracts; the implementations are replaceable."
+          />
+          <CapabilityStack />
         </div>
       </section>
 
       {/* A short pre-deploy notice (the footer carries the disclaimer). A plain div,
           not a labelled section, so the callout is not nested inside a region landmark. */}
-      <div className={`${shared.band} ${shared.bandAlt} ${styles.notices}`}>
+      <div className={`${styles.band} ${styles.bandAlt} ${styles.notices}`}>
         <div className="container">
-          <h2 className={styles.noticesHeading}>Before you deploy</h2>
+          <SectionHeading title="Before you deploy" className={styles.noticesHeading} />
           <div data-reveal>
             <Callout kind="important" title="Real resources, real costs">
               <p>
@@ -256,19 +247,18 @@ export function HomePage() {
 
       {/* Closing call to action */}
       <section
-        className={`${shared.band} ${shared.bandDark} on-dark ${styles.closing}`}
+        className={`${styles.band} ${styles.bandDark} on-dark ${styles.closing}`}
         aria-labelledby="closing-heading"
       >
         <div className="container">
-          <h2 id="closing-heading">Ready to start?</h2>
-          <div className={`${shared.actions} ${styles.closingActions}`}>
-            <Link to={PATHS.start} className={shared.btnPrimary}>
+          <SectionHeading id="closing-heading" title="Ready to start?" align="center" className={styles.closingHeading} />
+          <div className={styles.closingActions}>
+            <Button to={PATHS.start} iconEnd={<ArrowRight size={18} />}>
               Get started
-              <ArrowRight size={18} aria-hidden="true" />
-            </Link>
-            <ExternalLink href={REPO_URL} className={shared.btnSecondary}>
+            </Button>
+            <Button href={REPO_URL} external variant="secondary">
               Source on GitHub
-            </ExternalLink>
+            </Button>
           </div>
         </div>
       </section>

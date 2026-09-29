@@ -1,41 +1,8 @@
-/* Shared styles for the per-project sections and the policies page. */
-
-.section {
-  padding: var(--space-8) 0;
-  border-top: 1px solid var(--color-border);
-  /* In-page links (for example the hero's Quickstart action) land below the sticky header. */
-  scroll-margin-top: calc(var(--header-height) + var(--space-4));
-}
-
-.section:first-child {
-  border-top: 0;
-  padding-top: var(--space-4);
-}
-
-.section h2 {
-  margin-bottom: var(--space-4);
-}
-
-.section h3 {
-  margin: var(--space-6) 0 var(--space-3);
-}
-
-.section p + p,
-.section p + ul,
-.section p + ol,
-.section ul + p,
-.section ol + p {
-  margin-top: var(--space-3);
-}
+/* Shared styles for the per-project sections and the policies page. Section boxes, cards
+   and steppers come from the shared primitives; this file holds page-specific layout. */
 
 .prose {
   max-width: 72ch;
-}
-
-.sources {
-  margin-top: var(--space-2);
-  font-size: 0.875rem;
-  color: var(--color-text-secondary);
 }
 
 .caption {
@@ -57,22 +24,9 @@
   margin-top: var(--space-2);
 }
 
-.plainList {
-  list-style: none;
-}
-
-.plainList > li {
-  padding: var(--space-3) 0;
-  border-bottom: 1px solid var(--color-border);
-}
-
-.plainList > li:last-child {
-  border-bottom: 0;
-}
-
 .muted {
   color: var(--color-text-secondary);
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
 }
 
 .ok,
@@ -81,59 +35,59 @@
 }
 
 .ok {
-  color: var(--stage-build-ink);
+  color: var(--stage-build);
 }
 
 .no {
-  color: var(--stage-learn-ink);
+  color: var(--stage-learn);
 }
 
 .callouts > * + * {
   margin-top: var(--space-4);
 }
 
+/* Step title with mixed inline content (code, text, link) inside a NumberedSteps item */
+.stepText {
+  display: inline;
+  font-weight: 500;
+}
+
 /* Request-flow strip (MCP Gateway hero) */
 
 .flow {
-  --flow-bg: var(--color-bg-secondary);
-  --flow-border: var(--color-border);
   margin: 0;
   /* Sized by the header figure slot, so the grid follows the slot width, not the viewport. */
   container-type: inline-size;
 }
 
-:global(.on-dark) .flow {
-  --flow-bg: rgba(255, 255, 255, 0.06);
-  --flow-border: rgba(255, 255, 255, 0.28);
-}
-
 .flowList {
   list-style: none;
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-2);
 }
 
 @container (min-width: 340px) {
   .flowList {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 @container (min-width: 720px) {
   .flowList {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
-.flowStep {
+/* The strip sits on the dark header band: raise the cards on the band colour so the
+   inherited light text stays readable. */
+.flow .flowStep {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  padding: var(--space-3);
-  border: 1px solid var(--flow-border);
-  border-radius: var(--radius-md);
-  background: var(--flow-bg);
+  background: var(--color-band-raised);
+  border-color: var(--color-overlay-strong);
+  box-shadow: none;
 }
 
 .flowIndex {
@@ -142,8 +96,8 @@
   justify-content: center;
   width: 1.5rem;
   height: 1.5rem;
-  border-radius: 50%;
-  font-size: 0.75rem;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-xs);
   font-weight: 700;
   background: var(--stage-govern);
   color: var(--stage-fill-text);
@@ -168,8 +122,44 @@
 
 .flowCaption {
   margin-top: var(--space-3);
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
   color: var(--color-text-secondary);
+}
+
+/* Workshop track matrix: modules down, tracks across */
+
+.trackMatrix {
+  /* Wide enough for the three track columns; below that the ResponsiveTable wrapper scrolls. */
+  min-width: 600px;
+  table-layout: fixed;
+}
+
+.trackMatrix thead th:first-child {
+  width: 40%;
+}
+
+.trackHead {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.trackDuration {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.trackCell {
+  text-align: center;
+  vertical-align: middle;
+}
+
+.trackCell > svg {
+  display: inline-block;
+  vertical-align: middle;
+  color: var(--stage-build);
 }
 
 /* Notebook groups */
@@ -189,32 +179,25 @@
 
 .groups {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-4);
 }
 
 @media (min-width: 640px) {
   .groups {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 @media (min-width: 1024px) {
   .groups {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
-}
-
-.group {
-  padding: var(--space-4);
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
 }
 
 .group h3 {
   margin: 0 0 var(--space-2);
-  font-size: 1rem;
+  font-size: var(--text-base);
 }
 
 .group ul {
@@ -229,7 +212,7 @@
 
 .heroFigure {
   padding: var(--space-2);
-  background: #ffffff;
+  background: var(--color-figure-panel);
   border-radius: var(--radius-md);
 }
 
@@ -241,7 +224,7 @@
 
 .heroDownload {
   margin-top: var(--space-2);
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
 }
 
 /* Evidence section */

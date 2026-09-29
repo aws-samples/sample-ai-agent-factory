@@ -40,14 +40,26 @@ function isLowPower(): boolean {
   return (typeof cores === 'number' && cores <= 4) || window.innerWidth < 640;
 }
 
-/** Bounding box of the hero copy column relative to the backdrop, so drawing under the text can be dimmed. */
+/** Padding (CSS px) added around the copy block so the dimmed area clears the text comfortably. */
+const COPY_MARGIN = 16;
+
+/**
+ * Bounding box of the header's copy block (the element wrapping the h1), relative to the backdrop,
+ * so drawing under the text can be dimmed. Measured from the DOM rather than assumed, so it follows
+ * the block wherever the header places it (left column or centred).
+ */
 function measureCopyRegion(root: HTMLElement): Rect | null {
-  const heading = root.parentElement?.querySelector('h1');
-  const copy = heading?.parentElement;
+  const header = root.closest<HTMLElement>('[data-page-header]') ?? root.parentElement?.parentElement ?? null;
+  const copy = header?.querySelector<HTMLElement>('[data-copy]') ?? header?.querySelector('h1')?.parentElement ?? null;
   if (!copy) return null;
   const rootRect = root.getBoundingClientRect();
   const copyRect = copy.getBoundingClientRect();
-  return { x: copyRect.left - rootRect.left, y: copyRect.top - rootRect.top, width: copyRect.width, height: copyRect.height };
+  return {
+    x: copyRect.left - rootRect.left - COPY_MARGIN,
+    y: copyRect.top - rootRect.top - COPY_MARGIN,
+    width: copyRect.width + COPY_MARGIN * 2,
+    height: copyRect.height + COPY_MARGIN * 2,
+  };
 }
 
 /** Whether the animation should run given the visitor's choice and their motion preference. */

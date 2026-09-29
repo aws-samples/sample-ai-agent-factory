@@ -1,6 +1,14 @@
 .page {
-  padding-top: var(--space-6);
+  padding-top: var(--space-8);
   padding-bottom: var(--section-padding-y);
+}
+
+/* Source path in the header lead: monospace, wraps anywhere so long repository paths
+   never widen the band at narrow widths. Inherits the lead's on-dark colour. */
+.sourcePath {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
 }
 
 .layout,
@@ -76,9 +84,9 @@
   min-height: 36px;
   padding: var(--space-1) var(--space-3);
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--color-text-secondary);
-  background: var(--color-bg-secondary);
+  background: var(--color-surface);
   white-space: nowrap;
   text-decoration: none;
 }
@@ -89,8 +97,8 @@
 }
 
 .sidebarLink[aria-current='page'] {
-  color: var(--color-blue-hover);
-  border-color: var(--color-blue);
+  color: var(--color-link-hover);
+  border-color: var(--color-link);
   font-weight: 600;
 }
 
@@ -122,22 +130,13 @@
   }
 
   .sidebarLink[aria-current='page'] {
-    border-left-color: var(--color-blue);
+    border-left-color: var(--color-link);
   }
 }
 
 /* Article */
 .article {
   min-width: 0;
-}
-
-.header {
-  margin-bottom: var(--space-6);
-}
-
-.source {
-  margin-top: var(--space-2);
-  font-size: 0.875rem;
 }
 
 .body {
@@ -201,7 +200,7 @@
   border-top: 1px solid var(--color-border);
 }
 
-/* Previous / next */
+/* Previous / next: two interactive cards, each stretched over by its single link. */
 .pager {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -211,24 +210,30 @@
   border-top: 1px solid var(--color-border);
 }
 
+.pagerCard {
+  display: flex;
+  min-height: 48px;
+}
+
 .pagerLink {
   display: flex;
+  flex: 1;
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
   overflow-wrap: anywhere;
-  min-height: 48px;
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
   color: var(--color-text-primary);
-  background: var(--color-bg-secondary);
   text-decoration: none;
 }
 
 .pagerLink:hover {
-  border-color: var(--color-blue);
+  color: var(--color-text-primary);
   text-decoration: underline;
+}
+
+/* Long labels must not squeeze the arrow. */
+.pagerLink > svg {
+  flex-shrink: 0;
 }
 
 .pagerNext {
@@ -238,9 +243,9 @@
 
 .pagerLabel {
   display: block;
-  font-size: 0.75rem;
+  font-size: var(--text-xs);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--label-tracking);
   color: var(--color-text-secondary);
 }
 
@@ -257,14 +262,14 @@
     top: calc(var(--header-height) + var(--space-4));
     max-height: calc(100vh - var(--header-height) - var(--space-8));
     overflow-y: auto;
-    font-size: 0.875rem;
+    font-size: var(--text-sm);
   }
 }
 
 .tocHeading {
-  font-size: 0.75rem;
+  font-size: var(--text-xs);
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: var(--label-tracking);
   color: var(--color-text-secondary);
   margin-bottom: var(--space-2);
 }

@@ -2,11 +2,12 @@ import { Link } from 'react-router-dom';
 import { FactsTable } from '../../components/FactsTable';
 import { PageHeader } from '../../components/PageHeader';
 import { PageMeta } from '../../components/PageMeta';
+import { Section } from '../../components/Section';
 import { SourceLink } from '../../components/SourceLink';
 import { projects } from '../../content/data';
 import { FACT_LABELS, getFacts } from '../../content/facts';
 import { PATHS, projectPath } from '../../paths';
-import { JumpLinks, ProjectHeading, StartNav } from './shared';
+import { JumpLinks, ProjectBadge, StartNav } from './shared';
 import styles from './start.module.css';
 
 export function PrerequisitesPage() {
@@ -35,13 +36,7 @@ export function PrerequisitesPage() {
         {projects.map((project) => {
           const facts = getFacts(project.id);
           return (
-            <section
-              key={project.id}
-              id={project.id}
-              className={styles.projectSection}
-              aria-labelledby={`${project.id}-heading`}
-            >
-              <ProjectHeading project={project} id={`${project.id}-heading`} />
+            <Section key={project.id} id={project.id} title={project.name} badge={<ProjectBadge project={project} />}>
               <p className={styles.meta}>
                 From the README: <SourceLink source={project.sources.prerequisites} />
               </p>
@@ -65,7 +60,7 @@ export function PrerequisitesPage() {
                 Next: <Link to={`${PATHS.start}#${project.id}`}>first ten minutes with {project.shortName}</Link> or the{' '}
                 <Link to={projectPath(project.id)}>{project.shortName} project page</Link>.
               </p>
-            </section>
+            </Section>
           );
         })}
       </div>

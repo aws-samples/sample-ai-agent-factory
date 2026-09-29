@@ -1,14 +1,20 @@
 import { Link } from 'react-router-dom';
-import { ArrowRight } from 'lucide-react';
+import { ArrowRight, Timer } from 'lucide-react';
+import { Card } from '../../components/Card';
 import { PageHeader } from '../../components/PageHeader';
 import { PageMeta } from '../../components/PageMeta';
 import { ResponsiveTable } from '../../components/ResponsiveTable';
+import { Section } from '../../components/Section';
+import { SectionHeading } from '../../components/SectionHeading';
 import { StageBadge } from '../../components/StageBadge';
-import { getProjectById, projects } from '../../content/data';
+import { FactStat } from '../../components/StatTile';
+import { getProjectById, projects, type Project } from '../../content/data';
 import { FACT_KEYS, FACT_LABELS, getFacts, type ProjectFacts } from '../../content/facts';
 import { getSitePath, roleGuidance, sitePaths, timeGuidance } from '../../content/tracks';
 import { PATHS, projectPath } from '../../paths';
-import { FactItem, FactValue, SmallSource, StartNav } from './shared';
+import { STAGE_ICONS } from '../../stage';
+import { factIcon } from './factIcons';
+import { FactValue, SmallSource, StartNav } from './shared';
 import styles from './start.module.css';
 
 /**
@@ -39,6 +45,105 @@ const FACT_ROWS: ReadonlyArray<keyof ProjectFacts> = [
 /** One column per project, with its facts resolved once. */
 const columns = projects.map((project) => ({ project, facts: getFacts(project.id) }));
 
+function StageIcon({ project, size = 16 }: { project: Project; size?: number }) {
+  const Icon = STAGE_ICONS[project.stage];
+  return <Icon size={size} aria-hidden="true" className={styles.stageIcon} />;
+}
+
+/** The comparison as a table: columns are the projects, rows the facts. Shown from 640 px up. */
+function ComparisonTable() {
+  return (
+    <div className={styles.matrixDesktop}>
+      <ResponsiveTable className={styles.matrix}>
+        <caption>Comparison of the four projects. Each fact links to its source in the repository.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Fact</th>
+            {columns.map(({ project }) => (
+              <th scope="col" key={project.id} data-stage={project.stage}>
+                <span className={styles.matrixProject}>
+                  <Link to={projectPath(project.id)} className={styles.matrixName}>
+                    <StageIcon project={project} />
+                    <span>{project.name}</span>
+                  </Link>
+                  <StageBadge stage={project.stage} label={`${project.stageNumber}. ${project.stageLabel}`} />
+                </span>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Stage</th>
+            {columns.map(({ project }) => (
+              <td key={project.id}>
+                {project.stageNumber}. {project.stageLabel}
+              </td>
+            ))}
+          </tr>
+          <tr className={styles.bestForRow}>
+            <th scope="row">Best for</th>
+            {columns.map(({ project }) => (
+              <td key={project.id}>{project.bestFor}</td>
+            ))}
+          </tr>
+          {FACT_ROWS.map((key) => (
+            <tr key={key}>
+              <th scope="row">
+                <span className={styles.rowLabel}>
+                  {factIcon(key)}
+                  <span>{FACT_LABELS[key]}</span>
+                </span>
+              </th>
+              {columns.map(({ project, facts }) => (
+                <td key={project.id}>
+                  <FactValue fact={facts[key]} label={FACT_LABELS[key]} project={project.shortName} />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </ResponsiveTable>
+    </div>
+  );
+}
+
+/** The same comparison as one card per project, for screens below 640 px. */
+function ComparisonCards() {
+  return (
+    <ul className={styles.matrixCards} aria-label="Comparison of the four projects, one card per project">
+      {columns.map(({ project, facts }) => (
+        <Card as="li" key={project.id} variant="accent" stage={project.stage} className={styles.compareCard}>
+          <div className={styles.tileHead}>
+            <StageBadge stage={project.stage} label={`${project.stageNumber}. ${project.stageLabel}`} />
+          </div>
+          <h3 className={styles.compareTitle}>
+            <Link to={projectPath(project.id)} className={styles.matrixName}>
+              <StageIcon project={project} />
+              <span>{project.name}</span>
+            </Link>
+          </h3>
+          <p className={styles.tileText}>
+            <strong>Best for:</strong> {project.bestFor}
+          </p>
+          <dl className={styles.compareFacts}>
+            {FACT_ROWS.map((key) => (
+              <FactStat
+                key={key}
+                label={FACT_LABELS[key]}
+                fact={facts[key]}
+                project={project.shortName}
+                icon={factIcon(key)}
+                noteMode="collapsed"
+              />
+            ))}
+          </dl>
+        </Card>
+      ))}
+    </ul>
+  );
+}
+
 export function WhichProjectPage() {
   return (
     <>
@@ -54,72 +159,39 @@ export function WhichProjectPage() {
       <div className="container">
         <StartNav />
 
-        <section className={styles.projectSection} aria-labelledby="compare-heading">
-          <h2 id="compare-heading">Compare the four projects</h2>
-          <p className={styles.lead}>
-            Columns are the projects and rows are the facts. On a narrow screen, scroll the table sideways; the fact
-            labels stay in view.
-          </p>
-          <ResponsiveTable className={styles.matrix}>
-            <caption>Comparison of the four projects. Each fact links to its source in the repository.</caption>
-            <thead>
-              <tr>
-                <th scope="col">Fact</th>
-                {columns.map(({ project }) => (
-                  <th scope="col" key={project.id}>
-                    <span className={styles.matrixProject}>
-                      <Link to={projectPath(project.id)}>{project.name}</Link>
-                      <StageBadge stage={project.stage} label={`${project.stageNumber}. ${project.stageLabel}`} />
-                    </span>
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <th scope="row">Stage</th>
-                {columns.map(({ project }) => (
-                  <td key={project.id}>
-                    {project.stageNumber}. {project.stageLabel}
-                  </td>
-                ))}
-              </tr>
-              <tr>
-                <th scope="row">Best for</th>
-                {columns.map(({ project }) => (
-                  <td key={project.id}>{project.bestFor}</td>
-                ))}
-              </tr>
-              {FACT_ROWS.map((key) => (
-                <tr key={key}>
-                  <th scope="row">{FACT_LABELS[key]}</th>
-                  {columns.map(({ project, facts }) => (
-                    <td key={project.id}>
-                      <FactValue fact={facts[key]} label={FACT_LABELS[key]} project={project.shortName} />
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </ResponsiveTable>
+        <Section
+          id="compare"
+          title="Compare the four projects"
+          flush
+          lead="Columns are the projects and rows are the facts. On a narrow screen, scroll the table sideways; the fact labels stay in view."
+        >
+          <ComparisonTable />
+          <ComparisonCards />
           <p className={`${styles.meta} ${styles.matrixHint}`}>
             Prerequisites per project are on the <Link to={PATHS.prerequisites}>Prerequisites</Link> page; cost notes
             and teardown procedures are under <Link to={PATHS.costsAndCleanup}>Costs and cleanup</Link>.
           </p>
-        </section>
+        </Section>
 
-        <section className={styles.projectSection} aria-labelledby="paths-heading">
-          <h2 id="paths-heading">Four paths through the repository</h2>
-          <p className={styles.lead}>
-            Each path starts on one project and says who it is for, what you have at the end, and how long the first
-            result takes.
-          </p>
-          <ul className={`${styles.tileGrid} ${styles.tileGrid4}`}>
+        <Section
+          id="paths"
+          title="Four paths through the repository"
+          lead="Each path starts on one project and says who it is for, what you have at the end, and how long the first result takes."
+        >
+          <ul className={styles.pathGrid}>
             {sitePaths.map((path) => {
               const first = getProjectById(path.projects[0]);
               if (!first) return null;
               return (
-                <li key={path.id} className={styles.tile} data-stage={first.stage} data-reveal data-lift>
+                <Card
+                  as="li"
+                  key={path.id}
+                  variant="accent"
+                  stage={first.stage}
+                  interactive
+                  reveal
+                  className={styles.pathCard}
+                >
                   <div className={styles.tileHead}>
                     <StageBadge stage={first.stage} label={`${first.stageNumber}. ${first.stageLabel}`} />
                     <Link to={path.startRoute} className={styles.tileLink}>
@@ -136,19 +208,23 @@ export function WhichProjectPage() {
                     <strong>What you get:</strong> {path.whatYouGet}{' '}
                     <SmallSource source={path.source} context={`what you get: ${path.name}`} />
                   </p>
-                  <dl className={styles.facts}>
-                    <FactItem label="Time to first result" fact={path.timeToFirstResult} />
+                  <dl className={styles.pathFacts}>
+                    <FactStat
+                      label="Time to first result"
+                      fact={path.timeToFirstResult}
+                      icon={<Timer size={14} aria-hidden="true" />}
+                    />
                   </dl>
-                </li>
+                </Card>
               );
             })}
           </ul>
-        </section>
+        </Section>
 
-        <div className={`${styles.projectSection} ${styles.twoCol}`}>
+        <div className={`${styles.guidance} ${styles.twoCol}`}>
           <section aria-labelledby="role-heading">
-            <h2 id="role-heading">By role</h2>
-            <ul className={`${styles.plainList} ${styles.subSection}`}>
+            <SectionHeading id="role-heading" title="By role" />
+            <ul className={styles.plainList}>
               {roleGuidance.map((guidance) => {
                 const path = getSitePath(guidance.pathId);
                 if (!path) return null;
@@ -161,8 +237,8 @@ export function WhichProjectPage() {
             </ul>
           </section>
           <section aria-labelledby="time-heading">
-            <h2 id="time-heading">By time available</h2>
-            <ul className={`${styles.plainList} ${styles.subSection}`}>
+            <SectionHeading id="time-heading" title="By time available" />
+            <ul className={styles.plainList}>
               {timeGuidance.map((guidance) => {
                 const path = getSitePath(guidance.pathId);
                 if (!path) return null;

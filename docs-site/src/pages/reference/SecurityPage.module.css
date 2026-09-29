@@ -5,30 +5,12 @@
   padding-bottom: var(--section-padding-y);
 }
 
-.section {
-  padding: var(--space-10) 0 0;
-}
-
-.section h2 {
-  margin-bottom: var(--space-4);
-}
-
-.prose {
-  max-width: 72ch;
-  margin-bottom: var(--space-4);
-}
-
-/* Before production */
-.checklistBox {
+/* Tinted checklist and reporting boxes (the Card owns the surface). */
+.tintedBox {
   max-width: 80ch;
-  padding: var(--space-6);
-  background: var(--tint-amber);
-  border-left: 4px solid var(--stage-learn-tint);
-  border-radius: var(--radius-md);
 }
 
-.checklistBox ul {
-  margin-top: var(--space-3);
+.checklist {
   padding-left: var(--space-6);
   display: flex;
   flex-direction: column;
@@ -46,21 +28,23 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-5);
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
 }
 
 .docHeading {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--space-2) var(--space-3);
 }
 
-.docHeading h3 {
+.docIcon {
+  flex-shrink: 0;
+  color: var(--stage-color);
+}
+
+.docGrid .docTitle {
   font-size: 1.25rem;
+  margin: 0;
 }
 
 .docList {
@@ -84,24 +68,11 @@
 }
 
 .docAside {
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
   color: var(--color-text-secondary);
 }
 
 .docAside a {
   text-decoration: underline;
   text-underline-offset: 0.15em;
-}
-
-/* Reporting */
-.reportingBox {
-  max-width: 80ch;
-  padding: var(--space-6);
-  background: var(--tint-violet);
-  border-left: 4px solid var(--stage-govern-tint);
-  border-radius: var(--radius-md);
-}
-
-.reportingBox p + p {
-  margin-top: var(--space-3);
 }

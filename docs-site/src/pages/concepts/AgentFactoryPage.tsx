@@ -1,12 +1,17 @@
 import { Link } from 'react-router-dom';
+import { Card } from '../../components/Card';
+import { NumberedSteps } from '../../components/NumberedSteps';
 import { PageHeader } from '../../components/PageHeader';
 import { PageMeta } from '../../components/PageMeta';
-import { ConceptsNav } from './ConceptsNav';
+import { Section } from '../../components/Section';
 import { SourceLink } from '../../components/SourceLink';
 import { StageBadge } from '../../components/StageBadge';
+import { FactStat } from '../../components/StatTile';
 import { getProjectById, projects, type ProjectId } from '../../content/data';
-import { facts, factText, type Fact, type Source } from '../../content/facts';
+import { facts, type Fact, type Source } from '../../content/facts';
 import { PATHS, projectPath } from '../../paths';
+import { STAGE_ICONS } from '../../stage';
+import { ConceptsNav } from './ConceptsNav';
 import styles from './AgentFactoryPage.module.css';
 
 const ROOT_README = 'README.md';
@@ -147,8 +152,7 @@ export function AgentFactoryPage() {
       <div className="container">
         <ConceptsNav />
 
-        <section className={styles.section} aria-labelledby="concept">
-          <h2 id="concept">The Agent Factory concept</h2>
+        <Section id="concept" title="The Agent Factory concept" flush>
           <p className={styles.prose}>
             An <strong>AI Agent Factory</strong> is the people, patterns, and platform that let an organization turn
             ideas into production agents reliably and at scale. The hard part is everything around the model:
@@ -162,21 +166,20 @@ export function AgentFactoryPage() {
             how enterprises move from learning to agent operations at scale (
             <SourceLink source={INDEPENDENCE_SOURCE}>What This Is</SourceLink>).
           </p>
-        </section>
+        </Section>
 
-        <section className={styles.section} aria-labelledby="site-grouping">
-          <h2 id="site-grouping">How this site groups the four projects</h2>
-          <p className={styles.prose}>
-            This grouping is this site&apos;s reading of the repository, not a structure the project READMEs use. It
-            exists to show which project answers which need.
-          </p>
-          <div className={styles.partsGrid}>
+        <Section
+          id="site-grouping"
+          title="How this site groups the four projects"
+          lead="This grouping is this site's reading of the repository, not a structure the project READMEs use. It exists to show which project answers which need."
+        >
+          <ol className={styles.partsGrid}>
             {STORY_PARTS.map((part, index) => (
-              <article key={part.title} className={styles.partCard}>
+              <Card as="li" key={part.title} reveal padding="lg" className={styles.partCard}>
                 <span className={styles.partNumber} aria-hidden="true">
                   {index + 1}
                 </span>
-                <h3>{part.title}</h3>
+                <h3 className={styles.partTitle}>{part.title}</h3>
                 <p>{part.text}</p>
                 <p className={styles.partProjects}>
                   <span className={styles.partProjectsLabel}>Projects:</span>
@@ -191,13 +194,12 @@ export function AgentFactoryPage() {
                     );
                   })}
                 </p>
-              </article>
+              </Card>
             ))}
-          </div>
-        </section>
+          </ol>
+        </Section>
 
-        <section className={styles.section} aria-labelledby="ships">
-          <h2 id="ships">How an engineer ships an agent (Blueprint)</h2>
+        <Section id="ships" title="How an engineer ships an agent (Blueprint)">
           <p className={styles.prose}>
             The <Link to={projectPath('blueprint')}>{BLUEPRINT_NAME}</Link> (the Blueprint, in the rest of this page)
             describes this flow in its README. It is the Blueprint&apos;s pull-request-and-pipeline path; the other
@@ -205,44 +207,39 @@ export function AgentFactoryPage() {
             README&apos;s own and the first step is quoted; the other descriptions are condensed. Source:{' '}
             <SourceLink source={SHIPPING_SOURCE} />.
           </p>
-          <ol className={styles.stepsList}>
+          <NumberedSteps stage="scale" connector className={styles.steps}>
             {BLUEPRINT_STEPS.map((step) => (
-              <li key={step.title}>
-                <strong>{step.title}</strong> {step.text}
-              </li>
+              <NumberedSteps.Item key={step.title} title={step.title}>
+                <p>{step.text}</p>
+              </NumberedSteps.Item>
             ))}
-          </ol>
+          </NumberedSteps>
           <p className={styles.prose}>
             In the Blueprint, the Platform team is not in the application deployment loop. It owns the contracts that
             make independent deployment safe.
           </p>
-        </section>
+        </Section>
 
-        <section className={styles.section} aria-labelledby="each-project">
-          <h2 id="each-project">How each project actually ships an agent</h2>
+        <Section id="each-project" title="How each project actually ships an agent">
           <ul className={styles.shipList}>
             {PROJECT_SHIPPING.map((entry) => {
               const project = getProjectById(entry.projectId);
               if (!project) return null;
+              const Icon = STAGE_ICONS[project.stage];
               return (
-                <li key={entry.projectId} className={styles.shipItem}>
+                <Card as="li" key={entry.projectId} variant="accent" stage={project.stage} reveal className={styles.shipItem}>
                   <div className={styles.shipHeading}>
-                    <StageBadge stage={project.stage} label={project.stageLabel} />
-                    <h3>
+                    <Icon size={20} aria-hidden="true" className={styles.shipIcon} />
+                    <h3 className={styles.shipTitle}>
                       <Link to={projectPath(project.id)}>{project.shortName}</Link>
                     </h3>
+                    <StageBadge stage={project.stage} label={project.stageLabel} />
                   </div>
                   <p>{entry.text}</p>
-                  <p className={styles.shipFact}>
-                    <span className={styles.shipFactLabel}>{entry.factLabel}:</span> {factText(entry.fact)}
-                    {entry.fact.source && (
-                      <>
-                        {' '}
-                        (<SourceLink source={entry.fact.source}>source</SourceLink>)
-                      </>
-                    )}
-                  </p>
-                </li>
+                  <dl className={styles.shipFacts}>
+                    <FactStat fact={entry.fact} label={entry.factLabel} project={project.shortName} />
+                  </dl>
+                </Card>
               );
             })}
           </ul>
@@ -252,7 +249,7 @@ export function AgentFactoryPage() {
             <SourceLink source={INDEPENDENCE_SOURCE}>root README</SourceLink>). To pick one, use{' '}
             <Link to={PATHS.whichProject}>Which project is for me</Link>.
           </p>
-        </section>
+        </Section>
       </div>
     </div>
   );

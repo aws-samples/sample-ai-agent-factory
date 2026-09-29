@@ -4,45 +4,43 @@
   width: 100%;
 }
 
+.body {
+  padding: var(--space-8) var(--page-padding-x) var(--section-padding-y);
+}
+
 .grid {
   list-style: none;
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-6);
 }
 
-@media (min-width: 900px) {
+@media (min-width: 1024px) {
   .grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
-.card {
-  --card-stage: var(--color-border);
+/* Inner layout of one directory card; the box itself comes from Card. */
+.projectCard {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-6);
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  border-top: 4px solid var(--card-stage);
-  border-radius: var(--radius-lg);
 }
 
-.card[data-stage='learn'] {
-  --card-stage: var(--stage-learn-tint);
+.head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
 }
 
-.card[data-stage='build'] {
-  --card-stage: var(--stage-build-tint);
+.stageIcon {
+  display: inline-flex;
+  color: var(--stage-color, var(--color-text-secondary));
 }
 
-.card[data-stage='govern'] {
-  --card-stage: var(--stage-govern-tint);
-}
-
-.card[data-stage='scale'] {
-  --card-stage: var(--stage-scale-tint);
+.stageIcon > svg {
+  display: block;
 }
 
 .cardTitle {
@@ -54,31 +52,16 @@
   color: var(--color-text-secondary);
 }
 
-.facts {
+/* Three facts as StatTiles on a sunken strip */
+.factList {
   display: grid;
-  grid-template-columns: 1fr;
-  gap: var(--space-2);
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
   margin: 0;
-}
-
-.facts > div {
-  padding: var(--space-2) var(--space-3);
-  background: var(--color-cloud);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface-sunken);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-}
-
-.facts dt {
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--color-text-secondary);
-}
-
-.facts dd {
-  margin: 0;
-  font-size: 0.9375rem;
 }
 
 .actions {
@@ -87,38 +70,6 @@
   gap: var(--space-3);
   margin-top: auto;
   padding-top: var(--space-3);
-}
-
-.primary,
-.secondary {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: 44px;
-  padding: var(--space-2) var(--space-4);
-  border-radius: var(--radius-md);
-  font-weight: 600;
-  text-decoration: none;
-}
-
-a.primary {
-  background: var(--color-blue);
-  color: #ffffff;
-}
-
-a.primary:hover {
-  background: var(--color-blue-hover);
-  color: #ffffff;
-  text-decoration: underline;
-}
-
-a.secondary {
-  border: 1px solid var(--color-blue);
-  color: var(--color-blue);
-}
-
-a.secondary:hover {
-  text-decoration: underline;
 }
 
 .compare {

@@ -1,11 +1,13 @@
 import { BookOpen, CircleSlash, Eye, Minus, ShieldCheck } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { Card } from '../../components/Card';
 import { ResponsiveTable } from '../../components/ResponsiveTable';
 import { SourceLink } from '../../components/SourceLink';
 import { projects, type ProjectId } from '../../content/data';
 import type { Source } from '../../content/facts';
 import { POSTURE_LABELS, type MatrixCell, type Posture } from '../../content/matrix';
 import { projectPath } from '../../paths';
+import { STAGE_ICONS } from '../../stage';
 import styles from './PostureMatrix.module.css';
 
 /**
@@ -47,19 +49,11 @@ const POSTURE_ICONS = {
   'not-applicable': Minus,
 } as const;
 
-const POSTURE_CLASS: Record<Posture, string> = {
-  enforced: styles.enforced,
-  advisory: styles.advisory,
-  illustrative: styles.illustrative,
-  'outside-envelope': styles.outsideEnvelope,
-  'not-applicable': styles.notApplicable,
-};
-
 /** Posture label with an aria-hidden icon. The text is always visible. */
 export function PostureBadge({ posture }: { posture: Posture }) {
   const Icon = POSTURE_ICONS[posture];
   return (
-    <span className={`${styles.badge} ${POSTURE_CLASS[posture]}`}>
+    <span className={styles.badge} data-posture={posture}>
       <Icon size={14} aria-hidden="true" className={styles.badgeIcon} />
       {POSTURE_LABELS[posture].label}
     </span>
@@ -69,66 +63,74 @@ export function PostureBadge({ posture }: { posture: Posture }) {
 /** Legend explaining the five postures. Render once above a matrix. */
 export function PostureLegend() {
   return (
-    <ul className={styles.legend} aria-label="Posture legend">
-      {POSTURE_ORDER.map((posture) => (
-        <li key={posture} className={styles.legendItem}>
-          <PostureBadge posture={posture} />
-          <span className={styles.legendMeaning}>{POSTURE_LABELS[posture].meaning}</span>
-        </li>
-      ))}
-    </ul>
+    <Card padding="sm" className={styles.legend}>
+      <ul className={styles.legendList} aria-label="Posture legend">
+        {POSTURE_ORDER.map((posture) => (
+          <li key={posture} className={styles.legendItem}>
+            <PostureBadge posture={posture} />
+            <span className={styles.legendMeaning}>{POSTURE_LABELS[posture].meaning}</span>
+          </li>
+        ))}
+      </ul>
+    </Card>
   );
 }
 
 /**
- * Capability-by-project or control-by-project table. Every cell shows the
- * posture as text with a distinct icon, a short statement, and a link to the
- * repository file the statement comes from.
+ * Capability-by-project or control-by-project heat-map. Every cell is tinted by
+ * posture and also shows the posture as text with a distinct icon, a short
+ * statement, and a link to the repository file the statement comes from, so
+ * colour is never the only cue. Row-header cells carry `id="matrix-<rowId>"`
+ * so other pages can link to a row.
  */
 export function PostureMatrix({ caption, rowHeader, rows }: PostureMatrixProps) {
   return (
     <>
       <p className={styles.scrollHint}>The table is wider than the screen. Scroll it sideways to see every project.</p>
-      <ResponsiveTable className={styles.table}>
+      <ResponsiveTable className={styles.table} data-posture-matrix>
         <caption className={styles.caption}>{caption}</caption>
-      <thead>
-        <tr>
-          <th scope="col" className={styles.rowHeader}>
-            {rowHeader}
-          </th>
-          {projects.map((project) => (
-            <th scope="col" key={project.id} className={styles.colHeader}>
-              <Link to={projectPath(project.id)}>{project.shortName}</Link>
-              <span className={styles.stageLabel} data-stage={project.stage}>
-                {project.stageLabel}
-              </span>
-            </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((row) => (
-          <tr key={row.id} id={`matrix-${row.id}`}>
-            <th scope="row" className={styles.rowHeader}>
-              {row.name}
+        <thead>
+          <tr>
+            <th scope="col" className={styles.rowHeader}>
+              {rowHeader}
             </th>
             {projects.map((project) => {
-              const cell = row.cells[project.id];
+              const Icon = STAGE_ICONS[project.stage];
               return (
-                <td key={project.id} className={styles.cell}>
-                  <PostureBadge posture={cell.posture} />
-                  <p className={styles.cellText}>{cell.text}</p>
-                  {cell.source && (
-                    <p className={styles.cellSource}>
-                      <SourceLink source={cell.source}>{sourceLabel(cell.source)}</SourceLink>
-                    </p>
-                  )}
-                </td>
+                <th scope="col" key={project.id} className={styles.colHeader} data-stage={project.stage}>
+                  <span className={styles.colHeaderName}>
+                    <Icon size={18} aria-hidden="true" className={styles.stageIcon} />
+                    <Link to={projectPath(project.id)}>{project.shortName}</Link>
+                  </span>
+                  <span className={styles.stageLabel}>{project.stageLabel}</span>
+                </th>
               );
             })}
           </tr>
-        ))}
-      </tbody>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.id} className={styles.row}>
+              <th scope="row" id={`matrix-${row.id}`} className={styles.rowHeader}>
+                {row.name}
+              </th>
+              {projects.map((project) => {
+                const cell = row.cells[project.id];
+                return (
+                  <td key={project.id} className={styles.cell} data-posture={cell.posture}>
+                    <PostureBadge posture={cell.posture} />
+                    <p className={styles.cellText}>{cell.text}</p>
+                    {cell.source && (
+                      <p className={styles.cellSource}>
+                        <SourceLink source={cell.source}>{sourceLabel(cell.source)}</SourceLink>
+                      </p>
+                    )}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
       </ResponsiveTable>
     </>
   );

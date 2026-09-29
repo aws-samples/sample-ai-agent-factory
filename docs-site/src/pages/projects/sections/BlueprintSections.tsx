@@ -1,8 +1,10 @@
 import servicesSvg from '../../../../../enterprise-agentic-ai-platform-blueprint/assets/enterprise-agent-factory-aws-services.svg';
 import conceptSvg from '../../../../../enterprise-agentic-ai-platform-blueprint/assets/enterprise-agent-factory-concept.svg';
+import { Card } from '../../../components/Card';
 import { DocImage } from '../../../components/DocImage';
 import { ExternalLink } from '../../../components/ExternalLink';
 import { Figure } from '../../../components/Figure';
+import { NumberedSteps } from '../../../components/NumberedSteps';
 import { ResponsiveTable } from '../../../components/ResponsiveTable';
 import { SourceLink } from '../../../components/SourceLink';
 import { blueprintScps } from '../../../content/facts';
@@ -44,14 +46,19 @@ export function BlueprintSections() {
           The Blueprint ships {blueprintScps.length} service control policies as TypeScript definitions. Each entry
           links to its source file.
         </p>
-        <ol className={styles.list}>
+        <NumberedSteps stage="scale" dense>
           {blueprintScps.map((scp) => (
-            <li key={scp.id}>
-              <code>{scp.id}</code> {scp.title}:{' '}
-              <SourceLink source={{ file: scp.file }}>{scp.file.split('/').pop()}</SourceLink>
-            </li>
+            <NumberedSteps.Item
+              key={scp.id}
+              title={
+                <span className={styles.stepText}>
+                  <code>{scp.id}</code> {scp.title}:{' '}
+                  <SourceLink source={{ file: scp.file }}>{scp.file.split('/').pop()}</SourceLink>
+                </span>
+              }
+            />
           ))}
-        </ol>
+        </NumberedSteps>
       </Section>
 
       <Section id="golden-paths" title="Golden paths">
@@ -93,7 +100,7 @@ export function BlueprintSections() {
         </p>
         <div className={styles.groups}>
           {packageGroups.map((group) => (
-            <div key={group.id} className={styles.group}>
+            <Card key={group.id} padding="sm" className={styles.group}>
               <h3>{group.name}</h3>
               <ul>
                 {group.packages.map((name) => (
@@ -102,7 +109,7 @@ export function BlueprintSections() {
                   </li>
                 ))}
               </ul>
-            </div>
+            </Card>
           ))}
         </div>
       </Section>

@@ -2,138 +2,241 @@
   width: 100%;
 }
 
-/* Atlas band: image from 1024 px, typed stage list below */
-.atlas {
-  padding-top: var(--space-4);
+/* Section bands. Dark bands also carry the global `on-dark` class. */
+.band {
+  padding: var(--section-padding-y) 0;
 }
 
-.atlasHeading {
-  margin-bottom: var(--space-3);
+.bandAlt {
+  background: var(--color-surface);
+  border-block: 1px solid var(--color-border);
+}
+
+.bandDark {
+  background: var(--color-band);
+}
+
+/* Hero title accent on "Factory": a gradient in the two outer stage colours where the browser
+   can clip a background to text, otherwise (and for contrast tools, which read `color`) the
+   solid Scale on-dark blue, which passes 4.5:1 on the band. */
+.titleAccent {
+  color: var(--stage-scale-on-dark);
+}
+
+@supports (background-clip: text) or (-webkit-background-clip: text) {
+  .titleAccent {
+    background: linear-gradient(90deg, var(--stage-scale-on-dark), var(--stage-govern-on-dark));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+}
+
+@media (forced-colors: active) {
+  .titleAccent {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+}
+
+/* Atlas band: desktop only. Below 1024 px the hero journey strip already carries the
+   same four links, so the band would read as a duplicate. */
+.atlas {
+  display: none;
+  padding-top: var(--space-8);
 }
 
 .atlasImage {
-  display: none;
   width: 100%;
   height: auto;
 }
 
-.stageList {
+@media (min-width: 1024px) {
+  .atlas {
+    display: block;
+  }
+}
+
+/* Project tiles */
+.tileGrid {
   list-style: none;
   display: grid;
-  gap: var(--space-2);
-}
-
-.atlas .stageLink {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  min-height: 44px;
-  padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--color-midnight-light);
-  border-radius: var(--radius-md);
-  background: var(--color-midnight-light);
-  color: var(--color-cloud);
-  text-decoration: none;
-}
-
-.atlas .stageLink:hover {
-  border-color: var(--color-mist);
-  color: var(--color-cloud);
-  text-decoration: none;
-}
-
-.atlas .stageLink:hover strong {
-  text-decoration: underline;
-}
-
-.stageLink svg {
-  flex-shrink: 0;
-}
-
-.stageText {
-  flex: 1;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0 var(--space-2);
-}
-
-.stageTagline {
-  display: none;
-  color: var(--color-text-inverse-muted);
-  font-size: 0.875rem;
+  gap: var(--space-4);
 }
 
 @media (min-width: 640px) {
-  .stageTagline {
-    display: inline;
+  .tileGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 @media (min-width: 1024px) {
-  .atlas {
-    padding-top: var(--space-8);
-  }
-
-  .atlasImage {
-    display: block;
-  }
-
-  .stageList {
-    display: none;
+  .tileGrid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 
-/* Personas: plain text blocks, no card chrome */
-.personas {
-  list-style: none;
-  display: grid;
+.tile {
+  display: flex;
+  flex-direction: column;
   gap: var(--space-2);
 }
 
-.persona {
-  font-size: 0.875rem;
-  line-height: 1.45;
+.tileHead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
 }
 
-@media (min-width: 640px) {
-  .persona {
-    font-size: 0.9375rem;
-  }
+/* Stage icon in a soft disc of the card's accent hue; `--card-accent` and `--stage-color` come from Card. */
+.tileIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--card-accent, var(--color-border)) 14%, transparent);
+  color: var(--stage-color, var(--color-text-secondary));
 }
 
-.persona p {
-  color: var(--color-text-secondary);
+.tileIcon > svg {
+  display: block;
 }
 
-.personaRole {
-  font-size: 1rem;
-  margin-bottom: var(--space-1);
+.tileTitle {
+  font-size: var(--text-lg);
+  line-height: 1.3;
 }
 
-/* Flows with the sentence so long labels wrap inside narrow columns */
-.personaLink {
-  font-weight: 600;
+.tileTitle a {
+  color: var(--color-text-primary);
+  text-decoration: none;
+}
+
+.tileTitle a:hover {
+  color: var(--color-link-hover);
   text-decoration: underline;
   text-underline-offset: 0.15em;
 }
 
-.personaLink svg {
-  vertical-align: middle;
-  margin-left: 2px;
+.tileTitle a:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.tileTagline {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.tileText {
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.facts {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-1);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+/* Personas: five cards, one column, two from 640 px, three plus two from 1024 px */
+.personas {
+  list-style: none;
+  display: grid;
+  gap: var(--space-4);
+}
+
+.persona {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.personaIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+  color: var(--color-link);
+}
+
+.personaIcon > svg {
+  display: block;
+}
+
+.personaRole {
+  font-size: var(--text-lg);
+  line-height: 1.3;
+}
+
+.personaText {
+  flex: 1;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+.personaLink {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--target-min);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-link);
+  text-decoration: none;
+}
+
+.personaLink:hover {
+  color: var(--color-link-hover);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.personaLink > svg {
+  flex-shrink: 0;
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .personaLink > svg {
+    transition: translate var(--transition-fast);
+  }
+
+  .persona:hover .personaLink > svg,
+  .personaLink:focus-visible > svg {
+    translate: 2px 0;
+  }
 }
 
 @media (min-width: 640px) {
   .personas {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--space-6) var(--space-8);
   }
 }
 
-@media (min-width: 1100px) {
+@media (min-width: 1024px) {
   .personas {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: var(--space-6);
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+
+  .persona {
+    grid-column: span 2;
+  }
+
+  .persona:nth-child(4) {
+    grid-column: 2 / span 2;
+  }
+
+  .persona:nth-child(5) {
+    grid-column: 4 / span 2;
   }
 }
 
@@ -144,12 +247,12 @@
 
 .notices :global([role='note']) {
   margin: var(--space-3) 0 0;
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
 }
 
 @media (min-width: 640px) {
   .notices :global([role='note']) {
-    font-size: 1rem;
+    font-size: var(--text-base);
   }
 }
 
@@ -178,10 +281,13 @@
   text-align: center;
 }
 
-.closing h2 {
+.closingHeading {
   margin-bottom: var(--space-4);
 }
 
 .closingActions {
+  display: flex;
+  flex-wrap: wrap;
   justify-content: center;
+  gap: var(--space-3);
 }

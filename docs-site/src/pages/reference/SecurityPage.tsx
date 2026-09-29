@@ -1,8 +1,9 @@
 import { Link } from 'react-router-dom';
+import { Card } from '../../components/Card';
 import { ExternalLink } from '../../components/ExternalLink';
 import { PageHeader } from '../../components/PageHeader';
 import { PageMeta } from '../../components/PageMeta';
-import { ReferenceNav } from './ReferenceNav';
+import { Section } from '../../components/Section';
 import { StageBadge } from '../../components/StageBadge';
 import { getProjectById, type ProjectId } from '../../content/data';
 import { docById, PROJECT_FOLDERS, type DocEntry } from '../../content/docs';
@@ -10,7 +11,9 @@ import { blob, githubHeadingSlug, ISSUES_URL, VULN_REPORT_URL } from '../../cont
 import { securityMatrix } from '../../content/matrix';
 import { docLabel } from '../../docs/docModules';
 import { PATHS, projectPath, projectReadmePath } from '../../paths';
+import { STAGE_ICONS } from '../../stage';
 import { PostureLegend, PostureMatrix } from '../concepts/PostureMatrix';
+import { ReferenceNav } from './ReferenceNav';
 import styles from './SecurityPage.module.css';
 
 const PRODUCTION_CHECKLIST = [
@@ -113,21 +116,20 @@ export function SecurityPage() {
       <div className="container">
         <ReferenceNav />
 
-        <section className={styles.section} aria-labelledby="controls">
-          <h2 id="controls">Security controls by project</h2>
-          <p className={styles.prose}>
-            Each cell states the control as the project ships it, with a link to the file that says so. Postures are
-            coarse on purpose; read the cell text before relying on a control.
-          </p>
+        <Section
+          id="controls"
+          title="Security controls by project"
+          flush
+          lead="Each cell states the control as the project ships it, with a link to the file that says so. Postures are coarse on purpose; read the cell text before relying on a control."
+        >
           <PostureLegend />
           <PostureMatrix caption="Security control posture by project, with sources" rowHeader="Control" rows={matrixRows} />
-        </section>
+        </Section>
 
-        <section className={styles.section} aria-labelledby="before-production">
-          <h2 id="before-production">Before production use</h2>
-          <div className={styles.checklistBox}>
+        <Section id="before-production" title="Before production use">
+          <Card variant="tinted" tint="amber" padding="lg" className={styles.tintedBox}>
             <p>Before deploying any of these projects to a production environment, review:</p>
-            <ul>
+            <ul className={styles.checklist}>
               {PRODUCTION_CHECKLIST.map((item) => (
                 <li key={item}>{item}</li>
               ))}
@@ -136,27 +138,28 @@ export function SecurityPage() {
                 <Link to={PATHS.referenceSupportEnvelope}>support envelope</Link> page
               </li>
             </ul>
-          </div>
-        </section>
+          </Card>
+        </Section>
 
-        <section className={styles.section} aria-labelledby="docs">
-          <h2 id="docs">Security documentation on this site</h2>
-          <p className={styles.prose}>
-            Rendered documents open on this site. README sections open on the rendered README page, with a GitHub link
-            beside each. Files the site does not render link straight to GitHub.
-          </p>
+        <Section
+          id="docs"
+          title="Security documentation on this site"
+          lead="Rendered documents open on this site. README sections open on the rendered README page, with a GitHub link beside each. Files the site does not render link straight to GitHub."
+        >
           <div className={styles.docGrid}>
             {SECURITY_DOCS.map((entry) => {
               const project = getProjectById(entry.projectId);
               if (!project) return null;
+              const Icon = STAGE_ICONS[project.stage];
               const siteDocs = entry.siteDocIds.map((id) => docById(id)).filter((d): d is DocEntry => d !== undefined);
               return (
-                <article key={entry.projectId} className={styles.docCard}>
+                <Card as="article" key={entry.projectId} stage={project.stage} interactive reveal className={styles.docCard}>
                   <div className={styles.docHeading}>
-                    <StageBadge stage={project.stage} label={project.stageLabel} />
-                    <h3>
+                    <Icon size={20} aria-hidden="true" className={styles.docIcon} />
+                    <h3 className={styles.docTitle}>
                       <Link to={projectPath(project.id)}>{project.shortName}</Link>
                     </h3>
+                    <StageBadge stage={project.stage} label={project.stageLabel} />
                   </div>
                   <ul className={styles.docList}>
                     <li>
@@ -185,15 +188,14 @@ export function SecurityPage() {
                       </li>
                     ))}
                   </ul>
-                </article>
+                </Card>
               );
             })}
           </div>
-        </section>
+        </Section>
 
-        <section className={styles.section} aria-labelledby="reporting">
-          <h2 id="reporting">Reporting</h2>
-          <div className={styles.reportingBox}>
+        <Section id="reporting" title="Reporting">
+          <Card variant="tinted" tint="violet" padding="lg" className={styles.tintedBox}>
             <p>
               <strong>Security vulnerabilities:</strong> do not open a public GitHub issue. Report them through the{' '}
               <ExternalLink href={VULN_REPORT_URL}>AWS vulnerability reporting page</ExternalLink>, as the repository&apos;s{' '}
@@ -203,8 +205,8 @@ export function SecurityPage() {
               <strong>Bugs and documentation problems:</strong> open an issue in the{' '}
               <ExternalLink href={ISSUES_URL}>GitHub issue tracker</ExternalLink>.
             </p>
-          </div>
-        </section>
+          </Card>
+        </Section>
       </div>
     </div>
   );

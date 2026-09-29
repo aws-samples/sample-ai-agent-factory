@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { Callout } from '../../../components/Callout';
+import { Card } from '../../../components/Card';
 import { CodeBlock } from '../../../components/CodeBlock';
 import type { ProjectId } from '../../../content/data';
 import { githubUrl } from '../../../content/facts';
@@ -52,7 +53,7 @@ export function EvidenceSection({ projectId, children }: { projectId: ProjectId;
       </Callout>
       {children}
       {data.items.map((item) => (
-        <div key={item.id} className={styles.evidenceItem} data-reveal>
+        <Card key={item.id} reveal className={styles.evidenceItem}>
           <h3>{item.what}</h3>
           {item.command && <CodeBlock code={item.command} language="bash" />}
           <p className={styles.prose}>
@@ -66,7 +67,7 @@ export function EvidenceSection({ projectId, children }: { projectId: ProjectId;
             </ol>
           )}
           <Sources sources={item.sources} />
-        </div>
+        </Card>
       ))}
     </Section>
   );

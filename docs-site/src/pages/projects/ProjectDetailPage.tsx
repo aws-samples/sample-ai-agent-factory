@@ -1,11 +1,16 @@
 import { Link, useParams } from 'react-router-dom';
+import { ArrowRight } from 'lucide-react';
+import { Button } from '../../components/Button';
+import { Card } from '../../components/Card';
 import { CodeBlock } from '../../components/CodeBlock';
 import { ExternalLink } from '../../components/ExternalLink';
 import { FactsTable } from '../../components/FactsTable';
+import { NumberedSteps } from '../../components/NumberedSteps';
 import { PageHeader } from '../../components/PageHeader';
 import { PageMeta } from '../../components/PageMeta';
 import { SourceLink } from '../../components/SourceLink';
 import { StageBadge } from '../../components/StageBadge';
+import { FactStat } from '../../components/StatTile';
 import { getProjectById, projects, type ProjectId } from '../../content/data';
 import { docsForProject } from '../../content/docs';
 import {
@@ -30,14 +35,16 @@ import { getQuickstarts, type QuickstartStep } from '../../content/quickstarts';
 import { docLabel, docTitle } from '../../docs/docModules';
 import { PATHS, projectPath } from '../../paths';
 import { NotFoundPage } from '../NotFoundPage';
+import { factIcon } from '../start/factIcons';
 import { EvidenceSection, WhatItIsSection } from './sections/CommonSections';
 import { getProjectExtras } from './sections/projectExtras';
 import { InlineMarkdown, Section, Sources } from './sections/shared';
 import styles from './ProjectDetailPage.module.css';
 
-/** Facts shown as rows in the page header, built from the same objects as the At a glance table. */
+/** Facts shown as tiles in the page header, built from the same objects as the At a glance table. */
 const HERO_FACT_KEYS: ReadonlyArray<keyof ProjectFacts> = ['firstDeploy', 'regions', 'iac'];
 
+/** A fact in running text: value, default-labelled source link and note. */
 function FactValue({ fact }: { fact: Fact }) {
   return (
     <>
@@ -53,40 +60,32 @@ function FactValue({ fact }: { fact: Fact }) {
   );
 }
 
-function HeroFacts({ projectFacts }: { projectFacts: ProjectFacts }) {
+/* Hidden below 640px so a phone hero fits in about one viewport; the same facts are repeated
+   with sources in the "At a glance" table further down the page. */
+function HeroFacts({ projectFacts, project }: { projectFacts: ProjectFacts; project: string }) {
   return (
     <dl className={styles.heroFacts}>
-      {HERO_FACT_KEYS.map((key) => {
-        const fact = projectFacts[key];
-        const label = FACT_LABELS[key];
-        return (
-          <div key={key} className={styles.heroFact}>
-            <dt className={styles.heroFactLabel}>{label}</dt>
-            <dd className={styles.heroFactValue}>
-              {fact.notDocumented ? <em>{factText(fact)}</em> : fact.value}
-              {fact.source && (
-                <>
-                  {' '}
-                  <SourceLink source={fact.source} className={styles.heroSource}>
-                    source<span className="visually-hidden"> for {label.toLowerCase()}</span>
-                  </SourceLink>
-                </>
-              )}
-            </dd>
-          </div>
-        );
-      })}
+      {HERO_FACT_KEYS.map((key) => (
+        <FactStat
+          key={key}
+          label={FACT_LABELS[key]}
+          fact={projectFacts[key]}
+          project={project}
+          icon={factIcon(key)}
+          layout="stacked"
+          noteMode="collapsed"
+        />
+      ))}
     </dl>
   );
 }
 
-function StepBody({ step }: { step: QuickstartStep }) {
+function StepItem({ step }: { step: QuickstartStep }) {
   const linkIsTitle = step.href !== undefined && (step.hrefLabel ?? step.href) === step.title;
   return (
-    <>
-      <p className={styles.stepTitle}>
-        {linkIsTitle && step.href ? <ExternalLink href={step.href}>{step.title}</ExternalLink> : step.title}
-      </p>
+    <NumberedSteps.Item
+      title={linkIsTitle && step.href ? <ExternalLink href={step.href}>{step.title}</ExternalLink> : step.title}
+    >
       {step.command && <CodeBlock code={step.command} language="bash" />}
       {step.note && <p>{step.note}</p>}
       {step.href && !linkIsTitle && (
@@ -95,7 +94,7 @@ function StepBody({ step }: { step: QuickstartStep }) {
         </p>
       )}
       <Sources sources={[step.source]} />
-    </>
+    </NumberedSteps.Item>
   );
 }
 
@@ -122,21 +121,21 @@ export function ProjectDetailPage() {
   const actions = (
     <>
       {isWorkshop && (
-        <ExternalLink href={WORKSHOP_URL} className={styles.actionPrimary}>
+        <Button href={WORKSHOP_URL} external variant="primary">
           {WORKSHOP_LINK_LABEL}
-        </ExternalLink>
+        </Button>
       )}
-      <a href="#quickstart" className={isWorkshop ? styles.actionSecondary : styles.actionPrimary}>
+      <Button href="#quickstart" variant={isWorkshop ? 'secondary' : 'primary'}>
         Quickstart
-      </a>
+      </Button>
       {isWorkshop && (
-        <ExternalLink href={WORKSHOPS_DISCOVER_URL} className={styles.actionSecondary}>
+        <Button href={WORKSHOPS_DISCOVER_URL} external variant="secondary">
           {WORKSHOPS_DISCOVER_LABEL}
-        </ExternalLink>
+        </Button>
       )}
-      <ExternalLink href={tree(project.folder)} className={styles.actionSecondary}>
+      <Button href={tree(project.folder)} external variant="secondary">
         Source on GitHub
-      </ExternalLink>
+      </Button>
     </>
   );
 
@@ -149,7 +148,7 @@ export function ProjectDetailPage() {
         stageLabel={project.stageLabel}
         title={project.name}
         lead={project.description}
-        meta={<HeroFacts projectFacts={projectFacts} />}
+        meta={<HeroFacts projectFacts={projectFacts} project={project.shortName} />}
         actions={actions}
         figure={extras.hero}
       />
@@ -160,18 +159,19 @@ export function ProjectDetailPage() {
 
           <Section id="status" title="Status">
             <dl className={styles.statusList}>
-              <div className={styles.statusItem}>
-                <dt>{FACT_LABELS.version}</dt>
-                <dd>
-                  <FactValue fact={projectFacts.version} />
-                </dd>
-              </div>
-              <div className={styles.statusItem}>
-                <dt>{FACT_LABELS.status}</dt>
-                <dd>
-                  <FactValue fact={projectFacts.status} />
-                </dd>
-              </div>
+              <FactStat
+                className={styles.statusItem}
+                label={FACT_LABELS.version}
+                fact={projectFacts.version}
+                project={project.shortName}
+              />
+              <FactStat
+                className={styles.statusItem}
+                label={FACT_LABELS.status}
+                fact={projectFacts.status}
+                project={project.shortName}
+                icon={factIcon('status')}
+              />
             </dl>
             <p>
               <ExternalLink href={commitsUrl}>Recent changes: commit history for {project.folder} on GitHub</ExternalLink>
@@ -200,13 +200,11 @@ export function ProjectDetailPage() {
                 <p>
                   <strong>Expected time:</strong> <FactValue fact={quickstart.expectedTime} />
                 </p>
-                <ol className={styles.steps}>
+                <NumberedSteps stage={project.stage} connector>
                   {quickstart.steps.map((step) => (
-                    <li key={step.title}>
-                      <StepBody step={step} />
-                    </li>
+                    <StepItem key={step.title} step={step} />
                   ))}
-                </ol>
+                </NumberedSteps>
               </div>
             ))}
           </Section>
@@ -222,9 +220,9 @@ export function ProjectDetailPage() {
 
           <Section id="limitations" title="Known limitations and support envelope">
             <p className={styles.note}>Each item is copied from the project README or docs without paraphrase.</p>
-            <ul className={styles.limitations}>
+            <ul className={styles.cardList}>
               {projectLimitations.map((limitation) => (
-                <li key={limitation.id}>
+                <Card as="li" key={limitation.id} reveal padding="sm">
                   {limitation.title && (
                     <strong>
                       <InlineMarkdown text={limitation.title} />
@@ -232,7 +230,7 @@ export function ProjectDetailPage() {
                     </strong>
                   )}
                   <InlineMarkdown text={limitation.text} /> <SourceLink source={limitation.source} />
-                </li>
+                </Card>
               ))}
             </ul>
             <p>
@@ -245,11 +243,11 @@ export function ProjectDetailPage() {
               <div className={styles.validated}>
                 <h3>Live-validated reference envelope</h3>
                 <p className={styles.note}>Each item is copied from the README without paraphrase and links its source.</p>
-                <ul className={styles.limitations}>
+                <ul className={styles.cardList}>
                   {projectValidated.map((item) => (
-                    <li key={item.id}>
+                    <Card as="li" key={item.id} reveal padding="sm">
                       <InlineMarkdown text={item.text} /> <SourceLink source={item.source} />
-                    </li>
+                    </Card>
                   ))}
                 </ul>
               </div>
@@ -296,13 +294,14 @@ export function ProjectDetailPage() {
             <h2 id="other-projects-heading">Other projects</h2>
             <ul className={styles.othersList}>
               {otherProjects.map((other) => (
-                <li key={other.id}>
-                  <Link to={projectPath(other.id)} className={styles.otherLink}>
-                    <StageBadge stage={other.stage} label={other.stageLabel} variant="outline" />
-                    <span className={styles.otherName}>{other.shortName}</span>
-                    <span className={styles.otherTagline}>{other.tagline}</span>
+                <Card as="li" key={other.id} interactive className={styles.otherCard}>
+                  <StageBadge stage={other.stage} label={other.stageLabel} variant="outline" />
+                  <Link to={projectPath(other.id)} className={styles.otherName} data-stretch>
+                    {other.shortName}
+                    <ArrowRight size={16} aria-hidden="true" />
                   </Link>
-                </li>
+                  <span className={styles.otherTagline}>{other.tagline}</span>
+                </Card>
               ))}
             </ul>
           </nav>

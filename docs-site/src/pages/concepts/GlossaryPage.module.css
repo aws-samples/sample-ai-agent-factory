@@ -7,54 +7,23 @@
 
 .intro {
   max-width: 72ch;
-  margin: var(--space-6) 0 var(--space-6);
+  margin: var(--space-6) 0;
 }
 
-/* Letter navigation */
+/* A rule under the sticky letter rail separates it from the entries scrolling beneath. */
 .letterNav {
-  position: sticky;
-  top: var(--header-height);
-  z-index: 5;
-  margin: 0 calc(-1 * var(--page-padding-x));
-  padding: var(--space-2) var(--page-padding-x);
-  background: var(--color-bg-primary);
   border-bottom: 1px solid var(--color-border);
-}
-
-.letterList {
-  list-style: none;
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
-.letterLink {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 2rem;
-  min-height: 2rem;
-  padding: 0 var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-secondary);
-  font-weight: 600;
-  text-decoration: none;
-}
-
-.letterLink:hover {
-  border-color: var(--color-blue);
-  text-decoration: underline;
 }
 
 /* Letter sections */
 .letterSection {
   padding-top: var(--space-8);
+  scroll-margin-top: calc(var(--header-height) + var(--space-4));
 }
 
 .letterHeading {
   padding-bottom: var(--space-2);
-  border-bottom: 2px solid var(--color-midnight);
+  border-bottom: 2px solid var(--color-text-primary);
   margin-bottom: var(--space-4);
 }
 
@@ -66,10 +35,6 @@
 }
 
 .termEntry {
-  padding: var(--space-5);
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   /* Keep the term visible below the sticky letter nav and site header when jumped to. */
   scroll-margin-top: calc(var(--header-height) + 4rem);
 }

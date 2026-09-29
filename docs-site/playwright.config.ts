@@ -48,5 +48,17 @@ export default defineConfig({
       name: 'desktop',
       use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } },
     },
+    // Dark theme sweeps: the same axe, reflow, structure and motion checks with the OS
+    // preference set to dark, so every route is contrast-checked in both schemes.
+    {
+      name: 'desktop-dark',
+      testMatch: /(a11y|reflow|structure|motion)\.spec\.ts$/,
+      use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 }, colorScheme: 'dark' },
+    },
+    {
+      name: 'mobile-dark',
+      testMatch: /(a11y|reflow|structure)\.spec\.ts$/,
+      use: { ...devices['Desktop Chrome'], viewport: { width: 390, height: 844 }, colorScheme: 'dark' },
+    },
   ],
 });

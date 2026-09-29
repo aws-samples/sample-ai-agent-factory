@@ -1,21 +1,33 @@
 import type { ReactNode } from 'react';
+import { ArrowRight, ShieldCheck } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { Button } from '../../components/Button';
+import { Card } from '../../components/Card';
+import { ChipNav } from '../../components/ChipNav';
 import { FactsTable } from '../../components/FactsTable';
 import { PageHeader } from '../../components/PageHeader';
 import { PageMeta } from '../../components/PageMeta';
-import { ReferenceNav } from './ReferenceNav';
+import { Section } from '../../components/Section';
 import { SourceLink } from '../../components/SourceLink';
+import { Sources } from '../../components/Sources';
 import { StageBadge } from '../../components/StageBadge';
 import { projects } from '../../content/data';
 import { FACT_LABELS, getFacts, type ProjectFacts, type Source } from '../../content/facts';
 import { getLimitations, validated } from '../../content/limitations';
 import { PATHS, projectPath } from '../../paths';
+import { ReferenceNav } from './ReferenceNav';
 import styles from './SupportEnvelopePage.module.css';
 
 const ENVELOPE_SOURCE: Source = { file: 'README.md', heading: 'Support Envelope' };
 
 /** Fact rows shown per project, in order. */
 const ENVELOPE_FACT_KEYS: ReadonlyArray<keyof ProjectFacts> = ['regions', 'defaultRegion', 'status', 'version'];
+
+const JUMP_ITEMS = projects.map((project) => ({
+  label: project.shortName,
+  href: `#envelope-${project.id}`,
+  badge: <StageBadge stage={project.stage} label={project.stageLabel} variant="outline" />,
+}));
 
 /**
  * Render verbatim README text with its Markdown inline code and emphasis
@@ -57,34 +69,26 @@ export function SupportEnvelopePage() {
           the project files without paraphrase.
         </p>
 
-        <nav aria-label="Projects on this page" className={styles.jumpNav}>
-          <ul className={styles.jumpList}>
-            {projects.map((project) => (
-              <li key={project.id}>
-                <a href={`#envelope-${project.id}`} className={styles.jumpLink}>
-                  <StageBadge stage={project.stage} label={project.stageLabel} variant="outline" />
-                  {project.shortName}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </nav>
+        <ChipNav label="Projects on this page" lead="Jump to:" items={JUMP_ITEMS} overflow="wrap" />
 
-        {projects.map((project) => {
+        {projects.map((project, index) => {
           const facts = getFacts(project.id);
           const limitations = getLimitations(project.id);
           const validatedItems = validated[project.id];
           const validatedHeading = validatedItems[0]?.source.heading ?? 'Validated reference envelope';
           return (
-            <section key={project.id} className={styles.projectSection} aria-labelledby={`envelope-${project.id}`}>
-              <div className={styles.projectHeading}>
-                <StageBadge stage={project.stage} label={`${project.stageNumber}. ${project.stageLabel}`} />
-                <h2 id={`envelope-${project.id}`}>{project.name}</h2>
-              </div>
-              <p className={styles.projectLinks}>
-                <Link to={projectPath(project.id)}>Project page</Link>
-              </p>
-
+            <Section
+              key={project.id}
+              id={`envelope-${project.id}`}
+              title={project.name}
+              flush={index === 0}
+              badge={<StageBadge stage={project.stage} label={`${project.stageNumber}. ${project.stageLabel}`} />}
+              actions={
+                <Button variant="ghost" size="sm" to={projectPath(project.id)} iconEnd={<ArrowRight size={16} />}>
+                  Project page<span className="visually-hidden">: {project.shortName}</span>
+                </Button>
+              }
+            >
               <FactsTable
                 caption={`${project.shortName}: validated regions and status`}
                 rows={ENVELOPE_FACT_KEYS.map((key) => ({ label: FACT_LABELS[key], fact: facts[key] }))}
@@ -92,7 +96,7 @@ export function SupportEnvelopePage() {
 
               {validatedItems.length > 0 && (
                 <>
-                  <h3 className={styles.limitationsHeading}>{validatedHeading}</h3>
+                  <h3>{validatedHeading}</h3>
                   <p className={styles.validatedIntro}>
                     What {project.shortName} states it has validated, quoted from its README (
                     <SourceLink source={validatedItems[0].source}>source</SourceLink>). Anything outside this list is
@@ -101,26 +105,35 @@ export function SupportEnvelopePage() {
                   <ul className={styles.validatedList}>
                     {validatedItems.map((item) => (
                       <li key={item.id} id={item.id} className={styles.validatedItem}>
-                        <blockquote className={styles.limitationText}>{renderInline(item.text)}</blockquote>
+                        <ShieldCheck size={18} aria-hidden="true" className={styles.validatedIcon} />
+                        <span className="visually-hidden">Validated: </span>
+                        <blockquote className={styles.quote}>{renderInline(item.text)}</blockquote>
                       </li>
                     ))}
                   </ul>
                 </>
               )}
 
-              <h3 className={styles.limitationsHeading}>Known limitations, as documented</h3>
+              <h3>Known limitations, as documented</h3>
               <ul className={styles.limitationList}>
                 {limitations.map((limitation) => (
-                  <li key={limitation.id} id={limitation.id} className={styles.limitation} data-reveal>
+                  <Card
+                    as="li"
+                    key={limitation.id}
+                    id={limitation.id}
+                    variant="accent"
+                    stage={project.stage}
+                    reveal
+                    padding="sm"
+                    className={styles.limitation}
+                  >
                     {limitation.title && <strong className={styles.limitationTitle}>{limitation.title}</strong>}
-                    <blockquote className={styles.limitationText}>{renderInline(limitation.text)}</blockquote>
-                    <p className={styles.limitationSource}>
-                      Source: <SourceLink source={limitation.source} />
-                    </p>
-                  </li>
+                    <blockquote className={styles.quote}>{renderInline(limitation.text)}</blockquote>
+                    <Sources sources={[limitation.source]} className={styles.limitationSource} />
+                  </Card>
                 ))}
               </ul>
-            </section>
+            </Section>
           );
         })}
 

@@ -1,48 +1,9 @@
 /*
- * Shared styles for the Home and Start pages: one band (section) style, one
- * tile style, buttons, chips, quickstart steps and the comparison matrix.
- * Colours come from tokens.css only; text inside `.on-dark` bands inherits the
- * on-dark token set.
+ * Styles for the Start section only: page-level layout (hero facts, guidance
+ * columns, path cards, the comparison matrix, FAQ cards) around the shared
+ * primitives. Colours come from tokens.css only; text inside `.on-dark` bands
+ * inherits the on-dark token set.
  */
-
-/* Bands: full-width sections with the token rhythm */
-.band {
-  padding: var(--section-padding-y) 0;
-}
-
-.bandAlt {
-  background: var(--color-bg-secondary);
-  border-top: 1px solid var(--color-border);
-  border-bottom: 1px solid var(--color-border);
-}
-
-.bandDark {
-  background: var(--color-midnight);
-}
-
-.bandTight {
-  padding-top: var(--space-6);
-}
-
-.sectionHead {
-  max-width: 72ch;
-  margin-bottom: var(--space-4);
-}
-
-@media (min-width: 640px) {
-  .sectionHead {
-    margin-bottom: var(--space-6);
-  }
-}
-
-.sectionHead h2 {
-  margin-bottom: var(--space-2);
-}
-
-.lead {
-  color: var(--color-text-secondary);
-  max-width: 72ch;
-}
 
 .prose {
   max-width: 72ch;
@@ -53,7 +14,6 @@
 }
 
 /* Links inside running text carry an underline, not just a colour */
-.lead a,
 .meta a,
 .prose a,
 .stepNote a,
@@ -64,166 +24,6 @@
 .matrixHint a {
   text-decoration: underline;
   text-underline-offset: 0.15em;
-}
-
-/* In-page section navigation (jump chips) */
-.jump {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  margin: var(--space-4) 0;
-}
-
-.jumpLabel {
-  font-size: 0.875rem;
-  font-weight: 600;
-  color: var(--color-text-secondary);
-  margin-right: var(--space-1);
-}
-
-/* Chips: compact inline links or labels */
-.chips {
-  list-style: none;
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  min-height: 32px;
-  padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: 999px;
-  background: var(--color-bg-secondary);
-  color: var(--color-text-primary);
-  font-size: 0.875rem;
-  font-weight: 500;
-  text-decoration: none;
-}
-
-.chip:hover {
-  color: var(--color-blue-hover);
-  border-color: var(--color-blue);
-  text-decoration: underline;
-}
-
-/* Buttons (links styled as buttons) */
-.actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-  align-items: center;
-}
-
-.btnPrimary,
-.btnSecondary {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  min-height: 44px;
-  padding: var(--space-2) var(--space-4);
-  border-radius: var(--radius-md);
-  font-weight: 600;
-  font-size: 1rem;
-  text-decoration: none;
-  transition:
-    background var(--transition-fast),
-    border-color var(--transition-fast),
-    color var(--transition-fast);
-}
-
-.btnPrimary {
-  background: var(--color-blue);
-  color: #ffffff;
-  border: 1px solid var(--color-blue);
-}
-
-.btnPrimary:hover {
-  background: var(--color-blue-hover);
-  border-color: var(--color-blue-hover);
-  color: #ffffff;
-  text-decoration: none;
-}
-
-.btnSecondary {
-  background: transparent;
-  color: var(--color-text-primary);
-  border: 1px solid var(--color-slate);
-}
-
-.btnSecondary:hover {
-  color: var(--color-blue-hover);
-  border-color: var(--color-blue-hover);
-  text-decoration: none;
-}
-
-:global(.on-dark) .btnSecondary {
-  color: var(--color-cloud);
-  border-color: var(--color-mist);
-}
-
-:global(.on-dark) .btnSecondary:hover {
-  color: var(--color-cloud);
-  border-color: var(--color-cloud);
-  background: rgba(255, 255, 255, 0.08);
-}
-
-:global(.on-dark) .btnPrimary:focus-visible,
-:global(.on-dark) .btnSecondary:focus-visible {
-  outline-color: var(--color-cloud);
-}
-
-/* Tile grid: the one card style used by Home and the Start section */
-.tileGrid {
-  list-style: none;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-3);
-}
-
-@media (min-width: 640px) {
-  .tileGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (min-width: 1100px) {
-  .tileGrid4 {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-}
-
-.tile {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-3);
-  line-height: 1.4;
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  border-top: 4px solid var(--tile-accent, var(--color-border));
-  border-radius: var(--radius-lg);
-}
-
-.tile[data-stage='learn'] {
-  --tile-accent: var(--stage-learn-tint);
-}
-
-.tile[data-stage='build'] {
-  --tile-accent: var(--stage-build-tint);
-}
-
-.tile[data-stage='govern'] {
-  --tile-accent: var(--stage-govern-tint);
-}
-
-.tile[data-stage='scale'] {
-  --tile-accent: var(--stage-scale-tint);
 }
 
 .tileHead {
@@ -238,30 +38,14 @@
   line-height: 1.3;
 }
 
-.tileTagline {
-  color: var(--color-text-secondary);
-  font-size: 0.875rem;
-}
-
 .tileText {
   font-size: 0.875rem;
 }
 
 @media (min-width: 640px) {
-  .tile {
-    gap: var(--space-2);
-    padding: var(--space-4);
-    line-height: 1.45;
-  }
-
   .tileTitle {
     font-size: 1.125rem;
   }
-}
-
-.tileFoot {
-  margin-top: auto;
-  padding-top: var(--space-2);
 }
 
 .tileLink {
@@ -272,44 +56,21 @@
   font-weight: 600;
 }
 
-/* Compact facts inside tiles and table cells */
-.facts {
-  display: grid;
-  gap: var(--space-1);
-  margin: var(--space-1) 0 0;
-  padding-top: var(--space-2);
-  border-top: 1px solid var(--color-border);
-  font-size: 0.8125rem;
-}
-
-@media (min-width: 640px) {
-  .facts {
-    gap: var(--space-2);
-    font-size: 0.875rem;
-  }
-}
-
-.fact {
-  margin: 0;
-}
-
-.factLabel {
-  display: inline;
-  font-weight: 600;
-  color: var(--color-text-secondary);
-}
-
-.factLabel::after {
-  content: ': ';
-}
-
-.factValue {
-  display: inline;
-  margin: 0;
-}
-
+/* "not documented" as a muted pill, so a gap reads as a state rather than a value */
 .notDocumented {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--target-min);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-sunken);
   color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  font-style: normal;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 /* A fact's caveat, shown under the value in muted text */
@@ -319,17 +80,6 @@
   font-size: 0.8125rem;
   line-height: 1.4;
   color: var(--color-text-secondary);
-}
-
-/* Opt-in variant for the Home tiles: the same caveats appear on the comparison table and the project pages, so keep them for wider screens only */
-.factNote.factNoteCompact {
-  display: none;
-}
-
-@media (min-width: 640px) {
-  .factNote.factNoteCompact {
-    display: block;
-  }
 }
 
 /* Compact row of related links under a quickstart */
@@ -360,23 +110,18 @@
   color: var(--color-text-secondary);
 }
 
-/* Project sections on the Start pages */
-.projectSection {
-  padding: var(--space-8) 0;
-  border-top: 1px solid var(--color-border);
-  scroll-margin-top: calc(var(--header-height) + var(--space-4));
+/* First-deploy row on the Start header band: one StatTile per project */
+.heroFacts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3) var(--space-6);
+  margin: 0;
 }
 
-.projectSection:first-of-type {
-  border-top: none;
-}
-
-.projectHeading {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-3);
-  margin-bottom: var(--space-3);
+@media (min-width: 1024px) {
+  .heroFacts {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
 }
 
 .subSection {
@@ -395,57 +140,14 @@
   margin-top: var(--space-2);
 }
 
-/* Quickstart steps */
-.steps {
-  list-style: none;
-  counter-reset: step;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-3);
-  margin: var(--space-4) 0;
-}
-
-.step {
-  counter-increment: step;
-  position: relative;
-  min-width: 0;
-  padding-left: var(--space-10);
-}
-
-.step::before {
-  content: counter(step);
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 28px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 999px;
-  background: var(--color-midnight);
-  color: var(--color-cloud);
-  font-size: 0.875rem;
-  font-weight: 700;
-}
-
+/* Quickstart steps: title text followed by its small source link */
 .stepTitle {
-  font-weight: 600;
-  min-height: 28px;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-1) var(--space-2);
+  display: inline;
 }
 
 .stepNote {
   font-size: 0.9375rem;
   color: var(--color-text-secondary);
-  margin-top: var(--space-1);
-}
-
-.step :global(pre) {
-  margin: var(--space-2) 0;
 }
 
 /* Plain lists with a bold lead-in per item */
@@ -461,15 +163,61 @@
   gap: var(--space-3);
 }
 
-.twoCol {
-  display: grid;
-  gap: var(--space-4) var(--space-8);
+/* "By role" and "By time available" side by side from 1024 px up */
+.guidance {
+  padding: var(--space-10) 0;
+  border-top: 1px solid var(--color-border);
 }
 
-@media (min-width: 768px) {
+.twoCol {
+  display: grid;
+  gap: var(--space-8);
+}
+
+@media (min-width: 1024px) {
   .twoCol {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+/* Path cards on the comparison page: four accent cards */
+.pathGrid {
+  list-style: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-4);
+}
+
+@media (min-width: 640px) {
+  .pathGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1280px) {
+  .pathGrid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.pathCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.pathFacts,
+.compareFacts {
+  display: grid;
+  gap: var(--space-3);
+  margin: auto 0 0;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+.stageIcon {
+  flex-shrink: 0;
+  color: var(--stage-color, currentColor);
 }
 
 /*
@@ -477,7 +225,40 @@
  * layout gives the four project columns equal widths; the fact label column is
  * sticky so it stays in view when the table scrolls on narrow screens. At the
  * container's maximum width the table fits without horizontal scrolling.
+ * Below 640 px the table is replaced by one card per project (.matrixCards).
  */
+.matrixDesktop {
+  display: none;
+}
+
+.matrixCards {
+  list-style: none;
+  display: grid;
+  gap: var(--space-4);
+  margin: var(--space-4) 0;
+}
+
+@media (min-width: 640px) {
+  .matrixDesktop {
+    display: block;
+  }
+
+  .matrixCards {
+    display: none;
+  }
+}
+
+.compareCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.compareTitle {
+  font-size: 1.0625rem;
+  line-height: 1.3;
+}
+
 .matrix {
   width: 100%;
   min-width: 860px;
@@ -513,12 +294,37 @@
   left: 0;
   z-index: 1;
   width: 150px;
-  background: var(--color-bg-secondary);
+  background: var(--color-surface);
   box-shadow: 1px 0 0 var(--color-border);
 }
 
 .matrix thead th:first-child {
-  background: var(--color-cloud);
+  background: var(--color-surface-sunken);
+}
+
+/* Stage-coloured rule over each project column */
+.matrix thead th[data-stage] {
+  border-top: 3px solid var(--column-stage, var(--color-border));
+}
+
+.matrix thead th[data-stage='learn'] {
+  --column-stage: var(--stage-learn-tint);
+  --stage-color: var(--stage-learn);
+}
+
+.matrix thead th[data-stage='build'] {
+  --column-stage: var(--stage-build-tint);
+  --stage-color: var(--stage-build);
+}
+
+.matrix thead th[data-stage='govern'] {
+  --column-stage: var(--stage-govern-tint);
+  --stage-color: var(--stage-govern);
+}
+
+.matrix thead th[data-stage='scale'] {
+  --column-stage: var(--stage-scale-tint);
+  --stage-color: var(--stage-scale);
 }
 
 .matrixProject {
@@ -527,16 +333,61 @@
   justify-items: start;
 }
 
+.matrixName {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 600;
+}
+
+/* The "Best for" row is the decision row; give it a sunken background, sticky label included */
+.matrix .bestForRow td,
+.matrix .bestForRow th {
+  background: var(--color-surface-sunken);
+}
+
+/* Fact icon beside each row label */
+.rowLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.rowLabel > svg {
+  flex-shrink: 0;
+  color: var(--color-text-secondary);
+}
+
 .matrixHint {
   margin-top: var(--space-2);
 }
 
-/* Table cells hold a value plus a small source link */
-.cell {
-  display: block;
+/* FAQ: question chips wrap onto several lines, since questions are whole sentences */
+.faqNav a {
+  white-space: normal;
+  text-align: left;
 }
 
-.cell .sourceSmall {
-  display: inline-block;
-  margin-top: var(--space-1);
+/* FAQ: one card per question */
+.faqList {
+  display: grid;
+  gap: var(--space-4);
+  margin: var(--space-6) 0 var(--section-padding-y);
+}
+
+.faqCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.faqQuestion {
+  font-size: var(--font-size-h3);
+}
+
+.badgeRow {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }

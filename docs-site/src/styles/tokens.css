@@ -2,6 +2,7 @@
    Breakpoints used across the site: 640px (one to two columns), 1024px (desktop nav,
    header figure column), 1280px (doc page rails). Component styles use these three only. */
 :root {
+  color-scheme: light dark;
   /* Primary palette */
   --color-midnight: #0B1220;
   --color-midnight-light: #1a2744;
@@ -177,6 +178,58 @@
   color: var(--color-text-inverse);
 }
 
+/*
+ * Dark theme: follows the operating system preference (no toggle, no storage). Only the
+ * semantic tokens are remapped; the palette above and every component stay the same.
+ * Header, footer and other `.on-dark` bands keep `--color-band`, which is darker than the
+ * page so they still read as bands. Stage colours resolve to the on-dark set everywhere.
+ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg-primary: #0F172A;
+    --color-bg-secondary: #16213A;
+    --color-surface: #16213A;
+    --color-surface-sunken: #0F172A;
+    --color-band: #070B14;
+    --color-band-raised: #1E2A47;
+    --color-text-primary: #F5F7FB;
+    --color-text-secondary: #A3B1C6;
+    --color-text-muted: #64748B;
+    --color-border: #2A3650;
+    --color-link: #93C5FD;
+    --color-link-hover: #BFDBFE;
+    --color-blue-hover: #BFDBFE;
+    --color-focus: #93C5FD;
+    --color-code-bg: #1E293B;
+    --color-code-text: #E2E8F0;
+    --color-overlay-hover: rgba(255, 255, 255, 0.08);
+    --shadow-card: 0 0 0 1px rgba(255, 255, 255, 0.02);
+    --shadow-lg: 0 10px 24px rgba(0, 0, 0, 0.5);
+    --tint-amber: #2C1A0B;
+    --tint-green: #0B2416;
+    --tint-violet: #1E1538;
+    --tint-blue: #0F1F3D;
+    --tint-heading-amber: var(--stage-learn-on-dark);
+    --tint-heading-green: var(--stage-build-on-dark);
+    --tint-heading-violet: var(--stage-govern-on-dark);
+    --tint-heading-blue: var(--stage-scale-on-dark);
+    --stage-learn: var(--stage-learn-on-dark);
+    --stage-build: var(--stage-build-on-dark);
+    --stage-govern: var(--stage-govern-on-dark);
+    --stage-scale: var(--stage-scale-on-dark);
+    --stage-fill-text: var(--color-midnight);
+  }
+
+  /* Inline code inside a link on a dark page: the chip is dark, so keep the light link colour. */
+  a code {
+    color: var(--color-link);
+  }
+
+  :where(.on-dark) a code {
+    color: var(--color-link);
+  }
+}
+
 /* Reset and base */
 *, *::before, *::after {
   box-sizing: border-box;
@@ -236,13 +289,13 @@ h5 { font-size: 1rem; }
 h6 { font-size: 1rem; }
 
 a {
-  color: var(--color-blue);
+  color: var(--color-link);
   text-decoration: none;
   transition: color var(--transition-fast);
 }
 
 a:hover {
-  color: var(--color-blue-hover);
+  color: var(--color-link-hover);
   text-decoration: underline;
 }
 
@@ -261,29 +314,19 @@ a:hover {
 }
 
 a:focus-visible {
-  outline: 2px solid var(--color-blue);
+  outline: var(--focus-ring);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
 
-/* Defaults for links on dark surfaces. `:where()` keeps them at element specificity so any
-   class (buttons, footer links) overrides them without having to know about `.on-dark`. */
-:where(.on-dark) a {
-  color: var(--stage-scale-on-dark);
-}
-
-:where(.on-dark) a:hover {
-  color: var(--color-cloud);
-}
-
-:where(.on-dark) a:focus-visible {
-  outline-color: var(--color-cloud);
-}
+/* Links on dark surfaces take their colours from the `.on-dark` token remap above
+   (`--color-link`, `--color-link-hover`, `--color-focus`), so no extra rules are needed. */
 
 code {
   font-family: var(--font-mono);
   font-size: 0.875em;
-  background: var(--color-mist);
+  background: var(--color-code-bg);
+  color: var(--color-code-text);
   padding: 0.125em 0.375em;
   border-radius: var(--radius-sm);
 }
@@ -292,7 +335,7 @@ code {
    link blue clears 4.5:1 on mist and on cloud. On dark surfaces the chip stays light,
    so the code text goes midnight. */
 a code {
-  color: var(--color-blue-hover);
+  color: var(--color-link-hover);
 }
 
 :where(.on-dark) a code {
@@ -316,7 +359,7 @@ pre code {
   top: -100%;
   left: 50%;
   transform: translateX(-50%);
-  background: var(--color-midnight);
+  background: var(--color-band);
   color: var(--color-cloud);
   padding: var(--space-2) var(--space-4);
   border-radius: var(--radius-md);
@@ -326,7 +369,7 @@ pre code {
 
 .skip-link:focus {
   top: var(--space-2);
-  outline: 2px solid var(--color-blue);
+  outline: var(--focus-ring);
   outline-offset: 2px;
 }
 
