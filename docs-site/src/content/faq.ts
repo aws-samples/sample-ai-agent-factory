@@ -1,10 +1,10 @@
 /**
- * Frequently asked questions, seeded from README notices and GitHub issues
- * #2, #29 and #30. Every answer cites at least one repository source.
+ * Frequently asked questions, seeded from README notices. Every answer cites at
+ * least one repository source.
  */
 import type { ProjectId } from './data';
 import type { Source } from './facts';
-import { ISSUES_URL, VULN_REPORT_URL, WORKSHOP_URL, WORKSHOP_LINK_LABEL, issueUrl } from './links';
+import { ISSUES_URL, VULN_REPORT_URL, WORKSHOP_URL, WORKSHOP_LINK_LABEL } from './links';
 
 /** An external link offered with an answer. */
 export interface FaqLink {
@@ -34,13 +34,9 @@ const ROOT_README = 'README.md';
 const CONTRIBUTING = 'CONTRIBUTING.md';
 const WORKSHOP_INTRO = 'workshop-building-agentic-ai-platform/content/introduction/index.en.md';
 const WORKSHOP_SELF_PACED_PAGE = 'workshop-building-agentic-ai-platform/content/introduction/getting-started/self-service.en.md';
-const WORKSHOP_THIRD_PARTY = 'workshop-building-agentic-ai-platform/THIRD_PARTY_LICENSES.md';
-const WORKSHOP_LLM_GATEWAY_STACK = 'workshop-building-agentic-ai-platform/static/cfn/llm-gateway/workshop-llm-gateway-stack.yaml';
 const SELF_SERVICE_README = 'Agentic-ai-self-service/README.md';
 const SELF_SERVICE_COSTS = 'Agentic-ai-self-service/docs/COSTS.md';
 const GATEWAY_README = 'enterprise-mcp-governance-gateway/README.md';
-const BLUEPRINT_README = 'enterprise-agentic-ai-platform-blueprint/README.md';
-const BLUEPRINT_LOCKFILE = 'enterprise-agentic-ai-platform-blueprint/package-lock.json';
 
 export const faq: FaqEntry[] = [
   {
@@ -110,44 +106,6 @@ export const faq: FaqEntry[] = [
       { file: SELF_SERVICE_README, quote: '**Sign out and back in** after changing groups' },
     ],
     projectIds: ['self-service'],
-  },
-  {
-    id: 'workshop-litellm-image',
-    question: 'Why does the workshop LLM Gateway pull LiteLLM from docker.litellm.ai (issue #2)?',
-    answer:
-      'The LLM Gateway CloudFormation template pins the image docker.litellm.ai/berriai/litellm-database at the tag in the LiteLLMImageTag parameter (default v1.84.0), as recorded in THIRD_PARTY_LICENSES.md. Issue #2, open since 2026-06-30, asks for the image to come from ghcr.io instead. Until it is resolved, the deploy pulls from docker.litellm.ai.',
-    sources: [
-      { file: WORKSHOP_THIRD_PARTY, quote: '`docker.litellm.ai/berriai/litellm-database` | `v1.84.0`' },
-      { file: WORKSHOP_LLM_GATEWAY_STACK, quote: "Image: !Sub 'docker.litellm.ai/berriai/litellm-database:${LiteLLMImageTag}'" },
-    ],
-    projectIds: ['workshop'],
-    links: [{ label: 'Issue #2 on GitHub', href: issueUrl(2) }],
-  },
-  {
-    id: 'blueprint-registry-cutoff',
-    question: 'Does the Blueprint still work after the Agent Registry preview API cutoff (issue #29)?',
-    answer:
-      'Treat it as unverified. Issue #29, opened 2026-09-15, reports that the Blueprint still provisions and consumes Agent Registry through the preview bedrock-agentcore-control APIs, and AWS support for those APIs ended on 2026-09-17. The README envelope lists AWS Agent Registry record resolution and governance as live-validated, but that validation predates the cutoff. Check the issue before relying on Registry-dependent paths.',
-    sources: [
-      {
-        file: BLUEPRINT_README,
-        heading: 'Live-validated reference envelope',
-        quote: 'AWS Agent Registry record resolution and governance.',
-      },
-    ],
-    projectIds: ['blueprint'],
-    links: [{ label: 'Issue #29 on GitHub', href: issueUrl(29) }],
-  },
-  {
-    id: 'blueprint-npm-audit',
-    question: 'Are there known dependency findings in the Blueprint (issue #30)?',
-    answer:
-      'Yes. Issue #30, opened 2026-09-15, reports that the lockfile resolves aws-cdk-lib to 2.251.0 while GHSA-vcrf-j523-4mrf (CVE-2026-13760, high) is fixed in 2.260.0, plus transitive findings. It is a build and deployment toolchain risk rather than evidence of a remotely exploitable deployed workload. Run npm audit and update before deploying.',
-    sources: [
-      { file: BLUEPRINT_LOCKFILE, quote: 'aws-cdk-lib/-/aws-cdk-lib-2.251.0.tgz' },
-    ],
-    projectIds: ['blueprint'],
-    links: [{ label: 'Issue #30 on GitHub', href: issueUrl(30) }],
   },
   {
     id: 'gateway-production-ready',

@@ -70,26 +70,6 @@ export interface ProjectFacts {
   version: Fact;
 }
 
-/** A maintainer-curated advisory tied to an open GitHub issue. */
-export interface Advisory {
-  /** Stable id, for example `issue-29`. */
-  id: string;
-  /** Project the advisory applies to. */
-  projectId: ProjectId;
-  /** GitHub issue number. */
-  issue: number;
-  /** Issue title as written on GitHub. */
-  title: string;
-  /** One or two plain sentences on what it means for a reader. */
-  summary: string;
-  /** Link to the GitHub issue. */
-  url: string;
-  /** Date the issue was opened (ISO date). */
-  opened: string;
-  /** Repository evidence for the advisory. */
-  source?: Source;
-}
-
 /** One service control policy shipped by the Blueprint. */
 export interface BlueprintScp {
   /** Short id, for example `SCP-06`. */
@@ -518,7 +498,7 @@ export const facts: Record<ProjectId, ProjectFacts> = {
       },
     },
     status: {
-      value: 'Version 1.0.0 (README badge); two open advisories (issues #29 and #30)',
+      value: 'Version 1.0.0 (README badge)',
       source: {
         file: BLUEPRINT_README,
         quote: 'badge/version-1.0.0-blue',
@@ -540,58 +520,6 @@ export const facts: Record<ProjectId, ProjectFacts> = {
       },
     },
   },
-};
-
-/** Open advisories per project, seeded from GitHub issues #2, #29 and #30. */
-export const advisories: Record<ProjectId, Advisory[]> = {
-  workshop: [
-    {
-      id: 'issue-2',
-      projectId: 'workshop',
-      issue: 2,
-      title: 'ghcr.io instead of docker.litellm.ai',
-      summary:
-        'Open since 2026-06-30. The LLM Gateway CloudFormation template and THIRD_PARTY_LICENSES.md reference the LiteLLM image at docker.litellm.ai/berriai/litellm-database (tag v1.84.0). The issue asks for the image to be pulled from ghcr.io instead.',
-      url: 'https://github.com/aws-samples/sample-ai-agent-factory/issues/2',
-      opened: '2026-06-30',
-      source: {
-        file: 'workshop-building-agentic-ai-platform/THIRD_PARTY_LICENSES.md',
-        quote: '`docker.litellm.ai/berriai/litellm-database` | `v1.84.0`',
-      },
-    },
-  ],
-  'self-service': [],
-  'mcp-gateway': [],
-  blueprint: [
-    {
-      id: 'issue-29',
-      projectId: 'blueprint',
-      issue: 29,
-      title: 'enterprise blueprint: migrate Agent Registry before 2026-09-17 preview cutoff',
-      summary:
-        'Opened 2026-09-15. The blueprint still provisions and consumes Agent Registry through the preview bedrock-agentcore-control APIs, and AWS support for those APIs ended on 2026-09-17. Treat Registry-dependent paths as unverified until the issue is closed.',
-      url: 'https://github.com/aws-samples/sample-ai-agent-factory/issues/29',
-      opened: '2026-09-15',
-      source: {
-        file: 'enterprise-agentic-ai-platform-blueprint/packages/agent-registry/src/platform-registry-construct.ts',
-        quote: 'bedrock-agentcore-control:CreateRegistry',
-      },
-    },
-    {
-      id: 'issue-30',
-      projectId: 'blueprint',
-      issue: 30,
-      title: 'enterprise blueprint: resolve npm audit findings before deployment',
-      summary:
-        'Opened 2026-09-15. The lockfile resolves aws-cdk-lib to 2.251.0; advisory GHSA-vcrf-j523-4mrf (CVE-2026-13760, high) is fixed in aws-cdk-lib 2.260.0. This is a build and deployment toolchain risk; run npm audit and update before deploying.',
-      url: 'https://github.com/aws-samples/sample-ai-agent-factory/issues/30',
-      opened: '2026-09-15',
-      source: {
-        file: 'enterprise-agentic-ai-platform-blueprint/package-lock.json',
-        quote: 'aws-cdk-lib/-/aws-cdk-lib-2.251.0.tgz',
-      },
-    },
-  ],
 };
 
 /** File stem and header-comment title of each Blueprint SCP, in id order. */
@@ -620,11 +548,6 @@ export const blueprintScps: BlueprintScp[] = SCP_FILES.map(([stem, title]) => ({
 /** Get the fact set for a project. */
 export function getFacts(projectId: ProjectId): ProjectFacts {
   return facts[projectId];
-}
-
-/** Get the open advisories for a project (empty array when there are none). */
-export function getAdvisories(projectId: ProjectId): Advisory[] {
-  return advisories[projectId];
 }
 
 /** Text to render for a fact, honouring `notDocumented`. */

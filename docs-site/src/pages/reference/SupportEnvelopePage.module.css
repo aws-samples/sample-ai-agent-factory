@@ -71,32 +71,6 @@
   text-underline-offset: 0.15em;
 }
 
-.noAdvisories {
-  margin: var(--space-4) 0;
-  color: var(--color-text-secondary);
-}
-
-.advisoryList {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.advisoryList a {
-  font-weight: 600;
-}
-
-.advisorySummary {
-  margin-top: var(--space-1);
-}
-
-.advisorySource {
-  margin-top: var(--space-1);
-  font-size: 0.875rem;
-  color: var(--color-text-secondary);
-}
-
 /* Limitations */
 .limitationsHeading {
   margin: var(--space-6) 0 var(--space-3);
@@ -177,9 +151,7 @@
 
 /* Links inside secondary-coloured text need more than colour to stand out. */
 .footerNote a,
-.advisorySource a,
-.limitationSource a,
-.noAdvisories a {
+.limitationSource a {
   text-decoration: underline;
   text-underline-offset: 0.15em;
 }

@@ -137,7 +137,7 @@
   }
 }
 
-/* Advisories and disclaimer */
+/* Pre-deploy notice */
 .noticesHeading {
   margin-bottom: var(--space-2);
 }
@@ -153,13 +153,6 @@
   }
 }
 
-.advisoryList {
-  padding-left: 1.25rem;
-  display: grid;
-  gap: var(--space-1);
-}
-
-.advisoryList a,
 .notices :global([role='note']) p a {
   text-decoration: underline;
   text-underline-offset: 0.15em;

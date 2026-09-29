@@ -310,7 +310,7 @@ export const capabilityMatrix: CapabilityRow[] = [
       },
       blueprint: {
         posture: 'enforced',
-        text: 'AWS Agent Registry governance records drive Gateway targets. See advisory for issue #29 on the preview API cutoff.',
+        text: 'AWS Agent Registry governance records drive Gateway targets.',
         source: {
           file: BLUEPRINT_README,
           heading: BLUEPRINT_CONTRACTS,
