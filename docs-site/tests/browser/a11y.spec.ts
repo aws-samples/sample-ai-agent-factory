@@ -6,7 +6,7 @@
  * best-practice rules, colour contrast enabled (the default). Any violation fails.
  */
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { KNOWN_ROUTES, SITE_NAME, href, sweepRoutes } from './routes';
 
 type Violations = Awaited<ReturnType<AxeBuilder['analyze']>>['violations'];
@@ -14,6 +14,26 @@ type Violations = Awaited<ReturnType<AxeBuilder['analyze']>>['violations'];
 const AXE_TAGS = ['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa', 'best-practice'];
 
 const { routes, sitemap } = sweepRoutes();
+
+/**
+ * Let time-based entrance animations finish before auditing, so axe measures the
+ * settled page rather than a frame of the hero mid-fade. Scroll-driven animations
+ * (which never "finish") and the canvas background are left alone; the reveal
+ * moves without fading, so it cannot affect contrast in any state.
+ */
+async function settleAnimations(page: Page) {
+  await page.evaluate(() =>
+    Promise.race([
+      Promise.all(
+        document
+          .getAnimations()
+          .filter((animation) => animation.timeline instanceof DocumentTimeline)
+          .map((animation) => animation.finished.catch(() => undefined)),
+      ),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ]),
+  );
+}
 
 function summarise(violations: Violations) {
   return violations.map((violation) => ({
@@ -51,6 +71,7 @@ for (const route of routes) {
     await expect(page.locator('h1')).toHaveCount(1);
     await expect(page.locator('h1')).not.toBeEmpty();
     await expect(page).toHaveTitle(new RegExp(SITE_NAME));
+    await settleAnimations(page);
 
     const results = await new AxeBuilder({ page }).withTags(AXE_TAGS).analyze();
 

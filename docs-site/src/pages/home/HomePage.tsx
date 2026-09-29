@@ -1,3 +1,4 @@
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowRight } from 'lucide-react';
 import { Callout } from '../../components/Callout';
@@ -14,6 +15,33 @@ import shared from '../start/start.module.css';
 import styles from './HomePage.module.css';
 
 const BASE_URL = import.meta.env.BASE_URL || '/';
+
+const Constellation = lazy(() => import('../../components/Constellation'));
+
+/**
+ * Hero backdrop: mounts the constellation only on the client, after the first paint (idle callback,
+ * or 150ms where requestIdleCallback is missing), so its chunk never delays the largest contentful
+ * paint and the prerendered HTML contains just the empty backdrop wrapper.
+ */
+function HeroBackdrop() {
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    if (typeof window.requestIdleCallback === 'function') {
+      const id = window.requestIdleCallback(() => setReady(true));
+      return () => window.cancelIdleCallback(id);
+    }
+    const timer = window.setTimeout(() => setReady(true), 150);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  if (!ready) return null;
+  return (
+    <Suspense fallback={null}>
+      <Constellation />
+    </Suspense>
+  );
+}
 
 /** Same wording as the atlas figure on the Architecture page; project names match the SVG labels. */
 const ATLAS_ALT =
@@ -75,6 +103,7 @@ export function HomePage() {
       <PageHeader
         title="AI Agent Factory"
         lead="Enterprise samples for building, governing, and operating agentic AI on AWS with Amazon Bedrock and Amazon Bedrock AgentCore."
+        backdrop={<HeroBackdrop />}
         actions={
           <>
             <Link to={PATHS.whichProject} className={shared.btnPrimary}>
@@ -132,7 +161,7 @@ export function HomePage() {
             {projects.map((project) => {
               const facts = getFacts(project.id);
               return (
-                <li key={project.id} className={shared.tile} data-stage={project.stage}>
+                <li key={project.id} className={shared.tile} data-stage={project.stage} data-reveal data-lift>
                   <div className={shared.tileHead}>
                     <StageBadge stage={project.stage} label={`${project.stageNumber}. ${project.stageLabel}`} />
                     <Link to={projectPath(project.id)} className={shared.tileLink}>
@@ -166,7 +195,7 @@ export function HomePage() {
           </div>
           <ul className={styles.personas}>
             {personas.map((persona) => (
-              <li key={persona.role} className={styles.persona}>
+              <li key={persona.role} className={styles.persona} data-reveal>
                 <h3 className={styles.personaRole}>{persona.role}</h3>
                 <p>
                   {persona.text}{' '}
@@ -208,39 +237,43 @@ export function HomePage() {
         <div className="container">
           <h2 className={styles.noticesHeading}>Before you deploy</h2>
           {openAdvisories.length > 0 && (
-            <Callout kind="warning" title="Open advisories">
-              <ul className={styles.advisoryList}>
-                {openAdvisories.map(({ project, advisory }) => (
-                  <li key={advisory.id}>
-                    <strong>{project.shortName}:</strong>{' '}
-                    <ExternalLink href={advisory.url}>
-                      Issue #{advisory.issue}: {advisory.title}
-                    </ExternalLink>
-                  </li>
-                ))}
-              </ul>
-              <p>
-                <Link to={PATHS.referenceSupportEnvelope}>What each advisory means for you</Link>
-              </p>
-            </Callout>
+            <div data-reveal>
+              <Callout kind="warning" title="Open advisories">
+                <ul className={styles.advisoryList}>
+                  {openAdvisories.map(({ project, advisory }) => (
+                    <li key={advisory.id}>
+                      <strong>{project.shortName}:</strong>{' '}
+                      <ExternalLink href={advisory.url}>
+                        Issue #{advisory.issue}: {advisory.title}
+                      </ExternalLink>
+                    </li>
+                  ))}
+                </ul>
+                <p>
+                  <Link to={PATHS.referenceSupportEnvelope}>What each advisory means for you</Link>
+                </p>
+              </Callout>
+            </div>
           )}
-          <Callout kind="important" title="Real resources, real costs">
-            <p>
-              Every project deploys real, billable AWS resources. Check the cost notes and teardown steps, the support
-              envelope, and the license before you deploy.
-            </p>
-            <ul className={styles.noticeLinks}>
-              <li>
-                <Link to={PATHS.costsAndCleanup}>Costs and cleanup</Link>
-              </li>
-              <li>
-                <Link to={PATHS.referenceSupportEnvelope}>Support envelope</Link>
-              </li>
-              <li>
-                <ExternalLink href={blob('LICENSE')}>License</ExternalLink>
-              </li>
-            </ul>
-          </Callout>
+          <div data-reveal>
+            <Callout kind="important" title="Real resources, real costs">
+              <p>
+                Every project deploys real, billable AWS resources. Check the cost notes and teardown steps, the support
+                envelope, and the license before you deploy.
+              </p>
+              <ul className={styles.noticeLinks}>
+                <li>
+                  <Link to={PATHS.costsAndCleanup}>Costs and cleanup</Link>
+                </li>
+                <li>
+                  <Link to={PATHS.referenceSupportEnvelope}>Support envelope</Link>
+                </li>
+                <li>
+                  <ExternalLink href={blob('LICENSE')}>License</ExternalLink>
+                </li>
+              </ul>
+            </Callout>
+          </div>
         </div>
       </div>
 

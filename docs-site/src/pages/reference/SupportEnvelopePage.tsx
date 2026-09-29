@@ -136,7 +136,7 @@ export function SupportEnvelopePage() {
               <h3 className={styles.limitationsHeading}>Known limitations, as documented</h3>
               <ul className={styles.limitationList}>
                 {limitations.map((limitation) => (
-                  <li key={limitation.id} id={limitation.id} className={styles.limitation}>
+                  <li key={limitation.id} id={limitation.id} className={styles.limitation} data-reveal>
                     {limitation.title && <strong className={styles.limitationTitle}>{limitation.title}</strong>}
                     <blockquote className={styles.limitationText}>{renderInline(limitation.text)}</blockquote>
                     <p className={styles.limitationSource}>

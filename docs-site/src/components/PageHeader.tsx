@@ -22,6 +22,12 @@ export interface PageHeaderProps {
   /** Optional figure (diagram, illustration). Stacks under the copy on small screens and
    *  becomes a second column from 1024px up, all on the same dark band. */
   figure?: ReactNode;
+  /** Decorative layer behind the copy and figure, filling the band (for example the Home
+   *  constellation). Rendered first, absolutely positioned and `pointer-events: none`, above the
+   *  band's midnight background; the band looks identical when the slot is empty or JavaScript is
+   *  off. Only interactive descendants that opt back into pointer events (the pause control) are
+   *  reachable. */
+  backdrop?: ReactNode;
   className?: string;
 }
 
@@ -29,6 +35,11 @@ export interface PageHeaderProps {
  * The dark page-header band: eyebrow, optional stage badge, h1, lead paragraph,
  * optional meta row (fact chips), optional actions row and optional figure slot. It is the only dark band a page
  * needs; sections below it sit on the light surface. Pages still render <PageMeta>.
+ *
+ * On load the eyebrow, badge, title, lead, meta, actions and figure fade in and rise 12px with a
+ * short stagger (title first). The animation is CSS-only, applies inside
+ * `@media (prefers-reduced-motion: no-preference)` and runs once, so reduced-motion visitors and
+ * no-JavaScript renders see the final state immediately and nothing shifts layout.
  */
 export function PageHeader({
   eyebrow,
@@ -39,11 +50,13 @@ export function PageHeader({
   stageLabel,
   actions,
   figure,
+  backdrop,
   className,
 }: PageHeaderProps) {
   const innerClass = [styles.inner, figure ? styles.hasFigure : undefined].filter(Boolean).join(' ');
   return (
     <header className={[styles.header, 'on-dark', className].filter(Boolean).join(' ')}>
+      {backdrop !== undefined && <div className={styles.backdrop}>{backdrop}</div>}
       <div className={`container ${innerClass}`}>
         <div className={styles.copy}>
           {eyebrow && <p className={styles.eyebrow}>{eyebrow}</p>}

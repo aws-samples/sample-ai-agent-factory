@@ -17,22 +17,40 @@
       <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e3a5f" stroke-width="0.5" opacity="0.3"/>
     </pattern>
 
-    <!-- Journey arrowheads, coloured by the stage they point to -->
-    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L0,6 L9,3 z" fill="#86EFAC"/>
-    </marker>
-    <marker id="arrow-violet" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L0,6 L9,3 z" fill="#C4B5FD"/>
-    </marker>
-    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L0,6 L9,3 z" fill="#93C5FD"/>
-    </marker>
 
     <!-- Drop shadow filter -->
     <filter id="card-shadow" x="-20%" y="-20%" width="140%" height="140%">
       <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000" flood-opacity="0.25"/>
     </filter>
   </defs>
+
+  <style>
+    /* Entrance animation, CSS only, runs once when the image loads. Every rule sits behind
+       prefers-reduced-motion: no-preference, so users who ask for less motion see the final map at once. */
+    @media (prefers-reduced-motion: no-preference) {
+      .a-fade { animation: atlas-fade 600ms ease-out both; }
+      .a-rise { animation: atlas-rise 520ms cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+      .a-draw { animation: atlas-draw 700ms ease-in-out both; }
+      .a-hub { animation-delay: 150ms; }
+      .a-s1 { animation-delay: 420ms; }
+      .a-s2 { animation-delay: 560ms; }
+      .a-s3 { animation-delay: 700ms; }
+      .a-s4 { animation-delay: 840ms; }
+      .a-links { animation-delay: 1000ms; }
+      .a-flow-1 { animation-delay: 1050ms; }
+      .a-flow-2 { animation-delay: 1250ms; }
+      .a-flow-3 { animation-delay: 1450ms; }
+      .a-flow-skip { animation-delay: 1650ms; }
+      .a-head-1 { animation-delay: 1650ms; }
+      .a-head-2 { animation-delay: 1850ms; }
+      .a-head-3 { animation-delay: 2050ms; }
+      .a-head-skip { animation-delay: 2150ms; }
+      .a-legend { animation-delay: 2000ms; }
+      @keyframes atlas-fade { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes atlas-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+      @keyframes atlas-draw { from { stroke-dashoffset: 420; opacity: 0; } to { stroke-dashoffset: 0; opacity: 1; } }
+    }
+  </style>
 
   <!-- Background -->
   <rect width="1200" height="700" fill="url(#midnight-gradient)"/>
@@ -41,11 +59,13 @@
   <g font-family="system-ui, -apple-system, sans-serif">
 
     <!-- Title area -->
+    <g class="a-fade">
     <text x="600" y="54" text-anchor="middle" fill="#F5F7FB" font-size="28" font-weight="600">AI Agent Factory Atlas</text>
     <text x="600" y="86" text-anchor="middle" fill="#D7DEE8" font-size="18">Four complementary projects for enterprise agentic AI on AWS</text>
+    </g>
 
     <!-- Dotted connectors: every project uses the shared capabilities -->
-    <g fill="none" stroke-width="2.5" stroke-dasharray="3,6" stroke-linecap="round">
+    <g class="a-fade a-links" fill="none" stroke-width="2.5" stroke-dasharray="3,6" stroke-linecap="round">
       <path d="M 485 300 C 462 300 453 255 430 255" stroke="#FDBA74"/>
       <path d="M 485 430 C 462 430 453 475 430 475" stroke="#86EFAC"/>
       <path d="M 715 430 C 738 430 747 475 770 475" stroke="#C4B5FD"/>
@@ -53,6 +73,7 @@
     </g>
 
     <!-- Central capability hub -->
+    <g class="a-rise a-hub">
     <g filter="url(#card-shadow)">
       <rect x="485" y="268" width="230" height="194" rx="18" fill="#1a2744" stroke="#94a3b8" stroke-width="1.5"/>
       <text x="600" y="302" text-anchor="middle" fill="#F5F7FB" font-size="20" font-weight="600">Agent Factory</text>
@@ -63,8 +84,10 @@
       <text x="600" y="416" text-anchor="middle" fill="#D7DEE8" font-size="16">Identity + Registry</text>
       <text x="600" y="440" text-anchor="middle" fill="#D7DEE8" font-size="16">Policy + Observability</text>
     </g>
+    </g>
 
     <!-- Stage 1: LEARN - Workshop (amber) - top left -->
+    <g class="a-rise a-s1">
     <g transform="translate(30,118)" filter="url(#card-shadow)">
       <rect width="400" height="170" rx="14" fill="#0f1a2e" stroke="#FDBA74" stroke-width="2"/>
       <rect x="16" y="16" width="72" height="26" rx="6" fill="#FDBA74"/>
@@ -75,8 +98,10 @@
       <line x1="16" y1="126" x2="384" y2="126" stroke="#475569" stroke-width="1"/>
       <text x="16" y="152" fill="#FDBA74" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">workshop-building-agentic-ai-platform/</text>
     </g>
+    </g>
 
     <!-- Stage 2: BUILD - Self-Service (green) - bottom left -->
+    <g class="a-rise a-s2">
     <g transform="translate(30,442)" filter="url(#card-shadow)">
       <rect width="400" height="170" rx="14" fill="#0f1a2e" stroke="#86EFAC" stroke-width="2"/>
       <rect x="16" y="16" width="72" height="26" rx="6" fill="#86EFAC"/>
@@ -87,8 +112,10 @@
       <line x1="16" y1="126" x2="384" y2="126" stroke="#475569" stroke-width="1"/>
       <text x="16" y="152" fill="#86EFAC" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">Agentic-ai-self-service/</text>
     </g>
+    </g>
 
     <!-- Stage 3: GOVERN - MCP Gateway (violet) - bottom right -->
+    <g class="a-rise a-s3">
     <g transform="translate(770,442)" filter="url(#card-shadow)">
       <rect width="400" height="170" rx="14" fill="#0f1a2e" stroke="#C4B5FD" stroke-width="2"/>
       <rect x="16" y="16" width="86" height="26" rx="6" fill="#C4B5FD"/>
@@ -99,8 +126,10 @@
       <line x1="16" y1="126" x2="384" y2="126" stroke="#475569" stroke-width="1"/>
       <text x="16" y="152" fill="#C4B5FD" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">enterprise-mcp-governance-gateway/</text>
     </g>
+    </g>
 
     <!-- Stage 4: SCALE - Enterprise Blueprint (blue) - top right -->
+    <g class="a-rise a-s4">
     <g transform="translate(770,118)" filter="url(#card-shadow)">
       <rect width="400" height="170" rx="14" fill="#0f1a2e" stroke="#93C5FD" stroke-width="2"/>
       <rect x="16" y="16" width="72" height="26" rx="6" fill="#93C5FD"/>
@@ -111,21 +140,29 @@
       <line x1="16" y1="126" x2="384" y2="126" stroke="#475569" stroke-width="1"/>
       <text x="16" y="152" fill="#93C5FD" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">enterprise-agentic-ai-platform-blueprint/</text>
     </g>
+    </g>
 
     <!-- Journey flow arrows between stages -->
     <g fill="none" stroke="#94a3b8" stroke-width="2">
       <!-- 1 to 2 -->
-      <path d="M 230 294 L 230 436" marker-end="url(#arrow-green)"/>
+      <path class="a-draw a-flow-1" stroke-dasharray="420" d="M 230 294 L 230 436"/>
       <!-- 2 to 3 -->
-      <path d="M 434 560 C 520 612 680 612 766 560" marker-end="url(#arrow-violet)"/>
+      <path class="a-draw a-flow-2" stroke-dasharray="420" d="M 434 560 C 520 612 680 612 766 560"/>
       <!-- 3 to 4 -->
-      <path d="M 970 436 L 970 294" marker-end="url(#arrow-blue)"/>
+      <path class="a-draw a-flow-3" stroke-dasharray="420" d="M 970 436 L 970 294"/>
       <!-- Skip-ahead: 1 to 4 -->
-      <path d="M 434 168 C 520 118 680 118 766 168" stroke-dasharray="8,6" marker-end="url(#arrow-blue)"/>
+      <path class="a-fade a-flow-skip" d="M 434 168 C 520 118 680 118 766 168" stroke-dasharray="8,6"/>
+    </g>
+    <!-- Arrowheads as shapes so they can fade in after each line has drawn -->
+    <g>
+      <path class="a-fade a-head-1" d="M0,0 L0,6 L9,3 z" fill="#86EFAC" transform="translate(230,436) rotate(90.0) scale(2) translate(-9,-3)"/>
+      <path class="a-fade a-head-2" d="M0,0 L0,6 L9,3 z" fill="#C4B5FD" transform="translate(766,560) rotate(-31.2) scale(2) translate(-9,-3)"/>
+      <path class="a-fade a-head-3" d="M0,0 L0,6 L9,3 z" fill="#93C5FD" transform="translate(970,294) rotate(-90.0) scale(2) translate(-9,-3)"/>
+      <path class="a-fade a-head-skip" d="M0,0 L0,6 L9,3 z" fill="#93C5FD" transform="translate(766,168) rotate(30.2) scale(2) translate(-9,-3)"/>
     </g>
 
     <!-- Legend -->
-    <g transform="translate(7,652)">
+    <g class="a-fade a-legend" transform="translate(7,652)">
       <text x="292" y="0" fill="#D7DEE8" font-size="16">Journey path:</text>
       <line x1="404" y1="-5" x2="448" y2="-5" stroke="#94a3b8" stroke-width="2"/>
       <text x="458" y="0" fill="#D7DEE8" font-size="16">Sequential</text>
@@ -136,6 +173,6 @@
     </g>
 
     <!-- Footer note -->
-    <text x="600" y="686" text-anchor="middle" fill="#94a3b8" font-size="16">Each project is self-contained. Start anywhere based on your role and goals.</text>
+    <text class="a-fade a-legend" x="600" y="686" text-anchor="middle" fill="#94a3b8" font-size="16">Each project is self-contained. Start anywhere based on your role and goals.</text>
   </g>
 </svg>

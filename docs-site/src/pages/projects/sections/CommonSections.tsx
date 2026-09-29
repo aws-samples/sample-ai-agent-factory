@@ -52,7 +52,7 @@ export function EvidenceSection({ projectId, children }: { projectId: ProjectId;
       </Callout>
       {children}
       {data.items.map((item) => (
-        <div key={item.id} className={styles.evidenceItem}>
+        <div key={item.id} className={styles.evidenceItem} data-reveal>
           <h3>{item.what}</h3>
           {item.command && <CodeBlock code={item.command} language="bash" />}
           <p className={styles.prose}>

@@ -1,0 +1,68 @@
+/* Fills PageHeader's backdrop slot. The header band keeps its own midnight background, so the
+   canvas only adds the constellation on top; without JavaScript nothing here exists. */
+.root {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Bottom 40 percent fades back to midnight so the actions row and lead stay readable. */
+.fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 40%;
+  background: linear-gradient(to bottom, rgba(11, 18, 32, 0), var(--color-midnight));
+}
+
+/* The WCAG 2.2.2 pause control: bottom-right, inside the band's padding so it never overlaps
+   the copy. The backdrop slot is pointer-events: none; the button opts back in. */
+.toggle {
+  position: absolute;
+  right: var(--space-3);
+  bottom: var(--space-2);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 28px;
+  padding: 0 var(--space-3);
+  border: 1px solid rgba(245, 247, 251, 0.35);
+  border-radius: 999px;
+  background: rgba(11, 18, 32, 0.85);
+  color: var(--color-cloud);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;
+  transition:
+    border-color var(--transition-fast),
+    background var(--transition-fast);
+}
+
+.toggle:hover {
+  border-color: var(--color-cloud);
+  background: var(--color-midnight-light);
+}
+
+.toggle:focus-visible {
+  outline: 2px solid var(--color-cloud);
+  outline-offset: 2px;
+}
+
+@media (min-width: 640px) {
+  .toggle {
+    right: var(--space-4);
+    bottom: var(--space-3);
+    min-height: 32px;
+  }
+}
