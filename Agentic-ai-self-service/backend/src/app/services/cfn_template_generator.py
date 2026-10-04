@@ -5919,6 +5919,17 @@ class CfnTemplateGenerator:
         environment variable, so adding it here exposes nothing new. A key value here would
         be a hard stop.
         """
+        # Without a bundle digest the merged key must move with the bundle KEY instead.
+        # Raised by the independent G10 review: a Terraform or direct-template recipient
+        # who leaves DependencyBundleDigest at "none" and points DependencyBundleKey at a
+        # new bundle got the Update (the key is a property) merged into the SAME
+        # OutputKey, so CodeZipPrefix did not move, the Runtime published no version, and
+        # the overwrite destroyed the bytes the previous version referenced. The bundle
+        # key is the only other thing that identifies the bundle, so it is what keys the
+        # output when no digest does; "/" is joined to "_" to keep one path segment.
+        template.setdefault("Conditions", {})["DependencyBundleDigestSupplied"] = {
+            "Fn::Not": [{"Fn::Equals": [{"Ref": "DependencyBundleDigest"}, "none"]}]
+        }
         template["Resources"]["AgentCodePackage"] = {
             "Type": "Custom::AgentCodePackage",
             "Properties": {
@@ -5948,8 +5959,13 @@ class CfnTemplateGenerator:
                 # carrying the new dependency. That is the same failure this key exists to
                 # prevent, just reached by the other half of the zip.
                 #
-                # DependencyBundleDigest is the awkward one: it defaults to the literal
-                # "none", which has no ":" to split on, so splitting it directly would put
+                # DependencyBundleDigest is the awkward one. When it is "none" the bundle
+                # KEY takes its place in the path (see the Condition above the resource):
+                # a digest-less recipient who swaps the bundle object under a NEW key still
+                # moves CodeZipPrefix and gets a new runtime version; only "new bytes under
+                # the same key with no digest" cannot be detected, and the README says so.
+                # When a digest IS supplied it has no ":" problem in the true branch, but
+                # the guard stays because "none" has no ":" to split on: splitting it would put
                 # Fn::Select out of range and fail the whole template rather than just
                 # this resource. Appending ":none" before splitting guarantees a second
                 # element either way — "none" becomes "none:none" and yields "none", while
@@ -5970,14 +5986,20 @@ class CfnTemplateGenerator:
                         {
                             "Digest": {"Fn::Select": [1, {"Fn::Split": [":", {"Ref": "AgentCodeDigest"}]}]},
                             "BundleDigest": {
-                                "Fn::Select": [
-                                    1,
+                                "Fn::If": [
+                                    "DependencyBundleDigestSupplied",
                                     {
-                                        "Fn::Split": [
-                                            ":",
-                                            {"Fn::Join": ["", [{"Ref": "DependencyBundleDigest"}, ":none"]]},
+                                        "Fn::Select": [
+                                            1,
+                                            {
+                                                "Fn::Split": [
+                                                    ":",
+                                                    {"Fn::Join": ["", [{"Ref": "DependencyBundleDigest"}, ":none"]]},
+                                                ]
+                                            },
                                         ]
                                     },
+                                    {"Fn::Join": ["_", {"Fn::Split": ["/", {"Ref": "DependencyBundleKey"}]}]},
                                 ]
                             },
                         },
@@ -8799,6 +8821,10 @@ def handler(event, context):
         }
 
         # Code package for MCP server
+        # Same rule as AgentCodePackage: no digest, so the MCP bundle key keys the output.
+        template.setdefault("Conditions", {})["McpServerDependencyBundleDigestSupplied"] = {
+            "Fn::Not": [{"Fn::Equals": [{"Ref": "McpServerDependencyBundleDigest"}, "none"]}]
+        }
         template["Resources"]["McpServerCodePackage"] = {
             "Type": "Custom::AgentCodePackage",
             "Properties": {
@@ -8829,14 +8855,25 @@ def handler(event, context):
                         {
                             "Digest": {"Fn::Select": [1, {"Fn::Split": [":", {"Ref": "McpServerCodeDigest"}]}]},
                             "BundleDigest": {
-                                "Fn::Select": [
-                                    1,
+                                "Fn::If": [
+                                    "McpServerDependencyBundleDigestSupplied",
                                     {
-                                        "Fn::Split": [
-                                            ":",
-                                            {"Fn::Join": ["", [{"Ref": "McpServerDependencyBundleDigest"}, ":none"]]},
+                                        "Fn::Select": [
+                                            1,
+                                            {
+                                                "Fn::Split": [
+                                                    ":",
+                                                    {
+                                                        "Fn::Join": [
+                                                            "",
+                                                            [{"Ref": "McpServerDependencyBundleDigest"}, ":none"],
+                                                        ]
+                                                    },
+                                                ]
+                                            },
                                         ]
                                     },
+                                    {"Fn::Join": ["_", {"Fn::Split": ["/", {"Ref": "McpServerDependencyBundleKey"}]}]},
                                 ]
                             },
                         },
@@ -11424,6 +11461,15 @@ stage `cfn-provider.zip`, the zipped `agent-code/` directory, the dependency bun
 and any tool/MCP ZIPs present in this download, then supply their keys and digests
 through the parameters listed below. `deploy.sh` is the executable reference for
 that staging contract.
+
+Two of those parameters deserve a sentence. `DependencyBundleDigest` (and
+`McpServerDependencyBundleDigest` when a server is present) default to `none`, which
+skips the integrity check on the bundle and says so in the provider's log. Supply the
+real `sha256:<hex>` of the object in the bucket, as `deploy.sh` does. Either way a
+bundle change publishes a new runtime version: with a digest the merged `code.zip`
+key moves with the digest, without one it moves with the bundle's S3 key. The one
+combination that does not propagate is new bytes under the same key with the digest
+left at `none` — do not do that.
 
 A minimal stack wrapper, after those artifact parameters have been assembled, is:
 

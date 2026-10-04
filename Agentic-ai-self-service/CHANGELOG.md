@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — a dependency-bundle change without a digest no longer no-ops the exported runtime
+
+- The merged `code.zip` key was `<agent digest>-<bundle digest>`, and `DependencyBundleDigest`
+  defaults to `none` for recipients who stage the bundle themselves (Terraform, direct
+  template). Pointing `DependencyBundleKey` at a new bundle then re-merged into the SAME key, so
+  `CodeZipPrefix` did not move, the Runtime published no new version, kept the old dependencies,
+  and the overwrite destroyed the bytes the previous version referenced. When no digest is
+  supplied the bundle's S3 key now keys the output instead (same for the MCP server's bundle).
+  The generated README's Terraform section names both digest parameters and the one combination
+  that still cannot propagate (new bytes under an unchanged key, digest left at `none`). Raised
+  by the independent review of the export path.
+
 ### Fixed — a stalled CloudFormation response upload is retried instead of waited out
 
 - `cfn_response.send` opened the pre-signed PUT with no socket timeout. A connection that stalled

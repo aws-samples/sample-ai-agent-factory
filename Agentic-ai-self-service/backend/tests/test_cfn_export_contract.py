@@ -7319,3 +7319,100 @@ class TestLambdaRolesCannotRecreateTheirLogGroups:
                             st.get("Sid"),
                             rendered,
                         )
+
+
+def _render_key(expr, params, conditions, stack="stk"):
+    """Evaluate the handful of intrinsics the code-package keys are built from."""
+
+    def ev(x):
+        if isinstance(x, str):
+            return x
+        if isinstance(x, list):
+            return [ev(i) for i in x]
+        assert isinstance(x, dict) and len(x) == 1, x
+        ((k, v),) = x.items()
+        if k == "Ref":
+            return stack if v == "AWS::StackName" else params[v]
+        if k == "Fn::Sub":
+            tpl, variables = (v, {}) if isinstance(v, str) else v
+            out = tpl.replace("${AWS::StackName}", stack)
+            for name, val in variables.items():
+                out = out.replace("${" + name + "}", ev(val))
+            return out
+        if k == "Fn::Select":
+            return ev(v[1])[int(v[0])]
+        if k == "Fn::Split":
+            return ev(v[1]).split(v[0])
+        if k == "Fn::Join":
+            return v[0].join(ev(v[1]))
+        if k == "Fn::If":
+            return ev(v[1]) if truth(conditions[v[0]]) else ev(v[2])
+        raise AssertionError(f"unsupported intrinsic {k}")
+
+    def truth(c):
+        ((k, v),) = c.items()
+        if k == "Fn::Not":
+            return not truth(v[0])
+        if k == "Fn::Equals":
+            return ev(v[0]) == ev(v[1])
+        raise AssertionError(f"unsupported condition {k}")
+
+    return ev(expr)
+
+
+class TestABundleWithoutADigestStillMovesTheKey:
+    """P1 from the independent G10 review of the export path.
+
+    ``DependencyBundleDigest`` defaults to ``none`` for recipients who stage the bundle
+    themselves. With the key built from the two digests alone, pointing
+    ``DependencyBundleKey`` at a new bundle re-merged into the SAME OutputKey: the Update
+    ran (the key is a property), CodeZipPrefix did not move, the Runtime published no
+    version, and the overwrite destroyed the bytes the previous version referenced. The
+    bundle key is the only other thing that identifies the bundle, so without a digest it
+    is what keys the output.
+    """
+
+    CODE = "sha256:" + "a" * 64
+    BUNDLE = "sha256:" + "b" * 64
+
+    def _key(self, template, logical_id, **params):
+        res = template["Resources"][logical_id]["Properties"]["OutputKey"]
+        defaults = {name: p.get("Default") for name, p in template["Parameters"].items()}
+        return _render_key(res, {**defaults, **params}, template.get("Conditions", {}))
+
+    def test_the_agent_key_moves_with_the_bundle_key_when_no_digest_is_supplied(self):
+        t = _template()
+        a = self._key(t, "AgentCodePackage", AgentCodeDigest=self.CODE, DependencyBundleKey="agentcore-deps/base.zip")
+        b = self._key(t, "AgentCodePackage", AgentCodeDigest=self.CODE, DependencyBundleKey="agentcore-deps/base-2.zip")
+        assert a != b, "a bundle swap under a new key must re-key the merged code.zip"
+        assert a.startswith("deployments/stk/") and a.endswith("/code.zip"), a
+        assert a.count("/") == 3, f"the bundle key must collapse to one path segment: {a}"
+
+    def test_a_supplied_digest_governs_and_the_bundle_key_does_not(self):
+        t = _template()
+        common = dict(AgentCodeDigest=self.CODE, DependencyBundleDigest=self.BUNDLE)
+        a = self._key(t, "AgentCodePackage", DependencyBundleKey="k1.zip", **common)
+        b = self._key(t, "AgentCodePackage", DependencyBundleKey="k2.zip", **common)
+        assert a == b and "b" * 64 in a, (a, b)
+
+    def test_the_mcp_server_bundle_follows_the_same_rule(self):
+        t = _template(gateway_config=AGENTCORE_GATEWAY, mcp_server_config={"tools": []})
+        assert "McpServerCodePackage" in t["Resources"], "combination emits no MCP server; proves nothing"
+        a = self._key(
+            t, "McpServerCodePackage", McpServerCodeDigest=self.CODE, McpServerDependencyBundleKey="x/lean.zip"
+        )
+        b = self._key(
+            t, "McpServerCodePackage", McpServerCodeDigest=self.CODE, McpServerDependencyBundleKey="x/lean-2.zip"
+        )
+        assert a != b and a.endswith("/mcp-server-code.zip"), (a, b)
+
+    def test_the_conditions_test_the_none_sentinel_exactly(self):
+        t = _template(gateway_config=AGENTCORE_GATEWAY, mcp_server_config={"tools": []})
+        for param in ("DependencyBundleDigest", "McpServerDependencyBundleDigest"):
+            assert t["Conditions"][f"{param}Supplied"] == {"Fn::Not": [{"Fn::Equals": [{"Ref": param}, "none"]}]}
+
+    def test_the_readme_tells_terraform_users_about_both_digests(self):
+        readme = _generate(gateway_config=AGENTCORE_GATEWAY, mcp_server_config={"tools": []}).readme
+        section = readme.split("## Terraform", 1)[1]
+        assert "DependencyBundleDigest" in section and "McpServerDependencyBundleDigest" in section
+        assert "same key" in section, "the one non-propagating combination must be named"
