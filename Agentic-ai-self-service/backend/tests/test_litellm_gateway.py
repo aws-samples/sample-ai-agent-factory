@@ -1284,3 +1284,19 @@ class TestLiteLLMBranchRecordsItsManifest:
             "target_region": "us-east-1",
         }
         assert _manifest_completion_errors(record, event) == []
+
+
+class TestBothProviderSpellingsMustAgree:
+    """``a or b`` on the raw values let a whitespace-only ``gateway_provider`` hide a real
+    ``gatewayProvider`` and silently take the platform default -- the wrong-backend path
+    resolve_gateway_provider exists to close. Raised by the independent G10 review."""
+
+    def test_conflicting_spellings_are_refused_not_ranked(self):
+        with pytest.raises(ValueError, match="Conflicting gateway provider"):
+            lgd.resolve_gateway_provider({"gateway_provider": "agentcore", "gatewayProvider": "litellm"})
+
+    def test_a_whitespace_only_spelling_cannot_hide_the_other(self):
+        assert lgd.resolve_gateway_provider({"gateway_provider": "   ", "gatewayProvider": "litellm"}) == "litellm"
+
+    def test_agreeing_spellings_differing_only_in_case_are_one_value(self):
+        assert lgd.resolve_gateway_provider({"gateway_provider": "LiteLLM", "gatewayProvider": "litellm"}) == "litellm"

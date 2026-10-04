@@ -170,8 +170,19 @@ def resolve_gateway_provider(gateway_config: dict | None) -> str:
     against designing for which callers *should* reach a backend rather than
     which ones *can*, which is exactly this failure.
     """
-    raw = (gateway_config or {}).get("gateway_provider") or (gateway_config or {}).get("gatewayProvider")
-    provider = str(raw or "").strip().lower()
+    # Both spellings are read and must agree. ``a or b`` on the raw values let a
+    # whitespace-only ``gateway_provider`` (truthy) hide a real ``gatewayProvider``, and
+    # the empty result then took the platform default -- the silent wrong-backend path
+    # this function exists to close, reachable from imported JSON and direct API calls.
+    cfg = gateway_config or {}
+    spelled = {str(cfg.get(k) or "").strip().lower() for k in ("gateway_provider", "gatewayProvider")}
+    spelled.discard("")
+    if len(spelled) > 1:
+        raise ValueError(
+            f"Conflicting gateway provider values {sorted(spelled)!r} under 'gateway_provider' and "
+            "'gatewayProvider'. Refusing to pick one: they name different backends."
+        )
+    provider = next(iter(spelled), "")
     if provider in _VALID_PROVIDERS:
         return provider
     if provider:

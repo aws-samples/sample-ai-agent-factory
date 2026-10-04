@@ -44,6 +44,12 @@ MAX_REASON_LENGTH = 1000
 
 _MAX_ATTEMPTS = 4
 _BACKOFF_SECONDS = (1, 3, 7)
+#: Per-attempt socket timeout for the PUT. Without one, a stalled connection to the
+#: pre-signed URL sits inside urlopen until the Lambda's own timeout kills the
+#: invocation -- no retry ever runs, no FAILED is ever sent, and CloudFormation waits out
+#: the full custom-resource timeout. The body is a few hundred bytes to an S3 endpoint;
+#: ten seconds is generous, and four attempts stay well inside the 300 s function budget.
+_SEND_TIMEOUT_SECONDS = 10
 
 # CloudFormation custom resources receive a pre-signed URL for an AWS-owned S3
 # bucket whose name starts with this fixed prefix. Accepting arbitrary HTTPS is
@@ -153,7 +159,7 @@ def send(
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
             with (
-                urlopen(req) as resp  # nosec B310
+                urlopen(req, timeout=_SEND_TIMEOUT_SECONDS) as resp  # nosec B310
             ):  # nosemgrep: dynamic-urllib-use-detected -- URL validated as CloudFormation's AWS-owned S3 response host
                 logger.info("CFN response status: %s", resp.status)
             return True

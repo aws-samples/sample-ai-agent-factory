@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — a stalled CloudFormation response upload is retried instead of waited out
+
+- `cfn_response.send` opened the pre-signed PUT with no socket timeout. A connection that stalled
+  sat inside `urlopen` until the Lambda's own 300 s budget killed the invocation, so none of the
+  four retries ran, no FAILED was sent, and CloudFormation waited out the hour-long custom-resource
+  timeout. Each attempt is now bounded to 10 s. Raised by the independent review of the export path.
+
+### Fixed — the two spellings of the gateway provider must agree
+
+- `resolve_gateway_provider` read `gateway_provider or gatewayProvider` on the raw values, so a
+  whitespace-only first spelling hid a real second one and the empty result took the platform
+  default: the silent wrong-backend path the function exists to refuse, reachable from imported
+  JSON and direct API calls. Both spellings are read; blank ones are ignored; two different
+  values are refused by name.
+
 ### Fixed — a fresh clone can deploy: the CDK CLI lock file is tracked
 
 - `scripts/deploy.sh` installs the pinned CDK CLI with `npm ci`, which needs `infra/package.json`

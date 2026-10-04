@@ -3064,3 +3064,58 @@ class TestRuntimeLogGroupSweeperAndLedger:
         status = kwargs.get("status") or next((x for x in args if x in ("SUCCESS", "FAILED")), None)
         assert status == "SUCCESS", (args, kwargs)
         assert ssm.params == {}
+
+
+class TestTheResponsePutIsBounded:
+    """A stalled connection to the pre-signed URL must fail an ATTEMPT, not the invocation.
+
+    ``urlopen`` with no timeout blocks until Lambda's own 300 s budget kills the process:
+    no retry ever runs, no FAILED is ever sent, and CloudFormation waits out the hour-long
+    custom-resource timeout. Raised by the independent G10 review of the export path.
+    """
+
+    URL = TestResponseDelivery.URL
+
+    def _event(self):
+        # A real-shaped stack ARN: the URL guard checks the response host against the
+        # stack's region before a single byte is sent.
+        stack = "arn:aws:cloudformation:us-east-1:123456789012:stack/s/0b6a0e9e-0000-4000-8000-000000000000"
+        return {"ResponseURL": self.URL, "StackId": stack, "RequestId": "req", "LogicalResourceId": "Res"}
+
+    def test_every_attempt_carries_a_socket_timeout(self, monkeypatch):
+        seen = []
+
+        class _Resp:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def _urlopen(req, timeout=None):
+            seen.append(timeout)
+            return _Resp()
+
+        monkeypatch.setattr(provider.cfn_response, "urlopen", _urlopen)
+        ok = provider.cfn_response.send(
+            self._event(), _Context(), provider.cfn_response.SUCCESS, physical_resource_id="p"
+        )
+        assert ok is True
+        assert seen == [provider.cfn_response._SEND_TIMEOUT_SECONDS], seen
+        assert 0 < seen[0] <= 30, "the four attempts plus backoff must fit inside the 300 s function budget"
+
+    def test_a_stalled_attempt_is_retried_rather_than_waited_out(self, monkeypatch):
+        monkeypatch.setattr(provider.cfn_response.time, "sleep", lambda _s: None)
+        attempts = []
+
+        def _urlopen(req, timeout=None):
+            attempts.append(timeout)
+            raise TimeoutError("stalled")
+
+        monkeypatch.setattr(provider.cfn_response, "urlopen", _urlopen)
+        ok = provider.cfn_response.send(self._event(), _Context(), provider.cfn_response.FAILED, reason="x")
+        assert ok is False
+        assert len(attempts) == provider.cfn_response._MAX_ATTEMPTS
+        assert all(t == provider.cfn_response._SEND_TIMEOUT_SECONDS for t in attempts)
