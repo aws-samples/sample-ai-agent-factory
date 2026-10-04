@@ -225,7 +225,17 @@ def test_bundle_classifier_fails_closed_on_invalid_generated_python():
 
 
 def test_shipping_mcp_bundle_matches_the_generated_v1_import_contract():
-    archive = REPO_ROOT / "backend" / "agentcore-deps" / "mcp-lean.zip"
+    # The bundles are build artifacts of scripts/install-agentcore-deps.sh, gitignored, so a
+    # fresh checkout (CI) has none. Same rule as test_runtime_bundle_pins_match_the_test_environment:
+    # nothing built is a skip, a partial build is a failure, because a missing mcp-lean.zip next
+    # to a present base.zip is exactly the drift this test exists to catch.
+    deps_dir = REPO_ROOT / "backend" / "agentcore-deps"
+    archive = deps_dir / "mcp-lean.zip"
+    if not archive.exists():
+        built = sorted(p.name for p in deps_dir.glob("*.zip")) if deps_dir.is_dir() else []
+        if not built:
+            pytest.skip(f"no bundles built in {deps_dir}; run scripts/install-agentcore-deps.sh")
+        pytest.fail(f"{deps_dir.name}/ is partially built -- {archive.name} is missing but {built} exist")
     with zipfile.ZipFile(archive) as bundle:
         metadata_name = next(
             name for name in bundle.namelist() if name.startswith("mcp-") and name.endswith(".dist-info/METADATA")

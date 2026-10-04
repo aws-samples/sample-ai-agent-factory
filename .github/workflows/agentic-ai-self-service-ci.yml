@@ -213,6 +213,14 @@ jobs:
       # requirements-dev.txt includes requirements.txt and adds pytest. Installing
       # only the latter is what made this job fail with `No module named pytest`
       # rather than run the 118 assertions it exists to run.
+      # Several CDK assertions read the backend they grant for (route parity, the owner
+      # tag the backend stamps, the ownership getters), so they import ``app``. The
+      # certified local environment carries the backend; this job did not, and those
+      # tests failed with ModuleNotFoundError while the suite was green on every laptop.
+      # Backend first, so the exact infra pins below win any shared dependency.
+      - name: Install the backend the cross-layer assertions import
+        working-directory: Agentic-ai-self-service
+        run: pip install -e ./backend
       - name: Install infra requirements
         working-directory: Agentic-ai-self-service/infra
         run: pip install -r requirements-dev.txt

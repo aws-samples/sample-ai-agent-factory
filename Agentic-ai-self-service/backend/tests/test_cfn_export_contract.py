@@ -1328,13 +1328,18 @@ class TestDependencyBundleIntegrity:
         including the case where the other build legitimately resolved a newer wheel.
 
         Pinned as "no branch hashes $BUNDLE_FILE" rather than as the presence of the
-        helper, because the defect was a branch that reached for the local copy.
+        helper, because the defect was a branch that reached for the local copy. Both
+        callers pass the key explicitly: a defaulted ``$1`` with a bare call is
+        ShellCheck SC2120/SC2119 under 0.9.0, and the shipped script must lint clean
+        on the recipient's machine, not only on ours.
         """
         script = _generate().deploy_sh
-        assert 'BUNDLE_DIGEST="$(bundle_digest_in_bucket)"' in script
-        assert script.count('BUNDLE_DIGEST="$(bundle_digest_in_bucket)"') == 2, (
+        call = 'BUNDLE_DIGEST="$(bundle_digest_in_bucket "$BUNDLE_KEY")"'
+        assert call in script
+        assert script.count(call) == 2, (
             "one of the two branches still records a digest of something other than the object"
         )
+        assert "bundle_digest_in_bucket)" not in script, "a bare call would default the key (SC2120)"
         assert 'sha256_stdin <"$BUNDLE_FILE"' not in script, "a branch hashes the local zip"
         assert '"DependencyBundleDigest=$BUNDLE_DIGEST"' in script
         assert "DEPENDENCY_BUNDLE_DIGEST" in script, "no way to pin the digest by hand"

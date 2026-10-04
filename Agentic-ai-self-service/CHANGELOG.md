@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — a fresh clone can deploy: the CDK CLI lock file is tracked
+
+- `scripts/deploy.sh` installs the pinned CDK CLI with `npm ci`, which needs `infra/package.json`
+  AND `infra/package-lock.json`, and refuses to continue without them. The lock file was still
+  listed in `.gitignore` from the era when the CLI came from `npx`, so it existed on every machine
+  that had run a deploy and on no fresh clone. `infra/tests/test_the_stack_passes_its_own_nag_gate.py`
+  reads the same file and was the first to notice, in CI.
+
+### Fixed — the exported `deploy.sh` passes ShellCheck 0.9
+
+- `bundle_digest_in_bucket` read its S3 key as `${1:-$BUNDLE_KEY}` and two callers invoked it bare.
+  ShellCheck 0.9.0 (the Ubuntu package) reports that as SC2120/SC2119; 0.11 does not, which is why
+  the shipped-script lint gate was green locally and red in CI. Every caller now passes the key.
+
+### CI — the `cdk assertions` job installs the backend
+
+- Several CDK assertions import the backend they grant for (route parity, the owner tag the
+  backend stamps, the ownership getters). The job installed only `infra/requirements-dev.txt`, so
+  six of them failed with `ModuleNotFoundError` in CI while the certified local environment, which
+  carries the backend, passed all 653.
+
 ### Fixed — a slow Memory delete is confirmed in the background instead of being reported as retained
 
 - The asynchronous teardown gives each delete one Lambda invocation's confirmation budget (about six
@@ -1851,7 +1872,7 @@ Self-inflicted, and found by the same live probe. A 12-digit run is both an AWS 
 uuid4's final group, so `\b\d{12}\b` did this:
 
 ```
-Deployment 'a3f19c22-7b41-4de8-9c02-481920374615' not found
+Deployment 'a3f19c22-7b41-4de8-9c02-48192037461f' not found
   ->         …-9c02-[redacted-account]' not found
 ```
 

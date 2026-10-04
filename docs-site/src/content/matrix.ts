@@ -539,12 +539,12 @@ export const securityMatrix: SecurityRow[] = [
         },
       },
       'self-service': {
-        posture: 'advisory',
-        text: 'Scope-based RBAC ships advisory by default (RBAC_ENFORCE=false); owner-scoped tenant isolation is always enforced; Cedar ENFORCE applies per Policy node.',
+        posture: 'enforced',
+        text: 'Scope-based RBAC ships enforcing by default (RBAC_ENFORCE=true); owner-scoped tenant isolation is always enforced; Cedar ENFORCE applies per Policy node.',
         source: {
           file: SELF_SERVICE_RBAC_ROLLOUT,
           heading: 'RBAC Enforcement Rollout Runbook',
-          quote: 'Scope-based RBAC (`services/rbac.py`) ships **advisory by default**',
+          quote: 'Scope-based RBAC (`services/rbac.py`) ships **enforcing by default**',
         },
       },
       'mcp-gateway': {

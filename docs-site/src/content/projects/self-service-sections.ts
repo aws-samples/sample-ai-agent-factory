@@ -65,9 +65,9 @@ export const selfServiceFigures = {
 /** What happens on first sign-in. */
 export const firstSignInNote = {
   title: 'First sign-in: assign a persona',
-  text: 'COGNITO_USERS pre-creates Cognito users but assigns them to no group. Group membership grants capability scopes, so a brand-new user signs in effectively read-only (browse works; Clone and publish are disabled) until you assign a group. Sign out and back in after changing groups.',
+  text: 'COGNITO_USERS pre-creates Cognito users and puts each one in g-users-default and t-user: a standard user who can build, deploy and invoke their own agents and browse and clone the registry. Scopes are enforced by default, so a user in no group (one created in the Cognito console, say) gets 403 on every call until you assign one; admin personas are always a manual grant. Sign out and back in after changing groups.',
   sources: [
-    { file: SELF_SERVICE_README_PATH, quote: 'pre-creates Cognito **users** but assigns them to **no group**' },
+    { file: SELF_SERVICE_README_PATH, quote: 'pre-creates Cognito **users** and puts each one in `g-users-default` + `t-user`' },
     { file: SELF_SERVICE_README_PATH, quote: '**Sign out and back in** after changing groups' },
   ] satisfies Source[],
 };

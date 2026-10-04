@@ -10162,10 +10162,11 @@ BUNDLE_DIGEST="${{DEPENDENCY_BUNDLE_DIGEST:-}}"
 # -- turns the one check that catches a substituted bundle into something a transient
 # network error silently disables.
 bundle_digest_in_bucket() {{
-    # Takes the S3 key as $1 so it can hash either bundle. Defaults to the main
-    # bundle for the callers that predate the two-bundle (MCP server) split.
+    # Takes the S3 key as $1 so it can hash either bundle. Every caller passes it
+    # explicitly: a defaulted $1 with a bare call trips ShellCheck SC2120/SC2119
+    # (0.9.0, the Ubuntu package) and the recipient's own lint would then fail.
     local key tmp
-    key="${{1:-$BUNDLE_KEY}}"
+    key="$1"
     tmp="$(mktemp)"
     if ! aws s3 cp "s3://$BUCKET/$key" "$tmp" --region "$REGION" --quiet; then
         rm -f "$tmp"
@@ -10200,7 +10201,7 @@ if ! aws s3api head-object --bucket "$BUCKET" --key "$BUNDLE_KEY" --region "$REG
     # difference that was only embedded mtimes. build-dependency-bundle.sh now builds
     # deterministically, which removes that cause; reading back the object closes the race
     # itself, including the case where the other build genuinely resolved a newer wheel.
-    BUNDLE_DIGEST="$(bundle_digest_in_bucket)"
+    BUNDLE_DIGEST="$(bundle_digest_in_bucket "$BUNDLE_KEY")"
     echo "Dependency bundle digest: $BUNDLE_DIGEST"
 elif [[ -z "$BUNDLE_DIGEST" ]]; then
     # Hash the object that is IN THE BUCKET. Not a local copy, and above all not
@@ -10221,7 +10222,7 @@ elif [[ -z "$BUNDLE_DIGEST" ]]; then
     # switch it off. That was a fair worry about a LOCAL hash. These are the exact
     # bytes the provider Lambda will fetch, so there is no innocent difference left.
     echo "Dependency bundle already in s3://$BUCKET/$BUNDLE_KEY; hashing the object..."
-    BUNDLE_DIGEST="$(bundle_digest_in_bucket)"
+    BUNDLE_DIGEST="$(bundle_digest_in_bucket "$BUNDLE_KEY")"
     echo "Dependency bundle digest: $BUNDLE_DIGEST"
 fi
 {mcp_bundle_staging}

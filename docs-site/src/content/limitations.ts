@@ -99,12 +99,12 @@ export const limitations: Record<ProjectId, Limitation[]> = {
     },
     {
       id: 'self-service-rbac-advisory',
-      title: 'RBAC is advisory by default',
-      text: 'Scope-based RBAC (`services/rbac.py`) ships advisory by default (`RBAC_ENFORCE=false`): every request is allowed, but a request that would be denied logs `RBAC advisory (would-deny): ...`.',
+      title: 'RBAC enforcement can be switched off',
+      text: 'Scope-based RBAC (`services/rbac.py`) ships enforcing by default (`RBAC_ENFORCE=true`). `RBAC_ENFORCE=false ./scripts/deploy.sh` allows every request and logs `RBAC advisory (would-deny): ...` instead; it exists to size the blast radius of an upgrade, not as a long-term posture.',
       source: {
         file: SELF_SERVICE_RBAC_ROLLOUT,
-        heading: 'RBAC Enforcement Rollout Runbook',
-        quote: 'Scope-based RBAC (`services/rbac.py`) ships **advisory by default**',
+        heading: 'The advisory escape hatch',
+        quote: '`RBAC_ENFORCE=false ./scripts/deploy.sh` allows every request',
       },
     },
     {

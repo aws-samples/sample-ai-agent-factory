@@ -220,10 +220,10 @@ export const quickstarts: Quickstart[] = [
         title: 'Assign a persona on first sign-in',
         command:
           'POOL_ID=$(aws cognito-idp list-user-pools --max-results 40 --region us-east-1 \\\n  --query "UserPools[?Name==\'agentcore-workflow-dev-users\'].Id | [0]" --output text)\n\n# Full access (all scopes) + admin UI + registry approver:\nfor g in g-admins-super t-admin registry-admin; do\n  aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \\\n    --username you@example.com --group-name "$g" --region us-east-1\ndone',
-        note: 'COGNITO_USERS creates users with no group, so a new user is read-only until you assign one. Always pass the region you deployed to. Sign out and back in after changing groups.',
+        note: 'COGNITO_USERS puts each pre-created user in g-users-default + t-user (build, deploy, invoke, browse and clone). Admin personas are a manual grant; a user in no group gets 403 on every call. Always pass the region you deployed to. Sign out and back in after changing groups.',
         source: {
           file: SELF_SERVICE_README,
-          quote: 'pre-creates Cognito **users** but assigns them to **no group**',
+          quote: 'pre-creates Cognito **users** and puts each one in `g-users-default` + `t-user`',
         },
       },
       {
