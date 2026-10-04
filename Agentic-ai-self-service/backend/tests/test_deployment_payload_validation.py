@@ -31,7 +31,7 @@ from app.services.deployment_payload_validation import (
     validate_deployment_payload,
 )
 
-ACCOUNT = "166827918465"
+ACCOUNT = "123456789012"
 REGION = "us-east-1"
 CTX = ValidationContext(home_account_id=ACCOUNT, home_region=REGION)
 
@@ -1388,8 +1388,8 @@ def test_platform_defaults_win_and_the_overridden_canvas_reference_travels_unsta
 @pytest.mark.parametrize(
     "overridden,code",
     [
-        ("arn:aws:secretsmanager:us-east-1:166827918465", "arn_malformed"),
-        ("arn:aws:secretsmanager:us-east-1:166827918465:secret", "arn_wrong_resource_type"),
+        ("arn:aws:secretsmanager:us-east-1:123456789012", "arn_malformed"),
+        ("arn:aws:secretsmanager:us-east-1:123456789012:secret", "arn_wrong_resource_type"),
         (f"arn:aws:ssm:{REGION}:{ACCOUNT}:parameter/agentcore-otel/x", "arn_wrong_service"),
         (_arn_for("not-otel/x"), "secret_ref_wrong_namespace"),
     ],

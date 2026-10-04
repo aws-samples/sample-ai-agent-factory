@@ -54,7 +54,7 @@ class _FakeIam:
     exceptions = _FakeIamExceptions()
 
     def create_role(self, **kw):
-        return {"Role": {"Arn": f"arn:aws:iam::166827918465:role/{kw['RoleName']}"}}
+        return {"Role": {"Arn": f"arn:aws:iam::123456789012:role/{kw['RoleName']}"}}
 
     def put_role_policy(self, **kw):
         return {}
@@ -193,7 +193,7 @@ def _install(monkeypatch, *, ctrl, served=0, got_valid_response=True, expected=9
 
 class _FakeSts:
     def get_caller_identity(self):
-        return {"Account": "166827918465"}
+        return {"Account": "123456789012"}
 
 
 def test_exhausted_retries_return_the_gateway_id_so_teardown_can_find_it(monkeypatch):
@@ -230,7 +230,7 @@ def test_a_failed_delete_stops_the_loop_instead_of_recreating(monkeypatch):
         {
             "Error": {
                 "Code": "AccessDeniedException",
-                "Message": "User: arn:aws:sts::166827918465:assumed-role/step-gateway is not "
+                "Message": "User: arn:aws:sts::123456789012:assumed-role/step-gateway is not "
                 "authorized to perform: bedrock-agentcore:DeleteGateway",
             }
         },

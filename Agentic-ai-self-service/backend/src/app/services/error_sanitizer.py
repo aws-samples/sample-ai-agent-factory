@@ -234,7 +234,7 @@ def _from_envelope(envelope: dict) -> str:
 #: principal is the whole debugging value.
 #:
 #: Measured: ``POST /api/workflows/{id}/deploy`` against ``acfe2e-p0920`` returned
-#: ``User: arn:aws:sts::166827918465:assumed-role/acfe2e-p0920-WorkflowLambdaRole80E0B348-aT0dkiL4sxj2/...
+#: ``User: arn:aws:sts::123456789012:assumed-role/acfe2e-p0920-WorkflowLambdaRole80E0B348-aT0dkiL4sxj2/...
 #: is not authorized to perform: iam:CreateRole`` to any ``agent:write`` caller. That
 #: names the platform's account, its role-naming scheme, and the CloudFormation logical
 #: id the role was minted from -- "Internal system components" in ARCC
@@ -260,7 +260,7 @@ _PRINCIPAL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     #
     # Deliberately a 5-character fixed lookbehind (``xxxx-``) rather than excluding every
     # hyphen-adjacent run: a bucket name like
-    # ``acfe2e-p0920-frontend-us-east-1-166827918465`` ends in the account id after a
+    # ``acfe2e-p0920-frontend-us-east-1-123456789012`` ends in the account id after a
     # hyphen, and that one must still be redacted. Verified against both, plus the
     # principal ARN and the resource ARN above.
     (re.compile(r"(?<![0-9a-fA-F]{4}-)\b\d{12}\b"), "[redacted-account]"),

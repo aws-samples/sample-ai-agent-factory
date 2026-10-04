@@ -4116,7 +4116,7 @@ class TestTheDeclaredProtocolIsTheOneTheContainerSpeaks:
         assert "A2A_PEER_ALLOWLIST" in readme
 
 
-_PEER_ARN = "arn:aws:bedrock-agentcore:us-east-1:166827918465:runtime/peerB-AbC123"
+_PEER_ARN = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/peerB-AbC123"
 # What the parameter's Default must contain for ONE peer. Two ARNs, not one, and the reason
 # is measured rather than defensive: see TestAnA2AAgentCanActuallyReachAnAgentCorePeer.
 _PEER_GRANT = f"{_PEER_ARN},{_PEER_ARN}/runtime-endpoint/DEFAULT"
@@ -4214,8 +4214,8 @@ class TestAnA2AAgentCanActuallyReachAnAgentCorePeer:
         for rejected in [
             "*",
             f"{_PEER_ARN}*",
-            "arn:aws:bedrock-agentcore:us-east-1:166827918465:runtime/*",
-            "arn:aws:iam::166827918465:role/Admin",
+            "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/*",
+            "arn:aws:iam::123456789012:role/Admin",
             # A space after the comma would otherwise put " arn:..." in the Resource list,
             # which is a malformed policy document and a rollback on role creation.
             f"{_PEER_ARN}, {_PEER_ARN}",
@@ -4386,7 +4386,7 @@ class TestAnA2AAgentCanActuallyReachAnAgentCorePeer:
             assert default.split(",") == [_PEER_ARN, qualified], endpoint
 
     def test_two_peers_are_four_resources_and_neither_is_dropped(self):
-        other = "arn:aws:bedrock-agentcore:us-east-1:166827918465:runtime/peerC-XyZ789"
+        other = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/peerC-XyZ789"
         default = yaml.safe_load(_a2a_export([_PEER_ARN, other]).template_yaml)["Parameters"]["A2APeerRuntimeArns"][
             "Default"
         ]

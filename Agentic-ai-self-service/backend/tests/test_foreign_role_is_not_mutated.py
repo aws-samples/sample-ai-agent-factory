@@ -237,7 +237,7 @@ class _FakeIam:
 
     def get_role(self, RoleName: str):  # noqa: N803 - botocore casing
         self.calls.append("get_role")
-        return {"Role": {"Arn": f"arn:aws:iam::166827918465:role/{RoleName}", "Tags": self._tags}}
+        return {"Role": {"Arn": f"arn:aws:iam::123456789012:role/{RoleName}", "Tags": self._tags}}
 
     def tag_role(self, **kwargs):
         self.calls.append("tag_role")
@@ -262,7 +262,7 @@ def test_runtime_deployer_does_not_tag_or_overwrite_a_foreign_role(_deployment) 
         runtime_deployer.create_runtime_iam_role(
             iam_client=iam,
             role_name="AgentCoreRuntime-support",
-            account_id="166827918465",
+            account_id="123456789012",
             region="us-east-1",
         )
     assert "tag_role" not in iam.calls
@@ -282,7 +282,7 @@ def test_runtime_deployer_still_adopts_its_own_role(_deployment) -> None:
     arn = runtime_deployer.create_runtime_iam_role(
         iam_client=iam,
         role_name="AgentCoreRuntime-acfe2e-p0920-shared",
-        account_id="166827918465",
+        account_id="123456789012",
         region="us-east-1",
     )
     assert arn.endswith(":role/AgentCoreRuntime-acfe2e-p0920-shared")

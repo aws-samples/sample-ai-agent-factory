@@ -16,7 +16,7 @@ sys.path.insert(0, "src")
 
 import app.deployment_handler as dh  # noqa: E402
 
-VALID_ARN = "arn:aws:bedrock-agentcore:us-east-1:166827918465:runtime/myagent_abc123"
+VALID_ARN = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/myagent_abc123"
 
 
 class _FakeCtrl:

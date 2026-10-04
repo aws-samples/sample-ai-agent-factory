@@ -98,7 +98,7 @@ AGENTCORE_CREATE_TO_TAGGED_TYPES = {
     # Measured live 2026-09-22 on acfe2e-p0920, StepHarnessRole:
     #   User: .../acfe2e-p0920-step-harness is not authorized to perform:
     #   bedrock-agentcore:TagResource on resource:
-    #   arn:aws:bedrock-agentcore:166827918465:runtime/*
+    #   arn:aws:bedrock-agentcore:123456789012:runtime/*
     #   (Service: BedrockAgentcoreRuntimeControl, Status Code: 403)
     # Note the Service is BedrockAgentcoreRuntimeControl -- a DIFFERENT service from the
     # API that was called. The harness merely went CREATE_FAILED and the step raised
@@ -121,10 +121,10 @@ AGENTCORE_CREATE_TO_TAGGED_TYPES = {
     # read it later. The denial was invisible for the same reason as the runtime one: it
     # arrives asynchronously, after CreateHarness has already returned 200.
     # Measured live 2026-09-24 on acfe2e-p0920, deployment d22088ec:
-    #   User: arn:aws:sts::166827918465:assumed-role/acfe2e-p0920-StepHarnessRole.../
+    #   User: arn:aws:sts::123456789012:assumed-role/acfe2e-p0920-StepHarnessRole.../
     #   acfe2e-p0920-step-harness is not authorized to perform:
     #   bedrock-agentcore:TagResource on resource:
-    #   arn:aws:bedrock-agentcore:us-east-1:166827918465:memory/p0bharn1790231300_302f262f-*
+    #   arn:aws:bedrock-agentcore:us-east-1:123456789012:memory/p0bharn1790231300_302f262f-*
     #   because no identity-based policy allows the bedrock-agentcore:TagResource action
     #   (Service: GenesisMemoryControlPlane, Status Code: 403)
     # Unlike the runtime one this DID reach a log group (/aws/lambda/acfe2e-p0920-step-harness,

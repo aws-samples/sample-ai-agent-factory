@@ -45,7 +45,7 @@ class _Secrets:
 
     def create_secret(self, **kwargs):
         self.created.append(kwargs)
-        return {"ARN": f"arn:aws:secretsmanager:{REGION}:166827918465:secret:{kwargs['Name']}-AbCdEf"}
+        return {"ARN": f"arn:aws:secretsmanager:{REGION}:123456789012:secret:{kwargs['Name']}-AbCdEf"}
 
 
 def _tags(created: dict) -> dict:
@@ -175,7 +175,7 @@ def test_the_api_stages_connector_credentials_under_the_requests_identity_mode(m
 
     def _bind(**kwargs):
         seen.append(gd.current_connector_identity_mode())
-        return f"arn:aws:secretsmanager:{REGION}:166827918465:secret:agentcore-connector/o/{len(seen)}", True
+        return f"arn:aws:secretsmanager:{REGION}:123456789012:secret:agentcore-connector/o/{len(seen)}", True
 
     class _Session:
         def client(self, *a, **k):

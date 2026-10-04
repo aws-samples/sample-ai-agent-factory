@@ -54,7 +54,7 @@ from app.services import gateway_deployer
 from app.services.resource_ownership import ForeignResourceError, owner_tags
 
 REGION = "us-east-1"
-ACCOUNT = "166827918465"
+ACCOUNT = "123456789012"
 
 SHARED_POOL = "us-east-1_SHAREDPOOL"
 SHARED_DOMAIN = "acf-test-gw-0123456789"

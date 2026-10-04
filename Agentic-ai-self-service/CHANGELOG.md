@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed — every account id in the repository is an AWS documentation placeholder
+
+- Comments, docstrings, test fixtures and one catalog note carried the account the platform was
+  measured in. All 90 occurrences across 31 files now read `123456789012`, and the one
+  cross-account fixture reads `444455556666`; both are in the set AWS documentation uses, so a
+  reader cannot mistake them for a live account. Nothing else changed in those lines.
+
 ### Fixed — a dependency-bundle change without a digest no longer no-ops the exported runtime
 
 - The merged `code.zip` key was `<agent digest>-<bundle digest>`, and `DependencyBundleDigest`

@@ -125,7 +125,7 @@ Re-runnable end-to-end proof (creates a real Gateway + target, invokes, tears do
 AWS_REGION=us-west-2 python3 scripts/verify-external-mcp.py aws-knowledge
 ```
 
-Proven on `166827918465`/us-west-2 on 2026-07-16: the Gateway exposed
+Proven on `123456789012`/us-west-2 on 2026-07-16: the Gateway exposed
 `mcp-aws-knowledge___aws___search_documentation` and a `tools/call` returned real
 AWS documentation for "Amazon Bedrock AgentCore Gateway". All resources torn down.
 

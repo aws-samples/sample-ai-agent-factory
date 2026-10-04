@@ -22,7 +22,7 @@ updating Lambda function code ... to execute with permissions of the attached ex
 role." Overwriting a function is therefore not "breaking someone's tool", it is running
 our code under an execution role we did not choose and cannot see.
 
-Live measurements this was written against, all in account 166827918465:
+Live measurements this was written against, all in account 123456789012:
 
 * ``AgentCoreDynamicTools`` exists, ``Tags: null``. CloudTrail says
   ``CreateFunction20150331`` at 2026-09-20T12:39:25 by ``acfe2e-p0920-step-gateway``,

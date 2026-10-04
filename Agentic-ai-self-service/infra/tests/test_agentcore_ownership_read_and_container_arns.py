@@ -1,6 +1,6 @@
 """The read half of the AgentCore tagging model, and the container ARNs a nested shape needs.
 
-Four live AccessDeniedExceptions on acfe2e-p0920 (us-east-1, account 166827918465) on
+Four live AccessDeniedExceptions on acfe2e-p0920 (us-east-1, account 123456789012) on
 2026-09-22, across five deployments. Three are one defect and one is another:
 
 1. CONTAINER vs CHILD. AgentCore authorizes one logical call against BOTH the container ARN
@@ -9,10 +9,10 @@ Four live AccessDeniedExceptions on acfe2e-p0920 (us-east-1, account 16682791846
 
      StepRuntimeConfigureRole, CreateAgentRuntime:
        not authorized to perform: bedrock-agentcore:TagResource on resource:
-       arn:aws:bedrock-agentcore:us-east-1:166827918465:workload-identity-directory/default
+       arn:aws:bedrock-agentcore:us-east-1:123456789012:workload-identity-directory/default
      StepHarnessRole, CreateOauth2CredentialProvider:
        not authorized to perform: bedrock-agentcore:TagResource on resource:
-       arn:aws:bedrock-agentcore:us-east-1:166827918465:token-vault/default
+       arn:aws:bedrock-agentcore:us-east-1:123456789012:token-vault/default
 
    The first blocked every AgentCore runtime deploy outright. This exact mechanism, on these
    exact two shapes, was already measured with five throwaway roles for the DELETE verbs
@@ -26,7 +26,7 @@ Four live AccessDeniedExceptions on acfe2e-p0920 (us-east-1, account 16682791846
 
      StepMemoryRole:
        not authorized to perform: bedrock-agentcore:ListTagsForResource on resource:
-       arn:aws:bedrock-agentcore:us-east-1:166827918465:memory/mem_f46d1ded29-I80I66817h
+       arn:aws:bedrock-agentcore:us-east-1:123456789012:memory/mem_f46d1ded29-I80I66817h
      -> ResourceDeletionRefused: Deletion refused for memory mem_f46d1ded29-I80I66817h:
         live ownership could not be read (AccessDeniedException). The resource was left in
         place.

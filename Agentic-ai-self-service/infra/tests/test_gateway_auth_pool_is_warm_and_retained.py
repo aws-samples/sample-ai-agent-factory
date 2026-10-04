@@ -242,7 +242,7 @@ def test_the_domain_prefix_is_globally_unique_per_deployment():
 
     for pattern in (a, b, c, d):
         # Validate the RESOLVED prefix: substitute a real 12-digit account id.
-        resolved = pattern.replace("${AWS::AccountId}", "166827918465")
+        resolved = pattern.replace("${AWS::AccountId}", "123456789012")
         assert len(resolved) <= MAX_PREFIX_LEN, f"prefix is {len(resolved)} chars: {resolved}"
         assert resolved == resolved.lower()
         assert not resolved.startswith("-") and not resolved.endswith("-")
@@ -340,7 +340,7 @@ def test_a_long_project_name_still_yields_a_legal_prefix():
     convention the caller remembers. The budget must account for the 12 digits
     CloudFormation substitutes, which are not in the pattern's own length."""
     pattern = gateway_domain_prefix_pattern(REGION, _cfg(project="x" * 90, env="production-eu-central"))
-    resolved = pattern.replace("${AWS::AccountId}", "166827918465")
+    resolved = pattern.replace("${AWS::AccountId}", "123456789012")
     assert len(resolved) <= MAX_PREFIX_LEN, f"resolved prefix is {len(resolved)} chars: {resolved}"
     assert not resolved.startswith("-") and not resolved.endswith("-")
     assert "-gw-" in resolved, "the digest must survive truncation or uniqueness is lost"
@@ -351,7 +351,7 @@ def test_a_project_named_aws_does_not_produce_a_prefix_cognito_rejects():
     from CDK context, so a project called "aws-agents" would fail the deploy with an
     error that names no cause."""
     resolved = gateway_domain_prefix_pattern(REGION, _cfg(project="aws-agents")).replace(
-        "${AWS::AccountId}", "166827918465"
+        "${AWS::AccountId}", "123456789012"
     )
     assert not resolved.startswith("aws"), resolved
 

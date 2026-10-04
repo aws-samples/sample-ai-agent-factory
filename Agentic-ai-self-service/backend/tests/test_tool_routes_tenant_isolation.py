@@ -309,13 +309,13 @@ class TestAFailureDoesNotDescribeTheInternals:
         """This returned f"{type(e).__name__}: {e}" to the client."""
 
         def _boom(*a, **k):
-            raise RuntimeError("arn:aws:iam::166827918465:role/AgentCore-Secret-Role does not exist")
+            raise RuntimeError("arn:aws:iam::123456789012:role/AgentCore-Secret-Role does not exist")
 
         monkeypatch.setattr(table, "put_item", _boom)
         resp = _client(OWNER).post("/api/test-tool", json={"lambdaCode": CODE, "testCases": []})
         assert resp.status_code == 500
         assert "RuntimeError" not in resp.text
-        assert "166827918465" not in resp.text
+        assert "123456789012" not in resp.text
         assert "AgentCore-Secret-Role" not in resp.text
 
     def test_the_async_test_failure_is_generic(self, monkeypatch, table):
@@ -323,11 +323,11 @@ class TestAFailureDoesNotDescribeTheInternals:
         monkeypatch.setattr(
             dh,
             "test_tool",
-            lambda **kw: (_ for _ in ()).throw(RuntimeError("AccessDenied for arn:aws:iam::166827918465:role/x")),
+            lambda **kw: (_ for _ in ()).throw(RuntimeError("AccessDenied for arn:aws:iam::123456789012:role/x")),
         )
         dh._handle_async_test({"test_id": "test-abc123", "lambda_code": CODE, "test_cases": [], "region": "us-east-1"})
         stored = table.updates[-1]["ExpressionAttributeValues"][":e"]
-        assert "166827918465" not in stored
+        assert "123456789012" not in stored
         assert "AccessDenied" not in stored
         assert stored
 

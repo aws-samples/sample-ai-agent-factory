@@ -51,8 +51,8 @@ sys.path.insert(0, "src")
 from app.services import gateway_deployer as gd  # noqa: E402
 from app.step_handlers import gateway_step as gs  # noqa: E402
 
-MINTED = "arn:aws:secretsmanager:us-east-1:166827918465:secret:agentcore-gateway/dep-1-abc"
-CUSTOMER = "arn:aws:secretsmanager:us-east-1:166827918465:secret:prod/okta/agent-client-AbCdEf"
+MINTED = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-gateway/dep-1-abc"
+CUSTOMER = "arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/okta/agent-client-AbCdEf"
 
 
 class _Store:
@@ -208,7 +208,7 @@ def test_a_failed_deploy_still_records_the_minted_secret():
     iam, ctrl = MagicMock(), MagicMock()
     ctrl.list_gateways.return_value = {"items": []}  # no same-name gateway: the create path
     iam.exceptions.EntityAlreadyExistsException = type("E", (Exception,), {})
-    iam.create_role.return_value = {"Role": {"Arn": "arn:aws:iam::166827918465:role/AgentCoreGateway-gw"}}
+    iam.create_role.return_value = {"Role": {"Arn": "arn:aws:iam::123456789012:role/AgentCoreGateway-gw"}}
     ctrl.create_gateway.side_effect = RuntimeError("AccessDeniedException")
     with (
         patch.object(gd, "_create_agentcore_control_client", return_value=ctrl),

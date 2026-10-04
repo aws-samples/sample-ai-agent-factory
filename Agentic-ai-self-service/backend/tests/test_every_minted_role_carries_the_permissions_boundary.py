@@ -24,10 +24,10 @@ import pytest
 from app.services import iam_boundary
 from app.services import resource_ownership as ro
 
-BOUNDARY = "arn:aws:iam::166827918465:policy/acfe2e-p0920-agentcore-role-boundary"
-OTHER_BOUNDARY = "arn:aws:iam::166827918465:policy/some-older-boundary"
+BOUNDARY = "arn:aws:iam::123456789012:policy/acfe2e-p0920-agentcore-role-boundary"
+OTHER_BOUNDARY = "arn:aws:iam::123456789012:policy/some-older-boundary"
 REGION = "us-east-1"
-ACCOUNT = "166827918465"
+ACCOUNT = "123456789012"
 SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "app"
 
 
@@ -138,7 +138,7 @@ def test_a_set_variable_is_sent_on_create(boundary_set):
 
 def test_ensure_puts_the_boundary_on_a_role_that_lacks_it_without_a_second_read(boundary_set):
     iam = _FakeIam()
-    role = {"Arn": "arn:aws:iam::166827918465:role/AgentCoreRuntime-x", "Tags": []}
+    role = {"Arn": "arn:aws:iam::123456789012:role/AgentCoreRuntime-x", "Tags": []}
     assert iam_boundary.ensure_role_boundary(iam, "AgentCoreRuntime-x", role=role) is True
     assert iam.calls == [
         ("put_role_permissions_boundary", {"RoleName": "AgentCoreRuntime-x", "PermissionsBoundary": BOUNDARY})

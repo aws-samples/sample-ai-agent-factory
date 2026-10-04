@@ -823,7 +823,7 @@ class TestAFailureDoesNotNameTheAccount:
                 {
                     "Error": {
                         "Code": "AccessDenied",
-                        "Message": "User: arn:aws:sts::166827918465:assumed-role/AgentCore-Step is not authorized",
+                        "Message": "User: arn:aws:sts::123456789012:assumed-role/AgentCore-Step is not authorized",
                     }
                 },
                 "AttachRolePolicy",
@@ -834,7 +834,7 @@ class TestAFailureDoesNotNameTheAccount:
         result = tool_tester.test_tool(HANDLER, [], region="us-east-1")
 
         assert result["success"] is False
-        assert "166827918465" not in result["error"]
+        assert "123456789012" not in result["error"]
         assert "assumed-role" not in result["error"]
         assert "AccessDenied" not in result["error"]
         assert result["error"]

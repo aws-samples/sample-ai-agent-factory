@@ -64,7 +64,7 @@ from fastapi.testclient import TestClient
 
 OWNER = "b458d4f8-60e1-70fa-98bd-fb664f6e307c"
 MODEL_ID = "us.anthropic.claude-sonnet-5"
-ACCOUNT = "166827918465"
+ACCOUNT = "123456789012"
 REGION = "us-east-1"
 STATE_MACHINE = f"arn:aws:states:{REGION}:{ACCOUNT}:stateMachine:acfe2e-p0920-deployment"
 

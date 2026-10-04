@@ -3,7 +3,7 @@
 Found live. ``GET /api/deploy/{id}`` on ``acfe2e-p0920``, after a real failed deployment,
 returned::
 
-    "execution_arn": "arn:aws:states:us-east-1:166827918465:execution:
+    "execution_arn": "arn:aws:states:us-east-1:123456789012:execution:
                       acfe2e-p0920-deployment:deploy-70e488d0-..."
 
 which names the platform's account, its state machine and its region -- "Internal system

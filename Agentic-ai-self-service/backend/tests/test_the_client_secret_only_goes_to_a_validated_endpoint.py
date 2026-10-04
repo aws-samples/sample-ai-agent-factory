@@ -370,7 +370,7 @@ def test_no_runtime_is_created_when_the_agent_would_be_handed_a_cleartext_endpoi
         },
         "s3_bucket": "b",
         "s3_key": "k",
-        "role_arn": "arn:aws:iam::166827918465:role/AgentCoreRuntime-ssrf-probe",
+        "role_arn": "arn:aws:iam::123456789012:role/AgentCoreRuntime-ssrf-probe",
         "gateway_result": {
             "gateway_url": "https://gw.example/mcp",
             "client_info": client_info,

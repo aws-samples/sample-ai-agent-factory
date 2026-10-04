@@ -194,7 +194,7 @@ def test_reusing_an_existing_role_deliberately_does_not_tag_it():
     ``Tags=owner_tag_list()`` is on ``create_role`` only. In any account that ever ran the
     pre-tag code the singleton already exists untagged, ``create_role`` never runs again,
     and so ``_release_shared_tool_lambda_role`` can never fire for it — measured live in
-    166827918465: ``AgentCoreDynamicToolsLambdaRole`` (2026-07-19) and
+    123456789012: ``AgentCoreDynamicToolsLambdaRole`` (2026-07-19) and
     ``AgentCoreCustomerSupportLambdaRole`` (2026-09-20), both ``Tags: null``.
 
     Tagging here would fix that and is NOT wanted: ``AgentCoreDynamicToolsLambdaRole`` is

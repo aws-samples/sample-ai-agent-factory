@@ -111,7 +111,7 @@ def test_a_failure_after_the_role_step_still_reports_the_role():
     iam, ctrl = MagicMock(), MagicMock()
     ctrl.list_gateways.return_value = {"items": []}  # no same-name gateway: the create path
     iam.exceptions.EntityAlreadyExistsException = type("E", (Exception,), {})
-    iam.create_role.return_value = {"Role": {"Arn": "arn:aws:iam::166827918465:role/AgentCoreGateway-f6probe"}}
+    iam.create_role.return_value = {"Role": {"Arn": "arn:aws:iam::123456789012:role/AgentCoreGateway-f6probe"}}
     ctrl.create_gateway.side_effect = RuntimeError("AccessDeniedException: not authorized to CreateGateway")
     ps = _mock_clients(iam, ctrl)
     with ps[0], ps[1], ps[2], ps[3], ps[4]:
@@ -143,7 +143,7 @@ def test_a_failure_before_gateway_creation_immediately_cleans_confirmed_inventor
     iam, ctrl = MagicMock(), MagicMock()
     ctrl.list_gateways.return_value = {"items": []}  # no same-name gateway: the create path
     iam.exceptions.EntityAlreadyExistsException = type("E", (Exception,), {})
-    iam.create_role.return_value = {"Role": {"Arn": "arn:aws:iam::166827918465:role/AgentCoreGateway-f6probe"}}
+    iam.create_role.return_value = {"Role": {"Arn": "arn:aws:iam::123456789012:role/AgentCoreGateway-f6probe"}}
     ctrl.create_gateway.side_effect = RuntimeError("AccessDeniedException: not authorized to CreateGateway")
     ps = _mock_clients(iam, ctrl)
     with ps[0], ps[1], ps[2], ps[3], ps[4]:
@@ -206,7 +206,7 @@ def test_a_role_created_but_left_unpolicied_is_still_reported():
     iam, ctrl = MagicMock(), MagicMock()
     ctrl.list_gateways.return_value = {"items": []}  # no same-name gateway: the create path
     iam.exceptions.EntityAlreadyExistsException = type("E", (Exception,), {})
-    iam.create_role.return_value = {"Role": {"Arn": "arn:aws:iam::166827918465:role/AgentCoreGateway-f6probe"}}
+    iam.create_role.return_value = {"Role": {"Arn": "arn:aws:iam::123456789012:role/AgentCoreGateway-f6probe"}}
     iam.put_role_policy.side_effect = RuntimeError("AccessDenied: permissions boundary denies PutRolePolicy")
     ps = _mock_clients(iam, ctrl)
     with ps[0], ps[1], ps[2], ps[3], ps[4]:
@@ -240,7 +240,7 @@ def _adopt_role_deploy(role_tags):
 
     iam.exceptions.EntityAlreadyExistsException = _Exists
     iam.create_role.side_effect = _Exists()
-    role: dict = {"Arn": "arn:aws:iam::166827918465:role/AgentCoreGateway-f6probe"}
+    role: dict = {"Arn": "arn:aws:iam::123456789012:role/AgentCoreGateway-f6probe"}
     if role_tags is not None:
         role["Tags"] = role_tags
     iam.get_role.return_value = {"Role": role}

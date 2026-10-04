@@ -36,7 +36,7 @@ from stacks.platform_stack import PlatformStack
 PROJECT = "acfe2e"
 ENVIRONMENT = "p0920"
 REGION = "us-east-1"
-ACCOUNT = "166827918465"
+ACCOUNT = "123456789012"
 
 
 @pytest.fixture(scope="module")

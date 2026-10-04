@@ -376,7 +376,7 @@ class DeploymentState(BaseModel):
 #: Measured live, on ``GET /api/deploy/{id}`` against ``acfe2e-p0920`` after a real failed
 #: deployment. The body carried::
 #:
-#:     "execution_arn": "arn:aws:states:us-east-1:166827918465:execution:
+#:     "execution_arn": "arn:aws:states:us-east-1:123456789012:execution:
 #:                       acfe2e-p0920-deployment:deploy-70e488d0-..."
 #:
 #: which names the platform's account, its state machine, and its region -- "Internal system

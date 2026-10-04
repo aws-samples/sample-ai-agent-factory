@@ -181,10 +181,10 @@ def _denied(op: str = "AddPermission") -> Exception:
             "Error": {
                 "Code": "AccessDeniedException",
                 "Message": (
-                    "User: arn:aws:sts::166827918465:assumed-role/"
+                    "User: arn:aws:sts::123456789012:assumed-role/"
                     "acfe2e-p0920-StepGatewayRoleAAFE0C07-m9tHG9ZTMy3k/x is not authorized to "
                     "perform: lambda:AddPermission on resource: arn:aws:lambda:us-east-1:"
-                    "166827918465:function:acfe2e-llstub-22add474 because no identity-based "
+                    "123456789012:function:acfe2e-llstub-22add474 because no identity-based "
                     "policy allows the lambda:AddPermission action"
                 ),
             }
@@ -227,7 +227,7 @@ def test_a_denied_grant_on_a_byo_lambda_explains_what_to_do():
     """
     from app.services import gateway_deployer as gd
 
-    arn = "arn:aws:lambda:us-east-1:166827918465:function:acfe2e-llstub-22add474"
+    arn = "arn:aws:lambda:us-east-1:123456789012:function:acfe2e-llstub-22add474"
     lam = _lambda_client_that(_denied())
 
     with (
@@ -253,7 +253,7 @@ def test_a_denied_grant_fails_the_deploy_rather_than_shipping_a_broken_target():
     from app.services import gateway_deployer as gd
 
     ctrl = _fake_ctrl()
-    arn = "arn:aws:lambda:us-east-1:166827918465:function:someone-elses-fn"
+    arn = "arn:aws:lambda:us-east-1:123456789012:function:someone-elses-fn"
     lam = _lambda_client_that(_denied())
 
     with (

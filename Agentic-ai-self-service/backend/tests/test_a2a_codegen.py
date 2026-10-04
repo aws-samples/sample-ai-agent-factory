@@ -956,7 +956,7 @@ def test_a_transport_failure_is_still_error_not_blocked():
 # fetch dies first. Hence a separate road: recognise the peer, skip discovery, and sign
 # an InvokeAgentRuntime call instead.
 
-_PEER_ARN = "arn:aws:bedrock-agentcore:us-east-1:166827918465:runtime/peerB-AbC123"
+_PEER_ARN = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/peerB-AbC123"
 _PEER_DATA_PLANE_URL = (
     "https://bedrock-agentcore.us-east-1.amazonaws.com/runtimes/"
     + urllib.parse.quote(_PEER_ARN, safe="")
@@ -1172,7 +1172,7 @@ def _denial(stack, arn=None):
     """
     return (
         "An error occurred (AccessDeniedException) when calling the InvokeAgentRuntime operation: "
-        f"User: arn:aws:sts::166827918465:assumed-role/AgentCoreRuntime-{stack}"
+        f"User: arn:aws:sts::123456789012:assumed-role/AgentCoreRuntime-{stack}"
         "/BedrockAgentCore-8312b7ba-f5f8-4f14-af3d-0af20394f324 "
         "is not authorized to perform: bedrock-agentcore:InvokeAgentRuntime on resource: "
         f"{arn or _PEER_ARN}/runtime-endpoint/DEFAULT "
@@ -1183,7 +1183,7 @@ def _denial(stack, arn=None):
 # A real deployed peer's ARN. AgentCore mints `<sanitised-name>_runtime-<10 chars>`, so a live
 # ARN is 87 characters where this module's readable test ARN is 69. The difference is only ever
 # noticed when a length is being asserted, and then it is the whole story.
-_LIVE_PEER_ARN = "arn:aws:bedrock-agentcore:us-east-1:166827918465:runtime/m7peerb7c4e_runtime-WPEH9FF1C8"
+_LIVE_PEER_ARN = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/m7peerb7c4e_runtime-WPEH9FF1C8"
 
 # The exact denial a deployed caller returned, reproduced field for field. Pinned so that if
 # the shape of an AccessDenied message ever changes, the sample this test reasons about stops
@@ -1336,8 +1336,8 @@ def test_the_generator_and_the_generated_agent_agree_on_what_an_agentcore_peer_i
         "https://evil.net/bedrock-agentcore.us-east-1.amazonaws.com/runtimes/" + _PEER_ARN,
         "https://peer.example.com/x",
         "peer.example.com",
-        "arn:aws-cn:bedrock-agentcore:cn-north-1:166827918465:runtime/peerB",
-        "arn:AWS:bedrock-agentcore:us-east-1:166827918465:runtime/peerB",
+        "arn:aws-cn:bedrock-agentcore:cn-north-1:123456789012:runtime/peerB",
+        "arn:AWS:bedrock-agentcore:us-east-1:123456789012:runtime/peerB",
         "arn:aws:bedrock-agentcore:us-east-1:1:runtime/x",
         "arn:aws:s3:::some-bucket",
         "*",

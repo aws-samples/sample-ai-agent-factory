@@ -329,7 +329,7 @@ class TestThePlatformsOwnIdentityIsNotDisclosed:
     """
 
     DENIAL = (
-        "User: arn:aws:sts::166827918465:assumed-role/"
+        "User: arn:aws:sts::123456789012:assumed-role/"
         "acfe2e-p0920-WorkflowLambdaRole80E0B348-aT0dkiL4sxj2/abc "
         "is not authorized to perform: iam:CreateRole"
     )
@@ -340,14 +340,14 @@ class TestThePlatformsOwnIdentityIsNotDisclosed:
         assert "WorkflowLambdaRole" not in out
 
     def test_the_account_id_is_removed(self):
-        assert "166827918465" not in sanitize_error_details(self.DENIAL)
+        assert "123456789012" not in sanitize_error_details(self.DENIAL)
 
     def test_a_bare_account_id_is_removed_too(self):
         """Not every message wraps the account in an ARN."""
-        assert "166827918465" not in sanitize_error_details("Access denied in account 166827918465")
+        assert "123456789012" not in sanitize_error_details("Access denied in account 123456789012")
 
     def test_an_iam_role_arn_is_removed(self):
-        out = sanitize_error_details("Cannot assume arn:aws:iam::166827918465:role/AgentCoreRuntime-shared")
+        out = sanitize_error_details("Cannot assume arn:aws:iam::123456789012:role/AgentCoreRuntime-shared")
         assert "arn:aws:iam" not in out
 
     def test_the_actionable_part_of_the_denial_survives(self):
@@ -367,7 +367,7 @@ class TestThePlatformsOwnIdentityIsNotDisclosed:
 
     def test_a_partition_other_than_aws_is_covered(self):
         """govcloud and China ARNs use aws-us-gov / aws-cn."""
-        out = sanitize_error_details("User: arn:aws-us-gov:sts::166827918465:assumed-role/X/y is not authorized")
+        out = sanitize_error_details("User: arn:aws-us-gov:sts::123456789012:assumed-role/X/y is not authorized")
         assert "assumed-role" not in out
 
     def test_a_uuids_last_group_is_not_mistaken_for_an_account_id(self):
@@ -386,8 +386,8 @@ class TestThePlatformsOwnIdentityIsNotDisclosed:
         simpler rule and would stop redacting the account id where it most often appears:
         the tail of a generated resource name. So the exclusion is a fixed 5-character
         ``xxxx-`` hex lookbehind, not 'preceded by a hyphen'."""
-        out = sanitize_error_details("Denied on s3://acfe2e-p0920-frontend-us-east-1-166827918465/key")
-        assert "166827918465" not in out, out
+        out = sanitize_error_details("Denied on s3://acfe2e-p0920-frontend-us-east-1-123456789012/key")
+        assert "123456789012" not in out, out
 
 
 class TestAPrefixedSecretNameIsStillASecretName:
@@ -543,7 +543,7 @@ def _the_real_byo_lambda_refusal(function_arn: str) -> str:
             "Error": {
                 "Code": "AccessDeniedException",
                 "Message": (
-                    "User: arn:aws:sts::166827918465:assumed-role/"
+                    "User: arn:aws:sts::123456789012:assumed-role/"
                     "acfe2e-p0920-StepGatewayRoleAAFE0C07-m9tHG9ZTMy3k/x is not authorized to "
                     "perform: lambda:AddPermission on resource: " + function_arn
                 ),
@@ -557,7 +557,7 @@ def _the_real_byo_lambda_refusal(function_arn: str) -> str:
         pytest.raises(ValueError) as ei,
     ):
         gd._grant_gateway_invoke_on_lambda(
-            "us-east-1", function_arn, "arn:aws:iam::166827918465:role/AgentCoreGateway-gw"
+            "us-east-1", function_arn, "arn:aws:iam::123456789012:role/AgentCoreGateway-gw"
         )
     # The step handler's own wrapper prefix, which is part of what has to fit the cap.
     return f"Gateway deployment failed: {ei.value}"
@@ -580,13 +580,13 @@ class TestAnActionableRemedyIsNotClippedBeforeTheRemedy:
     redaction that share this path still do their jobs.
     """
 
-    ARN = "arn:aws:lambda:us-east-1:166827918465:function:acf-byoe2e-4d2d0038"
+    ARN = "arn:aws:lambda:us-east-1:123456789012:function:acf-byoe2e-4d2d0038"
 
     #: Lambda allows a 64-character function name; the probe's was 19. The ARN is
     #: interpolated twice, so the worst case is ~90 characters longer than the measured
     #: one -- which is why it gets its own test rather than relying on the slack.
     LONG_ARN = (
-        "arn:aws:lambda:us-east-1:166827918465:function:"
+        "arn:aws:lambda:us-east-1:123456789012:function:"
         "my-customer-support-tool-function-with-a-really-long-name-01234z"
     )
 
@@ -627,8 +627,8 @@ class TestAnActionableRemedyIsNotClippedBeforeTheRemedy:
         account id to learn it. Both, in one message -- the redaction is not sacrificed
         to make room."""
         out = self._stored()
-        assert self.ARN.replace("166827918465", "[redacted-account]") in out
-        assert "166827918465" not in out
+        assert self.ARN.replace("123456789012", "[redacted-account]") in out
+        assert "123456789012" not in out
 
     def test_the_platform_principal_is_still_gone(self):
         """The underlying denial names the step role by its CloudFormation logical id.
@@ -655,7 +655,7 @@ class TestAnActionableRemedyIsNotClippedBeforeTheRemedy:
         out = self._stored(self.LONG_ARN)
         assert "…" not in out, f"clipped at {len(out)} of {MAX_LENGTH}"
         assert "aws lambda tag-resource" in out and "at invoke time" in out
-        assert self.LONG_ARN.replace("166827918465", "[redacted-account]") in out
+        assert self.LONG_ARN.replace("123456789012", "[redacted-account]") in out
 
     def test_the_cap_still_truncates_something_unrecognised(self):
         """Vacuity guard in the other direction: the fix must not have been to delete the

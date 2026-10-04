@@ -37,7 +37,7 @@ def test_inherited_platform_otel_refuses_mcp_before_every_side_effect(
         "provider": "custom",
         "otlp_endpoint": "https://otel.example.test/v1/traces",
         "otlp_protocol": "http/protobuf",
-        "auth_header_secret_arn": ("arn:aws:secretsmanager:us-east-1:166827918465:secret:agentcore-otel/platform-test"),
+        "auth_header_secret_arn": ("arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-otel/platform-test"),
         "sample_rate": 1.0,
     }
     monkeypatch.setattr(

@@ -427,7 +427,7 @@ class _FakeIam:
     exceptions = _FakeIamExceptions()
 
     def create_role(self, **kw):
-        return {"Role": {"Arn": f"arn:aws:iam::166827918465:role/{kw['RoleName']}"}}
+        return {"Role": {"Arn": f"arn:aws:iam::123456789012:role/{kw['RoleName']}"}}
 
     def put_role_policy(self, **kw):
         return {}
@@ -435,7 +435,7 @@ class _FakeIam:
 
 class _FakeSts:
     def get_caller_identity(self):
-        return {"Account": "166827918465"}
+        return {"Account": "123456789012"}
 
 
 def _install(monkeypatch, *, ctrl, cog):

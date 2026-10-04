@@ -22,10 +22,10 @@ from app.services.auth import get_caller_sub
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-SHARED = "arn:aws:iam::166827918465:role/AgentCoreRuntime-acfe2e-p0920-shared"
-SHARED_MCP = "arn:aws:iam::166827918465:role/AgentCoreRuntime-acfe2e-p0920-mcp-shared"
+SHARED = "arn:aws:iam::123456789012:role/AgentCoreRuntime-acfe2e-p0920-shared"
+SHARED_MCP = "arn:aws:iam::123456789012:role/AgentCoreRuntime-acfe2e-p0920-mcp-shared"
 BUCKET = "arn:aws:s3:::probe-bucket/*"
-TABLE = "arn:aws:dynamodb:us-east-1:166827918465:table/ProbeTable"
+TABLE = "arn:aws:dynamodb:us-east-1:123456789012:table/ProbeTable"
 
 
 @pytest.fixture(autouse=True)
@@ -104,7 +104,7 @@ def test_named_arns_of_every_common_shape_are_accepted():
                 BUCKET,
                 "arn:aws:s3:::probe-bucket",
                 TABLE,
-                "arn:aws:secretsmanager:us-east-1:166827918465:secret:agentcore-connector/x/*",
+                "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-connector/x/*",
                 "arn:aws-us-gov:s3:::gov-bucket/*",
             ],
         )
@@ -148,7 +148,7 @@ def test_a_per_agent_or_tool_role_is_still_a_valid_target():
 
 
 def test_the_shared_names_are_read_from_the_environment_when_they_do_not_carry_the_suffix(monkeypatch):
-    monkeypatch.setenv("SHARED_RUNTIME_ROLE_ARN", "arn:aws:iam::166827918465:role/AgentCoreRuntime-oddly-named")
+    monkeypatch.setenv("SHARED_RUNTIME_ROLE_ARN", "arn:aws:iam::123456789012:role/AgentCoreRuntime-oddly-named")
     _refused(_req(role="AgentCoreRuntime-oddly-named", resources=[BUCKET]))
 
 
