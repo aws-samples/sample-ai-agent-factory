@@ -255,12 +255,12 @@ class TestGatewayMCPPreservation:
     def test_customer_support_has_cognito_oauth(self):
         """**Validates: Requirements 3.2**
 
-        _generate_customer_support MUST contain Cognito OAuth token acquisition.
+        The customer-support template MUST contain Cognito OAuth token acquisition.
         """
-        code = code_generator._generate_customer_support(
-            "You are a support agent.",
-            "us.anthropic.claude-sonnet-5",
-            _GATEWAY_CREDS,
+        code = code_generator.generate_agent_code(
+            _make_runtime_config(),
+            gateway_config={"gateway_url": _GATEWAY_CREDS["url"]},
+            template_id="customer-support-assistant",
         )
         assert "def _get_gateway_token():" in code
         assert "grant_type" in code
@@ -489,7 +489,7 @@ class TestTemplateRoutingPreservation:
     def test_routes_customer_support(self):
         """**Validates: Requirements 3.5**
 
-        template_id="customer-support-assistant" MUST route to _generate_customer_support.
+        template_id="customer-support-assistant" MUST route to the Strands gateway agent.
         """
         config = _make_runtime_config()
         gateway_config = {

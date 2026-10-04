@@ -2,9 +2,17 @@
 
 Loom-study Phase-0 defect 0.2 — selecting openai/anthropic/gemini/litellm/mistral
 generated a model with NO credential (provider_api_key_ref was consumed nowhere),
-so every model call 401'd. Fix: generated model init reads PROVIDER_API_KEY (and
-optional PROVIDER_BASE_URL), the runtime_configure step injects them from the
-provider_api_key_ref secret, and the ARN is namespace-locked at the API boundary.
+so every model call 401'd. Fix: generated model init obtains the key from
+``_provider_api_key()``, which dereferences ``PROVIDER_API_KEY_SECRET_ARN`` inside the
+container; the runtime_configure step injects that ARN (never the key) and iam_step grants
+the read on the same namespace the API boundary locks the ref into.
+
+The first version of the fix injected the RESOLVED key as a ``PROVIDER_API_KEY``
+environment variable, and these tests pinned it there. That is not a place a secret can
+live: ``GetAgentRuntime`` returns a runtime's environment variables verbatim to any
+principal holding that one describe call, and every Task in the deployment state machine
+re-emits the whole event into the execution history. ARCC ``cnt_n8LpZcqYi2t3I2``,
+``cnt_dAiE0OyXKvfeow``.
 """
 
 from __future__ import annotations
@@ -21,8 +29,30 @@ from app.services.code_generator import _get_model_init_code  # noqa: E402
 
 
 def test_all_provider_init_lines_are_valid_python():
+    # Enumerated from the enum, not hand-listed: llamaapi was in the enum, selectable in
+    # the UI, and had no branch here at all — it fell through to the Bedrock fallback, so a
+    # Llama API canvas silently deployed a Bedrock agent. A hand-written list cannot fail
+    # for a provider it forgot to mention.
+    from app.models.enums import StrandsModelProvider
+
+    for prov in [p.value for p in StrandsModelProvider]:
+        _imp, init = _get_model_init_code(prov, "m", "us-east-1")
+        ast.parse(init)  # malformed f-string would raise
+
+
+def test_non_bedrock_providers_read_a_provider_key():
+    # Every credentialed non-Bedrock provider must obtain a key — including the
+    # OpenAI-compatible shims (groq/deepseek/writer), the LiteLLM-backed together, and
+    # llamaapi, which previously read ONLY a provider-specific env var that the deploy
+    # path never sets, so they deployed keyless and 401'd (Loom-study 5.4).
+    #
+    # It is now obtained through _provider_api_key(), not from os.environ. This assertion
+    # read `"PROVIDER_API_KEY" in init` while the key was injected as a plaintext runtime
+    # environment variable — a place a secret cannot live, because GetAgentRuntime returns
+    # runtime environment variables verbatim to any principal holding that one describe
+    # call. The env var survives only as the resolver's FALLBACK, which is why the check
+    # has to move to the call and not merely be spelled differently.
     for prov in [
-        "bedrock",
         "openai",
         "anthropic",
         "gemini",
@@ -32,34 +62,44 @@ def test_all_provider_init_lines_are_valid_python():
         "deepseek",
         "together",
         "writer",
+        "llamaapi",
     ]:
         _imp, init = _get_model_init_code(prov, "m", "us-east-1")
-        ast.parse(init)  # malformed f-string would raise
+        assert "_provider_api_key(" in init, f"{prov} obtains no key at all: {init}"
+        assert 'os.environ.get("PROVIDER_API_KEY")' not in init, (
+            f"{prov} reads the plaintext env var directly instead of the resolver: {init}"
+        )
 
 
-def test_non_bedrock_providers_read_provider_api_key():
-    # Every credentialed non-Bedrock provider must reference PROVIDER_API_KEY —
-    # including the OpenAI-compatible shims (groq/deepseek/writer) and the
-    # LiteLLM-backed together, which previously read ONLY a provider-specific env
-    # var that the deploy path never sets, so they deployed keyless and 401'd
-    # (Loom-study 5.4).
-    for prov in ["openai", "anthropic", "gemini", "litellm", "mistral", "groq", "deepseek", "together", "writer"]:
-        _imp, init = _get_model_init_code(prov, "m", "us-east-1")
-        assert "PROVIDER_API_KEY" in init, f"{prov} does not read PROVIDER_API_KEY: {init}"
+def test_the_resolver_prefers_the_reference_over_the_plaintext_env_var():
+    """The precedence that used to live in each init line now lives in one function.
+
+    Asserted against the emitted resolver SOURCE, because that is what runs in the
+    container: the ARN is read first, the plaintext PROVIDER_API_KEY is a fallback for a
+    local run, and a provider-specific variable is the last resort.
+    """
+    from app.services.code_generator import _PROVIDER_KEY_HELPER
+
+    arn_at = _PROVIDER_KEY_HELPER.index("PROVIDER_API_KEY_SECRET_ARN:")
+    plain_at = _PROVIDER_KEY_HELPER.index('os.environ.get("PROVIDER_API_KEY", "")')
+    assert arn_at < plain_at, "the plaintext env var must not be consulted before the reference"
+    assert "get_secret_value(SecretId=PROVIDER_API_KEY_SECRET_ARN)" in _PROVIDER_KEY_HELPER
 
 
-def test_openai_compat_shims_prefer_injected_key_then_fallback():
-    # The deploy-injected PROVIDER_API_KEY must take precedence, with the
-    # provider-specific var kept as a local/manual-run fallback.
+def test_openai_compat_shims_keep_their_provider_specific_fallback():
+    # The fallback is passed INTO the resolver so the precedence lives in one place.
+    # Without it a deployed groq agent read an unset GROQ_API_KEY and 401'd.
     for prov, fallback in [
         ("groq", "GROQ_API_KEY"),
         ("deepseek", "DEEPSEEK_API_KEY"),
         ("writer", "WRITER_API_KEY"),
         ("together", "TOGETHER_API_KEY"),
+        ("llamaapi", "LLAMA_API_KEY"),
     ]:
         _imp, init = _get_model_init_code(prov, "m", "us-east-1")
-        assert 'os.environ.get("PROVIDER_API_KEY")' in init, f"{prov} missing injected-key precedence"
-        assert fallback in init, f"{prov} dropped its {fallback} fallback"
+        assert f'_provider_api_key("{fallback}")' in init, (
+            f"{prov} must pass {fallback} to the resolver as its fallback, not read it directly: {init}"
+        )
 
 
 def test_openai_and_litellm_support_base_url():

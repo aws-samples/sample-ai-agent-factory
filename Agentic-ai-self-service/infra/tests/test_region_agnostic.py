@@ -87,11 +87,40 @@ class TestWafScope:
         assert acl["Properties"]["Name"] == "agentcore-workflow-test-regional-waf"
 
     def test_other_region_associates_the_web_acl_with_the_user_pool(self, other_template):
+        """The WAF protects the pool humans sign in to — the APP pool.
+
+        The stack has two Cognito pools: the app pool (interactive sign-in, hosted
+        UI, the thing a credential-stuffing bot attacks) and GatewayAuthUserPool
+        (machine-to-machine client_credentials only, no sign-up, no login flow). This
+        used to pick `next(iter(...))`, which silently assumed there was exactly one
+        pool and would have started asserting against whichever one CDK happened to
+        emit first. Select the app pool by exclusion so the test says which pool it
+        means and cannot drift again.
+        """
+        pools = _resources(other_template, "AWS::Cognito::UserPool")
+        app_pools = [lid for lid in pools if not lid.startswith("GatewayAuth")]
+        assert len(app_pools) == 1, f"expected exactly one app user pool, found {app_pools}"
         assoc = _only(other_template, "AWS::WAFv2::WebACLAssociation")["Properties"]
         acl_logical_id = next(iter(_resources(other_template, "AWS::WAFv2::WebACL")))
-        pool_logical_id = next(iter(_resources(other_template, "AWS::Cognito::UserPool")))
         assert assoc["WebACLArn"] == {"Fn::GetAtt": [acl_logical_id, "Arn"]}
-        assert assoc["ResourceArn"] == {"Fn::GetAtt": [pool_logical_id, "Arn"]}
+        assert assoc["ResourceArn"] == {"Fn::GetAtt": [app_pools[0], "Arn"]}
+
+    def test_the_gateway_auth_pool_is_not_waf_associated(self, other_template):
+        """Deliberate, not an omission.
+
+        GatewayAuthUserPool exists only to issue client_credentials tokens for
+        gateway invocation: self_sign_up is disabled, it holds no human users and
+        exposes no hosted-UI login flow, so the WAFv2 rules that protect interactive
+        sign-in have nothing to protect here. Only ONE WebACLAssociation exists and
+        it points at the app pool (asserted above); this pins that the gateway pool
+        was left out on purpose, so a reviewer does not "fix" it.
+        """
+        pools = _resources(other_template, "AWS::Cognito::UserPool")
+        gw = [lid for lid in pools if lid.startswith("GatewayAuth")]
+        assert len(gw) == 1, f"expected exactly one gateway-auth pool, found {gw}"
+        associations = _resources(other_template, "AWS::WAFv2::WebACLAssociation")
+        targets = [a["Properties"].get("ResourceArn") for a in associations.values()]
+        assert {"Fn::GetAtt": [gw[0], "Arn"]} not in targets
 
     def test_other_region_distribution_has_no_web_acl(self, other_template):
         """CloudFront rejects a REGIONAL ACL, so there is nothing to attach."""
@@ -109,6 +138,19 @@ class TestWafScope:
         ]
         rate_limit = next(r for r in rules if r["Name"] == "RateLimitRule")
         assert rate_limit["Statement"]["RateBasedStatement"]["Limit"] == 2000
+
+    @pytest.mark.parametrize("region", [HOME_REGION, OTHER_REGION])
+    def test_only_the_8_kb_body_size_rule_is_counted(self, region, home_template, other_template):
+        """The managed 8 KB body rule blocked deploys of long-prompt canvases and webhooks the
+        platform accepts up to 240 KB; it counts now, and nothing else in the group changes."""
+        template = home_template if region == HOME_REGION else other_template
+        rules = _only(template, "AWS::WAFv2::WebACL")["Properties"]["Rules"]
+        common = next(r for r in rules if r["Name"] == "AWSManagedRulesCommonRuleSet")
+        statement = common["Statement"]["ManagedRuleGroupStatement"]
+        assert statement["RuleActionOverrides"] == [{"Name": "SizeRestrictions_BODY", "ActionToUse": {"Count": {}}}]
+        assert common["OverrideAction"] == {"None": {}}
+        bad_inputs = next(r for r in rules if r["Name"] == "AWSManagedRulesKnownBadInputsRuleSet")
+        assert "RuleActionOverrides" not in bad_inputs["Statement"]["ManagedRuleGroupStatement"]
 
     def test_supplied_cloudfront_acl_arn_is_attached_outside_us_east_1(self):
         """The escape hatch: bring your own us-east-1 edge ACL."""
@@ -156,11 +198,17 @@ class TestAccountGlobalNames:
         return oac["Properties"]["OriginAccessControlConfig"]["Name"]
 
     def test_home_region_names_are_unchanged(self, home_template):
-        assert self._role_names(home_template) == {"AgentCoreRuntime-agentcore-workflow-test-shared"}
+        assert self._role_names(home_template) == {
+            "AgentCoreRuntime-agentcore-workflow-test-shared",
+            "AgentCoreRuntime-agentcore-workflow-test-mcp-shared",
+        }
         assert self._rhp_name(home_template) == "agentcore-workflow-test-security-headers"
 
-    def test_other_region_qualifies_the_shared_runtime_role(self, other_template):
-        assert self._role_names(other_template) == {f"AgentCoreRuntime-agentcore-workflow-test-{OTHER_REGION}-shared"}
+    def test_other_region_qualifies_the_shared_runtime_roles(self, other_template):
+        assert self._role_names(other_template) == {
+            f"AgentCoreRuntime-agentcore-workflow-test-{OTHER_REGION}-shared",
+            f"AgentCoreRuntime-agentcore-workflow-test-{OTHER_REGION}-mcp-shared",
+        }
 
     def test_other_region_qualifies_the_response_headers_policy(self, other_template):
         assert self._rhp_name(other_template) == f"agentcore-workflow-test-{OTHER_REGION}-security-headers"

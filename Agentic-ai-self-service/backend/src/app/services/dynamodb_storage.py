@@ -12,10 +12,26 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import boto3
+from botocore.exceptions import ClientError
 
 from app.models import WorkflowDefinition
+from app.services.storage import WorkflowRevisionConflict
 
 logger = logging.getLogger(__name__)
+
+__all__ = ["DynamoDBWorkflowStorage", "WorkflowRevisionConflict"]
+
+
+def _revision_fence(expected: int) -> tuple[str, dict]:
+    """The ConditionExpression that pins a workflow row to the revision a save was built on.
+
+    A row written before the ``revision`` attribute existed reads as 0 (the model default), so a
+    save built on revision 0 must also accept a row that has no attribute at all; the first save
+    stamps 1 and from then on the fence is exact. Mirrors ``flow_storage._version_fence``.
+    """
+    if expected == 0:
+        return "attribute_not_exists(revision) OR revision = :expected", {":expected": 0}
+    return "revision = :expected", {":expected": expected}
 
 
 # ============================================================================
@@ -62,6 +78,37 @@ def _put_item(table, item: dict) -> dict:
         DynamoDB put_item response
     """
     return table.put_item(Item=item)
+
+
+def _conditional_put_item(
+    table,
+    item: dict,
+    *,
+    condition_expression: str,
+    expression_attribute_values: dict | None = None,
+) -> dict:
+    """Write an item only if ``condition_expression`` holds on the row as it is NOW.
+
+    This is the primitive behind every compare-and-set write (F-15). A plain ``put_item`` after a
+    ``get_item`` is last-writer-wins: two callers that both read the same row both land, and the
+    second silently discards the first. The caller names the fence (``attribute_not_exists(pk)``
+    for a create, ``version = :v`` for an update) and DynamoDB evaluates it atomically with the
+    write. A failed fence surfaces as ``ClientError`` with code ``ConditionalCheckFailedException``;
+    the caller decides what that means.
+
+    Args:
+        table: boto3 DynamoDB Table object
+        item: Dictionary representing the item to write
+        condition_expression: DynamoDB condition expression string
+        expression_attribute_values: Values referenced by the condition (``:name`` placeholders)
+
+    Returns:
+        DynamoDB put_item response
+    """
+    kwargs = {"Item": item, "ConditionExpression": condition_expression}
+    if expression_attribute_values:
+        kwargs["ExpressionAttributeValues"] = expression_attribute_values
+    return table.put_item(**kwargs)
 
 
 def _get_item(table, key: dict) -> dict | None:
@@ -177,7 +224,11 @@ def _serialize_workflow(workflow: WorkflowDefinition) -> dict:
     Returns:
         Dict suitable for DynamoDB put_item
     """
-    item = workflow.model_dump(mode="json")
+    from app.services.credential_scrub import scrub_write_only_credentials
+
+    # The typed model already excludes its declared credential fields; this catches any dict-shaped
+    # configuration that a future model widens, so storage never holds a raw credential.
+    item = scrub_write_only_credentials(workflow.model_dump(mode="json"))
     # Ensure workflow_id is set as the partition key
     item["workflow_id"] = item.pop("id")
     # DynamoDB requires Decimal instead of float
@@ -264,11 +315,19 @@ class DynamoDBWorkflowStorage:
             update={
                 "created_at": now,
                 "updated_at": now,
+                "revision": 0,
             }
         )
 
         item = _serialize_workflow(workflow)
-        _put_item(self._table, item)
+        # The pre-read above is a courtesy; the condition is what makes two creates of one id
+        # unable to both land (F-15).
+        try:
+            _conditional_put_item(self._table, item, condition_expression="attribute_not_exists(workflow_id)")
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
+            raise ValueError(f"Workflow with ID '{workflow.id}' already exists") from exc
         logger.info("Created workflow: %s", workflow.id)
         return workflow
 
@@ -286,35 +345,93 @@ class DynamoDBWorkflowStorage:
             return None
         return _deserialize_workflow(item)
 
-    def update(self, workflow_id: str, workflow: WorkflowDefinition) -> WorkflowDefinition | None:
-        """Update an existing workflow in DynamoDB.
+    def get_owner_sub_unvalidated(self, workflow_id: str) -> tuple[bool, str | None]:
+        """Read one row's ``owner_sub`` WITHOUT parsing it into a model.
 
-        Preserves the original workflow_id and created_at, updates
-        the updated_at timestamp, then overwrites the item.
+        This exists for exactly one caller: deleting a row that ``get`` cannot
+        deserialize. Every ownership check in the router reads ``owner_sub`` off a
+        parsed :class:`WorkflowDefinition`, so when parsing is the thing that fails,
+        the authorization step fails first and the row can never be removed — the
+        API has no remedy for its own corrupt data. A row written before the
+        validation fix in ``routers/workflows.py`` is exactly that row, and
+        ``list_all`` swallows its deserialize failure, so nobody can even see it.
+
+        Returns ``(exists, owner_sub)``. ``owner_sub`` is returned only when it is a
+        string: anything else (absent, a number, a dict) is reported as ``None``,
+        which ``assert_owner`` treats as a pre-tenancy record. It is deliberately
+        NOT used to grant access on any read path — only to decide whether the
+        caller may delete.
+        """
+        item = _get_item(self._table, {"workflow_id": workflow_id})
+        if item is None:
+            return (False, None)
+        owner_sub = item.get("owner_sub")
+        return (True, owner_sub if isinstance(owner_sub, str) else None)
+
+    def update(
+        self,
+        workflow_id: str,
+        workflow: WorkflowDefinition,
+        *,
+        expected_revision: int | None = None,
+    ) -> WorkflowDefinition | None:
+        """Update an existing workflow in DynamoDB as a compare-and-set on ``revision`` (F-15).
+
+        Preserves the original workflow_id and created_at, updates the updated_at timestamp and
+        advances ``revision``. The write is conditioned on the row still being at the revision
+        this method READ: the in-Python ``expected_revision`` check catches a client whose copy
+        is stale, and the DynamoDB condition catches the other writer that landed between this
+        read and this put. A client that names no revision is still fenced on the row it read.
 
         Args:
             workflow_id: The ID of the workflow to update
             workflow: The updated workflow data
+            expected_revision: The ``revision`` the caller built this save on (None for a
+                client that does not send one)
 
         Returns:
             The updated workflow if found, None otherwise
+
+        Raises:
+            WorkflowRevisionConflict: the row is not at ``expected_revision`` / moved under the
+                write; ``current`` is the row as it is now
         """
         existing_item = _get_item(self._table, {"workflow_id": workflow_id})
         if existing_item is None:
             return None
 
         existing = _deserialize_workflow(existing_item)
+        if expected_revision is not None and existing.revision != expected_revision:
+            raise WorkflowRevisionConflict(workflow_id, expected_revision, existing)
         updated = workflow.model_copy(
             update={
                 "id": workflow_id,
                 "created_at": existing.created_at,
                 "updated_at": datetime.now(timezone.utc),
+                "revision": existing.revision + 1,
             }
         )
 
         item = _serialize_workflow(updated)
-        _put_item(self._table, item)
-        logger.info("Updated workflow: %s", workflow_id)
+        condition, values = _revision_fence(existing.revision)
+        try:
+            _conditional_put_item(
+                self._table,
+                item,
+                condition_expression=condition,
+                expression_attribute_values=values,
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
+            current_item = _get_item(self._table, {"workflow_id": workflow_id})
+            current = _deserialize_workflow(current_item) if current_item is not None else None
+            raise WorkflowRevisionConflict(
+                workflow_id,
+                expected_revision if expected_revision is not None else existing.revision,
+                current,
+            ) from exc
+        logger.info("Updated workflow: %s (revision %s)", workflow_id, updated.revision)
         return updated
 
     def delete(self, workflow_id: str) -> bool:

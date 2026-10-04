@@ -13,6 +13,7 @@ a live test cannot be relied on to reproduce on demand.
 """
 
 import ast
+import hashlib
 import logging
 import sys
 from pathlib import Path
@@ -78,6 +79,7 @@ class FakeAgentCore:
         self.exceptions = _Exceptions
         self.calls: list[str] = []
         self._behaviour = behaviour
+        self._list_calls = 0
 
     def _record(self, name):
         self.calls.append(name)
@@ -121,6 +123,11 @@ class FakeAgentCore:
         exc = self._behaviour.get("list_raises")
         if exc:
             raise exc
+        pages = self._behaviour.get("list_pages")
+        if pages is not None:
+            page = pages[min(self._list_calls, len(pages) - 1)]
+            self._list_calls += 1
+            return page if isinstance(page, dict) else {"policies": page}
         return {"policies": self._behaviour.get("policies", [])}
 
     def delete_policy(self, **kwargs):
@@ -145,6 +152,16 @@ def _oauth_event(request_type: str, **overrides) -> dict:
             "ClientSecret": "not-a-real-secret",
         },
     }
+    if request_type in ("Update", "Delete"):
+        # CloudFormation ALWAYS sends the physical id it recorded from Create on an
+        # Update or a Delete — it is part of the custom-resource request contract. The
+        # update handler now compares the requested ProviderName against the name inside
+        # it, to refuse overwriting a provider this resource does not own, so an event
+        # without it models a request CloudFormation never sends and would exercise the
+        # wrong branch.
+        event["PhysicalResourceId"] = (
+            f"arn:aws:bedrock-agentcore:::provider/{event['ResourceProperties']['ProviderName']}"
+        )
     event.update(overrides)
     return event
 
@@ -186,6 +203,40 @@ class TestPolicyDeleteAfterAFailedCreate:
             "policyEngineId": "engine_demo-a1b2c3d4e5",
             "policyId": "policy_demo-9a8b7c6d5e",
         }
+
+    def test_the_orphaned_policy_is_found_on_page_two(self, monkeypatch):
+        ctrl = FakeAgentCore(
+            list_pages=[
+                {"policies": [], "nextToken": "page-2"},
+                {
+                    "policies": [
+                        {
+                            "name": "default_permit",
+                            "policyId": "policy_demo-9a8b7c6d5e",
+                        }
+                    ]
+                },
+            ]
+        )
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: ctrl)
+
+        provider._handle_policy_delete(dict(self.EVENT))
+
+        assert ctrl.delete_policy_kwargs["policyId"] == "policy_demo-9a8b7c6d5e"
+        assert ctrl.calls == ["list_policies", "list_policies", "delete_policy"]
+
+    def test_a_repeated_policy_page_token_cannot_spin_or_authorize_a_delete(self, monkeypatch):
+        ctrl = FakeAgentCore(
+            list_pages=[
+                {"policies": [], "nextToken": "same"},
+                {"policies": [], "nextToken": "same"},
+            ]
+        )
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: ctrl)
+
+        provider._handle_policy_delete(dict(self.EVENT))
+
+        assert ctrl.calls == ["list_policies", "list_policies"]
 
     def test_a_parseable_physical_id_still_skips_the_lookup(self, monkeypatch):
         """The normal path must not gain a list_policies call it does not need."""
@@ -278,7 +329,7 @@ class FakePolicyControl:
         if pages is not None:
             page = pages[min(self._list_calls, len(pages) - 1)]
             self._list_calls += 1
-            return {"policies": page}
+            return page if isinstance(page, dict) else {"policies": page}
         return {"policies": self._behaviour.get("policies", [])}
 
     def create_policy(self, **kwargs):
@@ -358,6 +409,45 @@ class TestPolicyCreateOverALeftover:
 
         provider._handle_policy_create_update(_policy_event(), _Context())
         assert ctrl.update_kwargs[0]["policyId"] == "policy_ok-3c4d5e6f7a"
+
+    def test_a_healthy_leftover_on_page_two_is_updated(self, monkeypatch):
+        ctrl = FakePolicyControl(
+            list_pages=[
+                {"policies": [], "nextToken": "page-2"},
+                {
+                    "policies": [
+                        {
+                            "name": "default_permit",
+                            "policyId": "policy_ok-3c4d5e6f7a",
+                            "status": "ACTIVE",
+                        }
+                    ]
+                },
+            ]
+        )
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: ctrl)
+
+        provider._handle_policy_create_update(_policy_event(), _Context())
+
+        assert ctrl.update_kwargs[0]["policyId"] == "policy_ok-3c4d5e6f7a"
+        assert ctrl.calls[:2] == ["get_policy_engine", "list_policies"]
+        assert ctrl.calls.count("list_policies") == 2
+
+    def test_a_repeated_policy_page_token_fails_before_create(self, monkeypatch):
+        ctrl = FakePolicyControl(
+            list_pages=[
+                {"policies": [], "nextToken": "same"},
+                {"policies": [], "nextToken": "same"},
+            ],
+            create_raises=None,
+        )
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: ctrl)
+
+        with pytest.raises(provider.ProviderError, match="repeated pagination token"):
+            provider._handle_policy_create_update(_policy_event(), _Context())
+
+        assert "create_policy" not in ctrl.calls
+        assert ctrl.calls.count("list_policies") == 2
 
     def test_nothing_there_is_created(self, monkeypatch):
         ctrl = FakePolicyControl(policies=[], create_raises=None)
@@ -749,6 +839,83 @@ class TestOAuth2ProviderUpdate:
         with pytest.raises(ClientError):
             provider._handle_oauth2_cred_update(_oauth_event("Update"))
         assert "create" not in ctrl.calls
+
+
+class TestAnUpdateCannotTakeOverAnotherDeploymentsProvider:
+    """Create refuses a same-named provider bound to a different OAuth client. Update
+    did not, and Update is reachable from the same resource — so the weaker check was
+    the one that mattered.
+
+    Rename ``ProviderName`` in the template to a name another deployment uses, and
+    CloudFormation sends an Update. The handler then pushed OUR client id, discovery URL
+    and client secret onto THEIR provider: their gateway target starts minting tokens
+    against our Cognito pool, and since the handler returned their ARN as the new
+    PhysicalResourceId, our next stack Delete deletes their provider.
+
+    Ownership comes from the PhysicalResourceId, which CloudFormation assigned from our
+    own Create — not from the name in the template, which the operator controls.
+    """
+
+    def test_a_renamed_provider_is_not_updated_in_place(self, monkeypatch):
+        ctrl = FakeAgentCore()
+        monkeypatch.setattr(provider, "_get_agentcore_ctrl", lambda: ctrl)
+        event = _oauth_event(
+            "Update",
+            PhysicalResourceId="arn:aws:bedrock-agentcore:::provider/mine-mcp",
+        )
+        event["ResourceProperties"]["ProviderName"] = "someone-elses-mcp"
+
+        provider._handle_oauth2_cred_update(event)
+
+        assert "update" not in ctrl.calls[:1], (
+            "the handler called UpdateOauth2CredentialProvider on a provider name this "
+            f"resource never created: {ctrl.calls}"
+        )
+        assert ctrl.calls[0] == "create", (
+            "a rename is a REPLACEMENT — it must go through the create path, which is "
+            f"the only one that checks ownership before adopting: {ctrl.calls}"
+        )
+
+    def test_the_rename_is_refused_when_the_target_belongs_to_someone_else(self, monkeypatch):
+        """End to end: the create path it now routes to must actually refuse. Routing
+        somewhere that adopts anyway would move the takeover, not remove it."""
+        ctrl = FakeAgentCore(
+            create_raises=_Exceptions.ValidationException("provider already exists"),
+            existing_client_id="a-different-deployments-client",
+        )
+        monkeypatch.setattr(provider, "_get_agentcore_ctrl", lambda: ctrl)
+        event = _oauth_event("Update", PhysicalResourceId="arn:aws:bedrock-agentcore:::provider/mine-mcp")
+        event["ResourceProperties"]["ProviderName"] = "someone-elses-mcp"
+
+        with pytest.raises(provider.ProviderError, match="bound to a different OAuth client"):
+            provider._handle_oauth2_cred_update(event)
+        assert "update" not in ctrl.calls, f"the victim's provider was mutated before the refusal: {ctrl.calls}"
+
+    def test_the_same_name_is_still_an_ordinary_in_place_update(self, monkeypatch):
+        """Vacuity guard. A check that rejected everything would also 'fix' this, and
+        would silently turn every secret rotation into a delete-and-recreate."""
+        ctrl = FakeAgentCore(arn="arn:aws:bedrock-agentcore:::provider/agent-demo-mcp")
+        monkeypatch.setattr(provider, "_get_agentcore_ctrl", lambda: ctrl)
+
+        provider._handle_oauth2_cred_update(_oauth_event("Update"))
+
+        assert ctrl.calls == ["update"]
+
+    def test_a_client_id_change_under_the_same_name_is_allowed(self, monkeypatch):
+        """The check is on the NAME, not the client id, and that is deliberate: a
+        redeploy mints a new Cognito app client, so the client id changes on an honest
+        rotation. Keying ownership off the client id here would reject the exact case
+        this resource exists to serve."""
+        ctrl = FakeAgentCore(arn="arn:aws:bedrock-agentcore:::provider/agent-demo-mcp")
+        monkeypatch.setattr(provider, "_get_agentcore_ctrl", lambda: ctrl)
+        event = _oauth_event("Update")
+        event["ResourceProperties"]["ClientId"] = "a-brand-new-client"
+
+        provider._handle_oauth2_cred_update(event)
+
+        assert ctrl.calls == ["update"]
+        config = ctrl.update_kwargs["oauth2ProviderConfigInput"]["customOauth2ProviderConfig"]
+        assert config["clientId"] == "a-brand-new-client"
 
 
 # ---------------------------------------------------------------------------
@@ -1402,7 +1569,7 @@ class TestResponseDelivery:
     the resource to time out.
     """
 
-    URL = "https://cloudformation-custom-resource-response.s3.amazonaws.com/resp?X-Amz-Signature=fake"
+    URL = "https://cloudformation-custom-resource-response-useast1.s3.amazonaws.com/resp?X-Amz-Signature=fake"
 
     @pytest.fixture
     def undeliverable(self, monkeypatch):
@@ -1443,6 +1610,7 @@ class TestResponseDelivery:
         """
         provider.handler(self._event(monkeypatch), _Context())
         provider.handler(self._event(monkeypatch, ResponseURL="http://attacker.example/collect"), _Context())
+        provider.handler(self._event(monkeypatch, ResponseURL="https://attacker.example/collect"), _Context())
 
     def test_a_delivered_response_does_not_raise(self, monkeypatch):
         """The ordinary path. Raising here would retry every resource three times."""
@@ -1459,6 +1627,69 @@ class TestResponseDelivery:
             provider.handler(self._event(monkeypatch, ResponseURL=self.URL), _Context())
         assert "X-Amz-Signature" not in str(excinfo.value)
         assert "s3.amazonaws.com" not in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# A forged event must not turn the response sender into an arbitrary HTTPS PUT
+# ---------------------------------------------------------------------------
+
+
+class TestResponseUrlAuthority:
+    STACK_ID = "arn:aws:cloudformation:us-east-1:111122223333:stack/demo/abc123"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            ("https://cloudformation-custom-resource-response-useast1.s3.amazonaws.com/response?X-Amz-Signature=fake"),
+            (
+                "https://cloudformation-custom-resource-response-useast1."
+                "s3.us-east-1.amazonaws.com/response?X-Amz-Signature=fake"
+            ),
+            (
+                "https://cloudformation-custom-resource-response-useast1."
+                "s3-us-east-1.amazonaws.com/response?X-Amz-Signature=fake"
+            ),
+        ],
+    )
+    def test_cloudformation_response_bucket_variants_are_accepted(self, url):
+        assert provider.cfn_response.is_usable_response_url(url, self.STACK_ID)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://cloudformation-custom-resource-response-useast1.s3.amazonaws.com/response",
+            "https://attacker.example/response",
+            "https://cloudformation-custom-resource-response-euwest1.s3.amazonaws.com/response",
+            "https://cloudformation-custom-resource-response-useast1.evil.s3.amazonaws.com/response",
+            "https://user@cloudformation-custom-resource-response-useast1.s3.amazonaws.com/response",
+            "https://cloudformation-custom-resource-response-useast1.s3.amazonaws.com:444/response",
+            "https://cloudformation-custom-resource-response-useast1.s3.amazonaws.com/response#fragment",
+            "https://cloudformation-custom-resource-response-useast1.s3.amazonaws.com/\nresponse",
+        ],
+    )
+    def test_non_cloudformation_destinations_are_rejected(self, url):
+        assert not provider.cfn_response.is_usable_response_url(url, self.STACK_ID)
+
+    def test_send_never_contacts_an_arbitrary_https_host(self, monkeypatch):
+        monkeypatch.setattr(
+            provider.cfn_response,
+            "urlopen",
+            lambda *_args, **_kwargs: pytest.fail("arbitrary HTTPS host was contacted"),
+        )
+
+        assert (
+            provider.cfn_response.send(
+                {
+                    "ResponseURL": "https://attacker.example/collect",
+                    "StackId": self.STACK_ID,
+                    "RequestId": "req-1",
+                    "LogicalResourceId": "AgentCodePackage",
+                },
+                _Context(),
+                provider.cfn_response.SUCCESS,
+            )
+            is False
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1974,7 +2205,9 @@ class TestRuntimeLogGroupGovernance:
 
         assert data == {"LogGroupNames": ""}
         assert logs.calls == []
-        assert physical_id == "runtime-log-groups/AgentCoreRuntimeLogGroups"
+        assert (
+            physical_id == "runtime-log-groups/AgentCoreRuntimeLogGroups"
+        )  # two governed names -> the stable legacy form
 
 
 class TestRuntimeLogGroupKeyPolicyFailure:
@@ -2093,22 +2326,22 @@ class TestRuntimeLogGroupKeyPolicyFailure:
 class TestRuntimeLogGroupDeleteAndIdentity:
     """Delete must not delete, and update must not replace."""
 
-    def test_delete_leaves_the_logs_in_place(self, monkeypatch):
-        """The whole point. These groups hold the agent's conversations; per ARCC
-        cnt_bO6I1SM60fP0J4 security-relevant logs are retained for years, and a stack
-        teardown is not authority to destroy the audit trail of what the agent did.
-        No client is created at all, so there is nothing that could delete them.
+    def test_delete_removes_the_groups_cloudformation_told_it_to(self, monkeypatch):
+        """The protection moved out of this handler and into the template: the generator
+        stamps Custom::RuntimeLogGroup RetainExceptOnCreate (Retain) / Delete (Delete), so a
+        retained stack's deletion SKIPS this resource and the audit trail of what the agent
+        did survives (ARCC cnt_bO6I1SM60fP0J4) -- asserted in test_cfn_export_contract.py.
+        When CloudFormation DOES send Delete -- the rollback of the operation that created
+        the runtime, or a Delete-mode teardown -- the groups must really go, verified.
         """
-
-        def no_clients(service_name, *args, **kwargs):
-            raise AssertionError(f"Delete built a {service_name} client; it must touch nothing")
-
-        monkeypatch.setattr(provider.boto3, "client", no_clients)
-
+        logs = FakeDeleteLogs()
+        _install_logs(monkeypatch, logs)
         data, physical_id = provider._handle_runtime_log_group_delete(_log_group_event(request_type="Delete"))
-
-        assert data == {}
-        assert physical_id == "runtime-log-groups/AgentCoreRuntimeLogGroups"
+        assert (
+            physical_id == "runtime-log-groups/AgentCoreRuntimeLogGroups"
+        )  # two governed names -> the stable legacy form
+        assert data["DeletedLogGroups"] and data["AlreadyAbsent"] == ""
+        assert len(logs.calls) == 2 * len(set(logs.calls)), "each group: one delete, one verification"
 
     def test_delete_of_a_resource_with_no_recorded_names_still_succeeds(self, monkeypatch):
         """A rollback of a failed Create sends a Delete with whatever properties it had.
@@ -2143,7 +2376,11 @@ class TestRuntimeLogGroupDeleteAndIdentity:
         create = _log_group_event(names=(DEFAULT_GROUP,))
 
         _data, created_id = provider._handle_runtime_log_group_create_update(create)
-        _data, deleted_id = provider._handle_runtime_log_group_delete(_log_group_event(request_type="Delete"))
+        _install_logs(monkeypatch, FakeDeleteLogs())  # Delete now really deletes; give it a client that can
+        # CloudFormation sends Delete with the SAME properties it created with, plus the physical id it recorded.
+        delete = _log_group_event(request_type="Delete", names=(DEFAULT_GROUP,))
+        delete["PhysicalResourceId"] = created_id
+        _data, deleted_id = provider._handle_runtime_log_group_delete(delete)
 
         assert created_id == deleted_id
 
@@ -2176,12 +2413,17 @@ class TestRuntimeLogGroupDispatch:
         assert kwargs["data"]["LogGroupNames"] == f"{DEFAULT_GROUP},{NAMED_GROUP}"
         assert logs.retention == {DEFAULT_GROUP: 7, NAMED_GROUP: 7}
 
-    def test_a_delete_is_routed_and_reports_success_without_touching_logs(self, monkeypatch, sent):
-        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: pytest.fail("no client expected"))
-
+    def test_a_delete_is_routed_and_deletes_the_governed_groups(self, monkeypatch, sent):
+        """Delete used to be a no-op ("without touching logs"). Now the generator stamps the
+        resource RetainExceptOnCreate/Delete, so CloudFormation only sends Delete when the
+        groups really must go (rollback of the creating operation, or Delete mode) -- and
+        then the handler deletes them and verifies each is gone."""
+        logs = FakeDeleteLogs()
+        _install_logs(monkeypatch, logs)
         provider.handler(self._event(monkeypatch, request_type="Delete"), _Context())
-
         assert sent[0][0] == "SUCCESS"
+        assert logs.calls, "Delete must reach DeleteLogGroup now"
+        assert len(logs.calls) == 2 * len(set(logs.calls)), "each group: one delete + one verification"
 
     def test_the_key_policy_remedy_reaches_the_stack_event(self, monkeypatch, sent):
         """A ProviderError's message is the only place the recipient will read it."""
@@ -2402,3 +2644,423 @@ class TestTheProviderErrorContractIsEnforced:
             provider.ProviderError("AgentCore rejected the Cedar policy: unexpected token at line 3")
         )
         assert "unexpected token at line 3" in reason
+
+
+# ---------------------------------------------------------------------------
+# Custom::RuntimeLogGroup Delete: real, verified, and only when CloudFormation asks
+# ---------------------------------------------------------------------------
+
+
+class FakeDeleteLogs:
+    """DeleteLogGroup with a real service's shape: a group deletes once and is then
+    ResourceNotFound; an `absent` group is ResourceNotFound from the start; a `zombie`
+    group "succeeds" every time (the outcome the verification exists to catch); a
+    `denied` group raises AccessDenied."""
+
+    def __init__(self, *, absent=(), zombie=(), denied=()):
+        self.absent, self.zombie, self.denied = set(absent), set(zombie), set(denied)
+        self.calls: list[str] = []
+        self._gone: set[str] = set(absent)
+
+    def delete_log_group(self, *, logGroupName):
+        self.calls.append(logGroupName)
+        if logGroupName in self.denied:
+            raise _client_error("AccessDeniedException", "DeleteLogGroup")
+        if logGroupName in self.zombie:
+            return {}
+        if logGroupName in self._gone:
+            raise _client_error("ResourceNotFoundException", "DeleteLogGroup")
+        self._gone.add(logGroupName)
+        return {}
+
+
+class TestRuntimeLogGroupDeleteIsRealAndVerified:
+    """Before: an unconditional no-op, so a failed FIRST create left every pre-created
+    runtime log group behind. Now the generator stamps the resource RetainExceptOnCreate
+    (Retain) / Delete (Delete), so CloudFormation sends Delete only on the rollback of the
+    creating operation or a Delete-mode teardown -- and when it does, the groups really go,
+    verified by a second DeleteLogGroup answering ResourceNotFound."""
+
+    GROUPS = [
+        "/aws/bedrock-agentcore/runtimes/abc123-DEFAULT",
+        "/aws/bedrock-agentcore/runtimes/abc123-prod",
+    ]
+
+    def _event(self, names=None):
+        return {
+            "RequestType": "Delete",
+            "StackId": STACK_ID,
+            "LogicalResourceId": "AgentCoreRuntimeLogGroups",
+            "PhysicalResourceId": "AgentCoreRuntimeLogGroups-governance",
+            "ResourceProperties": {
+                "LogGroupNames": list(self.GROUPS if names is None else names),
+                "RetentionInDays": "90",
+            },
+        }
+
+    def test_every_governed_group_is_deleted_and_verified(self, monkeypatch):
+        logs = FakeDeleteLogs()
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: logs)
+        data, _pid = provider._handle_runtime_log_group_delete(self._event())
+        assert data["DeletedLogGroups"].split(",") == self.GROUPS
+        assert data["AlreadyAbsent"] == ""
+        # two DeleteLogGroup calls per group: the delete, then the verification
+        assert logs.calls == [g for g in self.GROUPS for _ in range(2)]
+
+    def test_an_already_absent_group_is_benign(self, monkeypatch):
+        logs = FakeDeleteLogs(absent=[self.GROUPS[0]])
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: logs)
+        data, _pid = provider._handle_runtime_log_group_delete(self._event())
+        assert data["AlreadyAbsent"] == self.GROUPS[0]
+        assert data["DeletedLogGroups"] == self.GROUPS[1]
+
+    def test_a_group_that_survives_its_delete_fails_the_resource(self, monkeypatch):
+        # The mutant this catches: "delete returned 200, therefore it is gone".
+        logs = FakeDeleteLogs(zombie=[self.GROUPS[1]])
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: logs)
+        with pytest.raises(provider.ProviderError) as exc:
+            provider._handle_runtime_log_group_delete(self._event())
+        assert self.GROUPS[1] in str(exc.value) and "still exists" in str(exc.value)
+        assert "aws logs delete-log-group" in str(exc.value), "the operator needs the remedy"
+
+    def test_access_denied_is_not_swallowed(self, monkeypatch):
+        logs = FakeDeleteLogs(denied=[self.GROUPS[0]])
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: logs)
+        with pytest.raises(provider.ProviderError) as exc:
+            provider._handle_runtime_log_group_delete(self._event())
+        assert "AccessDeniedException" in str(exc.value) and self.GROUPS[0] in str(exc.value)
+
+    def test_no_names_deletes_nothing_and_still_succeeds(self, monkeypatch):
+        logs = FakeDeleteLogs()
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: logs)
+        data, _pid = provider._handle_runtime_log_group_delete(self._event(names=[]))
+        assert logs.calls == [], "no names -> no DeleteLogGroup calls (and, per the rollback test, no client)"
+        assert data == {}
+
+    def test_the_physical_id_is_stable_across_delete(self, monkeypatch):
+        logs = FakeDeleteLogs()
+        monkeypatch.setattr(provider.boto3, "client", lambda *a, **k: logs)
+        _data, pid = provider._handle_runtime_log_group_delete(self._event())
+        assert pid == provider._runtime_log_group_physical_id(self._event())
+
+
+class TestRuntimeLogGroupPhysicalIdEncodesTheGroup:
+    """One resource governs one group and its id is derived from that group's name, so a
+    changed name is a replacement (CloudFormation then Deletes the OLD resource after the
+    update stabilizes, honoured or skipped by its UpdateReplacePolicy) and an unchanged one
+    never is. Legacy multi-group resources keep their id forever: replacing them would make
+    CloudFormation Delete a resource whose Delete now really deletes."""
+
+    def _ev(self, names, request_type="Create", physical=None):
+        e = {
+            "RequestType": request_type,
+            "StackId": STACK_ID,
+            "LogicalResourceId": "AgentCoreRuntimeLogGroups",
+            "ResourceProperties": {"LogGroupNames": list(names), "RetentionInDays": "90"},
+        }
+        if physical:
+            e["PhysicalResourceId"] = physical
+        return e
+
+    def test_one_group_gets_an_id_derived_from_its_name(self):
+        pid = provider._runtime_log_group_physical_id(self._ev([DEFAULT_GROUP]))
+        assert pid == "runtime-log-group/" + hashlib.sha256(DEFAULT_GROUP.encode()).hexdigest()[:16]
+
+    def test_the_same_group_keeps_the_same_id_on_update(self):
+        first = provider._runtime_log_group_physical_id(self._ev([DEFAULT_GROUP]))
+        again = provider._runtime_log_group_physical_id(self._ev([DEFAULT_GROUP], "Update", physical=first))
+        assert again == first, "an unchanged group must never look like a replacement"
+
+    def test_a_changed_group_is_a_replacement(self):
+        first = provider._runtime_log_group_physical_id(self._ev([DEFAULT_GROUP]))
+        replaced = provider._runtime_log_group_physical_id(self._ev([NAMED_GROUP], "Update", physical=first))
+        assert replaced != first, "a replaced runtime renames the group; CloudFormation must see a replacement"
+        assert replaced == "runtime-log-group/" + hashlib.sha256(NAMED_GROUP.encode()).hexdigest()[:16]
+
+    def test_two_different_groups_never_share_an_id(self):
+        a = provider._runtime_log_group_physical_id(self._ev([DEFAULT_GROUP]))
+        b = provider._runtime_log_group_physical_id(self._ev([NAMED_GROUP]))
+        assert a != b
+
+    def test_a_legacy_multi_group_resource_is_never_replaced(self):
+        legacy = "runtime-log-groups/AgentCoreRuntimeLogGroups"
+        assert provider._runtime_log_group_physical_id(self._ev([DEFAULT_GROUP], "Update", physical=legacy)) == legacy
+        assert (
+            provider._runtime_log_group_physical_id(self._ev([DEFAULT_GROUP, NAMED_GROUP], "Update", physical=legacy))
+            == legacy
+        )
+
+    def test_a_multi_group_create_falls_back_to_the_stable_form(self):
+        assert (
+            provider._runtime_log_group_physical_id(self._ev([DEFAULT_GROUP, NAMED_GROUP]))
+            == "runtime-log-groups/AgentCoreRuntimeLogGroups"
+        )
+
+
+class FakeSSM:
+    """Per-entry ledger: put/get-by-path/delete, paginated by 2 so pagination is exercised."""
+
+    def __init__(self, params=None, get_raises=None, put_raises=None):
+        self.params = dict(params or {})
+        self.get_raises = get_raises
+        self.put_raises = put_raises
+        self.calls = []
+
+    def put_parameter(self, *, Name, Type, Overwrite, Value):
+        self.calls.append(("put", Name, Value))
+        if self.put_raises:
+            raise self.put_raises
+        self.params[Name] = Value
+        return {}
+
+    def get_parameters_by_path(self, *, Path, Recursive, NextToken=None):
+        self.calls.append(("get_by_path", Path, NextToken))
+        if self.get_raises:
+            raise self.get_raises
+        names = sorted(n for n in self.params if n.startswith(Path + "/"))
+        start = int(NextToken or 0)
+        page = names[start : start + 2]
+        out = {"Parameters": [{"Name": n, "Value": self.params[n]} for n in page]}
+        if start + 2 < len(names):
+            out["NextToken"] = str(start + 2)
+        return out
+
+    def delete_parameters(self, *, Names):
+        self.calls.append(("delete", tuple(Names)))
+        assert len(Names) <= 10, "DeleteParameters accepts at most 10 names"
+        for n in Names:
+            self.params.pop(n, None)
+        return {"DeletedParameters": list(Names), "InvalidParameters": []}
+
+
+class FakeCFN:
+    def __init__(self, physical=None, raises=None):
+        self.physical = physical
+        self.raises = raises
+        self.calls = []
+
+    def describe_stack_resource(self, *, StackName, LogicalResourceId):
+        self.calls.append((StackName, LogicalResourceId))
+        if self.raises:
+            raise self.raises
+        return {
+            "StackResourceDetail": {
+                "LogicalResourceId": LogicalResourceId,
+                "PhysicalResourceId": self.physical or LogicalResourceId,
+                "ResourceStatus": "DELETE_COMPLETE",
+            }
+        }
+
+
+class RecreatingLogs(FakeDeleteLogs):
+    """A group that AgentCore recreates `recreate` times after deletion -- the post-runtime race.
+    Also answers describe_log_groups for the sweeper's CloudFormation fallback."""
+
+    def __init__(self, recreate=None, listing=None):
+        super().__init__()
+        self.recreate = dict(recreate or {})
+        self.listing = list(listing or [])
+
+    def delete_log_group(self, *, logGroupName):
+        self.calls.append(logGroupName)
+        if logGroupName in self._gone:
+            if self.recreate.get(logGroupName, 0) > 0:
+                self.recreate[logGroupName] -= 1
+                self._gone.discard(logGroupName)
+                return {}
+            raise _client_error("ResourceNotFoundException", "DeleteLogGroup")
+        self._gone.add(logGroupName)
+        return {}
+
+    def describe_log_groups(self, *, logGroupNamePrefix, nextToken=None):
+        self.calls.append(("describe", logGroupNamePrefix))
+        return {"logGroups": [{"logGroupName": n} for n in self.listing if n.startswith(logGroupNamePrefix)]}
+
+
+def _clients(monkeypatch, *, logs=None, ssm=None, cfn=None):
+    def client(service, *a, **k):
+        if service == "logs":
+            return logs
+        if service == "ssm":
+            return ssm
+        if service == "cloudformation":
+            return cfn
+        raise AssertionError(f"unexpected client {service}")
+
+    monkeypatch.setattr(provider.boto3, "client", client)
+
+
+class TestRuntimeLogGroupSweeperAndLedger:
+    STACK = "arn:aws:cloudformation:us-east-1:123456789012:stack/mystack/11111111-2222-3333-4444-555555555555"
+    G1 = "/aws/bedrock-agentcore/runtimes/demo_runtime-aBcDeF1234-DEFAULT"
+    G2 = "/aws/bedrock-agentcore/runtimes/demo_runtime-aBcDeF1234-prod"
+    GEN = "0123456789ab"
+
+    @property
+    def prefix(self):
+        return provider._ledger_prefix(
+            {"StackId": self.STACK}, {"RuntimeLogicalId": "AgentCoreRuntime", "Generation": self.GEN}
+        )
+
+    def _group_event(self, names, request_type="Create"):
+        return {
+            "RequestType": request_type,
+            "StackId": self.STACK,
+            "LogicalResourceId": "AgentCoreRuntimeLogGroups",
+            "ResourceProperties": {
+                "LogGroupNames": list(names),
+                "RetentionInDays": "90",
+                "RuntimeLogicalId": "AgentCoreRuntime",
+                "Generation": self.GEN,
+            },
+        }
+
+    def _sweeper_event(self, request_type="Delete", generation=None, name="demo_runtime"):
+        e = {
+            "RequestType": request_type,
+            "StackId": self.STACK,
+            "LogicalResourceId": "AgentCoreRuntimeLogGroupSweeper",
+            "ResourceProperties": {
+                "Mode": "sweeper",
+                "RuntimeLogicalId": "AgentCoreRuntime",
+                "Generation": generation or self.GEN,
+                "AgentRuntimeName": name,
+            },
+        }
+        if request_type != "Create":
+            e["PhysicalResourceId"] = f"runtime-log-group-sweeper/AgentCoreRuntime/{generation or self.GEN}"
+        return e
+
+    def _ledger(self, *names):
+        import hashlib as _h
+
+        return {f"{self.prefix}/{_h.sha256(n.encode()).hexdigest()[:16]}": n for n in names}
+
+    def test_the_prefix_is_scoped_by_stack_id_digest_runtime_and_generation(self):
+        p = self.prefix
+        assert p.startswith("/agentcore-cfn/mystack/") and p.endswith(f"/AgentCoreRuntime/{self.GEN}/groups")
+        other = provider._ledger_prefix(
+            {"StackId": self.STACK.replace("1111", "9999")},
+            {"RuntimeLogicalId": "AgentCoreRuntime", "Generation": self.GEN},
+        )
+        assert other != p, "a same-name redeploy (new StackId) must not share the retained predecessor's ledger"
+
+    def test_governing_a_group_records_one_entry_per_group_without_a_shared_document(self, monkeypatch):
+        ssm = FakeSSM()
+        _clients(monkeypatch, logs=FakeLogs({self.G1: ""}), ssm=ssm)
+        provider._handle_runtime_log_group_create_update(self._group_event([self.G1]))
+        _clients(monkeypatch, logs=FakeLogs({self.G2: ""}), ssm=ssm)
+        provider._handle_runtime_log_group_create_update(self._group_event([self.G2]))
+        assert sorted(ssm.params.values()) == [self.G1, self.G2]
+        assert all(n.startswith(self.prefix + "/") for n in ssm.params), "entries live under the generation prefix"
+        assert not any(c[0] == "get_by_path" for c in ssm.calls), "recording never reads-then-writes a shared value"
+
+    def test_a_ledger_write_failure_fails_the_resource(self, monkeypatch):
+        _clients(
+            monkeypatch,
+            logs=FakeLogs({self.G1: ""}),
+            ssm=FakeSSM(put_raises=_client_error("AccessDeniedException", "PutParameter")),
+        )
+        with pytest.raises(provider.ProviderError) as exc:
+            provider._handle_runtime_log_group_create_update(self._group_event([self.G1]))
+        assert "ledger" in str(exc.value) and self.G1 in str(exc.value)
+
+    def test_the_sweeper_create_is_a_no_op_with_a_generation_specific_id(self, monkeypatch):
+        monkeypatch.setattr(
+            provider.boto3, "client", lambda *a, **k: pytest.fail("the sweeper must build no client on Create")
+        )
+        data, pid = provider._handle_runtime_log_group_create_update(self._sweeper_event("Create"))
+        assert data == {} and pid == f"runtime-log-group-sweeper/AgentCoreRuntime/{self.GEN}"
+        assert (
+            provider._runtime_log_group_physical_id(self._sweeper_event("Update", generation="ffffffffffff")) != pid
+        ), "a new generation (renamed runtime) is a replacement"
+
+    def test_the_sweeper_deletes_recorded_groups_after_they_stop_coming_back(self, monkeypatch):
+        monkeypatch.setattr(provider, "SWEEP_QUIESCENCE_SECONDS", 0)
+        monkeypatch.setattr(provider, "SWEEP_BUDGET_SECONDS", 60)
+        ssm = FakeSSM(self._ledger(self.G1, self.G2, "/aws/bedrock-agentcore/runtimes/demo_runtime-aBcDeF1234-third"))
+        logs = RecreatingLogs({self.G1: 2})
+        _clients(
+            monkeypatch,
+            logs=logs,
+            ssm=ssm,
+            cfn=FakeCFN(raises=AssertionError("CFN must not be consulted when the ledger has entries")),
+        )
+        data, _pid = provider._handle_runtime_log_group_delete(self._sweeper_event())
+        assert data["Source"] == "ledger" and len(data["SweptLogGroups"].split(",")) == 3
+        assert logs.calls.count(self.G1) >= 4, "each recreation must be deleted again and re-verified"
+        assert ssm.params == {}, "all three entries removed (pagination by 2 exercised)"
+
+    def test_a_group_that_never_stops_coming_back_fails_within_the_budget(self, monkeypatch):
+        monkeypatch.setattr(provider, "SWEEP_QUIESCENCE_SECONDS", 0)
+        monkeypatch.setattr(provider, "SWEEP_BUDGET_SECONDS", 0)
+        _clients(monkeypatch, logs=RecreatingLogs({self.G1: 10**6}), ssm=FakeSSM(self._ledger(self.G1)))
+        with pytest.raises(provider.ProviderError) as exc:
+            provider._handle_runtime_log_group_delete(self._sweeper_event())
+        assert "keeps being recreated" in str(exc.value) and "delete-log-group" in str(exc.value)
+
+    def test_an_empty_ledger_falls_back_to_cloudformations_record_of_the_runtime(self, monkeypatch):
+        """A runtime can create groups and the stack can fail before any governance resource
+        recorded them: an empty ledger is not proof. The sweeper asks CloudFormation for the
+        runtime's physical id, verifies it carries this generation's name, and lists the prefix."""
+        monkeypatch.setattr(provider, "SWEEP_QUIESCENCE_SECONDS", 0)
+        logs = RecreatingLogs(
+            listing=[self.G1, self.G2, "/aws/bedrock-agentcore/runtimes/other_runtime-ZZZZZZZZZZ-DEFAULT"]
+        )
+        _clients(monkeypatch, logs=logs, ssm=FakeSSM(), cfn=FakeCFN(physical="demo_runtime-aBcDeF1234"))
+        data, _pid = provider._handle_runtime_log_group_delete(self._sweeper_event())
+        assert data["Source"] == "cloudformation" and data["SweptLogGroups"].split(",") == [self.G1, self.G2]
+        assert ("describe", "/aws/bedrock-agentcore/runtimes/demo_runtime-aBcDeF1234-") in logs.calls
+
+    def test_the_fallback_refuses_a_runtime_id_of_another_generation(self, monkeypatch):
+        # a replacement whose old generation recorded nothing: CloudFormation now points at the NEW runtime
+        _clients(
+            monkeypatch,
+            logs=RecreatingLogs(listing=[self.G1]),
+            ssm=FakeSSM(),
+            cfn=FakeCFN(physical="renamed_runtime-XYZXYZXYZ1"),
+        )
+        with pytest.raises(provider.ProviderError) as exc:
+            provider._handle_runtime_log_group_delete(self._sweeper_event())
+        assert "does not belong to this sweeper's generation" in str(exc.value)
+
+    def test_no_runtime_ever_created_means_nothing_can_exist(self, monkeypatch):
+        cfn = FakeCFN(raises=_client_error("ValidationError", "DescribeStackResource"))
+        cfn.raises.response["Error"]["Message"] = "Resource AgentCoreRuntime does not exist for stack mystack"
+        _clients(monkeypatch, logs=RecreatingLogs(), ssm=FakeSSM(), cfn=cfn)
+        data, _pid = provider._handle_runtime_log_group_delete(self._sweeper_event())
+        assert data == {"SweptLogGroups": "", "Source": "none"}
+
+    def test_an_unreadable_ledger_or_stack_record_is_not_a_clean_sweep(self, monkeypatch):
+        _clients(
+            monkeypatch,
+            logs=RecreatingLogs(),
+            ssm=FakeSSM(get_raises=_client_error("AccessDeniedException", "GetParametersByPath")),
+        )
+        with pytest.raises(provider.ProviderError):
+            provider._handle_runtime_log_group_delete(self._sweeper_event())
+        _clients(
+            monkeypatch,
+            logs=RecreatingLogs(),
+            ssm=FakeSSM(),
+            cfn=FakeCFN(raises=_client_error("AccessDeniedException", "DescribeStackResource")),
+        )
+        with pytest.raises(provider.ProviderError):
+            provider._handle_runtime_log_group_delete(self._sweeper_event())
+
+    def test_the_router_reaches_the_sweeper_on_delete_and_reports_success(self, monkeypatch):
+        monkeypatch.setattr(provider, "SWEEP_QUIESCENCE_SECONDS", 0)
+        ssm = FakeSSM(self._ledger(self.G1))
+        _clients(monkeypatch, logs=RecreatingLogs(), ssm=ssm)
+        event = dict(self._sweeper_event())
+        event.update(
+            {"ResourceType": "Custom::RuntimeLogGroup", "ResponseURL": "https://example.invalid/r", "RequestId": "r1"}
+        )
+        sent = []
+        monkeypatch.setattr(provider.cfn_response, "send", lambda *a, **k: sent.append((a, k)))
+        provider.handler(event, _Context())
+        assert len(sent) == 1
+        args, kwargs = sent[0]
+        status = kwargs.get("status") or next((x for x in args if x in ("SUCCESS", "FAILED")), None)
+        assert status == "SUCCESS", (args, kwargs)
+        assert ssm.params == {}

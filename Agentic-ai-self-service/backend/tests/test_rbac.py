@@ -121,9 +121,22 @@ def test_advisory_allows_even_when_missing(monkeypatch):
     assert dep(req) is None  # advisory: allowed
 
 
-def test_advisory_is_default(monkeypatch):
+def test_enforcing_is_default(monkeypatch):
     monkeypatch.delenv("RBAC_ENFORCE", raising=False)
+    assert rbac.rbac_enforcing() is True
+
+
+@pytest.mark.parametrize("value", ["false", "FALSE", " 0 ", "no", "off"])
+def test_only_an_explicit_false_is_advisory(monkeypatch, value):
+    monkeypatch.setenv("RBAC_ENFORCE", value)
     assert rbac.rbac_enforcing() is False
+
+
+@pytest.mark.parametrize("value", ["", "true", "1", "yes", "on", "flase", "advisory"])
+def test_anything_else_enforces(monkeypatch, value):
+    """A typo in the escape hatch must not open the control plane."""
+    monkeypatch.setenv("RBAC_ENFORCE", value)
+    assert rbac.rbac_enforcing() is True
 
 
 def test_enforce_local_dev_always_allowed(monkeypatch):

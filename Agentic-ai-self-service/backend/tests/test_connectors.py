@@ -36,6 +36,13 @@ from app.services.connectors import (  # noqa: E402
     supports_auth,
     vendor_config_key,
 )
+from app.services.resource_ownership import owner_tags  # noqa: E402
+
+
+def _accept_test_secret_reference(**kwargs):
+    """Credential ownership is covered in the dedicated secret-binding suite."""
+    return kwargs["secret_ref"], False
+
 
 # ---------------------------------------------------------------------------
 # Catalog data contract
@@ -206,14 +213,28 @@ def _fake_ctrl() -> MagicMock:
     ctrl.create_oauth2_credential_provider.return_value = {
         "credentialProviderArn": "arn:aws:bedrock-agentcore:us-west-2:1:oauth/p",
     }
+    ctrl.get_api_key_credential_provider.return_value = {
+        "credentialProviderArn": "arn:aws:bedrock-agentcore:us-west-2:1:apikey/p",
+    }
+    ctrl.get_oauth2_credential_provider.return_value = {
+        "credentialProviderArn": "arn:aws:bedrock-agentcore:us-west-2:1:oauth/p",
+    }
+    ctrl.list_tags_for_resource.return_value = {
+        "tags": owner_tags("us-west-2"),
+    }
     ctrl.create_gateway_target.return_value = {"targetId": "tgt-1"}
     ctrl.get_gateway_target.return_value = {"status": "READY"}
     return ctrl
 
 
-def test_deploy_connector_target_api_key_builds_correct_shapes():
+def test_deploy_connector_target_api_key_builds_correct_shapes(monkeypatch):
     from app.services import gateway_deployer as gd
 
+    monkeypatch.setattr(
+        gd,
+        "bind_connector_secret_for_deployment",
+        _accept_test_secret_reference,
+    )
     ctrl = _fake_ctrl()
     connectors = [
         {
@@ -227,7 +248,14 @@ def test_deploy_connector_target_api_key_builds_correct_shapes():
         }
     ]
 
-    result = gd._deploy_connector_targets(ctrl, "gw-1", "us-west-2", connectors, owner_sub="o")
+    result = gd._deploy_connector_targets(
+        ctrl,
+        "gw-1",
+        "us-west-2",
+        connectors,
+        owner_sub="o",
+        deployment_id="dep-test",
+    )
 
     # API-key provider created against our EXTERNAL secret (jsonKey=apiKey).
     ctrl.create_api_key_credential_provider.assert_called_once()
@@ -258,9 +286,14 @@ def test_deploy_connector_target_api_key_builds_correct_shapes():
     assert result["secret_arns"] == [connectors[0]["secret_arn"]]
 
 
-def test_deploy_connector_target_oauth2_cc_builds_correct_shapes():
+def test_deploy_connector_target_oauth2_cc_builds_correct_shapes(monkeypatch):
     from app.services import gateway_deployer as gd
 
+    monkeypatch.setattr(
+        gd,
+        "bind_connector_secret_for_deployment",
+        _accept_test_secret_reference,
+    )
     ctrl = _fake_ctrl()
     connectors = [
         {
@@ -273,7 +306,14 @@ def test_deploy_connector_target_oauth2_cc_builds_correct_shapes():
         }
     ]
 
-    result = gd._deploy_connector_targets(ctrl, "gw-1", "us-west-2", connectors, owner_sub="o")
+    result = gd._deploy_connector_targets(
+        ctrl,
+        "gw-1",
+        "us-west-2",
+        connectors,
+        owner_sub="o",
+        deployment_id="dep-test",
+    )
 
     # OAuth2 provider created with the branded vendor + its config key, EXTERNAL
     # client secret referencing our secret (jsonKey=clientSecret).
@@ -318,7 +358,14 @@ def test_deploy_connector_mints_secret_from_raw_value_on_direct_path():
     ]
 
     with patch.object(gd, "_put_connector_secret", return_value=minted_arn) as put:
-        result = gd._deploy_connector_targets(ctrl, "gw-1", "us-west-2", connectors, owner_sub="o")
+        result = gd._deploy_connector_targets(
+            ctrl,
+            "gw-1",
+            "us-west-2",
+            connectors,
+            owner_sub="o",
+            deployment_id="dep-test",
+        )
 
     # Secret minted with the api_key jsonKey payload; raw value never returned.
     put.assert_called_once()
@@ -330,11 +377,16 @@ def test_deploy_connector_mints_secret_from_raw_value_on_direct_path():
     assert akp["apiKeySecretConfig"]["secretId"] == minted_arn
 
 
-def test_deploy_generic_oauth_falls_back_to_custom_vendor_with_discovery():
+def test_deploy_generic_oauth_falls_back_to_custom_vendor_with_discovery(monkeypatch):
     """A generic connector with oauth2_cc and no branded vendor uses CustomOauth2
     and requires/forwards the discovery_url."""
     from app.services import gateway_deployer as gd
 
+    monkeypatch.setattr(
+        gd,
+        "bind_connector_secret_for_deployment",
+        _accept_test_secret_reference,
+    )
     ctrl = _fake_ctrl()
     connectors = [
         {
@@ -348,7 +400,14 @@ def test_deploy_generic_oauth_falls_back_to_custom_vendor_with_discovery():
     ]
 
     with patch.object(gd, "_fetch_openapi_spec", return_value='{"openapi": "3.0.0"}') as fetch:
-        gd._deploy_connector_targets(ctrl, "gw-1", "us-west-2", connectors, owner_sub="o")
+        gd._deploy_connector_targets(
+            ctrl,
+            "gw-1",
+            "us-west-2",
+            connectors,
+            owner_sub="o",
+            deployment_id="dep-test",
+        )
 
     fetch.assert_called_once()
     op = ctrl.create_oauth2_credential_provider.call_args.kwargs
@@ -362,12 +421,17 @@ def test_deploy_generic_oauth_falls_back_to_custom_vendor_with_discovery():
 # ---------------------------------------------------------------------------
 
 
-def test_deploy_connector_rollback_on_midloop_failure():
+def test_deploy_connector_rollback_on_midloop_failure(monkeypatch):
     """If connector N fails, the providers + secrets created for connectors 0..N-1
     must be rolled back (best-effort delete) so nothing orphans on a failed deploy
     whose gateway_result is never persisted."""
     from app.services import gateway_deployer as gd
 
+    monkeypatch.setattr(
+        gd,
+        "bind_connector_secret_for_deployment",
+        _accept_test_secret_reference,
+    )
     ctrl = _fake_ctrl()
     # First connector deploys fine; second raises during target creation.
     ctrl.create_gateway_target.side_effect = [
@@ -390,16 +454,32 @@ def test_deploy_connector_rollback_on_midloop_failure():
     ]
 
     sm = MagicMock()
-    with patch.object(gd, "_create_secrets_client", return_value=sm):
+    delete_bound = MagicMock(return_value=True)
+    with (
+        patch.object(gd, "_create_secrets_client", return_value=sm),
+        patch.object(
+            gd,
+            "delete_deployment_bound_secret",
+            delete_bound,
+        ),
+    ):
         with pytest.raises(RuntimeError, match="boom on connector 2"):
-            gd._deploy_connector_targets(ctrl, "gw-1", "us-west-2", connectors, owner_sub="o")
+            gd._deploy_connector_targets(
+                ctrl,
+                "gw-1",
+                "us-west-2",
+                connectors,
+                owner_sub="o",
+                deployment_id="dep-test",
+            )
 
     # The first connector's provider was rolled back (delete attempted) and its
-    # consumed secret force-deleted — no orphan.
+    # deployment-bound secret was ownership-checked and deleted — no orphan.
     assert ctrl.delete_oauth2_credential_provider.called or ctrl.delete_api_key_credential_provider.called
-    assert sm.delete_secret.called
-    deleted_secret_ids = {c.kwargs.get("SecretId") for c in sm.delete_secret.call_args_list}
-    assert connectors[0]["secret_arn"] in deleted_secret_ids
+    assert {call.kwargs["secret_ref"] for call in delete_bound.call_args_list} == {
+        connectors[0]["secret_arn"],
+        connectors[1]["secret_arn"],
+    }
 
 
 @pytest.mark.parametrize("bad", ["body", "cookie", "HEADERS", "queryparam"])
@@ -429,23 +509,36 @@ def test_typed_provider_deleter_picks_correct_api():
     correct deleter — API_KEY -> delete_api_key_credential_provider only."""
     from app.services import gateway_deployer as gd
 
-    ctrl = MagicMock()
-    ok, msg = gd._delete_connector_credential_provider(ctrl, "API_KEY:acc-github-0")
+    ctrl = _fake_ctrl()
+    ok, msg = gd._delete_connector_credential_provider(
+        ctrl,
+        "API_KEY:acc-github-0",
+        "us-west-2",
+    )
     assert ok
     ctrl.delete_api_key_credential_provider.assert_called_once_with(name="acc-github-0")
     ctrl.delete_oauth2_credential_provider.assert_not_called()
 
-    ctrl2 = MagicMock()
-    ok2, _ = gd._delete_connector_credential_provider(ctrl2, "OAUTH:acc-jira-1")
+    ctrl2 = _fake_ctrl()
+    ok2, _ = gd._delete_connector_credential_provider(
+        ctrl2,
+        "OAUTH:acc-jira-1",
+        "us-west-2",
+    )
     assert ok2
     ctrl2.delete_oauth2_credential_provider.assert_called_once_with(name="acc-jira-1")
     ctrl2.delete_api_key_credential_provider.assert_not_called()
 
 
-def test_connector_providers_recorded_with_type_prefix():
+def test_connector_providers_recorded_with_type_prefix(monkeypatch):
     """deploy result records providers as 'TYPE:name' so teardown is unambiguous."""
     from app.services import gateway_deployer as gd
 
+    monkeypatch.setattr(
+        gd,
+        "bind_connector_secret_for_deployment",
+        _accept_test_secret_reference,
+    )
     ctrl = _fake_ctrl()
     connectors = [
         {
@@ -455,7 +548,14 @@ def test_connector_providers_recorded_with_type_prefix():
             "spec_inline": '{"openapi": "3.0.0"}',
         }
     ]
-    result = gd._deploy_connector_targets(ctrl, "gw-1", "us-west-2", connectors, owner_sub="o")
+    result = gd._deploy_connector_targets(
+        ctrl,
+        "gw-1",
+        "us-west-2",
+        connectors,
+        owner_sub="o",
+        deployment_id="dep-test",
+    )
     # The recorded name is gateway-SCOPED, and must match the name actually
     # created byte-for-byte or teardown orphans the provider. Provider names live
     # in one account-global vault, so an unscoped "acc-github-0" would be shared
@@ -481,13 +581,18 @@ def test_connector_providers_recorded_with_type_prefix():
 # ---------------------------------------------------------------------------
 
 
-def test_catalog_connector_spec_fetched_against_spec_host_not_api_host():
+def test_catalog_connector_spec_fetched_against_spec_host_not_api_host(monkeypatch):
     """An asana connector with no inline spec must fetch its catalog spec_url
     using the spec-host allowlist (raw.githubusercontent.com) — NOT the API
     allowlist (app.asana.com). Goes through the real _fetch_openapi_spec; only
     the network call (_validate_outbound_url) is observed."""
     from app.services import gateway_deployer as gd
 
+    monkeypatch.setattr(
+        gd,
+        "bind_connector_secret_for_deployment",
+        _accept_test_secret_reference,
+    )
     ctrl = _fake_ctrl()
     connectors = [
         {
@@ -519,7 +624,14 @@ def test_catalog_connector_spec_fetched_against_spec_host_not_api_host():
         patch.object(gd, "_validate_outbound_url", side_effect=_fake_validate),
         patch.object(gd.urllib.request, "urlopen", return_value=_Resp()),
     ):
-        gd._deploy_connector_targets(ctrl, "gw-1", "us-west-2", connectors, owner_sub="o")
+        gd._deploy_connector_targets(
+            ctrl,
+            "gw-1",
+            "us-west-2",
+            connectors,
+            owner_sub="o",
+            deployment_id="dep-test",
+        )
 
     # The spec was fetched from the GitHub raw host...
     assert captured["url"] == CONNECTOR_CATALOG["asana"]["spec_url"]
@@ -634,6 +746,34 @@ def test_build_openapi_schema_slims_when_over_s3_cap(monkeypatch):
     assert "s3" in block  # staged, not inlined
     # The staged object was slimmed below the 10MB cap.
     assert captured["bytes"] < gd._MAX_S3_SPEC_BYTES
+
+
+def test_build_openapi_schema_uses_the_validated_target_bucket_and_owner(monkeypatch):
+    from app.services import gateway_deployer as gd
+
+    monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "home-platform-bucket")
+    monkeypatch.setattr(gd, "_MAX_INLINE_SPEC_BYTES", 1)
+    s3 = MagicMock()
+    session = MagicMock()
+    session.client.return_value = s3
+
+    with gd.gateway_aws_session(
+        session,
+        artifact_bucket="customer-runtime-artifacts",
+        expected_bucket_owner="999999999999",
+    ):
+        block = gd._build_openapi_schema(
+            '{"openapi":"3.0.0","info":{"title":"x"},"paths":{}}',
+            connector_id="github",
+            region="us-east-1",
+        )
+
+    assert block["s3"]["uri"].startswith("s3://customer-runtime-artifacts/connector-specs/github/")
+    assert block["s3"]["bucketOwnerAccountId"] == "999999999999"
+    put = s3.put_object.call_args.kwargs
+    assert put["Bucket"] == "customer-runtime-artifacts"
+    assert put["ExpectedBucketOwner"] == "999999999999"
+    session.client.assert_called_once_with("s3", region_name="us-east-1")
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,13 @@ artifact had effectively no test coverage: of 118 backend test files, two
 mentioned ``CfnTemplateGenerator`` and both did so incidentally. That is how an
 entire gateway provider went unhandled without a single failing test, and how the
 generated README came to tell customers that the stack has one Custom Resource
-when it has three.
+when it had three.
+
+That count has since moved to FOUR (``AgentCodePackage``, ``OAuth2CredentialProvider``,
+``AgentCorePolicy``, ``RuntimeLogGroup``), which is the point of
+``TestCustomResources`` below: it reads ``handler.SUPPORTED_RESOURCE_TYPES`` rather
+than a number written in prose, so the next resource added cannot leave a stale claim
+behind the way "one" and then "three" both did.
 
 So these are not unit tests of internal helpers. Each one asserts something a
 recipient of the zip would notice if it broke:
@@ -46,6 +52,7 @@ from app.services.cfn_template_generator import (
     DATA_BEARING_RESOURCE_TYPES,
     DELETION_DEPENDENCIES,
     EMPTY_CONTENT_DIGEST,
+    RETENTION_GOVERNANCE_RESOURCE_TYPES,
     CfnExportUnsupportedError,
     CfnTemplateGenerator,
     content_digest,
@@ -148,6 +155,58 @@ def _walk_for_refs(expr):
             yield from _walk_for_refs(item)
 
 
+def _resource_dependencies(resource, resources):
+    """Logical resources CloudFormation must create before ``resource``.
+
+    CloudFormation derives ordering from ``Ref``, ``Fn::GetAtt`` and unresolved
+    resource variables inside ``Fn::Sub`` as well as from explicit ``DependsOn``.
+    Contract tests must inspect that complete graph: requiring an explicit edge
+    where an intrinsic already supplies one both misstates the template contract
+    and encourages W3005-producing duplicate dependencies.
+    """
+    known = set(resources)
+    dependencies = set()
+
+    explicit = resource.get("DependsOn", [])
+    if isinstance(explicit, str):
+        dependencies.add(explicit)
+    else:
+        dependencies.update(explicit)
+
+    def visit(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "Ref" and isinstance(value, str):
+                    if value in known:
+                        dependencies.add(value)
+                    continue
+                if key == "Fn::GetAtt":
+                    target = value[0] if isinstance(value, list) else str(value).split(".", 1)[0]
+                    if target in known:
+                        dependencies.add(target)
+                    continue
+                if key == "Fn::Sub":
+                    substitutions = {}
+                    template = value
+                    if isinstance(value, list):
+                        template, substitutions = value
+                        for replacement in substitutions.values():
+                            visit(replacement)
+                    if isinstance(template, str):
+                        for escaped, variable in re.findall(r"\$\{(!?)([^}]+)\}", template):
+                            target = variable.split(".", 1)[0]
+                            if not escaped and target not in substitutions and target in known:
+                                dependencies.add(target)
+                    continue
+                visit(value)
+        elif isinstance(node, list):
+            for item in node:
+                visit(item)
+
+    visit(resource.get("Properties", {}))
+    return dependencies
+
+
 def _walk_for_key(node, wanted):
     """Every value stored under ``wanted`` anywhere inside a nested structure.
 
@@ -182,8 +241,9 @@ COMPONENT_COMBINATIONS = {
     "memory": {"memory_config": {"enabled": True}},
     "gateway+memory": {"gateway_config": AGENTCORE_GATEWAY, "memory_config": {"enabled": True}},
     "gateway+kb": {"gateway_config": AGENTCORE_GATEWAY, "knowledge_base_config": KB_CONFIG},
-    "gateway+policy": {
+    "gateway+kb+policy": {
         "gateway_config": AGENTCORE_GATEWAY,
+        "knowledge_base_config": KB_CONFIG,
         "policy_config": {"policies": [{"name": "p", "statement": _VALID_CEDAR}]},
     },
     # The generated default policy rather than a supplied statement: policy_config
@@ -701,20 +761,32 @@ class TestLiteLLMExport:
         assert source, "the generated agent has no _resolve_client_secret to resolve the secret with"
 
         calls = []
+        secret_calls = []
+        secret_payload = {"value": ""}
 
         class _FakeIdp:
             def describe_user_pool_client(self, UserPoolId, ClientId):  # noqa: N803 - boto3 casing
                 calls.append((UserPoolId, ClientId))
                 return {"UserPoolClient": {"ClientSecret": "secret-from-cognito"}}
 
-        fake_boto3 = types.SimpleNamespace(client=lambda service, region_name=None: _FakeIdp())
+        class _FakeSecrets:
+            def get_secret_value(self, SecretId):  # noqa: N803 - boto3 casing
+                secret_calls.append(SecretId)
+                return {"SecretString": secret_payload["value"]}
 
-        def _run(env_secret, pool_id, client_id="client-abc"):
+        def _fake_client(service, region_name=None):
+            return _FakeSecrets() if service == "secretsmanager" else _FakeIdp()
+
+        fake_boto3 = types.SimpleNamespace(client=_fake_client)
+
+        def _run(env_secret, pool_id, client_id="client-abc", secret_ref=""):
             namespace = {
                 "COGNITO_CLIENT_SECRET": env_secret,
                 "COGNITO_USER_POOL_ID": pool_id,
                 "COGNITO_CLIENT_ID": client_id,
+                "OAUTH_CLIENT_SECRET_REF": secret_ref,
                 "REGION": "us-east-1",
+                "json": json,
                 "_client_secret_cache": {},
             }
             with mock.patch.dict(sys.modules, {"boto3": fake_boto3}):
@@ -738,6 +810,34 @@ class TestLiteLLMExport:
         calls.clear()
         assert _run("", "") == ""
         assert calls == []
+
+        # An EXTERNAL IDP (Okta/Azure AD/Auth0) has no DescribeUserPoolClient to fall
+        # back on, so its secret travels as a Secrets Manager NAME. Both deploy paths
+        # now inject OAUTH_CLIENT_SECRET_REF, so if the generated agent does not
+        # dereference it the runtime comes up holding a name it sends as a password
+        # and every token mint is rejected. A secret the platform wrote is a JSON
+        # object; one a customer created by hand is plain text — accept both.
+        for payload, expected in (
+            ('{"clientSecret": "secret-from-sm"}', "secret-from-sm"),
+            ('{"client_secret": "snake-case"}', "snake-case"),
+            ("  raw-plain-text  ", "raw-plain-text"),
+        ):
+            calls.clear()
+            secret_calls.clear()
+            secret_payload["value"] = payload
+            assert _run("", "us-east-1_pool", secret_ref="ext-idp/secret") == expected
+            assert secret_calls == ["ext-idp/secret"]
+            assert calls == [], "the reference must win over the pool, and never call Cognito"
+
+        # A secret that holds nothing usable must FAIL LOUDLY rather than silently
+        # minting tokens with an empty password, and the error must not echo the
+        # payload — only the reference.
+        secret_calls.clear()
+        secret_payload["value"] = '{"unrelated": "x"}'
+        with pytest.raises(RuntimeError) as excinfo:
+            _run("", "us-east-1_pool", secret_ref="ext-idp/secret")
+        assert "ext-idp/secret" in str(excinfo.value)
+        assert "unrelated" not in str(excinfo.value)
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -1143,8 +1243,17 @@ class TestDependencyBundleIntegrity:
             logical_id: r for logical_id, r in template["Resources"].items() if r["Type"] == "Custom::AgentCodePackage"
         }
         assert packages, "no combination should package code without a code package resource"
+        # Each package must state ITS OWN content-addressed digest. The agent code
+        # rides the Strands/base bundle keyed by DependencyBundleDigest; the MCP
+        # server package rides the separate lean bundle and therefore refs
+        # McpServerDependencyBundleDigest -- the two runtimes deliberately do not
+        # collapse onto one bundle (pinned independently in test_standalone_mcp_runtime).
+        # The CWE-494 ability this test guards is that EVERY package names a digest
+        # parameter, not that they all name the same one.
+        expected_digest_param = {"McpServerCodePackage": "McpServerDependencyBundleDigest"}
         for logical_id, resource in packages.items():
-            assert resource["Properties"]["BundleDigest"] == {"Ref": "DependencyBundleDigest"}, logical_id
+            param = expected_digest_param.get(logical_id, "DependencyBundleDigest")
+            assert resource["Properties"]["BundleDigest"] == {"Ref": param}, logical_id
 
     def test_the_parameter_only_accepts_none_or_a_sha256(self):
         """`none` has to be spelled out. An empty string would look like a digest
@@ -1482,7 +1591,10 @@ class TestDataRetention:
         resources = _template(**combo)["Resources"]
         data_resources = {k: v for k, v in resources.items() if v["Type"] in DATA_BEARING_RESOURCE_TYPES}
         for logical_id, resource in data_resources.items():
-            assert resource.get("DeletionPolicy") == "Retain", f"{logical_id} lacks DeletionPolicy"
+            # RetainExceptOnCreate, not Retain: retained on delete/replacement, but a failed
+            # FIRST create must clean up what it made (2026-09-25: plain Retain on the platform
+            # stack persisted two empty pools and a queue through a quota failure).
+            assert resource.get("DeletionPolicy") == "RetainExceptOnCreate", f"{logical_id} lacks DeletionPolicy"
             assert resource.get("UpdateReplacePolicy") == "Retain", (
                 f"{logical_id} lacks UpdateReplacePolicy — a replacing update destroys data "
                 "just as thoroughly as a delete, and this is the half everyone forgets"
@@ -1491,8 +1603,8 @@ class TestDataRetention:
     def test_retain_is_the_default_without_being_asked(self):
         """A caller who says nothing must get the safe behaviour."""
         resources = _template(gateway_config=AGENTCORE_GATEWAY, memory_config={"enabled": True})["Resources"]
-        assert resources["CognitoUserPool"]["DeletionPolicy"] == "Retain"
-        assert resources["AgentCoreMemory"]["DeletionPolicy"] == "Retain"
+        assert resources["CognitoUserPool"]["DeletionPolicy"] == "RetainExceptOnCreate"
+        assert resources["AgentCoreMemory"]["DeletionPolicy"] == "RetainExceptOnCreate"
 
     def test_delete_is_available_for_throwaway_stacks(self):
         resources = _template(
@@ -1515,7 +1627,12 @@ class TestDataRetention:
         data_resource`` pins the narrowness.
         """
         allowed = {dep for deps in DELETION_DEPENDENCIES.values() for dep in deps}
+        # Second declared exception: Custom::RuntimeLogGroup governs the runtime's own log
+        # groups and has no physical object of its own, so it carries the data pair (see
+        # RETENTION_GOVERNANCE_RESOURCE_TYPES and TestRuntimeLogGroupRetentionFollowsTheKnob).
         for logical_id, resource in _template(**combo)["Resources"].items():
+            if resource["Type"] in RETENTION_GOVERNANCE_RESOURCE_TYPES:
+                continue
             if resource["Type"] not in DATA_BEARING_RESOURCE_TYPES and logical_id not in allowed:
                 assert "DeletionPolicy" not in resource, f"{logical_id} ({resource['Type']}) wrongly retained"
                 assert "UpdateReplacePolicy" not in resource, f"{logical_id} wrongly retained"
@@ -1531,8 +1648,8 @@ class TestDataRetention:
         """
         combo = COMPONENT_COMBINATIONS["gateway+kb"]
         retained = _template(**combo, data_retention_policy="Retain")["Resources"]
-        assert retained["BedrockKnowledgeBase"]["DeletionPolicy"] == "Retain", "precondition"
-        assert retained["KnowledgeBaseRole"]["DeletionPolicy"] == "Retain", (
+        assert retained["BedrockKnowledgeBase"]["DeletionPolicy"] == "RetainExceptOnCreate", "precondition"
+        assert retained["KnowledgeBaseRole"]["DeletionPolicy"] == "RetainExceptOnCreate", (
             "a retained knowledge base purges its vectors with this role; without it "
             "the knowledge base can never be deleted"
         )
@@ -1684,6 +1801,15 @@ class TestDataRetention:
             # they hold what the agent was asked and what it answered.
             "CfnProviderLambdaLogGroup",
             "KBToolLambdaLogGroup",
+            # Governance over the runtime's own log groups (Custom::RuntimeLogGroup). Stamped
+            # with the data pair so a failed FIRST create removes the groups it pre-created
+            # while a retained stack's deletion skips it; see RETENTION_GOVERNANCE_RESOURCE_TYPES.
+            "AgentCoreRuntimeLogGroups",
+            "AgentCoreRuntimeLogGroupRuntimeEndpoint",
+            "AgentCoreRuntimeLogGroupSweeper",
+            "McpServerRuntimeLogGroupSweeper",
+            "McpServerRuntimeLogGroups",  # the MCP server runtime's counterpart, same rule
+            "McpServerRuntimeLogGroupMcpServerEndpoint",
             # Not data — the role a retained knowledge base needs in order to purge
             # its vectors and be deletable at all. Listed here rather than filtered
             # out because this assertion is a pin on what actually carries a
@@ -1737,21 +1863,48 @@ class TestCognitoPoolsAreHardened:
         ``Retain`` and the pool is retained but unguarded against a later manual
         delete. Hardcoding either one is how that mismatch happens.
         """
-        for retention, expected in (("Retain", "ACTIVE"), ("Delete", "INACTIVE")):
+        # INACTIVE under BOTH: Cognito rejects DeleteUserPool while ACTIVE, which would turn
+        # a failed first create (RetainExceptOnCreate) into ROLLBACK_FAILED, and would hang a
+        # Delete teardown. Service-level protection is documented as a post-create opt-in.
+        stamped = {"Retain": "RetainExceptOnCreate", "Delete": "Delete"}
+        for retention, expected in (("Retain", "INACTIVE"), ("Delete", "INACTIVE")):
             template = _template(**COMPONENT_COMBINATIONS["everything"], dataRetentionPolicy=retention)
             pools = _cognito_pools(template)
             assert pools, "this combination emits no user pool; the test is vacuous"
             for logical_id, pool in pools.items():
-                assert pool["DeletionPolicy"] == retention, logical_id
+                assert pool["DeletionPolicy"] == stamped[retention], logical_id
                 assert pool["Properties"]["DeletionProtection"] == expected, (
                     f"{logical_id} has DeletionPolicy {retention} but DeletionProtection "
                     f"{pool['Properties'].get('DeletionProtection')}; teardown cannot succeed"
                 )
 
-    def test_the_default_pool_is_protected(self):
-        """A caller who says nothing gets the guard, not the hole."""
-        pool = _template(gateway_config=AGENTCORE_GATEWAY)["Resources"]["CognitoUserPool"]
-        assert pool["Properties"]["DeletionProtection"] == "ACTIVE"
+    def test_the_default_pool_is_rollback_safe_and_protection_is_a_documented_opt_in(self):
+        """A caller who says nothing gets RetainExceptOnCreate (survives delete and replacement,
+        cleans up a failed first create) and an INACTIVE Cognito guard -- ACTIVE would make that
+        cleanup fail with InvalidParameterException and leave ROLLBACK_FAILED. The README must
+        tell the operator how to turn the service-level guard on safely after the first deploy,
+        WITHOUT recommending the unsafe one-field update-user-pool command."""
+        bundle = _generate(gateway_config=AGENTCORE_GATEWAY)
+        pool = yaml.safe_load(bundle.template_yaml)["Resources"]["CognitoUserPool"]
+        assert pool["DeletionPolicy"] == "RetainExceptOnCreate"
+        assert pool["UpdateReplacePolicy"] == "Retain"
+        assert pool["Properties"]["DeletionProtection"] == "INACTIVE"
+
+        # The README must NOT recommend the unsafe one-field command.
+        assert "update-user-pool --user-pool-id <id> --deletion-protection ACTIVE" not in bundle.readme, (
+            "the unsafe one-field command resets all omitted attributes to defaults"
+        )
+
+        # Safe guidance must be present: console recommendation and drift warning.
+        assert "console" in bundle.readme.lower(), (
+            "must recommend the Cognito console for safe post-deployment protection"
+        )
+        assert "drift" in bundle.readme or "NOT tracked by CloudFormation" in bundle.readme, (
+            "must warn about out-of-band protection changes creating CloudFormation drift"
+        )
+
+        # Rollback safety rationale must still be documented.
+        assert "failed FIRST create" in bundle.readme or "first create" in bundle.readme.lower()
 
     @COGNITO_COMBINATIONS
     def test_no_hosted_ui_domain_publishes_the_account_id(self, combo):
@@ -2034,6 +2187,17 @@ WILDCARD_ALLOWLIST = {
     ("RuntimeExecutionRole", "CodeInterpreterAccess"),
     # No guardrail is created by this template; the id arrives at runtime.
     ("RuntimeExecutionRole", "GuardrailsAccess"),
+    # DescribeLogGroups is list-shaped: IAM authorizes it against an EMPTY group name
+    # (arn:...:log-group::log-stream:), so no resource-scoped grant can match -- verified
+    # live on the governance statement, which is why it deliberately carries none. The
+    # sweeper needs it only for the fallback where no governance resource recorded a group.
+    ("CfnProviderRole", "RuntimeLogGroupSweeperList"),
+    # ENI verbs take no resource ARN. These replace AWSLambdaVPCAccessExecutionRole, which
+    # granted the same verbs on * AND logs:CreateLogGroup on * -- the second being how a
+    # Lambda recreates its declared log group after CloudFormation deleted it. Still gated
+    # on HasLambdaVpcConfig, so a recipient without a VPC gains no ec2 access.
+    ("CfnProviderRole", "VpcEniCfnProviderRole"),
+    ("KBToolLambdaRole", "VpcEniKBToolLambdaRole"),
 }
 
 
@@ -2949,6 +3113,8 @@ class TestEmittedActionsAreRealIamActions:
             "bedrock-agentcore:RetrieveMemories",
             "bedrock-agentcore:InvokeAgent",
             "bedrock-agentcore:CheckAuthorizePermissions",
+            "s3vectors:DescribeIndex",
+            "s3vectors:DescribeVectorBucket",
             # Added 2026-09-19, when these two were retired from the PLATFORM's
             # policy step role and deployment Lambda role. The export never granted
             # them, so this is not a regression guard for something that happened
@@ -3031,7 +3197,7 @@ class TestAuthorizationPolicyIsAcceptable:
     ==========================================================  =============
     """
 
-    POLICY_COMBOS = ["gateway+policy", "gateway+kb+default-policy", "everything"]
+    POLICY_COMBOS = ["gateway+kb+policy", "gateway+kb+default-policy", "everything"]
 
     @staticmethod
     def _statements(template):
@@ -3137,16 +3303,18 @@ class TestAuthorizationPolicyIsAcceptable:
     def test_the_policy_waits_for_the_engine_and_the_gateway(self):
         # The statement interpolates the gateway ARN and binds to the engine, so both
         # have to exist first. The custom resource is also what polls the policy to a
-        # terminal status, which is why this is not the native CFN policy type.
+        # terminal status, which is why this is not the native CFN policy type. These
+        # are intrinsic dependencies, not necessarily duplicate DependsOn entries.
         template = _template(**COMPONENT_COMBINATIONS["gateway+kb+default-policy"])
         policy = template["Resources"]["DefaultPolicy"]
-        assert set(policy["DependsOn"]) >= {"PolicyEngine", "AgentCoreGateway", "CfnProviderLambda"}
+        dependencies = _resource_dependencies(policy, template["Resources"])
+        assert dependencies >= {"PolicyEngine", "AgentCoreGateway", "CfnProviderLambda"}
 
 
 # Split at module level rather than in the class body: a comprehension there cannot
 # see the class's own names. Derived from COMPONENT_COMBINATIONS so a new combination
 # is covered by one side or the other without anyone remembering to add it.
-_POLICY_COMBOS = ["gateway+policy", "gateway+kb+default-policy", "everything"]
+_POLICY_COMBOS = ["gateway+kb+policy", "gateway+kb+default-policy", "everything"]
 _NO_POLICY_COMBOS = [name for name in COMPONENT_COMBINATIONS if name not in _POLICY_COMBOS]
 
 
@@ -3293,12 +3461,13 @@ class TestPolicyScanner:
         return [check for run in runs for check in run.get("results", {}).get("failed_checks", [])]
 
     @pytest.fixture(scope="class")
-    def findings(self, tmp_path_factory):
+    @classmethod
+    def findings(cls, tmp_path_factory):
         _require_scanner("checkov", "pipx install checkov==3.3.1 (isolated, see _require_scanner)")
         directory = tmp_path_factory.mktemp("emitted")
         for name, combo in COMPONENT_COMBINATIONS.items():
             (directory / f"{name}.yaml").write_text(_generate(**combo).template_yaml)
-        return self._scan(directory)
+        return cls._scan(directory)
 
     def test_no_unargued_finding(self, findings):
         unexpected = {}
@@ -3446,12 +3615,29 @@ class TestLambdasCanBePlacedInAVpc:
         }
         assert lambda_roles
         for role_id in lambda_roles:
-            managed = resources[role_id]["Properties"]["ManagedPolicyArns"]
-            conditional = [m for m in managed if isinstance(m, dict) and "Fn::If" in m]
-            assert conditional, f"{role_id} cannot create an ENI in a VPC"
+            props = resources[role_id]["Properties"]
+            # No managed execution policy of either kind: both grant logs:CreateLogGroup on *,
+            # which is how a Lambda recreates its declared log group after CloudFormation
+            # deleted it. The ENI verbs come from an inline policy gated on the same condition.
+            assert "AWSLambdaVPCAccessExecutionRole" not in json.dumps(props.get("ManagedPolicyArns", []))
+            conditional = [
+                pol
+                for pol in props.get("Policies", [])
+                if isinstance(pol, dict)
+                and "Fn::If" in pol
+                and str(pol["Fn::If"][1].get("PolicyName", "")).startswith("VpcEni")
+            ]
+            assert len(conditional) == 1, f"{role_id} cannot create an ENI in a VPC"
             branch = conditional[0]["Fn::If"]
             assert branch[0] == "HasLambdaVpcConfig"
-            assert "AWSLambdaVPCAccessExecutionRole" in branch[1]["Fn::Sub"]
+            statement = branch[1]["PolicyDocument"]["Statement"][0]
+            assert (
+                "ec2:CreateNetworkInterface" in statement["Action"]
+                and "ec2:DeleteNetworkInterface" in statement["Action"]
+            )
+            assert not any(str(a).startswith("logs:") for a in statement["Action"]), (
+                "ENI grant must carry no logs verbs"
+            )
             # Off by default too: a recipient not using a VPC gains no ec2 access.
             assert branch[2] == {"Ref": "AWS::NoValue"}
 
@@ -3726,12 +3912,39 @@ class TestMcpServerToolsAreGeneratable:
         assert any("sample support tools" in r.getMessage() for r in caplog.records)
 
 
+def _standalone_mcp_export_request() -> DeployRequest:
+    """The one API-valid request shape for a standalone MCP export.
+
+    MCP is no longer a generic protocol toggle on an otherwise conversational
+    runtime.  The dedicated gallery template is model-free and the admission
+    boundary intentionally rejects a model-bearing request with no template id.
+    Build this request from raw input so Pydantic's ``fields_set`` records only
+    the operational fields a real frontend request sends.
+    """
+    return DeployRequest.model_validate(
+        {
+            "config": {
+                "name": "exporttest",
+                "protocol": "MCP",
+                "enableOtel": False,
+            },
+            "nodeId": "node-1",
+            "templateId": "mcp-server-runtime",
+        }
+    )
+
+
 def _protocol_of(protocol):
     """``ProtocolConfiguration`` on the runtime for a canvas that asked for *protocol*."""
-    config = RuntimeConfig(name="exporttest", model={"modelId": MODEL_ID}, protocol=protocol)
-    template = yaml.safe_load(
-        CfnTemplateGenerator().generate(DeployRequest(config=config, nodeId="node-1")).template_yaml
+    request = (
+        _standalone_mcp_export_request()
+        if protocol == "MCP"
+        else DeployRequest(
+            config=RuntimeConfig(name="exporttest", model={"modelId": MODEL_ID}, protocol=protocol),
+            nodeId="node-1",
+        )
     )
+    template = yaml.safe_load(CfnTemplateGenerator().generate(request).template_yaml)
     runtimes = [r for r in template["Resources"].values() if r["Type"] == "AWS::BedrockAgentCore::Runtime"]
     assert len(runtimes) == 1, "expected exactly one runtime to assert about"
     return runtimes[0]["Properties"]["ProtocolConfiguration"]
@@ -3905,15 +4118,19 @@ _PEER_GRANT = f"{_PEER_ARN},{_PEER_ARN}/runtime-endpoint/DEFAULT"
 
 
 def _a2a_export(peer_allowlist=None, protocol="A2A"):
-    return CfnTemplateGenerator().generate(
-        DeployRequest(
+    if protocol == "MCP":
+        if peer_allowlist is not None:
+            raise AssertionError("A standalone MCP server cannot carry an A2A peer allowlist")
+        request = _standalone_mcp_export_request()
+    else:
+        request = DeployRequest(
             config=RuntimeConfig(name="exporttest", model={"modelId": MODEL_ID}, protocol=protocol),
             nodeId="node-1",
             a2aConfig=(
                 {"capabilities": ["chat"], "peer_allowlist": peer_allowlist} if peer_allowlist is not None else None
             ),
         )
-    )
+    return CfnTemplateGenerator().generate(request)
 
 
 def _runtime_statements(template):
@@ -4248,7 +4465,9 @@ class TestLambdaLogsAreOwnedAndBounded:
                 f"{logical_id} would create its own log group outside the stack"
             )
             assert resources[logical_id]["Properties"]["LoggingConfig"] == {"LogGroup": {"Ref": group_id}}
-            assert group_id in resources[logical_id]["DependsOn"]
+            assert group_id in _resource_dependencies(resources[logical_id], resources), (
+                f"{logical_id} can be created before its owned log group"
+            )
 
     @ALL_COMBINATIONS
     def test_every_log_group_expires(self, combo):
@@ -4290,8 +4509,11 @@ class TestLambdaLogsAreOwnedAndBounded:
             if resource["Type"] != "AWS::Logs::LogGroup":
                 continue
             # Logs are the only record of what the agent was asked and answered. A
-            # stack delete should not be what destroys an audit trail.
-            assert resource["DeletionPolicy"] == "Retain", logical_id
+            # stack delete should not be what destroys an audit trail. RetainExceptOnCreate
+            # keeps exactly that: retained on delete and replacement, cleaned up only when
+            # the operation that FIRST created the group rolls back.
+            assert resource["DeletionPolicy"] == "RetainExceptOnCreate", logical_id
+            assert resource["UpdateReplacePolicy"] == "Retain", logical_id
 
     def test_log_group_retention_follows_the_recipients_choice(self):
         """One knob, not two.
@@ -4421,7 +4643,17 @@ RUNTIME_LOG_PREFIX = "/aws/bedrock-agentcore/runtimes/"
 
 
 def _governance_resources(template):
-    return {k: v for k, v in template["Resources"].items() if v["Type"] == "Custom::RuntimeLogGroup"}
+    """The per-group governance resources (the sweepers govern no names of their own)."""
+    return {
+        k: v
+        for k, v in template["Resources"].items()
+        if v["Type"] == "Custom::RuntimeLogGroup" and v["Properties"].get("Mode") != "sweeper"
+    }
+
+
+def _governed_runtime(resource):
+    """The runtime a governance resource belongs to, read from its own Fn::Sub variables."""
+    return resource["Properties"]["LogGroupNames"][0]["Fn::Sub"][1]["RuntimeId"]["Fn::GetAtt"][0]
 
 
 def _governed_names(resource):
@@ -4449,12 +4681,36 @@ class TestTheRuntimesOwnLogGroupsAreGoverned:
     """
 
     @ALL_COMBINATIONS
-    def test_every_runtime_gets_exactly_one_governance_resource(self, combo):
+    def test_every_runtime_gets_one_governance_resource_per_log_group(self, combo):
+        """One per GROUP, not one per runtime: the id of a group's resource derives from
+        the group name, so a replaced runtime replaces exactly the affected resources and
+        CloudFormation's UpdateReplacePolicy can act on the old groups. The -DEFAULT
+        resource keeps the historical logical id so existing stacks update in place."""
         resources = _template(**combo)["Resources"]
         runtimes = {k for k, v in resources.items() if v["Type"] == "AWS::BedrockAgentCore::Runtime"}
         assert runtimes, "no runtime in this combination — the assertions below would be vacuous"
-        governed = {k: v for k, v in resources.items() if v["Type"] == "Custom::RuntimeLogGroup"}
-        assert set(governed) == {f"{runtime}LogGroups" for runtime in runtimes}
+        expected = set()
+        for runtime in runtimes:
+            expected.add(f"{runtime}LogGroups")
+            for endpoint_id, endpoint in resources.items():
+                if (
+                    endpoint["Type"] == "AWS::BedrockAgentCore::RuntimeEndpoint"
+                    and endpoint["Properties"]["AgentRuntimeId"]["Fn::GetAtt"][0] == runtime
+                ):
+                    expected.add(f"{runtime}LogGroup{endpoint_id}")
+        all_governance = {k: v for k, v in resources.items() if v["Type"] == "Custom::RuntimeLogGroup"}
+        sweepers = {k: v for k, v in all_governance.items() if v["Properties"].get("Mode") == "sweeper"}
+        governed = {k: v for k, v in all_governance.items() if k not in sweepers}
+        assert set(governed) == expected
+        assert set(sweepers) == {f"{runtime}LogGroupSweeper" for runtime in runtimes}
+        for logical_id, resource in governed.items():
+            assert len(_governed_names(resource)) == 1, (
+                f"{logical_id} governs {len(_governed_names(resource))} groups; one resource per group"
+            )
+            assert resource["Properties"]["RuntimeLogicalId"] in runtimes
+            assert re.fullmatch(r"[0-9a-f]{12}", resource["Properties"]["Generation"]), (
+                "generation = digest of AgentRuntimeName"
+            )
 
     @ALL_COMBINATIONS
     def test_every_endpoint_of_every_runtime_is_covered(self, combo):
@@ -4464,7 +4720,14 @@ class TestTheRuntimesOwnLogGroupsAreGoverned:
         """
         resources = _template(**combo)["Resources"]
         for runtime in [k for k, v in resources.items() if v["Type"] == "AWS::BedrockAgentCore::Runtime"]:
-            names = _governed_names(resources[f"{runtime}LogGroups"])
+            names = [
+                n
+                for lid, r in resources.items()
+                if r["Type"] == "Custom::RuntimeLogGroup"
+                and r["Properties"].get("Mode") != "sweeper"
+                and _governed_runtime(r) == runtime
+                for n in _governed_names(r)
+            ]
             # DEFAULT always exists: the service creates it whether or not the
             # template declares a named endpoint.
             assert any(name.endswith("-DEFAULT") for name in names), f"{runtime}: -DEFAULT is ungoverned"
@@ -4483,8 +4746,8 @@ class TestTheRuntimesOwnLogGroupsAreGoverned:
         """``AgentRuntimeId`` is not knowable at template-authoring time, which is the
         other half of why this cannot be a declared log group."""
         resources = _template(**combo)["Resources"]
-        for logical_id, resource in _governance_resources(_template(**combo)).items():
-            runtime = logical_id.removesuffix("LogGroups")
+        for _logical_id, resource in _governance_resources(_template(**combo)).items():
+            runtime = _governed_runtime(resource)
             for entry in resource["Properties"]["LogGroupNames"]:
                 template_string, variables = entry["Fn::Sub"]
                 assert template_string.startswith(f"{RUNTIME_LOG_PREFIX}${{RuntimeId}}-"), template_string
@@ -4511,24 +4774,25 @@ class TestTheRuntimesOwnLogGroupsAreGoverned:
             assert resource["Properties"]["RetentionInDays"] == {"Ref": "LogRetentionInDays"}, logical_id
 
     @ALL_COMBINATIONS
-    def test_governance_waits_for_the_endpoints_it_names(self, combo):
-        """The endpoint is what makes the service create the named group. Running before
-        it means creating the group ourselves — which works, but then the group exists
-        with our key before the service has ever written to it, and any ordering bug
-        there is invisible. Depend on the endpoint instead.
-        """
+    def test_each_endpoint_depends_on_its_group_governance_so_it_deletes_first(self, combo):
+        """Inverted from the original direction on purpose. A governance resource that
+        DependsOn its endpoint is deleted BEFORE the endpoint -- while it can still write,
+        and while its group can come back. The endpoint must depend on the governance
+        resource, so deletion runs endpoint -> group governance -> runtime -> sweeper; the
+        governance resource itself references only the runtime (GetAtt)."""
         resources = _template(**combo)["Resources"]
         for logical_id, resource in _governance_resources(_template(**combo)).items():
-            runtime = logical_id.removesuffix("LogGroups")
-            endpoints = [
-                k
-                for k, v in resources.items()
-                if v["Type"] == "AWS::BedrockAgentCore::RuntimeEndpoint"
-                and v["Properties"]["AgentRuntimeId"]["Fn::GetAtt"][0] == runtime
-            ]
-            if not endpoints:
-                continue
-            assert set(endpoints) <= set(resource.get("DependsOn", [])), f"{logical_id} does not wait for {endpoints}"
+            assert "DependsOn" not in resource, f"{logical_id} must not depend on an endpoint (it would delete first)"
+            runtime = _governed_runtime(resource)
+            if logical_id.endswith("LogGroups"):
+                continue  # the -DEFAULT group has no endpoint
+            endpoint_id = logical_id[len(runtime) + len("LogGroup") :]
+            endpoint = resources[endpoint_id]
+            assert endpoint["Type"] == "AWS::BedrockAgentCore::RuntimeEndpoint"
+            depends = endpoint.get("DependsOn") or []
+            assert logical_id in ([depends] if isinstance(depends, str) else depends), (
+                f"{endpoint_id} must DependsOn {logical_id}"
+            )
 
     def test_the_provider_role_can_govern_these_groups_and_only_these(self):
         """``logs:DisassociateKmsKey`` on ``log-group:*`` would let this Lambda make an
@@ -4542,7 +4806,12 @@ class TestTheRuntimesOwnLogGroupsAreGoverned:
             if p["PolicyName"] == "RuntimeLogGroupGovernance"
         ]
         assert len(policies) == 1, "the provider role cannot govern the runtime log groups"
-        for statement in policies[0]["PolicyDocument"]["Statement"]:
+        statements = policies[0]["PolicyDocument"]["Statement"]
+        # The policy now also carries the sweeper's ledger + fallback statements; the group
+        # governance itself is the statement with this Sid, and the log-group verbs live there.
+        govern = [st for st in statements if st.get("Sid") == "GovernRuntimeLogGroups"]
+        assert len(govern) == 1, [st.get("Sid") for st in statements]
+        for statement in govern:
             actions = set(_as_list(statement["Action"]))
             assert {"logs:PutRetentionPolicy", "logs:AssociateKmsKey", "logs:DisassociateKmsKey"} <= actions
             for resource in _as_list(statement["Resource"]):
@@ -4918,9 +5187,12 @@ class TestAnUpdateActuallyReachesTheRunningCode:
                 "changing that code re-uploads the bytes under the same key, leaves "
                 f"CodeZipPrefix identical, and publishes no new runtime version: {key!r}"
             )
-            assert "DependencyBundleDigest" in moves_with, (
-                f"{name}'s OutputKey renders without DependencyBundleDigest, so upgrading "
-                f"a pinned dependency with no code change is a silent no-op: {key!r}"
+            bundle = set(_walk_for_refs(props.get("BundleDigest")))
+            assert bundle, f"{name} has no BundleDigest to key on: {props.get('BundleDigest')!r}"
+            assert bundle <= moves_with, (
+                f"{name}'s OutputKey renders without {sorted(bundle - moves_with)}, so "
+                "upgrading its pinned dependency bundle with no code change is a "
+                f"silent no-op: {key!r}"
             )
 
 
@@ -5003,7 +5275,7 @@ class TestThePolicyWaitsForTheToolsItNames:
     """
 
     POLICY_COMBINATIONS = {
-        "gateway+policy": COMPONENT_COMBINATIONS["gateway+policy"],
+        "gateway+kb+policy": COMPONENT_COMBINATIONS["gateway+kb+policy"],
         "gateway+kb+default-policy": COMPONENT_COMBINATIONS["gateway+kb+default-policy"],
         "everything": COMPONENT_COMBINATIONS["everything"],
     }
@@ -5289,31 +5561,70 @@ class TestTheShippedScriptsAreExecutable:
     recipient who ran ``./build-dependency-bundle.sh`` on its own did not.
     """
 
-    EXECUTABLE = {"deploy.sh", "teardown.sh", "build-dependency-bundle.sh"}
+    REQUIRED_SCRIPTS = {"deploy.sh", "teardown.sh", "build-dependency-bundle.sh"}
+
+    @classmethod
+    def _expected_scripts(cls, bundle):
+        scripts = set(cls.REQUIRED_SCRIPTS)
+        if bundle.build_mcp_bundle_sh:
+            scripts.add("build-mcp-server-bundle.sh")
+        return scripts
 
     @ALL_COMBINATIONS
     def test_every_script_the_recipient_is_told_to_run_has_the_execute_bit(self, combo):
-        archive = zipfile.ZipFile(io.BytesIO(_generate(**combo).to_zip()))
+        bundle = _generate(**combo)
+        expected = self._expected_scripts(bundle)
+        archive = zipfile.ZipFile(io.BytesIO(bundle.to_zip()))
         found = set()
         for info in archive.infolist():
             name = info.filename.rsplit("/", 1)[-1]
-            if name not in self.EXECUTABLE:
+            if name not in expected:
                 continue
             found.add(name)
             mode = (info.external_attr >> 16) & 0o777
             assert mode & 0o111, f"{info.filename} arrives mode {mode:04o}; the recipient cannot run it"
-        assert found == self.EXECUTABLE, f"missing from the bundle: {self.EXECUTABLE - found}"
+        assert found == expected, f"missing from the bundle: {expected - found}"
 
     @ALL_COMBINATIONS
     def test_nothing_else_becomes_executable(self, combo):
-        """The execute bit belongs on the three scripts and nowhere else — an
+        """The execute bit belongs on the shipped scripts and nowhere else — an
         executable template.yaml is a signal that the mode is being set wholesale."""
-        archive = zipfile.ZipFile(io.BytesIO(_generate(**combo).to_zip()))
+        bundle = _generate(**combo)
+        expected = self._expected_scripts(bundle)
+        archive = zipfile.ZipFile(io.BytesIO(bundle.to_zip()))
         for info in archive.infolist():
-            if info.filename.rsplit("/", 1)[-1] in self.EXECUTABLE:
+            if info.filename.rsplit("/", 1)[-1] in expected:
                 continue
             mode = (info.external_attr >> 16) & 0o777
             assert not mode & 0o111, f"{info.filename} is executable and should not be"
+
+    @pytest.mark.shell_scan
+    @ALL_COMBINATIONS
+    def test_every_shipped_script_passes_shellcheck(self, combo):
+        _require_scanner("shellcheck", "install ShellCheck")
+        bundle = _generate(**combo)
+        scripts = {
+            "deploy.sh": bundle.deploy_sh,
+            "teardown.sh": bundle.teardown_sh,
+            "build-dependency-bundle.sh": bundle.build_bundle_sh,
+        }
+        if bundle.build_mcp_bundle_sh:
+            scripts["build-mcp-server-bundle.sh"] = bundle.build_mcp_bundle_sh
+        for name, script in scripts.items():
+            with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as handle:
+                handle.write(script)
+                path = handle.name
+            try:
+                result = subprocess.run(
+                    ["shellcheck", "--shell=bash", path],
+                    capture_output=True,
+                    text=True,
+                )
+                assert result.returncode == 0, (
+                    f"{name} in {combo or 'runtime-only'} failed ShellCheck:\n{result.stdout}{result.stderr}"
+                )
+            finally:
+                Path(path).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -5834,6 +6145,23 @@ class TestTheReadmeSaysHowToInvokeTheAgent:
 
 class TestGeneratedDocumentation:
     @staticmethod
+    def _full_litellm_bundle():
+        return _generate(
+            gateway_config=_litellm(litellm_api_key_ref=LITELLM_KEY_ARN),
+            memory_config={"enabled": True},
+            knowledge_base_config=KB_CONFIG,
+            evaluation_config={"enabled": True},
+            resource_tags={"CostCentre": "ECB-42"},
+            naming_profile={"prefix": "ecb"},
+        )
+
+    @staticmethod
+    def _terraform_block(readme):
+        match = re.search(r"```hcl\n(.*?)\n```", readme, re.DOTALL)
+        assert match, "the generated README has no Terraform HCL example"
+        return match.group(1) + "\n"
+
+    @staticmethod
     def _parameter_rows(readme):
         """The Parameters table, as ``{name: {"default", "set_with", "description"}}``."""
         section = readme.split("## Parameters")[1].split("\n## ")[0]
@@ -5844,6 +6172,78 @@ class TestGeneratedDocumentation:
             for name, default, set_with, description in cells
             if name != "Parameter"
         }
+
+    @staticmethod
+    def _components(readme):
+        line = next(line for line in readme.splitlines() if line.startswith("Components: "))
+        return line.removeprefix("Components: ").split(", ")
+
+    def test_the_component_inventory_matches_a_full_litellm_export(self):
+        readme = self._full_litellm_bundle().readme
+
+        assert self._components(readme) == [
+            "Runtime",
+            "RuntimeEndpoint",
+            "LiteLLM Gateway (external proxy)",
+            "Memory",
+            "Knowledge Base (created)",
+            "Online Evaluation",
+        ]
+        assert "for its Runtime, Endpoint, Memory and OnlineEvaluationConfig resources." in readme
+
+    def test_the_component_inventory_does_not_claim_absent_resources(self):
+        readme = _generate().readme
+
+        assert self._components(readme) == ["Runtime", "RuntimeEndpoint"]
+        assert "for its Runtime and Endpoint resources." in readme
+
+    def test_the_full_litellm_template_has_no_cfn_lint_warnings(self):
+        """The customer-facing reference shape should be warning-clean, not merely valid."""
+        _require_scanner("cfn-lint", "pip install -e '.[dev]'")
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+            handle.write(self._full_litellm_bundle().template_yaml)
+            path = handle.name
+        try:
+            result = subprocess.run(
+                ["cfn-lint", "-t", path, "-r", "us-east-1", "--format", "json"],
+                capture_output=True,
+                text=True,
+            )
+            assert result.returncode == 0, (
+                f"the representative LiteLLM export has cfn-lint findings:\n{result.stdout}{result.stderr}"
+            )
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    @pytest.mark.terraform_scan
+    def test_the_terraform_wrapper_is_parseable_and_canonically_formatted(self):
+        """The HCL is customer code, not illustrative pseudocode.
+
+        A wrapper copied directly from the generated README should survive
+        ``terraform fmt -check``. Besides enforcing canonical formatting, Terraform's
+        formatter parses the block and therefore catches malformed interpolation,
+        braces and expression syntax before the customer does.
+        """
+        _require_scanner("terraform", "install the Terraform CLI")
+        block = self._terraform_block(self._full_litellm_bundle().readme)
+        assert "template_url" in block
+        assert "template_body" not in block
+        assert "var.artifact_parameters" in block
+
+        with tempfile.NamedTemporaryFile("w", suffix=".tf", delete=False) as handle:
+            handle.write(block)
+            path = handle.name
+        try:
+            result = subprocess.run(
+                ["terraform", "fmt", "-check", "-diff", path],
+                capture_output=True,
+                text=True,
+            )
+            assert result.returncode == 0, (
+                f"the generated README's Terraform wrapper is not valid canonical HCL:\n{result.stdout}{result.stderr}"
+            )
+        finally:
+            Path(path).unlink()
 
     @ALL_COMBINATIONS
     def test_every_parameter_the_template_takes_is_documented(self, combo):
@@ -5923,6 +6323,8 @@ class TestGeneratedDocumentation:
             # Only when the export has an MCP server.
             "McpServerCodeKey",
             "McpServerCodeDigest",
+            "McpServerDependencyBundleKey",
+            "McpServerDependencyBundleDigest",
         }, f"declared as deploy.sh-owned but not in this template: {sorted(stale)}"
 
     def test_no_parameters_variable_name_cuts_an_acronym_in_half(self):
@@ -6013,8 +6415,17 @@ class TestGeneratedDocumentation:
     def test_data_protection_section_matches_the_template(self, combo):
         bundle = _generate(**combo)
         template = yaml.safe_load(bundle.template_yaml)
-        retained = sorted(k for k, v in template["Resources"].items() if v.get("DeletionPolicy"))
+        resources = template["Resources"]
+        # Governance resources (Custom::RuntimeLogGroup, incl. the sweeper) carry the data pair but
+        # are not data stores: the README covers them in prose -- the runtime's own log groups,
+        # `/aws/bedrock-agentcore/runtimes/<runtime-id>-*`, and what happens to them -- not by id.
+        governance = {k for k, v in resources.items() if v.get("Type") in RETENTION_GOVERNANCE_RESOURCE_TYPES}
+        retained = sorted(k for k, v in resources.items() if v.get("DeletionPolicy") and k not in governance)
         section = bundle.readme.split("## Data Protection")[1]
+        if governance:
+            assert "/aws/bedrock-agentcore/runtimes/" in section and "Custom::RuntimeLogGroup" in section, (
+                "the runtime's own log groups are governed but the README does not say what happens to them"
+            )
         if retained:
             for logical_id in retained:
                 assert logical_id in section, f"{logical_id} is retained but the README does not say so"
@@ -6395,37 +6806,50 @@ class TestGeneratedDocumentation:
             "the runtime's own group is outside the stack and outlives this cleanup"
         )
 
-    def test_teardown_says_a_retained_user_pool_takes_two_calls_to_delete(self):
-        """``DeletionProtection: ACTIVE`` makes the documented cleanup command fail.
+    def test_teardown_does_not_claim_pools_are_active_or_require_two_calls(self):
+        """Pools are deployed with DeletionProtection: INACTIVE and can be deleted in one call.
 
-        The notice above tells the operator the pool survives and to "delete it by
-        hand if you want it gone", and the obvious hand command — ``delete-user-pool``
-        — returns ``InvalidParameterException: deletion protection is activated``.
-        Hit live by a teammate clearing up after a *rolled-back* deploy, which is the
-        likeliest way to meet it: a rollback retains the pool too, and until the pool
-        is gone a same-name redeploy dies at
-        ``[AWS::EarlyValidation::ResourceExistenceCheck]`` naming no resource — the
-        same symptom as the retained log groups, from a different cause.
-
-        The protection itself is correct (see ``TestDataRetention``); what was missing
-        was telling the operator how to clear it.
+        The false claim that pools carry DeletionProtection: ACTIVE (and survive rollback,
+        requiring two calls to delete) contradicted the actual template at line 508. That
+        obsolete notice has been removed. The teardown now correctly states INACTIVE pools
+        delete directly, warns about out-of-band protection changes creating CloudFormation
+        drift, and does NOT recommend the unsafe one-field update-user-pool command.
         """
         teardown = _generate(gateway_config=AGENTCORE_GATEWAY).teardown_sh
         before_delete = teardown.split("aws cloudformation delete-stack")[0]
-        assert "deletion protection is activated" in before_delete, (
-            "the operator is not told why delete-user-pool will fail"
+
+        # The false claim that pools "carry" or "also carry" ACTIVE must be absent.
+        assert "carry DeletionProtection: ACTIVE" not in before_delete, (
+            "the teardown still claims pools are deployed ACTIVE, contradicting line 508"
         )
-        # Both calls, in order, and runnable as printed.
-        update = (
-            "aws cognito-idp update-user-pool --user-pool-id POOL_ID --region $REGION --deletion-protection INACTIVE"
+        assert "also carry DeletionProtection: ACTIVE" not in before_delete, (
+            "the teardown still claims pools are deployed ACTIVE, contradicting line 508"
         )
-        assert update in before_delete
-        assert "aws cognito-idp delete-user-pool --user-pool-id POOL_ID --region $REGION" in before_delete
-        assert before_delete.index(update) < before_delete.index("aws cognito-idp delete-user-pool")
+        assert "deletion protection is activated" not in before_delete, (
+            "pools are INACTIVE; this error message does not apply"
+        )
+        assert "two calls" not in before_delete.lower(), "INACTIVE pools delete in one call"
+
+        # The correct INACTIVE behavior and direct deletion must be documented.
+        assert "DeletionProtection: INACTIVE" in before_delete
+        assert "aws cognito-idp delete-user-pool --user-pool-id POOL_ID" in before_delete
+
+        # The unsafe one-field update-user-pool command must NOT appear as a recommended action.
+        # (It may appear in the drift warning explaining what NOT to do.)
+        assert "update-user-pool --user-pool-id <id> --deletion-protection" not in before_delete, (
+            "the unsafe one-field command must not be recommended"
+        )
+
+        # Safe guidance about out-of-band changes and drift must be present.
+        assert "out-of-band" in before_delete.lower() or "Out-of-band" in before_delete
+        assert "drift" in before_delete or "NOT tracked by CloudFormation" in before_delete
+        assert "console" in before_delete.lower(), "the console is the safe way to enable protection after deployment"
+        assert "resets every attribute you omit" in before_delete or "resets every" in before_delete, (
+            "must warn about UpdateUserPool's full-replace semantics"
+        )
+
+        # ResourceExistenceCheck symptom is still relevant (retained pool blocks same-name redeploy).
         assert "ResourceExistenceCheck" in before_delete
-        # update-user-pool is a full replace, not a field edit: pointing it at a pool
-        # the operator means to KEEP would silently reset every setting omitted.
-        assert "resets" in before_delete and "every setting you do not pass back" in before_delete
 
     def test_that_notice_is_absent_when_the_stack_has_no_user_pool(self):
         """A Cognito cleanup procedure in a stack with no Cognito teaches the
@@ -6527,11 +6951,13 @@ class TestTemplateIsAscii:
 class TestTemplateValidity:
     @ALL_COMBINATIONS
     def test_cfn_lint_passes(self, combo):
-        """No lint gate has ever run against the artifact we ship.
+        """Every emitted shape is warning-clean except one live-proven catalog gap.
 
-        Errors only (``--ignore-checks W``): warnings here are mostly stylistic
-        and gating on them would make this test a maintenance tax rather than a
-        safety net.
+        ``CreateTokenVault`` is a permission-only AgentCore action: there is no
+        corresponding SDK operation and it is absent from the public service-action
+        catalog cfn-lint consumes, but a fresh-account deployment failed with an
+        AccessDenied naming that exact action until it was granted. Preserve that
+        narrowly identified W3037 exception; fail on every other warning or error.
         """
         _require_scanner("cfn-lint", "pip install -e '.[dev]'")
         bundle = _generate(**combo)
@@ -6540,17 +6966,24 @@ class TestTemplateValidity:
             path = handle.name
         try:
             result = subprocess.run(
-                ["cfn-lint", path, "--format", "json", "--ignore-checks", "W"],
+                ["cfn-lint", path, "--format", "json"],
                 capture_output=True,
                 text=True,
             )
-            if result.returncode != 0:
-                findings = json.loads(result.stdout or "[]")
+            findings = json.loads(result.stdout or "[]")
+            unexpected = [
+                finding
+                for finding in findings
+                if not (finding["Rule"]["Id"] == "W3037" and "createtokenvault" in finding["Message"].lower())
+            ]
+            if unexpected:
                 rendered = "\n".join(
                     f"  {f['Rule']['Id']} {f['Level']}: {f['Message']} (line {f['Location']['Start']['LineNumber']})"
-                    for f in findings
+                    for f in unexpected
                 )
-                pytest.fail(f"cfn-lint found {len(findings)} error(s):\n{rendered}")
+                pytest.fail(
+                    f"cfn-lint found {len(unexpected)} unexpected finding(s) (exit {result.returncode}):\n{rendered}"
+                )
         finally:
             Path(path).unlink()
 
@@ -6685,3 +7118,199 @@ def _import_cfn_provider_handler():
     import handler  # noqa: PLC0415
 
     return handler
+
+
+class TestRuntimeLogGroupRetentionFollowsTheKnob:
+    """Custom::RuntimeLogGroup pre-creates the runtime's own log groups, so a failed FIRST
+    create used to leave them behind: the resource carried no DeletionPolicy and its Delete
+    was a no-op. Now it is stamped like the data it governs -- RetainExceptOnCreate/Retain under
+    Retain (CloudFormation sends Delete only when the creating operation rolls back; a retained
+    stack's deletion skips it), Delete/Delete under Delete -- the provider may DeleteLogGroup at
+    the same scope it may CreateLogGroup, and the README says so."""
+
+    def _runtime_log_groups(self, template):
+        out = {lid: r for lid, r in template["Resources"].items() if r["Type"] == "Custom::RuntimeLogGroup"}
+        assert out, "this combination emits no Custom::RuntimeLogGroup; the test is vacuous"
+        return out
+
+    def test_retain_mode_deletes_only_on_the_rollback_of_the_creating_operation(self):
+        template = _template(**COMPONENT_COMBINATIONS["gateway"], data_retention_policy="Retain")
+        for lid, r in self._runtime_log_groups(template).items():
+            assert r.get("DeletionPolicy") == "RetainExceptOnCreate", lid
+            assert r.get("UpdateReplacePolicy") == "Retain", lid
+
+    def test_delete_mode_removes_the_runtime_log_groups_with_the_stack(self):
+        template = _template(**COMPONENT_COMBINATIONS["gateway"], data_retention_policy="Delete")
+        for lid, r in self._runtime_log_groups(template).items():
+            assert r.get("DeletionPolicy") == "Delete", lid
+            assert r.get("UpdateReplacePolicy") == "Delete", lid
+
+    def test_the_provider_may_delete_exactly_the_groups_it_may_create(self):
+        template = _template(**COMPONENT_COMBINATIONS["gateway"], data_retention_policy="Retain")
+        role = template["Resources"]["CfnProviderRole"]
+        # Some Policies entries are conditional (Fn::If) rather than plain documents; look only
+        # at the documents that are present, as the suite's other role tests do.
+        statements = [
+            st
+            for pol in role["Properties"].get("Policies", [])
+            if isinstance(pol, dict) and "PolicyDocument" in pol
+            for st in pol["PolicyDocument"]["Statement"]
+        ]
+        govern = [st for st in statements if st.get("Sid") == "GovernRuntimeLogGroups"]
+        assert len(govern) == 1, "the runtime log-group statement must exist exactly once"
+        actions = govern[0]["Action"]
+        assert "logs:DeleteLogGroup" in actions and "logs:CreateLogGroup" in actions
+        resources = govern[0]["Resource"]
+        resources = resources if isinstance(resources, list) else [resources]
+        assert resources and all(r != "*" for r in resources), "DeleteLogGroup must stay resource-scoped"
+        # and nowhere else: no other statement hands out DeleteLogGroup
+        others = [st for st in statements if st is not govern[0] and "logs:DeleteLogGroup" in (st.get("Action") or [])]
+        assert not others, "logs:DeleteLogGroup leaked into another statement"
+
+    def test_the_readme_explains_the_runtime_log_groups_under_retain(self):
+        readme = _generate(**COMPONENT_COMBINATIONS["gateway"], data_retention_policy="Retain").readme
+        assert "/aws/bedrock-agentcore/runtimes/" in readme and "Custom::RuntimeLogGroup" in readme
+        assert "removed only if the stack operation that created the runtime rolls back" in readme
+
+
+class TestTheRuntimeLogGroupSweeperRunsAfterTheRuntime:
+    """Every per-group governance resource GetAtts its runtime, so CloudFormation deletes it
+    BEFORE the runtime -- while AgentCore can still write, recreating a group the provider
+    just deleted. The sweeper is the resource that runs AFTER: the runtime DependsOn it, it
+    references the runtime by logical id + static name only (no GetAtt on the runtime, no
+    DependsOn), its Generation is a digest of AgentRuntimeName (the replacement property) so
+    a renamed runtime replaces its sweeper, and it is granted the two reads the fallback needs."""
+
+    @ALL_COMBINATIONS
+    def test_the_runtime_depends_on_its_sweeper_and_the_sweeper_only_on_the_provider(self, combo):
+        resources = _template(**combo)["Resources"]
+        runtimes = [k for k, v in resources.items() if v["Type"] == "AWS::BedrockAgentCore::Runtime"]
+        assert runtimes
+        for runtime in runtimes:
+            sweeper_id = f"{runtime}LogGroupSweeper"
+            sweeper = resources[sweeper_id]
+            props = sweeper["Properties"]
+            assert props["Mode"] == "sweeper" and props["RuntimeLogicalId"] == runtime
+            assert props["AgentRuntimeName"] == resources[runtime]["Properties"]["AgentRuntimeName"]
+            assert re.fullmatch(r"[0-9a-f]{12}", props["Generation"])
+            assert "DependsOn" not in sweeper, "a sweeper that depends on anything is deleted too early"
+            getatts = re.findall(r'"Fn::GetAtt": \["([A-Za-z0-9]+)"', json.dumps(sweeper))
+            assert getatts == ["CfnProviderLambda"], (
+                f"the sweeper may GetAtt only the provider (ServiceToken), got {getatts}"
+            )
+            depends = resources[runtime].get("DependsOn") or []
+            assert sweeper_id in ([depends] if isinstance(depends, str) else depends), (
+                f"{runtime} must DependsOn {sweeper_id}"
+            )
+
+    def test_the_generation_changes_when_the_runtime_name_changes(self):
+        a = _template(**COMPONENT_COMBINATIONS["gateway"])["Resources"]
+        gen_a = a["AgentCoreRuntimeLogGroupSweeper"]["Properties"]["Generation"]
+        # the same canvas exported again yields the same generation (static digest) ...
+        assert (
+            _template(**COMPONENT_COMBINATIONS["gateway"])["Resources"]["AgentCoreRuntimeLogGroupSweeper"][
+                "Properties"
+            ]["Generation"]
+            == gen_a
+        )
+        # ... and the per-group resources of that runtime carry the same one
+        assert a["AgentCoreRuntimeLogGroups"]["Properties"]["Generation"] == gen_a
+
+    @ALL_COMBINATIONS
+    def test_the_sweeper_carries_the_same_retention_pair_as_the_groups(self, combo):
+        for mode, pair in (("Retain", ("RetainExceptOnCreate", "Retain")), ("Delete", ("Delete", "Delete"))):
+            resources = _template(**combo, data_retention_policy=mode)["Resources"]
+            for lid, r in resources.items():
+                if r["Type"] == "Custom::RuntimeLogGroup" and r["Properties"].get("Mode") == "sweeper":
+                    assert (r.get("DeletionPolicy"), r.get("UpdateReplacePolicy")) == pair, (mode, lid)
+
+    def test_the_ledger_and_fallback_grants_are_scoped(self):
+        template = _template(**COMPONENT_COMBINATIONS["gateway"])
+        role = template["Resources"]["CfnProviderRole"]
+        statements = [
+            st
+            for pol in role["Properties"].get("Policies", [])
+            if isinstance(pol, dict) and "PolicyDocument" in pol
+            for st in pol["PolicyDocument"]["Statement"]
+        ]
+        by_sid = {st.get("Sid"): st for st in statements}
+        ledger = by_sid["RuntimeLogGroupLedger"]
+        assert set(ledger["Action"]) == {"ssm:PutParameter", "ssm:GetParametersByPath", "ssm:DeleteParameters"}
+        assert "parameter/agentcore-cfn/${AWS::StackName}/*" in json.dumps(ledger["Resource"])
+        fallback = by_sid["RuntimeLogGroupSweeperFallback"]
+        assert fallback["Action"] == ["cloudformation:DescribeStackResource"] and fallback["Resource"] == {
+            "Ref": "AWS::StackId"
+        }
+        listing = by_sid["RuntimeLogGroupSweeperList"]
+        assert listing["Action"] == ["logs:DescribeLogGroups"], "list-shaped; takes no resource ARN"
+        others = [
+            st
+            for st in statements
+            if st.get("Sid") not in ("RuntimeLogGroupLedger",)
+            and any(str(a).startswith("ssm:") for a in (st.get("Action") or []))
+        ]
+        assert not others, "ssm permissions leaked into another statement"
+
+
+class TestLambdaRolesCannotRecreateTheirLogGroups:
+    """Every Lambda in the export writes to a DECLARED log group (LoggingConfig), so the only
+    thing logs:CreateLogGroup can do on a Lambda role is recreate that group after
+    CloudFormation deleted it -- which a final invocation on teardown does (measured:
+    /aws/lambda/<stack>/CfnProviderLambda came back seconds after its deletion), leaving
+    residue that a direct delete-stack or terraform destroy never sweeps. Both managed
+    Lambda execution policies grant CreateLogGroup on *, so no Lambda role may carry either;
+    each gets CreateLogStream/PutLogEvents on its own declared group instead. The AgentCore
+    RUNTIME roles are different: the service creates the runtime's groups itself, so they keep
+    CreateLogGroup -- scoped to the runtime prefix."""
+
+    @ALL_COMBINATIONS
+    def test_no_lambda_role_carries_a_managed_execution_policy(self, combo):
+        resources = _template(**combo)["Resources"]
+        functions = {lid: r for lid, r in resources.items() if r["Type"] == "AWS::Lambda::Function"}
+        assert functions
+        for fn_id, fn in functions.items():
+            role_id = fn["Properties"]["Role"]["Fn::GetAtt"][0]
+            role = resources[role_id]
+            managed = json.dumps(role["Properties"].get("ManagedPolicyArns", []))
+            assert "AWSLambdaBasicExecutionRole" not in managed and "AWSLambdaVPCAccessExecutionRole" not in managed, (
+                fn_id,
+                role_id,
+                managed,
+            )
+
+    @ALL_COMBINATIONS
+    def test_every_lambda_role_writes_only_to_its_own_declared_group(self, combo):
+        resources = _template(**combo)["Resources"]
+        for fn_id, fn in ((lid, r) for lid, r in resources.items() if r["Type"] == "AWS::Lambda::Function"):
+            role = resources[fn["Properties"]["Role"]["Fn::GetAtt"][0]]
+            own = [
+                pol
+                for pol in role["Properties"].get("Policies", [])
+                if isinstance(pol, dict) and pol.get("PolicyName") == f"OwnLogStreams{fn_id}"
+            ]
+            assert len(own) == 1, f"{fn_id}: no OwnLogStreams policy"
+            st = own[0]["PolicyDocument"]["Statement"][0]
+            assert set(st["Action"]) == {"logs:CreateLogStream", "logs:PutLogEvents"}
+            assert st["Resource"]["Fn::Sub"].endswith(f"log-group:/aws/lambda/${{AWS::StackName}}/{fn_id}:*")
+            assert fn["Properties"]["LoggingConfig"] == {"LogGroup": {"Ref": f"{fn_id}LogGroup"}}
+
+    @ALL_COMBINATIONS
+    def test_no_lambda_role_can_create_a_lambda_log_group(self, combo):
+        resources = _template(**combo)["Resources"]
+        for fn_id, fn in ((lid, r) for lid, r in resources.items() if r["Type"] == "AWS::Lambda::Function"):
+            role = resources[fn["Properties"]["Role"]["Fn::GetAtt"][0]]
+            for pol in role["Properties"].get("Policies", []):
+                if not (isinstance(pol, dict) and "PolicyDocument" in pol):
+                    continue
+                for st in pol["PolicyDocument"]["Statement"]:
+                    actions = st.get("Action") if isinstance(st.get("Action"), list) else [st.get("Action")]
+                    if "logs:CreateLogGroup" not in actions:
+                        continue
+                    # only the provider's scoped runtime-group governance may create groups
+                    for res in st["Resource"] if isinstance(st["Resource"], list) else [st["Resource"]]:
+                        rendered = json.dumps(res)
+                        assert "/aws/bedrock-agentcore/runtimes" in rendered and "log-group:*" not in rendered, (
+                            fn_id,
+                            st.get("Sid"),
+                            rendered,
+                        )

@@ -12,9 +12,22 @@ export interface ActiveDeployment {
   workflow_id?: string;
   runtime_id?: string;
   runtime_endpoint?: string;
+  runtime_protocol?: 'HTTP' | 'MCP' | 'A2A';
   gateway_url?: string;
   status: string;
   started_at: string;
+  /** Set once a delete was requested: deleting, deleted, delete_retained or delete_failed. */
+  delete_status?: string | null;
+}
+
+/**
+ * A succeeded deployment that no delete has touched. ``?status=succeeded`` matches deleted ones too: a delete
+ * keeps ``status`` and sets ``delete_status``. Measured 2026-10-02: every one of the matrix user's 103
+ * "succeeded" deployments was deleted, and the banner offered to restore the newest, whose runtime was gone.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function isActiveDeployment(deployment: ActiveDeployment): boolean {
+  return deployment.status === 'succeeded' && !deployment.delete_status;
 }
 
 interface ActiveDeploymentBannerProps {
@@ -36,7 +49,7 @@ export function ActiveDeploymentBanner({ onRestore }: ActiveDeploymentBannerProp
 
         const resp = await authFetch(`/api/deployments?status=succeeded`);
         if (!resp.ok || cancelled) return;
-        const data: ActiveDeployment[] = await resp.json();
+        const data: ActiveDeployment[] = (await resp.json()).filter(isActiveDeployment);
         if (data.length > 0 && !cancelled) {
           const sorted = data.sort(
             (a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime()

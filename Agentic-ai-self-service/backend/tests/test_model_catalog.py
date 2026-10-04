@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from unittest.mock import MagicMock, call
 
 sys.path.insert(0, "src")
 
@@ -15,7 +16,7 @@ class _FakeBedrock:
         self._models = models or []
         self._fail = fail
 
-    def list_inference_profiles(self):
+    def list_inference_profiles(self, **_kwargs):
         if self._fail:
             raise RuntimeError("nope")
         return {"inferenceProfileSummaries": self._profiles}
@@ -110,3 +111,32 @@ def test_profile_preferred_over_duplicate_foundation_model(monkeypatch):
     matches = [m for m in out if m["modelId"] == "us.anthropic.claude-sonnet-5"]
     assert len(matches) == 1
     assert matches[0]["source"] == "inference_profile"
+
+
+def test_inference_profile_discovery_includes_page_two(monkeypatch):
+    fake = MagicMock()
+    fake.list_inference_profiles.side_effect = [
+        {
+            "inferenceProfileSummaries": [],
+            "nextToken": "page-2",
+        },
+        {
+            "inferenceProfileSummaries": [
+                {
+                    "inferenceProfileId": "us.anthropic.claude-sonnet-5",
+                    "inferenceProfileName": "Sonnet",
+                    "status": "ACTIVE",
+                }
+            ]
+        },
+    ]
+    fake.list_foundation_models.return_value = {"modelSummaries": []}
+    _patch(monkeypatch, fake)
+
+    out = mc.list_models("us-east-1")
+
+    assert [model["modelId"] for model in out] == ["us.anthropic.claude-sonnet-5"]
+    assert fake.list_inference_profiles.call_args_list == [
+        call(maxResults=100),
+        call(maxResults=100, nextToken="page-2"),
+    ]

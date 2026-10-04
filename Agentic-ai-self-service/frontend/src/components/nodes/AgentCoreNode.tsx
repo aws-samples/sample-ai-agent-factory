@@ -19,6 +19,7 @@ import type { RuntimeConfiguration, ToolConfiguration } from '../../types/compon
 import { COMPONENT_ICONS } from '../icons/componentIcons';
 import { nodeEnter, spring } from '../../lib/motion';
 import { accentFor } from './nodeColors';
+import { getModalKeyForComponentType } from '../modals/modalRegistry';
 
 // ============================================================================
 // Validation Status Indicators
@@ -93,6 +94,13 @@ function AgentCoreNode({ data, selected }: AgentCoreNodeProps) {
   const runtimeConfig = data.configuration as RuntimeConfiguration | undefined;
   const toolConfig = data.configuration as ToolConfiguration | undefined;
   const execState = data.executionState as string | undefined;
+  const canConfigure =
+    getModalKeyForComponentType(
+      data.componentType,
+      data.configuration as
+        | { isConnector?: boolean; isKnowledgeBase?: boolean; toolId?: string }
+        | undefined,
+    ) !== null;
 
   const isError = data.validationStatus === 'error';
   const isWarning = data.validationStatus === 'warning';
@@ -275,9 +283,11 @@ function AgentCoreNode({ data, selected }: AgentCoreNodeProps) {
       />
 
       {/* Double-click hint — more discoverable */}
-      <div className="absolute -bottom-6 left-0 right-0 text-center text-[10px] text-[#8d99a8] opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none">
-        Double-click to configure
-      </div>
+      {canConfigure && (
+        <div className="absolute -bottom-6 left-0 right-0 text-center text-[10px] text-[#8d99a8] opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none">
+          Double-click to configure
+        </div>
+      )}
       </div>
     </m.div>
   );

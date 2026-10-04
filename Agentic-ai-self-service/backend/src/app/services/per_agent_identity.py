@@ -36,6 +36,8 @@ from __future__ import annotations
 
 import re
 
+from app.services.naming import regional_iam_role_name
+
 # ---------------------------------------------------------------------------
 # Trust policy — bedrock-agentcore assumes the per-agent execution role.
 # Mirrors runtime_deployer.create_runtime_iam_role's trust_policy.
@@ -84,13 +86,25 @@ _ROLE_NAME_PREFIX = "AgentCoreRuntime-"
 _IAM_ROLE_NAME_CHARSET = re.compile(r"[^A-Za-z0-9+=,.@_-]")
 
 
-def build_per_agent_role_name(agentcore_runtime_name: str) -> str:
+def build_per_agent_role_name(
+    agentcore_runtime_name: str,
+    *,
+    region: str | None = None,
+    home_region: str | None = None,
+) -> str:
     """Return the IAM role name for a per-agent runtime: ``AgentCoreRuntime-{name}``.
 
-    This is the SAME convention ``runtime_deployer.destroy_runtime`` derives via
-    its ``AgentCoreRuntime-{name_for_role}`` candidate, so per-agent roles are
-    cleaned up on delete and are NOT wrongly skipped by the Bug-62 shared-role
-    guard (which only skips names == shared_role_name or ending in ``-shared``).
+    ``runtime_deployer.destroy_runtime`` CALLS THIS FUNCTION to build its cleanup
+    candidate, so per-agent roles are cleaned up on delete and are NOT wrongly skipped
+    by the Bug-62 shared-role guard (which only skips names == shared_role_name or
+    ending in ``-shared``).
+
+    It used to re-spell ``f"AgentCoreRuntime-{name}"`` inline instead, and that was not
+    equivalent: the truncation below is load-bearing. The prefix is 17 characters and
+    ``sanitize_runtime_name`` caps a runtime name at 48, so 17 + 48 = 65 and any agent
+    whose sanitized name reaches 48 characters got a role truncated to 64 while the
+    delete path asked IAM for 65 -- NoSuchEntityException, swallowed, role leaked. Keep
+    both sides on this one function; do not re-derive the name at a call site.
 
     The result is sanitized to the IAM role-name charset and truncated to the
     64-char IAM limit (prefix included).
@@ -99,10 +113,11 @@ def build_per_agent_role_name(agentcore_runtime_name: str) -> str:
     # Strip anything outside the IAM role-name charset (defense in depth — the
     # name is normally already AgentCore-sanitized to [a-z0-9_]).
     name = _IAM_ROLE_NAME_CHARSET.sub("_", name)
-    role_name = f"{_ROLE_NAME_PREFIX}{name}"
-    if len(role_name) > 64:
-        role_name = role_name[:64]
-    return role_name
+    return regional_iam_role_name(
+        f"{_ROLE_NAME_PREFIX}{name}",
+        region,
+        home_region=home_region,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +293,11 @@ def build_scoped_runtime_policy(
     memory_arn: str | None = None,
     otel_secret_arn: str | None = None,
     artifacts_bucket: str | None = None,
+    user_pool_arn: str | None = None,
+    client_secret_arn: str | None = None,
+    provider_key_secret_arn: str | None = None,
+    gateway_key_secret_arn: str | None = None,
+    model_free: bool = False,
 ) -> dict:
     """Build a least-privilege IAM policy document for a per-agent runtime role.
 
@@ -295,6 +315,36 @@ def build_scoped_runtime_policy(
         artifacts_bucket: S3 artifacts bucket name. Scopes ``S3CodeAccess`` to
             that bucket; ``"*"`` fallback only if the name is unavailable
             (mirrors runtime_deployer's ``s3_resources``).
+        user_pool_arn: the gateway's Cognito user-pool ARN. When supplied, adds a
+            ``cognito-idp:DescribeUserPoolClient`` statement scoped to that ONE
+            pool, which is how the agent resolves its OAuth client secret without
+            the secret ever being injected as an environment variable. Omitted ->
+            no statement, so an agent that does not authenticate to a Cognito
+            gateway is granted nothing.
+        client_secret_arn: an EXTERNAL IDP's client-secret ARN (Okta/Azure AD/…),
+            for which there is no ``DescribeUserPoolClient`` fallback. When
+            supplied, adds a ``secretsmanager:GetSecretValue`` scoped to that one
+            secret. Both of these are deliberately separate from the OTEL secret
+            statement: ARCC cnt_LuG2TKuO0errRp requires access to a specific
+            secret only where the principal needs that secret.
+        provider_key_secret_arn: the MODEL PROVIDER's deployment-bound API-key
+            secret ARN. The Step Functions deploy boundary copied the long-lived
+            ``agentcore-provider/`` source into ``agentcore-connector/`` before
+            supplying this value. When supplied, adds a
+            ``secretsmanager:GetSecretValue`` scoped to that one secret. Needed
+            because the deploy hands the agent
+            ``PROVIDER_API_KEY_SECRET_ARN`` instead of the plaintext key —
+            ``GetAgentRuntime`` returns runtime environment variables verbatim.
+            Omitted -> no statement, so a Bedrock agent is granted nothing.
+        gateway_key_secret_arn: a LiteLLM MCP gateway's virtual-key secret ARN
+            (``client_info["api_key_ref"]``), handed over as
+            ``GATEWAY_API_KEY_SECRET_ARN`` for the same reason. Separate from
+            ``client_secret_arn`` because the two are different credentials and an
+            agent almost never needs both — per ARCC cnt_LuG2TKuO0errRp, one
+            statement per secret the principal actually reads. Omitted -> nothing.
+            This is where ``per_agent`` mode beats the shared role, which can only
+            grant the whole ``agentcore-connector/`` namespace because it has no
+            per-deploy ARN at synth time.
 
     Returns:
         A deterministic IAM policy document (dict) with the three baseline
@@ -310,18 +360,26 @@ def build_scoped_runtime_policy(
     else:
         s3_resources = "*"  # fallback only when bucket name unavailable
 
-    statements: list[dict] = [
-        {
-            "Sid": "BedrockModelAccess",
-            "Effect": "Allow",
-            "Action": [
-                "bedrock:InvokeModel",
-                "bedrock:InvokeModelWithResponseStream",
-            ],
-            # Intentional "*": inference-profile ARNs are dynamic per
-            # region/account — same justification as the shared role.
-            "Resource": "*",
-        },
+    statements: list[dict] = []
+    # A protocol-only FastMCP server never invokes a model, so it must NOT carry
+    # bedrock model access — reusing the model-capable grant would break the
+    # model-free runtime contract. Model access is prepended only for genuine
+    # (model-invoking) agent runtimes.
+    if not model_free:
+        statements.append(
+            {
+                "Sid": "BedrockModelAccess",
+                "Effect": "Allow",
+                "Action": [
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                ],
+                # Intentional "*": inference-profile ARNs are dynamic per
+                # region/account — same justification as the shared role.
+                "Resource": "*",
+            }
+        )
+    statements += [
         {
             "Sid": "S3CodeAccess",
             "Effect": "Allow",
@@ -366,6 +424,57 @@ def build_scoped_runtime_policy(
                 "Effect": "Allow",
                 "Action": ["secretsmanager:GetSecretValue"],
                 "Resource": [otel_secret_arn],
+            }
+        )
+
+    # ----- The gateway's OAuth client secret, resolved at runtime ---------
+    # The deploy no longer injects COGNITO_CLIENT_SECRET, because GetAgentRuntime
+    # returns a runtime's environment variables in plaintext and every Task in the
+    # state machine re-emits the whole event into the execution history. The agent
+    # re-reads the secret at the moment of use instead, which needs exactly one of
+    # these two grants — scoped to the one pool or the one secret it may read.
+    if user_pool_arn:
+        statements.append(
+            {
+                "Sid": "GatewayClientSecretFromUserPool",
+                "Effect": "Allow",
+                "Action": ["cognito-idp:DescribeUserPoolClient"],
+                "Resource": [user_pool_arn],
+            }
+        )
+    if client_secret_arn:
+        statements.append(
+            {
+                "Sid": "ExternalIdpClientSecret",
+                "Effect": "Allow",
+                "Action": ["secretsmanager:GetSecretValue"],
+                "Resource": [client_secret_arn],
+            }
+        )
+
+    # ----- The model provider's API key, resolved at runtime ---------------
+    # Same contract as the client secret above, for the same measured reason: no
+    # deploy path injects a model-provider key as an environment variable any more,
+    # so the agent dereferences PROVIDER_API_KEY_SECRET_ARN itself and needs exactly
+    # this one read. A Bedrock agent supplies no ARN and gets no statement.
+    if provider_key_secret_arn:
+        statements.append(
+            {
+                "Sid": "ModelProviderApiKey",
+                "Effect": "Allow",
+                "Action": ["secretsmanager:GetSecretValue"],
+                "Resource": [provider_key_secret_arn],
+            }
+        )
+
+    # ----- A LiteLLM gateway's virtual key, resolved at runtime ------------
+    if gateway_key_secret_arn:
+        statements.append(
+            {
+                "Sid": "LiteLLMGatewayVirtualKey",
+                "Effect": "Allow",
+                "Action": ["secretsmanager:GetSecretValue"],
+                "Resource": [gateway_key_secret_arn],
             }
         )
 

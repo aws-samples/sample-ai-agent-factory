@@ -17,6 +17,8 @@ secrets and both reused a provider created by an earlier deployment, whose
 produced a **READY** target, because the invalid key was never the one being sent.
 """
 
+import inspect
+
 import pytest
 from app.services.gateway_deployer import (
     _ensure_api_key_credential_provider,
@@ -30,12 +32,21 @@ class _Vault:
 
     def __init__(self):
         self.providers: dict[str, str] = {}  # name -> secret arn
+        self.tags: dict[str, dict[str, str]] = {}
         self.updates: list[tuple[str, str]] = []
 
-    def create_api_key_credential_provider(self, *, name, apiKeySecretConfig, apiKeySecretSource):  # noqa: N803
+    def create_api_key_credential_provider(
+        self,
+        *,
+        name,
+        apiKeySecretConfig,
+        apiKeySecretSource,
+        tags=None,
+    ):  # noqa: N803
         if name in self.providers:
             raise RuntimeError(f"ValidationException: provider {name} already exists")
         self.providers[name] = apiKeySecretConfig["secretId"]
+        self.tags[name] = dict(tags or {})
         return {"credentialProviderArn": f"arn:aws:bedrock-agentcore:::provider/{name}"}
 
     def get_api_key_credential_provider(self, *, name):
@@ -45,6 +56,10 @@ class _Vault:
             "credentialProviderArn": f"arn:aws:bedrock-agentcore:::provider/{name}",
             "apiKeySecretArn": {"secretArn": self.providers[name]},
         }
+
+    def list_tags_for_resource(self, *, resourceArn):  # noqa: N803
+        name = resourceArn.rsplit("/", 1)[-1]
+        return {"tags": self.tags[name]}
 
     def update_api_key_credential_provider(self, *, name, apiKeySecretConfig, apiKeySecretSource):  # noqa: N803
         self.providers[name] = apiKeySecretConfig["secretId"]
@@ -142,6 +157,30 @@ class TestAStaleCredentialIsRepointed:
         with pytest.raises(RuntimeError, match="AccessDenied"):
             _ensure_api_key_credential_provider(_Broken(), "mcp-x", secret_arn="arn:secret:v1", scope="gw-1")
 
+    def test_a_foreign_same_named_provider_is_not_repointed(self):
+        vault = _Vault()
+        _ensure_api_key_credential_provider(
+            vault,
+            "mcp-x",
+            secret_arn="arn:secret:foreign",
+            scope="gw-1",
+            region="us-east-1",
+        )
+        name = _scoped_provider_name("mcp-x", "gw-1")
+        vault.tags[name]["AgentCoreStack"] = "another-stack-prod-us-east-1"
+
+        with pytest.raises(RuntimeError, match="Deletion refused"):
+            _ensure_api_key_credential_provider(
+                vault,
+                "mcp-x",
+                secret_arn="arn:secret:ours",
+                scope="gw-1",
+                region="us-east-1",
+            )
+
+        assert vault.providers[name] == "arn:secret:foreign"
+        assert vault.updates == []
+
 
 class TestTeardownFindsWhatWasCreated:
     def test_the_recorded_name_matches_the_created_name(self, monkeypatch):
@@ -150,12 +189,23 @@ class TestTeardownFindsWhatWasCreated:
         from app.services import gateway_deployer as gd
 
         vault = _Vault()
-        monkeypatch.setattr(gd, "_put_connector_secret", lambda region, owner, payload: "arn:secret:minted")
         monkeypatch.setattr(
             gd,
-            "_create_gateway_target_with_retry",
-            lambda ctrl, gw, name, params: {"targetId": "t-1", "name": name},
+            "_put_connector_secret",
+            lambda region, owner, payload, deployment_id="", **kwargs: "arn:secret:minted",
         )
+        # Mirrors the real signature and is bind-checked against it, rather than taking
+        # `**kwargs` -- see the same double in tests/test_credential_provider_teardown.py.
+        target_calls = []
+
+        def _double(ctrl, gw, name, params, max_retries=5, *, update_existing=False):
+            target_calls.append({"name": name, "update_existing": update_existing})
+            return {"targetId": "t-1", "name": name}
+
+        for fn in (gd._create_gateway_target_with_retry, _double):
+            inspect.signature(fn).bind("ctrl", "gw", "name", {}, update_existing=True)
+
+        monkeypatch.setattr(gd, "_create_gateway_target_with_retry", _double)
         monkeypatch.setattr(gd, "_wait_for_mcp_target_ready", lambda *a, **k: None)
 
         out = gd._deploy_external_mcp_targets(
@@ -164,6 +214,7 @@ class TestTeardownFindsWhatWasCreated:
             "us-east-1",
             [{"endpoint": "https://example.com/mcp", "auth_type": "api_key", "secret_value": "sk-x", "name": "My MCP"}],
             owner_sub="alice",
+            deployment_id="dep-credential-provider-scope",
         )
         # Each record is "TYPE:name" — the type is what routes teardown to the right
         # namespace (see tests/test_credential_provider_teardown.py). The NAME half
@@ -171,3 +222,8 @@ class TestTeardownFindsWhatWasCreated:
         recorded = out["credential_provider_names"]
         assert [e.split(":", 1)[0] for e in recorded] == ["API_KEY"]
         assert [e.split(":", 1)[1] for e in recorded] == list(vault.providers.keys())
+        # F-74b: defect (2) above is a stale credential surviving a redeploy. Refreshing the
+        # provider only helps if the TARGET is also repointed, because the target is what
+        # names the provider it authenticates with. So the external-MCP create has to ask
+        # for a replace, not settle for "already exists".
+        assert target_calls and all(c["update_existing"] for c in target_calls), target_calls

@@ -16,7 +16,7 @@
  * promotePromptVersionApi / resolvePromptApi / deletePromptApi.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import {
   listPromptsApi,
   createPromptApi,
@@ -26,6 +26,8 @@ import {
   deletePromptApi,
   type PromptEntry,
 } from '../../services/api';
+import { ConfirmDialog } from '../common/ConfirmDialog';
+import { useDialogFocusTrap } from '../../hooks/useDialogFocusTrap';
 
 export interface PromptSelection {
   promptName: string;
@@ -54,6 +56,10 @@ export function PromptLibraryModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialogFocusTrap(isOpen, dialogRef, undefined, onClose);
 
   // Create form
   const [showCreate, setShowCreate] = useState(false);
@@ -146,6 +152,7 @@ export function PromptLibraryModal({
 
   const handleDelete = useCallback(
     async (promptName: string) => {
+      setPendingDelete(null);
       setError(null);
       try {
         await deletePromptApi(promptName);
@@ -178,11 +185,24 @@ export function PromptLibraryModal({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[85vh] flex flex-col">
+    <>
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+        onClick={(event) => {
+          if (event.target === event.currentTarget) onClose();
+        }}
+      >
+      <div
+        ref={dialogRef}
+        className="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[85vh] flex flex-col"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b">
-          <h2 className="text-lg font-semibold">
+          <h2 id={titleId} className="text-lg font-semibold">
             {mode === 'picker' ? 'Select a Library Prompt' : 'Prompt Library'}
           </h2>
           <button
@@ -203,11 +223,13 @@ export function PromptLibraryModal({
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && void refresh()}
             placeholder="Search prompts..."
+            aria-label="Search prompts"
             className="flex-1 px-3 py-1.5 text-sm border rounded"
           />
           <select
             value={scope}
             onChange={(e) => setScope(e.target.value as 'all' | 'mine')}
+            aria-label="Prompt ownership scope"
             className="px-2 py-1.5 text-sm border rounded"
           >
             <option value="all">All</option>
@@ -232,7 +254,7 @@ export function PromptLibraryModal({
         </div>
 
         {error && (
-          <div className="px-6 py-2 text-sm text-red-600 bg-red-50 border-b">
+          <div className="px-6 py-2 text-sm text-red-600 bg-red-50 border-b" role="alert">
             {error}
           </div>
         )}
@@ -245,6 +267,7 @@ export function PromptLibraryModal({
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               placeholder="Prompt name"
+              aria-label="Prompt name"
               className="w-full px-3 py-1.5 text-sm border rounded"
             />
             <input
@@ -252,6 +275,7 @@ export function PromptLibraryModal({
               value={newDescription}
               onChange={(e) => setNewDescription(e.target.value)}
               placeholder="Description (optional)"
+              aria-label="Prompt description"
               className="w-full px-3 py-1.5 text-sm border rounded"
             />
             <input
@@ -259,12 +283,14 @@ export function PromptLibraryModal({
               value={newTags}
               onChange={(e) => setNewTags(e.target.value)}
               placeholder="Tags (comma-separated)"
+              aria-label="Prompt tags"
               className="w-full px-3 py-1.5 text-sm border rounded"
             />
             <textarea
               value={newBody}
               onChange={(e) => setNewBody(e.target.value)}
               placeholder="Prompt body (the system prompt text)..."
+              aria-label="Prompt body"
               rows={6}
               className="w-full px-3 py-2 text-sm border rounded font-mono"
             />
@@ -327,6 +353,8 @@ export function PromptLibraryModal({
                       onClick={() =>
                         setExpanded(isExpanded ? null : p.prompt_name)
                       }
+                      aria-expanded={isExpanded}
+                      aria-controls={`prompt-versions-${p.prompt_name}`}
                       className="px-3 py-1 text-sm border rounded hover:bg-gray-50"
                     >
                       {isExpanded ? 'Hide' : `Versions (${p.versions.length})`}
@@ -334,7 +362,7 @@ export function PromptLibraryModal({
                     {mode === 'management' && p.is_owner && (
                       <button
                         type="button"
-                        onClick={() => void handleDelete(p.prompt_name)}
+                        onClick={() => setPendingDelete(p.prompt_name)}
                         className="px-3 py-1 text-sm text-red-600 border border-red-200 rounded hover:bg-red-50"
                       >
                         Delete
@@ -344,7 +372,10 @@ export function PromptLibraryModal({
                 </div>
 
                 {isExpanded && (
-                  <div className="px-4 py-3 border-t bg-gray-50 space-y-2">
+                  <div
+                    id={`prompt-versions-${p.prompt_name}`}
+                    className="px-4 py-3 border-t bg-gray-50 space-y-2"
+                  >
                     {p.versions.map((v) => {
                       const isDefault = v.version_id === p.default_version_id;
                       return (
@@ -408,6 +439,7 @@ export function PromptLibraryModal({
                               value={versionBody}
                               onChange={(e) => setVersionBody(e.target.value)}
                               placeholder="New version body..."
+                              aria-label={`New version body for ${p.display_name}`}
                               rows={4}
                               className="w-full px-3 py-2 text-sm border rounded font-mono"
                             />
@@ -455,6 +487,22 @@ export function PromptLibraryModal({
         </div>
       </div>
     </div>
+      <ConfirmDialog
+        isOpen={pendingDelete !== null}
+        title="Delete library prompt?"
+        message={
+          pendingDelete
+            ? `Delete “${pendingDelete}” and all of its versions? This action cannot be undone.`
+            : ''
+        }
+        confirmLabel="Delete prompt"
+        variant="danger"
+        onConfirm={() => {
+          if (pendingDelete) void handleDelete(pendingDelete);
+        }}
+        onCancel={() => setPendingDelete(null)}
+      />
+    </>
   );
 }
 

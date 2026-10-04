@@ -2,6 +2,12 @@
 # Install: pip install pre-commit && pre-commit install
 # Run manually: pre-commit run --all-files
 
+# This config belongs to one sample inside a larger git repository. Pre-commit
+# normalizes paths relative to the git root even when invoked from this directory,
+# so every hook needs the same boundary or `--all-files` can inspect—and fix—sibling
+# projects with unrelated policies.
+files: '^Agentic-ai-self-service/'
+
 repos:
   # --- Standard checks ---
   - repo: https://github.com/pre-commit/pre-commit-hooks

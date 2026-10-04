@@ -13,7 +13,11 @@ import {
   type SerializedMetadata,
 } from './serialization';
 import type { AgentCoreNode } from '../store/workflowStore';
-import type { AgentCoreComponentType } from '../types/workflow';
+import {
+  createEmptyDeploymentGovernance,
+  type AgentCoreComponentType,
+  type DeploymentGovernanceV1,
+} from '../types/workflow';
 import type { Edge, Viewport } from '@xyflow/react';
 
 // ============================================================================
@@ -357,5 +361,140 @@ describe('areWorkflowsEquivalent', () => {
       nodes: [],
     };
     expect(areWorkflowsEquivalent(workflow1, workflow2)).toBe(false);
+  });
+});
+
+describe('Deployment governance serialization', () => {
+  const governance: DeploymentGovernanceV1 = {
+    version: 1,
+    namingProfile: {
+      prefix: 'ecb',
+      resourceNames: { gateway: '{prefix}-{deployment}-gw' },
+    },
+    tags: {
+      explicitValues: { 'cost:center': '4711' },
+      effectiveValues: {
+        'cost:center': '4711',
+        'platform:application': 'payments',
+      },
+      profile: {
+        name: 'regulated',
+        updatedAt: '2026-09-23T12:00:00Z',
+      },
+      policyRevision: 'sha256:policy-v7',
+    },
+  };
+
+  it('round-trips the exact V1 object', () => {
+    const json = WorkflowSerializer.serialize(
+      [],
+      [],
+      { x: 0, y: 0, zoom: 1 },
+      undefined,
+      { id: 'wf', name: 'Governed' },
+      governance,
+    );
+
+    expect(JSON.parse(json).governance).toEqual(governance);
+    expect(WorkflowSerializer.deserialize(json).governance).toEqual(governance);
+  });
+
+  it('migrates a legacy document with no governance field', () => {
+    const legacy = WorkflowSerializer.toSerializedWorkflow(
+      [],
+      [],
+      { x: 0, y: 0, zoom: 1 },
+    );
+    delete legacy.governance;
+
+    const restored = WorkflowSerializer.fromSerializedWorkflow(legacy);
+
+    expect(restored.governance).toEqual(createEmptyDeploymentGovernance());
+  });
+
+  it('refuses malformed present governance instead of erasing it', () => {
+    const serialized = WorkflowSerializer.toSerializedWorkflow(
+      [],
+      [],
+      { x: 0, y: 0, zoom: 1 },
+    );
+    serialized.governance = {
+      ...governance,
+      tags: {
+        ...governance.tags,
+        policyRevision: '',
+      },
+    };
+
+    const errors = WorkflowSerializer.validateSchema(JSON.stringify(serialized));
+
+    expect(errors).toEqual([
+      expect.objectContaining({
+        field: 'governance',
+        message: expect.stringContaining('policyRevision'),
+      }),
+    ]);
+  });
+
+  it('refuses unknown fields and contradictory alias spellings', () => {
+    const serialized = WorkflowSerializer.toSerializedWorkflow(
+      [],
+      [],
+      { x: 0, y: 0, zoom: 1 },
+    );
+    const unknown = {
+      ...serialized,
+      governance: {
+        ...governance,
+        silentlyIgnored: true,
+      },
+    };
+    const contradictory = {
+      ...serialized,
+      governance: {
+        ...governance,
+        naming_profile: { prefix: 'other' },
+      },
+    };
+
+    expect(WorkflowSerializer.validateSchema(JSON.stringify(unknown)))
+      .toEqual([expect.objectContaining({ field: 'governance', message: expect.stringContaining('unknown') })]);
+    expect(WorkflowSerializer.validateSchema(JSON.stringify(contradictory)))
+      .toEqual([expect.objectContaining({ field: 'governance', message: expect.stringContaining('disagree') })]);
+  });
+
+  it('does not treat an explicit null governance value as a legacy omission', () => {
+    const serialized = WorkflowSerializer.toSerializedWorkflow(
+      [],
+      [],
+      { x: 0, y: 0, zoom: 1 },
+    );
+    serialized.governance = null as never;
+
+    expect(WorkflowSerializer.validateSchema(JSON.stringify(serialized)))
+      .toEqual([expect.objectContaining({
+        field: 'governance',
+        message: expect.stringContaining('must be an object'),
+      })]);
+  });
+
+  it('treats absent governance as equivalent only to an empty V1 object', () => {
+    const legacy = WorkflowSerializer.toSerializedWorkflow(
+      [],
+      [],
+      { x: 0, y: 0, zoom: 1 },
+    );
+    delete legacy.governance;
+    const empty = {
+      ...legacy,
+      governance: createEmptyDeploymentGovernance(),
+    };
+    const governed = {
+      ...legacy,
+      governance,
+    };
+
+    expect(areWorkflowsEquivalent(legacy, empty)).toBe(true);
+    expect(areWorkflowsEquivalent(legacy, governed)).toBe(false);
   });
 });

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { snapshotToCanvas } from './cloneSnapshot';
+import { createEmptyDeploymentGovernance } from '../types/workflow';
 
 // The exact pattern the user reported broken: Runtime -> Memory, Runtime ->
 // Gateway, Gateway -> Weather tool. A registry snapshot stores the RAW canvas.
@@ -44,9 +45,10 @@ describe('snapshotToCanvas (registry clone)', () => {
 
   it('deep-clones so edits to the clone never mutate the source snapshot', () => {
     const { nodes } = snapshotToCanvas(RUNTIME_MEM_GATEWAY_SNAPSHOT);
-    (nodes[0].data as Record<string, unknown>).mutated = true;
-    // original snapshot node data must be untouched
-    expect((RUNTIME_MEM_GATEWAY_SNAPSHOT.nodes[0].data as Record<string, unknown>).mutated).toBeUndefined();
+    const clonedConfig = nodes[0].data.config as Record<string, unknown>;
+    clonedConfig.name = 'mutated';
+    // The nested source config, not only its parent data object, must be untouched.
+    expect(RUNTIME_MEM_GATEWAY_SNAPSHOT.nodes[0].data.config.name).toBe('weatheragent');
   });
 
   it('clears transient selection flags', () => {
@@ -60,11 +62,17 @@ describe('snapshotToCanvas (registry clone)', () => {
   });
 
   it('is defensive against empty / legacy / malformed snapshots', () => {
-    expect(snapshotToCanvas(null)).toEqual({ nodes: [], edges: [] });
-    expect(snapshotToCanvas({})).toEqual({ nodes: [], edges: [] });
-    expect(snapshotToCanvas({ name: 'x' })).toEqual({ nodes: [], edges: [] });
+    const empty = {
+      nodes: [],
+      edges: [],
+      viewport: { x: 0, y: 0, zoom: 1 },
+      governance: createEmptyDeploymentGovernance(),
+    };
+    expect(snapshotToCanvas(null)).toEqual(empty);
+    expect(snapshotToCanvas({})).toEqual(empty);
+    expect(snapshotToCanvas({ name: 'x' })).toEqual(empty);
     // non-array nodes/edges must not throw
-    expect(snapshotToCanvas({ nodes: 'bad', edges: 5 } as never)).toEqual({ nodes: [], edges: [] });
+    expect(snapshotToCanvas({ nodes: 'bad', edges: 5 } as never)).toEqual(empty);
   });
 
   it('is pattern-agnostic — a bare single-runtime snapshot round-trips', () => {
@@ -73,5 +81,64 @@ describe('snapshotToCanvas (registry clone)', () => {
     });
     expect(nodes).toHaveLength(1);
     expect(edges).toHaveLength(0);
+  });
+
+  it('migrates a v1 snapshot to empty governance', () => {
+    const { governance } = snapshotToCanvas({
+      schemaVersion: 1,
+      name: 'legacy',
+      nodes: [],
+      edges: [],
+    });
+    expect(governance).toEqual(createEmptyDeploymentGovernance());
+  });
+
+  it('preserves exact governance from a schema v2 snapshot', () => {
+    const governance = {
+      version: 1 as const,
+      namingProfile: { prefix: 'ecb' },
+      tags: {
+        explicitValues: { owner: 'alice' },
+        effectiveValues: { owner: 'alice' },
+        profile: { name: 'regulated', updatedAt: '2026-09-23T12:00:00Z' },
+        policyRevision: 'sha256:v7',
+      },
+    };
+
+    const clone = snapshotToCanvas({
+      schemaVersion: 2,
+      name: 'governed',
+      nodes: [],
+      edges: [],
+      viewport: { x: 8, y: -3, zoom: 1.4 },
+      governance,
+    });
+
+    expect(clone.governance).toEqual(governance);
+    expect(clone.governance).not.toBe(governance);
+    expect(clone.viewport).toEqual({ x: 8, y: -3, zoom: 1.4 });
+  });
+
+  it('refuses malformed or unsupported versioned snapshots', () => {
+    expect(() => snapshotToCanvas({
+      schemaVersion: 2,
+      name: 'missing-governance',
+      nodes: [],
+      edges: [],
+      viewport: { x: 0, y: 0, zoom: 1 },
+    })).toThrow(/requires governance/);
+    expect(() => snapshotToCanvas({
+      schemaVersion: 2,
+      name: 'missing-viewport',
+      nodes: [],
+      edges: [],
+      governance: createEmptyDeploymentGovernance(),
+    })).toThrow(/requires a valid viewport/);
+    expect(() => snapshotToCanvas({
+      schemaVersion: 3,
+      name: 'future',
+      nodes: [],
+      edges: [],
+    })).toThrow(/Unsupported/);
   });
 });

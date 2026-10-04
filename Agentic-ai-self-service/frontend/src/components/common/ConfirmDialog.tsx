@@ -3,9 +3,10 @@
  * Replaces native confirm() with proper modal + focus trap + Escape handling.
  */
 
-import { useEffect, useRef } from 'react';
+import { useId, useRef } from 'react';
 import { m } from 'motion/react';
 import { spring } from '../../lib/motion';
+import { useDialogFocusTrap } from '../../hooks/useDialogFocusTrap';
 
 interface ConfirmDialogProps {
   isOpen: boolean;
@@ -28,26 +29,17 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
   const confirmButtonRef = useRef<HTMLButtonElement>(null);
-
-  // Focus confirm button when dialog opens
-  useEffect(() => {
-    if (isOpen) {
-      setTimeout(() => confirmButtonRef.current?.focus(), 100);
-    }
-  }, [isOpen]);
-
-  // Escape key handling
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onCancel();
-      }
-    };
-    window.addEventListener('keydown', handleEscape);
-    return () => window.removeEventListener('keydown', handleEscape);
-  }, [isOpen, onCancel]);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const messageId = useId();
+  useDialogFocusTrap(
+    isOpen,
+    dialogRef,
+    variant === 'danger' ? cancelButtonRef : confirmButtonRef,
+    onCancel,
+  );
 
   if (!isOpen) return null;
 
@@ -59,17 +51,24 @@ export function ConfirmDialog({
         style={{ backdropFilter: 'blur(4px)' }}
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
-        onClick={onCancel}
+        onPointerDown={onCancel}
         aria-hidden="true"
       />
 
       {/* Dialog */}
       <div
+        ref={dialogRef}
         className="fixed inset-0 flex items-center justify-center z-50 px-4"
         role="dialog"
         aria-modal="true"
-        aria-labelledby="confirm-dialog-title"
-        aria-describedby="confirm-dialog-message"
+        aria-labelledby={titleId}
+        aria-describedby={messageId}
+        tabIndex={-1}
+        onPointerDown={(event) => {
+          if (event.target === event.currentTarget) {
+            onCancel();
+          }
+        }}
       >
         <m.div
           className="bg-white rounded-xl border border-gray-200 shadow-xl max-w-md w-full p-6"
@@ -78,19 +77,20 @@ export function ConfirmDialog({
           transition={spring.gentle}
         >
           <h3
-            id="confirm-dialog-title"
+            id={titleId}
             className="text-lg font-semibold text-gray-900 mb-2"
           >
             {title}
           </h3>
           <p
-            id="confirm-dialog-message"
+            id={messageId}
             className="text-sm text-gray-600 mb-6"
           >
             {message}
           </p>
           <div className="flex items-center justify-end gap-3">
             <button
+              ref={cancelButtonRef}
               type="button"
               onClick={onCancel}
               className="px-4 py-2 rounded-md text-sm font-medium text-gray-700 bg-white border border-gray-300 hover:bg-gray-50 transition-colors"

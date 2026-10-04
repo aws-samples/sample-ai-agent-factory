@@ -103,13 +103,41 @@ def _client(caller: str, admin: bool = False) -> TestClient:
     return TestClient(app)
 
 
+def _snapshot(
+    name: str,
+    *,
+    nodes: list[dict] | None = None,
+    governance: dict | None = None,
+) -> dict:
+    """Current publish boundary: a complete, versioned workflow document."""
+    return {
+        "schemaVersion": 2,
+        "name": name,
+        "nodes": nodes if nodes is not None else [{"type": "runtime"}],
+        "edges": [],
+        "viewport": {"x": 0, "y": 0, "zoom": 1},
+        "governance": governance
+        if governance is not None
+        else {
+            "version": 1,
+            "namingProfile": None,
+            "tags": {
+                "explicitValues": {},
+                "effectiveValues": {},
+                "profile": None,
+                "policyRevision": "",
+            },
+        },
+    }
+
+
 def _publish(client: TestClient, name: str, visibility: str = "org") -> dict:
     resp = client.post(
         "/api/registry",
         json={
             "display_name": name,
             "visibility": visibility,
-            "canvas_snapshot": {"nodes": [{"type": "runtime"}], "edges": []},
+            "canvas_snapshot": _snapshot(name),
         },
     )
     assert resp.status_code == 200, resp.text
@@ -147,6 +175,86 @@ def test_legacy_row_without_status_defaults_to_approved(store: RegistryStore):
     assert any(e["agent_slug"] == "legacy" for e in listing)
 
 
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        {"name": "legacy", "nodes": [], "edges": []},
+        {
+            "schemaVersion": 2,
+            "name": "missing-governance",
+            "nodes": [],
+            "edges": [],
+            "viewport": {"x": 0, "y": 0, "zoom": 1},
+        },
+        {
+            "schemaVersion": 2,
+            "name": "missing-viewport",
+            "nodes": [],
+            "edges": [],
+            "governance": _snapshot("x")["governance"],
+        },
+    ],
+)
+def test_publish_rejects_incomplete_or_legacy_snapshots(
+    store: RegistryStore,
+    snapshot: dict,
+):
+    response = _client("alice").post(
+        "/api/registry",
+        json={"display_name": "Invalid", "canvas_snapshot": snapshot},
+    )
+
+    assert response.status_code == 422
+    assert store.get(DEFAULT_ORG_ID, "invalid") is None
+
+
+def test_governance_and_viewport_round_trip_through_publish_detail_and_clone(
+    store: RegistryStore,
+):
+    governance = {
+        "version": 1,
+        "namingProfile": {"prefix": "ecb"},
+        "tags": {
+            "explicitValues": {"owner": "alice"},
+            "effectiveValues": {"owner": "alice", "application": "payments"},
+            "profile": {
+                "name": "regulated",
+                "updatedAt": "2026-09-23T12:00:00Z",
+            },
+            "policyRevision": "sha256:policy-v7",
+        },
+    }
+    snapshot = _snapshot("Governed Bot", governance=governance)
+    client = _client("alice")
+
+    published = client.post(
+        "/api/registry",
+        json={"display_name": "Governed Bot", "canvas_snapshot": snapshot},
+    )
+    assert published.status_code == 200, published.text
+
+    detail = client.get("/api/registry/governed-bot")
+    clone = client.post("/api/registry/governed-bot/clone")
+    assert detail.status_code == 200, detail.text
+    assert clone.status_code == 200, clone.text
+    # The captured profile timestamp is stored in the tag catalog's own spelling ("+00:00",
+    # ``datetime.isoformat``), never pydantic's "Z": the two spellings of one instant were read
+    # as "the profile changed" by string comparisons (live, 2026-09-27). The instant round-trips.
+    expected = {
+        **snapshot,
+        "governance": {
+            **governance,
+            "namingProfile": {"prefix": "ecb", "resourceNames": {}},
+            "tags": {
+                **governance["tags"],
+                "profile": {"name": "regulated", "updatedAt": "2026-09-23T12:00:00+00:00"},
+            },
+        },
+    }
+    assert detail.json()["canvas_snapshot"] == expected
+    assert clone.json()["canvas_snapshot"] == expected
+
+
 def test_publish_sets_status_pending(store: RegistryStore):
     alice = _client("alice")
     body = _publish(alice, "Fresh Bot")
@@ -172,7 +280,7 @@ def test_republish_unchanged_preserves_approved_status(store: RegistryStore):
         json={
             "display_name": "Stable Bot",
             "visibility": "org",
-            "canvas_snapshot": {"nodes": [{"type": "runtime"}], "edges": []},
+            "canvas_snapshot": _snapshot("Stable Bot"),
         },
     ).json()
     assert body["status"] == "approved", "unchanged re-publish must stay approved"
@@ -194,7 +302,10 @@ def test_republish_changed_canvas_resets_to_pending(store: RegistryStore):
         json={
             "display_name": "Evolving Bot",
             "visibility": "org",
-            "canvas_snapshot": {"nodes": [{"type": "runtime"}, {"type": "memory"}], "edges": []},
+            "canvas_snapshot": _snapshot(
+                "Evolving Bot",
+                nodes=[{"type": "runtime"}, {"type": "memory"}],
+            ),
         },
     ).json()
     assert body["status"] == "pending", "a changed canvas must require re-review"

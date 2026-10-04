@@ -107,6 +107,8 @@ export {
   deleteTrigger,
   type TriggerSummary,
   type CreateTriggerInput,
+  type TriggerType,
+  type TriggerStatus,
 } from './api/triggers';
 
 // ============================================================================
@@ -145,6 +147,7 @@ export {
 
 export {
   publishToRegistry as publishToRegistryApi,
+  createRegistryCanvasSnapshot,
   searchRegistry as searchRegistryApi,
   getRegistryEntry as getRegistryEntryApi,
   cloneFromRegistry as cloneFromRegistryApi,
@@ -161,6 +164,8 @@ export {
   type RegistryEntry,
   type PublishRegistryRequest,
   type RegistryCanvasSnapshot,
+  type RegistryCanvasSnapshotV2,
+  type RegistryCanvasViewport,
   type RegistryCloneResponse,
   type LiteLLMRegistryConfig,
   type LiteLLMServer,
@@ -256,6 +261,18 @@ export {
   streamInvoke as streamInvokeApi,
   type DeployedAgentSummary,
 } from './api/chat';
+
+// ============================================================================
+// Re-export standalone MCP runtime invocation
+// ============================================================================
+
+export {
+  discoverMcpTools,
+  callMcpTool,
+  type McpToolDescriptor,
+  type McpToolsResult,
+  type McpToolCallResult,
+} from './api/runtimeMcp';
 
 // ============================================================================
 // Legacy ApiClient class (for backward compatibility)
@@ -354,8 +371,17 @@ export class ApiClient {
     return apiRequest<Flow>(`/api/flows/${flowId}`, {}, this.baseUrl);
   }
 
-  async updateFlow(flowId: string, data: FlowUpdateRequest): Promise<FlowResponse> {
-    return apiRequest<FlowResponse>(`/api/flows/${flowId}`, { method: 'PUT', body: JSON.stringify(data) }, this.baseUrl);
+  async updateFlow(
+    flowId: string,
+    data: FlowUpdateRequest,
+    init?: Pick<RequestInit, 'keepalive'>,
+  ): Promise<FlowResponse> {
+    // `keepalive` lets a save issued from `pagehide` outlive the page (F-14).
+    return apiRequest<FlowResponse>(
+      `/api/flows/${flowId}`,
+      { method: 'PUT', body: JSON.stringify(data), ...init },
+      this.baseUrl,
+    );
   }
 
   async deleteFlow(flowId: string): Promise<{ message: string }> {
@@ -487,7 +513,24 @@ export class ApiClient {
   }
 
   // Admin (Phase 7)
-  async getDeployTargets(): Promise<{ enabled: boolean; regions: string[]; accounts: Array<{ account_id: string; role_arn: string; region: string }> }> {
+  async getDeployTargets(): Promise<{
+    enabled: boolean;
+    regions: string[];
+    region_targets?: Array<{
+      region: string;
+      account_id?: string | null;
+      artifact_bucket?: string | null;
+    }>;
+    accounts: Array<{
+      account_id: string;
+      role_arn: string;
+      runtime_role_arn: string;
+      mcp_runtime_role_arn: string;
+      harness_role_arn: string;
+      artifact_bucket: string;
+      region: string;
+    }>;
+  }> {
     return apiRequest(`/api/admin/deploy-targets`, {}, this.baseUrl);
   }
 
@@ -495,12 +538,55 @@ export class ApiClient {
     return apiRequest(`/api/admin/deploy-targets/enable`, { method: 'POST', body: JSON.stringify({ enabled }) }, this.baseUrl);
   }
 
-  async addDeployRegion(region: string): Promise<{ regions: string[] }> {
-    return apiRequest(`/api/admin/deploy-targets/regions`, { method: 'POST', body: JSON.stringify({ region }) }, this.baseUrl);
+  async addDeployRegion(
+    region: string,
+    artifactBucket?: string,
+  ): Promise<{
+    region: string;
+    account_id: string;
+    artifact_bucket: string;
+    validated: boolean;
+    regions: string[];
+  }> {
+    return apiRequest(`/api/admin/deploy-targets/regions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        region,
+        ...(artifactBucket ? { artifact_bucket: artifactBucket } : {}),
+      }),
+    }, this.baseUrl);
   }
 
-  async addDeployAccount(accountId: string, roleArn: string, region: string): Promise<{ account_id: string; validated: boolean }> {
-    return apiRequest(`/api/admin/deploy-targets/accounts`, { method: 'POST', body: JSON.stringify({ account_id: accountId, role_arn: roleArn, region }) }, this.baseUrl);
+  async addDeployAccount(
+    accountId: string,
+    roleArn: string,
+    region: string,
+    runtimeRoleArn?: string,
+    mcpRuntimeRoleArn?: string,
+    harnessRoleArn?: string,
+    artifactBucket?: string,
+  ): Promise<{
+    account_id: string;
+    runtime_role_arn: string;
+    mcp_runtime_role_arn: string;
+    harness_role_arn: string;
+    artifact_bucket: string;
+    validated: boolean;
+  }> {
+    return apiRequest(`/api/admin/deploy-targets/accounts`, {
+      method: 'POST',
+      body: JSON.stringify({
+        account_id: accountId,
+        role_arn: roleArn,
+        region,
+        ...(runtimeRoleArn ? { runtime_role_arn: runtimeRoleArn } : {}),
+        ...(mcpRuntimeRoleArn
+          ? { mcp_runtime_role_arn: mcpRuntimeRoleArn }
+          : {}),
+        ...(harnessRoleArn ? { harness_role_arn: harnessRoleArn } : {}),
+        ...(artifactBucket ? { artifact_bucket: artifactBucket } : {}),
+      }),
+    }, this.baseUrl);
   }
 }
 

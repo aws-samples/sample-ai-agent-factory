@@ -202,7 +202,11 @@ class FakeStorage:
     def get(self, workflow_id: str) -> FakeWorkflow | None:
         return self._rows.get(workflow_id)
 
-    def update(self, workflow_id: str, wf: FakeWorkflow) -> FakeWorkflow | None:
+    def update(
+        self, workflow_id: str, wf: FakeWorkflow, *, expected_revision: int | None = None
+    ) -> FakeWorkflow | None:
+        # F-15 widened the store contract with a keyword-only fence; this fake carries no
+        # revision, so the router passes None and the write is unfenced here.
         if workflow_id not in self._rows:
             return None
         stored = wf.model_copy(update={"id": workflow_id})
@@ -480,7 +484,7 @@ def real_storage():
         def get(self, wid):
             return self._rows.get(wid)
 
-        def update(self, wid, wf):
+        def update(self, wid, wf, *, expected_revision=None):  # F-15 keyword-only fence
             if wid not in self._rows:
                 return None
             self._rows[wid] = wf

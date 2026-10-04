@@ -14,6 +14,7 @@ from app.routers import workflows_router
 from app.routers.flows import router as flows_router
 from app.routers.git_sync import router as git_sync_router
 from app.routers.observability import router as observability_router
+from app.routers.provider_credentials import router as provider_credentials_router
 from app.routers.workspaces import router as workspaces_router
 
 # routers/deployment.py and routers/tools.py used to mount /api/deploy + tool
@@ -99,6 +100,7 @@ app.include_router(flows_router, prefix="/api", tags=["flows"])
 ## deployment_router and tools_router were mounted here previously — see comment
 ## near imports above. The Deployment Lambda owns those endpoints now.
 app.include_router(observability_router, prefix="/api", tags=["observability"])
+app.include_router(provider_credentials_router)
 # Phase 2 Gap 2E — workspace sharing + RBAC. Mounted on the workflow Lambda
 # because it reads/writes workflow storage. Router carries its own /api prefix.
 app.include_router(workspaces_router)

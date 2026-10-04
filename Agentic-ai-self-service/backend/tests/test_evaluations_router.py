@@ -10,14 +10,55 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi import FastAPI
+from botocore.exceptions import ClientError
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, "src")
 
-from app.routers.evaluations import router as evaluations_router  # noqa: E402
-from app.services.agent_versions_store import AgentVersion, RuntimeSlots  # noqa: E402
+from app.routers.evaluations import (  # noqa: E402
+    _default_evaluation_config_name,
+)
+from app.routers.evaluations import (
+    router as evaluations_router,
+)
 from app.services.auth import _LOCAL_DEV_SUB, get_caller_sub  # noqa: E402
+from app.services.runtime_target_context import OwnedRuntimeTarget  # noqa: E402
+
+
+def _aws_error(code: str, operation: str, message: str = "sensitive internal detail") -> ClientError:
+    return ClientError(
+        {
+            "Error": {"Code": code, "Message": message},
+            "ResponseMetadata": {"RequestId": "sensitive-request-id"},
+        },
+        operation,
+    )
+
+
+def _target(
+    runtime_id: str,
+    *,
+    ctrl=None,
+    logs=None,
+    cloudwatch=None,
+) -> OwnedRuntimeTarget:
+    clients = {
+        "bedrock-agentcore-control": ctrl or MagicMock(name="target_ctrl"),
+        "logs": logs or MagicMock(name="target_logs"),
+        "cloudwatch": cloudwatch or MagicMock(name="target_cloudwatch"),
+    }
+    session = MagicMock(name="target_session")
+    session.client.side_effect = lambda service, **_kwargs: clients[service]
+    return OwnedRuntimeTarget(
+        runtime_id=runtime_id,
+        version_id="v1",
+        deployment_id="d1",
+        region="eu-west-1",
+        account_id="222222222222",
+        role_arn="arn:aws:iam::222222222222:role/DeploymentRole",
+        session=session,
+    )
 
 
 @pytest.fixture
@@ -34,61 +75,32 @@ def client(app_with_router: FastAPI) -> TestClient:
 
 
 def test_evaluation_config_404_when_no_slot(client: TestClient):
-    with patch("app.routers.evaluations.get_slots_store") as slots_store_mock:
-        slots_store_mock.return_value.get.return_value = None
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        side_effect=HTTPException(status_code=404, detail="Not found"),
+    ):
         resp = client.get("/api/runtimes/myagent/evaluation-config")
     assert resp.status_code == 404
 
 
 def test_evaluation_config_cross_tenant_returns_404(client: TestClient):
     """Different owner_sub on the slot row → 404 (existence non-disclosure)."""
-    with (
-        patch("app.routers.evaluations.get_slots_store") as slots_store_mock,
-        patch("app.routers.evaluations.get_versions_store") as versions_store_mock,
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        side_effect=HTTPException(status_code=404, detail="Not found"),
     ):
-        slots_store_mock.return_value.get.return_value = RuntimeSlots(
-            runtime_name="myagent",
-            owner_sub="someone-else",
-            production_version_id="v1",
-        )
-        # Even though we never reach versions_store.get, set up a return so a
-        # bug that bypasses assert_owner can't accidentally pass the test.
-        versions_store_mock.return_value.get.return_value = AgentVersion(
-            runtime_name="myagent",
-            version_id="v1",
-            owner_sub="someone-else",
-            created_at="2026-05-28T00:00:00+00:00",
-            deployment_id="d1",
-            agentcore_runtime_name="myagent_xyz",
-            runtime_id="rt-xyz",
-        )
         resp = client.get("/api/runtimes/myagent/evaluation-config")
     assert resp.status_code == 404
 
 
-def test_evaluation_config_match_by_runtime_id_substring(client: TestClient):
-    """Matched configs are returned with evaluators + sampling rate."""
+def test_evaluation_config_matches_an_exact_runtime_target(client: TestClient):
+    """A generated name is only accepted after its data source binds the runtime."""
     runtime_id = "myagent_abcd1234-runtime-abcd1234"
-    with (
-        patch("app.routers.evaluations.get_slots_store") as slots_store_mock,
-        patch("app.routers.evaluations.get_versions_store") as versions_store_mock,
-        patch("boto3.client") as boto_mock,
+    ctrl_client = MagicMock()
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target(runtime_id, ctrl=ctrl_client),
     ):
-        slots_store_mock.return_value.get.return_value = RuntimeSlots(
-            runtime_name="myagent",
-            owner_sub=_LOCAL_DEV_SUB,
-            production_version_id="v1",
-        )
-        versions_store_mock.return_value.get.return_value = AgentVersion(
-            runtime_name="myagent",
-            version_id="v1",
-            owner_sub=_LOCAL_DEV_SUB,
-            created_at="2026-05-28T00:00:00+00:00",
-            deployment_id="d1",
-            agentcore_runtime_name="myagent_abcd1234",
-            runtime_id=runtime_id,
-        )
-        ctrl_client = MagicMock()
         ctrl_client.list_online_evaluation_configs.return_value = {
             "onlineEvaluationConfigs": [
                 {
@@ -99,6 +111,12 @@ def test_evaluation_config_match_by_runtime_id_substring(client: TestClient):
         }
         ctrl_client.get_online_evaluation_config.return_value = {
             "onlineEvaluationConfigName": f"eval_{runtime_id[:32]}",
+            "dataSourceConfig": {
+                "cloudWatchLogs": {
+                    "serviceNames": [runtime_id],
+                    "logGroupNames": [],
+                }
+            },
             "evaluators": [
                 {"evaluatorId": "Builtin.GoalSuccessRate"},
                 {"evaluatorId": "Builtin.Correctness"},
@@ -106,7 +124,6 @@ def test_evaluation_config_match_by_runtime_id_substring(client: TestClient):
             "rule": {"samplingConfig": {"samplingPercentage": 50}},
             "status": "ENABLED",
         }
-        boto_mock.return_value = ctrl_client
 
         resp = client.get("/api/runtimes/myagent/evaluation-config")
 
@@ -128,26 +145,11 @@ def test_evaluation_config_fallback_resolves_custom_named_config(client: TestCli
     targets (dataSourceConfig.cloudWatchLogs serviceNames / logGroupNames) —
     live-verified 404 without this."""
     runtime_id = "myagent_abcd1234-runtime-abcd1234"
-    with (
-        patch("app.routers.evaluations.get_slots_store") as slots_store_mock,
-        patch("app.routers.evaluations.get_versions_store") as versions_store_mock,
-        patch("boto3.client") as boto_mock,
+    ctrl_client = MagicMock()
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target(runtime_id, ctrl=ctrl_client),
     ):
-        slots_store_mock.return_value.get.return_value = RuntimeSlots(
-            runtime_name="myagent",
-            owner_sub=_LOCAL_DEV_SUB,
-            production_version_id="v1",
-        )
-        versions_store_mock.return_value.get.return_value = AgentVersion(
-            runtime_name="myagent",
-            version_id="v1",
-            owner_sub=_LOCAL_DEV_SUB,
-            created_at="2026-05-28T00:00:00+00:00",
-            deployment_id="d1",
-            agentcore_runtime_name="myagent_abcd1234",
-            runtime_id=runtime_id,
-        )
-        ctrl_client = MagicMock()
         # Two configs: one unrelated, one custom-named targeting OUR runtime.
         ctrl_client.list_online_evaluation_configs.return_value = {
             "onlineEvaluationConfigs": [
@@ -192,7 +194,6 @@ def test_evaluation_config_fallback_resolves_custom_named_config(client: TestCli
             }
 
         ctrl_client.get_online_evaluation_config.side_effect = _get_cfg
-        boto_mock.return_value = ctrl_client
 
         resp = client.get("/api/runtimes/myagent/evaluation-config")
 
@@ -205,30 +206,17 @@ def test_evaluation_config_fallback_resolves_custom_named_config(client: TestCli
     assert body["status"] == "ACTIVE"
 
 
-def test_evaluation_config_prefers_eval_heuristic_name_over_fallback(client: TestClient):
-    """When an `eval_`-heuristic-named config exists, it wins WITHOUT the
-    fallback describing other configs."""
+def test_evaluation_config_accepts_the_exact_default_name_after_target_verification(
+    client: TestClient,
+):
+    """The default-named config wins only after every candidate is target-bound."""
     runtime_id = "myagent_abcd1234-runtime-abcd1234"
-    with (
-        patch("app.routers.evaluations.get_slots_store") as slots_store_mock,
-        patch("app.routers.evaluations.get_versions_store") as versions_store_mock,
-        patch("boto3.client") as boto_mock,
+    default_name = _default_evaluation_config_name(runtime_id)
+    ctrl_client = MagicMock()
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target(runtime_id, ctrl=ctrl_client),
     ):
-        slots_store_mock.return_value.get.return_value = RuntimeSlots(
-            runtime_name="myagent",
-            owner_sub=_LOCAL_DEV_SUB,
-            production_version_id="v1",
-        )
-        versions_store_mock.return_value.get.return_value = AgentVersion(
-            runtime_name="myagent",
-            version_id="v1",
-            owner_sub=_LOCAL_DEV_SUB,
-            created_at="2026-05-28T00:00:00+00:00",
-            deployment_id="d1",
-            agentcore_runtime_name="myagent_abcd1234",
-            runtime_id=runtime_id,
-        )
-        ctrl_client = MagicMock()
         ctrl_client.list_online_evaluation_configs.return_value = {
             "onlineEvaluationConfigs": [
                 {
@@ -236,49 +224,216 @@ def test_evaluation_config_prefers_eval_heuristic_name_over_fallback(client: Tes
                     "onlineEvaluationConfigId": "ec-custom",
                 },
                 {
-                    "onlineEvaluationConfigName": f"eval_{runtime_id[:32]}",
+                    "onlineEvaluationConfigName": default_name,
                     "onlineEvaluationConfigId": "ec-heuristic",
                 },
             ]
         }
-        ctrl_client.get_online_evaluation_config.return_value = {
-            "onlineEvaluationConfigName": f"eval_{runtime_id[:32]}",
-            "evaluators": [{"evaluatorId": "Builtin.GoalSuccessRate"}],
-            "rule": {"samplingConfig": {"samplingPercentage": 100}},
-            "status": "ACTIVE",
-        }
-        boto_mock.return_value = ctrl_client
+
+        def _get_cfg(onlineEvaluationConfigId):  # noqa: N803
+            if onlineEvaluationConfigId == "ec-heuristic":
+                return {
+                    "onlineEvaluationConfigName": default_name,
+                    "dataSourceConfig": {
+                        "cloudWatchLogs": {
+                            "serviceNames": [runtime_id],
+                            "logGroupNames": [],
+                        }
+                    },
+                    "evaluators": [{"evaluatorId": "Builtin.GoalSuccessRate"}],
+                    "rule": {"samplingConfig": {"samplingPercentage": 100}},
+                    "status": "ACTIVE",
+                }
+            return {
+                "onlineEvaluationConfigName": "my_custom_eval_name",
+                "dataSourceConfig": {
+                    "cloudWatchLogs": {
+                        "serviceNames": ["unrelated-runtime"],
+                        "logGroupNames": [],
+                    }
+                },
+            }
+
+        ctrl_client.get_online_evaluation_config.side_effect = _get_cfg
 
         resp = client.get("/api/runtimes/myagent/evaluation-config")
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["config_id"] == "ec-heuristic"
-    # Only the single detail Get for the matched config — no fallback sweep.
-    ctrl_client.get_online_evaluation_config.assert_called_once_with(onlineEvaluationConfigId="ec-heuristic")
+    assert [
+        call.kwargs["onlineEvaluationConfigId"] for call in ctrl_client.get_online_evaluation_config.call_args_list
+    ] == ["ec-heuristic", "ec-custom"]
+
+
+def test_evaluation_config_name_prefix_cannot_select_another_runtime(client: TestClient):
+    runtime_id = "runtime_with_a_shared_prefix_1234567890_ours"
+    other_runtime = "runtime_with_a_shared_prefix_1234567890_other"
+    ctrl_client = MagicMock()
+    ctrl_client.list_online_evaluation_configs.return_value = {
+        "onlineEvaluationConfigs": [
+            {
+                "onlineEvaluationConfigName": f"eval_{runtime_id[:32]}",
+                "onlineEvaluationConfigId": "ec-other",
+            }
+        ]
+    }
+    ctrl_client.get_online_evaluation_config.return_value = {
+        "onlineEvaluationConfigName": f"eval_{runtime_id[:32]}",
+        "onlineEvaluationConfigId": "ec-other",
+        "dataSourceConfig": {
+            "cloudWatchLogs": {
+                "serviceNames": [other_runtime],
+                "logGroupNames": [
+                    f"/aws/bedrock-agentcore/runtimes/{other_runtime}-DEFAULT",
+                ],
+            }
+        },
+    }
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target(runtime_id, ctrl=ctrl_client),
+    ):
+        resp = client.get("/api/runtimes/myagent/evaluation-config")
+
+    assert resp.status_code == 404
+
+
+def test_evaluation_config_log_group_match_is_exact_not_a_substring(client: TestClient):
+    runtime_id = "runtime-one"
+    ctrl_client = MagicMock()
+    ctrl_client.list_online_evaluation_configs.return_value = {
+        "onlineEvaluationConfigs": [
+            {
+                "onlineEvaluationConfigName": "custom",
+                "onlineEvaluationConfigId": "ec-other",
+            }
+        ]
+    }
+    ctrl_client.get_online_evaluation_config.return_value = {
+        "onlineEvaluationConfigName": "custom",
+        "onlineEvaluationConfigId": "ec-other",
+        "dataSourceConfig": {
+            "cloudWatchLogs": {
+                "serviceNames": [],
+                "logGroupNames": [
+                    f"/aws/bedrock-agentcore/runtimes/{runtime_id}-suffix-DEFAULT",
+                ],
+            }
+        },
+    }
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target(runtime_id, ctrl=ctrl_client),
+    ):
+        resp = client.get("/api/runtimes/myagent/evaluation-config")
+
+    assert resp.status_code == 404
+
+
+def test_evaluation_config_rejects_string_shaped_target_lists(client: TestClient):
+    runtime_id = "runtime-one"
+    ctrl_client = MagicMock()
+    ctrl_client.list_online_evaluation_configs.return_value = {
+        "onlineEvaluationConfigs": [
+            {
+                "onlineEvaluationConfigName": "custom",
+                "onlineEvaluationConfigId": "ec-other",
+            }
+        ]
+    }
+    ctrl_client.get_online_evaluation_config.return_value = {
+        "onlineEvaluationConfigName": "custom",
+        "onlineEvaluationConfigId": "ec-other",
+        "dataSourceConfig": {
+            "cloudWatchLogs": {
+                # A string would turn ``runtime_id in service_names`` back into
+                # substring matching if response shapes were not validated.
+                "serviceNames": f"prefix-{runtime_id}-suffix",
+                "logGroupNames": [],
+            }
+        },
+    }
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target(runtime_id, ctrl=ctrl_client),
+    ):
+        resp = client.get("/api/runtimes/myagent/evaluation-config")
+
+    assert resp.status_code == 404
+
+
+def test_malformed_evaluation_config_detail_fails_sanitized(client: TestClient):
+    ctrl_client = MagicMock()
+    ctrl_client.list_online_evaluation_configs.return_value = {
+        "onlineEvaluationConfigs": [
+            {
+                "onlineEvaluationConfigName": "custom",
+                "onlineEvaluationConfigId": "ec-bad",
+            }
+        ]
+    }
+    ctrl_client.get_online_evaluation_config.return_value = ["not", "an", "object"]
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target("runtime-one", ctrl=ctrl_client),
+    ):
+        resp = client.get("/api/runtimes/myagent/evaluation-config")
+
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "Runtime observability is temporarily unavailable. Try again shortly."
+
+
+def test_multiple_custom_configs_for_one_runtime_fail_closed(client: TestClient):
+    runtime_id = "runtime-one"
+    ctrl_client = MagicMock()
+    ctrl_client.list_online_evaluation_configs.return_value = {
+        "onlineEvaluationConfigs": [
+            {
+                "onlineEvaluationConfigName": "custom-one",
+                "onlineEvaluationConfigId": "ec-1",
+            },
+            {
+                "onlineEvaluationConfigName": "custom-two",
+                "onlineEvaluationConfigId": "ec-2",
+            },
+        ]
+    }
+    ctrl_client.get_online_evaluation_config.side_effect = [
+        {
+            "onlineEvaluationConfigName": "custom-one",
+            "dataSourceConfig": {
+                "cloudWatchLogs": {
+                    "serviceNames": [runtime_id],
+                }
+            },
+        },
+        {
+            "onlineEvaluationConfigName": "custom-two",
+            "dataSourceConfig": {
+                "cloudWatchLogs": {
+                    "serviceNames": [runtime_id],
+                }
+            },
+        },
+    ]
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target(runtime_id, ctrl=ctrl_client),
+    ):
+        resp = client.get("/api/runtimes/myagent/evaluation-config")
+
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "Runtime observability is temporarily unavailable. Try again shortly."
 
 
 def test_evaluation_config_404_when_no_match(client: TestClient):
     """No matching config → 404 (not 500)."""
-    with (
-        patch("app.routers.evaluations.get_slots_store") as slots_store_mock,
-        patch("app.routers.evaluations.get_versions_store") as versions_store_mock,
-        patch("boto3.client") as boto_mock,
+    runtime_id = "myagent_abcd1234-rt-xyz"
+    ctrl_client = MagicMock()
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target(runtime_id, ctrl=ctrl_client),
     ):
-        slots_store_mock.return_value.get.return_value = RuntimeSlots(
-            runtime_name="myagent",
-            owner_sub=_LOCAL_DEV_SUB,
-            production_version_id="v1",
-        )
-        versions_store_mock.return_value.get.return_value = AgentVersion(
-            runtime_name="myagent",
-            version_id="v1",
-            owner_sub=_LOCAL_DEV_SUB,
-            created_at="2026-05-28T00:00:00+00:00",
-            deployment_id="d1",
-            agentcore_runtime_name="myagent_abcd1234",
-            runtime_id="myagent_abcd1234-rt-xyz",
-        )
-        ctrl_client = MagicMock()
         ctrl_client.list_online_evaluation_configs.return_value = {
             "onlineEvaluationConfigs": [
                 {
@@ -287,7 +442,15 @@ def test_evaluation_config_404_when_no_match(client: TestClient):
                 }
             ]
         }
-        boto_mock.return_value = ctrl_client
+        ctrl_client.get_online_evaluation_config.return_value = {
+            "onlineEvaluationConfigName": "eval_unrelated_other_agent",
+            "dataSourceConfig": {
+                "cloudWatchLogs": {
+                    "serviceNames": ["unrelated-runtime"],
+                    "logGroupNames": [],
+                }
+            },
+        }
         resp = client.get("/api/runtimes/myagent/evaluation-config")
     assert resp.status_code == 404
 
@@ -301,36 +464,219 @@ def test_invalid_runtime_name_rejected(client: TestClient):
 def test_evaluation_results_handles_missing_log_group(client: TestClient):
     """If the runtime hasn't received traffic yet, the log group doesn't exist
     yet — treat that as "no results", not a 500."""
-    with (
-        patch("app.routers.evaluations.get_slots_store") as slots_store_mock,
-        patch("app.routers.evaluations.get_versions_store") as versions_store_mock,
-        patch("boto3.client") as boto_mock,
+    logs_client = MagicMock()
+    ctrl_client = MagicMock()
+    ctrl_client.list_online_evaluation_configs.return_value = {"onlineEvaluationConfigs": []}
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target("rt-xyz", ctrl=ctrl_client, logs=logs_client),
     ):
-        slots_store_mock.return_value.get.return_value = RuntimeSlots(
-            runtime_name="myagent",
-            owner_sub=_LOCAL_DEV_SUB,
-            production_version_id="v1",
-        )
-        versions_store_mock.return_value.get.return_value = AgentVersion(
-            runtime_name="myagent",
-            version_id="v1",
-            owner_sub=_LOCAL_DEV_SUB,
-            created_at="2026-05-28T00:00:00+00:00",
-            deployment_id="d1",
-            agentcore_runtime_name="myagent_abcd1234",
-            runtime_id="rt-xyz",
-        )
-        logs_client = MagicMock()
 
         class _RNF(Exception):
             pass
 
         logs_client.exceptions.ResourceNotFoundException = _RNF
         logs_client.start_query.side_effect = _RNF()
-        boto_mock.return_value = logs_client
 
         resp = client.get("/api/runtimes/myagent/evaluations")
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["results"] == []
     assert "No evaluation log group" in (body.get("message") or "")
+
+
+def test_evaluation_results_use_a_custom_configs_exact_result_group(client: TestClient):
+    runtime_id = "runtime-one"
+    ctrl_client = MagicMock()
+    ctrl_client.list_online_evaluation_configs.return_value = {
+        "onlineEvaluationConfigs": [
+            {
+                "onlineEvaluationConfigName": "custom",
+                "onlineEvaluationConfigId": "ec-custom",
+            }
+        ]
+    }
+    ctrl_client.get_online_evaluation_config.return_value = {
+        "onlineEvaluationConfigName": "custom",
+        "dataSourceConfig": {
+            "cloudWatchLogs": {
+                "serviceNames": [runtime_id],
+            }
+        },
+    }
+    logs_client = MagicMock()
+    logs_client.start_query.return_value = {"queryId": "query-1"}
+    logs_client.get_query_results.return_value = {
+        "status": "Complete",
+        "results": [],
+    }
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target(runtime_id, ctrl=ctrl_client, logs=logs_client),
+    ):
+        resp = client.get("/api/runtimes/myagent/evaluations")
+
+    assert resp.status_code == 200
+    assert resp.json()["log_group_name"] == ("/aws/bedrock-agentcore/evaluations/results/ec-custom")
+    assert logs_client.start_query.call_args.kwargs["logGroupName"] == (
+        "/aws/bedrock-agentcore/evaluations/results/ec-custom"
+    )
+
+
+def test_evaluation_config_list_failure_is_sanitized_and_fails_closed(client: TestClient):
+    ctrl_client = MagicMock()
+    ctrl_client.list_online_evaluation_configs.side_effect = _aws_error(
+        "AccessDeniedException",
+        "ListOnlineEvaluationConfigs",
+        "role arn:aws:iam::222222222222:role/private denied; request sensitive-request-id",
+    )
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target("rt-xyz", ctrl=ctrl_client),
+    ):
+        resp = client.get("/api/runtimes/myagent/evaluation-config")
+
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "Runtime observability is temporarily unavailable. Try again shortly."
+    assert "222222222222" not in resp.text
+    assert "sensitive-request-id" not in resp.text
+
+
+def test_evaluation_config_fallback_does_not_turn_access_denied_into_404(client: TestClient):
+    runtime_id = "myagent_abcd1234-runtime-abcd1234"
+    ctrl_client = MagicMock()
+    ctrl_client.list_online_evaluation_configs.return_value = {
+        "onlineEvaluationConfigs": [
+            {
+                "onlineEvaluationConfigName": "custom-name",
+                "onlineEvaluationConfigId": "ec-private",
+            }
+        ]
+    }
+    ctrl_client.get_online_evaluation_config.side_effect = _aws_error(
+        "AccessDeniedException",
+        "GetOnlineEvaluationConfig",
+    )
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target(runtime_id, ctrl=ctrl_client),
+    ):
+        resp = client.get("/api/runtimes/myagent/evaluation-config")
+
+    assert resp.status_code == 503
+    assert "sensitive" not in resp.text
+
+
+def test_evaluation_results_config_lookup_failure_does_not_query_a_fallback_group(client: TestClient):
+    ctrl_client = MagicMock()
+    logs_client = MagicMock()
+    ctrl_client.list_online_evaluation_configs.side_effect = _aws_error(
+        "AccessDeniedException",
+        "ListOnlineEvaluationConfigs",
+    )
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target("rt-xyz", ctrl=ctrl_client, logs=logs_client),
+    ):
+        resp = client.get("/api/runtimes/myagent/evaluations")
+
+    assert resp.status_code == 503
+    logs_client.start_query.assert_not_called()
+
+
+def test_evaluation_query_failure_never_returns_the_aws_exception(client: TestClient):
+    ctrl_client = MagicMock()
+    ctrl_client.list_online_evaluation_configs.return_value = {"onlineEvaluationConfigs": []}
+    logs_client = MagicMock()
+    logs_client.start_query.side_effect = _aws_error(
+        "AccessDeniedException",
+        "StartQuery",
+        "log-group arn:aws:logs:eu-west-1:222222222222:log-group:private request sensitive-request-id",
+    )
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target("rt-xyz", ctrl=ctrl_client, logs=logs_client),
+    ):
+        resp = client.get("/api/runtimes/myagent/evaluations")
+
+    assert resp.status_code == 503
+    assert "222222222222" not in resp.text
+    assert "sensitive-request-id" not in resp.text
+
+
+def test_evaluation_query_poll_failure_never_returns_the_aws_exception(client: TestClient):
+    ctrl_client = MagicMock()
+    ctrl_client.list_online_evaluation_configs.return_value = {"onlineEvaluationConfigs": []}
+    logs_client = MagicMock()
+    logs_client.start_query.return_value = {"queryId": "query-1"}
+    logs_client.get_query_results.side_effect = _aws_error(
+        "AccessDeniedException",
+        "GetQueryResults",
+        "query in account 222222222222 denied; request sensitive-request-id",
+    )
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target("rt-xyz", ctrl=ctrl_client, logs=logs_client),
+    ):
+        resp = client.get("/api/runtimes/myagent/evaluations")
+
+    assert resp.status_code == 503
+    assert "222222222222" not in resp.text
+    assert "sensitive-request-id" not in resp.text
+
+
+@pytest.mark.parametrize("terminal_status", ["Failed", "Cancelled"])
+def test_evaluation_query_failure_status_is_not_returned_as_http_200(
+    client: TestClient,
+    terminal_status: str,
+):
+    ctrl_client = MagicMock()
+    ctrl_client.list_online_evaluation_configs.return_value = {"onlineEvaluationConfigs": []}
+    logs_client = MagicMock()
+    logs_client.start_query.return_value = {"queryId": "query-1"}
+    logs_client.get_query_results.return_value = {
+        "status": terminal_status,
+        "results": [],
+    }
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target("rt-xyz", ctrl=ctrl_client, logs=logs_client),
+    ):
+        resp = client.get("/api/runtimes/myagent/evaluations")
+
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "Runtime observability is temporarily unavailable. Try again shortly."
+
+
+def test_dashboard_not_found_is_the_only_failure_reported_as_missing(client: TestClient):
+    cloudwatch = MagicMock()
+    cloudwatch.get_dashboard.side_effect = _aws_error(
+        "ResourceNotFound",
+        "GetDashboard",
+    )
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target("rt-xyz", cloudwatch=cloudwatch),
+    ):
+        resp = client.get("/api/runtimes/myagent/dashboard-url")
+
+    assert resp.status_code == 200
+    assert resp.json()["exists"] is False
+
+
+def test_dashboard_permission_failure_is_not_misreported_as_missing(client: TestClient):
+    cloudwatch = MagicMock()
+    cloudwatch.get_dashboard.side_effect = _aws_error(
+        "AccessDenied",
+        "GetDashboard",
+        "dashboard private-dashboard in account 222222222222; request sensitive-request-id",
+    )
+    with patch(
+        "app.routers.evaluations.resolve_owned_runtime_target",
+        return_value=_target("rt-xyz", cloudwatch=cloudwatch),
+    ):
+        resp = client.get("/api/runtimes/myagent/dashboard-url")
+
+    assert resp.status_code == 503
+    assert "222222222222" not in resp.text
+    assert "sensitive-request-id" not in resp.text

@@ -40,6 +40,36 @@ from app.services.code_generator import generate_agent_code
 # Config + stub helpers
 # ---------------------------------------------------------------------------
 
+_STUBBED_MODULE_NAMES = (
+    "strands",
+    "strands.models",
+    "strands.models.bedrock",
+    "bedrock_agentcore",
+    "bedrock_agentcore.runtime",
+    "starlette",
+    "starlette.responses",
+    "httpx",
+)
+_MISSING = object()
+
+
+@pytest.fixture(autouse=True)
+def _restore_modules_replaced_by_generated_code_stubs():
+    """Keep the generated-module harness from poisoning later test imports.
+
+    The old helper wrote a fake top-level ``starlette`` into ``sys.modules`` and
+    never restored it. Any later test importing FastAPI then failed because the
+    fake had no ``status`` module. The A2A tests passed alone, masking the leak;
+    this fixture makes every test return the interpreter to its entry state.
+    """
+    saved = {name: sys.modules.get(name, _MISSING) for name in _STUBBED_MODULE_NAMES}
+    yield
+    for name, module in saved.items():
+        if module is _MISSING:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
+
 
 def _cfg(protocol: str = "A2A"):
     return RuntimeConfig(

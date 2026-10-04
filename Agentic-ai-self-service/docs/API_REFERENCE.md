@@ -23,12 +23,99 @@ Every API endpoint the platform exposes, plus deploy-time configuration variable
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/deploy` | Start deployment (returns 202 with deployment_id and execution_arn) |
+| `POST` | `/api/deploy` | Start deployment (returns 202 with `deployment_id`, status, and message; the Step Functions execution ARN is operator-only state) |
 | `GET` | `/api/deploy/{deployment_id}` | Get deployment status from DynamoDB |
 | `POST` | `/api/test-runtime` | Test a deployed agent with a prompt (supports session_id for conversation context) |
 | `DELETE` | `/api/runtime/{id}` | Delete runtime + gateway + Cognito + Lambda (full cleanup) |
 | `POST` | `/api/generate-tool` | AI Tool Generator -- generate Lambda code from natural language via Claude Sonnet |
 | `POST` | `/api/generate-cfn-template` | Generate downloadable CloudFormation stack (template YAML + deploy scripts + code artifacts) |
+
+#### CloudFormation export naming and tags
+
+`POST /api/generate-cfn-template` accepts these optional governance fields in the
+normal `DeployRequest` body:
+
+```json
+{
+  "resourceTags": {
+    "CostCentre": "ECB-42"
+  },
+  "tagProfile": "regulated-production",
+  "namingProfile": {
+    "prefix": "ecb",
+    "resourceNames": {
+      "gateway": "{prefix}-{deployment}-gw",
+      "runtime": "{prefix}_{deployment}_agent"
+    }
+  }
+}
+```
+
+`tagProfile` is resolved server-side and merged with `resourceTags`; the emitted
+template contains concrete tags, not a platform profile reference. `namingProfile`
+is CloudFormation-only: `/api/deploy` and `/api/export-python` return `400` if it is
+sent, preventing a naming request from being silently discarded.
+
+The prefix must match `^[a-z][a-z0-9]{0,11}$`. Override templates use
+`{prefix}` and `{deployment}`; component families require `{component}`, while
+stack-unique domains, vector buckets, and IAM roles require `{suffix}`. The complete
+family list and coupling behavior are documented in
+[Deployment Internals](DEPLOYMENT_INTERNALS.md#naming-and-governance-tags).
+
+With a profile, `DeploymentName` is limited to 20 lowercase alphanumeric characters
+and long user-controlled components receive a deterministic hash suffix before they
+can exceed an AWS name limit. Without a profile, the legacy physical-name formulas
+remain unchanged, but each exported template publishes a component-specific
+`DeploymentName.MaxLength` derived from the names it actually emits. This prevents a
+value that passes parameter validation from failing later at an AWS service boundary.
+
+Legacy explicit IAM role names include the CloudFormation stack name, which is a
+separate input from `DeploymentName`. The generated `deploy.sh` automatically uses
+CloudFormation-generated role names when a stack name exceeds the emitted safe limit
+(currently 47 characters), and fails early if explicit names are forced. A direct
+CloudFormation or Terraform consumer must set `UseExplicitRoleNames=false` for a stack
+name beyond the limit stated in that bundle.
+
+Full component templates can exceed CloudFormation's 51,200-byte inline body limit.
+The generated script stages `template.yaml` with `--s3-bucket`; Terraform consumers
+must upload it and use `aws_cloudformation_stack.template_url`, not
+`template_body = file(...)`. They must also stage the ZIPs in the download and pass
+the corresponding artifact keys and digests. The generated README contains the
+per-bundle parameter table and a minimal HCL wrapper.
+
+#### Live-deploy credential and customer-resource authorization
+
+`POST /api/deploy` treats every caller-supplied AWS ARN or resource ID as
+inventory, not as permission to use that resource.
+
+- Model-provider and per-canvas OTEL source secrets must be complete Secrets
+  Manager ARNs in their approved namespace and carry this platform stack's exact
+  ownership tag plus the authenticated caller binding. The platform-default OTEL
+  source is read only from operator-controlled configuration. In both cases the
+  raw value is copied into a new `agentcore-connector/*` secret in the selected
+  deployment account and region. Only that deployment-bound copy is placed in
+  Step Functions input or granted to the runtime; the long-lived source is not
+  granted to the runtime or deleted with the deployment.
+- A customer-owned resource used by a Knowledge Base must opt in with
+  `AgentCoreFlowsAccess=allow`. This applies to an existing Knowledge Base, S3
+  data bucket, S3 Vectors bucket/index, OpenSearch Serverless collection/index,
+  Aurora cluster, transformation Lambda, KMS key, and Knowledge Base credential
+  source secret. Account, region, and ARN resource family are also checked where
+  the service exposes them.
+- `OwnerSubHash` is optional. When present, it must equal the first 32 hex
+  characters of SHA-256 over the intended caller's Cognito `sub`; omitting it
+  makes the opt-in intentionally shared among authenticated users of this
+  platform stack.
+- Customer Knowledge Base credential values are copied into the same
+  deployment-bound target-secret lifecycle before Step Functions starts. The
+  customer source ARN never reaches the Bedrock service role.
+- Resources created by the platform use a stricter proof: exact stack,
+  deployment, and caller tags. A same-name conflict that cannot prove that
+  binding aborts rather than being adopted or modified.
+
+This contract is for the platform's live Step Functions deployment path. A
+downloaded CloudFormation bundle is a customer-owned artifact and is governed by
+the IAM roles and parameters in the account where the customer deploys it.
 
 ### Flows
 
@@ -68,9 +155,16 @@ Every API endpoint the platform exposes, plus deploy-time configuration variable
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/runtimes/{name}/triggers` | Register a `cron` / `eventbridge` / `s3` / `webhook` trigger (target ARN derived server-side; created as `registered`) |
-| `GET` | `/api/runtimes/{name}/triggers` | List the runtime's triggers |
-| `DELETE` | `/api/runtimes/{name}/triggers/{id}` | Delete a trigger |
+| `POST` | `/api/runtimes/{name}/triggers` | Provision an active `cron` / `eventbridge` / `s3` / `webhook` trigger against the exact owned production deployment; webhook creation returns its signing secret once |
+| `GET` | `/api/runtimes/{name}/triggers` | List the runtime's trigger lifecycle state and provisioned public handles |
+| `DELETE` | `/api/runtimes/{name}/triggers/{id}` | Stop and delete the trigger's platform-owned resources and webhook HMAC secret |
+
+Cron, EventBridge, and S3 triggers create stack-tagged EventBridge rules that
+send version-pinned invocation envelopes through the platform's durable SQS
+queue and DLQ. Webhooks use a static HMAC-authenticated route and return `202`
+after durable enqueue. Optional result callbacks are HTTPS-only, network
+filtered, DNS-rebinding resistant, and do not follow redirects. S3 triggers
+require EventBridge notifications to be enabled on each source bucket.
 
 ### Agent Registry
 

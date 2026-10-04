@@ -51,11 +51,40 @@ class EnableTargetsRequest(BaseModel):
 
 class RegionTargetRequest(BaseModel):
     region: str = Field(min_length=2, max_length=32, pattern=r"^[a-z]{2}-[a-z]+-\d$")
+    artifact_bucket: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=63,
+        pattern=r"^[a-z0-9][a-z0-9.-]*[a-z0-9]$",
+    )
 
 
 class AccountTargetRequest(BaseModel):
     account_id: str = Field(pattern=r"^\d{12}$")
-    role_arn: str = Field(pattern=r"^arn:aws:iam::\d{12}:role/.+$")
+    role_arn: str = Field(
+        pattern=(
+            r"^arn:aws(?:-[a-z0-9-]+)?:iam::\d{12}:"
+            r"role/AgentCoreFlowsDeploymentRole$"
+        )
+    )
+    runtime_role_arn: str | None = Field(
+        default=None,
+        pattern=r"^arn:aws(?:-[a-z0-9-]+)?:iam::\d{12}:role/.+$",
+    )
+    mcp_runtime_role_arn: str | None = Field(
+        default=None,
+        pattern=r"^arn:aws(?:-[a-z0-9-]+)?:iam::\d{12}:role/.+$",
+    )
+    harness_role_arn: str | None = Field(
+        default=None,
+        pattern=r"^arn:aws(?:-[a-z0-9-]+)?:iam::\d{12}:role/.+$",
+    )
+    artifact_bucket: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=63,
+        pattern=r"^[a-z0-9][a-z0-9.-]*[a-z0-9]$",
+    )
     region: str = Field(min_length=2, max_length=32, pattern=r"^[a-z]{2}-[a-z]+-\d$")
 
 
@@ -67,8 +96,29 @@ async def get_deploy_targets(_caller_sub: str = Depends(get_caller_sub)) -> dict
     return {
         "enabled": dt.targets_enabled(),
         "regions": dt.list_regions(),
+        "region_targets": [
+            {
+                "region": target.get("region"),
+                "account_id": target.get("account_id"),
+                "artifact_bucket": target.get("artifact_bucket"),
+            }
+            for target in dt.list_region_targets()
+        ],
         "accounts": [
-            {"account_id": a.get("account_id"), "role_arn": a.get("role_arn"), "region": a.get("region")}
+            {
+                "account_id": a.get("account_id"),
+                "role_arn": a.get("role_arn"),
+                "runtime_role_arn": a.get("runtime_role_arn") or dt.default_runtime_role_arn(a.get("account_id")),
+                "mcp_runtime_role_arn": a.get("mcp_runtime_role_arn")
+                or dt.default_mcp_runtime_role_arn(a.get("account_id")),
+                "harness_role_arn": a.get("harness_role_arn") or dt.default_harness_role_arn(a.get("account_id")),
+                "artifact_bucket": a.get("artifact_bucket")
+                or dt.default_artifact_bucket_name(
+                    a.get("account_id"),
+                    a.get("region") or dt.home_region(),
+                ),
+                "region": a.get("region"),
+            }
             for a in dt.list_accounts()
         ],
     }
@@ -87,8 +137,44 @@ async def enable_deploy_targets(body: EnableTargetsRequest, _caller_sub: str = D
 async def add_region_target(body: RegionTargetRequest, _caller_sub: str = Depends(get_caller_sub)) -> dict:
     from app.services import deploy_target as dt
 
-    dt.add_region(body.region)
-    return {"regions": dt.list_regions()}
+    if not dt.targets_enabled():
+        raise HTTPException(status_code=400, detail="Enable deployment targets first")
+    try:
+        session = dt.session_for_target(
+            account_id=None,
+            region=body.region,
+            require_gate=False,
+        )
+        account_id = str(session.client("sts").get_caller_identity()["Account"])
+        dt.require_platform_bucket_namespace(account_id, body.region, body.artifact_bucket)
+        artifact_bucket = dt.validate_artifact_bucket(
+            session,
+            account_id=account_id,
+            region=body.region,
+            artifact_bucket=body.artifact_bucket,
+            same_account=True,
+        )
+    except dt.TargetError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400,
+            detail="The platform account or regional artifacts bucket could not be validated",
+        ) from exc
+
+    dt.add_region(
+        body.region,
+        account_id=account_id,
+        artifact_bucket=artifact_bucket,
+    )
+    return {
+        "region": body.region,
+        "account_id": account_id,
+        "artifact_bucket": artifact_bucket,
+        "validated": True,
+        "regions": dt.list_regions(),
+        "region_targets": dt.list_region_targets(),
+    }
 
 
 @router.post("/deploy-targets/accounts", dependencies=[Depends(require_scopes("admin"))])
@@ -100,9 +186,41 @@ async def add_account_target(body: AccountTargetRequest, _caller_sub: str = Depe
 
     if not dt.targets_enabled():
         raise HTTPException(status_code=400, detail="Enable deployment targets first")
-    dt.add_account(body.account_id, body.role_arn, body.region)
     try:
-        dt.session_for_target(account_id=body.account_id, region=body.region)
+        session = dt.session_for_target(
+            account_id=body.account_id,
+            region=body.region,
+            role_arn=body.role_arn,
+        )
+        runtime_role_arn, mcp_runtime_role_arn, harness_role_arn = dt.validate_execution_roles(
+            session,
+            account_id=body.account_id,
+            runtime_role_arn=body.runtime_role_arn,
+            mcp_runtime_role_arn=body.mcp_runtime_role_arn,
+            harness_role_arn=body.harness_role_arn,
+        )
+        artifact_bucket = dt.validate_artifact_bucket(
+            session,
+            account_id=body.account_id,
+            region=body.region,
+            artifact_bucket=body.artifact_bucket,
+        )
     except dt.TargetError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    return {"account_id": body.account_id, "validated": True}
+    dt.add_account(
+        body.account_id,
+        body.role_arn,
+        body.region,
+        runtime_role_arn=runtime_role_arn,
+        mcp_runtime_role_arn=mcp_runtime_role_arn,
+        harness_role_arn=harness_role_arn,
+        artifact_bucket=artifact_bucket,
+    )
+    return {
+        "account_id": body.account_id,
+        "runtime_role_arn": runtime_role_arn,
+        "mcp_runtime_role_arn": mcp_runtime_role_arn,
+        "harness_role_arn": harness_role_arn,
+        "artifact_bucket": artifact_bucket,
+        "validated": True,
+    }

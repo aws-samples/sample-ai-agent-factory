@@ -3,7 +3,11 @@
  */
 
 import { apiRequest } from './client';
-import type { WorkflowDefinition, DeploymentStatus } from '../../types/workflow';
+import type {
+  DeploymentGovernanceV1,
+  DeploymentStatus,
+  WorkflowDefinition,
+} from '../../types/workflow';
 import type { ValidationResult } from '../../types/validation';
 import type { Flow, FlowCreateRequest, FlowUpdateRequest, FlowResponse, FlowListResponse } from '../../types/flow';
 
@@ -22,6 +26,7 @@ export interface WorkflowCreateRequest {
     y: number;
     zoom: number;
   };
+  governance?: DeploymentGovernanceV1;
   metadata: {
     author: string;
     tags?: string[];
@@ -41,6 +46,7 @@ export interface WorkflowUpdateRequest {
     y: number;
     zoom: number;
   };
+  governance?: DeploymentGovernanceV1;
   metadata?: {
     author: string;
     tags?: string[];

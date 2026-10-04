@@ -203,7 +203,7 @@ export function EvaluationConfigurationModal({
                   )}
                 </div>
                 <div className="text-xs text-gray-600 mt-0.5">{ev.description}</div>
-                <code className="text-[10px] font-mono text-gray-400 mt-0.5 block">
+                <code className="text-[10px] font-mono text-gray-500 mt-0.5 block">
                   {ev.id}
                 </code>
               </div>

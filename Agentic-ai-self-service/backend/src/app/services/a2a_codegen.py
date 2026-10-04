@@ -72,6 +72,10 @@ def _generate_a2a_agent(
     model_id: str,
     region: str,
     peer_config: dict | None = None,
+    *,
+    model_import: str = "from strands.models.bedrock import BedrockModel",
+    model_init: str | None = None,
+    provider_key_helper: str = "",
 ) -> str:
     """Return Python source for a self-contained A2A interop agent.
 
@@ -90,6 +94,8 @@ def _generate_a2a_agent(
     starlette / httpx stubs and contains NO ``from a2a`` (a2a-sdk) import.
     """
     peer_config = peer_config or {}
+    if model_init is None:
+        model_init = "model = BedrockModel(model_id=MODEL_ID, region_name=REGION)"
     capabilities = peer_config.get("capabilities") or []
     advertised_description = (
         peer_config.get("advertised_description")
@@ -126,7 +132,8 @@ from starlette.responses import JSONResponse
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from strands import Agent, tool
-from strands.models.bedrock import BedrockModel
+{model_import}
+{provider_key_helper}
 
 app = BedrockAgentCoreApp()
 
@@ -742,7 +749,8 @@ def _get_agent():
     global _model, _agent
     if _agent is None:
         if _model is None:
-            _model = BedrockModel(model_id=MODEL_ID, region_name=REGION)
+            {model_init}
+            _model = model
         _agent = Agent(model=_model, system_prompt=SYSTEM_PROMPT, tools=[call_a2a_peer])
     return _agent
 

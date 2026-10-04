@@ -12,7 +12,9 @@ swallowing beats propagating, so ``send`` returns a bool instead of throwing.
 
 import json
 import logging
+import re
 import time
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,43 @@ MAX_REASON_LENGTH = 1000
 
 _MAX_ATTEMPTS = 4
 _BACKOFF_SECONDS = (1, 3, 7)
+
+# CloudFormation custom resources receive a pre-signed URL for an AWS-owned S3
+# bucket whose name starts with this fixed prefix. Accepting arbitrary HTTPS is
+# still SSRF: a forged Lambda event could otherwise make this function PUT the
+# stack/resource identifiers and result body to any TLS endpoint it can reach.
+_STACK_REGION = re.compile(r"^[a-z]{2}(?:-gov)?-[a-z]+-\d+$")
+
+
+def is_usable_response_url(url: object, stack_id: object) -> bool:
+    """Return whether *url* has the CloudFormation pre-signed S3 shape."""
+    if not isinstance(url, str) or not url or not isinstance(stack_id, str) or any(ord(char) <= 32 for char in url):
+        return False
+    arn_parts = stack_id.split(":", 5)
+    if len(arn_parts) != 6 or arn_parts[2] != "cloudformation":
+        return False
+    region = arn_parts[3]
+    if not _STACK_REGION.fullmatch(region):
+        return False
+    response_bucket = f"cloudformation-custom-resource-response-{region.replace('-', '')}"
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
+    except ValueError:
+        return False
+    expected_host = re.compile(
+        rf"^{re.escape(response_bucket)}"
+        r"\.s3(?:[.-][a-z0-9-]+)*(?:\.amazonaws\.com|\.amazonaws\.com\.cn)$"
+    )
+    return bool(
+        parsed.scheme == "https"
+        and parsed.username is None
+        and parsed.password is None
+        and port in (None, 443)
+        and not parsed.fragment
+        and expected_host.fullmatch(host)
+    )
 
 
 def send(
@@ -82,12 +121,13 @@ def send(
 
     body = json.dumps(response_body).encode("utf-8")
     url = event.get("ResponseURL", "")
-    # The ResponseURL is a CloudFormation-issued pre-signed S3 URL, but enforce
-    # https anyway so a forged event can't make urlopen dereference file:// etc.
+    # The ResponseURL is a CloudFormation-issued pre-signed S3 URL. Enforce both
+    # HTTPS and that service's AWS-owned bucket-host shape so a forged event
+    # cannot turn the responder into an arbitrary PUT/SSRF primitive.
     # Returning False rather than raising: with no usable URL there is no way to
     # respond at all, and throwing from here would only mask that in the caller.
-    if not url.startswith("https://"):
-        logger.error("ResponseURL is missing or not https — cannot signal CloudFormation")
+    if not is_usable_response_url(url, event.get("StackId", "")):
+        logger.error("ResponseURL is missing or not a CloudFormation S3 response URL — cannot signal CloudFormation")
         return False
 
     # No part of the ResponseURL is logged, not even with the query string stripped.
@@ -113,8 +153,8 @@ def send(
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
             with (
-                urlopen(req) as resp
-            ):  # nosemgrep: dynamic-urllib-use-detected -- URL from CloudFormation ResponseURL (AWS-controlled, not user input)
+                urlopen(req) as resp  # nosec B310
+            ):  # nosemgrep: dynamic-urllib-use-detected -- URL validated as CloudFormation's AWS-owned S3 response host
                 logger.info("CFN response status: %s", resp.status)
             return True
         except Exception as e:  # noqa: BLE001

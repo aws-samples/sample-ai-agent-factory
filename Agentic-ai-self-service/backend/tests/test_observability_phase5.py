@@ -6,6 +6,7 @@ build_waterfall + classify_action are pure; AuditStore is moto-backed.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from unittest.mock import MagicMock, patch
 
 import boto3
 import pytest
@@ -15,7 +16,11 @@ from app.services.audit_store import (
     AuditStore,
     classify_action,
 )
-from app.services.trace_query import build_waterfall
+from app.services.trace_query import (
+    build_waterfall,
+    fetch_trace_waterfall,
+    validate_trace_id_filter,
+)
 
 moto = pytest.importorskip("moto")
 from moto import mock_aws  # noqa: E402
@@ -73,6 +78,73 @@ def test_waterfall_multiple_roots_sorted_by_offset():
     ]
     wf = build_waterfall(spans)
     assert [s["name"] for s in wf["spans"]] == ["first", "second"]
+
+
+def test_trace_query_reads_a_named_endpoint_log_group():
+    logs_client = MagicMock()
+
+    class _RNF(Exception):
+        pass
+
+    logs_client.exceptions.ResourceNotFoundException = _RNF
+    named_group = "/aws/bedrock-agentcore/runtimes/rt-xyz-production"
+    logs_client.describe_log_groups.return_value = {"logGroups": [{"logGroupName": named_group}]}
+    logs_client.start_query.return_value = {"queryId": "q-1"}
+    logs_client.get_query_results.return_value = {
+        "status": "Complete",
+        "results": [
+            [
+                {"field": "traceId", "value": "trace-1"},
+                {"field": "spanId", "value": "span-1"},
+                {"field": "parentSpanId", "value": ""},
+                {"field": "name", "value": "model.invoke"},
+                {"field": "startTimeUnixNano", "value": "1000000000"},
+                {"field": "endTimeUnixNano", "value": "1500000000"},
+            ]
+        ],
+    }
+
+    with patch("app.services.trace_query.boto3.client", return_value=logs_client):
+        result = fetch_trace_waterfall(
+            "rt-xyz",
+            100,
+            200,
+            "us-east-1",
+            poll_seconds=1,
+        )
+
+    assert result["trace_id"] == "trace-1"
+    assert result["spans"][0]["name"] == "model.invoke"
+    assert result["log_group_names"] == [named_group]
+    assert logs_client.start_query.call_args.kwargs["logGroupNames"] == [named_group]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("0123456789ABCDEF0123456789ABCDEF", "0123456789abcdef0123456789abcdef"),  # pragma: allowlist secret
+        ("1-ABCDEF12-0123456789ABCDEF01234567", "1-abcdef12-0123456789abcdef01234567"),  # pragma: allowlist secret
+    ],
+)
+def test_trace_filter_accepts_only_canonical_trace_wire_formats(raw, expected):
+    assert validate_trace_id_filter(raw) == expected
+
+
+def test_trace_filter_rejects_logs_insights_injection_before_any_aws_call():
+    logs_client = MagicMock()
+
+    with pytest.raises(ValueError, match="W3C or X-Ray"):
+        fetch_trace_waterfall(
+            "rt-xyz",
+            100,
+            200,
+            "us-east-1",
+            logs_client=logs_client,
+            trace_id='abc" | filter @message like /secret/',
+        )
+
+    logs_client.describe_log_groups.assert_not_called()
+    logs_client.start_query.assert_not_called()
 
 
 # -- classify_action (pure) --------------------------------------------------

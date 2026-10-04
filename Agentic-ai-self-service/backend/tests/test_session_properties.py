@@ -65,16 +65,16 @@ class _MultiPatch:
 
 
 def _capture_invoke_kwargs():
-    """Patch _create_agentcore_client to return a mock that captures the
-    last invoke_agent_runtime kwargs. Returns (patcher, captured_dict).
+    """Patch the target-aware session to capture invoke_agent_runtime kwargs.
 
     The captured_dict will be populated with the kwargs dict on each call.
 
-    Also stubs boto3.client so the ARN-construction branch
-    (``sts.get_caller_identity()`` when the deployment record has no
-    ``runtime_arn``) is hermetic — otherwise the test makes a REAL AWS call
-    and fails NoCredentialsError on CI (the local pass was masked by ambient
-    credentials).
+    A deployment RECORD is stubbed in too (F-9). These properties are about session-id
+    passthrough, but they used to reach the invoke only because a runtime with no record
+    was invoked anyway — the very defect F-9 closed. The stub uses ``user_id=None``, the
+    documented pre-tenancy carve-out, so the properties stay about session ids and not
+    about who the caller is. It carries no ``runtime_arn`` so the target session's
+    hermetic STS client still exercises the legacy ARN-construction branch.
     """
     captured = {}
     mock_client = MagicMock()
@@ -93,12 +93,28 @@ def _capture_invoke_kwargs():
     _sts = MagicMock()
     _sts.get_caller_identity.return_value = {"Account": "123456789012"}
 
-    def _boto3_client(service, *args, **kwargs):
-        return _sts if service == "sts" else MagicMock()
+    class _Session:
+        def client(self, service, *args, **kwargs):
+            if service == "sts":
+                return _sts
+            if service == "bedrock-agentcore":
+                return mock_client
+            return MagicMock()
+
+    _store = MagicMock()
+    _store._table = object()
+    _record = {
+        "deployment_id": "dep-session-props",
+        "workflow_id": "wf-session-props",
+        "user_id": None,
+        "runtime_id": "diag_runtime_abc123",
+        "status": "succeeded",
+    }
 
     patcher = _MultiPatch(
-        patch("app.deployment_handler._create_agentcore_client", return_value=mock_client),
-        patch("app.deployment_handler.boto3.client", side_effect=_boto3_client),
+        patch("app.deployment_handler._get_state_store", return_value=_store),
+        patch("app.deployment_handler._scan_for_runtime", return_value=_record),
+        patch("app.services.step_clients.session_for_event", return_value=_Session()),
     )
     return patcher, captured
 

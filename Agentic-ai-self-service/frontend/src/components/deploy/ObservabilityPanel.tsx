@@ -38,8 +38,10 @@ export function ObservabilityPanel({ runtimeName, refreshKey }: ObservabilityPan
       const result = await api.getDashboardUrl(runtimeName);
       setDashboard(result);
     } catch (e) {
-      // 401/403/404 are expected if the runtime has never been deployed — treat
-      // as a friendly empty state, not an error (Bug 136).
+      // 403/404 are expected if the runtime has never been deployed — treat
+      // as a friendly empty state, not an error (Bug 136). 401 is excluded: it
+      // only ever means the session died, and hiding that leaves the user staring
+      // at a dashboard-less panel with no idea they need to sign in again.
       if (isNotReadyError(e)) {
         setDashboard(null);
         setError(null);

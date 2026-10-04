@@ -142,8 +142,15 @@ export function PolicyConfigurationModal({
               required
             />
             <div className="space-y-1">
-              <label className="block text-sm font-medium text-gray-700">Default Effect</label>
+              <label
+                htmlFor="policy-default-effect"
+                className="block text-sm font-medium text-gray-700"
+              >
+                Default Effect
+              </label>
               <select
+                id="policy-default-effect"
+                aria-describedby="policy-default-effect-help"
                 value={config.defaultEffect}
                 onChange={(e) => updateField('defaultEffect', e.target.value as 'permit' | 'forbid')}
                 className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
@@ -151,7 +158,9 @@ export function PolicyConfigurationModal({
                 <option value="permit">Permit (allow by default)</option>
                 <option value="forbid">Forbid (deny by default)</option>
               </select>
-              <p className="text-xs text-gray-500">The default effect when no policy matches</p>
+              <p id="policy-default-effect-help" className="text-xs text-gray-500">
+                The default effect when no policy matches
+              </p>
             </div>
           </FormSection>
         </div>
@@ -170,6 +179,7 @@ export function PolicyConfigurationModal({
                     <span className="text-sm font-medium text-gray-700">Rule {index + 1}</span>
                     {config.rules.length > 1 && (
                       <button
+                        type="button"
                         onClick={() => removeRule(index)}
                         className="text-xs text-red-500 hover:text-red-700"
                       >
@@ -179,8 +189,14 @@ export function PolicyConfigurationModal({
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1">
-                      <label className="block text-xs font-medium text-gray-600">Effect</label>
+                      <label
+                        htmlFor={`policy-rule-${index}-effect`}
+                        className="block text-xs font-medium text-gray-600"
+                      >
+                        Effect
+                      </label>
                       <select
+                        id={`policy-rule-${index}-effect`}
                         value={rule.effect}
                         onChange={(e) => updateRule(index, { effect: e.target.value as 'permit' | 'forbid' })}
                         className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md"
@@ -198,14 +214,26 @@ export function PolicyConfigurationModal({
                     />
                   </div>
                   <div className="space-y-1">
-                    <label className="block text-xs font-medium text-gray-600">Resource (optional)</label>
+                    <label
+                      htmlFor={`policy-rule-${index}-resource`}
+                      className="block text-xs font-medium text-gray-600"
+                    >
+                      Resource (optional)
+                    </label>
                     <input
+                      id={`policy-rule-${index}-resource`}
+                      aria-describedby={`policy-rule-${index}-resource-help`}
                       value={rule.resource || ''}
                       onChange={(e) => updateRule(index, { resource: e.target.value })}
                       placeholder='resource == AgentCore::Gateway::"{gateway_arn}"'
                       className="w-full px-2 py-1.5 text-xs font-mono border border-gray-300 rounded-md"
                     />
-                    <p className="text-xs text-gray-400">Leave empty to auto-fill with the deployed gateway ARN</p>
+                    <p
+                      id={`policy-rule-${index}-resource-help`}
+                      className="text-xs text-gray-500"
+                    >
+                      Leave empty to auto-fill with the deployed gateway ARN
+                    </p>
                   </div>
                   {/* Cedar preview */}
                   <div className="bg-gray-50 rounded p-2">
@@ -217,6 +245,7 @@ export function PolicyConfigurationModal({
                 </div>
               ))}
               <button
+                type="button"
                 onClick={addRule}
                 className="w-full py-2 text-sm text-blue-600 border border-dashed border-blue-300 rounded-lg hover:bg-blue-50 transition-colors"
               >

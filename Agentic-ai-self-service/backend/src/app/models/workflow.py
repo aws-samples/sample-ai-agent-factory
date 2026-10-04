@@ -1,9 +1,9 @@
 """Pydantic models for workflow structure and definitions."""
 
-from datetime import datetime
-from typing import Annotated
+from datetime import datetime, timezone
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 
 def to_camel(string: str) -> str:
@@ -27,6 +27,7 @@ from .components import (
     RuntimeConfiguration,
     ToolConfiguration,
 )
+from .deployment_models import CfnNamingProfile
 from .enums import (
     AgentCoreComponentType,
     ConnectionType,
@@ -47,10 +48,21 @@ class Position(BaseModel):
 
 
 class Viewport(BaseModel):
-    """Canvas viewport state."""
+    """Canvas viewport state.
 
-    x: float
-    y: float
+    ``x`` and ``y`` have defaults because :class:`WorkflowDefinition` declares
+    ``viewport: Viewport = Field(default_factory=Viewport)``, and a factory over a
+    model with required fields can only ever raise. That made ``viewport``
+    effectively REQUIRED on every path that does not supply one by hand, which is
+    ``import_workflow``: a workflow JSON without a viewport came back as a 400
+    naming ``viewport.x``, a field the caller never wrote and the schema says is
+    optional. ``create_workflow`` only escapes it by passing ``Viewport(x=0, y=0,
+    zoom=1.0)`` explicitly — the same value this default now produces, so no
+    existing caller changes behaviour.
+    """
+
+    x: float = 0.0
+    y: float = 0.0
     zoom: float = Field(ge=0.1, le=4.0, default=1.0)
 
 
@@ -176,6 +188,117 @@ class WorkflowMetadata(BaseModel):
 
 
 # ============================================================================
+# Deployment Governance Models
+# ============================================================================
+
+
+def _validate_governance_tag_record(
+    value: dict[str, str],
+    *,
+    field_name: str,
+    allow_empty_values: bool,
+) -> dict[str, str]:
+    """Validate a persisted governance tag map without applying path-specific limits.
+
+    The canonical workflow can carry the full AWS tag set (up to 50). Individual
+    deployment/export sinks may impose a lower limit — notably S3 object tags cap
+    the generated code bundle at 10 — and enforce that immediately before use.
+    """
+    if len(value) > 50:
+        raise ValueError(f"{field_name} accepts at most 50 tags")
+    for key, tag_value in value.items():
+        if not key or len(key) > 128:
+            raise ValueError(f"{field_name} keys must be 1-128 characters")
+        if len(tag_value) > 256:
+            raise ValueError(f"{field_name}.{key} must be at most 256 characters")
+        if not allow_empty_values and not tag_value:
+            raise ValueError(f"{field_name}.{key} must not be empty")
+    return value
+
+
+class GovernanceTagProfileRef(BaseModel):
+    """The exact tag-profile revision captured with a workflow."""
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    name: str = Field(min_length=1, max_length=128)
+    updated_at: datetime
+
+    @field_serializer("updated_at")
+    def _serialize_updated_at(self, value: datetime) -> str:
+        """Emit the catalog's own spelling (``+00:00``), not pydantic's ``Z``.
+
+        The tag-profile catalog stores and returns ``datetime.isoformat()`` strings; a captured
+        profile timestamp that came back from this model spelled ``Z`` was compared to it by
+        string and read as a change (live, 2026-09-27). Normalise to UTC and spell it the same
+        way so the value survives the round trip byte for byte.
+        """
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+
+
+class DeploymentGovernanceTagsV1(BaseModel):
+    """Persisted tag inputs and the resolved policy/profile snapshot."""
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    explicit_values: dict[str, str] = Field(default_factory=dict)
+    effective_values: dict[str, str] = Field(default_factory=dict)
+    profile: GovernanceTagProfileRef | None = None
+    # A deterministic digest over the sorted tag-policy records. Empty is reserved
+    # for legacy/unrefreshed empty governance; any captured tag input requires a
+    # concrete revision so deployment can fail closed when policy data changes.
+    policy_revision: str = Field(default="", max_length=128)
+
+    @field_validator("explicit_values")
+    @classmethod
+    def validate_explicit_values(cls, value: dict[str, str]) -> dict[str, str]:
+        return _validate_governance_tag_record(
+            value,
+            field_name="governance.tags.explicitValues",
+            allow_empty_values=True,
+        )
+
+    @field_validator("effective_values")
+    @classmethod
+    def validate_effective_values(cls, value: dict[str, str]) -> dict[str, str]:
+        return _validate_governance_tag_record(
+            value,
+            field_name="governance.tags.effectiveValues",
+            allow_empty_values=False,
+        )
+
+    @model_validator(mode="after")
+    def require_revision_for_captured_tags(self) -> "DeploymentGovernanceTagsV1":
+        if (self.explicit_values or self.effective_values or self.profile) and not self.policy_revision:
+            raise ValueError("governance.tags.policyRevision is required when tag values or a profile are captured")
+        return self
+
+
+class DeploymentGovernanceV1(BaseModel):
+    """Versioned naming/tagging state that travels with a workflow."""
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    version: Literal[1] = 1
+    naming_profile: CfnNamingProfile | None = None
+    tags: DeploymentGovernanceTagsV1 = Field(default_factory=DeploymentGovernanceTagsV1)
+
+
+# ============================================================================
 # Workflow Definition Model
 # ============================================================================
 
@@ -191,8 +314,16 @@ class WorkflowDefinition(BaseModel):
     edges: list[ConnectionEdge] = Field(default_factory=list)
     viewport: Viewport = Field(default_factory=Viewport)
     metadata: WorkflowMetadata
+    # Optional only in historical serialized records. Hydration always materializes
+    # an explicit V1 object, so save/export/clone cannot silently drop naming or tags.
+    governance: DeploymentGovernanceV1 = Field(default_factory=DeploymentGovernanceV1)
     created_at: datetime
     updated_at: datetime
+    # F-15: the compare-and-set fence. Every successful save advances it by one; a save names
+    # the revision it was built on (``expectedRevision``) and is refused with 409 when the row
+    # has moved. Not ``version``: that is the user-facing semver string above. Rows written
+    # before this field existed have no attribute and read as 0, so their first save succeeds.
+    revision: int = Field(default=0, ge=0)
     # Cognito sub of the user who created this workflow. None for pre-tenancy
     # records (legacy data). See services/auth.py + tasks/lessons.md Bug 37.
     owner_sub: str | None = None

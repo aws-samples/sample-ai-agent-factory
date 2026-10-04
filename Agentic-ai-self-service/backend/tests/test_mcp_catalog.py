@@ -13,6 +13,7 @@ mcpServer target needs only `endpoint`; credential providers are optional.
 
 from __future__ import annotations
 
+import inspect
 import sys
 
 import pytest
@@ -258,15 +259,30 @@ def test_fill_endpoint_placeholders_ok_and_missing_and_injection():
 
 
 def _patch_target_capture(monkeypatch):
-    """Capture CreateGatewayTarget params instead of calling AWS."""
+    """Capture CreateGatewayTarget params instead of calling AWS.
+
+    The double takes the REAL function's parameters, and its signature is checked against
+    the real one below rather than trusted. F-74b added a keyword argument to the real
+    function and to this call site; the previous double was a four-positional lambda, so
+    six tests failed with ``unexpected keyword argument 'update_existing'`` -- loudly, which
+    is the good case. A double that had accepted ``**kwargs`` would instead have swallowed
+    the new argument and reported coverage of a call it never made.
+    """
     captured = []
+
+    def _double(ctrl, gw, name, params, max_retries=5, *, update_existing=False):
+        captured.append({"name": name, "params": params, "update_existing": update_existing})
+        return {"targetId": "t-1", "name": name}
+
+    # The double is only evidence while it is call-compatible with the real thing.
+    inspect.signature(gd._create_gateway_target_with_retry).bind("ctrl", "gw", "name", {}, update_existing=True)
+    inspect.signature(_double).bind("ctrl", "gw", "name", {}, update_existing=True)
+
+    monkeypatch.setattr(gd, "_create_gateway_target_with_retry", _double)
     monkeypatch.setattr(
         gd,
-        "_create_gateway_target_with_retry",
-        lambda ctrl, gw, name, params: captured.append({"name": name, "params": params}) or {"targetId": "t-1"},
-    )
-    monkeypatch.setattr(
-        gd, "_put_connector_secret", lambda region, owner, payload: "arn:aws:secretsmanager:...:secret:fake"
+        "_put_connector_secret",
+        lambda region, owner, payload, deployment_id="", **kwargs: "arn:aws:secretsmanager:...:secret:fake",
     )
     return captured
 
@@ -285,6 +301,10 @@ def test_deploy_external_mcp_tier1_no_auth(monkeypatch):
     assert tc["endpoint"] == "https://knowledge-mcp.global.api.aws"
     assert "credentialProviderConfigurations" not in captured[0]["params"]  # Tier 1
     assert out["secret_arns"] == []
+    # F-74b: an external MCP server whose endpoint or credentials changed between deploys
+    # must repoint the existing target rather than reuse it. Capturing the flag without
+    # asserting it would make the double's extra field dead data.
+    assert captured[0]["update_existing"] is True
 
 
 def test_deploy_external_mcp_tier2_mints_secret_and_provider(monkeypatch):
@@ -295,6 +315,7 @@ def test_deploy_external_mcp_tier2_mints_secret_and_provider(monkeypatch):
         "us-east-1",
         [{"server_id": "exa", "secret_value": "sk-test-123"}],
         owner_sub="alice",
+        deployment_id="dep-mcp-catalog",
     )
     assert len(captured) == 1
     # secret minted from raw key; API_KEY credential provider attached
@@ -312,6 +333,7 @@ def test_deploy_external_mcp_tier2_missing_key_raises(monkeypatch):
             "us-east-1",
             [{"server_id": "exa"}],
             owner_sub="alice",
+            deployment_id="dep-mcp-catalog",
         )
 
 
@@ -369,6 +391,7 @@ def test_deploy_external_mcp_custom_endpoint_api_key(monkeypatch):
         "us-east-1",
         [{"endpoint": "https://example.com/mcp", "auth_type": "api_key", "secret_value": "sk-x"}],
         owner_sub="alice",
+        deployment_id="dep-mcp-catalog",
     )
     assert out["secret_arns"] == ["arn:aws:secretsmanager:...:secret:fake"]
     assert captured[0]["params"]["credentialProviderConfigurations"][0]["credentialProviderType"] == "API_KEY"

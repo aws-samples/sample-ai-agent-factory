@@ -61,12 +61,15 @@ Setup (no Docker needed, but DO read the two warnings after the commands):
     $PG/pg_ctl -D /tmp/llpg -o "-p 5439 -k /tmp/llpg" start
     $PG/createdb -h /tmp/llpg -p 5439 -U litellm litellm
 
-    # 2. Schema. `prisma generate` needs the venv on PATH to find prisma-client-py.
+    # 2. Prisma client ONLY -- do not create the schema, and note the --schema flag:
+    #    litellm ships schema.prisma inside the package, so a bare `prisma generate`
+    #    fails with "prisma/schema.prisma: file not found". Without this step startup
+    #    dies at "Unable to find Prisma binaries. Please run 'prisma generate' first."
     export DATABASE_URL="postgresql://litellm@localhost:5439/litellm?host=/tmp/llpg"
     export PATH="$V/venv/bin:$PATH"
-    prisma generate && prisma db push --accept-data-loss --skip-generate
+    prisma generate --schema="$($V/venv/bin/python -c 'import litellm,os;print(os.path.join(os.path.dirname(litellm.__file__),"proxy","schema.prisma"))')"
 
-    # 3. Run it, then WAIT -- see warning B.
+    # 3. Run it. Ready in ~24s on an EMPTY database -- see warning B.
     STORE_MODEL_IN_DB=True LITELLM_MASTER_KEY=sk-verify-1234 \
       $V/venv/bin/litellm --config $V/config.yaml --port 4000 > $V/proxy.log 2>&1 &
 
@@ -76,19 +79,26 @@ answers BOTH probe endpoints with
 and only ``/mcp/enabled`` responds. An earlier version of this recipe omitted
 Postgres and the script could not run at all.
 
-Warning B -- first startup takes roughly half an hour, and looks like a crash the
-whole time. Because step 2 creates the schema with ``prisma db push``, LiteLLM's
-own ``litellm_proxy_extras`` finds a non-empty schema, hits prisma **P3005**, and
-baselines by resolving all 158 migrations one at a time at ~10s each. Throughout,
-``/health/liveliness`` returns nothing at all (curl exit 000) -- the process is
-alive and making progress. Do not kill it. Track progress with:
+Warning B -- let LiteLLM own the schema. The half-hour startup an earlier version
+of this recipe warned about is specific to PRE-PUSHING the schema with
+``prisma db push``: LiteLLM's own ``litellm_proxy_extras`` then finds a non-empty
+schema, hits prisma **P3005**, and baselines by resolving all 158 migrations one at
+a time at ~10s each, with ``/health/liveliness`` returning nothing at all (curl
+exit 000) the whole time.
+
+Measured on litellm **1.102.0** with an EMPTY database and no ``db push``:
+``prisma migrate deploy`` applies **171 migrations in 1.4 seconds** and the proxy
+answers ``/health/liveliness`` with 200 after about **24 seconds**, 78 tables
+created. So drop the ``db push`` -- which is what step 2 above now does -- and this
+warning costs nothing. If you do pre-push anyway, track the baseline with:
 
     grep -c 'Resolving migration' /tmp/litellm-verify/proxy.log   # target: 158
 
-and wait for ``curl -o /dev/null -w '%{http_code}' localhost:4000/health/liveliness``
-to return 200 before running this script. (Letting LiteLLM own the schema on an
-empty database instead of pre-pushing it would plausibly skip the baseline, but
-that path is untested here -- the recipe above is the one that was actually run.)
+1.102.0 passes every check in this script, so both endpoint shapes above still
+hold three minor versions on from where they were first measured. One addition:
+``/mcp-rest/tools/list`` carries ``error``, ``message`` and ``server_outcomes``
+keys even on a fully successful call, so presence of an ``error`` key is NOT a
+failure signal -- only its value is.
 
 Teardown: ``pkill -f 'litellm --config'``, ``pg_ctl -D /tmp/llpg stop -m fast``,
 ``rm -rf /tmp/llpg /tmp/litellm-verify``.

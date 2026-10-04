@@ -5,10 +5,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useWorkflowStore } from '../store/workflowStore';
-import type { AgentCoreNode } from '../store/workflowStore';
 import { useFlowStore } from '../store/flowStore';
-import type { Edge } from '@xyflow/react';
-import { getDeploymentRegion } from '../utils/awsRegion';
+import { buildFlowSavePayload } from '../utils/flowSavePayload';
+import { registerPendingSaveController } from '../utils/pendingSave';
 
 /**
  * Return value of {@link useAutoSave}.
@@ -27,91 +26,17 @@ export interface UseAutoSaveResult {
 const DEFAULT_INTERVAL = 5000;
 
 /**
- * Converts a camelCase key to snake_case.
- */
-function toSnakeCase(str: string): string {
-  return str.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
-}
-
-/**
- * Recursively converts all object keys from camelCase to snake_case.
- */
-function keysToSnakeCase(obj: unknown): unknown {
-  if (Array.isArray(obj)) {
-    return obj.map(keysToSnakeCase);
-  }
-  if (obj !== null && typeof obj === 'object') {
-    const result: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
-      result[toSnakeCase(key)] = keysToSnakeCase(value);
-    }
-    return result;
-  }
-  return obj;
-}
-
-/**
- * Converts React Flow nodes to the backend ComponentNode format.
- * Only includes nodes that have a configuration set.
- * Converts all keys to snake_case to match backend Pydantic models.
- */
-function toBackendNodes(nodes: AgentCoreNode[]): unknown[] {
-  return nodes
-    .filter((node) => node.data?.configuration)
-    .map((node) => {
-      const config = keysToSnakeCase(node.data.configuration) as Record<string, unknown>;
-      // Ensure component_type is set (discriminator field)
-      if (!config.component_type) {
-        config.component_type = node.data.componentType;
-      }
-      return {
-        id: node.id,
-        type: node.data.componentType,
-        position: { x: node.position?.x ?? 0, y: node.position?.y ?? 0 },
-        data: config,
-        selected: node.selected ?? false,
-        validation_status: node.data?.validationStatus ?? 'pending',
-      };
-    });
-}
-
-/**
- * Maps frontend connection types to backend ConnectionType enum values.
- */
-const CONNECTION_TYPE_MAP: Record<string, string> = {
-  data: 'data',
-  identity: 'authentication',
-  tool: 'data',
-  authentication: 'authentication',
-  policy: 'policy',
-};
-
-/**
- * Converts React Flow edges to the backend ConnectionEdge format.
- * Backend requires: source_handle (non-empty string), target_handle (non-empty string), type (ConnectionType)
- */
-function toBackendEdges(edges: Edge[]): unknown[] {
-  return edges.map((edge) => {
-    const edgeData = edge.data as Record<string, unknown> | undefined;
-    const frontendType = (edgeData?.connectionType as string) || 'data';
-    const backendType = CONNECTION_TYPE_MAP[frontendType] || 'data';
-
-    return {
-      id: edge.id,
-      source: edge.source,
-      target: edge.target,
-      source_handle: edge.sourceHandle || 'output',
-      target_handle: edge.targetHandle || 'input',
-      type: backendType,
-      animated: false,
-    };
-  });
-}
-
-/**
  * Subscribes directly to workflowStore changes and debounces saves
  * to flowStore.saveFlow() when an active flow is set.
  * Converts React Flow nodes/edges to backend-compatible format with snake_case keys.
+ *
+ * The debounced edit is never simply dropped (F-14). The hook registers a
+ * pending-save controller so that a flow switch, a flow create and sign-out
+ * flush it first (flowStore / signOutAfterFlush call `flushPendingSave`), a
+ * `pagehide` fires it with a keepalive request, and `beforeunload` shows the
+ * browser's leave-page prompt while work is unsaved. A hydration that arrives
+ * WITHOUT a preceding flush still cancels the timer: at that point the canvas
+ * already holds the other flow, so there is nothing correct left to save.
  *
  * Returns {@link UseAutoSaveResult} so callers can render autosave-specific
  * error UI. Backwards-compatible: existing callers that ignore the return
@@ -121,103 +46,183 @@ export function useAutoSave(
   flowId: string | null,
   interval: number = DEFAULT_INTERVAL,
 ): UseAutoSaveResult {
-  const flowIdRef = useRef(flowId);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hasReceivedFirstState = useRef(false);
+  // The body of the pending timer, kept so a flush can run it before the
+  // interval elapses. Null when no edit is debounced.
+  const pendingFireRef = useRef<((options?: { keepalive?: boolean }) => void) | null>(null);
+  // Serialize writes. Without this, a slow older request can finish after a
+  // newer request and overwrite the server with stale canvas/governance state.
+  const saveQueueRef = useRef<Promise<boolean>>(Promise.resolve(true));
+  const inFlightRef = useRef(0);
+  const lastSaveFailedRef = useRef(false);
 
   const [lastSaveError, setLastSaveError] = useState<Error | null>(null);
   const clearLastSaveError = useCallback(() => setLastSaveError(null), []);
 
-  // Update ref in effect to avoid ref mutation during render
   useEffect(() => {
-    flowIdRef.current = flowId;
-  }, [flowId]);
-
-  useEffect(() => {
-    const unsubscribe = useWorkflowStore.subscribe(
-      (state, prevState) => {
-        if (!hasReceivedFirstState.current) {
-          hasReceivedFirstState.current = true;
-          return;
-        }
-
-        if (!flowIdRef.current) return;
-
-        if (
-          state.nodes === prevState.nodes &&
-          state.edges === prevState.edges &&
-          state.viewport === prevState.viewport
-        ) {
-          return;
-        }
-
-        if (timerRef.current !== null) {
-          clearTimeout(timerRef.current);
-        }
-
-        timerRef.current = setTimeout(() => {
-          const currentFlowId = flowIdRef.current;
-          if (!currentFlowId) return;
-
-          // Guard: skip save if the flow was deleted or is no longer active
-          const { activeFlowId, flows } = useFlowStore.getState();
-          if (!activeFlowId || activeFlowId !== currentFlowId) return;
-          if (!flows.some(f => f.id === currentFlowId)) return;
-
-          const workflowState = useWorkflowStore.getState();
-          const { saveFlow } = useFlowStore.getState();
-
-          const now = new Date().toISOString();
-          const workflow = {
-            id: currentFlowId,
-            name: 'auto-save',
-            description: '',
-            version: '1.0.0',
-            nodes: toBackendNodes(workflowState.nodes),
-            edges: toBackendEdges(workflowState.edges),
-            viewport: {
-              x: workflowState.viewport.x,
-              y: workflowState.viewport.y,
-              zoom: workflowState.viewport.zoom,
-            },
-            metadata: {
-              author: 'system',
-              tags: [],
-              aws_region: getDeploymentRegion(),
-              deployment_status: 'not_deployed',
-            },
-            created_at: now,
-            updated_at: now,
-          };
-
-          saveFlow(currentFlowId, workflow as never)
-            .then(() => {
-              // Successful save: clear any previously surfaced auto-save error
-              // so a transient network blip doesn't leave a stale banner.
-              setLastSaveError((prev) => (prev === null ? prev : null));
-            })
-            .catch((err: unknown) => {
-              // Audit issue #8: surface auto-save failures to the consumer
-              // so it can render a dedicated toast/banner. flowStore.error
-              // is shared with every other flow operation and gets clobbered;
-              // this state is autosave-specific.
-              const error = err instanceof Error ? err : new Error(String(err));
-              // Log so the failure is also visible in dev tools / observability.
-              console.error('[useAutoSave] flow save failed', error);
-              setLastSaveError(error);
-            });
-        }, interval);
-      }
-    );
-
-    return () => {
-      unsubscribe();
+    const clearPendingTimer = () => {
       if (timerRef.current !== null) {
         clearTimeout(timerRef.current);
         timerRef.current = null;
       }
+      pendingFireRef.current = null;
     };
-  }, [interval]);
+
+    // No active persisted document means there is nothing this hook may write.
+    if (!flowId) {
+      clearPendingTimer();
+      return undefined;
+    }
+
+    const enqueue = (workflow: unknown, options?: { keepalive?: boolean }): Promise<boolean> => {
+      const { saveFlow } = useFlowStore.getState();
+      const persist = async (): Promise<boolean> => {
+        inFlightRef.current += 1;
+        try {
+          await saveFlow(flowId, workflow as never, options);
+          lastSaveFailedRef.current = false;
+          // Successful save: clear any previously surfaced auto-save error
+          // so a transient network blip doesn't leave a stale banner.
+          setLastSaveError((prev) => (prev === null ? prev : null));
+          return true;
+        } catch (err: unknown) {
+          // Audit issue #8: surface auto-save failures to the consumer
+          // so it can render a dedicated toast/banner. flowStore.error
+          // is shared with every other flow operation and gets clobbered;
+          // this state is autosave-specific.
+          const error = err instanceof Error ? err : new Error(String(err));
+          // Log so the failure is also visible in dev tools / observability.
+          console.error('[useAutoSave] flow save failed', error);
+          lastSaveFailedRef.current = true;
+          setLastSaveError(error);
+          return false;
+        } finally {
+          inFlightRef.current -= 1;
+        }
+      };
+      // Start synchronously when the queue is idle: on `pagehide` this gets the
+      // request (and its token read) under way inside the event handler, before
+      // the page's task queue is torn down. Otherwise chain behind the save in
+      // flight so an older snapshot can never overtake a newer one.
+      saveQueueRef.current = inFlightRef.current === 0
+        ? persist()
+        : saveQueueRef.current.then(persist, persist);
+      return saveQueueRef.current;
+    };
+
+    // The canvas as it is right now, or null when this hook may not write it.
+    const currentSnapshot = () => {
+      const workflowState = useWorkflowStore.getState();
+      const { activeFlowId } = useFlowStore.getState();
+      if (activeFlowId !== flowId || workflowState.documentFlowId !== flowId) return null;
+      return buildFlowSavePayload(flowId, workflowState);
+    };
+
+    const hasUnsavedWork = () =>
+      pendingFireRef.current !== null || inFlightRef.current > 0 || lastSaveFailedRef.current;
+
+    const controller = {
+      hasUnsavedWork,
+      flush: async (): Promise<boolean> => {
+        const fire = pendingFireRef.current;
+        if (fire) {
+          clearPendingTimer();
+          fire();
+        } else if (lastSaveFailedRef.current) {
+          // Nothing debounced, but the last attempt failed: the edit is still
+          // only in the browser, so try once more before letting go of it.
+          const workflow = currentSnapshot();
+          if (workflow) enqueue(workflow);
+        }
+        return saveQueueRef.current;
+      },
+      saveNow: async (): Promise<boolean> => {
+        clearPendingTimer();
+        const workflow = currentSnapshot();
+        if (!workflow) return false;
+        return enqueue(workflow);
+      },
+    };
+    const unregister = registerPendingSaveController(controller);
+
+    const unsubscribe = useWorkflowStore.subscribe(
+      (state, prevState) => {
+        // Hydration is not a user edit. It also invalidates any timer captured for
+        // the previous flow, which is the fence that prevents flow B from being
+        // written into flow A after a fast switch.
+        if (state.hydrationVersion !== prevState.hydrationVersion) {
+          clearPendingTimer();
+          return;
+        }
+
+        // persistenceRevision advances only for user-visible persisted state,
+        // including governance-only edits. Validation/execution UI churn is ignored.
+        if (state.persistenceRevision === prevState.persistenceRevision) return;
+
+        const flowState = useFlowStore.getState();
+        if (state.documentFlowId !== flowId || flowState.activeFlowId !== flowId) return;
+
+        clearPendingTimer();
+        const scheduledHydrationVersion = state.hydrationVersion;
+        const scheduledPersistenceRevision = state.persistenceRevision;
+        const fire = (options?: { keepalive?: boolean }) => {
+          timerRef.current = null;
+          pendingFireRef.current = null;
+          const workflowState = useWorkflowStore.getState();
+          const { activeFlowId } = useFlowStore.getState();
+          if (activeFlowId !== flowId || workflowState.documentFlowId !== flowId) return;
+          if (
+            workflowState.hydrationVersion !== scheduledHydrationVersion
+            || workflowState.persistenceRevision !== scheduledPersistenceRevision
+          ) {
+            return;
+          }
+          enqueue(buildFlowSavePayload(flowId, workflowState), options);
+        };
+        pendingFireRef.current = fire;
+        timerRef.current = setTimeout(() => fire(), interval);
+      }
+    );
+
+    // Tab close / navigation away. `pagehide` is the last reliable event: fire
+    // the debounced edit now with a keepalive request so the browser lets it
+    // finish after the page is gone. It goes to the same origin (/api) through
+    // the same authFetch, so the bearer token travels exactly where it always
+    // does. `beforeunload` shows the browser's own leave-page prompt while work
+    // is unsaved, which covers the case where the keepalive request could not
+    // be issued in time.
+    const onPageHide = () => {
+      const fire = pendingFireRef.current;
+      if (!fire) return;
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      fire({ keepalive: true });
+    };
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!hasUnsavedWork()) return;
+      event.preventDefault();
+      // Legacy browsers read returnValue; modern ones only need preventDefault.
+      event.returnValue = '';
+    };
+    window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('beforeunload', onBeforeUnload);
+
+    return () => {
+      unsubscribe();
+      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      unregister();
+      // Unmounting with an edit still debounced: the flow is still active and
+      // the canvas still holds the edit, so save it rather than drop it. The
+      // fences inside `fire` keep this from writing a canvas that has already
+      // been replaced.
+      const fire = pendingFireRef.current;
+      clearPendingTimer();
+      if (fire) fire();
+    };
+  }, [flowId, interval]);
 
   return { lastSaveError, clearLastSaveError };
 }

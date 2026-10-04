@@ -289,6 +289,10 @@ _NONEXISTENT_ACTIONS = [
     # come back on a copy-paste.
     "bedrock-agentcore:GetLastKTurns",
     "bedrock-agentcore:RetrieveMemories",
+    # S3 Vectors exposes GetVectorBucket/GetIndex. The Describe aliases were
+    # accepted by IAM policy syntax but authorize no operation.
+    "s3vectors:DescribeIndex",
+    "s3vectors:DescribeVectorBucket",
 ]
 
 
@@ -312,9 +316,11 @@ def test_no_role_grants_an_action_that_does_not_exist(action):
 # that we KEEP, and the real grant each one must never be mistaken for.         #
 # --------------------------------------------------------------------------- #
 #
-# A sweep of all 273 actions the platform stack synthesizes through
-# `aws accessanalyzer validate-policy` returned exactly nine INVALID_ACTION
-# findings. None of them is removed, for two different reasons:
+# A sweep of the platform actions through
+# `aws accessanalyzer validate-policy` found the aliases below. Some inert
+# duplicates have since been removed once their real Get* counterparts and
+# direct API call sites were proven; this table preserves the counterparts for
+# the aliases that remain under review.
 #
 #   * CreateTokenVault is PROVEN NEEDED LIVE (AccessDenied on a fresh account),
 #     so Access Analyzer is simply wrong about it — see _NONEXISTENT_ACTIONS above.
@@ -345,8 +351,6 @@ _ABSENT_BUT_KEPT = {
     # dropping InvokeModel "because Converse covers it" removes model access.
     "bedrock:Converse": ["bedrock:InvokeModel"],
     "bedrock:ConverseStream": ["bedrock:InvokeModelWithResponseStream"],
-    "s3vectors:DescribeIndex": ["s3vectors:GetIndex"],
-    "s3vectors:DescribeVectorBucket": ["s3vectors:GetVectorBucket"],
 }
 
 

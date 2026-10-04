@@ -41,7 +41,10 @@ export const CONNECTION_COMPATIBILITY: Record<AgentCoreComponentType, AgentCoreC
 // Required fields per component type
 export const REQUIRED_FIELDS: Record<AgentCoreComponentType, string[]> = {
   runtime: ['name', 'framework', 'model', 'systemPrompt'],
-  gateway: ['name', 'targetType', 'targetConfig'],
+  // Targets are validated in validateWorkflow against the whole graph (explicit targets,
+  // connected tools, or a connected MCP runtime), not as bare required fields: requiring
+  // targetType/targetConfig here is what made templates ship a { type: 'lambda' } placeholder.
+  gateway: ['name'],
   memory: ['name'],
   code_interpreter: ['name'],
   browser: ['name'],

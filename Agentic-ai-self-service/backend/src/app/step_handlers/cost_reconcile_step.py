@@ -50,10 +50,16 @@ def _agent_runtime_id(runtime_name: str) -> str | None:
     """Resolve a friendly runtime_name to its PRODUCTION runtime_id (or None)."""
     from app.services.agent_versions_store import get_slots_store, get_versions_store
 
-    slots = get_slots_store().get(runtime_name)
+    # This pointer decides which runtime's spend is charged to the agent
+    # budget. A stale pre-promotion pointer can reconcile the wrong runtime.
+    slots = get_slots_store().get(runtime_name, consistent=True)
     if slots is None or not slots.production_version_id:
         return None
-    version = get_versions_store().get(runtime_name, slots.production_version_id)
+    version = get_versions_store().get(
+        runtime_name,
+        slots.production_version_id,
+        consistent=True,
+    )
     return version.runtime_id if version and version.runtime_id else None
 
 

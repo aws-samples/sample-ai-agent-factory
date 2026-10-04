@@ -12,21 +12,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { DeployPanel } from './DeployPanel';
 import type { RuntimeConfiguration, GatewayConfiguration } from '../../types/components';
+import { useWorkflowStore } from '../../store/workflowStore';
 
 const mockAuthFetch = vi.fn();
 vi.mock('../../auth/authFetch', () => ({
   authFetch: (...args: unknown[]) => mockAuthFetch(...args),
-}));
-
-// workflowStore is used for node-execution state + registry publish snapshot.
-vi.mock('../../store/workflowStore', () => ({
-  useWorkflowStore: Object.assign(
-    () => ({
-      setNodeExecutionStateByType: vi.fn(),
-      resetAllExecutionStates: vi.fn(),
-    }),
-    { getState: () => ({ nodes: [], edges: [] }) },
-  ),
 }));
 
 const config: RuntimeConfiguration = {
@@ -61,9 +51,16 @@ const gatewayConfig: GatewayConfiguration = {
 describe('DeployPanel — mixed gateway targets mapping', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockAuthFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ success: true, runtimeId: 'r1', endpoint: 'https://e' }),
+    useWorkflowStore.getState().resetWorkflowDocument(null);
+    mockAuthFetch.mockImplementation(async (url: string) => {
+      if (url === '/api/settings/tags' || url === '/api/settings/tag-profiles') {
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ success: true, runtimeId: 'r1', endpoint: 'https://e' }),
+      };
     });
   });
 
@@ -78,8 +75,9 @@ describe('DeployPanel — mixed gateway targets mapping', () => {
       />,
     );
 
-    // Click the primary Deploy button (there are two — panel + footer).
-    fireEvent.click(screen.getAllByRole('button', { name: /Deploy to AgentCore/i })[0]);
+    const deployButton = screen.getAllByRole('button', { name: /Deploy to AgentCore/i })[0];
+    await waitFor(() => expect(deployButton).toBeEnabled());
+    fireEvent.click(deployButton);
 
     await waitFor(() => {
       const deployCall = mockAuthFetch.mock.calls.find((c) => c[0] === '/api/deploy');

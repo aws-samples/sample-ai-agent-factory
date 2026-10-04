@@ -140,7 +140,7 @@ class TestOnlyTheJobWithCheckovRunsTheCheckovGate:
         )
 
     def test_the_export_gate_job_installs_checkov_and_does_not_deselect_it(self, jobs):
-        job = _job_by_name(jobs, "exported template (cfn-lint + checkov)")
+        job = _job_by_name(jobs, "exported bundle contract")
         run = _steps_text(job)
         assert "checkov" in run, "the job that owns the policy gate no longer installs checkov"
         # The inverse of the assertion above, and the half that matters: deselecting the

@@ -9,12 +9,13 @@
  * pattern from VersionsList.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import {
   getApiClient,
   getErrorMessage,
   type HitlRequestSummary,
 } from '../../services/api';
+import { useDialogFocusTrap } from '../../hooks/useDialogFocusTrap';
 
 export interface HitlInboxModalProps {
   isOpen: boolean;
@@ -27,6 +28,10 @@ export function HitlInboxModal({ isOpen, onClose }: HitlInboxModalProps) {
   const [error, setError] = useState<string | null>(null);
   const [acting, setActing] = useState<string | null>(null); // request_id being acted upon
   const [comments, setComments] = useState<Record<string, string>>({}); // Per-request comment text
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const descriptionId = useId();
+  useDialogFocusTrap(isOpen, dialogRef, undefined, onClose);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -82,15 +87,28 @@ export function HitlInboxModal({ isOpen, onClose }: HitlInboxModalProps) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40">
-      <div className="relative w-full max-w-3xl max-h-[90vh] bg-white rounded-xl shadow-xl flex flex-col">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        className="relative w-full max-w-3xl max-h-[90vh] bg-white rounded-xl shadow-xl flex flex-col"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        tabIndex={-1}
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">
+            <h2 id={titleId} className="text-lg font-semibold text-gray-900">
               Human-in-the-loop Approvals
             </h2>
-            <p className="text-xs text-gray-500 mt-0.5">
+            <p id={descriptionId} className="text-xs text-gray-500 mt-0.5">
               Pending approval requests across all your runtimes
             </p>
           </div>
@@ -129,13 +147,13 @@ export function HitlInboxModal({ isOpen, onClose }: HitlInboxModalProps) {
         {/* Body */}
         <div className="flex-1 overflow-y-auto px-6 py-5">
           {error && (
-            <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+            <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700" role="alert">
               {error}
             </div>
           )}
 
           {loading && requests.length === 0 ? (
-            <div className="text-sm text-gray-500">Loading pending requests…</div>
+            <div className="text-sm text-gray-500" role="status">Loading pending requests…</div>
           ) : requests.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-center">
               <div className="text-4xl mb-3">✓</div>

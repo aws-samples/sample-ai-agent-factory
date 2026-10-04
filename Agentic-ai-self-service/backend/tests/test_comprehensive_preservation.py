@@ -694,15 +694,16 @@ class TestGatewayDeployerPreservation:
         assert gw_idx < code_idx < runtime_idx
 
     def test_rollback_gateway_uses_boto3(self):
-        """**Validates: Requirements 3.7**
+        """**Validates: Requirements 3.7**, as superseded by F-66e.
 
-        rollback() gateway cleanup MUST use boto3 (list_gateways, delete_gateway_target,
-        delete_gateway).
+        rollback() found the gateway by NAME and deleted it with no ownership proof
+        and no write lock; its route is retired (501). It must now delete no gateway
+        and point at the manifest teardown, which holds the lock and proves absence.
         """
         source = self._read_deployment_source()
         func_idx = source.index("async def rollback")
-        # Use a larger window to capture the full rollback method
-        func_section = source[func_idx : func_idx + 3500]
-        assert "list_gateways()" in func_section
-        assert "delete_gateway_target(" in func_section
-        assert "delete_gateway(" in func_section
+        func_end = source.index("def get_deployment_status", func_idx)
+        func_section = source[func_idx:func_end]
+        assert "delete_gateway(" not in func_section
+        assert "delete_gateway_target(" not in func_section
+        assert "DELETE /api/deploy/{id}" in func_section

@@ -4,7 +4,6 @@ from .deployment import (
     VALID_AWS_REGIONS,
     DeploymentPhase,
     DeploymentState,
-    WorkflowExecutor,
     generate_agent_code,
     generate_requirements,
 )
@@ -38,7 +37,6 @@ __all__ = [
     "flow_storage",
     "get_flow_storage",
     "set_flow_storage",
-    "WorkflowExecutor",
     "DeploymentPhase",
     "DeploymentState",
     "VALID_AWS_REGIONS",

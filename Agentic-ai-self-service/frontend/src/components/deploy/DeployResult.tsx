@@ -6,6 +6,7 @@ interface DeployResultProps {
   message: string;
   simulated?: boolean;
   runtimeId?: string;
+  runtimeProtocol?: 'HTTP' | 'MCP' | 'A2A';
   endpoint?: string;
   gatewayUrl?: string;
   onRedeploy: () => void;
@@ -17,12 +18,31 @@ export function DeployResult({
   message,
   simulated,
   runtimeId,
+  runtimeProtocol = 'HTTP',
   endpoint,
   gatewayUrl,
   onRedeploy,
   onDelete,
   isDeleting,
 }: DeployResultProps) {
+  // The panel used to print `aws bedrock-agent-runtime invoke-agent --agent-id …
+  // --agent-alias-id TSTALIASID --input-text "Hello"`. That is the Bedrock
+  // *Agents* API, not AgentCore, and it cannot run: the CLI rejects it outright
+  // with `Found invalid choice 'invoke-agent'` (measured against a real deployed
+  // runtime). TSTALIASID is a Bedrock Agents test alias with no meaning here, and
+  // AgentCore takes a JSON --payload and requires an output file.
+  //
+  // `endpoint` is the runtime-endpoint ARN
+  // (…:runtime/<id>/runtime-endpoint/<qualifier>), so the runtime ARN and the
+  // qualifier the invoke needs are both derivable from it. Both ARNs are
+  // authorized separately by InvokeAgentRuntime, and it is the RUNTIME ARN plus a
+  // --qualifier that this call takes.
+  const [arnFromEndpoint, qualifierFromEndpoint] = (endpoint || '').split('/runtime-endpoint/');
+  const runtimeArn = arnFromEndpoint || `<runtime-arn for ${runtimeId}>`;
+  const qualifier = qualifierFromEndpoint || 'DEFAULT';
+  // arn:aws:bedrock-agentcore:<region>:<account>:runtime/<id>
+  const region = runtimeArn.split(':')[3] || '<region>';
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2 p-4 bg-green-50 rounded-xl border border-green-100">
@@ -59,39 +79,59 @@ export function DeployResult({
         </div>
         <div className="p-4 space-y-3">
           <div>
-            <div className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">Runtime ID</div>
+            <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">Runtime ID</div>
             <code className="text-sm font-mono text-gray-800 bg-gray-100 px-2 py-1 rounded">{runtimeId}</code>
           </div>
           <div>
-            <div className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">Endpoint URL</div>
+            <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">Endpoint URL</div>
             <code className="text-xs font-mono text-gray-600 break-all block bg-gray-100 p-2 rounded">{endpoint}</code>
           </div>
           {gatewayUrl && (
             <div>
-              <div className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">Gateway URL (MCP)</div>
+              <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">Gateway URL (MCP)</div>
               <code className="text-xs font-mono text-blue-600 break-all block bg-blue-50 p-2 rounded">{gatewayUrl}</code>
             </div>
           )}
         </div>
       </div>
 
-      {/* CLI Command */}
-      <div className="rounded-xl border border-slate-200 overflow-hidden bg-slate-900">
-        <div className="px-4 py-2.5 border-b border-slate-700 flex items-center gap-2">
-          <div className="flex gap-1.5">
-            <div className="w-3 h-3 rounded-full bg-red-500" />
-            <div className="w-3 h-3 rounded-full bg-yellow-500" />
-            <div className="w-3 h-3 rounded-full bg-green-500" />
-          </div>
-          <span className="text-xs text-slate-400 ml-2">AWS CLI</span>
+      {runtimeProtocol === 'MCP' ? (
+        <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+          <div className="font-medium">Standalone MCP runtime</div>
+          <p className="mt-1 text-xs leading-5">
+            Use the MCP Tools tab to run the complete authenticated handshake,
+            discover the runtime&apos;s schemas, and invoke a tool. A prompt-shaped
+            agent command is not valid for this protocol.
+          </p>
         </div>
-        <pre className="p-4 text-xs text-green-400 font-mono overflow-x-auto">
-{`aws bedrock-agent-runtime invoke-agent \\
-  --agent-id ${runtimeId} \\
-  --agent-alias-id TSTALIASID \\
-  --session-id test-session \\
-  --input-text "Hello"`}</pre>
-      </div>
+      ) : (
+        /* CLI Command */
+        <div className="rounded-xl border border-slate-200 overflow-hidden bg-slate-900">
+          <div className="px-4 py-2.5 border-b border-slate-700 flex items-center gap-2">
+            <div className="flex gap-1.5">
+              <div className="w-3 h-3 rounded-full bg-red-500" />
+              <div className="w-3 h-3 rounded-full bg-yellow-500" />
+              <div className="w-3 h-3 rounded-full bg-green-500" />
+            </div>
+            <span className="text-xs text-slate-400 ml-2">AWS CLI</span>
+          </div>
+          <pre
+            className="p-4 text-xs text-green-400 font-mono overflow-x-auto"
+            role="region"
+            tabIndex={0}
+            aria-label="AWS CLI invocation command"
+          >
+{`aws bedrock-agentcore invoke-agent-runtime \\
+  --region ${region} \\
+  --agent-runtime-arn ${runtimeArn} \\
+  --qualifier ${qualifier} \\
+  --runtime-session-id $(uuidgen) \\
+  --content-type application/json \\
+  --cli-binary-format raw-in-base64-out \\
+  --payload '{"prompt": "Hello"}' \\
+  response.json`}</pre>
+        </div>
+      )}
 
       <button
         onClick={onRedeploy}

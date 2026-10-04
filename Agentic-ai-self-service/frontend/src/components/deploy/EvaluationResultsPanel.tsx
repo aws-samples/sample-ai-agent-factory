@@ -29,11 +29,19 @@ export function EvaluationResultsPanel({ runtimeName, refreshKey }: EvaluationRe
   // Phase 1 Gap 1D — dashboard URL piggybacks on the same runtime resolution.
   const [dashboard, setDashboard] = useState<DashboardUrlSummary | null>(null);
   const [loading, setLoading] = useState(false);
+  // `null` config with `null` error is ambiguous: it is the initial state AND the
+  // state after a 404, which isNotReadyError deliberately swallows. Without this
+  // flag the panel cannot tell "still fetching" from "fetched, nothing there", so
+  // it showed "Loading evaluation config…" forever for every agent deployed
+  // without an Evaluation node — the common case — and the amber empty state below
+  // was unreachable for the one condition it was written for.
+  const [settled, setSettled] = useState(false);
   const [hours, setHours] = useState(24);
 
   const reload = useCallback(async () => {
     if (!runtimeName) return;
     setLoading(true);
+    setSettled(false);
     setCfgError(null);
     setResultsError(null);
     const api = getApiClient();
@@ -66,6 +74,7 @@ export function EvaluationResultsPanel({ runtimeName, refreshKey }: EvaluationRe
       }
     } finally {
       setLoading(false);
+      setSettled(true);
     }
   }, [runtimeName, hours]);
 
@@ -172,17 +181,18 @@ export function EvaluationResultsPanel({ runtimeName, refreshKey }: EvaluationRe
             config_id: {cfg.config_id}
           </code>
         </div>
-      ) : cfgError ? (
-        cfgError.includes('not found') || cfgError.toLowerCase().includes('not found') ? (
-          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-            No evaluation config registered for this runtime. Wire an
-            Evaluation node on the canvas and re-deploy to enable.
-          </div>
-        ) : (
-          <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">
-            {cfgError}
-          </div>
-        )
+      ) : cfgError && !cfgError.toLowerCase().includes('not found') ? (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">
+          {cfgError}
+        </div>
+      ) : settled ? (
+        /* Reached both when the API 404s (swallowed by isNotReadyError, so cfgError
+           is null) and when it reports a not-found message. Both mean the same
+           thing to the user, so say it rather than spinning. */
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+          No evaluation config registered for this runtime. Wire an
+          Evaluation node on the canvas and re-deploy to enable.
+        </div>
       ) : (
         <div className="text-xs text-gray-500">Loading evaluation config…</div>
       )}
@@ -212,7 +222,15 @@ export function EvaluationResultsPanel({ runtimeName, refreshKey }: EvaluationRe
           {resultsError}
         </div>
       ) : results === null ? (
-        <div className="text-xs text-gray-500">Loading results…</div>
+        settled ? (
+          /* Same ambiguity as the config block: a swallowed 404 leaves both values
+             null, which used to render a permanent "Loading results…". */
+          <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
+            No evaluation results available for this runtime yet.
+          </div>
+        ) : (
+          <div className="text-xs text-gray-500">Loading results…</div>
+        )
       ) : results.results.length === 0 ? (
         <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
           {results.message ?? 'No evaluation results in this window. Invoke the runtime to populate.'}

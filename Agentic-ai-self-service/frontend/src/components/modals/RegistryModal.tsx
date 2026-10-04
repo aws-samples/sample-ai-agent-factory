@@ -6,7 +6,7 @@
  * DEVELOPER (others): see approved entries + own pending entries, no approve/reject UI.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import {
   searchRegistryApi,
   cloneFromRegistryApi,
@@ -23,6 +23,8 @@ import { DeployTargetsPanel } from './DeployTargetsPanel';
 import { RegistryEntryDetail } from './registry/RegistryEntryDetail';
 import { McpServersPanel } from './registry/McpServersPanel';
 import { TokenInfoCard } from './registry/TokenInfoCard';
+import { ModalShell } from './ModalShell';
+import { useDialogFocusTrap } from '../../hooks/useDialogFocusTrap';
 
 // ============================================================================
 // Props
@@ -33,6 +35,13 @@ export interface RegistryModalProps {
   onClose: () => void;
   onClone?: (snapshot: RegistryCanvasSnapshot) => void;
 }
+
+const REGISTRY_VIEWS = [
+  ['agents', 'Agent blueprints'],
+  ['mcp', 'MCP servers'],
+  ['identity', 'My identity'],
+] as const;
+type RegistryView = (typeof REGISTRY_VIEWS)[number][0];
 
 // ============================================================================
 // Component
@@ -55,7 +64,18 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
   const [statusFilter, setStatusFilter] = useState<'all' | 'approved' | 'pending' | 'rejected'>('all');
   // Top-level view: agent blueprints, external MCP-server catalog, or the
   // signed-in user's identity/scopes (Loom-study 1.3).
-  const [view, setView] = useState<'agents' | 'mcp' | 'identity'>('agents');
+  const [view, setView] = useState<RegistryView>('agents');
+  const [rejectCandidate, setRejectCandidate] = useState<RegistryEntry | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const rejectReasonId = useId();
+
+  const closeRegistry = useCallback(() => {
+    setRejectCandidate(null);
+    setRejectReason('');
+    onClose();
+  }, [onClose]);
+  useDialogFocusTrap(isOpen, dialogRef, undefined, closeRegistry);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -131,9 +151,10 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
 
   const handleReject = async (slug: string) => {
     setRejecting(slug);
+    setRejectCandidate(null);
     setError(null);
     try {
-      await rejectRegistryApi(slug, rejectReason || undefined);
+      await rejectRegistryApi(slug, rejectReason.trim() || undefined);
       setRejectReason('');
       await load();
     } catch (e) {
@@ -143,6 +164,33 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
     }
   };
 
+  const handleViewTabKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLButtonElement>, currentView: RegistryView) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+
+      const currentIndex = Math.max(
+        0,
+        REGISTRY_VIEWS.findIndex(([key]) => key === currentView),
+      );
+      let nextIndex = currentIndex;
+      if (event.key === 'Home') nextIndex = 0;
+      if (event.key === 'End') nextIndex = REGISTRY_VIEWS.length - 1;
+      if (event.key === 'ArrowRight') {
+        nextIndex = (currentIndex + 1) % REGISTRY_VIEWS.length;
+      }
+      if (event.key === 'ArrowLeft') {
+        nextIndex = (currentIndex - 1 + REGISTRY_VIEWS.length) % REGISTRY_VIEWS.length;
+      }
+
+      event.preventDefault();
+      const nextView = REGISTRY_VIEWS[nextIndex][0];
+      setView(nextView);
+      setSelected(null);
+      document.getElementById(`registry-view-tab-${nextView}`)?.focus();
+    },
+    [],
+  );
+
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     void load();
@@ -151,20 +199,29 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
   if (!isOpen) return null;
 
   return (
+    <>
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Overlay */}
       <div
         className="absolute inset-0 bg-black/40"
-        onClick={onClose}
+        onClick={closeRegistry}
         aria-hidden="true"
       />
 
       {/* Panel */}
-      <div className="relative rounded-xl w-full max-w-4xl max-h-[85vh] flex flex-col" style={{ background: 'var(--color-surface-elevated)', boxShadow: 'var(--elevation-4)', border: '1px solid var(--color-border)' }}>
+      <div
+        ref={dialogRef}
+        className="relative rounded-xl w-full max-w-4xl max-h-[85vh] flex flex-col"
+        style={{ background: 'var(--color-surface-elevated)', boxShadow: 'var(--elevation-4)', border: '1px solid var(--color-border)' }}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b" style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg-subtle)' }}>
           <div>
-            <h2 className="text-lg font-semibold tracking-tight" style={{ color: 'var(--color-text-primary)' }}>
+            <h2 id={titleId} className="text-lg font-semibold tracking-tight" style={{ color: 'var(--color-text-primary)' }}>
               Agent Registry {isAdmin && <span className="text-xs font-normal" style={{ color: 'var(--accent)' }}>(Admin)</span>}
             </h2>
             <p className="text-xs mt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
@@ -175,7 +232,7 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={closeRegistry}
             className="text-gray-400 hover:text-gray-600 transition-colors"
             aria-label="Close"
           >
@@ -192,12 +249,23 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
         </div>
 
         {/* Top-level view toggle: agent blueprints vs external MCP-server catalog. */}
-        <div className="flex gap-1 px-6 pt-3 border-b" style={{ borderColor: 'var(--color-border)' }}>
-          {([['agents', 'Agent blueprints'], ['mcp', 'MCP servers'], ['identity', 'My identity']] as const).map(([key, label]) => (
+        <div
+          className="flex gap-1 px-6 pt-3 border-b"
+          style={{ borderColor: 'var(--color-border)' }}
+          role="tablist"
+          aria-label="Registry views"
+        >
+          {REGISTRY_VIEWS.map(([key, label]) => (
             <button
               key={key}
+              id={`registry-view-tab-${key}`}
               type="button"
+              role="tab"
+              aria-selected={view === key}
+              aria-controls="registry-view-panel"
+              tabIndex={view === key ? 0 : -1}
               onClick={() => { setView(key); setSelected(null); }}
+              onKeyDown={(event) => handleViewTabKeyDown(event, key)}
               className="px-3.5 py-2 text-sm border-b-2 -mb-px transition-colors"
               style={{
                 color: view === key ? 'var(--color-text-primary)' : 'var(--color-text-secondary)',
@@ -209,9 +277,16 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
           ))}
         </div>
 
+        <div
+          className="flex-1 min-h-0 flex flex-col"
+          role="tabpanel"
+          id="registry-view-panel"
+          aria-labelledby={`registry-view-tab-${view}`}
+          tabIndex={0}
+        >
         {/* Error banner — shown in both list and detail modes. */}
         {error && (
-          <div className="mx-6 mt-4 px-3 py-2 rounded-lg border border-red-200 bg-red-50 text-xs text-red-700">
+          <div className="mx-6 mt-4 px-3 py-2 rounded-lg border border-red-200 bg-red-50 text-xs text-red-700" role="alert">
             {error}
           </div>
         )}
@@ -244,11 +319,13 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search by name or description..."
+              aria-label="Search registry agents"
               className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
             <select
               value={scope}
               onChange={(e) => setScope(e.target.value as typeof scope)}
+              aria-label="Registry visibility scope"
               className="px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
             >
               <option value="all">All visible</option>
@@ -279,7 +356,7 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
             <DeployTargetsPanel />
           </div>
           {/* Status filter tabs with live counts (reference-registry pattern). */}
-          <div className="flex gap-2 mt-3 flex-wrap">
+          <div className="flex gap-2 mt-3 flex-wrap" role="group" aria-label="Filter agents by status">
             {([
               ['all', `All (${entries.length})`],
               ['approved', `Approved (${statusCounts.approved || 0})`],
@@ -290,6 +367,7 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
                 key={key}
                 type="button"
                 onClick={() => setStatusFilter(key)}
+                aria-pressed={statusFilter === key}
                 className={`px-3 py-1 rounded-full text-xs border transition-colors ${
                   statusFilter === key
                     ? 'bg-blue-600 text-white border-blue-600'
@@ -303,7 +381,7 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
         </div>
 
         {/* Content area */}
-        <div className="flex-1 overflow-y-auto px-6 py-4">
+        <div className="flex-1 overflow-y-auto px-6 py-4" tabIndex={0}>
           {loading && entries.length === 0 ? (
             <div className="text-sm text-gray-500">Loading agents...</div>
           ) : visibleEntries.length === 0 ? (
@@ -340,16 +418,7 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
                 return (
                   <div
                     key={entry.agent_slug}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => setSelected(entry)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        setSelected(entry);
-                      }
-                    }}
-                    className="border border-gray-200 rounded-lg p-4 bg-white hover:border-blue-300 cursor-pointer transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="border border-gray-200 rounded-lg p-4 bg-white hover:border-blue-300 transition-colors"
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex-1 min-w-0">
@@ -439,9 +508,15 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
                           </span>
                         </div>
                       </div>
-                      {/* Stop card-click propagation so action buttons don't
-                          also open the detail view. */}
-                      <div className="flex flex-col gap-2" onClick={(e) => e.stopPropagation()}>
+                      <div className="flex flex-col gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setSelected(entry)}
+                          className="px-3 py-1.5 text-xs font-semibold border border-gray-300 text-gray-700 rounded-lg hover:border-blue-400 hover:text-blue-700 transition-colors whitespace-nowrap"
+                          aria-label={`View details for ${entry.display_name}`}
+                        >
+                          View details
+                        </button>
                         {/* Clone button */}
                         <button
                           type="button"
@@ -490,11 +565,8 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
                             <button
                               type="button"
                               onClick={() => {
-                                const reason = prompt('Rejection reason (optional):');
-                                if (reason !== null) {
-                                  setRejectReason(reason);
-                                  void handleReject(entry.agent_slug);
-                                }
+                                setRejectReason('');
+                                setRejectCandidate(entry);
                               }}
                               disabled={rejecting !== null}
                               className="px-3 py-1.5 text-xs font-semibold bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-150 whitespace-nowrap"
@@ -515,7 +587,57 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
         </div>
         </>
         )}
+        </div>
       </div>
     </div>
+      <ModalShell
+        isOpen={rejectCandidate !== null}
+        onClose={() => {
+          setRejectCandidate(null);
+          setRejectReason('');
+        }}
+        title={rejectCandidate ? `Reject ${rejectCandidate.display_name}?` : 'Reject agent?'}
+        width="min(480px, calc(100vw - 2rem))"
+        data-testid="registry-reject-dialog"
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => {
+                setRejectCandidate(null);
+                setRejectReason('');
+              }}
+              className="px-4 py-2 text-sm font-medium border rounded-md"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (rejectCandidate) void handleReject(rejectCandidate.agent_slug);
+              }}
+              disabled={!rejectCandidate || rejecting !== null}
+              className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-md hover:bg-red-700 disabled:opacity-40"
+            >
+              {rejecting ? 'Rejecting…' : 'Reject agent'}
+            </button>
+          </>
+        }
+      >
+        <div className="p-5">
+          <label htmlFor={rejectReasonId} className="block text-sm font-medium mb-2">
+            Rejection reason <span className="font-normal text-gray-500">(optional)</span>
+          </label>
+          <textarea
+            id={rejectReasonId}
+            data-autofocus="true"
+            value={rejectReason}
+            onChange={(event) => setRejectReason(event.target.value)}
+            rows={4}
+            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
+          />
+        </div>
+      </ModalShell>
+    </>
   );
 }

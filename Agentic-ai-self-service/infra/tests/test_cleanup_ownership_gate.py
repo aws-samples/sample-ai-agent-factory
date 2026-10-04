@@ -1,21 +1,9 @@
-"""cleanup.sh must delete only resources tagged for the stack being torn down.
+"""The standalone cleanup script must fail closed on deletion authority.
 
-Why this exists: every sweep in ``cleanup.sh``'s ``sweep_orphan_resources`` matches
-on an account-global NAME PREFIX — Cognito ``AgentCore*``, secrets
-``agentcore-connector/`` and ``agentcore-otel/``, IAM roles ``AgentCoreMemory-*``
-and ``AgentCoreRuntime-*``. None of those names carry a deployment identity, so on
-an account running two deployments of this platform — dev + prod, or two teams,
-which is routine because customers deploy and delete this often — a teardown
-destroyed the *other* deployment's resources, including the secrets holding raw
-customer API keys.
-
-These are static assertions on the shipped script: that the gate is applied to
-every dangerous sweep, that the identity string still matches the Python side
-(``services/resource_ownership.stack_id``, which the backend uses to *write* the
-tag), and that the fail-closed default is intact. The behavior itself — what the
-AWS CLI's JMESPath filters actually match — is verified against real AWS by
-``scripts/verify-cleanup-ownership.sh``, because a mocked assertion here would
-only re-check a transcription of those filters.
+Dynamic deployment cleanup is delegated to the application Lambda's manifest
+teardown.  The shell retains only a narrow orphan sweep for taggable
+account-global resources, and every one requires a fresh exact AgentCoreStack
+tag read.  Missing tags are foreign; unreadable tags abort before CDK destroy.
 """
 
 from __future__ import annotations
@@ -35,19 +23,19 @@ def _cleanup_sh() -> str:
     return _CLEANUP_SH.read_text()
 
 
-def _sweep_body() -> str:
+def _function(name: str) -> str:
     src = _cleanup_sh()
-    start = src.index("sweep_orphan_resources() {")
-    end = src.index("# ── Step 6", start)
-    return src[start:end]
+    start = src.index(f"{name}() {{")
+    match = re.search(r"^\}", src[start:], re.MULTILINE)
+    assert match, f"{name} closing brace not found"
+    return src[start : start + match.end()]
+
+
+def _sweep_body() -> str:
+    return _function("sweep_orphan_resources")
 
 
 def test_the_owner_tag_key_matches_the_python_side() -> None:
-    """The backend writes the tag; the shell reads it. One typo and teardown leaks.
-
-    A mismatch fails safe (nothing is deleted) but silently: every teardown would
-    report success and leave the whole namespace behind.
-    """
     py_key = re.search(r'OWNER_TAG_KEY = "([^"]+)"', _OWNERSHIP_PY.read_text())
     sh_key = re.search(r'^OWNER_TAG_KEY="([^"]+)"', _cleanup_sh(), re.MULTILINE)
     assert py_key and sh_key
@@ -55,16 +43,18 @@ def test_the_owner_tag_key_matches_the_python_side() -> None:
 
 
 def test_the_identity_string_matches_the_python_side() -> None:
-    """``{project}-{env}-{region}`` is a cross-language contract.
-
-    Run the shipped bash assignment against the shell's own default config and
-    compare with the Python default, rather than transcribing either.
-    """
+    """``{project}-{env}-{region}`` remains a cross-language contract."""
     src = _cleanup_sh()
     expr = re.search(r'^STACK_OWNER_ID="([^"]+)"', src, re.MULTILINE)
-    assert expr, "STACK_OWNER_ID assignment not found — did cleanup.sh change shape?"
-    defaults = dict(re.findall(r'^(ENVIRONMENT_NAME|AWS_REGION|PROJECT_NAME)="\$\{\1:-([^}]*)\}"', src, re.MULTILINE))
-    assert set(defaults) == {"ENVIRONMENT_NAME", "AWS_REGION", "PROJECT_NAME"}, defaults
+    assert expr
+    defaults = dict(
+        re.findall(
+            r'^(ENVIRONMENT_NAME|AWS_REGION|PROJECT_NAME)="\$\{\1:-([^}]*)\}"',
+            src,
+            re.MULTILINE,
+        )
+    )
+    assert set(defaults) == {"ENVIRONMENT_NAME", "AWS_REGION", "PROJECT_NAME"}
 
     out = subprocess.run(
         [
@@ -80,128 +70,603 @@ def test_the_identity_string_matches_the_python_side() -> None:
         text=True,
         check=True,
     ).stdout
-    # Mirrors resource_ownership.stack_id() with the same defaults.
-    assert out == f"{defaults['PROJECT_NAME']}-{defaults['ENVIRONMENT_NAME']}-{defaults['AWS_REGION']}"
     assert out == "agentcore-workflow-dev-us-east-1"
 
 
-def test_ownership_check_fails_closed_for_untagged_resources() -> None:
-    """An untagged resource must count as foreign by default.
-
-    A resource that predates the tag and a resource belonging to another
-    deployment are indistinguishable; deleting a foreign secret is unrecoverable,
-    skipping a legacy orphan costs one manual delete.
-    """
-    src = _cleanup_sh()
-    fn = src[src.index("is_owned_by_this_stack() {") :]
-    fn = fn[: fn.index("\n}\n")]
+def test_ownership_check_accepts_only_the_exact_stack_tag() -> None:
+    fn = _function("is_owned_by_this_stack")
     for tag_value in ("", "None", "some-other-stack-us-east-1", "ManagedBy"):
-        rc = subprocess.run(
+        result = subprocess.run(
             [
                 "bash",
                 "-c",
-                f'STACK_OWNER_ID="agentcore-workflow-dev-us-east-1"\n{fn}\n}}\nis_owned_by_this_stack "$1"',
+                f'STACK_OWNER_ID="ours"\n{fn}\nis_owned_by_this_stack "$1"',
                 "_",
                 tag_value,
             ],
             capture_output=True,
-            text=True,
-        ).returncode
-        assert rc != 0, f"{tag_value!r} was accepted as proof of ownership"
-    rc = subprocess.run(
+        )
+        assert result.returncode != 0, f"{tag_value!r} became deletion authority"
+
+    result = subprocess.run(
         [
             "bash",
             "-c",
-            f'STACK_OWNER_ID="agentcore-workflow-dev-us-east-1"\n{fn}\n}}\nis_owned_by_this_stack "$1"',
+            f'STACK_OWNER_ID="ours"\n{fn}\nis_owned_by_this_stack "$1"',
             "_",
-            "agentcore-workflow-dev-us-east-1",
+            "ours",
         ],
         capture_output=True,
-        text=True,
-    ).returncode
-    assert rc == 0, "the stack's own tag was rejected"
+    )
+    assert result.returncode == 0
 
 
-def test_untagged_resources_are_only_swept_on_explicit_opt_in() -> None:
-    src = _cleanup_sh()
-    fn = src[src.index("is_owned_by_this_stack() {") :]
-    fn = fn[: fn.index("\n}\n")]
-    script = f'STACK_OWNER_ID="s"\n{fn}\n}}\nis_owned_by_this_stack "None"'
-    assert subprocess.run(["bash", "-c", script], capture_output=True).returncode != 0
-    assert (
-        subprocess.run(
+def test_no_environment_escape_hatch_can_authorize_untagged_resources() -> None:
+    fn = _function("is_owned_by_this_stack")
+    script = f'STACK_OWNER_ID="ours"\n{fn}\nis_owned_by_this_stack "None"'
+    for env_name in ("CLEANUP_INCLUDE_UNTAGGED", "CLEANUP_INCLUDE_FOREIGN_RUNTIMES"):
+        result = subprocess.run(
             ["bash", "-c", script],
             capture_output=True,
-            env={"PATH": "/usr/bin:/bin", "CLEANUP_INCLUDE_UNTAGGED": "1"},
-        ).returncode
-        == 0
-    )
+            env={"PATH": "/usr/bin:/bin", env_name: "1"},
+        )
+        assert result.returncode != 0
+
+    options = _function("validate_cleanup_options")
+    assert "were removed" in options
+    assert "return 1" in options
 
 
 @pytest.mark.parametrize(
     ("label", "marker"),
     [
-        # Deletes a pool whose name is "AgentCore-{the user's gateway name}" — it
-        # cannot tell this deployment's pool from another product's.
-        ("cognito user pool", 'skip_foreign "Cognito user pool'),
-        # Holds the raw customer API key. Worst case in the whole sweep.
+        ("runtime IAM role", 'delete_owned_iam_role "${role_name}" "runtime IAM role"'),
+        ("memory IAM role", 'delete_owned_iam_role "${role_name}" "memory IAM role"'),
+        ("Cognito user pool", 'skip_foreign "Cognito user pool'),
         ("connector secret", 'sweep_owned_secrets "connector secret"'),
         ("per-agent OTEL secret", 'sweep_owned_secrets "per-agent OTEL secret"'),
-        # IAM is not regional, so this reached the other region's roles too.
-        ("memory IAM role", 'skip_foreign "memory IAM role'),
-        ("runtime IAM role", 'skip_foreign "runtime IAM role'),
     ],
 )
-def test_every_dangerous_sweep_is_gated(label: str, marker: str) -> None:
-    assert marker in _sweep_body(), f"the {label} sweep no longer reports foreign resources"
+def test_every_orphan_namespace_routes_through_an_ownership_gate(
+    label: str,
+    marker: str,
+) -> None:
+    assert marker in _sweep_body(), f"{label} no longer routes through its ownership gate"
 
 
-def test_no_unconditional_deletes_left_in_the_swept_namespaces() -> None:
-    """The gate is worthless if one sweep still deletes on a name match alone.
+def test_iam_and_secret_helpers_re_read_live_tags_before_deleting() -> None:
+    role = _function("delete_owned_iam_role")
+    secret = _function("sweep_owned_secrets")
+    assert "read_iam_role_owner_tag" in role
+    assert 'is_owned_by_this_stack "${OWNER_READ_VALUE}"' in role
+    assert "read_secret_owner_tag" in secret
+    assert 'is_owned_by_this_stack "${OWNER_READ_VALUE}"' in secret
 
-    Each destructive call in these namespaces must be preceded by an ownership
-    decision, so assert the count of ownership checks against the count of
-    prefix-matched namespaces rather than eyeballing the file.
-    """
-    body = _sweep_body()
-    # One per namespace: cognito, otel secrets, connector secrets, memory roles,
-    # runtime roles. The secret sweeps route through the shared helper.
-    checks = body.count("is_owned_by_this_stack") + body.count("sweep_owned_secrets ")
-    assert checks >= 5, f"only {checks} ownership decisions found across the sweeps"
+
+def test_tag_read_failure_is_not_conflated_with_missing_tag() -> None:
+    src = _cleanup_sh()
+    assert 'OWNER_READ_STATE="unreadable"' in src
+    assert "SKIPPED_UNREADABLE" in _sweep_body()
+    assert "Stopping before CDK destroy" in _sweep_body()
+    assert '|| echo "None"' not in src
+
+
+def test_orphan_secrets_are_recoverable_and_never_force_deleted() -> None:
+    helper = _function("sweep_owned_secrets")
+    assert "--recovery-window-in-days 7" in helper
+    assert "--force-delete-without-recovery" not in _cleanup_sh()
 
 
 def test_the_platform_otel_secret_is_still_excluded_by_name() -> None:
-    """agentcore-otel/platform/* outlives every stack (bootstrap-otel-secret.sh).
-
-    It is excluded by NAME, not by tag, so the exclusion must survive the move to
-    the tag-gated helper. Deleting it silently broke the next deploy (Bug 24).
-    """
     assert "!starts_with(Name, 'agentcore-otel/platform/')" in _sweep_body()
 
 
 def test_the_cdk_shared_runtime_role_is_never_swept() -> None:
-    """AgentCoreRuntime-{project}-{env}[-{region}]-shared is CloudFormation's.
-
-    Verified live 2026-09-04: the old "AgentCoreRuntime-${PROJECT_NAME}" filter
-    matched AgentCoreRuntime-agentcore-workflow-dev-eu-central-1-shared, so a
-    us-east-1 teardown deleted the Frankfurt deployment's shared execution role —
-    the role every agent there assumes. IAM roles get no aws:cloudformation:*
-    system tags, so the name suffix is the only available signal.
-    """
-    body = _sweep_body()
-    assert "== *-shared" in body, "the -shared exclusion is gone from the runtime-role sweep"
+    assert "== *-shared" in _sweep_body()
 
 
-def test_operator_is_told_what_was_left_behind() -> None:
-    """Silently skipping is how the original bug stayed invisible for so long."""
+def test_broad_raw_agentcore_sweeps_no_longer_exist() -> None:
     src = _cleanup_sh()
-    assert "SKIPPED_FOREIGN" in src
-    assert "CLEANUP_INCLUDE_UNTAGGED=1" in src
+    for command in (
+        "delete-agent-runtime",
+        "delete-gateway",
+        "delete-memory",
+        "delete-policy-engine",
+        "delete-oauth2-credential-provider",
+        "delete-api-key-credential-provider",
+        "delete-guardrail",
+        "delete-knowledge-base",
+    ):
+        assert command not in src
+
+
+def test_noninteractive_cleanup_requires_the_exact_regional_identity() -> None:
+    confirm = _function("confirm_destroy")
+    assert "CLEANUP_CONFIRM_STACK_OWNER" in confirm
+    assert '"${STACK_OWNER_ID}"' in confirm
+    assert "return 1" in confirm
+
+
+def test_a_missing_stack_still_requires_confirmation_before_the_sweep() -> None:
+    main = _function("main")
+    assert main.index("check_stack_exists") < main.index("confirm_destroy")
+    assert main.index("confirm_destroy") < main.index("sweep_orphan_resources")
+    assert "exit 0" not in _function("check_stack_exists")
 
 
 def test_cleanup_sh_can_be_sourced_without_running_a_teardown() -> None:
-    """scripts/verify-cleanup-ownership.sh sources it to exercise the real sweep.
-
-    Without the guard, sourcing would run main() — i.e. destroy the stack.
-    """
     assert 'if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then' in _cleanup_sh()
+
+
+def test_retained_gateway_auth_cleanup_uses_exact_stack_outputs_and_runs_last() -> None:
+    check = _function("check_stack_exists")
+    main = _function("main")
+    assert 'capture_retained_gateway_auth_outputs "${describe_result}"' in check
+    assert "list-user-pools" not in _function("delete_retained_gateway_auth_resources")
+    assert main.index("prepare_retained_gateway_auth_target") < main.index("cleanup_deployment_resources")
+    assert main.index("verify_resources_removed") < main.index("delete_retained_gateway_auth_resources")
+    assert main.index("delete_retained_gateway_auth_resources") < main.index("print_summary")
+
+
+def test_exact_stack_outputs_capture_both_retained_resource_ids() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r"""
+source "$1"
+capture_retained_gateway_auth_outputs "$2"
+printf 'stack=%s\npool=%s\ndomain=%s\n' \
+  "${STACK_ID}" "${RETAINED_GATEWAY_AUTH_POOL_ID}" \
+  "${RETAINED_GATEWAY_AUTH_DOMAIN_PREFIX}"
+""",
+            "_",
+            str(_CLEANUP_SH),
+            (
+                '{"Stacks":[{"StackId":"arn:aws:cloudformation:us-east-1:123456789012:'
+                'stack/acfe2e-test/uuid","Outputs":['
+                '{"OutputKey":"GatewayAuthUserPoolId","OutputValue":"us-east-1_AbCd1234"},'
+                '{"OutputKey":"GatewayAuthDomainPrefix","OutputValue":"acfe2e-test-gw-abc123-123456789012"}'
+                "]}]}"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "stack=arn:aws:cloudformation:us-east-1:123456789012:stack/acfe2e-test/uuid" in result.stdout
+    assert "pool=us-east-1_AbCd1234" in result.stdout
+    assert "domain=acfe2e-test-gw-abc123-123456789012" in result.stdout
+
+
+def test_a_partial_retained_gateway_auth_output_fails_closed() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r"""
+source "$1"
+capture_retained_gateway_auth_outputs "$2"
+""",
+            "_",
+            str(_CLEANUP_SH),
+            (
+                '{"Stacks":[{"StackId":"arn:aws:cloudformation:us-east-1:123456789012:'
+                'stack/acfe2e-test/uuid","Outputs":['
+                '{"OutputKey":"GatewayAuthUserPoolId","OutputValue":"us-east-1_AbCd1234"}'
+                "]}]}"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "partial retained-resource identity is unsafe" in (result.stdout + result.stderr)
+
+
+def test_absent_stack_recovery_selects_only_the_exact_tagged_pool(
+    tmp_path: pathlib.Path,
+) -> None:
+    calls = tmp_path / "aws-calls"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r"""
+source "$1"
+CALL_LOG="$2"
+PROJECT_NAME="acfe2e"
+ENVIRONMENT_NAME="test"
+STACK_NAME="acfe2e-test"
+aws() {
+  printf '%s\n' "$*" >> "${CALL_LOG}"
+  if [[ "$1 $2" == "cognito-idp list-user-pools" ]]; then
+    printf '%s\n' '{"UserPools":[
+      {"Id":"us-east-1_Ours","Name":"acfe2e-test-gateway-auth"},
+      {"Id":"us-east-1_Foreign","Name":"acfe2e-test-gateway-auth"},
+      {"Id":"us-east-1_Other","Name":"different-gateway-auth"}
+    ]}'
+    return 0
+  fi
+  if [[ "$1 $2 $3" == "cognito-idp describe-user-pool --user-pool-id" ]]; then
+    if [[ "$4" == "us-east-1_Ours" ]]; then
+      printf '%s\n' '{"UserPool":{
+        "Name":"acfe2e-test-gateway-auth",
+        "Domain":"acfe2e-test-gw-ours-123456789012",
+        "UserPoolTags":{
+          "Project":"acfe2e",
+          "Environment":"test",
+          "aws:cloudformation:stack-name":"acfe2e-test"
+        }
+      }}'
+    else
+      printf '%s\n' '{"UserPool":{
+        "Name":"acfe2e-test-gateway-auth",
+        "Domain":"acfe2e-test-gw-foreign-123456789012",
+        "UserPoolTags":{
+          "Project":"someone-else",
+          "Environment":"test",
+          "aws:cloudformation:stack-name":"acfe2e-test"
+        }
+      }}'
+    fi
+    return 0
+  fi
+  return 99
+}
+discover_retained_gateway_auth_target
+printf 'pool=%s\ndomain=%s\n' \
+  "${RETAINED_GATEWAY_AUTH_POOL_ID}" "${RETAINED_GATEWAY_AUTH_DOMAIN_PREFIX}"
+""",
+            "_",
+            str(_CLEANUP_SH),
+            str(calls),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "pool=us-east-1_Ours" in result.stdout
+    assert "domain=acfe2e-test-gw-ours-123456789012" in result.stdout
+    assert "us-east-1_Other" not in calls.read_text()
+
+
+def test_absent_stack_recovery_refuses_ambiguous_exact_tagged_pools(
+    tmp_path: pathlib.Path,
+) -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r"""
+source "$1"
+PROJECT_NAME="acfe2e"
+ENVIRONMENT_NAME="test"
+STACK_NAME="acfe2e-test"
+aws() {
+  if [[ "$1 $2" == "cognito-idp list-user-pools" ]]; then
+    printf '%s\n' '{"UserPools":[
+      {"Id":"us-east-1_First","Name":"acfe2e-test-gateway-auth"},
+      {"Id":"us-east-1_Second","Name":"acfe2e-test-gateway-auth"}
+    ]}'
+    return 0
+  fi
+  local pool_id="$4"
+  printf '%s\n' "{\"UserPool\":{
+    \"Name\":\"acfe2e-test-gateway-auth\",
+    \"Domain\":\"acfe2e-test-gw-${pool_id##*_}-123456789012\",
+    \"UserPoolTags\":{
+      \"Project\":\"acfe2e\",
+      \"Environment\":\"test\",
+      \"aws:cloudformation:stack-name\":\"acfe2e-test\"
+    }
+  }}"
+}
+discover_retained_gateway_auth_target
+""",
+            "_",
+            str(_CLEANUP_SH),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "Refusing an ambiguous delete" in (result.stdout + result.stderr)
+
+
+def test_retained_gateway_auth_target_must_match_the_exact_stack_identity(
+    tmp_path: pathlib.Path,
+) -> None:
+    calls = tmp_path / "aws-calls"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r"""
+source "$1"
+CALL_LOG="$2"
+PROJECT_NAME="acfe2e"
+ENVIRONMENT_NAME="test"
+STACK_NAME="acfe2e-test"
+STACK_ID="arn:aws:cloudformation:us-east-1:123456789012:stack/acfe2e-test/right"
+RETAINED_GATEWAY_AUTH_POOL_ID="us-east-1_AbCd1234"
+RETAINED_GATEWAY_AUTH_DOMAIN_PREFIX="acfe2e-test-gw-abc123-123456789012"
+aws() {
+  printf '%s\n' "$*" >> "${CALL_LOG}"
+  printf '%s\n' '{"UserPool":{
+    "Name":"acfe2e-test-gateway-auth",
+    "Domain":"acfe2e-test-gw-abc123-123456789012",
+    "UserPoolTags":{
+      "Project":"acfe2e",
+      "Environment":"test",
+      "aws:cloudformation:stack-name":"acfe2e-test",
+      "aws:cloudformation:stack-id":"arn:aws:cloudformation:us-east-1:123456789012:stack/acfe2e-test/wrong"
+    }
+  }}'
+}
+validate_retained_gateway_auth_target
+""",
+            "_",
+            str(_CLEANUP_SH),
+            str(calls),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "not attributable to the exact stack" in (result.stdout + result.stderr)
+    assert calls.read_text().splitlines() == [
+        ("cognito-idp describe-user-pool --user-pool-id us-east-1_AbCd1234 --region us-east-1 --output json")
+    ]
+
+
+def test_retained_gateway_auth_delete_uses_only_the_verified_exact_ids(
+    tmp_path: pathlib.Path,
+) -> None:
+    calls = tmp_path / "aws-calls"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r"""
+source "$1"
+CALL_LOG="$2"
+RETAINED_GATEWAY_AUTH_POOL_ID="us-east-1_AbCd1234"
+RETAINED_GATEWAY_AUTH_DOMAIN_PREFIX="acfe2e-test-gw-abc123-123456789012"
+RETAINED_GATEWAY_AUTH_VALIDATED=true
+aws() {
+  printf '%s\n' "$*" >> "${CALL_LOG}"
+  case "$1 $2" in
+    "cognito-idp describe-user-pool")
+      local count
+      count=$(grep -c '^cognito-idp describe-user-pool ' "${CALL_LOG}")
+      if [[ "${count}" -eq 1 ]]; then
+        printf '%s\n' '{"UserPool":{
+          "Name":"acfe2e-test-gateway-auth",
+          "Domain":"acfe2e-test-gw-abc123-123456789012"
+        }}'
+        return 0
+      fi
+      printf 'ResourceNotFoundException\n' >&2
+      return 255
+      ;;
+    "cognito-idp delete-user-pool-domain"|"cognito-idp delete-user-pool")
+      return 0
+      ;;
+    "cognito-idp describe-user-pool-domain")
+      printf '%s\n' '{"DomainDescription":{}}'
+      return 0
+      ;;
+  esac
+  printf 'unexpected aws call: %s\n' "$*" >&2
+  return 99
+}
+delete_retained_gateway_auth_resources
+""",
+            "_",
+            str(_CLEANUP_SH),
+            str(calls),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    logged = calls.read_text()
+    assert "list-user-pools" not in logged
+    assert (
+        "cognito-idp delete-user-pool-domain --user-pool-id us-east-1_AbCd1234 "
+        "--domain acfe2e-test-gw-abc123-123456789012 --region us-east-1"
+    ) in logged
+    assert ("cognito-idp delete-user-pool --user-pool-id us-east-1_AbCd1234 --region us-east-1") in logged
+    assert "Retained gateway-auth pool and hosted domain are absent." in result.stdout
+
+
+def test_retained_gateway_auth_delete_refuses_a_changed_domain(
+    tmp_path: pathlib.Path,
+) -> None:
+    calls = tmp_path / "aws-calls"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r"""
+source "$1"
+CALL_LOG="$2"
+RETAINED_GATEWAY_AUTH_POOL_ID="us-east-1_AbCd1234"
+RETAINED_GATEWAY_AUTH_DOMAIN_PREFIX="captured-domain"
+RETAINED_GATEWAY_AUTH_VALIDATED=true
+aws() {
+  printf '%s\n' "$*" >> "${CALL_LOG}"
+  printf '%s\n' '{"UserPool":{"Domain":"different-domain"}}'
+}
+delete_retained_gateway_auth_resources
+""",
+            "_",
+            str(_CLEANUP_SH),
+            str(calls),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "domain changed after validation" in (result.stdout + result.stderr)
+    assert "delete-user-pool" not in calls.read_text()
+
+
+def test_unreadable_iam_owner_tag_never_reaches_a_delete_command(
+    tmp_path: pathlib.Path,
+) -> None:
+    calls = tmp_path / "aws-calls"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r"""
+source "$1"
+CALL_LOG="$2"
+aws() {
+  printf '%s\n' "$*" >> "${CALL_LOG}"
+  if [[ "$1 $2" == "iam list-role-tags" ]]; then
+    return 41
+  fi
+  return 0
+}
+delete_owned_iam_role "AgentCoreRuntime-customer" "runtime IAM role"
+printf 'foreign=%s unreadable=%s failures=%s state=%s\n' \
+  "${SKIPPED_FOREIGN}" "${SKIPPED_UNREADABLE}" "${DELETE_FAILURES}" \
+  "${OWNER_READ_STATE}"
+""",
+            "_",
+            str(_CLEANUP_SH),
+            str(calls),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "foreign=0 unreadable=1 failures=0 state=unreadable" in result.stdout
+    assert calls.read_text().splitlines() == [
+        (
+            "iam list-role-tags --role-name AgentCoreRuntime-customer "
+            "--query Tags[?Key=='AgentCoreStack'].Value | [0] --output text"
+        )
+    ]
+
+
+def test_missing_iam_owner_tag_is_foreign_but_not_an_unreadable_error(
+    tmp_path: pathlib.Path,
+) -> None:
+    calls = tmp_path / "aws-calls"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r"""
+source "$1"
+CALL_LOG="$2"
+aws() {
+  printf '%s\n' "$*" >> "${CALL_LOG}"
+  if [[ "$1 $2" == "iam list-role-tags" ]]; then
+    printf 'None\n'
+    return 0
+  fi
+  return 0
+}
+delete_owned_iam_role "AgentCoreRuntime-legacy" "runtime IAM role"
+printf 'foreign=%s unreadable=%s failures=%s state=%s\n' \
+  "${SKIPPED_FOREIGN}" "${SKIPPED_UNREADABLE}" "${DELETE_FAILURES}" \
+  "${OWNER_READ_STATE}"
+""",
+            "_",
+            str(_CLEANUP_SH),
+            str(calls),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "foreign=1 unreadable=0 failures=0 state=missing" in result.stdout
+    assert calls.read_text().splitlines() == [
+        (
+            "iam list-role-tags --role-name AgentCoreRuntime-legacy "
+            "--query Tags[?Key=='AgentCoreStack'].Value | [0] --output text"
+        )
+    ]
+
+
+def test_a_retained_lambda_result_stops_main_before_sweep_or_cdk_destroy(
+    tmp_path: pathlib.Path,
+) -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r"""
+source "$1"
+TMPDIR="$2"
+check_prerequisites() { :; }
+check_aws_credentials() { :; }
+check_stack_exists() { STACK_EXISTS=true; }
+confirm_destroy() { :; }
+install_cdk_dependencies_for_cleanup() { :; }
+sweep_orphan_resources() { printf 'SWEEP_RAN\n'; }
+run_cdk_destroy() { printf 'CDK_RAN\n'; }
+verify_resources_removed() { printf 'VERIFY_RAN\n'; }
+print_summary() { printf 'SUMMARY_RAN\n'; }
+aws() {
+  if [[ "$1 $2" == "dynamodb describe-table" ]]; then
+    printf '{}\n'
+    return 0
+  fi
+  if [[ "$1 $2" == "dynamodb scan" ]]; then
+    printf '%s\n' \
+      '{"Items":[{"deployment_id":{"S":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"},"delete_status":{"S":""}}]}'
+    return 0
+  fi
+  if [[ "$1 $2" == "lambda invoke" ]]; then
+    local arg response_file=""
+    for arg in "$@"; do
+      if [[ "${arg}" == "${TMPDIR}"/agentcore-cleanup-response.* ]]; then
+        response_file="${arg}"
+      fi
+    done
+    [[ -n "${response_file}" ]]
+    printf '%s\n' \
+      '{"success":false,"retained":true,"message":"ownership not proven"}' \
+      > "${response_file}"
+    printf '{"StatusCode":200}\n'
+    return 0
+  fi
+  printf 'unexpected aws call: %s\n' "$*" >&2
+  return 99
+}
+main
+""",
+            "_",
+            str(_CLEANUP_SH),
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "ownership not proven" in combined
+    assert "Stopping before CDK destroy" in combined
+    for forbidden in (
+        "SWEEP_RAN",
+        "CDK_RAN",
+        "VERIFY_RAN",
+        "SUMMARY_RAN",
+    ):
+        assert forbidden not in combined

@@ -8,22 +8,38 @@ import { apiRequest } from './client';
 // Types
 // ============================================================================
 
+export type TriggerType = 'cron' | 'eventbridge' | 's3' | 'webhook';
+
+export type TriggerStatus =
+  | 'active'
+  | 'provisioning'
+  | 'error'
+  | 'deleting'
+  | 'disabled'
+  | 'registered';
+
 export interface TriggerSummary {
   runtime_name: string;
   trigger_id: string;
-  type: string;
-  status: string;
+  type: TriggerType;
+  status: TriggerStatus;
   target_runtime_arn: string;
   schedule?: string | null;
   pattern?: Record<string, unknown> | null;
-  webhook_secret_ref?: string | null;
   webhook_out_url?: string | null;
+  webhook_path?: string | null;
+  /**
+   * Returned once, by webhook creation only. The backend never persists or
+   * returns this value from list operations.
+   */
+  webhook_signing_secret?: string | null;
+  last_error_code?: string | null;
   created_at: number;
   updated_at: number;
 }
 
 export interface CreateTriggerInput {
-  type: 'cron' | 'eventbridge' | 's3' | 'webhook';
+  type: TriggerType;
   schedule?: string;
   pattern?: Record<string, unknown>;
   webhook_out_url?: string;

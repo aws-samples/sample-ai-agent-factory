@@ -29,6 +29,7 @@ export function FlowSidebar() {
   const [isCreating, setIsCreating] = useState(false);
   const [createName, setCreateName] = useState('');
   const createInputRef = useRef<HTMLInputElement>(null);
+  const createResolutionRef = useRef<'pending' | 'confirmed' | 'cancelled'>('pending');
 
   useEffect(() => {
     fetchFlows().then(() => setHasFetched(true));
@@ -61,6 +62,7 @@ export function FlowSidebar() {
   const handleCreateClick = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
+      createResolutionRef.current = 'pending';
       setIsCreating(true);
       setCreateName('Untitled Flow');
     },
@@ -68,6 +70,8 @@ export function FlowSidebar() {
   );
 
   const handleCreateConfirm = useCallback(() => {
+    if (createResolutionRef.current !== 'pending') return;
+    createResolutionRef.current = 'confirmed';
     const trimmed = createName.trim();
     if (trimmed) {
       createFlow(trimmed);
@@ -77,6 +81,8 @@ export function FlowSidebar() {
   }, [createName, createFlow]);
 
   const handleCreateCancel = useCallback(() => {
+    if (createResolutionRef.current !== 'pending') return;
+    createResolutionRef.current = 'cancelled';
     setIsCreating(false);
     setCreateName('');
   }, []);
@@ -106,11 +112,16 @@ export function FlowSidebar() {
     <div data-testid="flow-sidebar" className="border-b border-[#e9ebed]">
       {/* Header */}
       <div
-        data-testid="flow-sidebar-header"
-        className="flex cursor-pointer items-center justify-between px-3 py-2.5 bg-[#fafafa] hover:bg-[#f2f3f3]"
-        onClick={handleToggle}
+        className="flex items-center bg-[#fafafa] hover:bg-[#f2f3f3]"
       >
-        <div className="flex items-center gap-1.5" data-testid="flow-sidebar-toggle">
+        <button
+          type="button"
+          data-testid="flow-sidebar-header"
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 px-3 py-2.5 text-left focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#0972d3]"
+          onClick={handleToggle}
+          aria-expanded={isExpanded}
+          aria-controls="flow-sidebar-list"
+        >
           {/* Chevron */}
           <svg
             className={`h-3.5 w-3.5 text-[#8d99a8] transition-transform ${isExpanded ? 'rotate-90' : ''}`}
@@ -118,17 +129,18 @@ export function FlowSidebar() {
             viewBox="0 0 24 24"
             stroke="currentColor"
             strokeWidth={2}
+            aria-hidden="true"
           >
             <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
           </svg>
           <span className="font-medium text-[#16191f] text-[13px]">Flows</span>
-        </div>
+        </button>
 
         {/* Create button */}
         <button
           type="button"
           data-testid="flow-sidebar-create"
-          className="flex h-5 w-5 items-center justify-center rounded text-[#8d99a8] hover:bg-[#e9ebed] hover:text-[#16191f]"
+          className="mr-3 flex h-5 w-5 shrink-0 items-center justify-center rounded text-[#8d99a8] hover:bg-[#e9ebed] hover:text-[#16191f] focus:outline-none focus:ring-2 focus:ring-[#0972d3]"
           onClick={handleCreateClick}
           aria-label="Create flow"
         >
@@ -140,7 +152,7 @@ export function FlowSidebar() {
 
       {/* Expanded content */}
       {isExpanded && (
-        <div data-testid="flow-sidebar-list" className="p-1.5 space-y-0.5">
+        <div id="flow-sidebar-list" data-testid="flow-sidebar-list" className="p-1.5 space-y-0.5">
           {/* Inline create input */}
           {isCreating && (
             <div className="flex items-center gap-1 px-2 py-1">
@@ -150,10 +162,17 @@ export function FlowSidebar() {
                 value={createName}
                 onChange={(e) => setCreateName(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleCreateConfirm();
-                  if (e.key === 'Escape') handleCreateCancel();
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleCreateConfirm();
+                  }
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    handleCreateCancel();
+                  }
                 }}
                 onBlur={handleCreateConfirm}
+                aria-label="New flow name"
                 className="flex-1 text-[13px] px-1.5 py-0.5 rounded border border-[#0972d3] focus:outline-none focus:ring-1 focus:ring-[#0972d3] bg-white"
                 data-testid="flow-sidebar-create-input"
               />
@@ -161,7 +180,11 @@ export function FlowSidebar() {
           )}
 
           {isLoading && (
-            <p data-testid="flow-sidebar-loading" className="px-2 py-1 text-[12px] text-[#8d99a8]">
+            <p
+              data-testid="flow-sidebar-loading"
+              className="px-2 py-1 text-[12px]"
+              style={{ color: 'var(--color-text-secondary)' }}
+            >
               Loading...
             </p>
           )}
@@ -171,7 +194,7 @@ export function FlowSidebar() {
               <svg className="h-3.5 w-3.5 text-red-400 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
               </svg>
-              <span className="text-[11px] text-red-600 leading-tight">Something went wrong. Please try again.</span>
+              <span className="text-[11px] text-red-700 leading-tight">Something went wrong. Please try again.</span>
             </div>
           )}
 

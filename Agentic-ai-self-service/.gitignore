@@ -81,6 +81,8 @@ frontend/dist/
 
 # CDK outputs
 cdk.out/
+infra/cdk.out.preflight/
+.cdk-gate/
 
 # Temporary files
 tmp/

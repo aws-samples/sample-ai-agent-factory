@@ -17,13 +17,9 @@ import type {
   ObservabilityProvider,
 } from '../../types/components';
 import { createDefaultObservabilityConfig } from './observabilityUtils';
-
-interface PlatformDefaults {
-  enabled: boolean;
-  endpoint?: string;
-  sample_rate?: number;
-  service_name_prefix?: string;
-}
+import { authFetch } from '../../auth/authFetch';
+import { usePlatformObservabilityPolicy } from '../../hooks/usePlatformObservabilityPolicy';
+import { PlatformObservabilityPolicyNotice } from './PlatformObservabilityPolicyNotice';
 
 // ============================================================================
 // Provider presets
@@ -99,23 +95,24 @@ export function ObservabilityConfigurationModal({
   const [credentialError, setCredentialError] = useState<string | null>(null);
   const [savingCredentials, setSavingCredentials] = useState(false);
 
-  // Platform-managed OTEL defaults (admin-set at deploy time). When enabled,
-  // endpoint/secret/sample are LOCKED — the user can only edit resource
-  // attributes. Fetched once when the modal opens.
-  const [platformDefaults, setPlatformDefaults] = useState<PlatformDefaults>({ enabled: false });
+  // Platform-managed OTEL defaults (admin-set at deploy time). An unreadable
+  // policy is not equivalent to "disabled": presenting editable fields in that
+  // state would let users configure values the locked server policy may discard.
+  const {
+    state: platformPolicy,
+    retry: retryPlatformPolicy,
+  } = usePlatformObservabilityPolicy(isOpen, apiBaseUrl);
+  const platformDefaults =
+    platformPolicy.status === 'ready' ? platformPolicy.defaults : undefined;
+  const platformDefaultsEnabled = platformDefaults?.enabled === true;
 
   useEffect(() => {
     if (isOpen) {
       setConfig({ ...createDefaultObservabilityConfig(), ...initialConfig });
       setCredentials({});
       setCredentialError(null);
-      // Fire-and-forget: silently fall back to per-canvas mode on error.
-      fetch(`${apiBaseUrl}/api/observability/platform-defaults`)
-        .then((r) => (r.ok ? r.json() : { enabled: false }))
-        .then((data: PlatformDefaults) => setPlatformDefaults(data))
-        .catch(() => setPlatformDefaults({ enabled: false }));
     }
-  }, [isOpen, initialConfig, apiBaseUrl]);
+  }, [isOpen, initialConfig]);
 
   const preset = useMemo(
     () => PROVIDER_PRESETS.find((p) => p.value === config.provider) ?? PROVIDER_PRESETS[0],
@@ -143,11 +140,16 @@ export function ObservabilityConfigurationModal({
 
   const validationErrors = useMemo(() => {
     const errors: ValidationError[] = [];
-    if (config.enableOtel && !config.otlpEndpoint?.trim()) {
+    if (
+      platformPolicy.status === 'ready' &&
+      !platformDefaults?.enabled &&
+      config.enableOtel &&
+      !config.otlpEndpoint?.trim()
+    ) {
       errors.push({ field: 'otlpEndpoint', message: 'OTLP endpoint is required when telemetry is enabled' });
     }
     return errors;
-  }, [config]);
+  }, [config.enableOtel, config.otlpEndpoint, platformDefaults?.enabled, platformPolicy]);
 
   const handleStoreCredentials = useCallback(async () => {
     setSavingCredentials(true);
@@ -157,7 +159,10 @@ export function ObservabilityConfigurationModal({
       preset.authFields.forEach(({ key }) => {
         if (credentials[key]) body[key] = credentials[key];
       });
-      const resp = await fetch(`${apiBaseUrl}/api/observability/credentials`, {
+      // authFetch: the route requires observability:write AND names the secret
+      // after the caller's Cognito sub, so it cannot work without the token —
+      // storing an OTLP credential failed with a bare "Failed (401)" every time.
+      const resp = await authFetch(`${apiBaseUrl}/api/observability/credentials`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -176,13 +181,17 @@ export function ObservabilityConfigurationModal({
     }
   }, [apiBaseUrl, config.provider, credentials, preset.authFields, update]);
 
-  const handleSave = useCallback(() => onSave(config), [config, onSave]);
+  const handleSave = useCallback(() => {
+    if (platformPolicy.status === 'ready') {
+      onSave(config);
+    }
+  }, [config, onSave, platformPolicy.status]);
 
   // -- Tab 1: Backend --
   // When platform-managed OTEL is on, the operator has set the endpoint /
   // secret / sample rate at deploy time and per-canvas overrides are dropped
   // server-side. Show the values read-only and hide the credentials section.
-  const backendTab = platformDefaults.enabled ? (
+  const backendTab = platformPolicy.status !== 'ready' ? null : platformDefaultsEnabled ? (
     <div className="space-y-5">
       <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
         <div className="font-medium">Platform-managed observability</div>
@@ -198,7 +207,7 @@ export function ObservabilityConfigurationModal({
         <TextField
           id="otlpEndpoint"
           label="OTLP Endpoint URL"
-          value={platformDefaults.endpoint ?? ''}
+          value={platformDefaults?.endpoint ?? ''}
           onChange={() => { /* read-only */ }}
           disabled
           helpText="Set at platform deploy time via OTEL_ENDPOINT."
@@ -298,14 +307,14 @@ export function ObservabilityConfigurationModal({
   );
 
   // -- Tab 2: Sampling & resource --
-  const tuningTab = (
+  const tuningTab = platformPolicy.status !== 'ready' ? null : (
     <div className="space-y-5">
       <FormSection title="Sampling">
-        {platformDefaults.enabled ? (
+        {platformDefaultsEnabled ? (
           <div className="text-sm text-gray-700">
             Platform-managed sample rate:{' '}
             <span className="font-mono">
-              {Math.round((platformDefaults.sample_rate ?? 1.0) * 100)}%
+              {Math.round((platformDefaults?.sample_rate ?? 1.0) * 100)}%
             </span>
           </div>
         ) : (
@@ -329,9 +338,9 @@ export function ObservabilityConfigurationModal({
           value={config.serviceName ?? ''}
           onChange={(v) => update('serviceName', v || undefined)}
           placeholder="my-agent (defaults to runtime name)"
-          disabled={platformDefaults.enabled}
-          helpText={platformDefaults.enabled
-            ? `Will be sent as ${platformDefaults.service_name_prefix ?? 'platform'}-{this name}.`
+          disabled={platformDefaultsEnabled}
+          helpText={platformDefaultsEnabled
+            ? `Will be sent as ${platformDefaults?.service_name_prefix ?? 'platform'}-{this name}.`
             : undefined}
         />
         <ResourceAttributesEditor
@@ -354,6 +363,15 @@ export function ObservabilityConfigurationModal({
         { id: 'tuning', label: 'Sampling & Resource', content: tuningTab },
       ]}
       validationErrors={validationErrors}
+      isSaveDisabled={platformPolicy.status !== 'ready'}
+      notice={
+        platformPolicy.status !== 'ready' ? (
+          <PlatformObservabilityPolicyNotice
+            state={platformPolicy}
+            onRetry={retryPlatformPolicy}
+          />
+        ) : undefined
+      }
     />
   );
 }
@@ -384,6 +402,7 @@ function ResourceAttributesEditor({
               onChange(next);
             }}
             placeholder="key (e.g. env)"
+            aria-label={`Resource attribute ${idx + 1} key`}
             className="flex-1 px-2 py-1 text-sm border rounded"
           />
           <input
@@ -391,6 +410,7 @@ function ResourceAttributesEditor({
             value={v}
             onChange={(e) => onChange({ ...attrs, [k]: e.target.value })}
             placeholder="value (e.g. prod)"
+            aria-label={`Resource attribute ${idx + 1} value`}
             className="flex-1 px-2 py-1 text-sm border rounded"
           />
           <button

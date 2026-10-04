@@ -1,0 +1,8 @@
+{
+  "name": "agentcore-platform-infra-toolchain",
+  "private": true,
+  "description": "Pins the AWS CDK CLI used by scripts/deploy.sh so every machine synthesizes and deploys with the same toolkit (the CLI is versioned independently of aws-cdk-lib, which requirements.txt pins).",
+  "devDependencies": {
+    "aws-cdk": "2.1138.0"
+  }
+}

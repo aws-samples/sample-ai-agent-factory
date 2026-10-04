@@ -169,12 +169,17 @@ export function GuardrailsConfigurationModal({
         <div className="space-y-3">
           {CONTENT_FILTER_CATEGORIES.map(({ key, label }) => (
             <div key={key} className="flex items-center justify-between">
-              <span className="text-sm text-gray-700 w-32">{label}</span>
-              <div className="flex gap-1">
+              <span id={`guardrail-filter-${key}-label`} className="text-sm text-gray-700 w-32">{label}</span>
+              <div
+                className="flex gap-1"
+                role="group"
+                aria-labelledby={`guardrail-filter-${key}-label`}
+              >
                 {FILTER_STRENGTHS.map((strength) => (
                   <button
                     key={strength}
                     type="button"
+                    aria-pressed={(config.contentFilters as Record<string, string>)?.[key] === strength}
                     onClick={() => updateField('contentFilters', {
                       ...config.contentFilters,
                       [key]: strength,
@@ -206,9 +211,12 @@ export function GuardrailsConfigurationModal({
         <div className="max-h-40 overflow-y-auto space-y-1">
           {PII_TYPES.map((piiType) => {
             const existing = config.piiFilters?.find((f) => f.type === piiType);
+            const displayName = piiType.replace(/_/g, ' ');
+            const checkboxId = `guardrail-pii-${piiType.toLowerCase()}`;
             return (
-              <label key={piiType} className="flex items-center gap-2 text-xs cursor-pointer">
+              <div key={piiType} className="flex items-center gap-2 text-xs">
                 <input
+                  id={checkboxId}
                   type="checkbox"
                   checked={!!existing}
                   onChange={(e) => {
@@ -221,10 +229,13 @@ export function GuardrailsConfigurationModal({
                   }}
                   className="text-console-blue"
                 />
-                <span className="text-gray-700 flex-1">{piiType.replace(/_/g, ' ')}</span>
+                <label htmlFor={checkboxId} className="text-gray-700 flex-1 cursor-pointer">
+                  {displayName}
+                </label>
                 {existing && (
                   <select
                     value={existing.action}
+                    aria-label={`${displayName} handling action`}
                     onChange={(e) => {
                       const current = config.piiFilters || [];
                       updateField('piiFilters', current.map((f) =>
@@ -237,15 +248,18 @@ export function GuardrailsConfigurationModal({
                     <option value="BLOCK">Block</option>
                   </select>
                 )}
-              </label>
+              </div>
             );
           })}
         </div>
       </FormSection>
 
       <FormSection title="Word Filters">
-        <p className="text-xs text-gray-500 mb-2">Comma-separated list of words to block</p>
+        <label htmlFor="guardrail-word-filters" className="block text-xs text-gray-500 mb-2">
+          Comma-separated list of words to block
+        </label>
         <textarea
+          id="guardrail-word-filters"
           value={(config.wordFilters || []).join(', ')}
           onChange={(e) => updateField('wordFilters', e.target.value.split(',').map((w) => w.trim()).filter(Boolean))}
           className="w-full border rounded px-3 py-2 text-sm"
@@ -267,6 +281,7 @@ export function GuardrailsConfigurationModal({
               }}
               className="flex-1 border rounded px-2 py-1 text-sm"
               placeholder="Topic name"
+              aria-label={`Denied topic ${i + 1} name`}
             />
             <input
               value={topic.definition}
@@ -277,6 +292,7 @@ export function GuardrailsConfigurationModal({
               }}
               className="flex-2 border rounded px-2 py-1 text-sm"
               placeholder="Topic definition"
+              aria-label={`Denied topic ${i + 1} definition`}
             />
             <button
               type="button"
@@ -285,6 +301,7 @@ export function GuardrailsConfigurationModal({
                 updateField('deniedTopics', topics);
               }}
               className="text-red-500 text-sm hover:text-red-700"
+              aria-label={`Remove denied topic ${i + 1}`}
             >
               Remove
             </button>

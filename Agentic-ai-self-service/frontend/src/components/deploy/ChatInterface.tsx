@@ -52,7 +52,7 @@ export function ChatInterface({
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                 </svg>
               </div>
-              <h4 className="text-sm font-medium text-[#16191f] mb-1">Chat with your Agent</h4>
+          <h3 className="text-sm font-medium text-[#16191f] mb-1">Chat with your Agent</h3>
               <p className="text-xs text-[#5f6b7a]">Send a message to test your deployed agent</p>
             </div>
           </div>
@@ -110,13 +110,16 @@ export function ChatInterface({
             onChange={(e) => onTestInputChange(e.target.value)}
             onKeyDown={onKeyDown}
             placeholder="Type a message..."
+            aria-label="Message to test agent"
             className="flex-1 resize-none rounded-xl border border-[#e9ebed] px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0972d3] focus:border-transparent bg-white"
             rows={1}
             disabled={isTesting}
           />
           <button
+            type="button"
             onClick={onSendMessage}
             disabled={!testInput.trim() || isTesting}
+            aria-label={isTesting ? 'Sending message' : 'Send message'}
             className={`self-end p-2.5 rounded-xl transition-all ${
               testInput.trim() && !isTesting
                 ? 'bg-[#0972d3] text-white hover:bg-[#0961b9]'

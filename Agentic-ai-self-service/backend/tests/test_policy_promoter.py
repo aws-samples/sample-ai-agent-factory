@@ -9,9 +9,11 @@ once the intended policies are ACTIVE. These tests use a MagicMock control clien
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from app.services import policy_promoter as pp
+
+from tests.gateway_fakes import applying_updates
 
 
 def _state(mode="LOG_ONLY", pending=True, validation_pending=False):
@@ -26,6 +28,13 @@ def _state(mode="LOG_ONLY", pending=True, validation_pending=False):
             "policies": [{"name": "allow", "statement": "permit(...);", "description": ""}],
         }
     return {"deployment_id": "d1", "policy_result": pr}
+
+
+def _live(pid="p1", status="ACTIVE", statement="permit(...);"):
+    """What get_policy returns for an existing policy. Since F-G05-001 an ACTIVE policy is not success by itself: the
+    promoter reads the LIVE definition and reconciles it to the desired Cedar before counting it (pinned in
+    test_policy_lifecycle), so every fixture that lists an ACTIVE policy must also answer get_policy."""
+    return {"status": status, "policyId": pid, "definition": {"cedar": {"statement": statement}}}
 
 
 def test_noop_when_nothing_pending():
@@ -44,9 +53,11 @@ def test_failclosed_enforce_unbricks_when_policies_active():
     """
     ctrl = MagicMock()
     ctrl.list_policies.return_value = {"policies": [{"name": "allow", "status": "ACTIVE", "policyId": "p1"}]}
+    ctrl.get_policy.return_value = _live()
     with patch.object(pp, "_ctrl", return_value=ctrl):
         out = pp.try_promote_to_enforce(_state(mode="ENFORCE", validation_pending=True), "us-east-1")
     assert out["promoted"] is True and out["mode"] == "ENFORCE"
+    ctrl.update_policy.assert_not_called()  # live Cedar already the desired one: nothing rewritten
     ctrl.update_gateway.assert_not_called()
 
 
@@ -64,20 +75,94 @@ def test_failclosed_enforce_stays_denied_until_policies_active():
 
 def test_promotes_when_policies_active():
     ctrl = MagicMock()
-    # policy already ACTIVE on the engine
+    # policy already ACTIVE on the engine, holding the desired definition
     ctrl.list_policies.return_value = {"policies": [{"name": "allow", "status": "ACTIVE", "policyId": "p1"}]}
+    ctrl.get_policy.return_value = _live()
     ctrl.get_gateway.return_value = {
         "name": "gw",
         "roleArn": "r",
         "protocolType": "MCP",
+        "authorizerType": "CUSTOM_JWT",
         "policyEngineConfiguration": {"arn": "arn:eng"},
     }
+    applying_updates(ctrl)
     with patch.object(pp, "_ctrl", return_value=ctrl):
         out = pp.try_promote_to_enforce(_state(), "us-east-1")
     assert out["promoted"] is True and out["mode"] == "ENFORCE"
     # flipped via update_gateway with ENFORCE
     _, kw = ctrl.update_gateway.call_args
     assert kw["policyEngineConfiguration"]["mode"] == "ENFORCE"
+
+
+def test_promoter_finds_the_intended_active_policy_on_page_two():
+    ctrl = MagicMock()
+    ctrl.list_policies.side_effect = [
+        {
+            "policies": [
+                {"name": "other", "status": "ACTIVE", "policyId": "p-other"},
+            ],
+            "nextToken": "page-2",
+        },
+        {
+            "policySummaries": [
+                {"name": "allow", "status": "ACTIVE", "policyId": "p-allow"},
+            ]
+        },
+    ]
+    ctrl.get_policy.return_value = _live("p-allow")
+    ctrl.get_gateway.return_value = {
+        "name": "gw",
+        "roleArn": "r",
+        "protocolType": "MCP",
+        "authorizerType": "CUSTOM_JWT",
+        "policyEngineConfiguration": {"arn": "arn:eng"},
+    }
+    applying_updates(ctrl)
+
+    out = pp.try_promote_to_enforce(
+        _state(),
+        "us-east-1",
+        control_client=ctrl,
+    )
+
+    assert out["promoted"] is True
+    ctrl.update_gateway.assert_called_once()
+    assert ctrl.list_policies.call_args_list == [
+        call(policyEngineId="eng-1", maxResults=100),
+        call(
+            policyEngineId="eng-1",
+            maxResults=100,
+            nextToken="page-2",
+        ),
+    ]
+
+
+def test_uses_the_supplied_target_account_control_client():
+    ctrl = MagicMock()
+    ctrl.list_policies.return_value = {"policies": [{"name": "allow", "status": "ACTIVE", "policyId": "p1"}]}
+    ctrl.get_policy.return_value = _live()
+    ctrl.get_gateway.return_value = {
+        "name": "gw",
+        "roleArn": "r",
+        "protocolType": "MCP",
+        "authorizerType": "CUSTOM_JWT",
+        "policyEngineConfiguration": {"arn": "arn:eng"},
+    }
+    applying_updates(ctrl)
+
+    with patch.object(
+        pp,
+        "_ctrl",
+        side_effect=AssertionError("must not create a home-account client"),
+    ):
+        out = pp.try_promote_to_enforce(
+            _state(),
+            "eu-west-1",
+            control_client=ctrl,
+        )
+
+    assert out["promoted"] is True
+    ctrl.update_gateway.assert_called_once()
 
 
 def test_stays_log_only_when_no_active_policy():
@@ -109,8 +194,10 @@ def test_recovers_create_failed_in_place_without_delete():
         "name": "gw",
         "roleArn": "r",
         "protocolType": "MCP",
+        "authorizerType": "CUSTOM_JWT",
         "policyEngineConfiguration": {"arn": "arn:eng"},
     }
+    applying_updates(ctrl)
     with patch.object(pp, "_ctrl", return_value=ctrl):
         out = pp.try_promote_to_enforce(_state(), "us-east-1")
     assert out["promoted"] is True and out["mode"] == "ENFORCE"
@@ -149,26 +236,43 @@ def test_best_effort_never_raises():
 
 
 def test_reconcile_redrive_when_enforce_pending_cleared_but_policy_regressed():
-    """Production-readiness: mode=ENFORCE, enforce_pending already cleared to
-    None (policy once ACTIVE), but the policy REGRESSED to UPDATE_FAILED. The
-    old code returned None (no-op) and the tool plane stayed deny-all forever.
-    The reconcile path must detect the non-ACTIVE policy and re-drive
-    update_policy using the policy's own live definition."""
+    """Production-readiness: mode=ENFORCE, enforce_pending already cleared to None (policy once ACTIVE), but the
+    policy REGRESSED to UPDATE_FAILED. The old code returned None (no-op) and the tool plane stayed deny-all forever.
+
+    The accepted fail-closed contract: recovery re-drives ONLY the exact persisted intent (``desired_policies``). A
+    legacy record that carries none is refused -- promoted False, update_policy never called, the live Cedar never
+    treated as intent, and the reason tells the operator to redeploy. (Safe recovery with persisted intent and the
+    legacy refusal are also pinned in test_policy_lifecycle.)"""
     ctrl = MagicMock()
-    # list_policies: one policy, not ACTIVE (regressed)
     ctrl.list_policies.return_value = {"policies": [{"name": "allow", "status": "UPDATE_FAILED", "policyId": "p1"}]}
-    # get_policy: first call (reconcile) returns live definition; poll after
-    # update_policy returns ACTIVE.
-    ctrl.get_policy.side_effect = [
-        {"status": "UPDATE_FAILED", "policyId": "p1", "definition": {"cedar": {"statement": "permit(...);"}}},
-        {"status": "ACTIVE", "policyId": "p1"},
-    ]
-    pr = {"mode": "ENFORCE", "engine_id": "eng-1", "engine_arn": "arn:eng", "gateway_id": "gw-1"}
-    state = {"deployment_id": "d1", "policy_result": pr}
+    ctrl.get_policy.return_value = _live(status="UPDATE_FAILED")
+    pr = {"mode": "ENFORCE", "engine_id": "eng-1", "engine_arn": "arn:eng", "gateway_id": "gw-1"}  # no desired_policies
     with patch.object(pp, "_ctrl", return_value=ctrl):
-        out = pp.try_promote_to_enforce(state, "us-east-1")
+        out = pp.try_promote_to_enforce({"deployment_id": "d1", "policy_result": pr}, "us-east-1")
+    assert out is not None and out["promoted"] is False and out["mode"] == "ENFORCE"
+    assert "redeploy" in out["reason"]
+    ctrl.update_policy.assert_not_called()
+    ctrl.get_policy.assert_not_called()  # the live text is not even read as a candidate intent
+
+
+def test_reconcile_redrive_with_persisted_intent_re_drives_update_policy_once():
+    """The same regression with the exact intent persisted: one update_policy re-drive to that intent, then ACTIVE."""
+    ctrl = MagicMock()
+    ctrl.list_policies.return_value = {"policies": [{"name": "allow", "status": "UPDATE_FAILED", "policyId": "p1"}]}
+    # UPDATE_FAILED until update_policy has been re-driven, ACTIVE afterwards (order-independent).
+    ctrl.get_policy.side_effect = lambda **kw: _live(status="ACTIVE" if ctrl.update_policy.called else "UPDATE_FAILED")
+    pr = {
+        "mode": "ENFORCE",
+        "engine_id": "eng-1",
+        "engine_arn": "arn:eng",
+        "gateway_id": "gw-1",
+        "desired_policies": [{"name": "allow", "statement": "permit(...);", "description": ""}],
+    }
+    with patch.object(pp, "_ctrl", return_value=ctrl):
+        out = pp.try_promote_to_enforce({"deployment_id": "d1", "policy_result": pr}, "us-east-1")
     assert out is not None and out["promoted"] is True
     ctrl.update_policy.assert_called_once()
+    assert ctrl.update_policy.call_args.kwargs["definition"] == {"cedar": {"statement": "permit(...);"}}
 
 
 def test_reconcile_noop_when_all_policies_active():

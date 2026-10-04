@@ -12,9 +12,13 @@ import type { AgentServerProtocol, PythonRuntime, DeploymentType } from './workf
 export interface RuntimeConfiguration {
   name: string;
   entrypoint: string;
-  framework: AgentFramework;
-  model: ModelConfiguration;
-  systemPrompt: string;
+  /**
+   * Conversational-agent fields. They are required by HTTP/A2A runtimes at
+   * validation time, but deliberately absent from a standalone MCP tool server.
+   */
+  framework?: AgentFramework;
+  model?: ModelConfiguration;
+  systemPrompt?: string;
   deploymentType: DeploymentType;
   pythonRuntime: PythonRuntime;
   protocol: AgentServerProtocol;
@@ -25,10 +29,11 @@ export interface RuntimeConfiguration {
   observability?: ObservabilityConfiguration;
   executionRoleArn?: string;
   // Strands model provider
-  modelProvider: StrandsModelProvider;
+  modelProvider?: StrandsModelProvider;
   providerApiKeyRef?: string;
+  providerBaseUrl?: string;
   // Multi-agent pattern
-  multiAgentPattern: MultiAgentPattern;
+  multiAgentPattern?: MultiAgentPattern;
   multiAgentConfig?: MultiAgentConfig;
 }
 

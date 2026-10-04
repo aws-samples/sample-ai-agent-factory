@@ -28,7 +28,9 @@ function CredentialsInfo({ service }: { service: string }) {
     <div className="p-2.5 bg-amber-50 rounded-lg border border-amber-200">
       <p className="text-xs text-amber-700">
         Create a secret in AWS Secrets Manager containing {service} authentication credentials.
-        Provide the secret ARN below. See the{' '}
+        Tag the source secret <span className="font-mono">AgentCoreFlowsAccess=allow</span>,
+        then provide its ARN below. The platform copies its value into a deployment-bound
+        target-account secret and leaves the source unchanged. See the{' '}
         <span className="font-medium">Bedrock Knowledge Base documentation</span> for the required secret format.
       </p>
     </div>
@@ -48,7 +50,7 @@ function DataSourceS3Fields({ config, updateField, errors }: DataSourceFieldProp
       onChange={(v) => updateField('s3BucketUri', v)}
       placeholder="s3://my-bucket/documents/"
       required
-      helpText="S3 path containing your documents (PDF, TXT, HTML, MD, CSV, DOCX)"
+      helpText="S3 path containing your documents. Customer buckets require AgentCoreFlowsAccess=allow."
       error={getError(errors, 's3BucketUri')}
     />
   );

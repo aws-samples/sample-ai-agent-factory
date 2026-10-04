@@ -19,6 +19,8 @@ from unittest.mock import MagicMock, patch
 
 from app.step_handlers import policy_step
 
+from tests.gateway_fakes import applying_updates
+
 
 def _ctrl_with_persistent_create_failed():
     """Control client where every created policy ends CREATE_FAILED with the
@@ -40,9 +42,10 @@ def _ctrl_with_persistent_create_failed():
         "name": "gw",
         "roleArn": "arn:role",
         "protocolType": "MCP",
+        "authorizerType": "CUSTOM_JWT",
         "status": "READY",
     }
-    return ctrl
+    return applying_updates(ctrl)
 
 
 def _event(**pc_extra):

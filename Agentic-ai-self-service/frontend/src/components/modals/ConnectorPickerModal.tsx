@@ -15,7 +15,7 @@
  * documented follow-up.
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   CONNECTORS as STATIC_CONNECTORS,
   connectorsByCategory,
@@ -26,6 +26,7 @@ import {
   getConnectorApi,
   type ConnectorDetail,
 } from '../../services/api';
+import { useDialogFocusTrap } from '../../hooks/useDialogFocusTrap';
 
 // Set to true once the backend credential POST hook (Secrets Manager) lands.
 const CREDENTIAL_HOOK_ENABLED = false;
@@ -71,6 +72,8 @@ export function ConnectorPickerModal({
   const [credentials, setCredentials] = useState<Record<string, string>>({});
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocusTrap(isOpen, dialogRef, undefined, onClose);
 
   // Refresh the catalog from the API when opened (static list paints first).
   useEffect(() => {
@@ -97,15 +100,6 @@ export function ConnectorPickerModal({
       setError(null);
     }
   }, [isOpen]);
-
-  // Escape-to-close, mirroring ConfigurationModal.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) onClose();
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [isOpen, onClose]);
 
   const handlePick = useCallback(async (id: string) => {
     setSelectedId(id);
@@ -150,11 +144,13 @@ export function ConnectorPickerModal({
       data-testid="connector-picker-backdrop"
     >
       <div
+        ref={dialogRef}
         className="bg-white rounded-xl shadow-2xl max-h-[90vh] flex flex-col"
         style={{ width: '560px' }}
         role="dialog"
         aria-modal="true"
         aria-labelledby="connector-picker-title"
+        tabIndex={-1}
         data-testid="connector-picker-modal"
       >
         {/* Header */}
@@ -166,6 +162,7 @@ export function ConnectorPickerModal({
             {detail ? `Connect ${detail.display_name}` : 'Add a connector'}
           </h2>
           <button
+            type="button"
             onClick={onClose}
             className="p-2 rounded-lg hover:bg-gray-100 transition-colors"
             aria-label="Close modal"
@@ -189,6 +186,7 @@ export function ConnectorPickerModal({
                   <div className="grid grid-cols-2 gap-2">
                     {items.map((c) => (
                       <button
+                        type="button"
                         key={c.id}
                         onClick={() => handlePick(c.id)}
                         className="flex flex-col items-start gap-1 p-3 text-left border border-gray-200 rounded-lg hover:border-blue-400 hover:bg-blue-50 transition-colors"
@@ -221,6 +219,7 @@ export function ConnectorPickerModal({
             <div className="flex flex-col items-center justify-center h-full gap-3">
               <p className="text-sm text-red-600">{error}</p>
               <button
+                type="button"
                 onClick={() => setSelectedId(null)}
                 className="text-sm text-blue-600 hover:underline"
               >
@@ -280,6 +279,7 @@ export function ConnectorPickerModal({
           <div>
             {selectedId && (
               <button
+                type="button"
                 onClick={() => {
                   setSelectedId(null);
                   setDetail(null);
@@ -294,6 +294,7 @@ export function ConnectorPickerModal({
           </div>
           <div className="flex items-center gap-3">
             <button
+              type="button"
               onClick={onClose}
               className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
               data-testid="connector-picker-cancel"
@@ -301,6 +302,7 @@ export function ConnectorPickerModal({
               Cancel
             </button>
             <button
+              type="button"
               onClick={handleSubmit}
               disabled={!detail || !CREDENTIAL_HOOK_ENABLED}
               className="px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 disabled:cursor-not-allowed"

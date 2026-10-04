@@ -20,10 +20,14 @@ Fix (1) with typed records at the producer, and (2) by purging BOTH namespaces a
 using each namespace's own ``get_*`` as the discriminator.
 """
 
+import inspect
+import re
 from unittest.mock import MagicMock
 
 import pytest
 from app.services import gateway_deployer as gd
+from app.services.deployment_state_store import GATEWAY_GRAPH_FIELD
+from app.services.resource_ownership import owner_tags
 from botocore.exceptions import ClientError
 
 
@@ -72,6 +76,10 @@ class _Vault:
     def delete_oauth2_credential_provider(self, *, name):
         self.calls.append(f"delete_oauth:{name}")
         self.oauth.discard(name)
+
+    def list_tags_for_resource(self, *, resourceArn):  # noqa: N803
+        self.calls.append(f"list_tags:{resourceArn}")
+        return {"tags": owner_tags("us-east-1")}
 
 
 class TestPurgeLeavesNothingBehind:
@@ -141,12 +149,30 @@ class TestTheExternalMcpPathRecordsTheType:
 
     @staticmethod
     def _capture(monkeypatch):
-        monkeypatch.setattr(
-            gd,
-            "_create_gateway_target_with_retry",
-            lambda ctrl, gw, name, params: {"targetId": "t-1"},
-        )
-        monkeypatch.setattr(gd, "_put_connector_secret", lambda region, owner, payload: "arn:aws:sm:::secret:fake")
+        # The double mirrors the real signature and is bind-checked against it. It was a
+        # four-positional lambda, and F-74b's new `update_existing` keyword made these
+        # tests fail with `unexpected keyword argument` -- the good failure. Taking
+        # `**kwargs` to silence it would have let the double accept a call the real
+        # function could reject, so the shape is copied and then verified.
+        def _double(ctrl, gw, name, params, max_retries=5, *, update_existing=False):
+            return {"targetId": "t-1", "name": name}
+
+        for fn in (gd._create_gateway_target_with_retry, _double):
+            inspect.signature(fn).bind("ctrl", "gw", "name", {}, update_existing=True)
+
+        monkeypatch.setattr(gd, "_create_gateway_target_with_retry", _double)
+        monkeypatch.setattr(gd, "_create_secrets_client", lambda region: MagicMock())
+
+        def _bind(**kwargs):
+            ref = kwargs.get("secret_ref")
+            if ref and not gd._is_platform_connector_secret(ref):
+                raise gd.ConnectorSecretBindingError("outside the platform-managed secret namespace")
+            return (
+                ref or "arn:aws:secretsmanager:us-east-1:1:secret:agentcore-connector/alice/fake-AbCdEf",
+                not bool(ref),
+            )
+
+        monkeypatch.setattr(gd, "bind_connector_secret_for_deployment", _bind)
 
     def test_an_api_key_server_is_recorded_as_api_key(self, monkeypatch):
         self._capture(monkeypatch)
@@ -155,7 +181,12 @@ class TestTheExternalMcpPathRecordsTheType:
         ctrl.get_gateway_target = MagicMock(return_value={"status": "READY", "statusReasons": []})
 
         out = gd._deploy_external_mcp_targets(
-            ctrl, "gw-1", "us-east-1", [{"server_id": "exa", "secret_value": "sk-x"}], owner_sub="alice"
+            ctrl,
+            "gw-1",
+            "us-east-1",
+            [{"server_id": "exa", "secret_value": "sk-x"}],
+            owner_sub="alice",
+            deployment_id="dep-1",
         )
 
         # The name must ALSO still match the one deploy_external_mcp_target creates
@@ -185,6 +216,7 @@ class TestTheExternalMcpPathRecordsTheType:
                 }
             ],
             owner_sub="alice",
+            deployment_id="dep-1",
         )
         assert out["credential_provider_names"] == [f"OAUTH:{gd._scoped_provider_name('mcp-databricks', 'gw-1')}"]
 
@@ -196,7 +228,12 @@ class TestTheExternalMcpPathRecordsTheType:
         ctrl.create_api_key_credential_provider = MagicMock(return_value={"credentialProviderArn": "arn:...:p"})
         ctrl.get_gateway_target = MagicMock(return_value={"status": "READY", "statusReasons": []})
         out = gd._deploy_external_mcp_targets(
-            ctrl, "gw-1", "us-east-1", [{"server_id": "exa", "secret_value": "sk-x"}], owner_sub="alice"
+            ctrl,
+            "gw-1",
+            "us-east-1",
+            [{"server_id": "exa", "secret_value": "sk-x"}],
+            owner_sub="alice",
+            deployment_id="dep-1",
         )
         for entry in out["credential_provider_names"]:
             assert entry.split(":", 1)[0] in {"API_KEY", "OAUTH"}, entry
@@ -228,17 +265,20 @@ class TestThePreMintedSecretIsTornDownToo:
             "us-east-1",
             [{"server_id": "exa", "secret_arn": secret_arn}],
             owner_sub="alice",
+            deployment_id="dep-1",
+            secrets_prebound=True,
         )
 
     def test_a_secret_minted_by_the_step_handler_is_recorded(self, monkeypatch):
         out = self._deploy(monkeypatch, self._PLATFORM)
         assert out["secret_arns"] == [self._PLATFORM]
 
-    def test_a_caller_owned_secret_is_not_scheduled_for_deletion(self, monkeypatch):
-        """Teardown deletes what the platform created. Deleting a secret the customer
-        brought would destroy a credential outside this agent's lifecycle."""
-        out = self._deploy(monkeypatch, self._CUSTOMER)
-        assert out["secret_arns"] == []
+    def test_a_caller_owned_secret_reference_is_rejected(self, monkeypatch):
+        """A customer reference is not merely omitted from teardown: accepting it
+        would leave the target sharing a credential outside this deployment's
+        lifecycle. The caller must supply the raw value for a safe copy."""
+        with pytest.raises(gd.ConnectorSecretBindingError, match="outside"):
+            self._deploy(monkeypatch, self._CUSTOMER)
 
     @pytest.mark.parametrize(
         "arn,owned",
@@ -262,7 +302,13 @@ class TestThePreMintedSecretIsTornDownToo:
         store = MagicMock()
         gateway_step._record_gateway_resources(store, "dep-1", "us-east-1", {"connector_secret_arns": [self._PLATFORM]})
         rows = [c.args[1] for c in store.record_resource.call_args_list]
-        assert {"type": "secret", "id": self._PLATFORM, "region": "us-east-1"} in rows
+        assert {
+            "type": "secret",
+            "id": self._PLATFORM,
+            "region": "us-east-1",
+            "created_by_deployment": True,
+            GATEWAY_GRAPH_FIELD: True,
+        } in rows
 
 
 class TestAFailedGatewayDeployIsStillTearableDown:
@@ -289,6 +335,14 @@ class TestAFailedGatewayDeployIsStillTearableDown:
         def record_resource(self, deployment_id, resource):
             self.resources.append(resource)
 
+        # The failure branch appends strictly so a refused row can be carried out
+        # of the Catch (F-65); without these the stub reads as a refused append.
+        def record_resource_strict(self, deployment_id, resource):
+            self.resources.append(resource)
+
+        def mark_resource_manifest_error(self, deployment_id):
+            pass
+
     def _run_failing_step(self, monkeypatch, gateway_result):
         from app.step_handlers import gateway_step
 
@@ -307,6 +361,7 @@ class TestAFailedGatewayDeployIsStillTearableDown:
         "error": "AccessDeniedException: Access denied when retrieving the provided secret",
         "gateway_id": "llmtgtp10-3que8whkac",
         "gateway_name": "LlmTgtP10",
+        "gateway_created_by_deployment": True,
         "client_info": {"provider": "cognito", "user_pool_id": "us-east-1_J6MhzCdas"},
         "connector_credential_providers": ["API_KEY:mcp-mcp-exa-abc"],
         "connector_secret_arns": ["arn:aws:secretsmanager:us-east-1:1:secret:agentcore-connector/a/b-x1"],
@@ -314,13 +369,26 @@ class TestAFailedGatewayDeployIsStillTearableDown:
 
     def test_the_gateway_is_recorded_so_a_later_delete_can_find_it(self, monkeypatch):
         rows = self._run_failing_step(monkeypatch, self._FAILED)
-        assert {"type": "gateway", "id": "llmtgtp10-3que8whkac", "region": "us-east-1"} in rows
+        gateway = next(row for row in rows if row.get("type") == "gateway")
+        assert gateway == {
+            "type": "gateway",
+            "id": "llmtgtp10-3que8whkac",
+            "name": "LlmTgtP10",
+            "region": "us-east-1",
+            "created_by_deployment": True,
+        }
 
     def test_the_cognito_pool_is_recorded_too(self, monkeypatch):
         """The pool is the resource with a hard account quota, so an invisible leak
         here eventually blocks all deploys."""
         rows = self._run_failing_step(monkeypatch, self._FAILED)
-        assert {"type": "cognito_user_pool", "id": "us-east-1_J6MhzCdas", "region": "us-east-1"} in rows
+        assert {
+            "type": "cognito_user_pool",
+            "id": "us-east-1_J6MhzCdas",
+            "region": "us-east-1",
+            "created_by_deployment": True,
+            GATEWAY_GRAPH_FIELD: True,
+        } in rows
 
     def test_partial_credentials_and_secrets_are_recorded(self, monkeypatch):
         """Whatever the mid-loop rollback failed to remove is still named."""
@@ -382,7 +450,10 @@ class TestAFailedGatewayDeployIsStillTearableDown:
 
         src = inspect.getsource(gdm.deploy_gateway)
         tail = src[src.rindex("except Exception as e:") :]
-        assert "_msgs = cleanup_gateway_resources(" in tail, "the returned cleanup log is still being discarded"
+        assert re.search(
+            r"_msgs\s*=\s*\(\s*cleanup_gateway_resources\(",
+            tail,
+        ), "the returned cleanup log is still being discarded"
         assert "Abort-cleanup left resources behind" in tail
 
 

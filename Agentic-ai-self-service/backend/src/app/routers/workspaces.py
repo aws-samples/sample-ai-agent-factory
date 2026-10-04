@@ -37,9 +37,10 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.routers.workflows import _revision_conflict
 from app.services.auth import assert_owner, get_caller_sub
 from app.services.rbac import require_scopes
-from app.services.storage import get_workflow_storage
+from app.services.storage import WorkflowRevisionConflict, get_workflow_storage
 from app.services.workspace_acl import (
     Acl,
     add_member,
@@ -82,7 +83,15 @@ def _persist_acl(workflow_id: str, workflow, new_acl: dict):
     either way), and against the in-memory fake storage used in tests.
     """
     updated = workflow.model_copy(update={"acl": new_acl})
-    result = get_workflow_storage().update(workflow_id, updated)
+    # F-15: this rewrites the WHOLE row from the copy read a moment ago, so it is fenced on the
+    # revision that copy carried. An editor's save that landed in between is refused with 409
+    # instead of being erased by the share. Legacy fakes/rows without a revision are unfenced.
+    try:
+        result = get_workflow_storage().update(
+            workflow_id, updated, expected_revision=getattr(workflow, "revision", None)
+        )
+    except WorkflowRevisionConflict as exc:
+        raise _revision_conflict(workflow_id, exc) from exc
     if result is None:
         raise HTTPException(status_code=404, detail="Not found")
     return result

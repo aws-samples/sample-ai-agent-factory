@@ -37,13 +37,15 @@ def test_stack_id_is_project_env_region(monkeypatch: pytest.MonkeyPatch) -> None
     assert ro.stack_id("eu-central-1") == "acme-platform-prod-eu-central-1"
 
 
-def test_stack_id_defaults_match_the_shell_defaults() -> None:
-    """cleanup.sh defaults to agentcore-workflow / dev / us-east-1; so must this.
+def test_stack_id_refuses_to_fabricate_the_default_stack() -> None:
+    """Missing configuration must not become authority over a real dev stack."""
+    with pytest.raises(ro.OwnershipConfigurationError, match="PROJECT_NAME"):
+        ro.stack_id()
 
-    A mismatch here means a default-configured deployment tags its resources with
-    one identity and then refuses to delete them under another.
-    """
-    assert ro.stack_id() == "agentcore-workflow-dev-us-east-1"
+
+def test_an_unconfigured_process_cannot_match_a_real_default_stack() -> None:
+    tags = {"AgentCoreStack": "agentcore-workflow-dev-us-east-1"}
+    assert ro.is_owned_by_this_stack(tags, "us-east-1") is False
 
 
 def test_region_is_part_of_the_identity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,29 +61,38 @@ def test_region_is_part_of_the_identity(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_explicit_region_beats_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Callers that know the target region must win over the Lambda's own region."""
+    monkeypatch.setenv("PROJECT_NAME", "p")
+    monkeypatch.setenv("ENVIRONMENT", "dev")
     monkeypatch.setenv("APP_AWS_REGION", "us-east-1")
     assert ro.stack_id("ap-southeast-2").endswith("-ap-southeast-2")
 
 
 def test_environment_name_is_accepted_as_a_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     """The API Lambdas set ENVIRONMENT; the shell config uses ENVIRONMENT_NAME."""
+    monkeypatch.setenv("PROJECT_NAME", "p")
     monkeypatch.setenv("ENVIRONMENT_NAME", "staging")
     assert "-staging-" in ro.stack_id("us-east-1")
 
 
-def test_owner_tags_always_include_both_keys() -> None:
+def test_owner_tags_always_include_both_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PROJECT_NAME", "p")
+    monkeypatch.setenv("ENVIRONMENT", "dev")
     tags = ro.owner_tags("us-east-1")
     assert tags["ManagedBy"] == "agentcore-flows"
     assert tags["AgentCoreStack"] == ro.stack_id("us-east-1")
 
 
-def test_governance_tags_are_merged_but_cannot_hijack_ownership() -> None:
+def test_governance_tags_are_merged_but_cannot_hijack_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A caller-supplied owner tag must not be able to reassign ownership.
 
     Governance tags come from user-controlled canvas metadata. If one could set
     AgentCoreStack, a tenant could mark its resources as belonging to another
     deployment and have that deployment's teardown delete them.
     """
+    monkeypatch.setenv("PROJECT_NAME", "p")
+    monkeypatch.setenv("ENVIRONMENT", "dev")
     tags = ro.owner_tags(
         "us-east-1",
         extra={"cost-center": "cc-42", "AgentCoreStack": "victim-stack", "ManagedBy": "attacker"},
@@ -91,14 +102,20 @@ def test_governance_tags_are_merged_but_cannot_hijack_ownership() -> None:
     assert tags["ManagedBy"] == "agentcore-flows"
 
 
-def test_owner_tag_list_is_the_iam_and_secretsmanager_shape() -> None:
+def test_owner_tag_list_is_the_iam_and_secretsmanager_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PROJECT_NAME", "p")
+    monkeypatch.setenv("ENVIRONMENT", "dev")
     as_list = ro.owner_tag_list("us-east-1")
     assert {"Key": "AgentCoreStack", "Value": ro.stack_id("us-east-1")} in as_list
     assert all(set(item) == {"Key", "Value"} for item in as_list)
 
 
-def test_ownership_accepts_both_tag_shapes() -> None:
+def test_ownership_accepts_both_tag_shapes(monkeypatch: pytest.MonkeyPatch) -> None:
     """SecretsManager/IAM return [{Key,Value}]; Cognito returns a plain map."""
+    monkeypatch.setenv("PROJECT_NAME", "p")
+    monkeypatch.setenv("ENVIRONMENT", "dev")
     sid = ro.stack_id("us-east-1")
     assert ro.is_owned_by_this_stack([{"Key": "AgentCoreStack", "Value": sid}], "us-east-1")
     assert ro.is_owned_by_this_stack({"AgentCoreStack": sid}, "us-east-1")

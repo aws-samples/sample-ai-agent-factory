@@ -27,7 +27,7 @@ export function ConfigSummary({
       {/* Runtime Configuration Card */}
       <div className="rounded-xl border border-gray-200 overflow-hidden">
         <div className="px-4 py-3 bg-gray-50 border-b border-gray-200">
-          <h4 className="text-sm font-medium text-gray-700">Configuration</h4>
+          <h3 className="text-sm font-medium text-gray-700">Configuration</h3>
         </div>
         <div className="p-4 space-y-3">
           <div className="flex items-center gap-3">
@@ -36,24 +36,30 @@ export function ConfigSummary({
             </div>
             <div>
               <div className="font-medium text-gray-900">{config.name || 'Unnamed Agent'}</div>
-              <div className="text-xs text-gray-500 capitalize">{config.framework.replace(/_/g, ' ')}</div>
+              <div className="text-xs text-gray-500 capitalize">
+                {config.protocol === 'MCP'
+                  ? 'MCP tool server'
+                  : (config.framework || 'strands_agents').replace(/_/g, ' ')}
+              </div>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3 pt-2">
             <div className="bg-gray-50 rounded-lg p-2.5">
-              <div className="text-[10px] uppercase tracking-wide text-gray-400 mb-0.5">Model</div>
-              <div className="text-xs font-medium text-gray-700 truncate">{config.model.modelId}</div>
+              <div className="text-[10px] uppercase tracking-wide text-gray-600 mb-0.5">Model</div>
+              <div className="text-xs font-medium text-gray-700 truncate">
+                {config.protocol === 'MCP' ? 'None (model-free)' : config.model?.modelId || 'Not selected'}
+              </div>
             </div>
             <div className="bg-gray-50 rounded-lg p-2.5">
-              <div className="text-[10px] uppercase tracking-wide text-gray-400 mb-0.5">Protocol</div>
+              <div className="text-[10px] uppercase tracking-wide text-gray-600 mb-0.5">Protocol</div>
               <div className="text-xs font-medium text-gray-700">{config.protocol}</div>
             </div>
             <div className="bg-gray-50 rounded-lg p-2.5">
-              <div className="text-[10px] uppercase tracking-wide text-gray-400 mb-0.5">Runtime</div>
+              <div className="text-[10px] uppercase tracking-wide text-gray-600 mb-0.5">Runtime</div>
               <div className="text-xs font-medium text-gray-700">{config.pythonRuntime.replace('PYTHON_', 'Python ')}</div>
             </div>
             <div className="bg-gray-50 rounded-lg p-2.5">
-              <div className="text-[10px] uppercase tracking-wide text-gray-400 mb-0.5">Memory</div>
+              <div className="text-[10px] uppercase tracking-wide text-gray-600 mb-0.5">Memory</div>
               <div className="text-xs font-medium text-gray-700">{connectedTools.includes('memory') ? 'Enabled' : 'Disabled'}</div>
             </div>
           </div>
@@ -125,8 +131,14 @@ export function ConfigSummary({
         <div className="rounded-xl border border-gray-200 overflow-hidden">
           <div className="px-4 py-3 border-b border-gray-200 flex items-center gap-2" style={{ background: 'var(--color-bg-subtle)' }}>
             <span className="text-sm">🧰</span>
-            <h4 className="text-sm font-medium text-gray-700">Template Tools Configuration</h4>
-            <span className="ml-auto text-[10px] px-2 py-0.5 bg-[#0972d3]/10 text-[#0972d3] rounded font-medium">
+            <h3 className="text-sm font-medium text-gray-700">Template Tools Configuration</h3>
+            <span
+              className="ml-auto text-[10px] px-2 py-0.5 rounded font-medium"
+              style={{
+                color: 'var(--color-aws-blue-hover)',
+                background: 'color-mix(in srgb, var(--color-aws-blue) 12%, transparent)',
+              }}
+            >
               {activeTemplate.name}
             </span>
           </div>
@@ -143,7 +155,7 @@ export function ConfigSummary({
                 </div>
               </div>
             ))}
-            <div className="text-[10px] text-gray-400 pt-1">
+            <div className="text-[10px] text-gray-600 pt-1">
               These tools are auto-configured in the generated agent code and included in requirements.txt
             </div>
           </div>

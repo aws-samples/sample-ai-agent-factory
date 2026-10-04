@@ -75,7 +75,15 @@ def client(event: dict | None, service: str, **kwargs: Any):
 
     Drop-in for ``boto3.client(service, region_name=region)``: pass the SFN
     ``event`` and the service name. Extra kwargs (e.g. ``config=``) pass through.
+
+    Home account with an explicit ``region_name``: the default session, directly. Resolving the home region through
+    ``session_for_event`` costs a settings-table read the caller did not ask for, and in the manifest deleter a
+    NotFound from THAT read was classified as "the resource is already gone" (measured on a policy row whose policy
+    still existed). Cross-account events still assume the target role.
     """
+    event = event or {}
+    if not event.get("target_account_id") and kwargs.get("region_name"):
+        return boto3.client(service, **kwargs)
     return session_for_event(event).client(service, **kwargs)
 
 
@@ -91,3 +99,39 @@ def account_id_for_event(event: dict | None) -> str:
     sts:GetCallerIdentity) so ARNs point at the target account.
     """
     return session_for_event(event).client("sts").get_caller_identity()["Account"]
+
+
+def artifacts_bucket_for_event(
+    event: dict | None,
+    *,
+    platform_bucket: str | None = None,
+) -> str:
+    """Return the exact code/staging bucket for this deployment target.
+
+    A cross-account or same-account/non-home-region event must carry the bucket
+    that the deployment handler already ownership/region-validated.
+    Reconstructing a name inside a step bypasses that registration boundary and
+    can target a missing or foreign bucket. Home-region deploys retain the
+    platform bucket environment value.
+    """
+    event = event or {}
+    account_id = event.get("target_account_id")
+    target_region = event.get("target_region")
+    platform_region = os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1"))
+    if not account_id:
+        if target_region and str(target_region) != platform_region:
+            artifact_bucket = event.get("target_artifact_bucket")
+            if not artifact_bucket:
+                raise ValueError("Same-account regional deployment is missing its validated target_artifact_bucket")
+            return str(artifact_bucket)
+        return platform_bucket if platform_bucket is not None else os.environ.get("ARTIFACTS_BUCKET_NAME", "")
+    from app.services.deploy_target import target_artifact_bucket_name
+
+    artifact_bucket = event.get("target_artifact_bucket")
+    if not artifact_bucket:
+        raise ValueError("Cross-account deployment is missing its validated target_artifact_bucket")
+    return target_artifact_bucket_name(
+        str(account_id),
+        str(event.get("target_region") or _home_region(event)),
+        artifact_bucket=str(artifact_bucket),
+    )

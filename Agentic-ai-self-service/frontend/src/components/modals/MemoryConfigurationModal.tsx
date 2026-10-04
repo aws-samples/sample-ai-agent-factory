@@ -152,10 +152,15 @@ export function MemoryConfigurationModal({
               error={validationErrors.find((e) => e.field === 'name')?.message}
             />
             <div className="mt-4">
-              <label className="block text-sm font-medium text-gray-700 mb-1">
+              <label
+                htmlFor="memory-event-expiry"
+                className="block text-sm font-medium text-gray-700 mb-1"
+              >
                 Event Expiry Duration
               </label>
               <select
+                id="memory-event-expiry"
+                aria-describedby="memory-event-expiry-help"
                 className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
                 value={config.eventExpiryDuration ?? 90}
                 onChange={(e) => updateField('eventExpiryDuration', Number(e.target.value))}
@@ -164,7 +169,12 @@ export function MemoryConfigurationModal({
                   <option key={d} value={d}>{d} days</option>
                 ))}
               </select>
-              <p className="mt-1 text-xs text-gray-500">How long raw conversation events are retained (3–365 days)</p>
+              <p
+                id="memory-event-expiry-help"
+                className="mt-1 text-xs text-gray-500"
+              >
+                How long raw conversation events are retained (3–365 days)
+              </p>
             </div>
           </FormSection>
         </div>

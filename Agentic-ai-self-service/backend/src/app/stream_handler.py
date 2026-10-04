@@ -6,18 +6,37 @@ longer than 30s time out at the *transport* even though the agent completes
 server-side. API Gateway + Lambda (Mangum) also cannot truly stream — the whole
 response is buffered before delivery.
 
-This module is a SEPARATE Lambda entry point fronted by a **Lambda Function URL**
-with ``InvokeMode=RESPONSE_STREAM``. The AWS Lambda runtime invokes
-``lambda_handler(event, response_stream, context)`` with a writable stream so we
-can emit SSE chunks incrementally and keep the connection open well past 30s
-(Function URLs allow up to ~15 min). The same SSE wire format the API-GW
-``/api/test-runtime-stream`` path emits is reused so the existing frontend SSE
-parser works unchanged: ``data: {"type":"token"|"done"|"error", ...}\\n\\n``.
+This module is a SEPARATE Lambda entry point fronted by a **Lambda Function URL**.
+It escapes the 30s cap: the function timeout is 900s and, measured live
+2026-09-20, a signed request returned HTTP 200 after 240.6s. The same SSE wire
+format the API-GW ``/api/test-runtime-stream`` path emits is reused so the
+existing frontend SSE parser works unchanged:
+``data: {"type":"token"|"done"|"error", ...}\\n\\n``.
 
-SECURITY: the Function URL uses ``auth_type=NONE`` (Function URLs cannot use a
-Cognito JWT authorizer the way API Gateway HTTP APIs can), so this handler
-MUST authenticate every request itself. We replicate the API-GW Cognito JWT
-authorizer minimally and WITHOUT third-party libraries:
+**The URL's InvokeMode is BUFFERED, and delivery is NOT incremental.** This
+module was written for ``RESPONSE_STREAM``, on the assumption that the runtime
+would invoke ``lambda_handler(event, response_stream, context)`` with a writable
+stream. On a **managed python3.12 runtime it never does** — response streaming is
+a Node.js managed-runtime feature — so ``lambda_handler`` always falls through to
+its buffered ``handler()``. Under RESPONSE_STREAM a Function URL does not unwrap
+that buffered ``{statusCode, headers, body}`` envelope, so the client received the
+envelope's JSON as the body and an SSE parser found zero frames, while the
+response still carried HTTP 200 and ``Content-Type: text/event-stream``. Under
+BUFFERED the envelope is unwrapped exactly as API Gateway unwraps it. See
+``infra/stacks/platform/lambdas.py`` (``build_stream_lambda``) for the full
+measurement, and ``backend/tests/test_stream_url_delivers_parseable_sse.py`` for
+the guard that ties the two together.
+
+SECURITY: the Function URL uses ``auth_type=AWS_IAM`` (a public ``NONE`` URL is
+forbidden in this org — see ``_sigv4_caller``). Under AWS_IAM the caller must
+SigV4-sign and SigV4 occupies the ``Authorization`` header, so a Cognito bearer
+cannot travel with it: measured live, a request carrying a VALID Cognito access
+token and no signature is rejected by AWS with HTTP 403 before this module runs.
+The Cognito path below is therefore the FALLBACK branch — for a ``NONE`` URL and
+for local tests — not a second gate in front of the deployed URL. It is kept
+because it is the path that lights up the moment a Cognito Identity Pool fronts
+the SPA. We replicate the API-GW Cognito JWT authorizer minimally and WITHOUT
+third-party libraries:
 
   * fetch + cache the pool's JWKS,
   * verify the RS256 signature with a pure-stdlib RSA PKCS#1 v1.5 check,
@@ -51,12 +70,17 @@ import app.services._otel_platform  # noqa: F401
 # Reuse the exact resolver + parser the API-GW path uses so the two stay in
 # lockstep (same ARN construction, same response-body parsing).
 from app.deployment_handler import (
+    _deployment_target_event,
     _parse_response_body,
+    _runtime_payload,
     _scan_for_runtime,
 )
+from app.services import step_clients
 from app.services.config import load_config
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.harness_deployer import invoke_harness
+from app.services.invocation_identity import InvocationIdentityError, memory_invocation_identity
+from app.services.runtime_invocation import parse_tool_receipts
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +143,8 @@ def _fetch_jwks() -> list:
     if _JWKS_CACHE["keys"] is not None and (now - _JWKS_CACHE["fetched_at"]) < _JWKS_TTL_SECONDS:
         return _JWKS_CACHE["keys"]
     url = f"{_issuer()}/.well-known/jwks.json"
-    with urllib.request.urlopen(url, timeout=5) as resp:  # nosec B310 — https Cognito endpoint
+    # The URL is the service-constructed HTTPS Cognito discovery endpoint above.
+    with urllib.request.urlopen(url, timeout=5) as resp:  # nosec B310
         body = json.loads(resp.read().decode("utf-8"))
     keys = body.get("keys", [])
     _JWKS_CACHE["keys"] = keys
@@ -163,12 +188,22 @@ class _AuthError(Exception):
 
 
 def _extract_bearer(event: dict) -> str:
+    """The caller's bearer token, or ``""`` when the Authorization header is not one.
+
+    F-28: this used to return ANY non-bearer header value whole, so on the SigV4 path the
+    ``AWS4-HMAC-SHA256 Credential=..., SignedHeaders=..., Signature=...`` string was carried
+    into the invoke payload as ``user_access_token``. A signature is not a user token and no
+    consumer wants it there. Only ``Bearer <token>`` -- or a bare JWT (three dot-separated
+    segments, no whitespace) for callers that omit the scheme -- is a token.
+    """
     headers = event.get("headers") or {}
     # Function URL lowercases header names, but be defensive.
-    auth = headers.get("authorization") or headers.get("Authorization") or ""
+    auth = (headers.get("authorization") or headers.get("Authorization") or "").strip()
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
-    return auth.strip()
+    if auth and not any(ch.isspace() for ch in auth) and auth.count(".") == 2:
+        return auth
+    return ""
 
 
 def _verify_cognito_token(token: str) -> str:
@@ -293,11 +328,28 @@ def _emit_tokens(write, text: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_runtime_arn(deployment_state: dict | None, runtime_id: str, region: str) -> str:
+def _resolve_runtime_arn(
+    deployment_state: dict | None,
+    runtime_id: str,
+    region: str,
+    *,
+    target_session=None,
+) -> str:
+    """Return the record's ARN, synthesizing one from *runtime_id* if it has none.
+
+    Synthesis is only sound because every caller has already required an OWNED record
+    for *runtime_id* (F-9). Do not call this with a record you have not authorized:
+    the id comes from the caller, so an unauthorized call here is an invoke of any
+    runtime in the account.
+    """
     runtime_arn = (deployment_state or {}).get("runtime_arn", "")
     if runtime_arn:
         return runtime_arn
-    sts = boto3.client("sts", region_name=region)
+    sts = (
+        target_session.client("sts", region_name=region)
+        if target_session is not None
+        else boto3.client("sts", region_name=region)
+    )
     account_id = sts.get_caller_identity()["Account"]
     return f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/{runtime_id}"
 
@@ -328,11 +380,15 @@ def _stream_invoke(write, body: dict, caller_sub: str | None) -> None:
     session_id = body.get("sessionId") or body.get("session_id")
 
     store = _get_state_store()
-    deployment_state = None
     try:
         deployment_state = _scan_for_runtime(store._table, runtime_id)
-    except Exception:  # noqa: BLE001
+    except Exception:
+        # F-9: this used to leave deployment_state=None and fall through, and the
+        # check below was `if deployment_state and ...`, so breaking the lookup
+        # disabled the check. Fail closed, and do not call it "not found".
         logger.warning("stream: deployment lookup failed for %s", runtime_id, exc_info=True)
+        write(_sse({"type": "error", "error": "Could not verify this runtime right now. Try again shortly."}))
+        return
 
     # Tenant isolation — identical rule to handle_test_runtime / delete, with
     # one carve-out: a SigV4 (AWS_IAM) caller is identified by its IAM principal
@@ -342,20 +398,43 @@ def _stream_invoke(write, body: dict, caller_sub: str | None) -> None:
     # IAM caller we DON'T enforce the per-Cognito-sub ownership check — otherwise
     # every SigV4-authed stream invoke 404s on a deployment it legitimately may
     # test. Cognito-bearer callers still get full owner-scoped isolation.
+    #
+    # F-9: the carve-out is about OWNERSHIP, not EXISTENCE. It used to be written as
+    # `if deployment_state and not is_iam_caller:`, which also skipped *having a record
+    # at all* — so the trusted boundary decayed into "any signed principal in the
+    # account may invoke any runtime id it can name", including the foreign runtimes
+    # this account holds. A record is required of every caller, IAM included; only the
+    # per-sub owner compare is waived for a SigV4 principal.
     is_iam_caller = isinstance(caller_sub, str) and caller_sub.startswith("iam:")
-    if deployment_state and not is_iam_caller:
+    if not deployment_state:
+        write(_sse({"type": "error", "error": "Runtime not found"}))
+        return
+    if not is_iam_caller:
         owner = deployment_state.get("user_id")
         if owner and owner != caller_sub:
             write(_sse({"type": "error", "error": "Runtime not found"}))
             return
 
+    target_event = _deployment_target_event(deployment_state, region)
+    region = target_event["target_region"]
+    target_session = step_clients.session_for_event(target_event)
+
     # HARNESS mode → data-plane invoke_harness (Phase B).
-    if deployment_state and deployment_state.get("deployment_mode") == "harness":
+    if deployment_state.get("deployment_mode") == "harness":
         harness_arn = deployment_state.get("harness_arn", "")
         if not harness_arn:
             write(_sse({"type": "error", "error": "Harness ARN not found for this deployment"}))
             return
-        result = invoke_harness(region, harness_arn, prompt, session_id or runtime_id)
+        result = invoke_harness(
+            region,
+            harness_arn,
+            prompt,
+            session_id or runtime_id,
+            agentcore_data_client=target_session.client(
+                "bedrock-agentcore",
+                region_name=region,
+            ),
+        )
         if not result.get("success"):
             # SECURITY (CodeQL py/stack-trace-exposure): never surface
             # invoke_harness's raw exception text to the external caller.
@@ -364,12 +443,36 @@ def _stream_invoke(write, body: dict, caller_sub: str | None) -> None:
             return
         output = result.get("output", "")
         _emit_tokens(write, output)
-        write(_sse({"type": "done", "session_id": session_id or runtime_id, "full_response": output}))
+        write(
+            _sse(
+                {
+                    "type": "done",
+                    "session_id": session_id or runtime_id,
+                    "full_response": output,
+                    "trace_id": result.get("trace_id"),
+                }
+            )
+        )
         return
+
+    # F-56: the shared Memory identity gate, before anything is invoked. For an IAM
+    # caller the actor is the record's stored owner, never the IAM principal.
+    try:
+        memory_identity = memory_invocation_identity(deployment_state, session_id, caller_sub)
+    except InvocationIdentityError as exc:
+        write(_sse({"type": "error", "error": str(exc)}))
+        return
+    if memory_identity:
+        session_id = memory_identity.session_id
 
     # RUNTIME mode → data-plane invoke_agent_runtime.
     try:
-        runtime_arn = _resolve_runtime_arn(deployment_state, runtime_id, region)
+        runtime_arn = _resolve_runtime_arn(
+            deployment_state,
+            runtime_id,
+            region,
+            target_session=target_session,
+        )
     except Exception:  # noqa: BLE001
         logger.exception("stream: cannot resolve runtime ARN for %s", runtime_id)
         write(_sse({"type": "error", "error": "Cannot resolve runtime ARN"}))
@@ -380,14 +483,12 @@ def _stream_invoke(write, body: dict, caller_sub: str | None) -> None:
         # tool-heavy agents run well past API Gateway's 30s cap.
         from botocore.config import Config as _BotoConfig
 
-        agentcore_client = boto3.client(
+        agentcore_client = target_session.client(
             "bedrock-agentcore",
             region_name=region,
             config=_BotoConfig(read_timeout=870, connect_timeout=10, retries={"max_attempts": 0}),
         )
-        payload_body: dict[str, str] = {"prompt": prompt}
-        if session_id:
-            payload_body["session_id"] = session_id
+        payload_body = _runtime_payload(prompt, session_id, memory_identity)
         # Phase 3 (Loom) OBO — pass the user's access token to the runtime so its
         # OAuth2 handler can perform the on-behalf-of exchange. Carried in the
         # invoke payload (not an AgentCore header, which the proxy strips).
@@ -402,7 +503,9 @@ def _stream_invoke(write, body: dict, caller_sub: str | None) -> None:
             invoke_params["runtimeSessionId"] = session_id
 
         resp = agentcore_client.invoke_agent_runtime(**invoke_params)
-        out_session = resp.get("runtimeSessionId") or resp.get("sessionId") or session_id
+        out_session = (
+            session_id if memory_identity else (resp.get("runtimeSessionId") or resp.get("sessionId") or session_id)
+        )
 
         raw_response = resp.get("response", "") or resp.get("body", b"")
         if hasattr(raw_response, "read"):
@@ -411,8 +514,12 @@ def _stream_invoke(write, body: dict, caller_sub: str | None) -> None:
             raw_response = raw_response.decode("utf-8", errors="replace")
 
         parsed = _parse_response_body(str(raw_response))
+        tool_receipts = parse_tool_receipts(raw_response)
         _emit_tokens(write, parsed)
-        write(_sse({"type": "done", "session_id": out_session, "full_response": parsed}))
+        done = {"type": "done", "session_id": out_session, "full_response": parsed}
+        if tool_receipts is not None:
+            done["tool_receipts"] = tool_receipts
+        write(_sse(done))
     except Exception as e:  # noqa: BLE001
         msg = str(e)
         if "ResourceNotFound" in msg:
@@ -468,27 +575,41 @@ def _handle(event: dict, write) -> None:
     _stream_invoke(write, body, caller_sub)
 
 
-# AWS Lambda RESPONSE_STREAM contract: the runtime passes a writable
-# ``response_stream`` as the second positional argument. We set the SSE content
-# type via the awslambdaric HttpResponseStream metadata helper when available,
-# and always emit ``data:`` framed chunks the frontend SSE parser understands.
+# The streaming branch below is DORMANT on this deployment — see the docstring.
+# The buffered fallback is the production path, and the Function URL is BUFFERED
+# so that its envelope is unwrapped into clean SSE bytes for the client.
 def lambda_handler(event, response_stream=None, context=None):  # noqa: D401
-    """Function URL streaming entry point (InvokeMode=RESPONSE_STREAM).
+    """Function URL entry point.
 
-    The AWS Lambda streaming runtime injects a writable ``response_stream`` as
-    the second positional arg. We attach the SSE content type via the
-    ``HttpResponseStream`` helper when the runtime exposes it (so the browser
-    sees ``text/event-stream``), then write ``data:`` framed chunks and close.
-    If the helper isn't available we fall back to writing raw SSE bytes — the
-    frontend SSE parser tolerates a missing explicit content type.
+    Two branches, and on this deployment only the second one ever runs:
+
+    1. If the second positional arg is a writable stream, write ``data:`` framed
+       chunks to it incrementally (attaching ``text/event-stream`` via the
+       ``HttpResponseStream`` helper when the runtime exposes it). **This branch
+       does not execute on a managed python3.12 runtime** — Lambda response
+       streaming is a Node.js managed-runtime feature, and measured live
+       2026-09-20 via ``invoke_with_response_stream``, the real function emits
+       exactly ONE PayloadChunk, at completion, containing the branch-2 envelope.
+       It is kept, not deleted, because it is what lights up if the function ever
+       moves to a Node.js handler or a custom runtime — but its unit test proves
+       only that the code works when given a stream, NOT that anything gives it
+       one. Do not read that test's coverage as evidence this product streams.
+    2. Otherwise return the buffered ``{statusCode, headers, body}`` envelope so
+       the caller still gets a complete SSE payload. A Function URL in **BUFFERED**
+       mode unwraps this envelope exactly as API Gateway does. It does NOT do so
+       under RESPONSE_STREAM: there the client receives the envelope's own JSON as
+       the body and an SSE parser finds zero frames, while HTTP 200 and
+       ``Content-Type: text/event-stream`` make the response look healthy.
 
     Bug (caught live 2026-06-25): the second positional arg is NOT guaranteed to
     be the writable stream — depending on how the runtime/Function-URL invokes
     the function (and for buffered callers / some RIC paths) the second arg is
     the LambdaContext, which has no ``.write`` (every write then threw
     AttributeError and the client saw ``null``). So we DETECT a writable stream
-    (``hasattr(arg, "write")``); when the second arg is not writable we fall back
-    to the buffered path so the caller still gets a complete SSE response.
+    (``hasattr(arg, "write")``). That fix was right, but it left the *wire*
+    contract unexamined for three months: the fallback's return value was
+    unit-tested and correct, and still unparseable by any client, because nobody
+    had paired the return shape with the URL's invoke mode. Fixed 2026-09-20.
     """
     if response_stream is None or not hasattr(response_stream, "write"):
         # No real stream object (second arg was the context, or absent) — serve

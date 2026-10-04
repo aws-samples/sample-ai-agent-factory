@@ -141,10 +141,10 @@ jobs:
       # that owns the gate (export-gate, below) and guaranteed failure here.
       - name: Run backend suite
         working-directory: Agentic-ai-self-service/backend
-        run: python3 -m pytest -m "not integration and not policy_scan" -q
+        run: python3 -m pytest -m "not integration and not policy_scan and not terraform_scan and not shell_scan" -q
 
   export-gate:
-    name: exported template (cfn-lint + checkov)
+    name: exported bundle contract
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -153,6 +153,10 @@ jobs:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: Agentic-ai-self-service/backend/pyproject.toml
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.6"
+          terraform_wrapper: false
       - name: Install backend with dev extras
         run: pip install -e './backend[dev]'
       # Isolated, and pinned exactly. checkov pins `boto3==1.35.49` while the backend
@@ -165,16 +169,26 @@ jobs:
       # bumping this means re-validating that baseline.
       - name: Install checkov in isolation
         run: pipx install 'checkov==3.3.1'
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
       # Fail loudly and early rather than letting the test-level guard report it, so a
       # dependency-resolution problem is not mistaken for a template problem.
       - name: Confirm the scanners are present
         run: |
           cfn-lint --version
           checkov --version
+          terraform version
+          shellcheck --version
       - name: Contract, lint and policy gates over the emitted bundle
         working-directory: Agentic-ai-self-service/backend
         run: |
-          python3 -m pytest tests/test_cfn_export_contract.py -q \
+          python3 -m pytest \
+            tests/test_cfn_export_contract.py \
+            tests/test_the_exported_template_can_actually_deploy.py \
+            tests/test_litellm_secret_region_is_enforced_in_the_template.py \
+            -q \
             --junit-xml=/tmp/export-gate.xml
       # Uploaded on failure only: the JUnit XML names which component combination
       # broke, which is the first thing anybody debugging this will want.
@@ -219,6 +233,9 @@ jobs:
       - name: Install
         working-directory: Agentic-ai-self-service/frontend
         run: npm ci
+      - name: Audit dependencies
+        working-directory: Agentic-ai-self-service/frontend
+        run: npm audit --audit-level=high
       - name: Lint
         working-directory: Agentic-ai-self-service/frontend
         run: npx eslint .
@@ -229,4 +246,17 @@ jobs:
       # that only surfaces when Vite actually builds.
       - name: Build
         working-directory: Agentic-ai-self-service/frontend
+        env:
+          VITE_API_BASE_URL: https://frontend.example.invalid
+          VITE_AWS_REGION: us-east-1
+          VITE_COGNITO_USER_POOL_ID: us-east-1_CiFixture
+          VITE_COGNITO_CLIENT_ID: ci-fixture-client
         run: npm run build
+      - name: Verify production bundle
+        working-directory: Agentic-ai-self-service/frontend
+        env:
+          VITE_API_BASE_URL: https://frontend.example.invalid
+          VITE_AWS_REGION: us-east-1
+          VITE_COGNITO_USER_POOL_ID: us-east-1_CiFixture
+          VITE_COGNITO_CLIENT_ID: ci-fixture-client
+        run: npm run verify:production-build

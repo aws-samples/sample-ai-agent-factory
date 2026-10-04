@@ -26,6 +26,22 @@ class Tables:
     budget: dynamodb.Table
     audit: dynamodb.Table
     permission_requests: dynamodb.Table
+    gateway_name_claims: dynamodb.Table
+
+
+#: The attributes the recovery reader (backend gateway_name_claim.recovered_gateway_rows)
+#: projects, and all its GetItem grant allows: never a claim's lease fields, whose
+#: holder_token is the fence every claim write is made under. Pinned to the reader's
+#: RECOVERY_READ_ATTRIBUTES by infra/tests/test_gateway_name_claim_table.py.
+RECOVERY_READ_ATTRIBUTES = (
+    "claim_key",
+    "claim_keys",
+    "owner_sub",
+    "pointer_generation",
+    "provisional",
+    "recovery_deployment_id",
+    "recovery_gateway_id",
+)
 
 
 def build_tables(stack: cdk.Stack, cfg: PlatformConfig) -> Tables:
@@ -55,7 +71,48 @@ def build_tables(stack: cdk.Stack, cfg: PlatformConfig) -> Tables:
         # Phase 5 (Loom) — action-audit trail table.
         audit=_create_audit_table(stack, cfg),
         permission_requests=_create_permission_requests_table(stack, cfg),
+        gateway_name_claims=_create_gateway_name_claims_table(stack, cfg),
     )
+
+
+def _create_gateway_name_claims_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamodb.Table:
+    """One row per (account, region, gateway name): who owns the name, and which of
+    their deployments may be creating on it right now.
+
+    Its own table, not a row type in the deployments table, which is scanned in many
+    places that would each have to learn to skip it. See
+    backend/src/app/services/gateway_name_claim.py.
+    """
+    table = dynamodb.Table(
+        stack,
+        "GatewayNameClaimsTable",
+        table_name=f"{cfg.project}-{cfg.env}-gateway-name-claims",
+        partition_key=dynamodb.Attribute(
+            name="claim_key",
+            type=dynamodb.AttributeType.STRING,
+        ),
+        billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+        removal_policy=cfg.removal_policy,
+        # F-25: RETAIN alone does not stop an out-of-band DeleteTable (the
+        # AGENTCORE_ALLOW_DESTROY=true flip, a console click, a scripted sweep).
+        # Protection follows the same knob so destroy envs stay destroyable.
+        # ARCC cnt_h02wszR9St529D. Enforced by tests/test_f25_tables_are_deletion_protected.py.
+        deletion_protection=not cfg.allow_destroy,
+        encryption=dynamodb.TableEncryption.AWS_MANAGED,
+        point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+            point_in_time_recovery_enabled=True,
+        ),
+        # Two row kinds carry gc_after (epoch seconds, past a lease plus a grace period):
+        # a provisional name claim, and a gateway write lock (gwlock#), which an
+        # unconfirmed write deliberately never deletes. Either way its lease is free by
+        # then and it proves nothing, so expiring it loses no protection. A durable claim
+        # has no gc_after and is never expired.
+        time_to_live_attribute="gc_after",
+    )
+    # No index: a teardown finds a gateway recorded only on its claim through the
+    # deployment's recovery pointer item (recovery#<deployment id>), by strongly
+    # consistent GetItem, so the read cannot lag the write the way a GSI's does.
+    return table
 
 
 def _create_workflows_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamodb.Table:
@@ -74,6 +131,11 @@ def _create_workflows_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamodb.T
         billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
         # Audit #9: gated on env so prod doesn't lose data on teardown.
         removal_policy=cfg.removal_policy,
+        # F-25: RETAIN alone does not stop an out-of-band DeleteTable (the
+        # AGENTCORE_ALLOW_DESTROY=true flip, a console click, a scripted sweep).
+        # Protection follows the same knob so destroy envs stay destroyable.
+        # ARCC cnt_h02wszR9St529D. Enforced by tests/test_f25_tables_are_deletion_protected.py.
+        deletion_protection=not cfg.allow_destroy,
         encryption=dynamodb.TableEncryption.AWS_MANAGED,
         point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
             point_in_time_recovery_enabled=True,
@@ -96,6 +158,11 @@ def _create_deployments_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamodb
         ),
         billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
         removal_policy=cfg.removal_policy,
+        # F-25: RETAIN alone does not stop an out-of-band DeleteTable (the
+        # AGENTCORE_ALLOW_DESTROY=true flip, a console click, a scripted sweep).
+        # Protection follows the same knob so destroy envs stay destroyable.
+        # ARCC cnt_h02wszR9St529D. Enforced by tests/test_f25_tables_are_deletion_protected.py.
+        deletion_protection=not cfg.allow_destroy,
         time_to_live_attribute="ttl",
         encryption=dynamodb.TableEncryption.AWS_MANAGED,
         point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
@@ -144,6 +211,11 @@ def _create_flows_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamodb.Table
         ),
         billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
         removal_policy=cfg.removal_policy,
+        # F-25: RETAIN alone does not stop an out-of-band DeleteTable (the
+        # AGENTCORE_ALLOW_DESTROY=true flip, a console click, a scripted sweep).
+        # Protection follows the same knob so destroy envs stay destroyable.
+        # ARCC cnt_h02wszR9St529D. Enforced by tests/test_f25_tables_are_deletion_protected.py.
+        deletion_protection=not cfg.allow_destroy,
         encryption=dynamodb.TableEncryption.AWS_MANAGED,
         point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
             point_in_time_recovery_enabled=True,
@@ -176,6 +248,11 @@ def _create_agent_versions_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynam
         ),
         billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
         removal_policy=cfg.removal_policy,
+        # F-25: RETAIN alone does not stop an out-of-band DeleteTable (the
+        # AGENTCORE_ALLOW_DESTROY=true flip, a console click, a scripted sweep).
+        # Protection follows the same knob so destroy envs stay destroyable.
+        # ARCC cnt_h02wszR9St529D. Enforced by tests/test_f25_tables_are_deletion_protected.py.
+        deletion_protection=not cfg.allow_destroy,
         encryption=dynamodb.TableEncryption.AWS_MANAGED,
         point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
             point_in_time_recovery_enabled=True,
@@ -213,6 +290,11 @@ def _create_runtime_slots_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamo
         ),
         billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
         removal_policy=cfg.removal_policy,
+        # F-25: RETAIN alone does not stop an out-of-band DeleteTable (the
+        # AGENTCORE_ALLOW_DESTROY=true flip, a console click, a scripted sweep).
+        # Protection follows the same knob so destroy envs stay destroyable.
+        # ARCC cnt_h02wszR9St529D. Enforced by tests/test_f25_tables_are_deletion_protected.py.
+        deletion_protection=not cfg.allow_destroy,
         encryption=dynamodb.TableEncryption.AWS_MANAGED,
         point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
             point_in_time_recovery_enabled=True,
@@ -244,6 +326,11 @@ def _create_agent_registry_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynam
         ),
         billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
         removal_policy=cfg.removal_policy,
+        # F-25: RETAIN alone does not stop an out-of-band DeleteTable (the
+        # AGENTCORE_ALLOW_DESTROY=true flip, a console click, a scripted sweep).
+        # Protection follows the same knob so destroy envs stay destroyable.
+        # ARCC cnt_h02wszR9St529D. Enforced by tests/test_f25_tables_are_deletion_protected.py.
+        deletion_protection=not cfg.allow_destroy,
         encryption=dynamodb.TableEncryption.AWS_MANAGED,
         point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
             point_in_time_recovery_enabled=True,
@@ -296,6 +383,11 @@ def _create_hitl_requests_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamo
         ),
         billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
         removal_policy=cfg.removal_policy,
+        # F-25: RETAIN alone does not stop an out-of-band DeleteTable (the
+        # AGENTCORE_ALLOW_DESTROY=true flip, a console click, a scripted sweep).
+        # Protection follows the same knob so destroy envs stay destroyable.
+        # ARCC cnt_h02wszR9St529D. Enforced by tests/test_f25_tables_are_deletion_protected.py.
+        deletion_protection=not cfg.allow_destroy,
         encryption=dynamodb.TableEncryption.AWS_MANAGED,
         time_to_live_attribute="ttl",
         point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
@@ -339,6 +431,11 @@ def _create_permission_requests_table(stack: cdk.Stack, cfg: PlatformConfig) -> 
         ),
         billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
         removal_policy=cfg.removal_policy,
+        # F-25: RETAIN alone does not stop an out-of-band DeleteTable (the
+        # AGENTCORE_ALLOW_DESTROY=true flip, a console click, a scripted sweep).
+        # Protection follows the same knob so destroy envs stay destroyable.
+        # ARCC cnt_h02wszR9St529D. Enforced by tests/test_f25_tables_are_deletion_protected.py.
+        deletion_protection=not cfg.allow_destroy,
         encryption=dynamodb.TableEncryption.AWS_MANAGED,
         point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
             point_in_time_recovery_enabled=True,
@@ -365,8 +462,9 @@ def _create_triggers_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamodb.Ta
     every write/list/delete through the production-slot owner, so the Bug
     122 PK-collision class is closed by ownership resolution). SK
     ``trigger_id`` (sortable hex). GSI ``owner_sub-trigger_id-index`` powers
-    the owner-scoped list-across-runtimes query. No TTL — rows live until the
-    trigger is deleted or destroy_runtime cleans them up (Bug 124).
+    the owner-scoped list-across-runtimes query. Trigger rows omit ``ttl`` and
+    therefore live until explicit deletion. Completed delivery-deduplication
+    rows carry ``ttl`` so DynamoDB can expire them after the replay window.
     """
     table = dynamodb.Table(
         stack,
@@ -382,10 +480,16 @@ def _create_triggers_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamodb.Ta
         ),
         billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
         removal_policy=cfg.removal_policy,
+        # F-25: RETAIN alone does not stop an out-of-band DeleteTable (the
+        # AGENTCORE_ALLOW_DESTROY=true flip, a console click, a scripted sweep).
+        # Protection follows the same knob so destroy envs stay destroyable.
+        # ARCC cnt_h02wszR9St529D. Enforced by tests/test_f25_tables_are_deletion_protected.py.
+        deletion_protection=not cfg.allow_destroy,
         encryption=dynamodb.TableEncryption.AWS_MANAGED,
         point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
             point_in_time_recovery_enabled=True,
         ),
+        time_to_live_attribute="ttl",
     )
     table.add_global_secondary_index(
         index_name="owner_sub-trigger_id-index",
@@ -423,6 +527,11 @@ def _create_prompt_library_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynam
         ),
         billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
         removal_policy=cfg.removal_policy,
+        # F-25: RETAIN alone does not stop an out-of-band DeleteTable (the
+        # AGENTCORE_ALLOW_DESTROY=true flip, a console click, a scripted sweep).
+        # Protection follows the same knob so destroy envs stay destroyable.
+        # ARCC cnt_h02wszR9St529D. Enforced by tests/test_f25_tables_are_deletion_protected.py.
+        deletion_protection=not cfg.allow_destroy,
         encryption=dynamodb.TableEncryption.AWS_MANAGED,
         point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
             point_in_time_recovery_enabled=True,
@@ -463,6 +572,11 @@ def _create_tag_policy_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamodb.
         ),
         billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
         removal_policy=cfg.removal_policy,
+        # F-25: RETAIN alone does not stop an out-of-band DeleteTable (the
+        # AGENTCORE_ALLOW_DESTROY=true flip, a console click, a scripted sweep).
+        # Protection follows the same knob so destroy envs stay destroyable.
+        # ARCC cnt_h02wszR9St529D. Enforced by tests/test_f25_tables_are_deletion_protected.py.
+        deletion_protection=not cfg.allow_destroy,
         encryption=dynamodb.TableEncryption.AWS_MANAGED,
         point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
             point_in_time_recovery_enabled=True,
@@ -490,6 +604,11 @@ def _create_budget_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamodb.Tabl
         ),
         billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
         removal_policy=cfg.removal_policy,
+        # F-25: RETAIN alone does not stop an out-of-band DeleteTable (the
+        # AGENTCORE_ALLOW_DESTROY=true flip, a console click, a scripted sweep).
+        # Protection follows the same knob so destroy envs stay destroyable.
+        # ARCC cnt_h02wszR9St529D. Enforced by tests/test_f25_tables_are_deletion_protected.py.
+        deletion_protection=not cfg.allow_destroy,
         encryption=dynamodb.TableEncryption.AWS_MANAGED,
         point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
             point_in_time_recovery_enabled=True,
@@ -517,6 +636,11 @@ def _create_audit_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamodb.Table
         ),
         billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
         removal_policy=cfg.removal_policy,
+        # F-25: RETAIN alone does not stop an out-of-band DeleteTable (the
+        # AGENTCORE_ALLOW_DESTROY=true flip, a console click, a scripted sweep).
+        # Protection follows the same knob so destroy envs stay destroyable.
+        # ARCC cnt_h02wszR9St529D. Enforced by tests/test_f25_tables_are_deletion_protected.py.
+        deletion_protection=not cfg.allow_destroy,
         encryption=dynamodb.TableEncryption.AWS_MANAGED,
         time_to_live_attribute="ttl",
         point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
@@ -551,6 +675,11 @@ def _create_usage_events_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamod
         ),
         billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
         removal_policy=cfg.removal_policy,
+        # F-25: RETAIN alone does not stop an out-of-band DeleteTable (the
+        # AGENTCORE_ALLOW_DESTROY=true flip, a console click, a scripted sweep).
+        # Protection follows the same knob so destroy envs stay destroyable.
+        # ARCC cnt_h02wszR9St529D. Enforced by tests/test_f25_tables_are_deletion_protected.py.
+        deletion_protection=not cfg.allow_destroy,
         encryption=dynamodb.TableEncryption.AWS_MANAGED,
         time_to_live_attribute="ttl",
         point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(

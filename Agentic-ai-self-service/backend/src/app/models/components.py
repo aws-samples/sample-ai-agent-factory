@@ -140,7 +140,11 @@ GatewayTargetConfig = Annotated[
 class APIKeyCredentials(BaseModel):
     """API key credentials for gateway targets."""
 
-    api_key: str = Field(min_length=1)
+    # Write-only: validated on input, never serialised (``exclude=True``) and never read back by
+    # any backend path -- the deploy path takes the key from the request, not from storage. Optional
+    # so a record stored without it (every record, after this) still re-validates. See
+    # services/credential_scrub.py for the dict-shaped boundaries.
+    api_key: str | None = Field(default=None, min_length=1, exclude=True, repr=False)
     credential_location: Literal["header", "query"] = "header"
     credential_parameter_name: str = Field(default="X-API-Key")
 

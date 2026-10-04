@@ -727,6 +727,7 @@ class AwsAgentRegistry:
             )
         records: list[dict] = []
         token: str | None = None
+        seen_tokens: set[str] = set()
         while True:
             try:
                 resp = self.control.list_registry_records(
@@ -736,10 +737,28 @@ class AwsAgentRegistry:
                 )
             except Exception as e:  # noqa: BLE001
                 raise RegistryQueryFailed(str(e)[:300], partial=records) from e
-            records.extend(resp.get("registryRecords") or [])
-            token = resp.get("nextToken")
-            if not token:
+            page_records = resp.get("registryRecords") or []
+            if not isinstance(page_records, list):
+                raise RegistryQueryFailed(
+                    "list_registry_records returned a non-list registryRecords collection",
+                    partial=records,
+                )
+            records.extend(page_records)
+            candidate = resp.get("nextToken")
+            if candidate in (None, ""):
                 return records
+            if not isinstance(candidate, str):
+                raise RegistryQueryFailed(
+                    "list_registry_records returned a non-string nextToken",
+                    partial=records,
+                )
+            if candidate in seen_tokens:
+                raise RegistryQueryFailed(
+                    f"list_registry_records repeated pagination token {candidate!r}",
+                    partial=records,
+                )
+            seen_tokens.add(candidate)
+            token = candidate
 
     def list_records(self, filters: list[dict] | None = None) -> list[dict]:
         """Lenient listing for display/inventory: [] (or a partial page) on error.

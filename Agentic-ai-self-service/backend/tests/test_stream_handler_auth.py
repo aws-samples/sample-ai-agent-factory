@@ -310,7 +310,17 @@ def test_cognito_caller_still_owner_scoped(wired, monkeypatch, keypair):
 
 
 def test_lambda_handler_uses_stream_when_writable(wired):
-    """When a real writable stream IS provided, it writes to it (not buffered)."""
+    """When a real writable stream IS provided, it writes to it (not buffered).
+
+    DORMANT PATH — do not read this test as evidence the product streams. Measured live
+    2026-09-20: on the managed python3.12 runtime the real function is deployed on, nothing
+    ever passes a writable stream (``invoke_with_response_stream`` returns exactly one
+    PayloadChunk, at completion, containing the buffered envelope). This test proves the code
+    works *when given* a stream, never that anything gives it one. The production path is
+    ``test_lambda_handler_falls_back_to_buffered_when_second_arg_is_context`` above, and the
+    wire contract that path has to satisfy is pinned by
+    tests/test_stream_url_delivers_parseable_sse.py.
+    """
     written = []
 
     class _Stream:

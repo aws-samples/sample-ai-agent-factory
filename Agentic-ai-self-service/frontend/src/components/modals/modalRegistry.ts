@@ -17,10 +17,11 @@ import type {
   KnowledgeBaseToolConfig,
   A2AConfiguration,
   ConnectorConfiguration,
+  ComponentConfiguration,
 } from '../../types/components';
+import type { AgentCoreNode } from '../../store/workflowStore';
 import type { EvaluationNodeConfig } from '../modals/EvaluationConfigurationModal';
 import type { PromptSelection } from '../modals/PromptLibraryModal';
-import type { RegistryCanvasSnapshot } from '../../services/api';
 
 // Lazy-load all modals
 const RuntimeConfigurationModal = lazy(() => import('./RuntimeConfigurationModal').then(m => ({ default: m.RuntimeConfigurationModal })));
@@ -35,9 +36,6 @@ const ToolConfigModal = lazy(() => import('./ToolConfigModal').then(m => ({ defa
 const ConnectorConfigModal = lazy(() => import('./ConnectorConfigModal').then(m => ({ default: m.ConnectorConfigModal })));
 const KnowledgeBaseConfigModal = lazy(() => import('./KnowledgeBaseConfigModal').then(m => ({ default: m.KnowledgeBaseConfigModal })));
 const A2AConfigurationModal = lazy(() => import('./A2AConfigurationModal').then(m => ({ default: m.A2AConfigurationModal })));
-const PromptLibraryModal = lazy(() => import('./PromptLibraryModal').then(m => ({ default: m.PromptLibraryModal })));
-const RegistryModal = lazy(() => import('./RegistryModal').then(m => ({ default: m.RegistryModal })));
-const HitlInboxModal = lazy(() => import('./HitlInboxModal').then(m => ({ default: m.HitlInboxModal })));
 
 // Modal props interfaces
 export interface RuntimeModalProps {
@@ -45,6 +43,7 @@ export interface RuntimeModalProps {
   onClose: () => void;
   onSave: (config: RuntimeConfiguration) => void;
   initialConfig?: RuntimeConfiguration;
+  onOpenPromptLibrary?: (onSelect: (selection: PromptSelection) => void) => void;
 }
 
 export interface GatewayModalProps {
@@ -125,24 +124,6 @@ export interface A2AModalProps {
   initialConfig?: Partial<A2AConfiguration>;
 }
 
-export interface PromptLibraryModalProps {
-  isOpen: boolean;
-  mode: 'management' | 'picker';
-  onClose: () => void;
-  onSelect?: (sel: PromptSelection) => void;
-}
-
-export interface RegistryModalProps {
-  isOpen: boolean;
-  onClose: () => void;
-  onClone: (snapshot: RegistryCanvasSnapshot) => void;
-}
-
-export interface HitlModalProps {
-  isOpen: boolean;
-  onClose: () => void;
-}
-
 // Registry entry type
 export interface ModalRegistryEntry<P = unknown> {
   component: ComponentType<P>;
@@ -163,9 +144,6 @@ export const MODAL_REGISTRY = {
   connector: ConnectorConfigModal,
   knowledgeBase: KnowledgeBaseConfigModal,
   a2a: A2AConfigurationModal,
-  promptLibrary: PromptLibraryModal,
-  registry: RegistryModal,
-  hitl: HitlInboxModal,
 } as const;
 
 export type ModalKey = keyof typeof MODAL_REGISTRY;
@@ -191,4 +169,75 @@ export function getModalKeyForComponentType(
   if (componentType === 'evaluation') return 'evaluation';
   if (componentType === 'a2a') return 'a2a';
   return null;
+}
+
+/**
+ * Whether a newly-created palette/drop node should enter App's pending-modal
+ * state. Built-in tools are preconfigured, while connector tools need their
+ * credential form. Components without a registered modal (currently Browser
+ * and Code Interpreter) must never enter that state: there would be no dialog
+ * capable of closing it, and every later configuration modal would be blocked.
+ */
+export function shouldOpenConfigurationForNewNode(
+  componentType: AgentCoreComponentType,
+  toolId?: string | null,
+): boolean {
+  if (componentType === 'tool' && !toolId?.startsWith('connector:')) {
+    return false;
+  }
+
+  return getModalKeyForComponentType(
+    componentType,
+    toolId ? { toolId } : undefined,
+  ) !== null;
+}
+
+export interface NewNodeConfigurationTarget {
+  nodeId: string;
+  componentType: AgentCoreComponentType;
+  initialConfig?: ComponentConfiguration;
+}
+
+/**
+ * Preserve the identity of the node that was just created. Resolving it later
+ * from type/position is unsafe because palette positions intentionally repeat
+ * after nine additions and multiple tool nodes share the same component type.
+ */
+export function configurationTargetForNewNode(
+  node: AgentCoreNode,
+): NewNodeConfigurationTarget | null {
+  const initialConfig = node.data.configuration;
+  const toolId = (initialConfig as { toolId?: string } | undefined)?.toolId;
+
+  if (!shouldOpenConfigurationForNewNode(node.data.componentType, toolId)) {
+    return null;
+  }
+
+  return {
+    nodeId: node.id,
+    componentType: node.data.componentType,
+    initialConfig,
+  };
+}
+
+export function configurationTargetForExistingNode(
+  node: AgentCoreNode,
+): NewNodeConfigurationTarget | null {
+  const initialConfig = node.data.configuration;
+  const modalKey = getModalKeyForComponentType(
+    node.data.componentType,
+    initialConfig as
+      | { isConnector?: boolean; isKnowledgeBase?: boolean; toolId?: string }
+      | undefined,
+  );
+
+  if (!modalKey) {
+    return null;
+  }
+
+  return {
+    nodeId: node.id,
+    componentType: node.data.componentType,
+    initialConfig,
+  };
 }

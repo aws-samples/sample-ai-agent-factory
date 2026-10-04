@@ -105,7 +105,16 @@ def test_update_guardrail_includes_required_name_field(deployment_store_stub, mo
 
     bedrock.update_guardrail.return_value = {"guardrailId": "gr-existing-123"}
     # READY immediately → break wait loop on first poll
-    bedrock.get_guardrail.return_value = {"status": "READY"}
+    bedrock.get_guardrail.return_value = {
+        "status": "READY",
+        "guardrailArn": ("arn:aws:bedrock:us-east-1:123456789012:guardrail/gr-existing-123"),
+    }
+    bedrock.list_tags_for_resource.return_value = {
+        "tags": {
+            "ManagedBy": "agentcore-flows",
+            "AgentCoreStack": "unit-tests-local-us-east-1",
+        }
+    }
     bedrock.create_guardrail_version.return_value = {"version": "1"}
 
     # No real sleeps in the wait loop.
@@ -135,6 +144,27 @@ def test_update_guardrail_includes_required_name_field(deployment_store_stub, mo
     # And the other required body fields the API mandates.
     assert "blockedInputMessaging" in update_kwargs
     assert "blockedOutputsMessaging" in update_kwargs
+
+
+def test_guardrail_conflict_fallback_finds_page_two():
+    from app.step_handlers import guardrails_step
+
+    bedrock = MagicMock()
+    bedrock.get_paginator.side_effect = RuntimeError("paginator unavailable")
+    bedrock.list_guardrails.side_effect = [
+        {
+            "guardrails": [{"name": "other", "id": "gr-other"}],
+            "nextToken": "page-2",
+        },
+        {
+            "guardrails": [
+                {"name": "wanted", "guardrailId": "gr-wanted"},
+            ]
+        },
+    ]
+
+    assert guardrails_step._find_guardrail_id_by_name(bedrock, "wanted") == "gr-wanted"
+    assert bedrock.list_guardrails.call_args_list[1].kwargs["nextToken"] == "page-2"
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +214,13 @@ def test_create_data_source_does_not_leak_bda_sentinel(deployment_store_stub, mo
             None,
         ),
     )
+    # Customer-resource authorization has its own exhaustive matrix. This
+    # regression isolates the service-model shape handed to CreateDataSource.
+    monkeypatch.setattr(
+        knowledge_base_step,
+        "_authorize_create_new_resources",
+        lambda *_a, **_kw: None,
+    )
     # Skip role creation/validation
     monkeypatch.setattr(
         knowledge_base_step,
@@ -193,12 +230,22 @@ def test_create_data_source_does_not_leak_bda_sentinel(deployment_store_stub, mo
     )
 
     bedrock_agent = MagicMock()
+    bedrock_agent.list_knowledge_bases.return_value = {"knowledgeBaseSummaries": []}
     bedrock_agent.create_knowledge_base.return_value = {"knowledgeBase": {"knowledgeBaseId": "kb-abc"}}
     bedrock_agent.create_data_source.return_value = {"dataSource": {"dataSourceId": "ds-xyz"}}
 
     iam = MagicMock()
     s3v = MagicMock()
     s3v.list_indexes.return_value = {"indexes": [{"indexName": "default-index"}]}
+    s3v.get_index.return_value = {
+        "index": {
+            "indexName": "default-index",
+            "indexArn": ("arn:aws:s3vectors:us-east-1:123456789012:bucket/my-vec/index/default-index"),
+            "dataType": "float32",
+            "dimension": 1024,
+            "distanceMetric": "cosine",
+        }
+    }
 
     def _client(_event, name, **_kw):
         if name == "bedrock-agent":
@@ -235,6 +282,9 @@ def test_create_data_source_does_not_leak_bda_sentinel(deployment_store_stub, mo
         knowledge_base_step.handler(
             {
                 "deployment_id": "dep-kb-test",
+                "target_account_id": "123456789012",
+                "target_region": "us-east-1",
+                "target_artifact_bucket": "customer-runtime-artifacts",
                 "knowledge_base_config": kb_config,
             },
             None,
@@ -269,6 +319,14 @@ def test_create_data_source_does_not_leak_bda_sentinel(deployment_store_stub, mo
     kb_kwargs = bedrock_agent.create_knowledge_base.call_args.kwargs
     vec_cfg = kb_kwargs["knowledgeBaseConfiguration"]["vectorKnowledgeBaseConfiguration"]
     assert "supplementalDataStorageConfiguration" in vec_cfg
+    assert vec_cfg["supplementalDataStorageConfiguration"] == {
+        "storageLocations": [
+            {
+                "type": "S3",
+                "s3Location": {"uri": "s3://customer-runtime-artifacts"},
+            }
+        ]
+    }
 
 
 # ---------------------------------------------------------------------------

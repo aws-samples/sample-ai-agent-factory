@@ -8,26 +8,42 @@ import { staggerContainer, fadeRise, pressable } from '../../lib/motion';
 import WorkflowCanvas from './WorkflowCanvas';
 import { ActiveDeploymentBanner } from '../deploy/ActiveDeploymentBanner';
 import type { ActiveDeployment } from '../deploy/ActiveDeploymentBanner';
-import type { AgentCoreComponentType } from '../../types/workflow';
 import type { AgentCoreNode } from '../../store/workflowStore';
+import type { FlowSaveConflict, SaveConflictResolution } from '../../store/flowStore';
+import { configurationTargetForExistingNode } from '../modals/modalRegistry';
 
 interface CanvasAreaProps {
   nodes: AgentCoreNode[];
   selectedNode: AgentCoreNode | null;
   lastSaveError: string | null;
-  onNodeCreate: (componentType: AgentCoreComponentType, position: { x: number; y: number }, toolId?: string | null) => void;
+  /**
+   * A save was refused because the flow changed elsewhere (another tab or
+   * session). Neither side has been lost; the user picks which one wins.
+   */
+  saveConflict?: FlowSaveConflict | null;
+  onResolveSaveConflict?: (choice: SaveConflictResolution) => void;
+  onNodeCreate: (node: AgentCoreNode) => void;
   onNodeDoubleClick: (nodeId: string) => void;
   onRestoreDeployment: (deployment: ActiveDeployment) => void;
   onClearSaveError: () => void;
   onOpenTemplateGallery: () => void;
   onOpenAgentGenerator: () => void;
   onOpenConfig: (nodeId: string) => void;
+  /**
+   * When set, the empty-state actions are disabled and the text is announced as
+   * the reason. The App sets it until a flow is active; content placed on a
+   * canvas that no flow owns cannot be saved and would be replaced by the
+   * sidebar's auto-open.
+   */
+  authoringDisabledReason?: string | null;
 }
 
 export function CanvasArea({
   nodes,
   selectedNode,
   lastSaveError,
+  saveConflict = null,
+  onResolveSaveConflict,
   onNodeCreate,
   onNodeDoubleClick,
   onRestoreDeployment,
@@ -35,7 +51,13 @@ export function CanvasArea({
   onOpenTemplateGallery,
   onOpenAgentGenerator,
   onOpenConfig,
+  authoringDisabledReason = null,
 }: CanvasAreaProps) {
+  const authoringDisabled = authoringDisabledReason !== null;
+  const selectedNodeCanConfigure =
+    selectedNode !== null &&
+    configurationTargetForExistingNode(selectedNode) !== null;
+
   return (
     <div className="flex-1 relative">
       <WorkflowCanvas
@@ -45,8 +67,46 @@ export function CanvasArea({
 
       <ActiveDeploymentBanner onRestore={onRestoreDeployment} />
 
+      {/* Save conflict: the server holds a newer version of this flow (F-15) */}
+      {saveConflict && (
+        <div
+          data-testid="autosave-conflict-toast"
+          role="alertdialog"
+          aria-labelledby="autosave-conflict-title"
+          aria-describedby="autosave-conflict-body"
+          className="absolute bottom-4 right-4 z-40 max-w-sm rounded-md border border-amber-300 bg-amber-50 shadow-md"
+        >
+          <div className="px-3 py-2.5">
+            <div id="autosave-conflict-title" className="text-[13px] font-semibold text-amber-900">
+              This flow was changed elsewhere
+            </div>
+            <div id="autosave-conflict-body" className="text-[12px] text-amber-800 mt-0.5 break-words">
+              Another tab or session saved a newer version, so your latest changes were not saved.
+              Reload to see that version (your unsaved changes here are discarded), or keep yours and
+              overwrite it.
+            </div>
+            <div className="mt-2 flex gap-2">
+              <button
+                type="button"
+                onClick={() => onResolveSaveConflict?.('reload')}
+                className="rounded-md border border-amber-400 bg-white px-2.5 py-1 text-[12px] font-medium text-amber-900 hover:bg-amber-100"
+              >
+                Reload their version
+              </button>
+              <button
+                type="button"
+                onClick={() => onResolveSaveConflict?.('keep_mine')}
+                className="rounded-md bg-amber-600 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-amber-700"
+              >
+                Keep mine and overwrite
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Auto-save error toast */}
-      {lastSaveError && (
+      {lastSaveError && !saveConflict && (
         <div
           data-testid="autosave-error-toast"
           role="alert"
@@ -130,8 +190,9 @@ export function CanvasArea({
               </div>
             </div>
           </div>
-          <button
-            onClick={() => onOpenConfig(selectedNode.id)}
+          {selectedNodeCanConfigure && (
+            <button
+              onClick={() => onOpenConfig(selectedNode.id)}
             className="mt-3 w-full py-2 px-3 text-sm text-[#0972d3] hover:bg-[#0972d3]/8 active:bg-[#0972d3]/12 rounded-lg transition-colors duration-200 font-medium flex items-center justify-center gap-2 border border-[#0972d3]/25 hover:border-[#0972d3]/40"
             style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
             aria-label={`Configure ${selectedNode.data.label || selectedNode.data.componentType}`}
@@ -140,8 +201,9 @@ export function CanvasArea({
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
             </svg>
-            Configure
-          </button>
+              Configure
+            </button>
+          )}
         </div>
       )}
 
@@ -182,13 +244,13 @@ export function CanvasArea({
               </div>
             </m.div>
 
-            <m.h3
+            <m.h2
               variants={fadeRise}
               className="no-darkmap text-4xl sm:text-5xl md:text-6xl mb-3 leading-tight u-neon-text u-gradient-anim"
               style={{ fontFamily: 'var(--font-accent)', fontStyle: 'italic', fontWeight: 400 }}
             >
               Build Your First Agent
-            </m.h3>
+            </m.h2>
             <m.p
               variants={fadeRise}
               className="no-darkmap text-base sm:text-lg mb-8 font-light tracking-tight leading-relaxed"
@@ -196,15 +258,27 @@ export function CanvasArea({
             >
               Drag components from the sidebar, start with a template, or let AI generate an agent for you.
             </m.p>
+            {authoringDisabled && (
+              <m.p
+                variants={fadeRise}
+                role="status"
+                data-testid="authoring-disabled-reason"
+                className="no-darkmap text-sm mb-6 font-medium tracking-tight"
+                style={{ color: 'var(--color-text-secondary)' }}
+              >
+                {authoringDisabledReason}
+              </m.p>
+            )}
 
             <m.div variants={fadeRise} className="flex gap-3 justify-center">
               <m.button
                 {...pressable}
                 onClick={onOpenTemplateGallery}
-                className="no-darkmap u-gradient-anim pointer-events-auto px-5 py-2.5 text-sm font-semibold"
+                disabled={authoringDisabled}
+                className="no-darkmap pointer-events-auto px-5 py-2.5 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
                 style={{
-                  background: 'linear-gradient(90deg, var(--neon-cyan), var(--neon-violet), var(--neon-magenta))',
-                  color: '#06080f',
+                  background: 'var(--accent)',
+                  color: 'var(--accent-foreground)',
                   borderRadius: '2px',
                   boxShadow: '0 0 22px -6px var(--neon-cyan)',
                 }}
@@ -214,12 +288,13 @@ export function CanvasArea({
               <m.button
                 {...pressable}
                 onClick={onOpenAgentGenerator}
-                className="no-darkmap pointer-events-auto px-5 py-2.5 text-sm font-medium"
+                disabled={authoringDisabled}
+                className="no-darkmap pointer-events-auto px-5 py-2.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60"
                 style={{
                   background: 'var(--glass-bg)',
                   backdropFilter: 'blur(10px)',
-                  color: 'var(--neon-cyan)',
-                  border: '1px solid color-mix(in srgb, var(--neon-cyan) 40%, transparent)',
+                  color: 'var(--accent)',
+                  border: '1px solid color-mix(in srgb, var(--accent) 40%, transparent)',
                   borderRadius: '2px',
                 }}
               >

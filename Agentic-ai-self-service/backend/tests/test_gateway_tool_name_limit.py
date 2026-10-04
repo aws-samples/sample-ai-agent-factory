@@ -72,18 +72,23 @@ def _emitted_fitter(which: str):
     rather than a local copy of it that could drift."""
     code = _body(which)
     tree = ast.parse(code)
-    src = next(
-        (
-            ast.get_source_segment(code, n)
-            for n in tree.body
-            if isinstance(n, ast.FunctionDef) and n.name == "_fit_tool_names_for_bedrock"
-        ),
-        None,
-    )
-    assert src, f"{which} does not emit _fit_tool_names_for_bedrock"
+    fitter = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_fit_tool_names_for_bedrock"]
+    assert fitter, f"{which} does not emit _fit_tool_names_for_bedrock"
+    # The fitter records each alias it publishes in the module-level map emitted beside
+    # it (tool receipts report the gateway's name through it), so both are lifted.
+    alias_map = [
+        n
+        for n in tree.body
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "_TOOL_NAME_ALIASES" for t in n.targets)
+    ]
+    assert len(alias_map) == 1, f"{which} does not emit exactly one _TOOL_NAME_ALIASES map"
     ns: dict = {}
-    exec(compile(src, f"<{which}>", "exec"), ns)  # noqa: S102 — the point is to run the emitted text
-    return ns["_fit_tool_names_for_bedrock"]
+    module = ast.Module(body=[*alias_map, *fitter], type_ignores=[])
+    exec(compile(module, f"<{which}>", "exec"), ns)  # noqa: S102 — the point is to run the emitted text
+    fit = ns["_fit_tool_names_for_bedrock"]
+    fit.aliases = ns["_TOOL_NAME_ALIASES"]
+    return fit
 
 
 class _McpTool:
@@ -101,7 +106,12 @@ class _Client:
         self.called.append(name)
         return {"status": "success"}
 
-    async def call_tool_async(self, tool_use_id, name, arguments):
+    async def call_tool_async(self, tool_use_id, name, arguments, **_kwargs):
+        # Newer strands-agents forwards transport controls such as
+        # ``read_timeout_seconds`` to MCPClient.call_tool_async.  They are
+        # orthogonal to this test's contract (the published gateway tool name),
+        # but the drift alarm must accept the installed SDK's real call shape
+        # or it fails before observing the name.
         self.called.append(name)
         return {"status": "success"}
 
@@ -178,6 +188,13 @@ class TestTheEmittedFitter:
         assert len(tools[0].tool_name) <= 64
         assert len(tools[0].tool_spec["name"]) <= 64
         assert re.fullmatch(r"[a-zA-Z0-9_-]+", tools[0].tool_name), tools[0].tool_name
+
+    def test_every_published_alias_maps_back_to_the_gateway_name(self, which, gen):
+        """A tool receipt must name the tool the gateway published, not the alias the
+        model saw, so each rename is recorded; a name left alone is not."""
+        fit = _emitted_fitter(which)
+        tools = fit(_Client(), [GENERATIONS[gen](REAL_NAME), GENERATIONS[gen]("mcp-lambda___get_weather")])
+        assert fit.aliases == {tools[0].tool_name: REAL_NAME}
 
     def test_the_alias_keeps_the_leaf_tool_name_the_model_needs(self, which, gen):
         """The prefixes are plumbing; ``get_regional_availability`` is what tells

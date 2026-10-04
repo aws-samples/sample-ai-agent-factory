@@ -7,19 +7,19 @@ How the org-wide agent registry's two-persona approval workflow works and how it
 The registry turns a deployed agent into a reusable, governed blueprint others can discover and clone. Access is **driven entirely by Cognito groups** — no separate auth system. Two group families cooperate:
 
 1. **Scope groups** (`g-admins-*` / `g-users-*`) grant capability **scopes** — the actual enforcement boundary. Registry actions map to `registry:read` (browse, view, **clone**) and `registry:write` (publish, edit, delete, approve, reject).
-2. **Registry-persona groups** (`registry-admin` / `registry-developer`) drive the **two-persona approval workflow** (who may approve vs only publish).
+2. **Registry-persona groups** drive the **two-persona approval workflow** (who may approve vs only publish). Approvers are `g-admins-registry`, `g-admins-super`, and the legacy `registry-admin` / `org-admin`; `registry-developer` publishes.
 
-> **A user in NO group has NO scopes → effectively read-only.** `registry:read` gates the **Clone to canvas** button, so a freshly-provisioned user (e.g. one created via `COGNITO_USERS`, which assigns no group) can browse but **cannot clone or publish** until a scope group is assigned. This is the most common "why is Clone greyed out?" cause. The registry detail **Access tab** renders exactly which actions the signed-in user can/can't perform, and why.
+> **A user in NO group has NO scopes, and the API enforces by default → every call is `403`.** A user created via `COGNITO_USERS` is put in `g-users-default` + `t-user`, so this only bites a user created elsewhere (the Cognito console, an IdP without a group mapping). `registry:read` gates the **Clone to canvas** button, so such a user sees Clone disabled until a scope group is assigned. The registry detail **Access tab** renders exactly which actions the signed-in user can/can't perform, and why.
 
 ## Group → scope map
 
-The full platform-wide group→scope table (super-admin, security, cost, standard-user, legacy groups) lives in [`PERSONAS.md`](PERSONAS.md) — source of truth in code: `backend/src/app/services/rbac.py` `GROUP_SCOPES`, mirrored in the UI at `frontend/src/auth/scopes.ts` (keep in sync). For the advisory→enforce rollout procedure, see [`RBAC_ROLLOUT.md`](RBAC_ROLLOUT.md).
+The full platform-wide group→scope table (super-admin, security, cost, standard-user, legacy groups) lives in [`PERSONAS.md`](PERSONAS.md) — source of truth in code: `backend/src/app/services/rbac.py` `GROUP_SCOPES`, mirrored in the UI at `frontend/src/auth/scopes.ts` (keep in sync). For enforcement and the advisory escape hatch, see [`RBAC_ROLLOUT.md`](RBAC_ROLLOUT.md).
 
 The registry-relevant slice:
 
 - `g-admins-registry` (legacy `registry-admin`) → `registry:read` + `registry:write` — publish, clone, edit/delete, approve/reject.
 - `g-users-default` → includes `registry:read` — browse + clone approved entries; publish own via the `registry-developer` persona; **cannot** approve.
-- *(no group)* → no scopes — browse only (advisory backend); **Clone disabled**.
+- *(no group)* → no scopes — `403` on every call (enforcing backend); **Clone disabled**.
 
 `t-admin` / `t-user` are a separate **UI dimension** — they decide which admin sections render, not what you're authorized to do (scopes do that).
 
@@ -27,8 +27,8 @@ The registry-relevant slice:
 
 | Persona | Cognito group | Can do | Cannot do |
 |---------|---------------|--------|-----------|
-| **Developer** | `registry-developer` (+ a scope group granting `registry:read`/`registry:write`) | Publish (entry enters `pending`); view **approved** entries + their **own** (any status); clone approved/own; edit/delete their own | Approve or reject; see other users' pending entries |
-| **Admin** | `registry-admin` (legacy `org-admin` also honored) | Everything a developer can, **plus**: see the pending-review queue, approve/reject submissions, delete any entry | — |
+| **Developer** | `registry-developer` (grants `registry:read`/`registry:write`) | Publish (entry enters `pending`); view **approved** entries + their **own** (any status); clone approved/own; edit/delete their own | Approve or reject; see other users' pending entries |
+| **Admin** | `g-admins-registry` or `g-admins-super` (legacy `registry-admin` / `org-admin` also honored) | Everything a developer can, **plus**: see the pending-review queue, approve/reject submissions, delete any entry | — |
 
 ## Entry lifecycle
 
@@ -44,7 +44,7 @@ developer publishes ──▶ pending ──▶ (admin approves) ──▶ appro
 
 ## Authorization rules (enforced server-side)
 
-- Admin status is read from the caller's `cognito:groups` JWT claim (`auth.is_registry_admin`); the frontend reads the same claim to show/hide the admin "Pending review" UI.
+- Admin status is read from the caller's `cognito:groups` JWT claim (`auth.is_registry_admin`, groups `_REGISTRY_ADMIN_GROUPS`, mirrored by `REGISTRY_ADMIN_GROUPS` in `useIsRegistryAdmin.ts`; a backend test pins the two equal); the frontend reads the same claim to show/hide the admin "Pending review" UI.
 - **RBAC-role denial returns `403`** (e.g. a developer calling `approve`); **cross-tenant / not-visible returns `404`** (never disclosing existence). These are kept strictly distinct.
 - Before attaching, the server reads the engine/entry back from the store — a defense-in-depth ground-truth check, not a client-supplied flag.
 

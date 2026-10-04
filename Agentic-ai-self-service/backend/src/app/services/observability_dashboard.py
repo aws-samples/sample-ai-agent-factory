@@ -88,7 +88,7 @@ def build_dashboard_body(
         "\n| stats pct(@duration, 50) as p50, pct(@duration, 95) as p95, "
         "pct(@duration, 99) as p99 by bin(5m)"
     )
-    token_query = (  # noqa: S105  # CloudWatch Logs Insights query text, not a credential
+    usage_query = (
         "fields @timestamp, @message"
         "\n| filter @message like /gen_ai.usage/"
         '\n| parse @message /"gen_ai.usage.input_tokens":\\s*(?<in_tok>\\d+)/'
@@ -165,7 +165,7 @@ def build_dashboard_body(
                 "title": "Token usage (input + output, 5m bins)",
                 "region": region,
                 "logGroupNames": [log_group],
-                "query": f"SOURCE '{log_group}'\n| {token_query}",
+                "query": f"SOURCE '{log_group}'\n| {usage_query}",
                 "view": "timeSeries",
                 "stacked": True,
             },
@@ -240,6 +240,7 @@ def put_dashboard_for_runtime(
     *,
     log_group_name: str | None = None,
     eval_log_group_name: str | None = None,
+    cloudwatch_client=None,
 ) -> tuple[str, str]:
     """Create or update the CloudWatch dashboard for *runtime_id*.
 
@@ -255,14 +256,14 @@ def put_dashboard_for_runtime(
         log_group_name=log_group_name,
         eval_log_group_name=eval_log_group_name,
     )
-    cw = boto3.client("cloudwatch", region_name=region)
+    cw = cloudwatch_client or boto3.client("cloudwatch", region_name=region)
     cw.put_dashboard(DashboardName=name, DashboardBody=body)
     url = dashboard_console_url(region, name)
     logger.info("Put CloudWatch dashboard %s -> %s", name, url)
     return name, url
 
 
-def delete_dashboard_for_runtime(runtime_id: str, region: str) -> bool:
+def delete_dashboard_for_runtime(runtime_id: str, region: str, *, cloudwatch_client=None) -> bool:
     """Delete the CloudWatch dashboard for *runtime_id*. Idempotent.
 
     Returns True on success or when the dashboard didn't exist; False on
@@ -271,7 +272,7 @@ def delete_dashboard_for_runtime(runtime_id: str, region: str) -> bool:
     """
     name = dashboard_name_for_runtime(runtime_id)
     try:
-        cw = boto3.client("cloudwatch", region_name=region)
+        cw = cloudwatch_client or boto3.client("cloudwatch", region_name=region)
         cw.delete_dashboards(DashboardNames=[name])
         logger.info("Deleted CloudWatch dashboard %s", name)
         return True

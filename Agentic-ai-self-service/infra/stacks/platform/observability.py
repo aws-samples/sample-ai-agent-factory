@@ -8,6 +8,7 @@ from aws_cdk import aws_kms as kms
 from aws_cdk import aws_lambda as _lambda
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_sns as sns
+from aws_cdk import aws_sqs as sqs
 from aws_cdk import aws_stepfunctions as sfn
 
 from .config import PlatformConfig
@@ -23,6 +24,7 @@ def build_lambda_alarms(
     step_lambdas: dict[str, _lambda.Function],
     tables: Tables,
     state_machine: sfn.StateMachine,
+    trigger_dead_letter_queue: sqs.IQueue,
 ) -> sns.Topic:
     """Create CloudWatch alarms for Lambdas + the new governance surfaces.
 
@@ -79,6 +81,24 @@ def build_lambda_alarms(
                 treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
             )
         )
+
+    # A trigger reaches this queue only after repeated durable-processing
+    # failures. One visible message is actionable because it represents a
+    # user-configured automation that is no longer making forward progress.
+    _wire(
+        trigger_dead_letter_queue.metric_approximate_number_of_messages_visible(
+            period=Duration.minutes(1),
+            statistic="Maximum",
+        ).create_alarm(
+            stack,
+            "Alarm-trigger-dispatch-dlq",
+            alarm_name=f"{cfg.project}-{cfg.env}-trigger-dispatch-dlq",
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=(cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD),
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+    )
 
     # --- p99 latency on the two user-facing API Lambdas ---------------
     for name, fn in (("workflow", workflow_lambda), ("deployment", deployment_lambda)):

@@ -95,9 +95,9 @@ export function ChatPage({ previewBanner }: ChatPageProps) {
     <div className="flex h-screen" style={{ background: 'var(--color-bg)', color: 'var(--color-text-primary)' }}>
       {/* Sidebar */}
       <aside className="w-64 flex flex-col border-r" style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg-subtle)' }}>
-        <div className="px-4 py-3 font-semibold tracking-tight" style={{ borderBottom: '1px solid var(--color-border)' }}>
+        <h1 className="px-4 py-3 font-semibold tracking-tight" style={{ borderBottom: '1px solid var(--color-border)' }}>
           AgentCore Chat
-        </div>
+        </h1>
         <div className="p-3 space-y-2 flex-1 overflow-y-auto">
           <button
             type="button"
@@ -108,7 +108,13 @@ export function ChatPage({ previewBanner }: ChatPageProps) {
           </button>
           <div className="text-xs mt-3 mb-1" style={{ color: 'var(--color-text-secondary)' }}>Your agents</div>
           {agentError && <div className="text-xs" style={{ color: '#dc2626' }}>{agentError}</div>}
-          {agents === null && <div className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>Loading…</div>}
+          {/* `agents` stays null when the fetch rejects, so this has to exclude the
+              error case or the sidebar shows the failure and a spinner that never
+              resolves, side by side — observed live as "Agent list failed (401)"
+              above a permanent "Loading…". */}
+          {agents === null && !agentError && (
+            <div className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>Loading…</div>
+          )}
           {agents?.length === 0 && (
             <div className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
               No deployed agents yet.
@@ -176,6 +182,7 @@ export function ChatPage({ previewBanner }: ChatPageProps) {
                 }
               }}
               placeholder={selected ? 'Message your agent… (Enter to send, Shift+Enter for newline)' : 'Select an agent first'}
+              aria-label="Message your agent"
               disabled={!selected || sending}
               rows={1}
               className="flex-1 px-3 py-2 text-sm rounded-lg resize-none border focus:outline-none focus:ring-2 focus:ring-blue-500"

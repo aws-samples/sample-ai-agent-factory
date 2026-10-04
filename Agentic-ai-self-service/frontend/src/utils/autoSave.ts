@@ -7,7 +7,11 @@
 import type { Viewport } from '@xyflow/react';
 import type { AgentCoreNode } from '../store/workflowStore';
 import type { Edge } from '@xyflow/react';
-import type { SaveStatus } from '../types/workflow';
+import {
+  normalizeDeploymentGovernance,
+  type DeploymentGovernanceV1,
+  type SaveStatus,
+} from '../types/workflow';
 import { WorkflowSerializer, type SerializedMetadata } from './serialization';
 import { getApiClient, isApiError } from '../services/api';
 import { getDeploymentRegion } from './awsRegion';
@@ -107,10 +111,18 @@ export class AutoSaveService {
     edges: Edge[],
     viewport: Viewport,
     metadata?: Partial<SerializedMetadata>,
-    workflowInfo?: { id?: string; name?: string; description?: string; version?: string }
+    workflowInfo?: { id?: string; name?: string; description?: string; version?: string },
+    governance?: DeploymentGovernanceV1,
   ): void {
     // Serialize the workflow data
-    const data = WorkflowSerializer.serialize(nodes, edges, viewport, metadata, workflowInfo);
+    const data = WorkflowSerializer.serialize(
+      nodes,
+      edges,
+      viewport,
+      metadata,
+      workflowInfo,
+      governance,
+    );
     this.pendingData = data;
 
     // Update status to pending
@@ -143,10 +155,18 @@ export class AutoSaveService {
     edges: Edge[],
     viewport: Viewport,
     metadata?: Partial<SerializedMetadata>,
-    workflowInfo?: { id?: string; name?: string; description?: string; version?: string }
+    workflowInfo?: { id?: string; name?: string; description?: string; version?: string },
+    governance?: DeploymentGovernanceV1,
   ): Promise<SaveResult> {
     this.cancelPendingAutoSave();
-    const data = WorkflowSerializer.serialize(nodes, edges, viewport, metadata, workflowInfo);
+    const data = WorkflowSerializer.serialize(
+      nodes,
+      edges,
+      viewport,
+      metadata,
+      workflowInfo,
+      governance,
+    );
     this.pendingData = data;
     return this.executeSave();
   }
@@ -355,6 +375,7 @@ export function createBackendSaveFunction(
           awsRegion: getDeploymentRegion(),
           deploymentStatus: 'not_deployed',
         },
+        governance: normalizeDeploymentGovernance(workflowData.governance),
       };
 
       if (currentWorkflowId) {

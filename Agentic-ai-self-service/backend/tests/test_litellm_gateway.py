@@ -24,13 +24,22 @@ import json
 import urllib.error
 
 import pytest
+from app.models import AgentCoreComponentType, ComponentNode
 from app.models.components import GatewayConfiguration
+from app.services import gateway_deployer
 from app.services import litellm_gateway_deployer as lgd
 from app.services.code_generator import _generate_memory_agent, _generate_strands_gateway
+from app.services.validation import ValidationEngine
 from pydantic import ValidationError
 
 BASE = "https://litellm.example.com"
 _LAMBDA_ARN = "arn:aws:lambda:us-east-1:123456789012:function:tool"
+
+# A caller identity and the secret-name prefix the platform mints for it. Derived from
+# the production helper rather than written out, so a change to the naming scheme moves
+# this test with it instead of leaving it asserting a name nobody mints any more.
+OWNER_SUB = "54381418-7021-708e-4f3b-30505a2b82ec"
+OWNER_PREFIX = gateway_deployer.connector_secret_owner_prefix(OWNER_SUB)
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +58,9 @@ class _FakeStore:
         self.steps.append((a, kw))
 
     def record_resource(self, deployment_id, resource):
+        self.resources.append((deployment_id, resource))
+
+    def record_resource_strict(self, deployment_id, resource):
         self.resources.append((deployment_id, resource))
 
 
@@ -113,11 +125,45 @@ class TestResolveGatewayProvider:
         # target fields left over from a switched provider.
         assert lgd.resolve_gateway_provider({"targetType": "lambda", "litellmBaseUrl": "https://p"}) == "litellm"
 
-    def test_an_unrecognized_value_degrades_to_agentcore(self, monkeypatch):
-        """Garbage means a hand-edited or legacy canvas. The old behaviour is the
-        safe answer — never fail a deploy over it."""
+    def test_an_unrecognized_value_fails_closed(self, monkeypatch):
+        """An unrecognized provider must NOT degrade to agentcore.
+
+        This test previously asserted the opposite, on the stated grounds that
+        "the model layer already rejects bad values at the API boundary". It does
+        not on the CloudFormation export path: ``DeployRequest.gateway_config`` is
+        declared ``dict | None``, so ``GatewayConfiguration`` is never constructed
+        and nothing validates the provider. Measured live against the real
+        generator, a canvas with the typo ``gatewayProvider: "lite-llm"`` emitted
+        an AgentCore Gateway plus four Cognito resources and silently dropped
+        ``litellmBaseUrl`` — a different backend than the canvas asked for, with
+        the proxy URL and key reference gone and no error raised. One typed
+        character is not something to guess about, so it now raises. (Same posture
+        as the Strands-only framework field, which raises on an unrecognized value
+        by design — see the note in test_preservation.py.)
+        """
         monkeypatch.setattr(lgd, "default_gateway_provider", lambda: pytest.fail("must not consult the default"))
-        assert lgd.resolve_gateway_provider({"gateway_provider": "nonsense"}) == "agentcore"
+        for bad in ("nonsense", "lite-llm", "LiteLLM-proxy", "agent core"):
+            with pytest.raises(ValueError, match="Unrecognized gateway provider"):
+                lgd.resolve_gateway_provider({"gateway_provider": bad})
+            # camelCase is the shape the frontend actually sends, so both keys
+            # must fail closed or the fix only covers half the callers.
+            with pytest.raises(ValueError, match="Unrecognized gateway provider"):
+                lgd.resolve_gateway_provider({"gatewayProvider": bad})
+
+    def test_a_legacy_canvas_with_no_provider_key_still_follows_the_default(self, monkeypatch):
+        """The admitting half of the test above.
+
+        Failing closed on garbage is only safe because a legacy stored canvas does
+        not carry a garbage value — it carries no provider key at all, and must
+        keep taking the platform-default path untouched. Without this, the change
+        above would be indistinguishable from "break every pre-existing agent".
+        """
+        monkeypatch.setattr(lgd, "default_gateway_provider", lambda: "litellm")
+        assert lgd.resolve_gateway_provider({}) == "litellm"
+        assert lgd.resolve_gateway_provider(None) == "litellm"
+        # An explicitly empty / whitespace value is "says nothing", not garbage.
+        assert lgd.resolve_gateway_provider({"gateway_provider": ""}) == "litellm"
+        assert lgd.resolve_gateway_provider({"gatewayProvider": "   "}) == "litellm"
 
 
 class TestDefaultGatewayProvider:
@@ -213,6 +259,27 @@ class TestGatewayConfigurationModel:
         assert "sk-secret" not in json.dumps(cfg.model_dump(mode="json"))
         assert "sk-secret" not in repr(cfg)
 
+    def test_the_workflow_validator_accepts_the_provider_specific_shape(self):
+        """The secondary validator must not re-impose AgentCore target fields.
+
+        This is the route-level crash shape found in the live audit:
+        GatewayConfiguration correctly accepted a LiteLLM node, then
+        ValidationEngine dereferenced ``target_config.type`` even though that
+        field is intentionally absent for this provider.
+        """
+        node = ComponentNode(
+            id="gateway-1",
+            type=AgentCoreComponentType.GATEWAY,
+            position={"x": 0, "y": 0},
+            data=GatewayConfiguration(
+                name="gw",
+                gatewayProvider="litellm",
+                litellmBaseUrl=BASE,
+            ),
+        )
+
+        assert ValidationEngine().validate_component(node) == []
+
 
 # ---------------------------------------------------------------------------
 # SSRF
@@ -232,7 +299,11 @@ class TestBaseUrlIsGuarded:
     )
     def test_a_disallowed_base_url_is_refused_before_any_request(self, monkeypatch, bad):
         monkeypatch.setattr(lgd, "_get_json", lambda *a, **kw: pytest.fail("SSRF guard did not run first"))
-        monkeypatch.setattr(lgd, "_put_connector_secret", lambda *a, **kw: pytest.fail("must not mint a secret"))
+        monkeypatch.setattr(
+            lgd,
+            "bind_connector_secret_for_deployment",
+            lambda **kw: pytest.fail("must not bind a secret"),
+        )
         result = lgd.deploy_litellm_gateway(
             gateway_config={"name": "gw", "litellm_base_url": bad, "litellm_api_key": "sk-x"},
             region="eu-central-1",
@@ -248,7 +319,11 @@ class TestBaseUrlIsGuarded:
         https scheme", which points an operator at their IdP config instead of at
         the gateway node they just edited. The guard now takes a label.
         """
-        monkeypatch.setattr(lgd, "_put_connector_secret", lambda *a, **kw: pytest.fail("must not mint a secret"))
+        monkeypatch.setattr(
+            lgd,
+            "bind_connector_secret_for_deployment",
+            lambda **kw: pytest.fail("must not bind a secret"),
+        )
         result = lgd.deploy_litellm_gateway(
             gateway_config={"name": "gw", "litellm_base_url": "http://litellm.example.com", "litellm_api_key": "sk-x"},
             region="eu-central-1",
@@ -400,14 +475,21 @@ class TestDeployContract:
         monkeypatch.setattr(lgd, "_get_json", _fake_get_json())
         minted = []
 
-        def _mint(region, owner, payload):
-            minted.append((region, owner, payload))
-            return "arn:aws:secretsmanager:eu-central-1:1:secret:agentcore-connector/x"
+        def _bind(**kwargs):
+            minted.append(kwargs)
+            return "arn:aws:secretsmanager:eu-central-1:1:secret:agentcore-connector/x", True
 
-        monkeypatch.setattr(lgd, "_put_connector_secret", _mint)
+        monkeypatch.setattr(lgd, "bind_connector_secret_for_deployment", _bind)
         cfg = {"name": "gw", "litellm_base_url": BASE, "litellm_api_key": "sk-x"}
         cfg.update(overrides)
-        return lgd.deploy_litellm_gateway(gateway_config=cfg, region="eu-central-1"), minted
+        return (
+            lgd.deploy_litellm_gateway(
+                gateway_config=cfg,
+                region="eu-central-1",
+                deployment_id="d1",
+            ),
+            minted,
+        )
 
     def test_it_returns_the_same_shape_deploy_gateway_returns(self, monkeypatch):
         """This is what lets the Step Functions state machine stay unchanged."""
@@ -448,44 +530,79 @@ class TestDeployContract:
         assert result["custom_tool_lambdas"] == []
         assert result["connector_credential_providers"] == []
 
-    def test_the_secret_is_minted_only_after_the_probe_passes(self, monkeypatch):
-        """Otherwise every attempt with a typo'd key leaves an orphan secret."""
+    def test_a_failed_probe_compensation_deletes_the_new_bound_secret(self, monkeypatch):
+        """Binding happens before use, but a bad key must not leave an orphan."""
         monkeypatch.setattr(lgd, "_validate_outbound_url", lambda u, **kw: u)
         monkeypatch.setattr(lgd, "_get_json", _fake_get_json(tools=[]))
-        monkeypatch.setattr(lgd, "_put_connector_secret", lambda *a: pytest.fail("minted despite a failed probe"))
+        calls = []
+        monkeypatch.setattr(
+            lgd,
+            "bind_connector_secret_for_deployment",
+            lambda **kw: ("arn:aws:secretsmanager:eu-central-1:1:secret:agentcore-connector/x", True),
+        )
+        monkeypatch.setattr(
+            lgd,
+            "delete_deployment_bound_secret",
+            lambda **kw: calls.append(kw) or True,
+        )
         result = lgd.deploy_litellm_gateway(
             gateway_config={"name": "gw", "litellm_base_url": BASE, "litellm_api_key": "sk-x"},
             region="eu-central-1",
+            deployment_id="d1",
         )
         assert result["success"] is False
         assert "0 tools" in result["error"]
+        assert calls[0]["deployment_id"] == "d1"
 
     def test_the_error_string_never_carries_the_key(self, monkeypatch):
         monkeypatch.setattr(lgd, "_validate_outbound_url", lambda u, **kw: u)
         err = urllib.error.HTTPError(BASE, 401, "nope", {}, None)
         monkeypatch.setattr(lgd, "_get_json", _fake_get_json(raises=err))
+        monkeypatch.setattr(
+            lgd,
+            "bind_connector_secret_for_deployment",
+            lambda **kw: ("arn:aws:secretsmanager:eu-central-1:1:secret:agentcore-connector/x", True),
+        )
+        monkeypatch.setattr(lgd, "delete_deployment_bound_secret", lambda **kw: True)
         result = lgd.deploy_litellm_gateway(
             gateway_config={"name": "gw", "litellm_base_url": BASE, "litellm_api_key": "sk-topsecret"},
             region="eu-central-1",
+            deployment_id="d1",
         )
         assert result["success"] is False
         assert "sk-topsecret" not in result["error"]
 
     def test_a_redeploy_reuses_the_stored_arn_instead_of_minting_again(self, monkeypatch):
+        """The ACCEPTING half of the ownership guard.
+
+        The ref has to be a name this platform actually mints —
+        ``agentcore-connector/{owner}/{uuid}`` — and ``owner_sub`` has to match it, because
+        the ref names a secret both the control plane and the deployed agent will read.
+        ``tests/test_connector_secret_ownership.py`` holds the refusing half; a suite with
+        only that half is satisfied by a guard that rejects everything, which is a redeploy
+        that can never reuse its own stored key.
+        """
+        own_ref = f"arn:aws:secretsmanager:eu-central-1:1:secret:{OWNER_PREFIX}deadbeef1234-AbCdEf"
         monkeypatch.setattr(lgd, "_validate_outbound_url", lambda u, **kw: u)
         monkeypatch.setattr(lgd, "_get_json", _fake_get_json())
-        monkeypatch.setattr(lgd, "_put_connector_secret", lambda *a: pytest.fail("re-minted"))
-        monkeypatch.setattr(lgd, "_read_secret_key", lambda region, arn: "sk-from-secret")
+        monkeypatch.setattr(
+            lgd,
+            "bind_connector_secret_for_deployment",
+            lambda **kw: (own_ref, False),
+        )
+        monkeypatch.setattr(lgd, "_read_secret_key", lambda region, arn, **kw: "sk-from-secret")
         result = lgd.deploy_litellm_gateway(
             gateway_config={
                 "name": "gw",
                 "litellm_base_url": BASE,
-                "litellm_api_key_ref": "arn:aws:secretsmanager:eu-central-1:1:secret:x",
+                "litellm_api_key_ref": own_ref,
             },
             region="eu-central-1",
+            owner_sub=OWNER_SUB,
+            deployment_id="d1",
         )
-        assert result["success"] is True
-        assert result["client_info"]["api_key_ref"].endswith(":secret:x")
+        assert result["success"] is True, result.get("error")
+        assert result["client_info"]["api_key_ref"] == own_ref
 
     def test_a_comma_string_of_servers_is_accepted(self, monkeypatch):
         """The modal collects aliases as free text; the deploy payload can carry
@@ -500,7 +617,11 @@ class TestDeployContract:
         they must have no effect."""
         monkeypatch.setattr(lgd, "_validate_outbound_url", lambda u, **kw: u)
         monkeypatch.setattr(lgd, "_get_json", _fake_get_json())
-        monkeypatch.setattr(lgd, "_put_connector_secret", lambda *a: "arn:secret")
+        monkeypatch.setattr(
+            lgd,
+            "bind_connector_secret_for_deployment",
+            lambda **kw: ("arn:secret", True),
+        )
         result = lgd.deploy_litellm_gateway(
             gateway_config={"name": "gw", "litellm_base_url": BASE, "litellm_api_key": "sk-x"},
             region="eu-central-1",
@@ -508,6 +629,7 @@ class TestDeployContract:
             custom_tools=[{"name": "x"}],
             connectors=[{"connector_id": "github"}],
             knowledge_base_result={"knowledge_base_id": "KB1"},
+            deployment_id="d1",
         )
         assert result["success"] is True
         assert result["kb_lambda_name"] is None
@@ -530,12 +652,34 @@ class TestGatewayStepDispatch:
         store = _FakeStore()
         monkeypatch.setattr(gateway_step, "_get_deployment_store", lambda: store)
         monkeypatch.setattr(gateway_step, "deploy_gateway", lambda **kw: pytest.fail("AgentCore path taken"))
+        secrets_client = object()
+
+        class _Session:
+            def client(self, service, **kwargs):
+                assert service == "secretsmanager"
+                return secrets_client
+
+        monkeypatch.setattr(gateway_step.step_clients, "session_for_event", lambda event: _Session())
+        monkeypatch.setattr(
+            gateway_step,
+            "bind_connector_secret_for_deployment",
+            lambda **kw: ("arn:secret:k", True),
+        )
         seen = {}
 
-        def _fake_litellm(*, gateway_config, region, owner_sub="", deployment_id=None):
+        # Deliberately keyword-explicit rather than ``**kw``: this fake is the only thing
+        # that notices when the handler starts passing an argument the real deployer does
+        # not declare. It earned that when ``resource_tags`` was added -- a ``**kw`` fake
+        # would have swallowed it and reported a green suite for a call the real function
+        # absorbed into ``**_ignored`` and dropped.
+        def _fake_litellm(
+            *, gateway_config, region, owner_sub="", deployment_id=None, secrets_client=None, resource_tags=None
+        ):
             seen["gateway_config"] = dict(gateway_config)
             seen["region"] = region
             seen["owner_sub"] = owner_sub
+            seen["secrets_client"] = secrets_client
+            seen["resource_tags"] = resource_tags
             return litellm_result or {
                 "success": True,
                 "gateway_url": f"{BASE}/mcp/",
@@ -547,6 +691,35 @@ class TestGatewayStepDispatch:
 
         monkeypatch.setattr(gateway_step, "deploy_litellm_gateway", _fake_litellm)
         return gateway_step, store, seen
+
+    def test_the_deployments_resource_tags_reach_the_litellm_deployer(self, monkeypatch):
+        """The LiteLLM branch is a second, separate path to a connector secret.
+
+        ``deploy_litellm_gateway`` mints the virtual-key secret through
+        ``bind_connector_secret_for_deployment``, exactly as the AgentCore gateway does,
+        so an admin's tag policy has to reach it or the two providers produce differently
+        tagged credentials from the same canvas. Nothing asserted this: the parameter was
+        absorbed into ``**_ignored`` and dropped with no error, and the step handler was
+        not passing it at all.
+        """
+        gateway_step, _store, seen = self._patch(monkeypatch)
+        out = gateway_step.handler(
+            {
+                "deployment_id": "d1",
+                "resource_tags": {"org:cost-centre": "cc-42"},
+                "gateway_config": {
+                    "name": "gw",
+                    "gateway_provider": "litellm",
+                    "litellm_base_url": BASE,
+                },
+            },
+            None,
+        )
+        assert out["gateway_config"]["gateway_provider"] == "litellm"
+        assert seen["resource_tags"] == {"org:cost-centre": "cc-42"}, (
+            "the LiteLLM branch did not thread the deployment's resource_tags to the "
+            "deployer, so its connector secret carries none of the admin's governance tags"
+        )
 
     @pytest.mark.parametrize("key", ["litellm_api_key", "litellmApiKey"])
     def test_the_raw_key_is_dropped_from_the_re_emitted_event(self, monkeypatch, key):
@@ -569,8 +742,9 @@ class TestGatewayStepDispatch:
         assert "sk-topsecret" not in json.dumps(out)
         assert "litellm_api_key" not in out["gateway_config"]
         assert "litellmApiKey" not in out["gateway_config"]
-        # The deployer still needs it for the readiness probe.
-        assert seen["gateway_config"]["litellm_api_key"] == "sk-topsecret"
+        # The deployer receives only the exact deployment-bound reference.
+        assert seen["gateway_config"]["litellm_api_key_ref"] == "arn:secret:k"
+        assert "sk-topsecret" not in json.dumps(seen["gateway_config"])
 
     def test_both_spellings_are_popped_even_when_both_arrive(self, monkeypatch):
         gateway_step, _store, _seen = self._patch(monkeypatch)
@@ -605,7 +779,19 @@ class TestGatewayStepDispatch:
             },
             None,
         )
-        assert store.resources == [("d1", {"type": "secret", "id": "arn:secret:k", "region": "us-east-1"})]
+        assert store.resources == [
+            (
+                "d1",
+                {
+                    "type": "secret",
+                    "id": "arn:secret:k",
+                    "region": "us-east-1",
+                    "created_by_deployment": True,
+                    # Every non-gateway row the gateway step records is its graph's.
+                    "gateway_graph": True,
+                },
+            )
+        ]
 
     def test_the_arn_is_written_back_for_a_redeploy(self, monkeypatch):
         gateway_step, _store, _seen = self._patch(monkeypatch)
@@ -657,10 +843,16 @@ class TestGatewayStepDispatch:
         assert out["config"] == {"name": "agent"}
         assert out["role_arn"] == "arn:role"
 
-    @pytest.mark.parametrize("cfg", [{}, {"gateway_provider": "agentcore"}, {"gateway_provider": "bogus"}])
+    @pytest.mark.parametrize("cfg", [{}, {"gateway_provider": "agentcore"}])
     def test_anything_not_litellm_still_goes_to_agentcore(self, monkeypatch, cfg):
         """The whole point of the workstream: this is additive. Everything that
-        does not explicitly say ``litellm`` must reach ``deploy_gateway``."""
+        does not explicitly say ``litellm`` must reach ``deploy_gateway``.
+
+        ``{"gateway_provider": "bogus"}`` used to be a third case here. It
+        conflated two different things: *saying nothing* (which must follow the
+        default) and *saying something invalid* (which must not be guessed at).
+        See test_an_invalid_provider_fails_the_step_instead_of_deploying_agentcore.
+        """
         from app.step_handlers import gateway_step
 
         store = _FakeStore()
@@ -682,6 +874,34 @@ class TestGatewayStepDispatch:
         assert called["kwargs"]["gateway_config"] == cfg
         assert out["gateway_result"]["gateway_id"] == "gw-1"
 
+    def test_an_invalid_provider_fails_the_step_instead_of_deploying_agentcore(self, monkeypatch):
+        """A typo must fail the deploy, not quietly deploy the other backend.
+
+        Asserting on the step handler rather than only on
+        ``resolve_gateway_provider`` because that is where the consequence lives:
+        the unit-level raise would still be a silent misdeploy if the handler
+        swallowed it and carried on to ``deploy_gateway``. Neither provider's
+        deployer may be reached at all.
+        """
+        from app.step_handlers import gateway_step
+
+        store = _FakeStore()
+        monkeypatch.setattr(gateway_step, "_get_deployment_store", lambda: store)
+        monkeypatch.setattr(
+            gateway_step,
+            "deploy_gateway",
+            lambda **kw: pytest.fail("AgentCore gateway deployed for an INVALID provider"),
+        )
+        monkeypatch.setattr(
+            gateway_step,
+            "deploy_litellm_gateway",
+            lambda **kw: pytest.fail("LiteLLM gateway deployed for an INVALID provider"),
+        )
+        with pytest.raises(Exception) as exc:
+            gateway_step.handler({"deployment_id": "d1", "gateway_config": {"gatewayProvider": "lite-llm"}}, None)
+        # The operator has to be able to tell what to fix from the message alone.
+        assert "lite-llm" in str(exc.value)
+
 
 # ---------------------------------------------------------------------------
 # Runtime auth handoff
@@ -697,6 +917,9 @@ class TestRuntimeConfigureAuthMode:
         monkeypatch.setattr(rcs, "sanitize_runtime_name", lambda n: "agent_x")
         monkeypatch.setattr(rcs, "build_otel_env_vars", lambda *a, **kw: {})
         monkeypatch.setattr(rcs, "get_platform_observability_defaults", lambda: {})
+        # Runtime-log governance has its own AWS-contract tests; this helper is
+        # intentionally scoped to the environment handed to CreateAgentRuntime.
+        monkeypatch.setattr(rcs, "govern_default_runtime_log_group", lambda *_a, **_kw: None)
         monkeypatch.delenv("TAG_POLICY_TABLE_NAME", raising=False)
 
         class _SM:
@@ -744,8 +967,16 @@ class TestRuntimeConfigureAuthMode:
         )
         assert env["GATEWAY_URL"] == f"{BASE}/mcp/"
         assert env["GATEWAY_AUTH_MODE"] == "static_bearer"
-        assert env["GATEWAY_API_KEY"] == "sk-resolved"
         assert env["GATEWAY_MCP_SERVERS"] == "github,jira"
+        # The REFERENCE, never the key. This assertion used to read
+        # `env["GATEWAY_API_KEY"] == "sk-resolved"`, i.e. it pinned the leak: the step
+        # resolved the virtual key during the deploy and handed it over as a runtime
+        # environment variable, which GetAgentRuntime returns in plaintext to any
+        # principal holding that one describe call, and which every Task in the state
+        # machine re-emits into the execution history. The agent dereferences the ARN
+        # itself (_resolve_gateway_key). ARCC cnt_n8LpZcqYi2t3I2.
+        assert env["GATEWAY_API_KEY_SECRET_ARN"] == "arn:secret:k"
+        assert "GATEWAY_API_KEY" not in env, "the resolved virtual key must not travel as an env var"
         # No Cognito exchange exists for LiteLLM; leaking these would make the
         # generated agent try a token endpoint that isn't there.
         assert "COGNITO_CLIENT_ID" not in env
@@ -930,10 +1161,38 @@ class TestTheTeardownManifest:
 
     def test_the_agentcore_path_still_records_its_role(self):
         """Regression guard for the branch above: nothing about the default
-        provider's manifest may change."""
-        rows = self._record({"gateway_id": "gw-123", "gateway_name": "my-agent"})
-        assert {"type": "gateway", "id": "gw-123", "region": "eu-central-1"} in rows
-        assert {"type": "iam_role", "name": "AgentCoreGateway-my-agent", "region": "eu-central-1"} in rows
+        provider's manifest may change.
+
+        ``gateway_role_name`` is part of the AgentCore result shape, not decoration on
+        this fixture. The row used to be derived from ``gateway_name``, which is bound
+        at the top of ``deploy_gateway`` and therefore present even for a failure that
+        never reached the IAM call — a deploy refused at Step 1 wrote a row for a role
+        that did not exist (measured live 2026-09-21). ``deploy_gateway`` now reports
+        the role only once IAM has confirmed it; see
+        ``test_the_manifest_records_only_the_role_that_exists.py`` for both directions.
+        """
+        rows = self._record(
+            {
+                "gateway_id": "gw-123",
+                "gateway_name": "my-agent",
+                "gateway_role_name": "AgentCoreGateway-my-agent",
+            }
+        )
+        assert {
+            "type": "gateway",
+            "id": "gw-123",
+            # The gateway-name claim's key, for teardown to erase it.
+            "name": "my-agent",
+            "region": "eu-central-1",
+            "created_by_deployment": False,
+        } in rows
+        assert {
+            "type": "iam_role",
+            "name": "AgentCoreGateway-my-agent",
+            "region": "eu-central-1",
+            "created_by_deployment": False,
+            "gateway_graph": True,
+        } in rows
 
     def test_teardown_treats_the_row_as_a_deliberate_no_op(self):
         """Not merely "unknown type falls through" — an explicit arm, so the row
@@ -950,3 +1209,78 @@ class TestTheTeardownManifest:
 
         src = inspect.getsource(deployment_handler)
         assert '"litellm_gateway": 2,' in src, "must share the gateway band for symmetry"
+
+
+class TestLiteLLMBranchRecordsItsManifest:
+    """Live, 2026-09-30 (first LiteLLM deploy to reach the completeness gate): the LiteLLM branch of
+    gateway_step returned before ``_record_gateway_resources`` ran, so the informational
+    ``litellm_gateway`` row was never written and status_update_step failed the deployment with
+    "Deployment resource inventory is incomplete: missing litellm_gateway teardown handle for <proxy>"."""
+
+    def _run(self, monkeypatch):
+        from app.step_handlers import gateway_step
+
+        monkeypatch.setenv("APP_AWS_REGION", "us-east-1")
+        store = _FakeStore()
+        monkeypatch.setattr(gateway_step, "_get_deployment_store", lambda: store)
+        monkeypatch.setattr(gateway_step, "deploy_gateway", lambda **kw: pytest.fail("AgentCore path taken"))
+
+        class _Session:
+            def client(self, service, **kwargs):
+                return object()
+
+        monkeypatch.setattr(gateway_step.step_clients, "session_for_event", lambda event: _Session())
+        monkeypatch.setattr(gateway_step, "bind_connector_secret_for_deployment", lambda **kw: ("arn:secret:k", True))
+        monkeypatch.setattr(
+            gateway_step,
+            "deploy_litellm_gateway",
+            lambda **kw: {
+                "success": True,
+                "gateway_provider": "litellm",
+                "litellm_base_url": BASE,
+                "gateway_url": f"{BASE}/mcp/",
+                "gateway_id": None,
+                "gateway_name": "gw",
+                "client_info": {"provider": "litellm", "api_key_ref": "arn:secret:k"},
+                "litellm_servers": ["github"],
+            },
+        )
+        out = gateway_step.handler(
+            {
+                "deployment_id": "d-litellm",
+                "gateway_config": {"name": "gw", "gateway_provider": "litellm", "litellm_base_url": BASE},
+            },
+            None,
+        )
+        return out, store
+
+    def test_the_litellm_gateway_row_is_recorded_before_the_branch_returns(self, monkeypatch):
+        out, store = self._run(monkeypatch)
+        rows = [r for _d, r in store.resources if r.get("type") == "litellm_gateway"]
+        assert rows == [
+            {
+                "type": "litellm_gateway",
+                "id": BASE,
+                "name": "gw",
+                "region": "us-east-1",
+                "created_by_deployment": False,
+                "gateway_graph": True,
+            }
+        ] or (len(rows) == 1 and rows[0]["id"] == BASE and rows[0]["created_by_deployment"] is False), rows
+        assert out["gateway_result"]["gateway_provider"] == "litellm"
+
+    def test_the_completeness_gate_accepts_what_the_branch_recorded(self, monkeypatch):
+        from app.step_handlers.status_update_step import _manifest_completion_errors
+
+        out, store = self._run(monkeypatch)
+        event = {**out, "runtime_id": "rt-1"}
+        record = {
+            "resource_manifest_version": 1,
+            "resource_manifest_error": False,
+            "created_resources": [
+                {"type": "agent_runtime", "id": "rt-1", "region": "us-east-1"},
+                *[r for _d, r in store.resources],
+            ],
+            "target_region": "us-east-1",
+        }
+        assert _manifest_completion_errors(record, event) == []

@@ -38,10 +38,21 @@ import uuid
 # ---------------------------------------------------------------------------
 
 
-def _https_open(req, timeout):
-    """urlopen with an https-only scheme guard (Bandit B310)."""
-    if not req.full_url.startswith("https://"):
-        raise ValueError("only https URLs are allowed")
+def _safe_open(req, timeout):
+    """Open HTTPS, plus plaintext HTTP only for an actual loopback host.
+
+    Both documented defaults are local development services
+    (``localhost:8000`` and ``localhost:6006``). The old guard rejected those
+    defaults unconditionally, making the script fail before its first request.
+    Parsing the host instead of prefix-matching keeps remote credentials and
+    trace data HTTPS-only while preserving the intended local workflow.
+    """
+    parsed = urllib.parse.urlsplit(req.full_url)
+    loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
+        raise ValueError("remote URLs must use https; http is allowed only for localhost/loopback")
+    if parsed.username or parsed.password:
+        raise ValueError("URLs must not embed credentials")
     return urllib.request.urlopen(req, timeout=timeout)  # noqa: S310
 
 
@@ -60,7 +71,7 @@ def invoke_agent(api_base: str, runtime_id: str, prompt: str, session_id: str) -
         data=body,
         headers={"Content-Type": "application/json"},
     )
-    with _https_open(req, timeout=120) as resp:
+    with _safe_open(req, timeout=120) as resp:
         return json.loads(resp.read().decode())
 
 
@@ -83,7 +94,7 @@ def fetch_langfuse_traces(host: str, pk: str, sk: str) -> list[dict]:
         f"{host.rstrip('/')}/api/public/traces?{qs}",
         headers={"Authorization": f"Basic {auth}"},
     )
-    with _https_open(req, timeout=30) as resp:
+    with _safe_open(req, timeout=30) as resp:
         body = json.loads(resp.read().decode())
         return body.get("data", body if isinstance(body, list) else [])
 
@@ -165,7 +176,7 @@ def assert_phoenix(host: str, service_name: str, expected_session: str) -> None:
     while time.time() < deadline:
         req = urllib.request.Request(f"{host.rstrip('/')}/v1/spans?{qs}")
         try:
-            with _https_open(req, timeout=15) as resp:
+            with _safe_open(req, timeout=15) as resp:
                 spans = json.loads(resp.read().decode()).get("data", [])
         except Exception as e:
             print(f"[verify] poll error: {e}", file=sys.stderr)

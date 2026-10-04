@@ -207,6 +207,69 @@ def repoint_regional_prefix(model_id: str, region: str | None = None) -> str:
     return model_id
 
 
+# Every model provider whose model IDs name a model in a FOREIGN catalog, where a
+# geography prefix is not a namespace — it is part of the name, and the wrong name.
+#
+# Measured, which is why this set exists: an OpenAI agent deployed through the real
+# API came up with ``MODEL_ID = us.gpt-4o-mini``, because the prefix rule was applied
+# to every provider. OpenAI has no ``us.`` namespace; ``us.gpt-4o-mini`` is simply a
+# model that does not exist, and the same mangled ID is baked into the generated
+# module as a literal (``OpenAIModel(model_id="…")`` does not read MODEL_ID at all),
+# so nothing downstream can recover it. Ollama takes a local tag (``llama3``) and
+# SageMaker takes an ENDPOINT NAME, neither of which is a Bedrock ID either.
+#
+# This set is the complement, not the list, on purpose: ``_get_model_init_code`` in
+# ``code_generator`` falls through to ``BedrockModel`` for any provider string it does
+# not recognise, so an unrecognised string has to be treated as Bedrock HERE too —
+# otherwise the ID this module produces is not the ID the generated agent invokes.
+# ``backend/tests/test_region_model_prefix.py`` pins the two against each other.
+NON_BEDROCK_PROVIDERS = frozenset(
+    {
+        "openai",
+        "anthropic",
+        "gemini",
+        "litellm",
+        "mistral",
+        "ollama",
+        "sagemaker",
+        "groq",
+        "deepseek",
+        "together",
+        "writer",
+        "llamaapi",
+    }
+)
+
+
+def uses_bedrock_inference_profiles(provider: str | None) -> bool:
+    """True when *provider*'s model IDs are Bedrock IDs, so the prefix rule applies.
+
+    ``""`` and ``None`` mean Bedrock: it is the platform default everywhere
+    (``StrandsModelProvider.BEDROCK``, ``RuntimeConfig.model_provider``'s default),
+    and a config that omits the provider is a Bedrock config.
+    """
+    return str(provider or "").strip().lower() not in NON_BEDROCK_PROVIDERS
+
+
+def to_regional_model_id_for_provider(model_id: str, provider: str | None, region: str | None = None) -> str:
+    """:func:`to_regional_model_id`, but only for a provider that has profiles.
+
+    Use this at every point where the provider is known. A foreign catalog's ID is
+    returned untouched — including its absent prefix, because "add ``us.``" is as
+    wrong as "re-point ``us.`` to ``eu.``" when the catalog is OpenAI's.
+    """
+    if not uses_bedrock_inference_profiles(provider):
+        return model_id
+    return to_regional_model_id(model_id, region)
+
+
+def repoint_regional_prefix_for_provider(model_id: str, provider: str | None, region: str | None = None) -> str:
+    """:func:`repoint_regional_prefix`, but only for a provider that has profiles."""
+    if not uses_bedrock_inference_profiles(provider):
+        return model_id
+    return repoint_regional_prefix(model_id, region)
+
+
 def regionalize_catalog(models: list[dict], region: str | None = None, key: str = "modelId") -> list[dict]:
     """Re-point every geography-prefixed model ID in a catalog list.
 

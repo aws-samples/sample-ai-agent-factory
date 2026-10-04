@@ -320,8 +320,15 @@ async def delete_prompt(
     if entry is None:
         raise HTTPException(status_code=404, detail="Not found")
     assert_owner(entry.owner_sub, caller_sub)  # 404 on mismatch
-    ok = store.delete(org_id, name)
-    return {"success": ok, "prompt_name": name}
+    # F-34: a delete that did not happen is not a 200 (see routers/registry.delete_entry).
+    try:
+        store.delete(org_id, name)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Prompt %s/%s was not deleted (%s)", org_id, name, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="The prompt could not be deleted. Try again.") from exc
+    return {"success": True, "prompt_name": name}
 
 
 @router.post(

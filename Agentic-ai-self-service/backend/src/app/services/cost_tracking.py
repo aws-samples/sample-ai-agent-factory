@@ -19,14 +19,15 @@ tenant-supplied) and SK is a random sortable ``event_id``, so cross-tenant
 overwrite is structurally impossible (Bug 122). ``owner_sub`` is still stamped
 and the ``owner_sub-event_id-index`` GSI is owner-scoped.
 
-Bedrock price window (Bug 113): current as of the July-2026 window —
+Bedrock price window (Bug 113): current as of the September-2026 window —
 ``anthropic.claude-sonnet-5``, ``anthropic.claude-sonnet-4-6``,
 ``anthropic.claude-opus-4-8``, and ``anthropic.claude-haiku-4-5-...``; the
 previous-window ``anthropic.claude-sonnet-4-5-...`` id is kept because
 deployed runtimes may still emit it in logs (the table prices LOGGED ids).
-Keys are matched after the ``us.``/``eu.``/``ap.`` inference-profile prefix
-is stripped. Unknown models fall back to a default rate and are logged,
-never crash.
+Keys are matched after the inference-profile geography prefix is stripped.
+Input, output, cache-read, and five-minute cache-write tokens are priced
+separately; Bedrock bills all four categories separately. Unknown models fall
+back to a conservative default rate and are logged, never crash.
 """
 
 from __future__ import annotations
@@ -42,6 +43,8 @@ from decimal import Decimal
 import boto3
 from boto3.dynamodb.conditions import Key
 
+from app.services.aws_errors import error_code, is_error
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,33 +55,47 @@ logger = logging.getLogger(__name__)
 # Rates are keyed by the *normalized* bedrock model id (inference-profile
 # region prefix stripped). Both the long anthropic-foundation-model id and the
 # bare form are listed so whatever lands in ``gen_ai.request.model`` resolves.
-# Source: AWS Bedrock on-demand pricing, current as of the July-2026 window.
+# Source: the AWS Price List API's AmazonBedrockFoundationModels offer,
+# us-east-1 Global on-demand SKUs, read 2026-09-22. Cache-write rates are the
+# ordinary five-minute TTL rate. The generated runtime does not expose a
+# one-hour cache policy; if that changes, the usage record must carry the TTL
+# before this ledger can price that more expensive category honestly.
 # REVIEW each model-window rotation (Bug 113).
-_PRICE_PER_1K: dict[str, tuple[float, float]] = {
-    # (input_per_1k, output_per_1k)
+
+
+@dataclass(frozen=True)
+class _TokenRates:
+    input_per_1k: float
+    output_per_1k: float
+    cache_read_per_1k: float
+    cache_write_per_1k: float
+
+
+_PRICE_PER_1K: dict[str, _TokenRates] = {
     # Claude Sonnet 5
-    "anthropic.claude-sonnet-5": (0.003, 0.015),
+    "anthropic.claude-sonnet-5": _TokenRates(0.002, 0.010, 0.0002, 0.0025),
     # Claude Sonnet 4.6
-    "anthropic.claude-sonnet-4-6": (0.003, 0.015),
+    "anthropic.claude-sonnet-4-6": _TokenRates(0.003, 0.015, 0.0003, 0.00375),
     # Claude Opus 4.8
-    "anthropic.claude-opus-4-8": (0.005, 0.025),
+    "anthropic.claude-opus-4-8": _TokenRates(0.005, 0.025, 0.0005, 0.00625),
     # Claude Haiku 4.5 (published 2025-10-01)
-    "anthropic.claude-haiku-4-5-20251001-v1:0": (0.001, 0.005),
+    "anthropic.claude-haiku-4-5-20251001-v1:0": _TokenRates(0.001, 0.005, 0.0001, 0.00125),
     # -- Previous window: kept because deployed runtimes may still emit this
     #    model id in logs; the table prices LOGGED ids, so removing it would
     #    misprice history.
     # Claude Sonnet 4.5 (published 2025-09-29)
-    "anthropic.claude-sonnet-4-5-20250929-v1:0": (0.003, 0.015),
+    "anthropic.claude-sonnet-4-5-20250929-v1:0": _TokenRates(0.003, 0.015, 0.0003, 0.00375),
 }
 
 # Fallback rate for unknown models so the endpoint never crashes (and is
-# never negative). Mirrors the more expensive tier so we under-promise on
-# savings rather than under-report cost.
-_DEFAULT_PRICE_PER_1K: tuple[float, float] = (0.003, 0.015)
+# never negative). Mirrors the most expensive current tier in the table so we
+# under-promise on savings rather than under-report cost.
+_DEFAULT_PRICE_PER_1K = _TokenRates(0.005, 0.025, 0.0005, 0.00625)
 
 # Inference-profile region prefixes that AgentCore prepends to a bedrock
-# model id (e.g. ``us.anthropic...`` / ``eu.anthropic...`` / ``ap.anthropic...``).
-_INFERENCE_PROFILE_PREFIX = re.compile(r"^(us|eu|ap|us-gov)\.")
+# model id. ``apac`` is the current APAC family; ``ap`` is retained for older
+# stored values, while ``jp`` and ``au`` are country-scoped APAC profiles.
+_INFERENCE_PROFILE_PREFIX = re.compile(r"^(us|us-gov|eu|apac|ap|global|jp|au)\.")
 
 # Default 90-day TTL for explicit usage events (write-path only).
 _EVENT_TTL_SECONDS = 90 * 24 * 3600
@@ -95,16 +112,27 @@ def normalize_model_id(model_id: str | None) -> str:
     return _INFERENCE_PROFILE_PREFIX.sub("", str(model_id).strip())
 
 
-def compute_cost(model_id: str | None, input_tokens: int, output_tokens: int) -> float:
-    """Return the USD cost for *input_tokens*/*output_tokens* of *model_id*.
+def compute_cost(
+    model_id: str | None,
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    cache_read_input_tokens: int = 0,
+    cache_write_input_tokens: int = 0,
+) -> float:
+    """Return the USD cost for all reported token categories of *model_id*.
 
-    Normalizes the model id (drops ``us.``/``eu.``/``ap.`` inference-profile
-    prefix). Unknown models fall back to ``_DEFAULT_PRICE_PER_1K`` and log a
+    Normalizes the model id by dropping a known inference-profile prefix.
+    Cache reads and writes are not ordinary input tokens: Bedrock prices each
+    separately, and its total input-token usage is the sum of all three input
+    categories. Unknown models fall back to ``_DEFAULT_PRICE_PER_1K`` and log a
     warning. Negative token counts are clamped to 0. Always non-negative.
     """
     in_tok = max(int(input_tokens or 0), 0)
     out_tok = max(int(output_tokens or 0), 0)
-    if in_tok == 0 and out_tok == 0:
+    cache_read_tok = max(int(cache_read_input_tokens or 0), 0)
+    cache_write_tok = max(int(cache_write_input_tokens or 0), 0)
+    if in_tok == 0 and out_tok == 0 and cache_read_tok == 0 and cache_write_tok == 0:
         return 0.0
 
     normalized = normalize_model_id(model_id)
@@ -117,19 +145,22 @@ def compute_cost(model_id: str | None, input_tokens: int, output_tokens: int) ->
         )
         rate = _DEFAULT_PRICE_PER_1K
 
-    in_rate, out_rate = rate
-    cost = (in_tok / 1000.0) * in_rate + (out_tok / 1000.0) * out_rate
+    cost = (
+        (in_tok / 1000.0) * rate.input_per_1k
+        + (out_tok / 1000.0) * rate.output_per_1k
+        + (cache_read_tok / 1000.0) * rate.cache_read_per_1k
+        + (cache_write_tok / 1000.0) * rate.cache_write_per_1k
+    )
     return round(cost, 8)
 
 
 def extract_usage_from_otel_span(span_attrs: dict | None) -> dict:
     """Pull token usage + model from a GenAI-semconv span's attributes.
 
-    Reads ``gen_ai.usage.input_tokens`` / ``gen_ai.usage.output_tokens`` and
-    ``gen_ai.request.model`` (falls back to ``gen_ai.response.model``).
-    Tolerates int- and str-typed attribute values. Returns a dict with
-    ``input_tokens`` (int), ``output_tokens`` (int), ``model_id`` (str|None).
-    Missing/garbage attrs degrade gracefully to zeros / None.
+    Reads ordinary input, output, cache-read, and cache-write token counts plus
+    ``gen_ai.request.model`` (falling back to ``gen_ai.response.model``).
+    Tolerates int- and str-typed attribute values. Missing/garbage counts
+    degrade gracefully to zero and a missing model to ``None``.
     """
     attrs = span_attrs or {}
 
@@ -143,12 +174,16 @@ def extract_usage_from_otel_span(span_attrs: dict | None) -> dict:
 
     input_tokens = _to_int(attrs.get("gen_ai.usage.input_tokens"))
     output_tokens = _to_int(attrs.get("gen_ai.usage.output_tokens"))
+    cache_read_input_tokens = _to_int(attrs.get("gen_ai.usage.cache_read_input_tokens"))
+    cache_write_input_tokens = _to_int(attrs.get("gen_ai.usage.cache_write_input_tokens"))
     model_id = attrs.get("gen_ai.request.model") or attrs.get("gen_ai.response.model")
     if model_id is not None:
         model_id = str(model_id)
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "cache_read_input_tokens": cache_read_input_tokens,
+        "cache_write_input_tokens": cache_write_input_tokens,
         "model_id": model_id,
     }
 
@@ -223,6 +258,8 @@ class UsageEvent:
     output_tokens: int
     cost_usd: float
     ts: str  # ISO 8601
+    cache_read_input_tokens: int = 0
+    cache_write_input_tokens: int = 0
     version_id: str | None = None
     ttl: int | None = None
 
@@ -234,6 +271,8 @@ class UsageEvent:
             "model_id": self.model_id,
             "input_tokens": int(self.input_tokens),
             "output_tokens": int(self.output_tokens),
+            "cache_read_input_tokens": int(self.cache_read_input_tokens),
+            "cache_write_input_tokens": int(self.cache_write_input_tokens),
             "cost_usd": float(self.cost_usd),
             "ts": self.ts,
         }
@@ -254,6 +293,8 @@ class UsageEvent:
             model_id=item.get("model_id", ""),
             input_tokens=int(item.get("input_tokens", 0)),
             output_tokens=int(item.get("output_tokens", 0)),
+            cache_read_input_tokens=int(item.get("cache_read_input_tokens", 0)),
+            cache_write_input_tokens=int(item.get("cache_write_input_tokens", 0)),
             cost_usd=float(item.get("cost_usd", 0.0)),
             ts=item.get("ts", ""),
             version_id=item.get("version_id"),
@@ -264,24 +305,42 @@ class UsageEvent:
 def summarize(events: list[UsageEvent]) -> dict:
     """Aggregate a list of UsageEvents into a cost/token rollup.
 
-    Returns ``{total_cost, total_in, total_out, by_model}`` where ``by_model``
-    maps each ``model_id`` to its own ``{cost, input_tokens, output_tokens,
-    count}`` bucket.
+    Returns ordinary input, cache-read, cache-write, total input, and output
+    counts alongside the cost. ``total_in`` remains the ordinary-input field
+    for backward compatibility; ``total_input_tokens`` is the complete input
+    volume across all three billed input categories.
     """
     total_cost = 0.0
     total_in = 0
     total_out = 0
+    total_cache_read = 0
+    total_cache_write = 0
     by_model: dict[str, dict] = {}
     for ev in events:
         total_cost += float(ev.cost_usd)
         total_in += int(ev.input_tokens)
         total_out += int(ev.output_tokens)
+        total_cache_read += int(ev.cache_read_input_tokens)
+        total_cache_write += int(ev.cache_write_input_tokens)
         bucket = by_model.setdefault(
             ev.model_id or "unknown",
-            {"cost": 0.0, "input_tokens": 0, "output_tokens": 0, "count": 0},
+            {
+                "cost": 0.0,
+                "input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_write_input_tokens": 0,
+                "total_input_tokens": 0,
+                "output_tokens": 0,
+                "count": 0,
+            },
         )
         bucket["cost"] += float(ev.cost_usd)
         bucket["input_tokens"] += int(ev.input_tokens)
+        bucket["cache_read_input_tokens"] += int(ev.cache_read_input_tokens)
+        bucket["cache_write_input_tokens"] += int(ev.cache_write_input_tokens)
+        bucket["total_input_tokens"] += (
+            int(ev.input_tokens) + int(ev.cache_read_input_tokens) + int(ev.cache_write_input_tokens)
+        )
         bucket["output_tokens"] += int(ev.output_tokens)
         bucket["count"] += 1
     for bucket in by_model.values():
@@ -289,6 +348,9 @@ def summarize(events: list[UsageEvent]) -> dict:
     return {
         "total_cost": round(total_cost, 8),
         "total_in": total_in,
+        "total_cache_read": total_cache_read,
+        "total_cache_write": total_cache_write,
+        "total_input_tokens": total_in + total_cache_read + total_cache_write,
         "total_out": total_out,
         "by_model": by_model,
     }
@@ -374,14 +436,157 @@ class UsageEventsStore:
 # ---------------------------------------------------------------------------
 
 
-def log_group_for_runtime(runtime_id: str) -> str:
-    """Return the canonical runtime token-log group for *runtime_id*.
+class RuntimeLogQueryError(RuntimeError):
+    """A runtime log query could not produce a complete, trustworthy result."""
 
-    Reuses the dashboard's ``-DEFAULT`` form (observability_dashboard.py)
-    rather than evaluations.py's bare form, because that is where the runtime
-    actually emits ``gen_ai.usage`` spans. See the LOG-GROUP-NAMING-drift risk.
+
+def is_logs_resource_not_found(exc: Exception, logs_client) -> bool:
+    """Match typed CloudWatch Logs not-found errors without message substrings."""
+
+    if is_error(exc, "ResourceNotFound", "ResourceNotFoundException"):
+        return True
+    exception_type = getattr(getattr(logs_client, "exceptions", None), "ResourceNotFoundException", None)
+    return (
+        isinstance(exception_type, type)
+        and issubclass(exception_type, BaseException)
+        and isinstance(exc, exception_type)
+    )
+
+
+def log_group_for_runtime(runtime_id: str) -> str:
+    """Return the legacy/default runtime log group for *runtime_id*.
+
+    AgentCore names application-log groups after the invoked endpoint
+    qualifier. ``DEFAULT`` is the platform's ordinary live-deploy qualifier,
+    but exported stacks can create a named endpoint. Call
+    :func:`log_groups_for_runtime` before querying; this helper remains for
+    backward-compatible response fields and callers that explicitly need the
+    default name.
     """
     return f"/aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT"
+
+
+def log_group_prefix_for_runtime(runtime_id: str) -> str:
+    """Return the prefix shared by every endpoint-qualified runtime group."""
+    return f"/aws/bedrock-agentcore/runtimes/{runtime_id}-"
+
+
+def log_groups_for_runtime(logs_client, runtime_id: str) -> list[str]:
+    """Enumerate all CloudWatch groups belonging to one AgentCore runtime.
+
+    Runtime application records follow the endpoint qualifier. A query pinned
+    to ``-DEFAULT`` therefore misses invocations made through a named endpoint,
+    which is the path the CloudFormation export creates. Pagination and exact
+    prefix filtering keep the result complete without sweeping unrelated
+    runtimes in the account.
+    """
+    prefix = log_group_prefix_for_runtime(runtime_id)
+    names: set[str] = set()
+    kwargs: dict = {"logGroupNamePrefix": prefix, "limit": 50}
+    seen_tokens: set[str] = set()
+    while True:
+        response = logs_client.describe_log_groups(**kwargs)
+        for group in response.get("logGroups", []):
+            name = group.get("logGroupName")
+            if isinstance(name, str) and name.startswith(prefix):
+                names.add(name)
+        token = response.get("nextToken")
+        if not token or token in seen_tokens:
+            break
+        seen_tokens.add(token)
+        kwargs["nextToken"] = token
+
+    default = log_group_for_runtime(runtime_id)
+    return sorted(names, key=lambda name: (name != default, name))
+
+
+def query_runtime_log_groups(
+    logs_client,
+    runtime_id: str,
+    from_ts: int,
+    to_ts: int,
+    query_string: str,
+    *,
+    poll_seconds: float,
+) -> tuple[list[dict], str, list[str]]:
+    """Run one Insights query over every endpoint group for *runtime_id*.
+
+    CloudWatch accepts at most 50 log groups per StartQuery request. Start all
+    chunks first, then poll them under one shared deadline so a runtime with
+    many historical endpoints does not multiply the API's response latency.
+    """
+    log_groups = log_groups_for_runtime(logs_client, runtime_id)
+    if not log_groups:
+        return [], "Empty", []
+
+    query_ids: list[str] = []
+    start_failures = 0
+    for offset in range(0, len(log_groups), 50):
+        try:
+            response = logs_client.start_query(
+                logGroupNames=log_groups[offset : offset + 50],
+                startTime=int(from_ts),
+                endTime=int(to_ts),
+                queryString=query_string,
+            )
+        except Exception as exc:  # noqa: BLE001 — preserve other chunks and report a failed query
+            start_failures += 1
+            logger.warning(
+                "Could not start runtime log query chunk (%s)",
+                type(exc).__name__,
+            )
+            continue
+        query_id = response.get("queryId")
+        if query_id:
+            query_ids.append(query_id)
+        else:
+            start_failures += 1
+    if not query_ids:
+        return [], "Failed" if start_failures else "Empty", log_groups
+
+    deadline = time.time() + poll_seconds
+    rows: list[dict] = []
+    statuses = {query_id: "Running" for query_id in query_ids}
+    while time.time() < deadline and any(status == "Running" for status in statuses.values()):
+        for query_id, current in list(statuses.items()):
+            if current != "Running":
+                continue
+            try:
+                response = logs_client.get_query_results(queryId=query_id)
+            except Exception as exc:  # noqa: BLE001 — one failed chunk must not discard completed rows
+                statuses[query_id] = "Failed"
+                logger.warning(
+                    "Could not poll runtime log query %s (%s)",
+                    query_id,
+                    type(exc).__name__,
+                )
+                continue
+            status = response.get("status", "Running")
+            statuses[query_id] = status
+            if status in ("Complete", "Failed", "Cancelled"):
+                for row in response.get("results", []):
+                    rows.append({field["field"]: field["value"] for field in row})
+        if any(status == "Running" for status in statuses.values()):
+            time.sleep(0.5)
+
+    for query_id, status in statuses.items():
+        if status != "Running":
+            continue
+        try:
+            logs_client.stop_query(queryId=query_id)
+        except Exception:  # noqa: BLE001 — best-effort cancel; partial rows remain useful
+            logger.debug("stop_query %s failed", query_id, exc_info=True)
+
+    values = set(statuses.values())
+    if start_failures or "Failed" in values:
+        overall = "Failed"
+    elif "Cancelled" in values:
+        overall = "Cancelled"
+    elif "Running" in values:
+        overall = "Running"
+    else:
+        overall = "Complete"
+    return rows, overall, log_groups
 
 
 def summarize_from_logs(
@@ -390,119 +595,182 @@ def summarize_from_logs(
     to_ts: int,
     region: str,
     *,
+    logs_client=None,
     poll_seconds: float = 10.0,
 ) -> dict:
     """Compute a cost/token rollup from the runtime's CloudWatch Logs.
 
-    Runs a Logs Insights query over the runtime token-log group that parses
-    ``gen_ai.usage.input_tokens`` / ``gen_ai.usage.output_tokens`` and
+    Runs a Logs Insights query over every endpoint-qualified runtime group and
+    parses ordinary input, output, cache-read, and cache-write counts plus
     ``gen_ai.request.model`` from each log message, grouped by model, then
     applies ``compute_cost`` per model.
 
     Returns ``{total_cost, total_in, total_out, by_model, from_ts, to_ts,
-    log_group_name, query_status}``. When the log group does not exist yet
-    (runtime hasn't received instrumented traffic), returns an EMPTY summary
-    — never raises.
+    log_group_name, log_group_names, query_status}``. When no group exists yet
+    (runtime hasn't received instrumented traffic), returns an EMPTY summary.
+    Permission errors, failed query chunks, cancellation, and timeouts raise
+    :class:`RuntimeLogQueryError` so callers cannot present an undercount as a
+    measured zero.
     """
     log_group = log_group_for_runtime(runtime_id)
     empty = {
         "total_cost": 0.0,
         "total_in": 0,
+        "total_cache_read": 0,
+        "total_cache_write": 0,
+        "total_input_tokens": 0,
         "total_out": 0,
         "by_model": {},
         "from_ts": from_ts,
         "to_ts": to_ts,
         "log_group_name": log_group,
-        "query_status": "Complete",
+        "log_group_names": [],
+        "cache_reporting": {
+            "cache_read_complete": True,
+            "cache_write_complete": True,
+            "invocations": 0,
+            "cache_read_reports": 0,
+            "cache_write_reports": 0,
+        },
+        "query_status": "Empty",
     }
 
-    logs_client = boto3.client("logs", region_name=region)
+    # Runtime-name API routes resolve the deployment's target session before
+    # calling this helper.  Accept that session's Logs client so a
+    # cross-account runtime cannot silently fall back to the platform account.
+    logs_client = logs_client or boto3.client("logs", region_name=region)
 
     # Group token sums by the request model so we can price each model
-    # separately. The dashboard widget proves this @message shape parses.
+    # separately. Restrict to the explicit marker this bootstrap owns: a future
+    # AgentCore native span containing the same semantic-convention fields must
+    # not be counted a second time beside our usage record.
     query_string = (
         "fields @timestamp, @message"
-        "\n| filter @message like /gen_ai.usage/"
+        "\n| filter @message like /AGENTCORE_USAGE/"
         '\n| parse @message /"gen_ai.usage.input_tokens":\\s*(?<in_tok>\\d+)/'
         '\n| parse @message /"gen_ai.usage.output_tokens":\\s*(?<out_tok>\\d+)/'
+        '\n| parse @message /"gen_ai.usage.cache_read_input_tokens":\\s*(?<cache_read_tok>\\d+)/'
+        '\n| parse @message /"gen_ai.usage.cache_write_input_tokens":\\s*(?<cache_write_tok>\\d+)/'
         '\n| parse @message /"gen_ai.request.model":\\s*"?(?<model>[^",}\\s]+)"?/'
         "\n| stats sum(in_tok) as input_tokens, sum(out_tok) as output_tokens, "
+        "sum(cache_read_tok) as cache_read_input_tokens, "
+        "sum(cache_write_tok) as cache_write_input_tokens, "
+        "count(cache_read_tok) as cache_read_reports, "
+        "count(cache_write_tok) as cache_write_reports, "
         "count(*) as invocations by model"
         "\n| sort by input_tokens desc"
         "\n| limit 100"
     )
 
     try:
-        start_resp = logs_client.start_query(
-            logGroupName=log_group,
-            startTime=int(from_ts),
-            endTime=int(to_ts),
-            queryString=query_string,
+        rows, status, log_groups = query_runtime_log_groups(
+            logs_client,
+            runtime_id,
+            from_ts,
+            to_ts,
+            query_string,
+            poll_seconds=poll_seconds,
         )
-        query_id = start_resp.get("queryId")
-        if not query_id:
-            logger.warning("summarize_from_logs: no queryId returned")
+    except Exception as exc:
+        if is_logs_resource_not_found(exc, logs_client):
+            # Runtime groups not created yet — no instrumented traffic.
             return empty
-    except logs_client.exceptions.ResourceNotFoundException:
-        # Log group not created yet — no instrumented traffic. Empty, not error.
-        return empty
-    except Exception:
-        logger.exception("summarize_from_logs: start_query failed")
-        return empty
+        logger.warning(
+            "summarize_from_logs failed: %s%s",
+            type(exc).__name__,
+            f" {error_code(exc)}" if error_code(exc) else "",
+        )
+        raise
 
-    # Poll until the query finishes (Logs Insights is async). Bound the poll
-    # to stay under API GW's 29s ceiling with margin (mirrors evaluations.py).
-    deadline = time.time() + poll_seconds
-    rows: list[dict] = []
-    status = "Running"
-    while time.time() < deadline:
-        get_resp = logs_client.get_query_results(queryId=query_id)
-        status = get_resp.get("status", "Running")
-        if status in ("Complete", "Failed", "Cancelled"):
-            for row in get_resp.get("results", []):
-                rows.append({field["field"]: field["value"] for field in row})
-            break
-        time.sleep(0.5)
+    if status not in {"Complete", "Empty"}:
+        raise RuntimeLogQueryError(f"runtime cost query ended with status {status}")
 
-    if status == "Running":
-        try:
-            logs_client.stop_query(queryId=query_id)
-        except Exception:  # noqa: BLE001 — best-effort cancel; partial results are still returned
-            logger.debug("stop_query %s failed", query_id, exc_info=True)
+    if not log_groups:
+        return empty
 
     total_cost = 0.0
     total_in = 0
     total_out = 0
+    total_cache_read = 0
+    total_cache_write = 0
+    total_invocations = 0
+    total_cache_read_reports = 0
+    total_cache_write_reports = 0
     by_model: dict[str, dict] = {}
     for row in rows:
         model_id = row.get("model") or "unknown"
         try:
             in_tok = int(float(row.get("input_tokens", 0) or 0))
             out_tok = int(float(row.get("output_tokens", 0) or 0))
+            cache_read_tok = int(float(row.get("cache_read_input_tokens", 0) or 0))
+            cache_write_tok = int(float(row.get("cache_write_input_tokens", 0) or 0))
             invocations = int(float(row.get("invocations", 0) or 0))
+            cache_read_reports = int(float(row.get("cache_read_reports", 0) or 0))
+            cache_write_reports = int(float(row.get("cache_write_reports", 0) or 0))
         except (TypeError, ValueError):
             continue
-        cost = compute_cost(model_id, in_tok, out_tok)
+        cost = compute_cost(
+            model_id,
+            in_tok,
+            out_tok,
+            cache_read_input_tokens=cache_read_tok,
+            cache_write_input_tokens=cache_write_tok,
+        )
         total_cost += cost
         total_in += in_tok
         total_out += out_tok
+        total_cache_read += cache_read_tok
+        total_cache_write += cache_write_tok
+        total_invocations += invocations
+        total_cache_read_reports += cache_read_reports
+        total_cache_write_reports += cache_write_reports
         bucket = by_model.setdefault(
             model_id,
-            {"cost": 0.0, "input_tokens": 0, "output_tokens": 0, "count": 0},
+            {
+                "cost": 0.0,
+                "input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_write_input_tokens": 0,
+                "total_input_tokens": 0,
+                "output_tokens": 0,
+                "count": 0,
+                "cache_read_reports": 0,
+                "cache_write_reports": 0,
+            },
         )
         bucket["cost"] = round(bucket["cost"] + cost, 8)
         bucket["input_tokens"] += in_tok
+        bucket["cache_read_input_tokens"] += cache_read_tok
+        bucket["cache_write_input_tokens"] += cache_write_tok
+        bucket["total_input_tokens"] += in_tok + cache_read_tok + cache_write_tok
         bucket["output_tokens"] += out_tok
         bucket["count"] += invocations
+        bucket["cache_read_reports"] += cache_read_reports
+        bucket["cache_write_reports"] += cache_write_reports
+
+    for bucket in by_model.values():
+        bucket["cache_read_complete"] = bucket["cache_read_reports"] == bucket["count"]
+        bucket["cache_write_complete"] = bucket["cache_write_reports"] == bucket["count"]
 
     return {
         "total_cost": round(total_cost, 8),
         "total_in": total_in,
+        "total_cache_read": total_cache_read,
+        "total_cache_write": total_cache_write,
+        "total_input_tokens": total_in + total_cache_read + total_cache_write,
         "total_out": total_out,
         "by_model": by_model,
         "from_ts": from_ts,
         "to_ts": to_ts,
         "log_group_name": log_group,
+        "log_group_names": log_groups,
+        "cache_reporting": {
+            "cache_read_complete": total_cache_read_reports == total_invocations,
+            "cache_write_complete": total_cache_write_reports == total_invocations,
+            "invocations": total_invocations,
+            "cache_read_reports": total_cache_read_reports,
+            "cache_write_reports": total_cache_write_reports,
+        },
         "query_status": status,
     }
 

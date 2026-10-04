@@ -12,6 +12,22 @@ from datetime import datetime, timezone
 from app.models import WorkflowDefinition
 
 
+class WorkflowRevisionConflict(Exception):
+    """A save was built on a ``WorkflowDefinition.revision`` the row no longer has (F-15).
+
+    Raised by both stores instead of overwriting. ``current`` is the row as it is NOW (re-read
+    after the refused write), so the router can tell the client which revision to reload or to
+    adopt before saving again; ``None`` when the row vanished underneath the save.
+    """
+
+    def __init__(self, workflow_id: str, expected: int, current: WorkflowDefinition | None):
+        self.workflow_id = workflow_id
+        self.expected = expected
+        self.current = current
+        actual = "missing" if current is None else str(current.revision)
+        super().__init__(f"Workflow '{workflow_id}' is at revision {actual}, save was built on revision {expected}")
+
+
 class WorkflowStorage:
     """In-memory storage for workflows.
 
@@ -46,6 +62,7 @@ class WorkflowStorage:
             update={
                 "created_at": now,
                 "updated_at": now,
+                "revision": 0,
             }
         )
 
@@ -63,25 +80,55 @@ class WorkflowStorage:
         """
         return self._workflows.get(workflow_id)
 
-    def update(self, workflow_id: str, workflow: WorkflowDefinition) -> WorkflowDefinition | None:
-        """Update an existing workflow.
+    def get_owner_sub_unvalidated(self, workflow_id: str) -> tuple[bool, str | None]:
+        """Read one row's ``owner_sub`` without parsing it into a model.
+
+        Part of the storage interface so the router's "delete a row I cannot read"
+        path does not have to ask whether the backend supports it. This backend
+        holds already-parsed models, so it can never HAVE an unreadable row and this
+        is equivalent to ``get``; it is the DynamoDB implementation that matters.
+        See ``DynamoDBWorkflowStorage.get_owner_sub_unvalidated``.
+        """
+        workflow = self._workflows.get(workflow_id)
+        if workflow is None:
+            return (False, None)
+        owner_sub = getattr(workflow, "owner_sub", None)
+        return (True, owner_sub if isinstance(owner_sub, str) else None)
+
+    def update(
+        self,
+        workflow_id: str,
+        workflow: WorkflowDefinition,
+        *,
+        expected_revision: int | None = None,
+    ) -> WorkflowDefinition | None:
+        """Update an existing workflow as a compare-and-set on its revision (F-15).
 
         Args:
             workflow_id: The ID of the workflow to update
             workflow: The updated workflow data
+            expected_revision: The ``revision`` the caller built this save on; when given and
+                different from the stored row's, nothing is written. ``None`` (a client that
+                sends no revision) saves against whatever is stored.
 
         Returns:
             The updated workflow if found, None otherwise
+
+        Raises:
+            WorkflowRevisionConflict: the row is not at ``expected_revision``
         """
         if workflow_id not in self._workflows:
             return None
 
         existing = self._workflows[workflow_id]
+        if expected_revision is not None and existing.revision != expected_revision:
+            raise WorkflowRevisionConflict(workflow_id, expected_revision, existing)
         updated = workflow.model_copy(
             update={
                 "id": workflow_id,
                 "created_at": existing.created_at,
                 "updated_at": datetime.now(timezone.utc),
+                "revision": existing.revision + 1,
             }
         )
 

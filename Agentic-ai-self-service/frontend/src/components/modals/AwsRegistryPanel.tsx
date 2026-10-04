@@ -85,7 +85,7 @@ export function AwsRegistryPanel() {
         <span className="text-sm font-medium">AWS Agent Registry</span>
         <span className={
           enabled && available ? 'text-xs text-green-500'
-          : enabled || !sdkSupported ? 'text-xs text-amber-500' : 'text-xs text-gray-400'
+          : enabled || !sdkSupported ? 'text-xs text-amber-500' : 'text-xs text-gray-600'
         }>
           {enabled && available ? 'Connected'
             : !sdkSupported ? 'SDK out of date'
@@ -115,6 +115,7 @@ export function AwsRegistryPanel() {
           <input
             className="flex-1 rounded bg-black/20 border border-white/10 px-2 py-1 text-sm"
             placeholder="AWS Agent Registry registryId"
+            aria-label="AWS Agent Registry ID"
             value={input}
             onChange={(e) => setInput(e.target.value)}
           />
@@ -132,6 +133,7 @@ export function AwsRegistryPanel() {
             <input
               className="flex-1 rounded bg-black/20 border border-white/10 px-2 py-1 text-sm"
               placeholder="Search registered agents…"
+              aria-label="Search registered agents"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') void search(); }}

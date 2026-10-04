@@ -238,9 +238,12 @@ export function Toggle({
   return (
     <div className="flex items-start gap-3">
       <button
+        id={id}
         type="button"
         role="switch"
         aria-checked={checked}
+        aria-labelledby={`${id}-label`}
+        aria-describedby={description ? `${id}-description` : undefined}
         onClick={() => !disabled && onChange(!checked)}
         disabled={disabled}
         className={`
@@ -259,11 +262,11 @@ export function Toggle({
         />
       </button>
       <div className="flex-1">
-        <label htmlFor={id} className="text-sm font-medium text-gray-700">
+        <label id={`${id}-label`} htmlFor={id} className="text-sm font-medium text-gray-700">
           {label}
         </label>
         {description && (
-          <p className="text-xs text-gray-500 mt-0.5">{description}</p>
+          <p id={`${id}-description`} className="text-xs text-gray-500 mt-0.5">{description}</p>
         )}
       </div>
     </div>
@@ -391,7 +394,7 @@ export function SliderField({
         `}
         data-testid={`field-${id}`}
       />
-      <div className="flex justify-between text-xs text-gray-400">
+      <div className="flex justify-between text-xs text-gray-500">
         <span>{min}</span>
         <span>{max}</span>
       </div>

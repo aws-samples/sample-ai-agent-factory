@@ -18,8 +18,8 @@ reads until an orphan turns up.
 
 from __future__ import annotations
 
+import ast
 import pathlib
-import re
 import sys
 
 sys.path.insert(0, "src")
@@ -48,6 +48,20 @@ class TestClassification:
         assert classify_cleanup_failures(["Custom tool Lambda delete error: x"]) == ["custom-tool-lambda"]
         assert classify_cleanup_failures(["Gateway IAM role cleanup error: x"]) == ["gateway-iam-role"]
 
+    def test_a_shared_lambdas_role_is_its_own_kind(self):
+        """The function and its execution role fail independently: the release can
+        delete ``AgentCoreCustomerSupportTools`` cleanly and still leave
+        ``AgentCoreCustomerSupportLambdaRole`` behind. Folding the role's failure into
+        'shared-tool-lambda' would tell an operator the Lambda is the thing to go look
+        at, when the Lambda is gone and an orphaned IAM role is what is left.
+
+        This entry was missing when the role-delete arm was added; only the
+        exhaustiveness check below noticed, and it reported 'unclassified'.
+        """
+        assert classify_cleanup_failures(["Shared tool Lambda role delete error: x"]) == ["shared-tool-lambda-role"]
+        # Still distinct in the other direction.
+        assert classify_cleanup_failures(["Shared tool Lambda delete error: x"]) == ["shared-tool-lambda"]
+
     def test_kinds_are_deduped_and_sorted(self):
         assert classify_cleanup_failures(
             [
@@ -68,15 +82,49 @@ class TestClassification:
 
 class TestTheVocabularyIsExhaustive:
     def _failure_messages(self) -> list[str]:
-        """Every f-string literal in gateway_deployer that reads as a cleanup
-        failure. Matches the source rather than a transcription of it, so this
-        cannot pass against a stale copy of the list."""
-        src = _SRC.read_text()
-        # The literal prefix of each f-string, up to its first interpolation.
-        # Covers both ways a cleanup message is produced: appended to cleanup_log,
-        # or returned from a per-resource helper for the caller to append.
-        literals = re.findall(r'(?:append\(|return (?:True|False), |return )f"([^"{]*)', src)
-        return [text for text in literals if "error" in text.lower()]
+        """Every literal in gateway_deployer that reads as a cleanup failure.
+
+        Matches the source rather than a transcription of it, so this cannot pass
+        against a stale copy of the list.
+
+        This used to be a regex anchored on ``append(f"``, which required the call
+        and its literal to sit on ONE source line. A message long enough for the
+        formatter to wrap — ``append(\\n    f"Shared-pool resource server delete
+        error: ..."\\n)`` — was therefore invisible to it, so the test read as
+        exhaustive while silently skipping exactly the messages most likely to be
+        new. It missed one of the two shared-pool messages for that reason.
+
+        An AST walk cannot be defeated by wrapping: it finds the call and the
+        literal by structure. Scope stays deliberately narrow — arguments to an
+        ``*.append(...)`` and returned values — because widening it to every
+        literal containing "error" would demand vocabulary entries for log lines
+        that never reach ``classify_cleanup_failures``.
+        """
+        tree = ast.parse(_SRC.read_text())
+        found: list[str] = []
+
+        def _leading_literal(node: ast.AST) -> str | None:
+            """The constant text of a str or the literal prefix of an f-string."""
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                return node.value
+            if isinstance(node, ast.JoinedStr):
+                first = node.values[0] if node.values else None
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    return first.value
+            return None
+
+        for node in ast.walk(tree):
+            candidates: list[ast.AST] = []
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "append":
+                candidates = list(node.args)
+            elif isinstance(node, ast.Return) and node.value is not None:
+                # Helpers return either the message or a (ok, message) tuple.
+                candidates = list(node.value.elts) if isinstance(node.value, ast.Tuple) else [node.value]
+            for arg in candidates:
+                text = _leading_literal(arg)
+                if text and "error" in text.lower():
+                    found.append(text)
+        return found
 
     def test_every_failure_message_the_source_can_emit_is_named(self):
         unnamed = [
@@ -94,7 +142,17 @@ class TestTheVocabularyIsExhaustive:
         """A regex that matches nothing would make the test above vacuously pass —
         the same failure mode as a guard filtering on the wrong resource Type."""
         found = self._failure_messages()
-        assert len(found) >= 8, f"only found {found!r}; the extraction regex has probably drifted"
+        assert len(found) >= 8, f"only found {found!r}; the extraction has probably drifted"
+
+    def test_a_hard_wrapped_message_is_still_extracted(self):
+        """The hole the AST walk closed, pinned so nobody reintroduces a
+        line-anchored regex. This message is wrapped across source lines by the
+        formatter, so a pattern requiring `append(f"` adjacency cannot see it —
+        and an extractor that cannot see a message cannot check it."""
+        found = self._failure_messages()
+        assert any(text.startswith("Shared-pool resource server delete error") for text in found), (
+            f"the wrapped shared-pool message is invisible to the extractor again; extracted: {found!r}"
+        )
 
     def test_every_vocabulary_entry_is_still_reachable(self):
         """The other direction: a needle nobody emits any more is dead weight that

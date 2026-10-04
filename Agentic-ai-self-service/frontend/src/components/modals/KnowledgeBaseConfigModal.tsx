@@ -68,8 +68,8 @@ const DATA_SOURCE_OPTIONS = [
 ];
 
 const VECTOR_STORE_OPTIONS = [
-  { value: 's3_vectors', label: 'S3 Vectors (Managed)' },
-  { value: 'opensearch_serverless', label: 'OpenSearch Serverless' },
+  { value: 's3_vectors', label: 'S3 Vectors (platform-managed by default)' },
+  { value: 'opensearch_serverless', label: 'OpenSearch Serverless (platform-managed by default)' },
   { value: 'rds', label: 'Aurora PostgreSQL (pgvector)' },
 ];
 
@@ -98,6 +98,11 @@ function createDefaultKBConfig(): KnowledgeBaseToolConfig {
     embeddingModelId: 'amazon.titan-embed-text-v2:0',
     foundationModelId: 'us.anthropic.claude-sonnet-5',
     vectorStoreType: 's3_vectors',
+    s3VectorsIndexName: 'bedrock-knowledge-base-default-index',
+    opensearchVectorIndexName: 'bedrock-knowledge-base-default-index',
+    opensearchVectorField: 'bedrock-knowledge-base-default-vector',
+    opensearchTextField: 'AMAZON_BEDROCK_TEXT_CHUNK',
+    opensearchMetadataField: 'AMAZON_BEDROCK_METADATA',
     parsingStrategy: 'default',
     dataDeletionPolicy: 'DELETE',
     retrievalStrategy: 'simple',
@@ -111,6 +116,7 @@ const TAB1_ERROR_FIELDS = [
   'confluenceHostUrl', 'confluenceCredentialsSecretArn',
   'salesforceHostUrl', 'salesforceCredentialsSecretArn',
   'sharePointDomain', 'sharePointSiteUrls', 'sharePointTenantId', 'sharePointCredentialsSecretArn',
+  'vectorStoreType', 's3VectorsBucketArn', 's3VectorsIndexName', 's3VectorsIndexArn',
   'opensearchCollectionArn', 'opensearchVectorIndexName',
   'rdsResourceArn', 'rdsCredentialsSecretArn', 'rdsDatabaseName', 'rdsTableName',
 ];
@@ -232,8 +238,46 @@ export function KnowledgeBaseConfigModal({
 
       // Vector store validation
       const vs = config.vectorStoreType;
-      if (vs === 'opensearch_serverless') {
-        validateArn(errors, 'opensearchCollectionArn', config.opensearchCollectionArn, 'Collection ARN');
+      if (ds === 'web_crawler' && vs !== 'opensearch_serverless') {
+        errors.push({
+          field: 'vectorStoreType',
+          message: 'Web Crawler requires the OpenSearch Serverless vector store',
+        });
+      }
+      if (vs === 's3_vectors') {
+        const bucketArn = config.s3VectorsBucketArn?.trim();
+        const indexArn = config.s3VectorsIndexArn?.trim();
+        if (bucketArn && !bucketArn.startsWith('arn:aws:s3vectors:')) {
+          errors.push({
+            field: 's3VectorsBucketArn',
+            message: 'S3 Vectors Bucket ARN must be a valid S3 Vectors ARN',
+          });
+        }
+        if (!bucketArn && indexArn) {
+          errors.push({
+            field: 's3VectorsIndexArn',
+            message: 'S3 Vectors Bucket ARN is required when an index ARN is supplied',
+          });
+        } else if (
+          bucketArn
+          && indexArn
+          && !indexArn.startsWith(`${bucketArn.replace(/\/+$/, '')}/index/`)
+        ) {
+          errors.push({
+            field: 's3VectorsIndexArn',
+            message: 'S3 Vectors Index ARN must belong to the selected bucket',
+          });
+        }
+      } else if (vs === 'opensearch_serverless') {
+        if (
+          config.opensearchCollectionArn?.trim()
+          && !config.opensearchCollectionArn.startsWith('arn:aws:aoss:')
+        ) {
+          errors.push({
+            field: 'opensearchCollectionArn',
+            message: 'Collection ARN must be a valid OpenSearch Serverless ARN',
+          });
+        }
         validateRequired(errors, 'opensearchVectorIndexName', config.opensearchVectorIndexName, 'Vector index name');
       } else if (vs === 'rds') {
         validateArn(errors, 'rdsResourceArn', config.rdsResourceArn, 'Cluster ARN');
@@ -265,6 +309,22 @@ export function KnowledgeBaseConfigModal({
 
   const kbTab = (
     <div className="space-y-5">
+      <div
+        role="note"
+        aria-label="Customer resource authorization"
+        data-testid="kb-resource-authorization-notice"
+        className="p-3 bg-amber-50 rounded-lg border border-amber-200"
+      >
+        <p className="text-xs text-amber-800">
+          Customer-owned AWS resources referenced here—including an existing Knowledge Base,
+          S3 buckets, vector stores, Lambda functions, KMS keys, and credential secrets—must
+          carry the tag{' '}
+          <code className="font-mono font-semibold">AgentCoreFlowsAccess=allow</code>{' '}
+          before deployment. Credential values are copied into a deployment-bound secret in
+          the selected target account; the source secret is not granted to Bedrock or deleted.
+        </p>
+      </div>
+
       {/* Mode Selection */}
       <FormSection title="Connection Mode">
         <div className="flex gap-3">

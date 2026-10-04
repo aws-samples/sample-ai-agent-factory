@@ -19,6 +19,8 @@ import {
   type GeneratedCanvasSpec,
 } from '../../services/api';
 import { useWorkflowStore } from '../../store/workflowStore';
+import { ConfirmDialog } from '../common/ConfirmDialog';
+import { useDialogFocusTrap } from '../../hooks/useDialogFocusTrap';
 
 interface ChatMessage {
   id: string;
@@ -44,25 +46,61 @@ export function AgentGeneratorPanel({
   const [inputValue, setInputValue] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [currentSpec, setCurrentSpec] = useState<GeneratedCanvasSpec | null>(null);
+  const [showApplyConfirm, setShowApplyConfirm] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const focusOriginRef = useRef<HTMLElement | null>(null);
+  const wasGeneratingRef = useRef(false);
   const validationState = useWorkflowStore((state) => state.validationState);
+
+  const closePanel = useCallback(() => {
+    setShowApplyConfirm(false);
+    onClose();
+  }, [onClose]);
+  useDialogFocusTrap(isVisible, panelRef, inputRef, closePanel);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isGenerating]);
 
   useEffect(() => {
-    if (isVisible) {
-      setTimeout(() => inputRef.current?.focus(), 200);
+    if (!isVisible) {
+      wasGeneratingRef.current = false;
+      focusOriginRef.current = null;
+      return;
     }
-  }, [isVisible]);
+
+    if (isGenerating) {
+      wasGeneratingRef.current = true;
+      return;
+    }
+
+    if (!wasGeneratingRef.current || showApplyConfirm) return;
+    wasGeneratingRef.current = false;
+
+    const origin = focusOriginRef.current;
+    focusOriginRef.current = null;
+    const active = document.activeElement;
+    if (
+      origin &&
+      (active === origin ||
+        active === document.body ||
+        active === inputRef.current ||
+        (active instanceof HTMLElement && !active.isConnected))
+    ) {
+      inputRef.current?.focus();
+    }
+  }, [isVisible, isGenerating, showApplyConfirm]);
 
   // Panel is closed via onClose prop — validation results remain visible
 
   const handleSubmit = useCallback(async () => {
     const trimmed = inputValue.trim();
     if (!trimmed || isGenerating) return;
+
+    focusOriginRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
 
     const userMsg: ChatMessage = {
       id: `u-${Date.now()}`,
@@ -138,19 +176,21 @@ export function AgentGeneratorPanel({
     }
   }, [inputValue, isGenerating, messages]);
 
+  const applyCurrentSpec = useCallback(() => {
+    if (!currentSpec) return;
+    setShowApplyConfirm(false);
+    onApplySpec(currentSpec);
+  }, [currentSpec, onApplySpec]);
+
   const handleApply = useCallback(() => {
     if (!currentSpec) return;
-    if (
-      hasExistingNodes &&
-      !window.confirm(
-        'This will replace the current canvas. Continue?',
-      )
-    ) {
+    if (hasExistingNodes) {
+      setShowApplyConfirm(true);
       return;
     }
-    onApplySpec(currentSpec);
+    applyCurrentSpec();
     // Panel stays open to show validation results — user can close manually
-  }, [currentSpec, hasExistingNodes, onApplySpec]);
+  }, [currentSpec, hasExistingNodes, applyCurrentSpec]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -166,14 +206,20 @@ export function AgentGeneratorPanel({
       <m.div
         className="fixed inset-0 z-40"
         style={{ background: 'rgba(11, 18, 32, 0.28)', backdropFilter: 'blur(2px)' }}
-        onClick={onClose}
+        onClick={closePanel}
+        aria-hidden="true"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         transition={tween.base}
       />
       <m.div
+        ref={panelRef}
         className="fixed right-0 top-0 bottom-0 w-[460px] bg-white z-50 flex flex-col overflow-hidden border-l border-[#e9ebed]"
         style={{ boxShadow: 'var(--elevation-4)' }}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="agent-generator-title"
+        tabIndex={-1}
         initial={{ x: '100%' }}
         animate={{ x: 0 }}
         transition={spring.gentle}
@@ -185,16 +231,17 @@ export function AgentGeneratorPanel({
               ✨
             </div>
             <div>
-              <h3 className="font-semibold text-white text-sm">Generate Agent</h3>
+              <h2 id="agent-generator-title" className="font-semibold text-white text-sm">Generate Agent</h2>
               <p className="text-[11px] text-white/50">
                 Describe the agent you want; we'll wire the canvas.
               </p>
             </div>
           </div>
           <button
-            onClick={onClose}
+            type="button"
+            onClick={closePanel}
             className="p-1.5 rounded-md hover:bg-white/10 transition-colors"
-            aria-label="Close"
+            aria-label="Close the agent generator"
           >
             <svg className="w-4 h-4 text-white/50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -223,19 +270,47 @@ export function AgentGeneratorPanel({
           {messages.map((m) => (
             <div
               key={m.id}
-              className={`text-sm whitespace-pre-wrap rounded-lg px-3 py-2 ${
+              className={`text-sm rounded-lg px-3 py-2 ${
                 m.role === 'user'
                   ? 'bg-[#0972d3] text-white ml-8'
                   : 'bg-gray-50 text-gray-800 mr-8 border border-gray-200'
               }`}
             >
-              {m.content}
+              {m.spec ? (
+                <div className="space-y-2">
+                  <p className="font-semibold">{m.spec.name}</p>
+                  {m.spec.description && <p>{m.spec.description}</p>}
+                  <div>
+                    <p className="font-medium">Components:</p>
+                    <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                      {m.spec.nodes.map((node) => (
+                        <li key={node.idSuffix}>
+                          {node.type}
+                          {node.label ? ` (${node.label})` : ''}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  {m.spec.rationale && (
+                    <p>
+                      <span className="font-medium">Why:</span> {m.spec.rationale}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <p className="whitespace-pre-wrap">{m.content}</p>
+              )}
               {m.spec && (
                 <details className="mt-2 text-xs text-gray-700">
                   <summary className="cursor-pointer hover:underline">
                     View raw JSON
                   </summary>
-                  <pre className="mt-1 p-2 bg-white border border-gray-200 rounded text-[10px] overflow-auto max-h-48">
+                  <pre
+                    role="region"
+                    aria-label="Generated agent specification JSON"
+                    tabIndex={0}
+                    className="mt-1 p-2 bg-white border border-gray-200 rounded text-[10px] overflow-auto max-h-48"
+                  >
                     {JSON.stringify(m.spec, null, 2)}
                   </pre>
                 </details>
@@ -261,8 +336,9 @@ export function AgentGeneratorPanel({
                 {currentSpec.nodes.length === 1 ? '' : 's'}
               </div>
               <button
+                type="button"
                 onClick={handleApply}
-                className="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700"
+                className="text-xs px-3 py-1.5 rounded bg-[#047857] text-white hover:bg-[#065f46]"
               >
                 Apply to Canvas →
               </button>
@@ -324,6 +400,7 @@ export function AgentGeneratorPanel({
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Describe the agent you want…"
+              aria-label="Agent description"
               className="flex-1 resize-none rounded-xl border border-[#e9ebed] px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0972d3] focus:border-transparent bg-white"
               rows={2}
               disabled={isGenerating}
@@ -354,6 +431,15 @@ export function AgentGeneratorPanel({
           </div>
         </div>
       </m.div>
+      <ConfirmDialog
+        isOpen={showApplyConfirm}
+        title="Replace current workflow?"
+        message="Applying this generated agent will replace every component currently on the canvas."
+        confirmLabel="Replace workflow"
+        variant="danger"
+        onConfirm={applyCurrentSpec}
+        onCancel={() => setShowApplyConfirm(false)}
+      />
     </>
   );
 }

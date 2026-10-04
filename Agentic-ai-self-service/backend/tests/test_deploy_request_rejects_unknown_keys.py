@@ -63,8 +63,58 @@ def test_the_misspelling_would_otherwise_have_meant_retain():
     that matters. ``Delete`` under the correct spelling is the admitting case.
     """
     assert DeployRequest(**_payload(dataRetentionPolicy="Delete")).data_retention_policy == "Delete"
-    # And the default, which is what the misspelled request silently produced.
-    assert DeployRequest(**_payload()).data_retention_policy == "Retain"
+
+    # And the default, which is what the misspelled request silently produced. The MODEL now
+    # records absence as None rather than "Retain", so that a route which cannot honour this
+    # field can tell "the caller did not ask" apart from "the caller asked for Retain" and refuse
+    # the latter instead of dropping it -- the same silent-drop class this file exists for. The
+    # EFFECTIVE default is unchanged and still Retain; it is applied at the one place that can
+    # act on it, which is asserted below rather than here.
+    assert DeployRequest(**_payload()).data_retention_policy is None
+    assert DeployRequest(**_payload(dataRetentionPolicy="Retain")).data_retention_policy == "Retain"
+
+
+def test_an_omitted_retention_policy_still_generates_a_retaining_template():
+    """The half that actually protects the data: absence must still mean Retain in the YAML.
+
+    Moving the model default to None would be a REGRESSION rather than a refinement if nothing
+    re-applied it downstream -- an omitted field would generate DeletionPolicy: Delete and take
+    the Knowledge Base, Cognito pool and Memory with the first teardown. The generator reads
+    ``request.data_retention_policy or "Retain"``, so this asserts the behaviour a caller depends
+    on (the emitted attribute) rather than the mechanism (the model default) that produces it.
+    """
+    import yaml
+    from app.services.cfn_template_generator import CfnTemplateGenerator
+
+    def _emit(**extra):
+        request = DeployRequest(**_payload(memoryConfig={"enabled": True}, **extra))
+        return yaml.safe_load(CfnTemplateGenerator().generate(request).template_yaml)
+
+    omitted = _emit()
+    explicit_retain = _emit(dataRetentionPolicy="Retain")
+    explicit_delete = _emit(dataRetentionPolicy="Delete")
+
+    memory = "AgentCoreMemory"
+    assert memory in omitted["Resources"], sorted(omitted["Resources"])
+
+    # Absence must be indistinguishable from an explicit Retain in the EMITTED artifact. This is
+    # the assertion that makes the model-level None safe; without it, moving the default silently
+    # turns every omitted-policy export into one whose first teardown destroys the memory.
+    # A retaining export is DeletionPolicy RetainExceptOnCreate + UpdateReplacePolicy Retain: the
+    # data survives every delete and replacement of a stack that once existed, while a CREATE that
+    # rolls back leaves no orphan behind (ARCC cnt_h02wszR9St529D; see _apply_data_retention).
+    retaining = {"DeletionPolicy": "RetainExceptOnCreate", "UpdateReplacePolicy": "Retain"}
+    for attribute, expected in retaining.items():
+        assert omitted["Resources"][memory][attribute] == expected, (
+            f"an omitted dataRetentionPolicy must still emit {attribute}: {expected}"
+        )
+        assert explicit_retain["Resources"][memory][attribute] == expected
+        # And the admitting control: the field is not inert. A suite that only proved "omitted
+        # means Retain" would pass against a generator that hardcoded Retain and ignored the
+        # caller entirely.
+        assert explicit_delete["Resources"][memory][attribute] == "Delete", (
+            f"an explicit dataRetentionPolicy: Delete must reach {attribute}"
+        )
 
 
 def test_the_deploy_panels_duplicate_spelling_of_deployment_mode_still_works():

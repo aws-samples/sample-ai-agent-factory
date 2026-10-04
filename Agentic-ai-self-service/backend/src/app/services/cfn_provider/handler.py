@@ -77,9 +77,11 @@ SUPPORTED_RESOURCE_TYPES below:
 import hashlib
 import io
 import logging
+import os
+import re
 import time
 import zipfile
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import boto3
 import cfn_response  # absolute import — this file is packaged as a flat Lambda zip, not a package
@@ -120,6 +122,10 @@ class ProviderError(Exception):
     """
 
 
+class _AgentCoreTagResourceNotFound(Exception):
+    """Internal signal that a tagged provider vanished before an Update."""
+
+
 def _stack_account_id(event: dict) -> str:
     """The account that owns the stack, from ``StackId``, or "" if unreadable.
 
@@ -142,6 +148,303 @@ def _owner_kwargs(event: dict) -> dict:
     """``{"ExpectedBucketOwner": ...}`` when the account is knowable, else ``{}``."""
     account = _stack_account_id(event)
     return {"ExpectedBucketOwner": account} if account else {}
+
+
+_RESOURCE_TAG_CHAR_PATTERN = re.compile(r"^[a-zA-Z0-9\s._:/=+@-]*$")
+_RESOURCE_TAG_SECRET_TOKENS = frozenset(
+    {
+        "secretvalue",
+        "clientsecret",
+        "apikey",
+        "litellmapikey",
+        "virtualkey",
+        "secret",
+        "password",
+        "passwd",
+        "pwd",
+        "privatekey",
+        "signingkey",
+        "secretkey",
+        "accesskey",
+        "secretaccesskey",
+        "credentials",
+        "connectionstring",
+        "authorization",
+        "proxyauthorization",
+        "xapikey",
+        "xauthtoken",
+        "accesstoken",
+        "refreshtoken",
+        "sessiontoken",
+        "idtoken",
+        "bearertoken",
+        "token",
+    }
+)
+_RESOURCE_TAG_KEY_SEPARATORS = str.maketrans({char: None for char in "_-. "})
+
+
+def _tag_key_designates_credential(key: str) -> bool:
+    candidates = (
+        key,
+        *(key[match.end() :] for match in re.finditer(r"[:/._\-\s]+", key)),
+    )
+    return any(
+        candidate.casefold().translate(_RESOURCE_TAG_KEY_SEPARATORS) in _RESOURCE_TAG_SECRET_TOKENS
+        for candidate in candidates
+        if candidate
+    )
+
+
+def _resource_tags(props: dict) -> dict[str, str]:
+    """Validated governance tags from one custom resource's properties.
+
+    The generator validates these before it emits a template, but this Lambda is also
+    the boundary for hand-edited templates and Terraform callers. Validate again before
+    the first AWS write so a malformed tag cannot leave a partly-created resource.
+    AgentCore's tag character set is the strictest one among the resources below, which
+    gives all four handlers one deterministic contract.
+    """
+    raw = props.get("ResourceTags")
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ProviderError("ResourceTags must be a map of tag keys to string values")
+
+    tags: dict[str, str] = {}
+    for raw_key, raw_value in raw.items():
+        key = str(raw_key)
+        value = "" if raw_value is None else str(raw_value)
+        if not key or len(key) > 128:
+            raise ProviderError(f"resource tag keys must contain 1 to 128 characters; got length {len(key)}")
+        if key.lower().startswith("aws:"):
+            raise ProviderError("resource tag keys must not use the reserved aws: prefix")
+        if _tag_key_designates_credential(key):
+            raise ProviderError(
+                f"resource tag key {key!r} designates credential material; "
+                "credentials must stay in Secrets Manager rather than resource tags"
+            )
+        if len(value) > 256:
+            raise ProviderError(f"resource tag {key!r} has a value longer than 256 characters")
+        if not _RESOURCE_TAG_CHAR_PATTERN.fullmatch(key) or not _RESOURCE_TAG_CHAR_PATTERN.fullmatch(value):
+            raise ProviderError(f"resource tag {key!r} contains characters outside the common AWS tag character set")
+        tags[key] = value
+
+    if len(tags) > 50:
+        raise ProviderError(f"{len(tags)} resource tags were supplied; these resources accept at most 50")
+    return tags
+
+
+def _old_resource_tag_keys(event: dict) -> set[str]:
+    """Keys this custom resource managed before an Update.
+
+    Values are deliberately ignored: they are not needed to remove a stale key and may
+    contain material that must never be inspected or echoed. This parser is also more
+    permissive than ``_resource_tags`` on purpose. If a prior release allowed a key that
+    the current release now forbids (for example ``client-secret``), the secure migration
+    is to remove it, not to make every future Update fail before cleanup can run.
+    """
+    old_props = event.get("OldResourceProperties")
+    if old_props is None:
+        old_props = {}
+    if not isinstance(old_props, dict):
+        raise ProviderError("OldResourceProperties must be a map when supplied")
+    raw = old_props.get("ResourceTags")
+    if raw is None:
+        return set()
+    if not isinstance(raw, dict):
+        raise ProviderError("OldResourceProperties.ResourceTags must be a map when supplied")
+
+    keys: set[str] = set()
+    for raw_key in raw:
+        key = str(raw_key)
+        if not key or len(key) > 128 or key.lower().startswith("aws:") or not _RESOURCE_TAG_CHAR_PATTERN.fullmatch(key):
+            raise ProviderError(
+                "OldResourceProperties.ResourceTags contains a key that cannot be "
+                "reconciled safely; the key is not repeated in stack events"
+            )
+        keys.add(key)
+    return keys
+
+
+def _reconcile_agentcore_tags(
+    ctrl,
+    resource_arn: str,
+    desired: dict[str, str],
+    old_keys: set[str] | None = None,
+) -> None:
+    """Apply our desired AgentCore tags, preserve foreign tags, and verify the result."""
+    stale = sorted((old_keys or set()) - set(desired))
+    if not desired and not stale:
+        return
+    if not resource_arn:
+        raise ProviderError("AgentCore returned no resource ARN, so governance tags cannot be applied safely")
+
+    def read_tags() -> dict[str, str]:
+        try:
+            response = ctrl.list_tags_for_resource(resourceArn=resource_arn)
+        except Exception as e:
+            code = _error_code(e) or type(e).__name__
+            not_found = getattr(getattr(ctrl, "exceptions", None), "ResourceNotFoundException", ())
+            if code == "ResourceNotFoundException" or (not_found and isinstance(e, not_found)):
+                raise _AgentCoreTagResourceNotFound(resource_arn) from e
+            raise ProviderError(
+                f"AgentCore governance tags on {resource_arn} could not be read ({code}); "
+                "the resource was not treated as correctly tagged"
+            ) from e
+        current = response.get("tags", {})
+        if not isinstance(current, dict):
+            raise ProviderError(f"AgentCore returned a non-map tag set for {resource_arn}")
+        return {str(key): "" if value is None else str(value) for key, value in current.items()}
+
+    current = read_tags()
+    to_set = {key: value for key, value in desired.items() if current.get(key) != value}
+    to_remove = [key for key in stale if key in current]
+    new_key_count = sum(key not in current for key in to_set)
+    capacity_needed = max(0, len(current) + new_key_count - 50)
+    if capacity_needed > len(to_remove):
+        raise ProviderError(
+            f"AgentCore governance tags on {resource_arn} cannot converge without "
+            "removing tags this stack does not own; reduce the requested tag set or "
+            "remove unrelated tags from the provider and retry"
+        )
+    remove_first = to_remove[:capacity_needed]
+    remove_after = to_remove[capacity_needed:]
+    try:
+        # At the 50-tag ceiling, a one-for-one key replacement must remove the stale
+        # managed key before adding the new one. Without this ordering the service
+        # rejects a perfectly valid final state as a transient 51st tag.
+        if remove_first:
+            ctrl.untag_resource(resourceArn=resource_arn, tagKeys=remove_first)
+        if to_set:
+            ctrl.tag_resource(resourceArn=resource_arn, tags=to_set)
+        if remove_after:
+            ctrl.untag_resource(resourceArn=resource_arn, tagKeys=remove_after)
+    except Exception as e:
+        # A capacity-safe replacement may have removed a stale key before the write
+        # that failed. Restore this invocation's pre-update view best-effort so a
+        # failed stack update does not leave governance weaker while CloudFormation
+        # schedules its own rollback.
+        try:
+            after_failure = read_tags()
+            introduced = sorted(key for key in desired if key not in current and key in after_failure)
+            if introduced:
+                ctrl.untag_resource(resourceArn=resource_arn, tagKeys=introduced)
+                after_failure = {key: value for key, value in after_failure.items() if key not in introduced}
+            restore = {key: value for key, value in current.items() if after_failure.get(key) != value}
+            if restore:
+                ctrl.tag_resource(resourceArn=resource_arn, tags=restore)
+        except Exception:
+            logger.exception(
+                "Could not restore AgentCore tags after a failed reconciliation on %s",
+                resource_arn,
+            )
+        code = _error_code(e) or type(e).__name__
+        raise ProviderError(
+            f"AgentCore governance tags on {resource_arn} could not be reconciled ({code}); "
+            "the custom resource is failing rather than reporting an untagged success"
+        ) from e
+
+    if to_set or to_remove:
+        current = read_tags()
+    wrong = sorted(key for key, value in desired.items() if current.get(key) != value)
+    present = sorted(key for key in stale if key in current)
+    if wrong or present:
+        raise ProviderError(
+            f"AgentCore did not converge governance tags on {resource_arn}; "
+            f"incorrect or missing keys: {wrong or '(none)'}, stale keys still present: "
+            f"{present or '(none)'}"
+        )
+
+
+def _reconcile_log_group_tags(
+    logs,
+    event: dict,
+    name: str,
+    desired: dict[str, str],
+    old_keys: set[str] | None = None,
+) -> None:
+    """Apply managed log-group tags, preserve foreign tags, and verify convergence."""
+    stale = sorted((old_keys or set()) - set(desired))
+    if not desired and not stale:
+        return
+
+    stack_parts = str(event.get("StackId", "")).split(":")
+    region = str(getattr(getattr(logs, "meta", None), "region_name", "") or "")
+    if len(stack_parts) < 6 or stack_parts[0] != "arn" or not stack_parts[1] or not stack_parts[4] or not region:
+        raise ProviderError(
+            "CloudWatch log-group tags cannot be verified because the stack partition, "
+            "account, or provider region is unavailable"
+        )
+    arn = f"arn:{stack_parts[1]}:logs:{region}:{stack_parts[4]}:log-group:{name}"
+
+    def read_tags() -> dict[str, str]:
+        try:
+            response = logs.list_tags_for_resource(resourceArn=arn)
+        except Exception as e:
+            code = _error_code(e) or type(e).__name__
+            raise ProviderError(
+                f"CloudWatch governance tags on log group {name} could not be read "
+                f"({code}); the group was not treated as correctly tagged"
+            ) from e
+        current = response.get("tags", {})
+        if not isinstance(current, dict):
+            raise ProviderError(f"CloudWatch returned a non-map tag set for log group {name}")
+        return {str(key): "" if value is None else str(value) for key, value in current.items()}
+
+    current = read_tags()
+    to_set = {key: value for key, value in desired.items() if current.get(key) != value}
+    to_remove = [key for key in stale if key in current]
+    new_key_count = sum(key not in current for key in to_set)
+    capacity_needed = max(0, len(current) + new_key_count - 50)
+    if capacity_needed > len(to_remove):
+        raise ProviderError(
+            f"CloudWatch governance tags on log group {name} cannot converge without "
+            "removing tags this stack does not own; reduce the requested tag set or "
+            "remove unrelated tags from the group and retry"
+        )
+    remove_first = to_remove[:capacity_needed]
+    remove_after = to_remove[capacity_needed:]
+
+    try:
+        if remove_first:
+            logs.untag_log_group(logGroupName=name, tags=remove_first)
+        if to_set:
+            logs.tag_log_group(logGroupName=name, tags=to_set)
+        if remove_after:
+            logs.untag_log_group(logGroupName=name, tags=remove_after)
+    except Exception as e:
+        try:
+            after_failure = read_tags()
+            introduced = sorted(key for key in desired if key not in current and key in after_failure)
+            if introduced:
+                logs.untag_log_group(logGroupName=name, tags=introduced)
+                after_failure = {key: value for key, value in after_failure.items() if key not in introduced}
+            restore = {key: value for key, value in current.items() if after_failure.get(key) != value}
+            if restore:
+                logs.tag_log_group(logGroupName=name, tags=restore)
+        except Exception:
+            logger.exception(
+                "Could not restore CloudWatch tags after a failed reconciliation on %s",
+                name,
+            )
+        code = _error_code(e) or type(e).__name__
+        raise ProviderError(
+            f"CloudWatch governance tags on log group {name} could not be reconciled "
+            f"({code}); the custom resource is failing rather than reporting an "
+            "untagged success"
+        ) from e
+
+    if to_set or to_remove:
+        current = read_tags()
+    wrong = sorted(key for key, value in desired.items() if current.get(key) != value)
+    present = sorted(key for key in stale if key in current)
+    if wrong or present:
+        raise ProviderError(
+            f"CloudWatch did not converge governance tags on log group {name}; "
+            f"incorrect or missing keys: {wrong or '(none)'}, stale keys still present: "
+            f"{present or '(none)'}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +579,97 @@ def _verify_bundle_digest(bundle: bytes, expected: str) -> None:
     logger.info("Dependency bundle digest verified: %s", expected)
 
 
+#: The exact Secrets Manager ARN grammar the generator's AllowedPattern enforces on the template parameter. The handler
+#: enforces the SAME grammar itself because a hand-edited or Terraform-embedded template bypasses parameter constraints:
+#: partition arn:aws[...], service secretsmanager, a region token, a 12-digit account, and a `secret:<name>` resource.
+LITELLM_SECRET_ARN_RE = re.compile(
+    r"arn:aws[a-zA-Z-]*:secretsmanager:[a-z0-9-]{1,32}:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]{1,512}"
+)
+
+
+def _verify_litellm_secret_region(props: dict) -> None:
+    """Refuse a LiteLLM key secret that lives in another region.
+
+    Only present on a LiteLLM export. The agent runtime builds its Secrets Manager client
+    from its OWN region -- ``AWS_REGION`` inside the container -- and not from the ARN it
+    was handed, so a stack deployed to region B holding a region-A ARN deploys green and
+    then fails on the first tool call. Measured live against a real secret: the error is
+    ``ResourceNotFoundException: Secrets Manager can't find the specified secret``, which
+    never mentions a region even though the call passed a full ARN naming one. Hours after
+    a successful deploy, that is close to undiagnosable.
+
+    Refused rather than resolved, on purpose, and on guidance rather than on local taste.
+    ARCC guidance on regional isolation (cnt_IMvJNFIFGGpGIU, "[Service Credentials - Single
+    Region Credentials]") requires that any credential used by a service in a region be
+    stored, deployed and used solely for that region. ARCC guidance on secrets management
+    (cnt_LuG2TKuO0errRp) says the same thing from the other side: secrets "must not be
+    shared globally or between regions and partitions... do not create global secrets." So
+    a cross-region read is not a thing to make work.
+
+    This runs here rather than in deploy.sh alone because deploy.sh is not the only
+    consumer: the generated README documents wrapping template.yaml in Terraform's
+    ``aws_cloudformation_stack``, and that path runs no script of ours. The provider does
+    run, on every create and every update, in the stack's own region -- which is why the
+    region to compare against is simply this Lambda's.
+
+    Account is deliberately NOT checked here, and the asymmetry is the point. Cross-region
+    cannot be made to work; cross-account can, once the owning account grants a resource
+    policy on the secret and a key policy on the customer-managed KMS key that encrypts it
+    (ARCC cnt_LuG2TKuO0errRp names exactly those two mechanisms for scoping access to a
+    secret and to a key). An operator who has done that setup is not making a mistake, so
+    failing their stack from inside the template -- the one path Terraform cannot bypass --
+    would break a legitimate configuration. deploy.sh therefore refuses cross-account by
+    default and takes an explicit ``i-accept-cross-account-secret-setup`` acknowledgement to
+    proceed, which is where a policy choice belongs rather than in a correctness check.
+
+    Raised as ProviderError and not as a bare ValueError, which matters more here than it
+    looks: ``_safe_failure_reason`` reduces every other exception class to its name, so a
+    ValueError would reach the operator's stack events as "cfn-provider failed with
+    ValueError" and the entire explanation below would exist only in a Lambda log group they
+    have to go find. The remedy for this failure is a single specific action -- create the
+    secret in the deploy region -- so it has to travel with the failure. It satisfies
+    ProviderError's narrow contract: every part of the message is a literal or a region
+    name, and no part of it came through a request body or a botocore message.
+    """
+    raw = str(props.get("LiteLLMApiKeySecretArn") or "")
+    arn = raw.strip()
+    if not arn:
+        return  # absent or whitespace-only: not a LiteLLM export
+    # exact parity with the template's AllowedPattern: a padded value is refused (CloudFormation would refuse the actual
+    # padded parameter), never silently trimmed into acceptance
+    grammar = LITELLM_SECRET_ARN_RE.fullmatch(arn) if raw == arn else None
+    if grammar is None:
+        # Malformed rather than cross-region. The template's AllowedPattern already
+        # rejects this shape, so reaching here means the pattern changed; say what is
+        # wrong instead of reading an out-of-range element.
+        #
+        # Deliberately WITHOUT echoing the value, unlike every other message in this
+        # module that names a resource id. The likeliest way to arrive here is a virtual
+        # key pasted where its ARN belonged -- the same mistake deploy.sh's own
+        # not-an-ARN branch refuses to echo -- and this string is bound for stack events,
+        # which are readable for 90 days and land in Terraform state. A malformed value is
+        # exactly the value that must not be repeated back.
+        raise ProviderError(
+            "LiteLLMApiKeySecretArn is not a Secrets Manager ARN. Expected "
+            "arn:<partition>:secretsmanager:<region>:<account>:secret:<name> -- the ARN of "
+            "the secret holding the LiteLLM virtual key, not the key itself. The value is "
+            "not repeated here in case it is the key."
+        )
+    arn_region = arn.split(":")[3]  # safe: the grammar above fixed the field layout
+    # The provider Lambda is created by this stack, so its region IS the stack's.
+    own_region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or ""
+    if own_region and arn_region != own_region:
+        raise ProviderError(
+            f"The LiteLLM key secret is in {arn_region} but this stack is deploying to "
+            f"{own_region}. The agent reads the secret from its own region, so this stack "
+            f"would reach CREATE_COMPLETE and then fail on its first tool call with a bare "
+            f"'Secrets Manager can't find the specified secret'. Create the secret in "
+            f"{own_region} and pass its ARN as the LiteLLMApiKeySecretArn parameter. The "
+            f"ARN baked into template.yaml is the one from the environment the bundle was "
+            f"exported from, which is the usual cause."
+        )
+
+
 def _handle_code_package_create_update(event: dict) -> tuple[dict, str]:
     """Handle CREATE/UPDATE for AgentCodePackage."""
     props = event["ResourceProperties"]
@@ -283,6 +677,18 @@ def _handle_code_package_create_update(event: dict) -> tuple[dict, str]:
     agent_code_key = props["AgentCodeKey"]
     bundle_key = props["DependencyBundleKey"]
     output_key = props["OutputKey"]
+
+    # First, before any other helper can grow into a pre-flight side effect and before
+    # a single byte is downloaded or written: a stack that cannot work is better
+    # stopped than packaged.
+    _verify_litellm_secret_region(props)
+
+    resource_tags = _resource_tags(props)
+    if len(resource_tags) > 10:
+        raise ProviderError(
+            f"{len(resource_tags)} resource tags were supplied for the merged code object; "
+            "S3 object tagging accepts at most 10. Remove some tags and retry."
+        )
 
     s3 = boto3.client("s3")
     owner = _owner_kwargs(event)
@@ -306,7 +712,13 @@ def _handle_code_package_create_update(event: dict) -> tuple[dict, str]:
     logger.info("Merged code.zip: %d bytes", len(merged))
 
     logger.info("Uploading to s3://%s/%s", bucket, output_key)
-    s3.put_object(Bucket=bucket, Key=output_key, Body=merged, **owner)
+    s3.put_object(
+        Bucket=bucket,
+        Key=output_key,
+        Body=merged,
+        **({"Tagging": urlencode(sorted(resource_tags.items()))} if resource_tags else {}),
+        **owner,
+    )
 
     physical_id = f"{bucket}/{output_key}"
     return {"CodeZipPrefix": output_key}, physical_id
@@ -596,7 +1008,14 @@ def _existing_provider_client(ctrl, name: str) -> tuple[str, str, str]:
     )
 
 
-def _adopt_existing_provider(ctrl, name: str, discovery_url: str, client_id: str, client_secret: str) -> str:
+def _adopt_existing_provider(
+    ctrl,
+    name: str,
+    discovery_url: str,
+    client_id: str,
+    client_secret: str,
+    resource_tags: dict[str, str],
+) -> str:
     """Take over a same-named provider only when it is demonstrably this stack's.
 
     Create used to answer "already exists" by fetching the ARN and adopting the
@@ -630,10 +1049,13 @@ def _adopt_existing_provider(ctrl, name: str, discovery_url: str, client_id: str
             f"'aws bedrock-agentcore-control delete-oauth2-credential-provider --name {name}', or "
             "deploy this stack with a different DeploymentName."
         )
+    # The client-id check above is the ownership proof. Only after it passes may this
+    # handler write tags to an existing provider; a matching name alone is not authority.
+    _reconcile_agentcore_tags(ctrl, arn, resource_tags)
     logger.info(
-        "Credential provider %s already exists for this stack's OAuth client; updating it in place",
+        "OAuth2 provider %s already exists for this stack's client; updating it in place",
         name,
-    )  # nosemgrep: python-logger-credential-disclosure -- logs resource name, not secret
+    )
     resp = ctrl.update_oauth2_credential_provider(
         name=name,
         credentialProviderVendor="CustomOauth2",
@@ -645,6 +1067,7 @@ def _adopt_existing_provider(ctrl, name: str, discovery_url: str, client_id: str
 def _handle_oauth2_cred_create(event: dict) -> tuple[dict, str]:
     """Create an OAuth2 credential provider via bedrock-agentcore-control API."""
     props = event["ResourceProperties"]
+    resource_tags = _resource_tags(props)
     name = props["ProviderName"]
     discovery_url = props["DiscoveryUrl"]
     client_id = props["ClientId"]
@@ -652,26 +1075,63 @@ def _handle_oauth2_cred_create(event: dict) -> tuple[dict, str]:
 
     ctrl = _get_agentcore_ctrl()
 
-    logger.info(
-        "Creating OAuth2 credential provider: %s", name
-    )  # nosemgrep: python-logger-credential-disclosure -- logs resource name, not secret
+    logger.info("Creating OAuth2 provider resource: %s", name)
+    created_here = False
     try:
         resp = ctrl.create_oauth2_credential_provider(
             name=name,
             credentialProviderVendor="CustomOauth2",
             oauth2ProviderConfigInput=_provider_config(discovery_url, client_id, client_secret),
+            **({"tags": resource_tags} if resource_tags else {}),
         )
+        created_here = True
         cred_arn = resp.get("credentialProviderArn", "")
     except ctrl.exceptions.ValidationException as e:
         if "already exists" not in str(e):
             raise
-        cred_arn = _adopt_existing_provider(ctrl, name, discovery_url, client_id, client_secret)
-    logger.info(
-        "Created OAuth2 credential provider: %s", cred_arn
-    )  # nosemgrep: python-logger-credential-disclosure -- logs resource ARN, not secret
+        cred_arn = _adopt_existing_provider(
+            ctrl,
+            name,
+            discovery_url,
+            client_id,
+            client_secret,
+            resource_tags,
+        )
+    logger.info("Created OAuth2 provider resource: %s", cred_arn)
 
-    # Wait a few seconds for IAM propagation
-    time.sleep(5)
+    try:
+        # Wait a few seconds for IAM propagation
+        time.sleep(5)
+        # Create accepts tags atomically, and the read-back is the oracle that catches a
+        # service or permission regression instead of returning CREATE_COMPLETE untagged.
+        _reconcile_agentcore_tags(ctrl, cred_arn, resource_tags)
+    except Exception as verify_error:
+        if created_here:
+            # A FAILED Create response cannot carry the ARN returned above through this
+            # function, so CloudFormation's rollback Delete would receive only the
+            # logical id and could not find the provider. Remove what this invocation
+            # just created before reporting the failed governance control.
+            try:
+                ctrl.delete_oauth2_credential_provider(name=name)
+                logger.info(
+                    "Deleted newly-created OAuth2 provider %s after tag verification failed",
+                    name,
+                )
+            except Exception as cleanup_error:
+                cleanup_code = _error_code(cleanup_error) or type(cleanup_error).__name__
+                if cleanup_code not in ("ResourceNotFoundException", "ValidationException"):
+                    raise ProviderError(
+                        f"OAuth2 provider {name} tag verification failed and its "
+                        f"compensating delete also failed ({cleanup_code}); remove the "
+                        "provider before retrying the stack"
+                    ) from verify_error
+        if isinstance(verify_error, _AgentCoreTagResourceNotFound):
+            raise ProviderError(
+                f"OAuth2 provider {name} could not be read back after creation, so the "
+                "custom resource removed it and failed instead of reporting an "
+                "unverified success"
+            ) from verify_error
+        raise
 
     data = {"CredentialProviderArn": cred_arn}
     data.update(_mcp_endpoint_data(props.get("RuntimeArn", "")))
@@ -699,14 +1159,64 @@ def _handle_oauth2_cred_update(event: dict) -> tuple[dict, str]:
 
     Falls back to create only when the provider is genuinely absent — someone removed
     it out of band — rather than treating every update failure as a reason to create.
+
+    AND IT MUST ONLY EVER UPDATE THE PROVIDER **THIS RESOURCE** CREATED. Create refuses
+    to take over a same-named provider bound to a different OAuth client
+    (``_adopt_existing_provider``); Update had no such check, so the two disagreed and
+    the weaker one was reachable from the stronger one's own resource. Change
+    ``ProviderName`` in the template to a name another deployment is using and
+    CloudFormation sends an Update — whereupon this handler overwrote that provider's
+    client id, discovery URL and secret with ours. The victim's gateway target then
+    mints tokens against our Cognito pool, and because the returned PhysicalResourceId
+    became the victim's ARN, our eventual stack Delete deleted *their* provider.
+
+    The PhysicalResourceId is the authority on what this resource owns: CloudFormation
+    assigned it from our own Create. A requested name that does not match the name
+    inside it is not an in-place update at all, it is a rename — which CloudFormation
+    already models as a REPLACEMENT — so it routes to Create, which performs the
+    ownership check and refuses a foreign provider by name.
+
+    The check is deliberately on the name and not on the client id: a legitimate
+    redeploy recreates the Cognito app client, so the client id DOES change on an
+    honest rotation, and requiring it to match would reject exactly the case this
+    handler exists to serve. Ownership comes from the physical id; the client id is
+    only the discriminator Create has to fall back on, because Create has no physical
+    id yet.
     """
     props = event["ResourceProperties"]
+    resource_tags = _resource_tags(props)
+    old_tag_keys = _old_resource_tag_keys(event)
     name = props["ProviderName"]
     discovery_url = props["DiscoveryUrl"]
     client_id = props["ClientId"]
+
+    physical_id = event.get("PhysicalResourceId", "")
+    owned_name = physical_id.rsplit("/", 1)[-1] if physical_id.startswith("arn:") else ""
+    if owned_name != name:
+        # Either the name changed (a replacement) or there is no owned ARN to compare
+        # against at all. Both mean "we cannot prove this resource owns the provider
+        # called *name*", and the only safe answer to that is the Create path, which
+        # creates it if absent and otherwise refuses anything bound to a different
+        # OAuth client. An unproven update is the takeover; an unproven create is not.
+        logger.info(
+            "Update names provider %s but this resource owns %s; routing to create so "
+            "ownership is checked instead of overwriting a provider we may not own",
+            name,
+            owned_name or "(no ARN)",
+        )
+        return _handle_oauth2_cred_create(event)
+
     client_secret = _resolve_client_secret(props)
 
     ctrl = _get_agentcore_ctrl()
+    try:
+        _reconcile_agentcore_tags(ctrl, physical_id, resource_tags, old_tag_keys)
+    except _AgentCoreTagResourceNotFound:
+        # The pre-tagging implementation reached Update first and recreated a provider
+        # that had been removed out of band. Tag reconciliation reads before writing;
+        # without this branch, adding tags accidentally removed that recovery path.
+        logger.info("OAuth2 provider %s no longer exists; creating it", name)
+        return _handle_oauth2_cred_create(event)
     try:
         resp = ctrl.update_oauth2_credential_provider(
             name=name,
@@ -718,15 +1228,11 @@ def _handle_oauth2_cred_update(event: dict) -> tuple[dict, str]:
             e, ctrl.exceptions.ResourceNotFoundException
         ):
             raise
-        logger.info(
-            "Credential provider %s no longer exists; creating it", name
-        )  # nosemgrep: python-logger-credential-disclosure -- logs resource name, not secret
+        logger.info("OAuth2 provider %s no longer exists; creating it", name)
         return _handle_oauth2_cred_create(event)
 
     cred_arn = resp.get("credentialProviderArn", "") or event.get("PhysicalResourceId", "")
-    logger.info(
-        "Updated OAuth2 credential provider: %s", cred_arn
-    )  # nosemgrep: python-logger-credential-disclosure -- logs resource ARN, not secret
+    logger.info("Updated OAuth2 provider resource: %s", cred_arn)
 
     # IAM/secret propagation, same reason as the create path.
     time.sleep(5)
@@ -761,18 +1267,16 @@ def _delete_oauth2_cred(cred_arn: str) -> None:
     cred_name = cred_arn.rsplit("/", 1)[-1] if "/" in cred_arn else cred_arn
     try:
         ctrl.delete_oauth2_credential_provider(name=cred_name)
-        logger.info(
-            "Deleted OAuth2 credential provider: %s", cred_arn
-        )  # nosemgrep: python-logger-credential-disclosure -- logs resource ARN, not secret
+        logger.info("Deleted OAuth2 provider resource: %s", cred_arn)
     except Exception as e:
         code = _error_code(e)
         if code in _BENIGN_DELETE_CODES:
-            logger.info("Credential provider %s is already gone (%s)", cred_name, code)
+            logger.info("OAuth2 provider %s is already gone (%s)", cred_name, code)
             return
         # type(e).__name__ and the AWS error code only. str(e) is a botocore message
         # built from the request, and the create/update requests for this resource
         # carry a Cognito app client secret — see _safe_failure_reason.
-        logger.error("Failed to delete credential provider %s: %s %s", cred_name, type(e).__name__, code)
+        logger.error("Failed to delete OAuth2 provider %s: %s %s", cred_name, type(e).__name__, code)
         raise ProviderError(
             f"the OAuth2 credential provider {cred_name} could not be deleted ({code or type(e).__name__}), "
             "so it still exists. Delete it with 'aws bedrock-agentcore-control "
@@ -830,7 +1334,7 @@ def _deadline(context, reserve_seconds: float = 45.0) -> float:
     try:
         remaining = context.get_remaining_time_in_millis() / 1000.0
     except Exception:  # no context: a local invocation or a test stub
-        pass
+        remaining = 300.0
     return time.monotonic() + max(remaining - reserve_seconds, 0.0)
 
 
@@ -908,6 +1412,46 @@ def _policy_status(ctrl, engine_id: str, policy_id: str):
         logger.info("get_policy(%s) not readable yet: %s: %s", policy_id, type(e).__name__, e)
         return "", []
     return resp.get("status", ""), list(resp.get("statusReasons") or [])
+
+
+_MAX_POLICY_PAGES = 100
+
+
+def _find_policy_by_name(ctrl, engine_id: str, name: str) -> dict | None:
+    """Find one policy by name without truncating or looping on malformed pages.
+
+    This provider is packaged as a flat, standalone Lambda zip, so it cannot import
+    the application's shared pagination helper. Keep the same fail-closed guarantees
+    locally: validate the collection and token, reject token cycles, and put an upper
+    bound on a service response that never terminates.
+    """
+    token: str | None = None
+    seen_tokens: set[str] = set()
+    for _ in range(_MAX_POLICY_PAGES):
+        kwargs = {"policyEngineId": engine_id, "maxResults": 100}
+        if token:
+            kwargs["nextToken"] = token
+        resp = ctrl.list_policies(**kwargs)
+        policies = resp.get("policies")
+        if policies is None:
+            policies = resp.get("policySummaries", [])
+        if not isinstance(policies, list):
+            raise ProviderError("list_policies returned a non-list policy collection")
+        for policy in policies:
+            if policy.get("name") == name:
+                return policy
+
+        candidate = resp.get("nextToken")
+        if candidate in (None, ""):
+            return None
+        if not isinstance(candidate, str):
+            raise ProviderError("list_policies returned a non-string nextToken")
+        if candidate in seen_tokens:
+            raise ProviderError(f"list_policies repeated pagination token {candidate!r}")
+        seen_tokens.add(candidate)
+        token = candidate
+
+    raise ProviderError(f"list_policies exceeded {_MAX_POLICY_PAGES} pages while looking for {name!r}")
 
 
 def _await_policy_gone(ctrl, engine_id: str, name: str, deadline: float, poll_seconds: float = 5.0) -> None:
@@ -1080,35 +1624,23 @@ def _handle_policy_create_update(event: dict, context) -> tuple[dict, str]:
     policy_id = ""
     reusable = False
     try:
-        next_token = None
-        for _ in range(10):
-            kw = {"policyEngineId": engine_id}
-            if next_token:
-                kw["nextToken"] = next_token
-            resp = ctrl.list_policies(**kw)
-            for p in resp.get("policies", resp.get("policySummaries", [])):
-                if p.get("name") != name:
-                    continue
-                policy_id = p.get("policyId") or p.get("id") or ""
-                status = p.get("status", "")
-                if status in ("DELETING", "DELETED"):
-                    # Going away on its own. Neither update nor create works while
-                    # it is mid-delete, so wait for the name to free up and create.
-                    logger.warning("policy %s is %s; waiting for it to go before creating", name, status)
-                    _await_policy_gone(ctrl, engine_id, name, deadline)
-                    policy_id = ""
-                    break
-                reusable = bool(policy_id)
-                if reusable and _is_failed_status(status):
-                    logger.warning(
-                        "policy %s exists in status %s; updating it in place to recover it",
-                        name,
-                        status or "unknown",
-                    )
-                break
-            if policy_id or not resp.get("nextToken"):
-                break
-            next_token = resp.get("nextToken")
+        existing = _find_policy_by_name(ctrl, engine_id, name)
+        if existing:
+            policy_id = existing.get("policyId") or existing.get("id") or ""
+            status = existing.get("status", "")
+            if status in ("DELETING", "DELETED"):
+                # Going away on its own. Neither update nor create works while
+                # it is mid-delete, so wait for the name to free up and create.
+                logger.warning("policy %s is %s; waiting for it to go before creating", name, status)
+                _await_policy_gone(ctrl, engine_id, name, deadline)
+                policy_id = ""
+            reusable = bool(policy_id)
+            if reusable and _is_failed_status(status):
+                logger.warning(
+                    "policy %s exists in status %s; updating it in place to recover it",
+                    name,
+                    status or "unknown",
+                )
     except ProviderError:
         # Raised by _await_policy_gone. Not an unreadable-list problem, so it must
         # not be swallowed into "will create" — that create would only Conflict.
@@ -1194,19 +1726,10 @@ def _find_policy_id_by_name(ctrl, engine_id: str, name: str) -> str:
     it at the PolicyEngine the same stack creates, so the search is confined to this
     stack's engine.
     """
-    next_token = None
-    for _ in range(10):
-        kw = {"policyEngineId": engine_id}
-        if next_token:
-            kw["nextToken"] = next_token
-        resp = ctrl.list_policies(**kw)
-        for p in resp.get("policies", resp.get("policySummaries", [])):
-            if p.get("name") == name:
-                return p.get("policyId") or p.get("id") or ""
-        next_token = resp.get("nextToken")
-        if not next_token:
-            break
-    return ""
+    policy = _find_policy_by_name(ctrl, engine_id, name)
+    if not policy:
+        return ""
+    return policy.get("policyId") or policy.get("id") or ""
 
 
 def _handle_policy_delete(event: dict) -> tuple[dict, str]:
@@ -1318,7 +1841,15 @@ def _logs_kms_denied(logs, name: str, key_arn: str, code: str) -> ProviderError:
     )
 
 
-def _apply_log_group_governance(logs, name: str, retention: int, key_arn: str) -> None:
+def _apply_log_group_governance(
+    logs,
+    event: dict,
+    name: str,
+    retention: int,
+    key_arn: str,
+    resource_tags: dict[str, str],
+    old_tag_keys: set[str],
+) -> None:
     """Bring one log group to *retention* and *key_arn*, creating it if it is absent.
 
     Create-first, then fall back to adopting what is there. That order is deliberate:
@@ -1331,16 +1862,30 @@ def _apply_log_group_governance(logs, name: str, retention: int, key_arn: str) -
     create_kwargs = {"logGroupName": name}
     if key_arn:
         create_kwargs["kmsKeyId"] = key_arn
+    if resource_tags:
+        # Tags on CreateLogGroup are atomic with creation. Do not retry without
+        # them: an untagged group would make a failed governance control look green.
+        create_kwargs["tags"] = resource_tags
 
     try:
         logs.create_log_group(**create_kwargs)
         logger.info("created log group %s (retention %s, key %s)", name, retention, key_arn or "aws-owned")
+        if resource_tags:
+            # CreateLogGroup accepts tags atomically. A read-back turns that documented
+            # contract into an observed postcondition and catches a missing IAM grant or
+            # service regression before retention/encryption changes make the operation
+            # look otherwise successful.
+            _reconcile_log_group_tags(logs, event, name, resource_tags)
     except ClientError as e:
         code = _error_code(e)
         if code == "AccessDeniedException" and key_arn:
             raise _logs_kms_denied(logs, name, key_arn, code) from e
         if code != "ResourceAlreadyExistsException":
             raise
+        # The runtime normally creates the group first. Reconcile its tags before
+        # changing retention or encryption so a denied tag write leaves those other
+        # settings untouched and the stack failure points at the first unmet control.
+        _reconcile_log_group_tags(logs, event, name, resource_tags, old_tag_keys)
         # The expected path: the runtime already made the group, so the key has to be
         # applied to it separately.
         #
@@ -1389,53 +1934,348 @@ def _apply_log_group_governance(logs, name: str, retention: int, key_arn: str) -
     logger.info("log group %s governed: retention %s, key %s", name, retention or "never", key_arn or "aws-owned")
 
 
+SWEEP_BUDGET_SECONDS = int(os.environ.get("RUNTIME_LOG_GROUP_SWEEP_BUDGET_SECONDS", "240"))
+SWEEP_QUIESCENCE_SECONDS = int(os.environ.get("RUNTIME_LOG_GROUP_SWEEP_QUIESCENCE_SECONDS", "20"))
+
+
+def _is_sweeper(props: dict) -> bool:
+    return str(props.get("Mode", "")).strip().lower() == "sweeper"
+
+
+def _stack_name_and_digest(event: dict) -> tuple[str, str]:
+    """(stack name, 16-hex digest of the full StackId ARN). The digest keeps a same-name
+    redeploy apart from a retained predecessor's ledger entries."""
+    stack_id = str(event.get("StackId") or "")
+    name = stack_id.split("/")[1] if stack_id.count("/") >= 2 else stack_id
+    return name, hashlib.sha256(stack_id.encode("utf-8")).hexdigest()[:16]
+
+
+def _ledger_prefix(event: dict, props: dict) -> str:
+    name, digest = _stack_name_and_digest(event)
+    return f"/agentcore-cfn/{name}/{digest}/{props.get('RuntimeLogicalId', '')}/{props.get('Generation', '')}/groups"
+
+
+def _ledger_add(ssm, prefix: str, names: list[str]) -> None:
+    """One parameter per group, so parallel governance resources never race on a shared
+    document. Fail closed: a ledger the sweeper cannot read later is how residue comes back."""
+    for name in names:
+        try:
+            ssm.put_parameter(
+                Name=f"{prefix}/{hashlib.sha256(name.encode('utf-8')).hexdigest()[:16]}",
+                Type="String",
+                Overwrite=True,
+                Value=name,
+            )
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            raise ProviderError(
+                f"could not record runtime log group {name} in the ledger under {prefix} ({code}); "
+                "the sweeper would miss it"
+            ) from exc
+
+
+def _ledger_entries(ssm, prefix: str) -> list[tuple[str, str]]:
+    """[(parameter name, log group name)] under *prefix*, all pages."""
+    out: list[tuple[str, str]] = []
+    token = None
+    while True:
+        kwargs = {"Path": prefix, "Recursive": True}
+        if token:
+            kwargs["NextToken"] = token
+        page = ssm.get_parameters_by_path(**kwargs)
+        out.extend((p["Name"], p["Value"]) for p in page.get("Parameters", []))
+        token = page.get("NextToken")
+        if not token:
+            return out
+
+
 def _handle_runtime_log_group_create_update(event: dict) -> tuple[dict, str]:
     props = event.get("ResourceProperties", {})
+    if _is_sweeper(props):
+        # Nothing exists yet when the sweeper is created (the runtime depends on it);
+        # its only work is on Delete, after the runtime is gone.
+        return {}, _runtime_log_group_physical_id(event)
+    resource_tags = _resource_tags(props)
+    old_tag_keys = _old_resource_tag_keys(event)
     names = _governed_log_group_names(props)
     retention = _retention_days(props)
     key_arn = str(props.get("KmsKeyArn", "") or "").strip()
 
     logs = boto3.client("logs")
     for name in names:
-        _apply_log_group_governance(logs, name, retention, key_arn)
+        _apply_log_group_governance(
+            logs,
+            event,
+            name,
+            retention,
+            key_arn,
+            resource_tags,
+            old_tag_keys,
+        )
 
     if not names:
         logger.warning("no log group names to govern for %s", event.get("LogicalResourceId", ""))
+    if names and props.get("Generation"):
+        _ledger_add(boto3.client("ssm"), _ledger_prefix(event, props), names)
 
     return {"LogGroupNames": ",".join(names)}, _runtime_log_group_physical_id(event)
 
 
 def _runtime_log_group_physical_id(event: dict) -> str:
-    """A physical id that never changes, so an update is never a replacement.
+    """The physical id encodes WHICH group this resource governs, so a changed group is a
+    replacement and an unchanged one never is.
 
-    If this returned a different id on an update, CloudFormation would follow up with
-    a Delete for the old one. The Delete below is a no-op, so nothing would break
-    today — but the id is what the next reader would reasonably use to name the
-    groups, and an id that changes is how a future Delete-that-does-something ends up
-    deleting the log groups of the resource that just replaced it.
+    One resource governs one log group (the generator emits one per endpoint plus
+    ``-DEFAULT``). The id is derived from the governed name, so:
+
+    * Create: ``runtime-log-group/<sha256(name)[:16]>``. Two resources for two groups
+      get two ids; the same group always gets the same id.
+    * Update with the same name: the same id, so CloudFormation sees no replacement.
+    * Update where the resolved name changed (the runtime was replaced, or an endpoint
+      renamed): a NEW id. CloudFormation then treats it as a replacement and, after the
+      update has stabilized, sends Delete for the OLD resource -- honoured or skipped by
+      its ``UpdateReplacePolicy`` -- while a failed update's rollback deletes the new
+      resource and keeps the old group. That is the only way ``UpdateReplacePolicy``
+      can mean anything for groups the service names after the runtime id.
+    * Legacy resources (``runtime-log-groups/<LogicalId>``, from templates that governed
+      every group with one resource) keep their id on Update, whatever the names now
+      are: replacing them would make CloudFormation Delete the old resource, and that
+      Delete now really deletes -- the groups of a runtime that is still running.
     """
-    return event.get("PhysicalResourceId") or f"runtime-log-groups/{event.get('LogicalResourceId', '')}"
+    existing = str(event.get("PhysicalResourceId") or "")
+    props = event.get("ResourceProperties", {})
+    if _is_sweeper(props):
+        # Generation-specific: a changed AgentRuntimeName replaces the sweeper, so the old
+        # one is deleted after the old runtime and sweeps the old runtime's groups.
+        return f"runtime-log-group-sweeper/{props.get('RuntimeLogicalId') or event.get('LogicalResourceId', '')}/{props.get('Generation', '')}"
+    if existing.startswith("runtime-log-groups/"):
+        return existing
+    names = _governed_log_group_names(event.get("ResourceProperties", {}))
+    if len(names) == 1:
+        return "runtime-log-group/" + hashlib.sha256(names[0].encode("utf-8")).hexdigest()[:16]
+    # No single governed name (nothing recorded, or a legacy multi-group shape): fall
+    # back to the stable per-logical-id form so nothing is ever replaced by accident.
+    return existing or f"runtime-log-groups/{event.get('LogicalResourceId', '')}"
 
 
 def _handle_runtime_log_group_delete(event: dict) -> tuple[dict, str]:
-    """Deliberately a no-op: a stack deletion must not delete the agent's logs.
+    """Delete the runtime's governed log groups -- but ONLY when CloudFormation asks.
 
-    The groups belong to the runtime, not to this resource — it only sets two
-    properties on them — and they hold the record of what the agent was asked and
-    what it answered. Per ARCC cnt_bO6I1SM60fP0J4 security-relevant logs are retained
-    for years, and an incident investigation that starts after a teardown is exactly
-    when they are needed. Whatever retention was last applied still expires them on
-    schedule; the recipient can delete them explicitly if they want them gone sooner.
+    The generator stamps this resource with ``DeletionPolicy: RetainExceptOnCreate``
+    (Retain mode) or ``Delete`` (Delete mode), so CloudFormation sends Delete in exactly
+    two cases: the rollback of the stack operation that CREATED the runtime -- the groups
+    this resource pre-created for a runtime that is itself being rolled back -- and a
+    deliberate Delete-mode teardown. A retained stack's deletion SKIPS this resource
+    (DELETE_SKIPPED), so the record of what a real agent was asked and what it answered
+    is kept for as long as its retention says (ARCC cnt_bO6I1SM60fP0J4: security-relevant
+    logs are retained for years, and an investigation that starts after a teardown is
+    exactly when they are needed). Before this, Delete was an unconditional no-op, so a
+    failed first create left every pre-created group behind, and a replaced runtime under
+    Delete orphaned the old runtime's groups.
+
+    Deletion is verified, not assumed: the role deliberately has no DescribeLogGroups, so
+    a second DeleteLogGroup must answer ResourceNotFoundException. Anything else -- a
+    group that survives, an AccessDenied -- fails the resource with the remedy in the
+    message rather than reporting a success that did not happen.
     """
-    names = _governed_log_group_names(event.get("ResourceProperties", {}))
+    props = event.get("ResourceProperties", {})
+    if _is_sweeper(props):
+        return _sweep_runtime_log_groups(event, props)
+    names = _governed_log_group_names(props)
+    if not names:
+        # A rollback of a failed Create sends Delete with whatever properties it had;
+        # nothing recorded means nothing to remove, and no client is built at all.
+        logger.info(
+            "Delete for %s: no log group names recorded; nothing to remove.", event.get("LogicalResourceId", "")
+        )
+        return {}, _runtime_log_group_physical_id(event)
+    logs = boto3.client("logs")
+    removed: list[str] = []
+    absent: list[str] = []
+    for name in names:
+        remedy = f"aws logs delete-log-group --log-group-name {name}"
+        try:
+            logs.delete_log_group(logGroupName=name)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code == "ResourceNotFoundException":
+                absent.append(name)
+                continue
+            raise ProviderError(
+                f"could not delete runtime log group {name} ({code}); it will survive this "
+                f"rollback/teardown as residue. Remedy once the cause is fixed: {remedy}"
+            ) from exc
+        try:
+            logs.delete_log_group(logGroupName=name)
+        except ClientError as exc:
+            verify_code = exc.response.get("Error", {}).get("Code", "")
+            if verify_code == "ResourceNotFoundException":
+                removed.append(name)
+                continue
+            raise ProviderError(
+                f"could not verify deletion of runtime log group {name} ({verify_code}). Remedy: {remedy}"
+            ) from exc
+        raise ProviderError(
+            f"runtime log group {name} still exists after DeleteLogGroup; refusing to report a "
+            f"deletion that did not happen. Remedy: {remedy}"
+        )
     logger.info(
-        "Delete for %s: leaving log group(s) %s in place, including their retention and "
-        "encryption settings. This resource governs the runtime's own log groups and never "
-        "deletes them; delete them explicitly if they are no longer wanted.",
+        "Delete for %s: removed runtime log group(s) %s; already absent: %s. This runs only on the "
+        "rollback of the creating operation or a Delete-mode teardown -- a retained stack's "
+        "deletion skips this resource.",
         event.get("LogicalResourceId", ""),
-        ", ".join(names) or "(none recorded)",
+        ", ".join(removed) or "(none)",
+        ", ".join(absent) or "(none)",
     )
-    return {}, _runtime_log_group_physical_id(event)
+    return {
+        "LogGroupNames": ",".join(names),
+        "DeletedLogGroups": ",".join(removed),
+        "AlreadyAbsent": ",".join(absent),
+    }, _runtime_log_group_physical_id(event)
+
+
+def _sweep_runtime_log_groups(event: dict, props: dict) -> tuple[dict, str]:
+    """Runs LAST in a stack delete (the runtime depended on this resource), i.e. after
+    AgentCore has stopped. Sources of truth, in order:
+
+    1. This generation's ledger entries (one SSM parameter per group, written by the
+       per-group resources as they governed).
+    2. If there are none: CloudFormation's own record of the runtime resource. A runtime
+       can create its groups and the stack can fail before any governance resource ran,
+       so an empty ledger is NOT proof. The recovered id must carry THIS generation's
+       AgentRuntimeName (ids are "<name>-<suffix>"); otherwise -- a replacement whose old
+       generation recorded nothing, say -- we refuse rather than sweep another runtime's
+       groups. If CloudFormation has no physical id for the runtime, none was created and
+       no group can exist.
+
+    Then delete each group, wait, and re-check until nothing comes back within the
+    budget; finally remove the ledger entries. CloudFormation only sends this Delete
+    under Delete or on a failed first create.
+    """
+    physical = _runtime_log_group_physical_id(event)
+    prefix = _ledger_prefix(event, props)
+    ssm = boto3.client("ssm")
+    try:
+        entries = _ledger_entries(ssm, prefix)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        raise ProviderError(
+            f"could not read the runtime log-group ledger under {prefix} ({code}); refusing to report a clean sweep"
+        ) from exc
+    names = sorted({value for _n, value in entries})
+    source = "ledger"
+    logs = boto3.client("logs")
+    if not names:
+        source = "cloudformation"
+        runtime_id = _runtime_id_from_stack(event, props)
+        if runtime_id is None:
+            logger.info(
+                "sweeper %s: no ledger entries and CloudFormation records no runtime; nothing can exist",
+                event.get("LogicalResourceId", ""),
+            )
+            return {"SweptLogGroups": "", "Source": "none"}, physical
+        names = _list_runtime_log_groups(logs, runtime_id)
+    swept: list[str] = []
+    deadline = time.monotonic() + SWEEP_BUDGET_SECONDS
+    for name in names:
+        remedy = f"aws logs delete-log-group --log-group-name {name}"
+        while True:
+            try:
+                logs.delete_log_group(logGroupName=name)
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code != "ResourceNotFoundException":
+                    raise ProviderError(
+                        f"could not delete runtime log group {name} ({code}). Remedy: {remedy}"
+                    ) from exc
+            # quiescence: wait, then confirm it stayed gone. A successful delete on the
+            # re-check means the service recreated it -- loop while the budget allows.
+            time.sleep(SWEEP_QUIESCENCE_SECONDS)
+            try:
+                logs.delete_log_group(logGroupName=name)
+                recreated = True
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code != "ResourceNotFoundException":
+                    raise ProviderError(
+                        f"could not verify runtime log group {name} stayed deleted ({code}). Remedy: {remedy}"
+                    ) from exc
+                recreated = False
+            if not recreated:
+                swept.append(name)
+                break
+            if time.monotonic() > deadline:
+                raise ProviderError(
+                    f"runtime log group {name} keeps being recreated after deletion ({SWEEP_BUDGET_SECONDS}s budget); "
+                    f"refusing to report a clean sweep. Remedy once the runtime is fully gone: {remedy}"
+                )
+    param_names = [n for n, _v in entries]
+    for i in range(0, len(param_names), 10):
+        try:
+            ssm.delete_parameters(Names=param_names[i : i + 10])
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            raise ProviderError(
+                f"swept the log groups but could not delete ledger entries under {prefix} ({code}); remove them with aws ssm delete-parameters"
+            ) from exc
+    logger.info(
+        "sweeper %s: swept %s (source: %s) and removed %d ledger entries",
+        event.get("LogicalResourceId", ""),
+        ", ".join(swept) or "(none)",
+        source,
+        len(param_names),
+    )
+    return {"SweptLogGroups": ",".join(swept), "Source": source}, physical
+
+
+def _runtime_id_from_stack(event: dict, props: dict) -> str | None:
+    """The runtime's physical id as CloudFormation recorded it, or None if it never had
+    one. Refuses (ProviderError) unless the id carries this generation's AgentRuntimeName."""
+    cfn = boto3.client("cloudformation")
+    logical = str(props.get("RuntimeLogicalId") or "")
+    try:
+        detail = cfn.describe_stack_resource(StackName=event.get("StackId", ""), LogicalResourceId=logical)[
+            "StackResourceDetail"
+        ]
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        message = str(exc.response.get("Error", {}).get("Message", ""))
+        if code == "ValidationError" and "does not exist" in message:
+            return None
+        raise ProviderError(
+            f"could not read the runtime resource {logical} from this stack ({code}); refusing to report a clean sweep"
+        ) from exc
+    runtime_id = str(detail.get("PhysicalResourceId") or "")
+    if not runtime_id or runtime_id == logical:
+        return None
+    expected_name = str(props.get("AgentRuntimeName") or "")
+    if not expected_name or not runtime_id.startswith(f"{expected_name}-"):
+        raise ProviderError(
+            f"the stack's runtime id {runtime_id} does not belong to this sweeper's generation ({expected_name}); "
+            "refusing to sweep another runtime's log groups"
+        )
+    return runtime_id
+
+
+def _list_runtime_log_groups(logs, runtime_id: str) -> list[str]:
+    prefix = f"/aws/bedrock-agentcore/runtimes/{runtime_id}-"
+    names: list[str] = []
+    token = None
+    while True:
+        kwargs = {"logGroupNamePrefix": prefix}
+        if token:
+            kwargs["nextToken"] = token
+        try:
+            page = logs.describe_log_groups(**kwargs)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            raise ProviderError(
+                f"could not list runtime log groups under {prefix} ({code}); refusing to report a clean sweep"
+            ) from exc
+        names.extend(g["logGroupName"] for g in page.get("logGroups", []))
+        token = page.get("nextToken")
+        if not token:
+            return sorted(names)
 
 
 # ---------------------------------------------------------------------------
@@ -1508,16 +2348,20 @@ def _raise_if_undelivered(event: dict, delivered: bool, status: str, request_typ
     (the policy write adopts a leftover, a delete treats "already gone" as
     success, and a code package re-uploads the same key).
 
-    A ResponseURL that is missing or not https is the one case not worth
-    retrying: it cannot start working on the second attempt, so the work would
-    simply be repeated twice for nothing.
+    A ResponseURL that is missing or not a CloudFormation-issued S3 URL is the
+    one case not worth retrying: it cannot start working on the second attempt,
+    so the work would simply be repeated twice for nothing.
     """
     if delivered:
         return
 
-    if not event.get("ResponseURL", "").startswith("https://"):
+    if not cfn_response.is_usable_response_url(
+        event.get("ResponseURL", ""),
+        event.get("StackId", ""),
+    ):
         logger.error(
-            "%s %s finished (%s) but the event carries no usable https ResponseURL, "
+            "%s %s finished (%s) but the event carries no usable CloudFormation "
+            "S3 ResponseURL, "
             "so CloudFormation cannot be signalled at all and a retry would not help.",
             request_type,
             logical_id,

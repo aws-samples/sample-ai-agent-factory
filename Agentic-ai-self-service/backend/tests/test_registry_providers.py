@@ -46,6 +46,8 @@ from app.services.registry_providers.dynamo import DynamoRegistryProvider  # noq
 from app.services.registry_store import RegistryEntry, RegistryStore  # noqa: E402
 from moto import mock_aws  # noqa: E402
 
+from tests.registry_fakes import registry_snapshot_body  # noqa: E402
+
 _BACKEND = pathlib.Path(__file__).resolve().parents[1]
 
 CALLER = "sub-dev-1"
@@ -364,7 +366,7 @@ def test_the_router_maps_a_conflict_to_409_rather_than_500(store, monkeypatch):
             raise lgl.RegistryEntryConflict("'x' already names an MCP server; choose a different name.")
 
     monkeypatch.setattr(registry_router_mod, "get_registry_provider", lambda: _Conflicting())
-    resp = _client().post("/api/registry", json={"display_name": "x", "canvas_snapshot": {}})
+    resp = _client().post("/api/registry", json={"display_name": "x", "canvas_snapshot": registry_snapshot_body("x")})
     assert resp.status_code == 409
     assert "choose a different" in resp.json()["detail"]
 
@@ -445,7 +447,7 @@ def test_router_marks_platform_rows_mutable_even_under_litellm(store, litellm_co
     monkeypatch.setenv("REGISTRY_PROVIDER", "litellm")
     _client().post(
         "/api/registry",
-        json={"display_name": "mine", "canvas_snapshot": {"nodes": []}},
+        json={"display_name": "mine", "canvas_snapshot": registry_snapshot_body("mine")},
     )
     rows = {r["agent_slug"]: r for r in _client().get("/api/registry").json()}
     assert rows["mine"]["source"] == "platform"
@@ -489,7 +491,9 @@ def test_publishing_a_name_a_governed_server_holds_does_not_shadow_it(store, lit
     outcome than the provider's 409 — the developer still gets their agent, and the
     governed catalog row keeps its name."""
     monkeypatch.setenv("REGISTRY_PROVIDER", "litellm")
-    resp = _client().post("/api/registry", json={"display_name": "GitHub MCP", "canvas_snapshot": {}})
+    resp = _client().post(
+        "/api/registry", json={"display_name": "GitHub MCP", "canvas_snapshot": registry_snapshot_body("GitHub MCP")}
+    )
     assert resp.status_code == 200
     assert resp.json()["agent_slug"] != "github-mcp"
     assert resp.json()["source"] == "platform"
@@ -513,7 +517,12 @@ def test_an_unreadable_catalog_is_503_not_a_short_list(store, monkeypatch):
 def test_the_default_backend_leaves_every_operation_available(store):
     """The additive guarantee, asserted rather than assumed."""
     client = _client(admin=True)
-    assert client.post("/api/registry", json={"display_name": "a", "canvas_snapshot": {}}).status_code == 200
+    assert (
+        client.post(
+            "/api/registry", json={"display_name": "a", "canvas_snapshot": registry_snapshot_body("a")}
+        ).status_code
+        == 200
+    )
     assert client.post("/api/registry/a/approve").status_code == 200
     assert client.put("/api/registry/a", json={"description": "d"}).status_code == 200
     assert client.post("/api/registry/a/clone").status_code == 200
@@ -598,9 +607,9 @@ def test_the_ssrf_guard_runs_before_anything_else_is_touched(store, monkeypatch)
 def test_the_secret_namespace_is_its_own(monkeypatch):
     """Not agentcore-connector/ — that namespace is swept by per-deployment
     teardown, and a registry credential outlives every deployment."""
-    assert lgl.SECRET_NAMESPACE == "agentcore-registry/"
-    assert "connector" not in lgl.SECRET_NAMESPACE
-    assert "provider" not in lgl.SECRET_NAMESPACE
+    assert lgl.REGISTRY_NAMESPACE == "agentcore-registry/"
+    assert "connector" not in lgl.REGISTRY_NAMESPACE
+    assert "provider" not in lgl.REGISTRY_NAMESPACE
 
 
 def test_the_iam_grant_covers_the_new_namespace():

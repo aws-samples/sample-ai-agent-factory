@@ -36,7 +36,9 @@ export function CostPanel({ runtimeName, refreshKey }: CostPanelProps) {
       const costData = await api.getCost(runtimeName);
       setCost(costData);
     } catch (e) {
-      // Not-yet-deployed runtime returns 401/403/404 — empty state, not error (Bug 136).
+      // Not-yet-deployed runtime returns 403/404 — empty state, not error (Bug 136).
+      // A 401 is NOT in that set: it only ever means the session died, and calling
+      // that an empty state showed "no cost data" to a signed-out user.
       if (isNotReadyError(e)) {
         setCost(null);
       } else {
@@ -50,6 +52,33 @@ export function CostPanel({ runtimeName, refreshKey }: CostPanelProps) {
   useEffect(() => {
     void reload();
   }, [reload, refreshKey]);
+
+  const hasCacheMetrics = Boolean(
+    cost &&
+      (cost.total_cache_read !== undefined ||
+        cost.total_cache_write !== undefined ||
+        cost.total_input_tokens !== undefined ||
+        cost.cache_reporting !== undefined),
+  );
+  const totalInput =
+    cost?.total_input_tokens ??
+    (cost
+      ? cost.total_in +
+        (cost.total_cache_read ?? 0) +
+        (cost.total_cache_write ?? 0)
+      : 0);
+  const hasUsage = Boolean(
+    cost &&
+      (cost.total_cost !== 0 ||
+        totalInput !== 0 ||
+        cost.total_out !== 0),
+  );
+  const incompleteCacheTelemetry = cost?.cache_reporting
+    ? [
+        !cost.cache_reporting.cache_read_complete ? 'Cache-read' : null,
+        !cost.cache_reporting.cache_write_complete ? 'Cache-write' : null,
+      ].filter((label): label is string => label !== null)
+    : [];
 
   if (!runtimeName) {
     return (
@@ -86,7 +115,7 @@ export function CostPanel({ runtimeName, refreshKey }: CostPanelProps) {
 
       {loading && !cost ? (
         <div className="text-xs text-gray-500">Loading cost data…</div>
-      ) : !cost || cost.total_cost === 0 ? (
+      ) : !cost || !hasUsage ? (
         <div className="text-xs text-gray-500">
           No usage recorded yet — invoke this agent to see cost.
         </div>
@@ -105,16 +134,54 @@ export function CostPanel({ runtimeName, refreshKey }: CostPanelProps) {
                 )}
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-2 text-xs text-gray-700">
-              <div>
-                <span className="font-medium">Input tokens:</span>{' '}
-                <span className="font-mono">{cost.total_in.toLocaleString()}</span>
+            {hasCacheMetrics ? (
+              <div className="grid grid-cols-2 gap-2 text-xs text-gray-700">
+                <div>
+                  <span className="font-medium">Total input:</span>{' '}
+                  <span className="font-mono">{totalInput.toLocaleString()}</span>
+                </div>
+                <div>
+                  <span className="font-medium">Output tokens:</span>{' '}
+                  <span className="font-mono">{cost.total_out.toLocaleString()}</span>
+                </div>
+                <div>
+                  <span className="font-medium">Uncached input:</span>{' '}
+                  <span className="font-mono">{cost.total_in.toLocaleString()}</span>
+                </div>
+                <div>
+                  <span className="font-medium">Cache reads:</span>{' '}
+                  <span className="font-mono">
+                    {(cost.total_cache_read ?? 0).toLocaleString()}
+                  </span>
+                </div>
+                <div>
+                  <span className="font-medium">Cache writes:</span>{' '}
+                  <span className="font-mono">
+                    {(cost.total_cache_write ?? 0).toLocaleString()}
+                  </span>
+                </div>
               </div>
-              <div>
-                <span className="font-medium">Output tokens:</span>{' '}
-                <span className="font-mono">{cost.total_out.toLocaleString()}</span>
+            ) : (
+              <div className="grid grid-cols-2 gap-2 text-xs text-gray-700">
+                <div>
+                  <span className="font-medium">Input tokens:</span>{' '}
+                  <span className="font-mono">{cost.total_in.toLocaleString()}</span>
+                </div>
+                <div>
+                  <span className="font-medium">Output tokens:</span>{' '}
+                  <span className="font-mono">{cost.total_out.toLocaleString()}</span>
+                </div>
               </div>
-            </div>
+            )}
+            {incompleteCacheTelemetry.length > 0 && (
+              <div
+                role="status"
+                className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800"
+              >
+                {incompleteCacheTelemetry.join(' and ')} token telemetry is
+                incomplete for some invocations. Estimated cost may be understated.
+              </div>
+            )}
             {cost.from_ts && cost.to_ts && (
               <div className="text-[11px] text-gray-500 mt-2 pt-2 border-t border-gray-200">
                 {new Date(cost.from_ts * 1000).toLocaleString()} —{' '}
@@ -163,35 +230,86 @@ export function CostPanel({ runtimeName, refreshKey }: CostPanelProps) {
                 By Model
               </h5>
               <ul className="space-y-2">
-                {Object.entries(cost.by_model).map(([modelId, usage]) => (
-                  <li
-                    key={modelId}
-                    className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs"
-                  >
-                    <div className="flex items-center justify-between mb-1">
-                      <code className="font-mono text-[11px] text-gray-800">
-                        {modelId}
-                      </code>
-                      <span className="font-mono font-semibold text-gray-900">
-                        ${(usage.cost ?? 0).toFixed(4)}
-                      </span>
-                    </div>
-                    <div className="flex gap-3 text-[11px] text-gray-600">
-                      <div>
-                        <span className="font-medium">In:</span>{' '}
-                        <span className="font-mono">
-                          {(usage.input_tokens ?? 0).toLocaleString()}
+                {Object.entries(cost.by_model).map(([modelId, usage]) => {
+                  const modelHasCacheMetrics =
+                    usage.cache_read_input_tokens !== undefined ||
+                    usage.cache_write_input_tokens !== undefined ||
+                    usage.total_input_tokens !== undefined ||
+                    usage.cache_read_complete !== undefined ||
+                    usage.cache_write_complete !== undefined;
+                  const modelTotalInput =
+                    usage.total_input_tokens ??
+                    (usage.input_tokens ?? 0) +
+                      (usage.cache_read_input_tokens ?? 0) +
+                      (usage.cache_write_input_tokens ?? 0);
+
+                  return (
+                    <li
+                      key={modelId}
+                      className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs"
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <code className="font-mono text-[11px] text-gray-800">
+                          {modelId}
+                        </code>
+                        <span className="font-mono font-semibold text-gray-900">
+                          ${(usage.cost ?? 0).toFixed(4)}
                         </span>
                       </div>
-                      <div>
-                        <span className="font-medium">Out:</span>{' '}
-                        <span className="font-mono">
-                          {(usage.output_tokens ?? 0).toLocaleString()}
-                        </span>
+                      <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-600">
+                        {modelHasCacheMetrics ? (
+                          <>
+                            <div>
+                              <span className="font-medium">Total in:</span>{' '}
+                              <span className="font-mono">
+                                {modelTotalInput.toLocaleString()}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="font-medium">Uncached:</span>{' '}
+                              <span className="font-mono">
+                                {(usage.input_tokens ?? 0).toLocaleString()}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="font-medium">Cache reads:</span>{' '}
+                              <span className="font-mono">
+                                {(usage.cache_read_input_tokens ?? 0).toLocaleString()}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="font-medium">Cache writes:</span>{' '}
+                              <span className="font-mono">
+                                {(usage.cache_write_input_tokens ?? 0).toLocaleString()}
+                              </span>
+                            </div>
+                          </>
+                        ) : (
+                          <div>
+                            <span className="font-medium">In:</span>{' '}
+                            <span className="font-mono">
+                              {(usage.input_tokens ?? 0).toLocaleString()}
+                            </span>
+                          </div>
+                        )}
+                        <div>
+                          <span className="font-medium">Out:</span>{' '}
+                          <span className="font-mono">
+                            {(usage.output_tokens ?? 0).toLocaleString()}
+                          </span>
+                        </div>
+                        {usage.count !== undefined && (
+                          <div>
+                            <span className="font-mono">
+                              {usage.count.toLocaleString()}
+                            </span>{' '}
+                            {usage.count === 1 ? 'invocation' : 'invocations'}
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  </li>
-                ))}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}

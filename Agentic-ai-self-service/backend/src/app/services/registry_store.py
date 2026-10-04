@@ -189,13 +189,15 @@ class RegistryStore:
             logger.warning("increment_usage failed for %s/%s", org_id, agent_slug, exc_info=True)
 
     def delete(self, org_id: str, agent_slug: str) -> bool:
-        try:
-            self._table.delete_item(Key={"org_id": org_id, "agent_slug": agent_slug})
-            logger.info("Deleted registry entry %s/%s", org_id, agent_slug)
-            return True
-        except Exception as e:
-            logger.warning("Failed to delete registry entry %s/%s: %s", org_id, agent_slug, e)
-            return False
+        """Delete the entry; RAISES when DynamoDB refuses.
+
+        F-34: this used to swallow the exception and return ``False``, which the router served
+        as HTTP 200 with ``success: false`` -- a delete the client read as done. The caller maps
+        the failure to an honest status.
+        """
+        self._table.delete_item(Key={"org_id": org_id, "agent_slug": agent_slug})
+        logger.info("Deleted registry entry %s/%s", org_id, agent_slug)
+        return True
 
     # -- reads -----------------------------------------------------------
 

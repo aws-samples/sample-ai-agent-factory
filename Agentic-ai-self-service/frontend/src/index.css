@@ -43,6 +43,7 @@
   /* Primary accent used for focus/active/CTA glow */
   --accent: var(--neon-cyan);
   --accent-2: var(--neon-violet);
+  --accent-foreground: #06080f;
 
   /* AWS brand (kept for continuity, brightened for dark) */
   --color-aws-squid-ink: #0b1220;
@@ -164,6 +165,7 @@
   --neon-red: #dc2626;
   --accent: #0972d3;
   --accent-2: #7c3aed;
+  --accent-foreground: #ffffff;
 
   --color-aws-squid-ink: #232f3e;
   --color-aws-anchor: #16191f;
@@ -303,6 +305,7 @@ body {
      kept a light bg while its text turned bright → invisible text. Map the
      "-50/-100" tints to dark translucent tints in their own hue. */
   .bg-blue-50:not(.no-darkmap),
+  .bg-blue-50\/50:not(.no-darkmap),
   .bg-blue-100:not(.no-darkmap) { background-color: color-mix(in srgb, var(--neon-blue) 14%, transparent) !important; }
   .bg-sky-50:not(.no-darkmap),
   .bg-cyan-50:not(.no-darkmap) { background-color: color-mix(in srgb, var(--neon-cyan) 14%, transparent) !important; }
@@ -338,6 +341,7 @@ body {
   .text-red-800:not(.no-darkmap),
   .text-red-700:not(.no-darkmap),
   .text-red-600:not(.no-darkmap) { color: var(--neon-red) !important; }
+  .text-amber-800:not(.no-darkmap),
   .text-amber-700:not(.no-darkmap),
   .text-amber-600:not(.no-darkmap),
   .text-yellow-700:not(.no-darkmap),
@@ -435,6 +439,7 @@ body {
   .react-flow__controls-button,
   .react-flow__minimap { background: #ffffff !important; border-color: var(--color-border) !important; box-shadow: var(--elevation-1) !important; }
   .react-flow__controls-button { color: var(--color-text-secondary) !important; fill: var(--color-text-secondary) !important; }
+  .react-flow__attribution a { color: var(--color-text-secondary) !important; }
 }
 
 /* Themed canvas dot-grid color (Background color prop is "transparent"). */
