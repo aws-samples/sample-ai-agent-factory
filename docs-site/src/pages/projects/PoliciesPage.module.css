@@ -1,0 +1,87 @@
+/* PoliciesPage.module.css */
+
+.page {
+  width: 100%;
+}
+
+.body {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: var(--space-6) 0 var(--section-padding-y);
+}
+
+.fileCode {
+  font-size: 0.85em;
+  padding: 0.125em 0.5em;
+}
+
+/* Summary grid: one card per policy file */
+
+.summaryGrid {
+  list-style: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+}
+
+@media (min-width: 640px) {
+  .summaryGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.summaryCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.summaryHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.summaryName {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--target-min);
+  text-decoration: none;
+}
+
+.summaryName code {
+  font-size: var(--text-sm);
+}
+
+.summaryPurpose {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+/* Deployed / Not deployed pill: icon plus text */
+
+.deployBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--target-min);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-sunken);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.deployBadge[data-deployed] {
+  background: var(--tint-green);
+  border-color: var(--stage-build-tint);
+  color: var(--tint-heading-green);
+}

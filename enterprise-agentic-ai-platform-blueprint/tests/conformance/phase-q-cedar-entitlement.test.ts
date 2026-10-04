@@ -7,10 +7,10 @@
  *   Q1 — `ToolSpec.allowedGroups` is validated at synth (catalogue SSOT)
  *   Q2 — `composeCedarPolicyDocument` emits principal-bound permits with no
  *        wildcards when `allowedGroups` is set; default forbid is preserved
- *   Q3 — `D03WorkstreamGatewayStack` (legacy path) throws at synth when any
- *        subscribed tool declares `allowedGroups` but `cognitoDiscoveryUrl`
- *        is missing — Cedar group binding has nothing to evaluate against
- *        without JWT claims
+ *   Q3 — `D03WorkstreamGatewayStack` throws at synth when any subscribed GA
+ *        record declares `allowedGroups` but `cognitoDiscoveryUrl` is
+ *        missing — Cedar group binding has nothing to evaluate against
+ *        without JWT claims (the legacy `allowedToolIds` path is retired)
  *   Q4 — `evaluateCedar` denies a principal whose `cognito:groups` claim
  *        does not intersect a tool's allow-list (covered in the
  *        @agenticai/tool-cedar-wrapper unit tests; this file pins the
@@ -34,11 +34,12 @@ import {
 
 import { D03WorkstreamGatewayStack } from '../../apps/platform-account/lib/d03-workstream-gateway-stack';
 import { D03PlatformCoreStack } from '../../apps/platform-account/lib/d03-platform-core-stack';
+import { FIXTURE_PLATFORM_ACCOUNT_ID, gaRegistryContext } from './fixtures/ga-registry-context';
 
-const PLATFORM_ACCOUNT_ID = '222222222222';
+const PLATFORM_ACCOUNT_ID = FIXTURE_PLATFORM_ACCOUNT_ID;
 const WORKLOAD_ACCOUNT_ID = '333333333333';
 const COGNITO_DISCOVERY =
-  'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc/.well-known/openid-configuration';
+  'https://cognito-idp.us-west-2.amazonaws.com/us-west-2_abc/.well-known/openid-configuration';
 
 describe('Phase Q — composed Cedar bundle shape', () => {
   it('produces principal-bound permits + default forbid when allowedGroups is set', () => {
@@ -78,27 +79,22 @@ describe('Phase Q — composed Cedar bundle shape', () => {
   });
 });
 
-describe('Phase Q — D03WorkstreamGatewayStack legacy-path enforcement', () => {
-  function synthLegacy(opts: {
-    readonly toolWithGroups?: readonly string[];
+describe('Phase Q — D03WorkstreamGatewayStack GA-path enforcement', () => {
+  function synthGa(opts: {
     readonly cognitoDiscoveryUrl?: string;
   }): { template: Template; stack: D03WorkstreamGatewayStack } {
     const app = new App();
-    // Inject the test-only entitled tool by mutating the catalogue subset
-    // through a derived ToolSpec — but the production stack reads the
-    // catalogue itself, so we synth using the existing tool-echo and
-    // augment via a per-test override of the catalogue entry. The simpler
-    // path is to use the publicly-exported catalogue and rely on the
-    // synth-time validation reading it as-is. So the assertion strategy
-    // below uses the documented stack-level error message instead.
+    // The GA fixture derives each record's authorization from the in-process
+    // catalogue, so per-test catalogue overrides reach the governance records.
     const stack = new D03WorkstreamGatewayStack(app, 'AgenticAI-D03-WorkstreamGateway-q-test', {
-      env: { account: WORKLOAD_ACCOUNT_ID, region: 'us-east-1' },
+      env: { account: WORKLOAD_ACCOUNT_ID, region: 'us-west-2' },
       tenantId: 'q',
       agentId: 'test',
       envName: 'nonprod',
       workloadAccountId: WORKLOAD_ACCOUNT_ID,
       platformAccountId: PLATFORM_ACCOUNT_ID,
-      allowedToolIds: ['tool-echo', 'tool-ping'],
+      costCentre: 'engineering',
+      gaRegistryContext: gaRegistryContext(['tool-echo', 'tool-ping']),
       cognitoDiscoveryUrl: opts.cognitoDiscoveryUrl,
       cognitoAudience: opts.cognitoDiscoveryUrl ? ['aud-q'] : undefined,
     });
@@ -106,17 +102,17 @@ describe('Phase Q — D03WorkstreamGatewayStack legacy-path enforcement', () => 
   }
 
   it('synth still succeeds when no subscribed tool declares allowedGroups (back-compat)', () => {
-    expect(() => synthLegacy({})).not.toThrow();
+    expect(() => synthGa({})).not.toThrow();
   });
 
   it('synth still succeeds when allowedGroups is absent and CUSTOM_JWT is in use', () => {
-    expect(() => synthLegacy({ cognitoDiscoveryUrl: COGNITO_DISCOVERY })).not.toThrow();
+    expect(() => synthGa({ cognitoDiscoveryUrl: COGNITO_DISCOVERY })).not.toThrow();
   });
 });
 
-describe('Phase Q — D03WorkstreamGatewayStack legacy-path: allowedGroups on subset throws without JWT', () => {
-  // Spy the catalogue so we can simulate an entitled tool without forking the
-  // SSOT export. We restore in `afterEach`.
+describe('Phase Q — D03WorkstreamGatewayStack GA path: allowedGroups on a record throws without JWT', () => {
+  // Spy the catalogue so the GA fixture renders an entitled record without
+  // forking the SSOT export. We restore in `afterEach`.
   let originalEcho: ToolSpec | undefined;
 
   beforeEach(() => {
@@ -134,35 +130,30 @@ describe('Phase Q — D03WorkstreamGatewayStack legacy-path: allowedGroups on su
     }
   });
 
+  function entitledProps(cognitoDiscoveryUrl?: string) {
+    return {
+      env: { account: WORKLOAD_ACCOUNT_ID, region: 'us-west-2' },
+      tenantId: 'q',
+      agentId: 'throws',
+      envName: 'nonprod',
+      workloadAccountId: WORKLOAD_ACCOUNT_ID,
+      platformAccountId: PLATFORM_ACCOUNT_ID,
+      costCentre: 'engineering',
+      gaRegistryContext: gaRegistryContext(['tool-echo']),
+      cognitoDiscoveryUrl,
+      cognitoAudience: cognitoDiscoveryUrl ? ['aud-q'] : undefined,
+    };
+  }
+
   it('throws at synth when an entitled tool is subscribed but no cognitoDiscoveryUrl is supplied', () => {
-    const app = new App();
     expect(
-      () =>
-        new D03WorkstreamGatewayStack(app, 'AgenticAI-D03-WorkstreamGateway-q-throws', {
-          env: { account: WORKLOAD_ACCOUNT_ID, region: 'us-east-1' },
-          tenantId: 'q',
-          agentId: 'throws',
-          envName: 'nonprod',
-          workloadAccountId: WORKLOAD_ACCOUNT_ID,
-          platformAccountId: PLATFORM_ACCOUNT_ID,
-          allowedToolIds: ['tool-echo'],
-          // cognitoDiscoveryUrl deliberately omitted
-        }),
-    ).toThrow(/allowedGroups.*CUSTOM_JWT|cognitoDiscoveryUrl/);
+      () => new D03WorkstreamGatewayStack(new App(), 'AgenticAI-D03-WorkstreamGateway-q-throws', entitledProps()),
+    ).toThrow(/require CUSTOM_JWT because allowedGroups/);
   });
 
   it('error names the offending tool id so the developer can fix the subscription', () => {
-    const app = new App();
     try {
-      new D03WorkstreamGatewayStack(app, 'AgenticAI-D03-WorkstreamGateway-q-throws-2', {
-        env: { account: WORKLOAD_ACCOUNT_ID, region: 'us-east-1' },
-        tenantId: 'q',
-        agentId: 'throws',
-        envName: 'nonprod',
-        workloadAccountId: WORKLOAD_ACCOUNT_ID,
-        platformAccountId: PLATFORM_ACCOUNT_ID,
-        allowedToolIds: ['tool-echo'],
-      });
+      new D03WorkstreamGatewayStack(new App(), 'AgenticAI-D03-WorkstreamGateway-q-throws-2', entitledProps());
       fail('expected throw');
     } catch (err) {
       expect((err as Error).message).toContain('tool-echo');
@@ -170,38 +161,21 @@ describe('Phase Q — D03WorkstreamGatewayStack legacy-path: allowedGroups on su
   });
 
   it('synth succeeds when the entitled tool is subscribed AND cognitoDiscoveryUrl is supplied', () => {
-    const app = new App();
     expect(
       () =>
-        new D03WorkstreamGatewayStack(app, 'AgenticAI-D03-WorkstreamGateway-q-jwt', {
-          env: { account: WORKLOAD_ACCOUNT_ID, region: 'us-east-1' },
-          tenantId: 'q',
-          agentId: 'jwt',
-          envName: 'nonprod',
-          workloadAccountId: WORKLOAD_ACCOUNT_ID,
-          platformAccountId: PLATFORM_ACCOUNT_ID,
-          allowedToolIds: ['tool-echo'],
-          cognitoDiscoveryUrl: COGNITO_DISCOVERY,
-          cognitoAudience: ['aud-q'],
-        }),
+        new D03WorkstreamGatewayStack(
+          new App(),
+          'AgenticAI-D03-WorkstreamGateway-q-jwt',
+          entitledProps(COGNITO_DISCOVERY),
+        ),
     ).not.toThrow();
   });
 
   it('PerTenantCedarPolicy output contains principal-bound permits when entitlement is in use', () => {
-    const app = new App();
     const stack = new D03WorkstreamGatewayStack(
-      app,
+      new App(),
       'AgenticAI-D03-WorkstreamGateway-q-bundle',
-      {
-        env: { account: WORKLOAD_ACCOUNT_ID, region: 'us-east-1' },
-        tenantId: 'q',
-        agentId: 'bundle',
-        envName: 'nonprod',
-        workloadAccountId: WORKLOAD_ACCOUNT_ID,
-        platformAccountId: PLATFORM_ACCOUNT_ID,
-        allowedToolIds: ['tool-echo'],
-        cognitoDiscoveryUrl: COGNITO_DISCOVERY,
-      },
+      entitledProps(COGNITO_DISCOVERY),
     );
     const template = Template.fromStack(stack);
     const outputs = template.findOutputs('PerTenantCedarPolicy');

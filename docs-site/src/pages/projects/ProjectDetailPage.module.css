@@ -1,0 +1,139 @@
+/* ProjectDetailPage.module.css */
+
+.page {
+  width: 100%;
+}
+
+.body {
+  max-width: 900px;
+  margin: 0 auto;
+  padding-bottom: var(--section-padding-y);
+}
+
+/* Status: two StatTiles on card surfaces */
+
+.statusList {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+@media (min-width: 640px) {
+  .statusList {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.statusItem {
+  padding: var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+.note {
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+/* Quickstart */
+
+.quickstart + .quickstart {
+  margin-top: var(--space-8);
+  padding-top: var(--space-6);
+  border-top: 1px dashed var(--color-border);
+}
+
+/* Limitations, validated items and docs */
+
+.cardList {
+  list-style: none;
+  display: grid;
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
+}
+
+.docList {
+  padding-left: var(--space-6);
+}
+
+.docList > li + li {
+  margin-top: var(--space-2);
+}
+
+/* Other projects */
+
+.others {
+  margin-top: var(--space-8);
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--color-border);
+}
+
+.others h2 {
+  margin-bottom: var(--space-4);
+}
+
+.othersList {
+  list-style: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+}
+
+@media (min-width: 640px) {
+  .othersList {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.otherCard {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.otherName {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--target-min);
+  font-weight: 600;
+  color: var(--color-link);
+}
+
+.otherCard:hover .otherName {
+  color: var(--color-link-hover);
+  text-decoration: underline;
+}
+
+.otherTagline {
+  font-size: 0.9375rem;
+  color: var(--color-text-secondary);
+}
+
+/* Hero fact tiles on the dark band. Hidden below 640px so a phone hero fits in about one viewport;
+   the same facts are repeated with sources in the "At a glance" table further down the page. */
+
+.heroFacts {
+  display: none;
+  gap: var(--space-3) var(--space-6);
+  margin: 0;
+}
+
+@media (min-width: 640px) {
+  .heroFacts {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.validated {
+  margin-top: var(--space-6);
+}
+
+.validated h3 {
+  margin: 0 0 var(--space-2);
+}

@@ -1,0 +1,114 @@
+/* AgentFactoryPage.module.css */
+
+.page {
+  width: 100%;
+  padding-bottom: var(--section-padding-y);
+}
+
+.prose {
+  max-width: 72ch;
+  color: var(--color-text-primary);
+}
+
+/* How this site groups the four projects */
+.partsGrid {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+}
+
+.partCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.partNumber {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: var(--radius-pill);
+  background: var(--color-band);
+  color: var(--color-text-inverse);
+  font-weight: 700;
+  /* Transparent border so forced-colors mode still draws the circle. */
+  border: 1px solid transparent;
+}
+
+.partsGrid .partTitle {
+  font-size: 1.25rem;
+  margin: 0;
+}
+
+.partProjects {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: auto;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+  font-size: 0.9375rem;
+}
+
+.partProjectsLabel {
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.partProjectLink {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--target-min);
+  font-weight: 600;
+}
+
+/* Eight steps */
+.steps {
+  max-width: 72ch;
+}
+
+/* Per-project shipping */
+.shipList {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(18rem, 100%), 1fr));
+  gap: var(--space-4);
+  margin: 0 0 var(--space-6);
+  padding: 0;
+}
+
+.shipItem {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.shipHeading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.shipIcon {
+  flex-shrink: 0;
+  color: var(--stage-color);
+}
+
+.shipList .shipTitle {
+  font-size: 1.25rem;
+  margin: 0;
+}
+
+.shipFacts {
+  margin-top: auto;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}

@@ -15,5 +15,12 @@ export {
   resolveSubscribedTools,
   resolveTargetArn,
   composeCedarPolicyDocument,
+  composeAgentCorePolicyDefinitions,
 } from './tool-catalogue';
-export type { ToolId, ToolSpec } from './tool-catalogue';
+export type {
+  AgentCoreGatewayAuthorizerType,
+  AgentCorePolicyDefinition,
+  AgentCorePolicyEngineOptions,
+  ToolId,
+  ToolSpec,
+} from './tool-catalogue';

@@ -1,0 +1,435 @@
+/* CSS Design Tokens - Atlas Journey Theme
+   Breakpoints used across the site: 640px (one to two columns), 1024px (desktop nav,
+   header figure column), 1280px (doc page rails). Component styles use these three only. */
+:root {
+  color-scheme: light dark;
+  /* Primary palette */
+  --color-midnight: #0B1220;
+  --color-midnight-light: #1a2744;
+  --color-cloud: #F5F7FB;
+  --color-mist: #D7DEE8;
+  --color-slate: #475569;
+
+  /* Journey stage colours (tints: borders and decorative strokes only) */
+  --color-amber: #EA580C;
+  --color-amber-light: #f97316;
+  --color-green: #16A34A;
+  --color-green-light: #22c55e;
+  --color-violet: #6D28D9;
+  --color-violet-light: #8b5cf6;
+  --color-blue: #2563EB;
+  --color-blue-light: #3b82f6;
+
+  /* Stage ink: text and filled badges on light backgrounds (all 4.5:1 or better on white) */
+  --stage-learn-ink: #C2410C;
+  --stage-build-ink: #15803D;
+  --stage-govern-ink: #6D28D9;
+  --stage-scale-ink: #1D4ED8;
+
+  /* Stage on-dark: text and filled badges inside dark containers */
+  --stage-learn-on-dark: #FDBA74;
+  --stage-build-on-dark: #86EFAC;
+  --stage-govern-on-dark: #C4B5FD;
+  --stage-scale-on-dark: #93C5FD;
+
+  /* Stage tints: decorative borders and strokes (keep the original hues) */
+  --stage-learn-tint: var(--color-amber);
+  --stage-build-tint: var(--color-green);
+  --stage-govern-tint: var(--color-violet);
+  --stage-scale-tint: var(--color-blue);
+
+  /* Resolved stage colours: ink by default, on-dark inside `.on-dark` containers */
+  --stage-learn: var(--stage-learn-ink);
+  --stage-build: var(--stage-build-ink);
+  --stage-govern: var(--stage-govern-ink);
+  --stage-scale: var(--stage-scale-ink);
+  /* Text colour on a filled stage badge */
+  --stage-fill-text: #ffffff;
+
+  /* Tinted surfaces and their heading colours */
+  --tint-amber: #FFF7ED;
+  --tint-green: #F0FDF4;
+  --tint-violet: #F5F3FF;
+  --tint-blue: #EFF6FF;
+  --tint-heading-amber: #9A3412;
+  --tint-heading-green: #166534;
+  --tint-heading-violet: #5B21B6;
+  --tint-heading-blue: #1E40AF;
+
+  /* Semantic tokens */
+  --color-text-primary: var(--color-midnight);
+  --color-text-secondary: var(--color-slate);
+  --color-text-muted: var(--color-mist);
+  --color-text-inverse: var(--color-cloud);
+  --color-text-inverse-muted: #94a3b8; /* slate-400 - meets 4.5:1 on midnight */
+  --color-bg-primary: var(--color-cloud);
+  --color-bg-secondary: #ffffff;
+  --color-bg-dark: var(--color-midnight);
+  --color-border: var(--color-mist);
+  --color-blue-hover: #1d4ed8;
+
+  /* Surfaces and roles. Components use these, never the raw palette above, so the
+     dark theme (see the prefers-color-scheme block) only has to remap this list. */
+  --color-surface: #ffffff;                 /* cards, tables, chips */
+  --color-surface-sunken: var(--color-cloud); /* table heads, inset fact boxes */
+  --color-band: var(--color-midnight);      /* page headers, footer, dark bands, code blocks */
+  --color-band-raised: var(--color-midnight-light);
+  --color-link: var(--color-blue);
+  --color-link-hover: var(--color-blue-hover);
+  --color-accent: var(--color-blue);        /* primary buttons */
+  --color-on-accent: #ffffff;
+  --color-focus: var(--color-blue);
+  --color-code-bg: var(--color-mist);
+  --color-code-text: inherit;
+  --color-overlay-hover: rgba(37, 99, 235, 0.06);
+  --color-overlay-strong: rgba(255, 255, 255, 0.12);
+  --color-figure-panel: #ffffff;            /* raster diagrams have white interiors */
+  --focus-ring: 2px solid var(--color-focus);
+
+  /* Typography */
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+
+  /* Fluid type scale */
+  --font-size-h1: clamp(1.75rem, 5vw, 3rem);
+  --font-size-h2: clamp(1.375rem, 3.5vw, 2rem);
+  --font-size-h3: clamp(1.125rem, 2.5vw, 1.5rem);
+  --font-size-h4: 1.125rem;
+
+  /* Body text scale and the tracking used by every uppercase label */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --label-tracking: 0.06em;
+
+  /* Spacing scale */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+  --space-20: 5rem;
+
+  /* Section rhythm: vertical padding for page sections (40 px on mobile) */
+  --section-padding-y: var(--space-16);
+  /* Horizontal page padding */
+  --page-padding-x: var(--space-4);
+
+  /* Border radius */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-pill: 999px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1);
+  /* Resting shadow for cards, so a hover lift starts from something */
+  --shadow-card: 0 1px 2px rgba(11, 18, 32, 0.06);
+
+  /* Transitions */
+  --transition-fast: 150ms ease;
+  --transition-normal: 200ms ease;
+
+  /* Layout */
+  --max-width: 1200px;
+  --header-height: 64px;
+  --target-min: 24px; /* WCAG 2.2 minimum target size */
+}
+
+@media (max-width: 640px) {
+  :root {
+    --section-padding-y: 40px;
+  }
+}
+
+@media (min-width: 1024px) {
+  :root {
+    --page-padding-x: var(--space-8);
+  }
+}
+
+/*
+ * Dark containers: add the global class `on-dark` to any element with a dark
+ * background (heroes, atlas sections, header and footer dark areas). Inside it
+ * the resolved stage colours switch to the on-dark set and default text
+ * becomes light.
+ */
+.on-dark {
+  --stage-learn: var(--stage-learn-on-dark);
+  --stage-build: var(--stage-build-on-dark);
+  --stage-govern: var(--stage-govern-on-dark);
+  --stage-scale: var(--stage-scale-on-dark);
+  --stage-fill-text: var(--color-midnight);
+  --color-text-primary: var(--color-cloud);
+  --color-text-secondary: var(--color-text-inverse-muted);
+  --color-link: var(--stage-scale-on-dark);
+  --color-link-hover: var(--color-cloud);
+  --color-focus: var(--color-cloud);
+  --color-overlay-hover: rgba(255, 255, 255, 0.08);
+  color: var(--color-text-inverse);
+}
+
+/*
+ * Dark theme: follows the operating system preference (no toggle, no storage). Only the
+ * semantic tokens are remapped; the palette above and every component stay the same.
+ * Header, footer and other `.on-dark` bands keep `--color-band`, which is darker than the
+ * page so they still read as bands. Stage colours resolve to the on-dark set everywhere.
+ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg-primary: #0F172A;
+    --color-bg-secondary: #16213A;
+    --color-surface: #16213A;
+    --color-surface-sunken: #0F172A;
+    --color-band: #070B14;
+    --color-band-raised: #1E2A47;
+    --color-text-primary: #F5F7FB;
+    --color-text-secondary: #A3B1C6;
+    --color-text-muted: #64748B;
+    --color-border: #2A3650;
+    --color-link: #93C5FD;
+    --color-link-hover: #BFDBFE;
+    --color-blue-hover: #BFDBFE;
+    --color-focus: #93C5FD;
+    --color-code-bg: #1E293B;
+    --color-code-text: #E2E8F0;
+    --color-overlay-hover: rgba(255, 255, 255, 0.08);
+    --shadow-card: 0 0 0 1px rgba(255, 255, 255, 0.02);
+    --shadow-lg: 0 10px 24px rgba(0, 0, 0, 0.5);
+    --tint-amber: #2C1A0B;
+    --tint-green: #0B2416;
+    --tint-violet: #1E1538;
+    --tint-blue: #0F1F3D;
+    --tint-heading-amber: var(--stage-learn-on-dark);
+    --tint-heading-green: var(--stage-build-on-dark);
+    --tint-heading-violet: var(--stage-govern-on-dark);
+    --tint-heading-blue: var(--stage-scale-on-dark);
+    --stage-learn: var(--stage-learn-on-dark);
+    --stage-build: var(--stage-build-on-dark);
+    --stage-govern: var(--stage-govern-on-dark);
+    --stage-scale: var(--stage-scale-on-dark);
+    --stage-fill-text: var(--color-midnight);
+  }
+
+  /* Inline code inside a link on a dark page: the chip is dark, so keep the light link colour. */
+  a code {
+    color: var(--color-link);
+  }
+
+  :where(.on-dark) a code {
+    color: var(--color-link);
+  }
+}
+
+/* Reset and base */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+  /* Anchor targets and focused headings land below the sticky header. */
+  scroll-padding-top: calc(var(--header-height) + var(--space-4));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--color-text-primary);
+  background-color: var(--color-bg-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Long unbroken tokens (paths, identifiers, URLs) wrap at the line end instead of
+     widening the page at narrow widths. Inherited; pre keeps white-space: pre. */
+  overflow-wrap: break-word;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Typography */
+h1, h2, h3, h4, h5, h6 {
+  line-height: 1.25;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+h1 { font-size: var(--font-size-h1); }
+h2 { font-size: var(--font-size-h2); }
+h3 { font-size: var(--font-size-h3); }
+h4 { font-size: var(--font-size-h4); }
+h5 { font-size: 1rem; }
+h6 { font-size: 1rem; }
+
+a {
+  color: var(--color-link);
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+
+a:hover {
+  color: var(--color-link-hover);
+  text-decoration: underline;
+}
+
+/* Links inside text blocks are underlined so they never rely on colour alone: link blue
+   against secondary text measures 1.5:1. `:where()` keeps the rule at element specificity,
+   so any class (buttons, cards, tabs) overrides it with its own text-decoration. */
+:where(p, li, dd, dt, td, th, figcaption, blockquote, small, span, em, strong, label, summary) a {
+  text-decoration: underline;
+  text-decoration-thickness: from-font;
+  text-underline-offset: 0.15em;
+}
+
+/* Navigation lists and headings are link groups, not prose. */
+:where(nav, h1, h2, h3, h4, h5, h6) a {
+  text-decoration: none;
+}
+
+a:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Links on dark surfaces take their colours from the `.on-dark` token remap above
+   (`--color-link`, `--color-link-hover`, `--color-focus`), so no extra rules are needed. */
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  background: var(--color-code-bg);
+  color: var(--color-code-text);
+  padding: 0.125em 0.375em;
+  border-radius: var(--radius-sm);
+}
+
+/* Inline code inside a link: link blue on the mist chip measures 3.8:1; the darker
+   link blue clears 4.5:1 on mist and on cloud. On dark surfaces the chip stays light,
+   so the code text goes midnight. */
+a code {
+  color: var(--color-link-hover);
+}
+
+:where(.on-dark) a code {
+  color: var(--color-midnight);
+}
+
+pre code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+/* The main landmark receives programmatic focus on route change and via the skip link. */
+#main-content:focus {
+  outline: none;
+}
+
+/* Skip link for accessibility */
+.skip-link {
+  position: absolute;
+  top: -100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--color-band);
+  color: var(--color-cloud);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-md);
+  z-index: 9999;
+  transition: top var(--transition-fast);
+}
+
+.skip-link:focus {
+  top: var(--space-2);
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Utility classes */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.container {
+  width: 100%;
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 0 var(--page-padding-x);
+}
+
+/* ---------------------------------------------------------------------------
+   Motion utilities. Everything here is progressive enhancement: content is fully
+   visible without JavaScript, in browsers without scroll-driven animations, and
+   for users who prefer reduced motion (the rule above zeroes every duration).
+   --------------------------------------------------------------------------- */
+
+/* Scroll reveal: elements marked data-reveal rise into place as they enter the viewport.
+   Uses CSS scroll-driven animations only (no JavaScript, no hidden initial state), so
+   browsers that lack animation-timeline simply show the content as normal. The reveal
+   moves but never fades: text keeps its full contrast at every scroll position, so
+   automated contrast checks (axe, Lighthouse) see the same colours as the reader. */
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    [data-reveal] {
+      animation: aaf-reveal cubic-bezier(0.2, 0.7, 0.2, 1) both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 45%;
+    }
+    @keyframes aaf-reveal {
+      from {
+        translate: 0 18px;
+      }
+      to {
+        translate: 0 0;
+      }
+    }
+  }
+}
+
+/* Hover lift for interactive cards and tiles: pointer devices only, never for
+   reduced-motion users. Focus styles are unaffected. */
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  [data-lift] {
+    transition: translate var(--transition-normal), box-shadow var(--transition-normal);
+  }
+  [data-lift]:hover {
+    translate: 0 -3px;
+    box-shadow: var(--shadow-lg);
+  }
+}

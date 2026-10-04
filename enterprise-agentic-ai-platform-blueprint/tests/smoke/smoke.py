@@ -39,7 +39,10 @@ def main() -> int:
         print('[smoke] boto3 not installed; skipping live checks.')
         return 0
 
-    region = os.environ.get('AWS_REGION', 'us-west-2')
+    region = os.environ.get('AWS_REGION') or os.environ.get('AWS_DEFAULT_REGION')
+    if not region:
+        print('[smoke] AWS_REGION or AWS_DEFAULT_REGION is required for live checks.')
+        return 1
     failures: list[str] = []
 
     # Check 3 — guardrail-less InvokeModel must deny.

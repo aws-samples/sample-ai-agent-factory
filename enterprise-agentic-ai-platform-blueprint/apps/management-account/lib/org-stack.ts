@@ -33,6 +33,16 @@ export interface OrgStackProps extends StackProps {
 
   /** Existing Organization root id (required when importExistingOrganization). */
   readonly existingRootId?: string;
+
+  /** Approved guardrail ARNs for SCP-02's positive allow-list. */
+  readonly approvedGuardrailIds?: readonly string[];
+
+  /**
+   * Exact AgentCore / Bedrock interface VPC endpoint ids. SCP-03 / SCP-04 are
+   * VPC-mode controls and are emitted only when these are supplied.
+   */
+  readonly approvedAgentCoreVpceIds?: readonly string[];
+  readonly approvedBedrockVpceIds?: readonly string[];
 }
 
 export class OrgStack extends Stack {
@@ -47,6 +57,9 @@ export class OrgStack extends Stack {
       importExistingOrganization: props.importExistingOrganization,
       existingRootId: props.existingRootId,
       primaryRegion: this.region,
+      approvedGuardrailIds: props.approvedGuardrailIds,
+      approvedAgentCoreVpceIds: props.approvedAgentCoreVpceIds,
+      approvedBedrockVpceIds: props.approvedBedrockVpceIds,
     });
   }
 }

@@ -1,178 +1,343 @@
 # Enterprise Agentic AI Platform Blueprint on AWS
 
-![version](https://img.shields.io/badge/version-1.0.0-blue) ![tests](https://img.shields.io/badge/tests-500%20passing-brightgreen) ![packages](https://img.shields.io/badge/packages-35-blue) ![cdk-nag](https://img.shields.io/badge/cdk--nag-clean-brightgreen) ![license](https://img.shields.io/badge/license-MIT--0-blue)
+[![version](https://img.shields.io/badge/version-1.0.0-blue)](#)
+[![AWS CDK](https://img.shields.io/badge/AWS%20CDK-TypeScript-orange)](https://aws.amazon.com/cdk/)
+[![reference Region](https://img.shields.io/badge/reference%20Region-eu--west--1-blue)](#15-known-limitations-and-support-envelope)
+[![license](https://img.shields.io/badge/license-MIT--0-blue)](LICENSE)
 
-A multi-account AWS CDK blueprint for running enterprise agentic AI workloads on **Amazon Bedrock AgentCore**, with org-level guardrails, tenant isolation, guardrailed inference, per-tool Cedar authorisation, and per-application cost attribution.
+An enterprise Agent Factory reference architecture for organizations where hundreds of engineers across many product teams need to build, govern, release, and operate agentic use cases. This repository provides a concrete AWS implementation centered on Amazon Bedrock AgentCore, while the architecture itself is expressed as capability contracts that can be implemented with suitable customer-selected technologies.
 
-This is one of the samples in [`aws-samples/sample-ai-agent-factory`](https://github.com/aws-samples/sample-ai-agent-factory) — it is the **governed platform foundation** an organisation stands up once, so that agent-building teams have a secured landing zone to deploy onto. See [§1.2](#12-how-this-fits-with-the-other-samples-in-this-repository) for how it relates to the sibling samples.
+This is not a single-agent deployment example. It separates an **enterprise control plane**, operated as an internal platform product, from **repeatable workstream cells** where delivery teams own their agents, tools, data, and production outcomes. Central teams define paved roads, policy, approved models and tools, evidence requirements, and fleet visibility; engineering teams consume those capabilities through versioned interfaces and pipelines without waiting for the platform team to deploy every application.
 
-> **Status.** Sample / reference content published under MIT-0. It is **not** an AppSec-reviewed product — run your own security review before deploying to any regulated or customer-facing environment, and read [§15](#15-known-limitations-and-honest-disclaimers) for what has and has not been verified against live AWS. 500 Jest tests across 50 suites, plus pytest coverage on the offline eval gate, integration suites, and teardown. The D-03 v3 + gap-closure surface was verified end-to-end on a real two-account deploy in `us-east-1` (MCP `tools/list` + `tools/call` through the CUSTOM_JWT gateway, per-developer Cedar entitlement allow/deny), then torn down to zero residuals. Full history in [`CHANGELOG.md`](CHANGELOG.md).
+This blueprint is the governed platform foundation in [AWS Samples — Sample AI Agent Factory](https://github.com/aws-samples/sample-ai-agent-factory).
+
+> **Status:** Sample and reference content published under MIT-0. It is not an AWS service. It deploys real, billable AWS resources. Review the architecture, IAM policies, quotas, data handling, operating model, and costs before using it with production or regulated workloads.
 >
-> **This deploys real, billable AWS resources** across multiple accounts — see [§8 Cost](#8-cost) before deploying and [§16 Cleanup](#16-cleanup) when you are done.
+> **Architecture versus implementation:** Labels such as LLM Gateway, Tool Gateway, agent runtime, memory, identity, registry, policy engine, delivery pipeline, and observability describe architectural capabilities. AgentCore Gateway inference targets, LiteLLM, AgentCore Runtime, AgentCore Memory, AgentCore Identity, AWS Agent Registry, CodePipeline, and CloudWatch are implementation choices. Customers can select alternatives that fit their standards, but each replacement must preserve the stated security, identity, tenancy, lifecycle, and evidence contracts. The live support envelope applies only to the exact reference implementation that was tested.
 
-![Architecture](assets/architecture-diagram.png)
+[![Enterprise Agent Factory operating model and governed flow](assets/enterprise-agent-factory-concept.svg)](assets/enterprise-agent-factory-concept.svg)
 
-> *Drawio source: [`assets/architecture-diagram.drawio`](assets/architecture-diagram.drawio).*
+_Figure 1 — Enterprise operating model and governed flow. AWS labels illustrate this repository's reference choices; the capability boundaries are the architecture. [Open the editable Draw.io source](assets/enterprise-agent-factory-concept.drawio)._
 
 ---
 
 ## Table of Contents
 
 1. [Overview](#1-overview)
-2. [Architecture](#2-architecture)
-3. [Deviations](#3-deviations)
-4. [AWS Services Used](#4-aws-services-used)
+2. [Enterprise architecture](#2-enterprise-architecture)
+3. [Deviations and key design decisions](#3-deviations-and-key-design-decisions)
+4. [AWS services used](#4-aws-services-used)
 5. [Prerequisites](#5-prerequisites)
 6. [Deployment](#6-deployment)
-7. [Running the Guidance](#7-running-the-guidance)
+7. [Golden paths for engineering teams](#7-golden-paths-for-engineering-teams)
 8. [Cost](#8-cost)
-9. [Operations](#9-operations)
+9. [Fleet operations](#9-fleet-operations)
 10. [Security](#10-security)
 11. [Choice architecture](#11-choice-architecture)
 12. [Compliance](#12-compliance)
-13. [Multi-account topology](#13-multi-account-topology)
-14. [Architecture Decision Records](#14-architecture-decision-records)
-15. [Known limitations and honest disclaimers](#15-known-limitations-and-honest-disclaimers)
+13. [Multi-account scaling model](#13-multi-account-scaling-model)
+14. [Architecture decision record](#14-architecture-decision-record)
+15. [Known limitations and support envelope](#15-known-limitations-and-support-envelope)
 16. [Cleanup](#16-cleanup)
-17. [Contributors and License](#17-contributors-and-license)
+17. [Contributors and license](#17-contributors-and-license)
 
 ---
 
 ## 1. Overview
 
-Agentic AI platforms at enterprise scale need the same controls ordinary systems need — identity, network isolation, audit, cost attribution, tenancy — plus agentic-specific ones: model allow-listing, Bedrock Guardrails on every inference call, Cedar micro-policies on AgentCore Gateway, memory-namespace isolation, and evaluation gates before promotion.
+At enterprise scale, the difficult problem is not creating the first agent. It is enabling many teams to create agents without producing hundreds of inconsistent identity models, tool integrations, prompt controls, deployment paths, observability conventions, and security exceptions.
 
-This blueprint delivers all of the above as a deployable AWS CDK app spanning a real AWS Organization, in two mutually-exclusive deployment patterns.
+The blueprint treats the Agent Factory as a product with four planes:
 
-**Default distributed pattern (D-01)** — `apps/workload-account/`. Everything lives in the workload account: baseline SCPs 01–08 at the OU, per-account VPC (11 interface VPCEs + 1 S3 gateway, no IGW/NAT), baseline Bedrock Guardrail, LiteLLM in the inference path with a triple-gate guardrail enforcement (SCP + IAM deny + VPCE policy), AgentCore Runtime/Gateway/Identity/Memory/Registry, API Gateway as the primary auth boundary, CloudWatch cross-account observability, CDK Pipelines with a mandatory evaluation gate, and three Strands agent blueprints.
+1. **Developer experience plane** — versioned agent templates, CLI and repository workflows, approved extension points, and self-service onboarding.
+2. **Platform control plane** — Registry governance, model and Guardrail policy, shared inference, release orchestration, and reusable account baselines.
+3. **Workstream execution plane** — isolated cells containing team-owned Runtime, Memory, Tool Gateway, tools, and application data.
+4. **Assurance and operations plane** — organization policy, evidence gates, fleet telemetry, audit, incident response, quota management, and chargeback.
 
-**Centralised-platform alternative (D-03 v3)** — `apps/platform-account/` + `apps/workload-account/lib/d03-workload-agent-stack.ts`. A platform-governed, per-workstream AgentCore Gateway is deployed **into** the workstream account, removing the cross-account Runtime→Gateway hop while keeping platform governance via three layers:
+The unit of scale is a **workstream cell**, not a manually configured agent. A cell can represent a product, business domain, regulated boundary, or portfolio team. It is created from the same baseline and connected to the same platform contracts, then operated independently to contain blast radius and deployment cadence.
 
-1. **Synth** — the AWS Bedrock AgentCore Registry is the tool SSOT (`packages/agent-registry/`); each tool is a `RegistryRecord` (`gatewayTargetArn` pinned to a Lambda alias, `cedarPolicy`, `ownerTeam`, `costCentre`). Workstream Gateway synth calls `GetRegistryRecord` per subscribed id and **fails at synth** on any non-`APPROVED` record.
-2. **Deploy** — SCP-09 denies `bedrock-agentcore:Create/Update/Delete*` on Gateway resources from every principal except the platform `AgenticAI-D03-GatewayAdmin` role.
-3. **Runtime** — the Gateway service role's identity policy lists the exact N subscribed tool ARNs (no wildcards); SCP-10 denies `lambda:InvokeFunction` to any non-catalogued ARN.
+### 1.1 What the platform solves at enterprise scale
 
-Cross-account Bedrock calls go through a `BedrockCallerRole` (`sts:ExternalId` + `aws:PrincipalArn` + `RoleSessionName` trust conditions); per-tenant Application Inference Profiles carry CUR attribution tags in place of `sts:TagSession` (which does not propagate across role chains — `BUG-005`).
+| Enterprise pressure                                      | Platform mechanism                                                                    | Outcome for hundreds of engineers                                                     |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Every team invents its own agent stack                   | Versioned golden-path templates and one Workload pipeline contract                    | Teams start from supported patterns instead of assembling infrastructure from scratch |
+| A central platform team becomes a ticket queue           | Self-service onboarding and delegated Workstream ownership                            | Product teams ship independently inside pre-approved boundaries                       |
+| Models, prompts, and tools proliferate without ownership | Platform model allow-list, Bedrock Guardrails, AWS Agent Registry, and exact aliases  | Every production dependency has an owner, policy, and review state                    |
+| Shared services create organization-wide blast radius    | Environment isolation plus repeatable Workstream cells                                | Failures and rollbacks are contained to a bounded cell or platform environment        |
+| Security review happens after implementation             | Policy, adversarial, mutation, image, and deployed-runtime gates in the delivery path | Controls are tested before production rather than documented afterward                |
+| Operations cannot see across accounts                    | CloudWatch OAM links, common dimensions, and centralized audit                        | Platform SREs can operate the fleet without owning application code                   |
+| Spend cannot be assigned to products                     | Five-tag contract, application budgets, quotas, and CUR reconciliation                | FinOps can allocate shared and team-owned costs consistently                          |
+| Regional support is assumed rather than proven           | Region-specific availability, policy, rollback, observability, and teardown gates     | Adoption claims remain bounded to evidence                                            |
 
-### 1.1 Day-in-the-life — how a developer ships an agent
+### 1.2 How an engineer ships an agent
 
-Workstream accounts are the developer's primary surface; the platform account holds governance + the central Registry and developers do not log into it.
+1. **Discover a paved road.** The engineer selects a task, chatbot, supervisor/worker, LangGraph, or CrewAI template maintained by the platform team.
+2. **Create in a team-owned repository.** The template supplies the approved Gateway clients, prompt and tool extension points, evaluation corpus, and metadata contract.
+3. **Select governed capabilities.** Models come from the Platform allow-list. Tools come from approved AWS Agent Registry records. Guardrail profiles come from the supported catalog.
+4. **Open a pull request.** Source review, static checks, manifest hashing, image scanning, policy validation, and evaluation run before deployment.
+5. **Deploy to the Workstream cell.** The Workload pipeline creates stable roles, completes the Platform permission handoff, and deploys nonproduction Runtime, Memory, and Tool Gateway resources.
+6. **Prove behavior.** The deployed Runtime is exercised with authorized and adversarial twins. Quality, tool success, refusal, latency, cost, rollback, and telemetry gates fail closed.
+7. **Approve production.** A human reviews evidence rather than a generic “pipeline succeeded” signal.
+8. **Operate with the fleet.** The team owns its application SLOs and data; the platform team owns shared service health and common controls; Management receives centralized telemetry and audit.
 
-1. **Onboarding (platform team, one-time).** `D03PlatformCoreStack` provisions three Identity Center permission sets per workstream — `AgenticAI-WS-Dev-<ws>` (deploy + observability + Registry consumer), `-Ro-` (read-only), `-Apv-` (pipeline approve).
-2. **Discover + subscribe.** `agenticai registry search` / `subscribe` appends record ids to `cdk.context.json`; synth resolves each via `GetRegistryRecord` and emits the resolved cross-account Lambda ARNs into the service role (no wildcards).
-3. **Build + eval + submit.** `agenticai dev eval` runs the same 7-category scoring the CI gate runs; `agenticai submit` renders the PR body. The pipeline runs Source → Synth → Deploy(nonprod) → Evaluation Gate → Manual Approval → 5 % canary + soak → Prod.
-4. **Per-developer entitlement.** A Curator can pin `metadata.allowedGroups` on a record; the Gateway then runs in `CUSTOM_JWT` mode and the per-tool Lambda's Cedar wrapper (`@agenticai/tool-cedar-wrapper`) denies on `cognito:groups` mismatch before user code runs. Until AgentCore PolicyEngine GAs, this Cedar evaluation lives inside each tool Lambda (TODO-GW-POLICY-ENGINE in §3.3).
+The Platform team is not in the application deployment loop. It owns the contracts that make independent deployment safe.
 
-### 1.2 How this fits with the other samples in this repository
+### 1.3 Enterprise operating model
 
-`sample-ai-agent-factory` collects complementary samples covering different layers of an AI Agent Factory. This one is the **platform foundation** — the multi-account landing zone, org guardrails, and governance surface. It is deliberately infrastructure-heavy and assumes a real AWS Organization.
-
-| Sample | Layer | Relationship to this blueprint |
-|---|---|---|
-| [`workshop-building-agentic-ai-platform/`](../workshop-building-agentic-ai-platform/) | Learn the foundation | Closest neighbour. A guided 300-level workshop over the same building blocks (LLM Gateway via LiteLLM, MCP Gateway + Registry, Strands agents) in a **single account**. **Start there** if you want to understand the pattern hands-on; come here when you need the multi-account, SCP-governed, CI/CD-gated production form of it. |
-| [`Agentic-ai-self-service/`](../Agentic-ai-self-service/) | Build agents | The builder experience that sits **on top of** a foundation like this one. It gives teams a visual canvas for authoring and deploying AgentCore agents; this blueprint provides the governed accounts, model allow-list, guardrails, and cost attribution those agents deploy into. |
-| [`enterprise-mcp-governance-gateway/`](../enterprise-mcp-governance-gateway/) | Govern tool calls | Overlapping but distinct depth on per-tool-call authorisation. That sample evaluates Cedar in the AgentCore Gateway's **PolicyEngine in `ENFORCE` mode** and is the better reference for the request-path interceptor and OAuth 3LO connector patterns. This blueprint currently evaluates Cedar **inside each tool Lambda** (§3.3, `TODO-GW-POLICY-ENGINE`) and adds the org-level layers around it — SCP-09/10/11, the Registry as tool SSOT, and synth-time subscription validation. |
-
-Pick this sample if your question is *"how do I govern agentic AI across many accounts and many teams?"*. Pick one of the others if your question is *"how do I learn this?"*, *"how do I ship an agent quickly?"*, or *"how do I authorise a single tool call?"*.
-
----
-
-## 2. Architecture
-
-See `assets/architecture-diagram.png` (editable `.drawio` source alongside). Control-level detail below.
-
-### 2.1 Account topology
-
-| Role | OU | Purpose |
-|---|---|---|
-| Management | Root | AWS Organization, OUs, SCPs 01-12 (01-08 baseline; 09-10 D-03 Gateway; 11 Registry; 12 developer permission sets) |
-| Log Archive | Security | CloudTrail org trail + CUR + CWL cross-account destination |
-| Audit | Security | CloudWatch OAM sink, Security Hub master |
-| Platform non-prod / prod | AgenticAI-Platform | Guardrail Admin, Registry, CDK Pipelines (plus LiteLLM/Gateway/Cognito under D-03) |
-| Workload non-prod / prod | AgenticAI-Workloads | Per-application agent stacks |
-| SCP Sandbox | AgenticAI-Sandbox | Soaks new SCPs before promotion |
-
-### 2.2 Network
-
-Per workload account (`packages/agentic-vpc/`): VPC with 3 AZs, **private-isolated subnets only** (no IGW/NAT); interface VPCEs for AgentCore (data/control/gateway), Bedrock (runtime/management), ECR, CloudWatch, STS, KMS + S3 gateway endpoint (11 interface + 1 gateway). Endpoint policies scoped to the local account root; the Bedrock Runtime endpoint restricts `InvokeModel`/`Converse` to the allow-listed model ARNs and denies when `GuardrailIdentifier` is Null. VPC Flow Logs → CMK-encrypted log group.
-
-### 2.3 Bedrock governance
-
-- **Model allow-list SSOT** — `PLATFORM_ALLOWED_MODELS` (`packages/platform-baselines/`) = Claude Sonnet 4.5 + Haiku 4.5, flowing into SCP-01, the Bedrock VPCE policy, the LiteLLM router config, and AgentCore execution-role IAM. A conformance test diffs all four for drift.
-- **Guardrail triple-gate** — every invocation carries a `GuardrailIdentifier`, enforced by SCP-02 (org), an IAM identity-policy deny (`Null: bedrock:GuardrailIdentifier` twinned with `ForAnyValue:StringNotEquals` positive allow-list), and the Bedrock VPCE policy.
-- **Guardrail profiles** — Baseline (mandatory default: HIGH content filters, prompt-attack detection, AU TFN/Medicare/BSB regex, PII BLOCK/ANONYMIZE), Internal Tool, Customer-Facing (both opt-in, platform-approved).
-- **Segregation of duties** — `GuardrailAdminRole` in the platform account only; SCP-05 (`ArnNotLike` on role + assumed-role session forms) denies guardrail mutation everywhere else.
-- **Model Invocation Logging** — CMK-encrypted `/agenticai/bedrock-invocations`, text-only delivery; under D-03 the record carries the per-tenant `inferenceProfileArn`.
-
-### 2.4 AgentCore stack
-
-- **Runtime** (`packages/agentcore-runtime/`) — per-agent execution role, immutable-tag ECR repo, CMK log group. Under D-03 the role is trusted by `bedrock-agentcore.amazonaws.com`.
-- **Gateway** (`packages/agentcore-gateway/`) — API Gateway HTTP v2 + Cognito JWT authorizer + WAFv2 + VPC Link is the primary auth boundary; the internal ALB + Cedar micro-policies sit behind it.
-- **Identity** (`packages/agentcore-identity/`) — Cognito User Pool + Token Vault CMK; 12-char password minimum, email verification, deletion protection, 1h access-token TTL.
-- **Memory** (`packages/agentcore-memory/`) — per-tenant CMK; namespace template static at synth (only `{actorId}`/`{memoryStrategyId}`/`{sessionId}` vary at runtime); confused-deputy grant closed with `aws:SourceAccount` + `aws:SourceArn`.
-- **Registry — tool SSOT** (`packages/agent-registry/`) — one org-wide `bedrock-agentcore` Registry (Authorization=`IAM`, Approval=`MANUAL`). Each tool is a `RegistryRecord`; workstream Gateway synth reads it via `GetRegistryRecord`. Four personas (Admin/Publisher/Curator/Consumer) map onto Identity Center permission sets.
-- **Per-developer entitlement** (`packages/tool-cedar-wrapper/`) — a record may carry `metadata.allowedGroups`; when set the Gateway is forced into `CUSTOM_JWT` and the per-tool Cedar bundle binds each permit to a `CognitoGroup`. Enforced inside the tool Lambda until the AgentCore PolicyEngine API GAs.
-
-### 2.5 Other constructs
-
-- **RAG** (`packages/rag/`) — per-tenant CMK source bucket, versioned + access-logged + SSL-enforced, scoped `kbs/<tenant>/<kb>/` prefix, bucket policy denies any request not arriving via the workload VPCE.
-- **LiteLLM (D-01)** (`packages/litellm-gateway/`) — per-account ECS Fargate behind an internal ALB, task-role allow-list + deny-on-null-guardrail, master key from Secrets Manager (CMK, injected via ECS `secrets:`).
-- **Tenancy** (`packages/agentic-app/`) — per-app IAM role, per-app SG, memory namespace locked at synth, cost-allocation tags for per-app CUR.
-- **Observability** (`packages/observability/`) — OAM source link to the Audit account, per-app dashboard + guardrail/latency alarms.
-- **Cost** (`packages/cost-allocation/`) — per-app Budget filtered by `application-id`, alerts at 80 % ACTUAL + 100 % FORECASTED.
-- **CI/CD** (`pipelines/`) — self-mutating platform pipeline + per-app workload pipeline with the mandatory sequence *Source → Synth → Deploy(nonprod) → Evaluation Gate → Manual Approval → Deploy(prod)*.
-
-Evaluation-gate thresholds (defaults, overridable via `cdk.context.json`): regression pass ≥ 95 %, guardrail violation ≤ 1 %, LLM-as-judge quality ≥ 85 %, tool success ≥ 98 %, first-token p99 ≤ 1500 ms.
+| Persona                  | Owns                                                                                                        | Does not own                                                                 |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Platform engineering     | Golden paths, shared inference, Registry integration, pipelines, account baselines, compatibility lifecycle | Product requirements, application data, or day-to-day agent behavior         |
+| Product and domain teams | Agent code, prompts, tools, evaluation cases, application SLOs, data classification                         | Platform model admission, shared Guardrail baselines, or organization policy |
+| Security and risk        | Policy requirements, threat model, exception process, adversarial acceptance criteria                       | Manual deployment of every agent                                             |
+| Platform SRE             | Shared Gateway health, fleet telemetry, quotas, rollback tooling, platform incident response                | Business correctness of each product agent                                   |
+| FinOps                   | Allocation taxonomy, shared-cost policy, budgets, portfolio reporting                                       | Individual prompt design or model behavior                                   |
+| Human approvers          | Risk-based production decisions using deployed evidence                                                     | Re-running technical checks by hand                                          |
 
 ---
 
-## 3. Deviations
+## 2. Enterprise architecture
 
-Every conscious divergence from the source spec is recorded with the affected clauses, rationale, residual risks, and compensating controls. All three are publishable.
+The architecture is layered so organizational scale does not weaken ownership or controls. Shared policy and services remain centralized; mutable application state and execution remain inside repeatable Workstream cells.
 
-### 3.1 D-01 — LiteLLM in the inference path
+### Two complementary architecture views
 
-Agents call Bedrock through a per-workload-account LiteLLM deployment rather than directly. The inference boundary shifts inside the account; the per-account quota/CUR/audit boundary is preserved.
+Figure 1 is the **operating-model view**: people, ownership, shared capability planes, repeatable cells, and governed flows. Figure 2 is the **AWS reference-implementation view**: the concrete services deployed by this repository and the numbered release/run cycle used by its live evidence.
 
-- **Rationale.** Virtual-key per-team budgets (429-on-exceed), per-team cost attribution, unified observability, reuse of mature existing code.
-- **Compensating controls.** Guardrails enforced three ways (LiteLLM `default_on` + IAM deny-on-null + VPCE policy); model allow-list SSOT; agent identity forwarded via Bedrock session tags for CloudTrail attribution; per-account deployment enforced at synth; PrivateLink-only; CMK everywhere.
+[![Enterprise Agent Factory AWS service-level reference architecture](assets/enterprise-agent-factory-aws-services.svg)](assets/enterprise-agent-factory-aws-services.svg)
 
-### 3.2 D-02 — IaC authored in AWS CDK, not Terraform
+_Figure 2 — AWS service-level reference implementation. Account IDs are documentation placeholders. [Open the editable Draw.io source](assets/enterprise-agent-factory-aws-services.drawio)._
 
-Infrastructure is authored in AWS CDK (TypeScript + Python), synthesising CloudFormation. The spec's Terraform examples are re-implemented as CDK constructs with equivalent control semantics — same SCP bodies, VPCE policies, resource-based policies, Cedar policies, CMK wiring, guardrail attachment.
+### Capability contracts and replaceable implementations
 
-- **Compensating controls.** Every deviating construct cites the spec § it implements; cdk-nag `AwsSolutionsChecks` + `NIST80053R5Checks` Aspects mandatory; build-time SCP-size check; every suppression carries an inline `SEC-0NN` marker with owner, rationale and compensating control.
+The architecture standardizes **what each component must do**, not one product for every customer. The repository supplies one integrated implementation so that the contracts can be deployed and tested end to end.
 
-### 3.3 D-03 — Centralised-platform pattern
+| Architectural capability               | Reference implementation in this repository                                                                                                       | Contract a replacement must preserve                                                                                                                                                |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| LLM Gateway                            | AgentCore Gateway with inference targets; `LiteLLMModel` is the current agent client. A LiteLLM gateway is an alternative implementation pattern. | Central, non-bypassable authentication, tenant context, model routing and allow-listing, Guardrail/policy enforcement, quotas or traffic controls, usage attribution, and telemetry |
+| Tool / MCP Gateway                     | AgentCore Gateway with `AWS_IAM`, MCP targets, and PolicyEngine integration                                                                       | Authenticated MCP discovery/invocation, exact approved targets, least-privilege execution identity, tenant propagation, policy enforcement, audit, and failure isolation            |
+| Agent runtime                          | AgentCore Runtime                                                                                                                                 | Immutable deployable revision, workload identity, isolation, health, scaling, logs, safe update, rollback, and invocation contract                                                  |
+| Agent memory                           | AgentCore Memory with actor-scoped events and customer-managed KMS keys                                                                           | Tenant and actor isolation, encryption, retention, deletion, access policy, and auditable reads/writes                                                                              |
+| Workload identity and token brokerage  | AgentCore Identity plus Cognito M2M                                                                                                               | Short-lived credentials, audience and issuer validation, tenant binding, rotation, revocation, no secret exposure, and traceable identity exchange                                  |
+| Governance catalog / registry          | AWS Agent Registry and approved governance records                                                                                                | Ownership, lifecycle state, immutable descriptor identity, approval separation, versioning, discovery, and prevention of unapproved use                                             |
+| Policy decision and enforcement        | AgentCore PolicyEngine, IAM/SCP controls, and the retained Lambda Cedar wrapper                                                                   | Fail-closed authorization, explicit subject/resource/action context, policy versioning, decision telemetry, positive/negative tests, and rollback                                   |
+| Software delivery                      | GitHub, CodeConnections, CodePipeline, CodeBuild, ECR, and CodeArtifact                                                                           | Reviewed immutable source, reproducible build, provenance, image/package scanning, nonproduction proof, approval, production promotion, rollback, and retirement                    |
+| Observability                          | CloudWatch, CloudWatch Logs, X-Ray, Transaction Search when enabled, and OAM                                                                      | Correlated logs/metrics/traces, cell and fleet views, access separation, retention, alarms, request attribution, and restoration of temporary settings                              |
+| Secrets and encryption                 | Secrets Manager and KMS                                                                                                                           | No plaintext output, scoped retrieval, rotation, encryption at rest/in transit, separation of duties, and deletion lifecycle                                                        |
+| Landing zone and preventive governance | Organizations, Control Tower where adopted, Identity Center, IAM, SCPs, Security Hub, GuardDuty, and Config                                       | Account isolation, workforce access, preventive/detective controls, audit, exception handling, and delegated administration                                                         |
+| Cost governance                        | Allocation tags, Budgets, Cost Explorer, and CUR                                                                                                  | Application/agent/tenant/environment attribution, shared-cost policy, budgets, anomaly response, and portfolio reporting                                                            |
 
-LiteLLM, API Gateway, WAF, Cognito, AgentCore Gateway, Registry, shared base-image ECR, and experiment-tracking DynamoDB live in the platform account and are consumed cross-account by agents on AgentCore Runtime in workload accounts. Memory stays in the workload account.
+A substitute is **not** automatically a drop-in configuration change. It can require new adapters, IaC, runbooks, threat-model updates, and migration logic. The substitute becomes supported only after the same positive/adversarial, mutation, load, rollback, observability, and teardown obligations pass for that implementation and Region.
 
-- **Rationale.** Central AI Platform team owns LiteLLM/Gateway/guardrails; product teams own agents. One deployment to upgrade; faster workload onboarding; consolidated guardrail enforcement.
-- **Residual risks + compensating controls.** Platform SPOF → multi-AZ + per-env isolation + evaluation-gate-gated pipeline; per-workload quota → LiteLLM virtual-key budgets; **per-workload CUR** → platform-owned per-tenant Application Inference Profiles (the real fix for `BUG-005`: `sts:TagSession` does not survive role chaining); cross-account AssumeRole → `ExternalId` + `PrincipalArn`/`RoleSessionName` conditions; JWT replay → `tenantId` claim asserted against `sts:SourceAccount`; shared Registry/ECR tampering → per-tenant scoping + platform-pipeline-only writes; **per-developer scoping** → Cedar entitlement (`allowedGroups` + `CUSTOM_JWT` + `@agenticai/tool-cedar-wrapper`, fail-closed). **TODO-GW-POLICY-ENGINE**: when the AgentCore Gateway PolicyEngine API GAs, the wrapper retires and Cedar evaluation moves to the Gateway.
-- **Equivalence obligations.** Guardrail-on-every-call, per-workload cost attribution, per-workload audit trail, model allow-list SSOT, tenancy isolation, and network isolation are all preserved and CI-asserted. Two-account live verification (2026-05-01): 12/12 behavioural assertions PASS; re-verified end-to-end 2026-07-02.
+### 2.1 Logical topology and cardinality
 
-New deviations require product-owner sign-off documenting: affected spec clauses, rationale, residual risks, compensating controls, equivalence obligations, and the CI conformance tests that assert them.
+| Layer                       | Typical cardinality                                      | Purpose                                                                                                               |
+| --------------------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Enterprise landing zone     | One per AWS Organization or regulated boundary           | Identity Center, Organizations controls, audit, log archive, central observability, security posture, and cost policy |
+| Agent Factory control plane | One per supported Region and environment class           | Golden paths, Registry governance, pipelines, Guardrails, shared inference, fleet operations                          |
+| Workstream cell             | Many—usually per product/domain and environment boundary | Team-owned Runtime, Memory, Tool Gateway, tools, data, and application release cadence                                |
+| Agent workload              | Many per cell, subject to quotas and isolation design    | One governed agentic use case with explicit ownership and cost metadata                                               |
+
+The Management, Platform, and Workstream names describe **account roles**, not a permanently fixed three-account estate. An enterprise can have one Management foundation, multiple validated Platform environments, and tens or hundreds of Workstream account pairs.
+
+> **Scale boundary:** The design scales organizationally through repeatable cells and versioned contracts. The live support envelope in §15 proves one bounded Ireland topology; it is not a benchmark of hundreds of simultaneous developers, agents, or requests. Capacity and organizational rollout require independent quota, concurrency, load, soak, and operating-model validation.
+
+### 2.2 Agent Factory control plane
+
+The Platform account is operated as an internal product and exposes five versioned capability surfaces:
+
+| Capability surface    | Platform responsibility                                                                                       | Team-facing contract                                                                                                  |
+| --------------------- | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Developer enablement  | Curate templates, examples, CLI workflows, metadata schema, and upgrade guidance                              | A paved-road repository that can be instantiated without custom infrastructure design                                 |
+| Governance catalog    | Manage approved models, Guardrail profiles, tool records, ownership, and lifecycle states                     | Stable identifiers and descriptors resolved during synthesis                                                          |
+| Software supply chain | Run source, build, image, policy, evaluation, approval, rollback, and teardown controls                       | One predictable promotion path from pull request to production                                                        |
+| Shared inference      | Operate the selected LLM Gateway, workload identity exchange, safety/policy interception, and model admission | Stable governed inference contract; this repository maps it to AgentCore Gateway inference targets and `LiteLLMModel` |
+| Fleet operations      | Aggregate logs, metrics, traces, security signals, quotas, and cost dimensions                                | Common telemetry and support interfaces without taking application ownership                                          |
+
+Platform capabilities are consumed through code, descriptors, and pipeline interfaces—not bespoke tickets or administrator sessions.
+
+### 2.3 Repeatable Workstream cell
+
+Each Workstream cell is an isolated application execution boundary containing:
+
+- a team-owned source repository and Workload pipeline instance;
+- stable IAM roles created before cross-account grants;
+- nonproduction and production AgentCore Runtime and Memory resources;
+- an `AWS_IAM` AgentCore Tool Gateway;
+- Registry-approved targets and exact Platform Lambda aliases;
+- team-owned tools and application data;
+- local alarms, budgets, KMS keys, tags, and retention policy;
+- an OAM source link into the enterprise observability plane.
+
+A cell can deploy, roll back, or fail without requiring another product team to coordinate its release. Platform changes are versioned and evaluated against representative cells before broad rollout.
+
+### 2.4 Four governed flows
+
+#### Software delivery flow
+
+```text
+Engineer → pull request → source/build/synth → policy and image gates
+         → stable roles → permission handoff → nonproduction
+         → deployed-runtime evaluation → human approval → production
+```
+
+No direct developer deployment path writes into a Workstream account.
+
+#### Inference flow
+
+The architectural requirement is a governed **LLM Gateway** between agent workloads and model providers. The current AWS reference flow is:
+
+1. The generated agent runs in AgentCore Runtime.
+2. `LiteLLMModel` obtains a short-lived token through AgentCore Identity and Cognito M2M.
+3. The agent calls the AgentCore Gateway inference endpoint through the LLM Gateway contract.
+4. A request interceptor applies the stage Bedrock Guardrail to every untrusted turn.
+5. The Gateway role invokes only an allow-listed Bedrock model target.
+
+`LiteLLMModel` is a client adapter; it is not itself the deployed LLM Gateway. Customers can use AgentCore Gateway inference targets, a LiteLLM gateway, or another suitable managed or self-managed gateway. The selected implementation must prevent bypass and preserve identity, model policy, safety enforcement, traffic controls, usage attribution, audit, and failure behavior. Direct model-provider access is architecture-compatible only when those gateway obligations are implemented elsewhere and proven—it cannot silently remove them.
+
+#### Tool flow
+
+The architectural requirement is a governed **Tool / MCP Gateway** between agents and enterprise actions. The current AWS reference flow is:
+
+1. The generated agent uses `MCPClient` with AWS SigV4.
+2. AgentCore Gateway authenticates the Runtime role with `AWS_IAM`.
+3. Gateway targets are derived from approved AWS Agent Registry governance records.
+4. The Gateway service role invokes only subscribed Platform Lambda aliases.
+5. AgentCore PolicyEngine can enforce per-tool policy; the Lambda Cedar wrapper remains rollback and defense in depth.
+
+Customers can use another MCP Gateway, registry, or policy engine when it preserves authenticated discovery/invocation, exact target admission, least privilege, tenant propagation, policy decisions, audit, and failure isolation. Generated-agent code must not bypass the selected Tool Gateway to call privileged tools directly.
+
+#### Telemetry and assurance flow
+
+- Every cell emits common logs, metrics, traces, deployment evidence, and allocation dimensions.
+- OAM links make Platform and Workstream telemetry queryable from Management.
+- CloudTrail and retained audit data provide independent control-plane corroboration.
+- Security, SRE, and FinOps views aggregate the fleet while preserving account ownership.
+
+### 2.5 Permission handoff and retirement
+
+The two-phase handoff prevents a pipeline from deploying a Gateway target before its stable principal exists:
+
+1. The Workload pipeline creates stable Workstream roles and pauses at `GatewayPermissionReady`.
+2. The Platform pipeline grants each environment's exact aliases to its exact Tool Gateway service-role ARN.
+3. The live alias policies are verified.
+4. The Workload pipeline resumes and deploys application resources.
+
+Retirement reverses the order: Platform grants are removed before Workstream roles. This is an enterprise lifecycle rule, not a one-time installation detail.
+
+### 2.6 Trust, resilience, and blast-radius boundaries
+
+| Boundary                     | Primary controls                                                    | Blast-radius intent                                                              |
+| ---------------------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| GitHub to pipeline           | CodeConnections, explicit source branch, review, immutable revision | One repository change cannot silently source another branch                      |
+| Platform deployment          | Scoped bootstrap trust and execution policies                       | Platform mutations remain inside the intended account and Region                 |
+| Workstream deployment        | Pipeline-only writes and exact account/Region context               | Product teams cannot bypass common gates                                         |
+| Runtime to Tool Gateway      | AWS_IAM, SigV4, exact Runtime role                                  | Compromise remains inside the cell's approved tool surface                       |
+| Runtime to Inference Gateway | AgentCore Identity, Cognito M2M, CUSTOM_JWT                         | Shared inference receives short-lived, environment-bound identity                |
+| Gateway to tools             | Exact aliases and exact service-role principals                     | One cell cannot invoke another cell's unapproved tools                           |
+| Gateway to model             | Model allow-list, mandatory Guardrail, account quotas               | Model and safety policy remain centrally governed                                |
+| Memory                       | Actor-scoped namespace, exact Memory ARN, customer-managed KMS key  | Session and tenant data remain cell scoped                                       |
+| Observability                | OAM source links and scoped sink policy                             | Central operators can read fleet signals without receiving workload write access |
+
+Resilience principles:
+
+- isolate nonproduction and production;
+- replicate Platform environments only after independent regional validation;
+- use Workstream cells to contain application failures and release cadence;
+- evaluate the deployed Runtime before promotion;
+- continuously sample serving revisions during updates and rollbacks;
+- treat native Gateway rate limits as approximate, fail-open traffic shaping;
+- use IAM, SCPs, Guardrails, and account quotas as hard boundaries;
+- keep Transaction Search opt-in because it changes account-wide behavior and incurs cost.
 
 ---
 
-## 4. AWS Services Used
+## 3. Deviations and key design decisions
 
-Amazon Bedrock · Amazon Bedrock AgentCore (Runtime, Gateway, Identity, Memory, Registry) · Bedrock Guardrails · Bedrock Application Inference Profiles · AWS Organizations · AWS Control Tower · AWS IAM · IAM Identity Center · AWS STS · Amazon API Gateway · AWS WAF · Amazon Cognito · Amazon VPC + PrivateLink · Amazon ECR · AWS KMS · AWS CloudTrail · Amazon CloudWatch (+ cross-account OAM) · Amazon S3 (+ S3 Vectors) · AWS Service Quotas · AWS CodePipeline / CodeBuild · AWS Lambda · AWS Step Functions · AWS Cost and Usage Report · AWS Security Hub · Amazon GuardDuty · AWS Config · Amazon Inspector · AWS Secrets Manager · Amazon DynamoDB · Amazon ECS (Fargate, Graviton) · AWS Certificate Manager · AWS Budgets · Amazon Verified Permissions (Cedar).
+### 3.1 D-01 — LLM Gateway implementation choice
+
+The architecture requires an LLM Gateway capability; it does not require one gateway product for every customer. The earlier repository path used a self-managed LiteLLM gateway. The current live-validated AWS reference uses AgentCore Gateway inference targets and keeps `LiteLLMModel` as the OpenAI-compatible agent client.
+
+- **Architectural invariant:** model traffic crosses a centrally governed, non-bypassable boundary with workload identity, tenant context, model admission, safety policy, traffic controls, attribution, and telemetry.
+- **Current repository implementation:** AgentCore Identity and Cognito M2M, AgentCore Gateway inference targets, a mandatory Guardrail interceptor, allow-listed Bedrock targets, account quotas, and pipeline evaluation.
+- **Valid customer alternatives:** LiteLLM or another managed/self-managed LLM Gateway can be appropriate for multi-provider routing, virtual keys, gateway-specific policy, or existing enterprise standards.
+- **Migration obligation:** replacing the gateway can change authentication, streaming, tool-call encoding, rate limits, attribution, availability, and failure behavior; adapters and runbooks must be explicit.
+- **Evidence boundary:** this repository's Ireland results prove the AgentCore reference implementation only. An alternative must rerun the full contract matrix before inheriting a support claim.
+
+### 3.2 D-02 — infrastructure authored in AWS CDK
+
+Infrastructure is authored in TypeScript AWS CDK, with Python and shell utilities where those ecosystems are the natural fit, and synthesized to CloudFormation.
+
+The synthesized artifacts—not plausible-looking source—are the review boundary. The build validates rendered IAM policies, resource policies, SCPs, stack dependencies, and cdk-nag reports. Construct moves and logical-ID changes can replace resources, so refactors require an explicit CloudFormation diff.
+
+Terraform was not selected because a second state model and review workflow would split one control surface. Customers standardized on Terraform can port the design, but must preserve the same effective policy and adversarial evidence contracts.
+
+### 3.3 D-03 — centralized governance with workstream execution
+
+Shared governance and inference services live in Platform; agent execution, Memory, and the Tool Gateway live in Workstream.
+
+- **Why:** central model, tool, and Guardrail governance without giving Platform ownership of product execution.
+- **Availability trade-off:** each environment's central Inference Gateway is shared. Isolate environments, use managed service resilience, and gate Gateway changes through deployed-runtime evaluation.
+- **Organizational trade-off:** Platform consistency can become a bottleneck if capabilities require tickets. Versioned self-service interfaces and delegated Workstream ownership are therefore part of the architecture.
+- **Tenancy:** identities, Registry records, aliases, Memory actors, application tags, and environment context remain explicit at every boundary.
+- **Cost attribution:** application tags and supported inference attribution records stay outside the agent's ability to rewrite.
+
+---
+
+## 4. AWS services used
+
+The following services form this repository's deployable and live-tested AWS reference implementation. They are not a universal mandatory product list; substitutions follow the capability contracts in §2 and reset the affected evidence boundary until independently validated.
+
+| Capability                   | AWS services                                                                               |
+| ---------------------------- | ------------------------------------------------------------------------------------------ |
+| Agent runtime and governance | Amazon Bedrock AgentCore Runtime, Gateway, Identity, Memory, Policy, Registry, Evaluations |
+| Models and safety            | Amazon Bedrock, Bedrock Guardrails, Bedrock application inference profiles                 |
+| Identity and authorization   | AWS IAM, AWS STS, Amazon Cognito, IAM Identity Center, Cedar policy controls               |
+| Organization governance      | AWS Organizations, AWS Control Tower where adopted, service control policies               |
+| Delivery                     | AWS CodePipeline, AWS CodeBuild, AWS CodeConnections, AWS CloudFormation, AWS CDK          |
+| Networking                   | Amazon VPC, VPC endpoints, security groups                                                 |
+| Tool execution               | AWS Lambda                                                                                 |
+| Data and encryption          | AWS KMS, Amazon S3, Amazon DynamoDB, AWS Secrets Manager, Amazon ECR                       |
+| Observability                | Amazon CloudWatch, CloudWatch Logs, OAM, AWS X-Ray and Transaction Search when enabled     |
+| Security posture             | AWS CloudTrail, AWS Config, Security Hub, GuardDuty, Inspector                             |
+| Cost governance              | AWS Budgets, Cost and Usage Reports, allocation tags                                       |
+
+Not every optional construct is part of the Ireland support envelope. See [§15](#15-known-limitations-and-support-envelope).
 
 ---
 
 ## 5. Prerequisites
 
-- **AWS Control Tower** landing zone (documented hard prerequisite).
-- **AWS CLI** ≥ 2.15, **Node.js** ≥ 20 LTS, **Python** ≥ 3.12, **AWS CDK** ≥ 2.150.0.
-- Bedrock model access approved for Claude Sonnet 4.5 + Haiku 4.5 in the target account(s).
-- IAM Identity Center user with management-account access for the initial deploy.
-- A GitHub repo + AWS CodeStar Connections V2 connection (CI/CD only).
-- Corporate VPC CIDR allocation (or accept defaults `10.20.0.0/16`, `10.21.0.0/16`).
+Technical prerequisites:
+
+- Node.js 20 or later.
+- Python 3.12 or later.
+- AWS CLI v2.
+- AWS CDK v2.
+- An AWS Organizations landing zone or equivalent account-governance model.
+- At least Management, Platform, and Workstream account roles; an enterprise rollout typically adds many Workstream accounts and can separate environments.
+- AWS Organizations or an explicit trusted-account set for the OAM sink policy.
+- A GitHub organization, repository strategy, and AWS CodeConnections connection.
+- Access to the selected Bedrock model in the target Region.
+- Administrator access for initial bootstrap only. Pipeline deployments use generated scoped execution policies.
+- Capacity and quotas for AgentCore, Bedrock, Lambda, CodeBuild, VPC, CloudWatch Logs, OAM, KMS, and Cognito.
+
+Organizational prerequisites:
+
+- a Platform product owner and service ownership model;
+- a workstream/account-vending process;
+- model, tool, Guardrail, and data-classification governance;
+- production approval and security-exception policy;
+- platform and application SLO ownership;
+- FinOps allocation and shared-cost policy;
+- an onboarding and upgrade path for delivery teams.
+
+The currently validated reference Region is `eu-west-1` (Ireland). A different Region is a new validation target, not a configuration-only substitution.
 
 ---
 
 ## 6. Deployment
+
+An enterprise rollout should start with one representative Workstream cell, prove the complete lifecycle, then onboard additional cells from the same versioned baseline. Do not create many accounts before rollback, observability, support ownership, and teardown are proven.
 
 ### 6.1 One-time setup
 
@@ -181,265 +346,621 @@ git clone https://github.com/aws-samples/sample-ai-agent-factory.git
 cd sample-ai-agent-factory/enterprise-agentic-ai-platform-blueprint
 npm ci
 npm run build
-npm test     # 500 Jest tests across 50 suites expected
-
-# Populate cdk.context.json with your account IDs + emails + CIDRs, then bootstrap:
-export CDK_DEFAULT_ACCOUNT=<MGMT_ACCT>
-export CDK_DEFAULT_REGION=us-west-2
-npx cdk bootstrap "aws://$CDK_DEFAULT_ACCOUNT/$CDK_DEFAULT_REGION" --qualifier hnb659fds
+npm test
+npm run lint
+npm run scrub
 ```
 
-> **Least privilege.** Set the CDK CloudFormation execution policy to a customer-managed policy scoped to the services these stacks provision — do **not** use `AdministratorAccess`. See `pipelines/bootstrap/bootstrap-cross-account.sh` (requires `CFN_EXECUTION_POLICY_ARN`); the required scope is documented inline there.
-
-> **Worked example.** [`examples/reference-deployment-us-west-2/`](examples/reference-deployment-us-west-2/) is a complete 7-account `us-west-2` walkthrough with a fully populated `cdk.context.json` template (placeholder account ids), the Phase 1 → 8 deploy sequence, and the matching teardown. Use it as the concrete reference for the abstract steps below.
-
-### 6.2 Path A — Default distributed (D-01)
-
-1. Deploy Org + OUs + SCPs sandbox-first; run `bash scripts/scp-sandbox-soak.sh` (all four denial tests must pass) before attaching SCPs to the Workloads OU.
-2. Provision accounts via Control Tower Account Factory (Log Archive, Audit, Sandbox, platform ×2, workload ×2).
-3. `bash pipelines/bootstrap/bootstrap-cross-account.sh` (with a scoped `CFN_EXECUTION_POLICY_ARN`).
-4. `npx cdk deploy --context stage=pipeline ... AgenticAI-PlatformPipelineStack AgenticAI-WorkloadPipelineStack` — the pipeline self-mutates and deploys platform + workload stacks with the evaluation gate + manual approval.
-
-### 6.3 Path B — Centralised platform (D-03)
+Set all three Region variables for CDK commands. The CDK child process can derive its Region from the SDK session, so setting only `CDK_DEFAULT_REGION` is insufficient.
 
 ```bash
-# Platform account
-npx cdk deploy AgenticAI-D03-PlatformCoreStack \
-  -c stage=d03-platform \
-  -c 'agenticai/d03WorkloadAccountIds=["<workload-acct>"]' \
-  -c 'agenticai/d03ExternalId=<rotated-secret>' \
-  -c agenticai/d03EnableAgentRegistry=true \
-  -c agenticai/d03RegistryName=agenticai-platform-registry
-
-# Workload account
-npx cdk deploy AgenticAI-D03-WorkloadAgentStack \
-  -c stage=d03-workload \
-  -c agenticai/d03PlatformAccountId=<platform-acct> \
-  -c agenticai/d03ExternalId=<rotated-secret> \
-  -c agenticai/tenantId=demo -c agenticai/agentId=primary
-
-# Workstream Gateway (deployed INTO the workload account)
-npx cdk deploy AgenticAI-D03-WorkstreamGateway-demo-primary \
-  -c stage=d03-workstream-gateway \
-  -c agenticai/tenantId=demo -c agenticai/agentId=primary \
-  -c agenticai/d03PlatformAccountId=<platform-acct> \
-  -c agenticai/d03WorkloadAccountId=<workload-acct> \
-  -c 'agenticai/d03AllowedToolIds=["tool-echo","tool-ping"]' \
-  -c agenticai/d03GatewayRoleArnOverride=<pre-created-gw-svc-role-arn>
+export AWS_REGION=eu-west-1
+export AWS_DEFAULT_REGION="$AWS_REGION"
+export CDK_DEFAULT_REGION="$AWS_REGION"
 ```
 
-> **Gateway service role.** Pre-create it out-of-band and import it via `agenticai/d03GatewayRoleArnOverride` so its IAM `RoleId` stays stable across rollbacks (tool Lambda resource policies capture the stable ARN). A freshly-created custom-resource role's authorization also takes minutes to propagate to the AgentCore control plane — either pre-create it (`agenticai/d03CrExecRoleArnOverride`) or let the built-in propagation gate wait it out.
+### 6.2 Configuration
 
-### 6.4 Validation
+The CDK application reads `agenticai/*` context values. Keep real account IDs, secret ARNs, tokens, generated Registry context, and environment inventory outside source control.
+
+Core Platform context:
+
+- `agenticai/githubRepo`
+- `agenticai/githubBranch`
+- `agenticai/githubConnectionArn`
+- `agenticai/organizationId`
+- `agenticai/auditAccountId`
+- `agenticai/logArchiveAccountId`
+- `agenticai/platformNonprodAccountId`
+- `agenticai/platformProdAccountId`
+- `agenticai/workloadAccountIds`
+- `agenticai/inferenceModelRateLimits`
+- `agenticai/auditOamSinkArn`
+
+Core Workload context:
+
+- `agenticai/tenantId`
+- `agenticai/agentId`
+- `agenticai/applicationId`
+- `agenticai/costCentre`
+- `agenticai/workloadNonprodAccountId`
+- `agenticai/workloadProdAccountId`
+- `agenticai/workloadNonprodAvailabilityZones`
+- `agenticai/workloadProdAvailabilityZones`
+- `agenticai/enableGaRegistryConsumer=true`
+- `agenticai/gaRegistryExpectedToolIds`
+- `agenticai/gaRegistryNonprodContextFile`
+- `agenticai/gaRegistryProdContextFile`
+- `agenticai/workstreamGatewayRegion`
+- `agenticai/enablePipelineRuntimeMemory=true`
+- `agenticai/agentImageVariant=generated-agent`
+- `agenticai/generatedAgentInference`
+
+Pin `agenticai/githubBranch` when deploying an unmerged branch. If omitted, the pipeline can silently source the repository's default branch instead of the revision under review.
+
+### 6.3 Bootstrap with scoped policies
+
+Generate one CloudFormation execution policy per account and Region:
 
 ```bash
-python3 tests/smoke/smoke.py            # read-only sanity checks
-pytest tests/integration/ -v            # full D-03 harness (needs live creds)
+python3 pipelines/bootstrap/render-cfn-execution-policy.py platform \
+  --account-id <PLATFORM_ACCOUNT> \
+  --region eu-west-1 \
+  --target-account-id <PLATFORM_ACCOUNT> \
+  --target-account-id <WORKSTREAM_ACCOUNT> \
+  --target-account-id <MANAGEMENT_ACCOUNT> \
+  --connection-arn <CODECONNECTIONS_ARN> \
+  > platform-policy.json
+
+python3 pipelines/bootstrap/render-cfn-execution-policy.py workstream \
+  --account-id <WORKSTREAM_ACCOUNT> \
+  --region eu-west-1 \
+  > workstream-policy.json
+
+python3 pipelines/bootstrap/render-cfn-execution-policy.py management \
+  --account-id <MANAGEMENT_ACCOUNT> \
+  --region eu-west-1 \
+  > management-policy.json
 ```
 
-Fast checks: `npm test` green (500/50); `npx cdk synth` cdk-nag-clean with only the documented `SEC-0NN` suppressions; SCPs attached; VPCEs present; `bedrock:InvokeModel` without a `GuardrailIdentifier` returns `AccessDenied`; a non-allow-listed model returns `AccessDenied`.
+Validate every generated identity policy:
 
-Repository hygiene gates, runnable locally and suitable for wiring into CI: `npm run scrub` (fails on any AWS account ID, internal reference, or hardcoded developer path in the tree) and `gitleaks detect --config .gitleaks.toml`.
+```bash
+aws accessanalyzer validate-policy \
+  --region eu-west-1 \
+  --policy-type IDENTITY_POLICY \
+  --policy-document file://platform-policy.json
+```
 
-### 6.5 Common issues
+Create each document under the same local managed-policy name, then bootstrap the accounts:
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| `cdk bootstrap` `sts:AssumeRole` denied | Target not set up for cross-account trust | Assume admin in the target first, re-run |
-| Bedrock `AccessDenied` | SCP-01/02 not matched | Confirm model on allow-list + `GuardrailIdentifier` supplied |
-| Cross-account KMS decrypt fails | Bootstrap `aws-cdk-lib` < 2.150 | Re-bootstrap ≥ 2.150 |
-| D-03 `CreateGateway` `not authorized` | Fresh CR role IAM not yet propagated to AgentCore | Pre-create the CR role or rely on the propagation gate |
-| D-03 `CreateGatewayTarget` "role lacks permission to invoke Lambda" | Imported gateway role missing the invoke policy | Attach `lambda:InvokeFunction` on the tool alias ARNs to the pre-created role |
-| `subnets in unsupported AZ` | AgentCore supports only `use1-az1/az2/az4` in `us-east-1` | Filter subnets by AZ ID (`AgentcoreCompatibleSubnetIdFirst` output) |
+```bash
+export CFN_EXECUTION_POLICY_NAME=AgenticAICdkExecutionPolicyEuWest1
+bash pipelines/bootstrap/bootstrap-cross-account.sh
+```
 
-Rollback: `npx cdk destroy <stack>` per-stack, or `bash scripts/teardown.sh` for the full sweep.
+Do not use `AdministratorAccess` as the CloudFormation execution policy. Validate effective allow and deny decisions with IAM simulation after propagation.
+
+### 6.4 Deploy the Platform control plane
+
+Create or update `AgenticAI-PlatformPipelineStack` with Gateway invoke permissions disabled:
+
+```text
+agenticai/enableGaGatewayInvokePermissions=false
+```
+
+Run the Platform pipeline. It creates environment Registries, governance records, tool aliases, Guardrails, Inference Gateways, and Management resources.
+
+Review Registry descriptors before approval:
+
+```bash
+python3 scripts/live-agent-registry-spike/approve_pipeline_registry.py verify ...
+python3 scripts/live-agent-registry-spike/approve_pipeline_registry.py apply ...
+```
+
+The utility verifies every record before submitting or approving any record.
+
+### 6.5 Onboard a Workstream cell
+
+Resolve one non-secret Registry context file per environment:
+
+```bash
+python3 pipelines/resolve_ga_registry_context.py \
+  --account-id <PLATFORM_ACCOUNT> \
+  --region eu-west-1 \
+  --environment nonprod \
+  --application-id <APPLICATION_ID> \
+  --agent-id <AGENT_ID> \
+  --tenant-id <TENANT_ID> \
+  --cost-centre <COST_CENTRE> \
+  --expected-tool-id tool-echo \
+  --expected-tool-id tool-ping \
+  --source-revision "$(git rev-parse HEAD)" \
+  --output <NONPROD_CONTEXT_FILE>
+```
+
+Repeat for production. The resolver is read-only and fails if ownership tags, record state, descriptor digests, or target ARNs differ.
+
+Deploy only the Workload pipeline root. It creates stable Workstream roles, creates the account-and-Region OAM link, and pauses at `GatewayPermissionReady`.
+
+Read the nonproduction and production `GatewayServiceRoleArn` outputs. Update the Platform pipeline root with:
+
+```text
+agenticai/enableGaGatewayInvokePermissions=true
+agenticai/gaGatewayServiceRoleArns=[<NONPROD_ROLE_ARN>,<PROD_ROLE_ARN>]
+```
+
+Run the Platform pipeline and verify each Lambda alias policy names its matching role ARN. Only then approve `GatewayPermissionReady`.
+
+The Workload pipeline deploys nonproduction, invokes the deployed Runtime through the evaluation gate, and pauses before production. Review evaluation and adversarial evidence before approving production.
+
+For the next cell, automate these same inputs through your account-vending and repository-bootstrap process. Do not fork the control model.
+
+### 6.6 Validation
+
+Local gates:
+
+```bash
+npm run build
+npm test
+npm run lint
+npm run scrub
+
+python3 -m pytest tests/adversarial/unit -q
+python3 -m pytest scripts/test_final_teardown.py scripts/test_residue_inventory.py -q
+```
+
+For infrastructure changes, synthesize the exact account and Region topology with `npx cdk synth --strict`, review the generated templates, and require clean cdk-nag reports.
+
+A behavior-changing revision is complete only after:
+
+1. reviewed pipeline deployment;
+2. an authorized positive call;
+3. an unauthorized adversarial twin with an exact denial;
+4. a mutation proving the test fails when the control is removed;
+5. rollback and re-run to green;
+6. centralized logs, metrics, and traces where claimed;
+7. dependency-ordered teardown and direct resource inventory.
+
+Live mode fails closed. Missing credentials, probes, resources, or expected denials are errors—not passing skips.
+
+### 6.7 Common issues
+
+| Symptom                                             | Likely cause                                                     | Corrective action                                                                                                             |
+| --------------------------------------------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Pipeline sources old code                           | `agenticai/githubBranch` omitted                                 | Pin the intended branch and verify the Source revision before promotion.                                                      |
+| CDK deploys to an unexpected Region                 | Only one Region environment variable set                         | Set `AWS_REGION`, `AWS_DEFAULT_REGION`, and `CDK_DEFAULT_REGION`; inspect synthesized environments.                           |
+| OAM `CreateLink` is denied                          | Sink policy or execution policy lacks the exact source-link path | Keep Organizations and explicit-account trust in separate statements; grant OAM lifecycle and required `*:Link` dependencies. |
+| OAM stack is `ROLLBACK_COMPLETE`                    | First create failed before a resource survived                   | Verify the stack is empty, delete only that exact stack, and let the reviewed pipeline recreate it.                           |
+| Tool target creation is denied                      | Alias grants do not name the exact stable Gateway role           | Re-run the two-phase permission handoff and verify live alias policies.                                                       |
+| Runtime returns a configuration error               | Generated-agent environment is incomplete                        | Populate the full tenant, agent, environment, Guardrail, model, and Gateway URL contract.                                     |
+| Teardown stalls on Registry deletion                | AgentCore Registry deletion is asynchronous                      | Retry conflicts while records settle, then poll Registry absence before handling its KMS key.                                 |
+| CloudFormation delete is denied after an IAM update | New policy version has not propagated                            | Wait and verify effective permission with IAM simulation before retrying.                                                     |
 
 ---
 
-## 7. Running the Guidance
+## 7. Golden paths for engineering teams
 
-Three Strands blueprints ship at v1 under `blueprints/` (plus LangGraph + CrewAI reference agents):
+The blueprints under `blueprints/` are starting points for **versioned enterprise golden paths**, not disconnected demos. A Platform team should publish supported versions, compatibility windows, migration guidance, and end-of-life dates, then make repository creation self-service through its developer portal or internal scaffolding system.
 
-| Blueprint | Model mix | Pattern |
-|---|---|---|
-| `agenticai-task-agent` | Haiku 4.5 | Deterministic single-shot; max-iteration guard; streaming |
-| `agenticai-chatbot-agent` | Sonnet 4.5 / Haiku 4.5 | Multi-turn; HITL escalation; Customer-Facing guardrail |
-| `agenticai-multi-agent` | Sonnet supervisor + Haiku workers | Supervisor + N-worker dispatch |
+| Golden path                 | Framework | Best fit                             | Enterprise contract                                            |
+| --------------------------- | --------- | ------------------------------------ | -------------------------------------------------------------- |
+| `agenticai-task-agent`      | Strands   | Deterministic business task          | Max-iteration guard, baseline Guardrail, optional durable HITL |
+| `agenticai-chatbot-agent`   | Strands   | Customer or employee conversation    | Streaming, conversation memory, human handoff                  |
+| `agenticai-multi-agent`     | Strands   | Supervisor and bounded workers       | Separate identities, explicit delegation, bounded fan-out      |
+| `agenticai-langgraph-agent` | LangGraph | State-machine or graph orchestration | Same Gateway and governance boundaries through an adapter      |
+| `agenticai-crewai-agent`    | CrewAI    | Role-oriented crew orchestration     | Same approved-tool and Guardrail contracts through an adapter  |
 
-Under D-01 you invoke via the per-workload LiteLLM endpoint fronted by API Gateway. Under D-03 agents run on AgentCore Runtime and reach tools through the workstream MCP Gateway and Bedrock via cross-account AssumeRole. Next steps: add a workload app (§13), swap the guardrail profile (§11), tune eval thresholds (§11), or add a region (§11).
+A production template should provide:
+
+- repository metadata and ownership;
+- supported model and Guardrail selection;
+- `LiteLLMModel` and `MCPClient` wiring;
+- prompt and tool extension points;
+- evaluation and adversarial case structure;
+- manifest and image provenance;
+- deployment pipeline registration;
+- dashboards, alarms, budgets, and on-call metadata;
+- upgrade and retirement instructions.
+
+Delivery teams customize agent logic, prompts, tools, evaluation cases, data access, and application SLOs. They consume an approved implementation profile and do not bypass the selected LLM Gateway or Tool Gateway contracts, governance approval, least-privilege roles, or pipeline path. Platform engineering can publish additional implementation profiles when each one has an owner, compatibility contract, migration path, and independent evidence.
+
+The checked-in task and chatbot prompt assets use `.txt` so this blueprint keeps one canonical Markdown document. Generated projects can choose their own documentation and prompt extensions.
+
+### Platform product metrics
+
+At scale, platform success is measured by outcomes, not resource count:
+
+- median time from approved use case to first nonproduction deployment;
+- percentage of agents on a supported golden-path version;
+- pipeline lead time and rollback success;
+- policy and image gate failure rates;
+- model, tool, and Guardrail reuse;
+- support tickets per onboarded team;
+- fleet SLO and incident trends;
+- unallocated spend and tag coverage;
+- time to retire a Workstream cell with zero residual resources.
 
 ---
 
 ## 8. Cost
 
-Rough estimates (no measured 24-hour baseline yet — see §15). `us-west-2` pricing, 2026.
+The enterprise cost model has two layers:
 
-| Traffic profile | Monthly (USD, approx) |
-|---|---|
-| Dev / low (10K invocations/day, 500 tok) | ~$280 |
-| Moderate (100K/day, 1K tok) | ~$1,100 |
-| High (1M/day, 1.5K tok) | ~$9,000 |
+1. **Shared Platform cost** — Inference Gateways, pipelines, Registry governance, security services, central observability, and platform operations.
+2. **Workstream cost** — Runtime, Memory, Tool Gateway, tools, data, logs, builds, and model consumption attributable to an application or portfolio.
 
-At moderate traffic the largest lines are Bedrock inference (~$600, Haiku ≈ 4× cheaper than Sonnet) and the 11 interface VPCEs across 3 AZs (~$240). Optimisation levers: route tolerant workloads to Haiku, Flex tier for dev/test, batch inference, Provisioned Throughput for sustained steady-state, and tuning CloudWatch retention. Per-app Budgets (filtered by `application-id`) alert at 80 % ACTUAL / 100 % FORECASTED; override via `agenticai/monthlyBudgetUsd` + `agenticai/notificationEmail`.
+Costs depend on model traffic, Runtime duration, retention, VPC endpoints, build frequency, security services, and optional account-wide observability. Whole-account Cost Explorer totals are not blueprint attribution when accounts host unrelated workloads.
 
-LiteLLM's virtual-key spend view is the budget-alert source of truth; CUR is the chargeback source of truth. They diverge for retries, cached responses, and guardrail short-circuits — reconcile monthly (target drift ≤ 1 %).
+Recommended controls:
+
+- allocation tags on every supported application resource;
+- per-application and portfolio budgets;
+- account-level Bedrock quotas;
+- model routing by quality and latency need;
+- bounded log, image, and build retention;
+- monthly CUR reconciliation by cost centre, application, agent, tenant, and environment;
+- an explicit policy for allocating shared Platform cost;
+- approval before enabling Transaction Search.
+
+Native Gateway rate limits are approximate traffic shaping. Do not use them as a billing ceiling or authorization control.
 
 ---
 
-## 9. Operations
+## 9. Fleet operations
 
-**SLOs.** First-token p99 ≤ 1500 ms; guardrail violations ≤ 1 %; tool-call success ≥ 98 %; session success ≥ 95 %; API Gateway 5xx ≤ 0.1 %. Each has a CloudWatch alarm feeding a CMK-encrypted SNS topic.
+Enterprise operation has two scopes: **cell operations**, owned by product teams, and **fleet operations**, owned by Platform SRE. Central visibility must not become central write access.
 
-**Runbooks** (`scripts/` + dashboards). Key incident classes and first moves:
+### 9.1 Release and fleet lifecycle
 
-- **Guardrail-violation spike** — inspect the dashboard, pull offending prompts from `/agenticai/bedrock-invocations`, classify (content / prompt-attack / PII / denied-topic), mitigate (WAF rule, pause agent via ECS scale-to-0 + API GW throttle, upgrade guardrail profile), add a regression case to the blueprint's `eval/cases.jsonl`.
-- **Prompt injection** (OWASP LLM01) — capture sessions, isolate source (Cognito block for direct; S3 version-revert for poisoned RAG), add adversarial regression cases.
-- **Tool-call spiral** — pull the session trace, identify the loop, cancel in-flight runs; prefer better termination signals over raising the max-iteration ceiling.
-- **Bedrock throttling (429)** — check `ThrottledCount` vs quota, shed load via WAF rate-limit / route to Haiku, then request a quota increase or move to Provisioned Throughput.
-- **LiteLLM p99 regression** — check ECS CPU/memory + Bedrock-side latency + VPCE/ALB health; scale the service or cycle tasks.
-- **MCP target outage** — identify the failing target in the Gateway logs, circuit-break its Cedar route, activate fallbacks.
-- **Cross-account KMS / SelfMutate failures** — usually a bootstrap `aws-cdk-lib` gap or a direct `cdk deploy` against the pipeline stack; re-bootstrap ≥ 2.150 or always flow changes through the pipeline.
+- Every production change flows through the reviewed pipeline.
+- Nonproduction deploys and is invoked before production approval.
+- Evaluation covers regression, quality, tool success, refusal, latency, and cost.
+- Runtime changes require continuity sampling through update, rollback, and restore.
+- A failing or missing evaluation blocks promotion.
+- Golden-path versions have support and retirement windows.
+- Platform changes are canaried against representative cells before fleet rollout.
+- Direct Workstream deployment is outside the supported operating model.
 
-**Change management.** All prod changes flow through the pipeline (evaluation gate + manual approval); no out-of-band `cdk deploy` to prod. Reviews: Well-Architected quarterly, cost monthly, security-exception expiry monthly, SCP drift quarterly, dependency/SBOM monthly, red-team quarterly. Quarterly chaos experiments (Bedrock throttling, VPCE failure, ECS task kill, KMS pending-delete) each carry a hypothesis + stop criteria.
+### 9.2 Observability
+
+The Platform pipeline root and every distinct Workstream account-and-Region create one OAM source link to the Management sink. A same-account nonproduction/production topology shares one link to avoid cardinality conflicts.
+
+Fleet telemetry should support slicing by `application-id`, `agent-id`, `tenant-id`, `cost-centre`, `environment`, account, Region, golden-path version, model, tool, and deployment revision.
+
+OAM links share Logs, Metrics, and Traces. Verify central visibility by owning account; link presence alone does not prove Management can query the data.
+
+Gateway application logs require a CloudWatch Logs delivery. Gateway spans require Transaction Search and a `TRACES` delivery. Transaction Search changes account-wide behavior and incurs cost, so it is opt-in. Allow for regional propagation, correlate admitted and throttled requests, and restore every temporary source, destination, delivery, resource policy, log group, and account setting.
+
+### 9.3 Incident ownership
+
+| Signal                           | Primary owner       | First moves                                                                                                   |
+| -------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------- |
+| One agent regresses              | Product team        | Compare revision and evaluation evidence, stop promotion, roll back the cell                                  |
+| Shared inference degrades        | Platform SRE        | Isolate environment and target, inspect quotas and Gateway telemetry, communicate fleet impact                |
+| Guardrail intervention spike     | Product + Security  | Correlate traces, classify attack/content/PII, add adversarial regression, change policy through review       |
+| Tool-call loop                   | Product team        | Identify repeated qualified tool, stop affected workflow, fix termination signals                             |
+| Cross-cell authorization anomaly | Security + Platform | Contain the principal, read effective policy and CloudTrail, verify exact aliases and Registry records        |
+| Missing centralized telemetry    | Platform SRE        | Verify OAM and deliveries, check regional propagation, preserve workload operation while restoring visibility |
+| Unallocated spend                | FinOps + owner      | Find missing tags or shared-cost mapping, cap through quotas/budgets rather than authorization changes        |
+
+### 9.4 Review cadence
+
+Recommended cadence:
+
+- platform service and architecture review quarterly;
+- cost, capacity, and quota review monthly;
+- dependency, image, and SBOM review monthly;
+- IAM/SCP drift and Access Analyzer review quarterly;
+- Guardrail and adversarial corpus review for every behavior change;
+- representative-cell rollback and failure injection quarterly;
+- teardown rehearsal before widening a Region or portfolio support envelope.
 
 ---
 
 ## 10. Security
 
-### 10.1 Threat model
+### 10.1 Control summary
 
-STRIDE + OWASP LLM Top 10 + MITRE ATLAS applied to blueprint-authored controls (customer deployments extend it). Highlights:
+- Scoped CDK execution policies generated per account and Region.
+- Organizations SCPs for model, Region, Guardrail, Registry, Gateway, and deployment boundaries.
+- Mandatory Bedrock Guardrail request interceptor on the Inference Gateway.
+- Model allow-list on the Gateway execution role.
+- Cognito M2M and AgentCore Identity short-lived credentials.
+- `AWS_IAM` authentication for the Workstream Tool Gateway.
+- Registry-approved tool descriptors and exact Lambda alias ARNs.
+- Exact Workstream role principals on Platform alias policies.
+- Actor-scoped AgentCore Memory and customer-managed KMS keys.
+- Digest-bound ECR image scanning that blocks Critical or High findings.
+- Human approval after deployed-runtime evaluation.
+- Five allocation tags: `application-id`, `agent-id`, `tenant-id`, `cost-centre`, and `environment`.
+- OAM links for centralized Logs, Metrics, and Traces.
 
-- **Spoofing** — Cognito JWT authorizer at API Gateway; RBPs with `aws:SourceArn`/`aws:SourceAccount`; LiteLLM forwards agent identity for CloudTrail attribution.
-- **Tampering** — SCPs inherited from the OU (workload IAM cannot override); SCP-05 guardrail-mutation deny; immutable-tag ECR + scan-on-push; config rendered from SSOT at synth.
-- **Information disclosure** — Guardrail PII BLOCK/ANONYMIZE + AU regex; per-tenant IAM + SG + memory namespace + `dynamodb:LeadingKeys`; public-access-block + CMK on every bucket; `kms:ViaService` + `kms:CallerAccount` on cross-account grants; `scripts/scrub-security-leakage.sh` + gitleaks on every change.
-- **Denial of service** — WAF rate limit at API Gateway; LiteLLM virtual-key budgets; per-account Bedrock quotas; agent max-iteration guard; circuit breaker on MCP targets.
-- **Elevation of privilege** — ExternalId + `PrincipalArn`/`RoleSessionName` conditions on cross-account roles; pipeline role scoped to bootstrap roles; AgentRuntime trust is service-principal-only (`allowLocalRootAssume` opt-in, hard-disabled in prod).
+### 10.2 Threat and evidence model
 
-**OWASP LLM Top 10** — prompt injection (guardrail PROMPT_ATTACK + pinned system prompts), insecure output (guardrail output filters + eval quality score), model DoS (rate limits + quotas), supply chain (Dependabot + license-check + SBOM + pinned SDK + image scan), sensitive-info disclosure (PII filters + Memory actor-scoping), insecure plugin design (Registry-declared tools + scoped Gateway targets), excessive agency (max-iteration + HITL), overreliance (evaluation gate + human review).
+The design addresses STRIDE, the OWASP Top 10 for LLM Applications, and agent-specific risks such as prompt injection, excessive agency, insecure tools, cross-tenant memory access, supply-chain tampering, policy bypass, and unsafe rollback.
 
-### 10.2 Security exceptions
+A denied request is evidence only when it proves the intended control:
 
-Every cdk-nag / cfn-nag suppression carries an inline `SEC-0NN` marker recording the requirement, the justification, and the compensating control — 24 in total (`SEC-001`..`SEC-016`, `SEC-022`..`SEC-029`), each visible on the suppression itself in the CDK source. Suppressions without a marker fail CI. The markers distinguish **service-limitation** exceptions (e.g. AgentCore's action-family evaluator rejecting narrow per-action lists; Bedrock guardrail admin APIs lacking resource-level ARNs — reviewed when the upstream service adds support) from **framework** exceptions (CDK custom-resource / Provider internals — reviewed on each `aws-cdk-lib` major bump).
+- authentication failures do not prove authorization;
+- missing resources do not prove policy denial;
+- validation errors do not prove enforcement;
+- timeouts and 5xx responses do not prove denial;
+- every negative test requires an authorized positive twin in the same run;
+- denial evidence names the exact error code and status and is independently correlated;
+- a mutation removes the control and demonstrates that the adversarial test then fails.
+
+The adversarial harness under `tests/adversarial/` validates the evidence schema, twin ledger, sanitization, and domain catalog offline. Live probes fail closed when requested evidence is unavailable. Evidence must not contain account IDs, credentials, tokens, prompts, or sensitive response content.
 
 ### 10.3 Shared responsibility
 
-- **AWS** — managed services under the Shared Responsibility Model.
-- **Platform team** — blueprint code, platform-account stacks, SCPs, base guardrail, CI/CD, Registry, shared ECR.
-- **Delivery team** — per-application workload code (agent container, tools, prompts, eval corpus, inference-profile tagging, guardrail-profile selection from the approved list) and privacy compliance for any personal data they store (see the note in `packages/developer-access/src/workstream-roster.ts`).
+- **AWS** operates managed services under the AWS Shared Responsibility Model.
+- **Platform engineering** owns the blueprint, shared services, interfaces, upgrades, and control evidence.
+- **Product teams** own application code, tools, prompts, evaluation corpora, data classification, and application incidents.
+- **Security and compliance** own requirements, exceptions, risk acceptance, and independent assurance.
+- **Platform SRE** owns shared service reliability and fleet operations.
+- **FinOps** owns allocation policy, shared-cost treatment, and portfolio reporting.
 
-Report security issues privately via the [AWS vulnerability reporting page](https://aws.amazon.com/security/vulnerability-reporting/) — **not** public GitHub issues.
+Report security issues privately through the [AWS vulnerability reporting process](https://aws.amazon.com/security/vulnerability-reporting/), not a public GitHub issue.
 
 ---
 
 ## 11. Choice architecture
 
-A customer should never have to fork the repo to make a supported variant. Every recognised override:
+The reference defaults below are integrated choices, not universal mandates. A customer-selected alternative is architecture-compatible only when it implements the capability contract, has a named owner and lifecycle, and passes the affected validation matrix.
 
-| Decision | Default | Override |
-|---|---|---|
-| Identity provider | Cognito | `agenticai/customJwtIssuer` + `customJwtAudience` (corporate OIDC) |
-| Guardrail profile (per agent) | Baseline | per-agent `blueprints/<name>/bedrock.config.yaml` |
-| Model allow-list | Sonnet 4.5 + Haiku 4.5 | `PLATFORM_ALLOWED_MODELS` constant (forces platform review) |
-| Region | `us-west-2` | `packages/platform-baselines/src/approved-regions.ts` + SCP-06 sandbox-soak |
-| Eval thresholds | see §2.5 | `agenticai/eval*` context keys |
-| Gateway fronting | API Gateway (§08 Option A) | hard default |
-| Browser egress / Lattice endpoints | Off | `agenticai/enableBrowserInternetEgress` / `enableLatticePrivateEndpoints` (BETA) |
+| Decision                     | Reference default                                                   | Supported alternative or obligation                                                                                                                           |
+| ---------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Architecture profile         | AgentCore-centered AWS reference                                    | Publish each approved profile as a versioned bundle of gateway, identity, runtime, policy, telemetry, and delivery contracts                                  |
+| Organizational unit          | Workstream cell per product/domain boundary                         | Define ownership, data boundary, environment model, implementation profile, and retirement contract before vending accounts                                   |
+| LLM Gateway                  | AgentCore Gateway inference targets with `LiteLLMModel` client      | LiteLLM or another suitable gateway; preserve non-bypassable identity, routing, safety, model policy, traffic control, attribution, and telemetry             |
+| Tool / MCP Gateway           | AgentCore Gateway with AWS_IAM and PolicyEngine                     | Another suitable MCP gateway; preserve authenticated discovery/invocation, exact target admission, tenant context, least privilege, policy, and audit         |
+| Agent runtime                | AgentCore Runtime                                                   | Another managed runtime, container platform, or compute service; preserve identity, isolation, health, scaling, immutable deployment, logs, and rollback      |
+| Agent memory                 | AgentCore Memory                                                    | Another state or memory service; preserve actor/tenant isolation, encryption, retention, access control, audit, and deletion                                  |
+| Identity and token brokerage | AgentCore Identity plus Cognito M2M                                 | Enterprise IdP/token broker with equivalent issuer, audience, tenancy, short-lived credentials, rotation, revocation, and traceability                        |
+| Governance catalog           | AWS Agent Registry                                                  | Another governed catalog with ownership, approval separation, immutable descriptors, versioning, lifecycle, discovery, and admission enforcement              |
+| Policy enforcement           | AgentCore PolicyEngine, IAM/SCPs, retained Cedar wrapper            | Another PDP/PEP combination; preserve fail-closed decisions, context, versioning, telemetry, positive/negative tests, and rollback                            |
+| Software delivery            | GitHub, CodeConnections, CodePipeline, CodeBuild, ECR, CodeArtifact | Another enterprise delivery stack; preserve immutable reviewed source, provenance, scanning, nonproduction proof, approval, promotion, rollback, and teardown |
+| Observability                | CloudWatch, X-Ray, Transaction Search when enabled, and OAM         | Another telemetry stack; preserve correlated logs/metrics/traces, cell/fleet views, alarms, access separation, attribution, and retention                     |
+| Platform instance            | One validated Ireland environment                                   | Additional Region or regulatory boundary requires an independently operated and validated Platform instance                                                   |
+| Account separation           | Management, Platform, Workstream roles                              | Nonproduction and production may use separate accounts; same-account profiles deduplicate singleton resources                                                 |
+| Guardrail / safety policy    | Stage Bedrock Guardrail baseline                                    | Another safety enforcement layer requires pre-model enforcement, versioning, failure behavior, telemetry, and positive/adversarial proof                      |
+| Models                       | Platform allow-list                                                 | Adding a provider or model requires availability, policy, residency, quality, cost, attribution, and denial validation                                        |
+| Rate limiting                | Native Gateway profile                                              | Treat as fail-open shaping; use IAM/policy and provider quotas for hard boundaries                                                                            |
+| Transaction Search           | Off                                                                 | Enable deliberately, account for cost, and verify restoration if temporary                                                                                    |
+| Evaluation thresholds        | Platform defaults                                                   | Teams can tighten; weakening requires explicit risk acceptance                                                                                                |
 
-An override that breaks a spec MUST (e.g. adding a non-Claude model) becomes a new deviation in §3.
+A choice that changes a trust boundary, ownership model, protocol, or failure behavior requires a documented decision, migration plan, and independent evidence. It is not supported merely because the replacement exposes a similar API.
 
 ---
 
 ## 12. Compliance
 
-### 12.1 Well-Architected + GenAI Lens
+This blueprint provides implementation hooks and evidence surfaces; it does not provide certification or an authorization to operate.
 
-The blueprint maps to all six pillars: **Operational Excellence** (dashboards + OAM + self-mutating pipeline + eval gate + runbooks), **Security** (Identity/SCPs/RBPs/VPCE/WAF/Cedar, PrivateLink-only, CMK everywhere, CloudTrail + GuardDuty + Security Hub), **Reliability** (quota requests, 3-AZ, per-account isolation, versioning), **Performance** (Sonnet/Haiku per-agent, `ConverseStream`, eval p99 gate), **Cost** (per-app Budgets + CUR attribution + allow-list caps), **Sustainability** (Graviton, on-demand, Haiku for low-stakes, TTLs). The GenAI Lens considerations (model governance, RAG, evaluation, responsible-AI guardrails, observability, spiral detection, HITL, red-team) each map to a named construct.
+- **AWS Well-Architected:** platform automation and runbooks support Operational Excellence; explicit identities, policies, encryption, and Guardrails support Security; cells and rollback support Reliability; evaluation and model choice support Performance Efficiency; allocation tags and budgets support Cost Optimization; managed services and right-sized model choice support Sustainability.
+- **NIST SP 800-53 Rev. 5:** IAM, SCPs, Registry governance, encryption, logging, deployment controls, and evidence map principally to AC, AU, CM, IA, SC, SI, SR, and PT families. Customers build their own authoritative control matrix.
+- **EU AI Act:** optional constructs support risk assessment, technical documentation, human oversight, evaluation, and retained governance artifacts. Customers determine risk classification, retention, legal basis, and whether immutable storage is appropriate.
+- **Data protection:** customers classify prompts, responses, Memory events, tool payloads, and logs; configure retention; and avoid storing personal or regulated data without an approved design.
 
-### 12.2 NIST 800-53 Rev 5
-
-**First-pass derivation** — the blueprint maintainers' interpretation, **not** an authoritative attestation. Customers under formal regimes (FedRAMP, IRAP, ISM, HIPAA, PCI-DSS) must validate against their own catalogue and run their ATO process. Heavy coverage in AC (SCPs, per-app IAM, tenant RBPs, VPCE, Cognito, Cedar) and SC (PrivateLink-only, VPCEs, CMK, TLS 1.2+, region allow-list); AU (CloudTrail + Model Invocation Logging), SI (guardrails + eval gate), SR (pinned deps + SBOM), PT (PII filters + Memory scoping). PE/PS inherited. For each control the blueprint emits the CFN template, cdk-nag `NagReport.csv`, CloudTrail events, and a conformance-test assertion.
-
-### 12.3 EU AI Act
-
-`ConformityAssessmentConstruct` (`@agenticai/eu-ai-act-compliance`) wires Article-by-Article controls. Default risk classes (Article 6): chatbot=`limited`, task=`limited`, multi-agent=`high`. It auto-generates `technical-documentation.md` / `risk-assessment.md` / `human-oversight-protocol.md` at deploy into an Object-Lock COMPLIANCE 7-year record-keeping bucket. Article 9 (risk management) → online-evaluation watchdog; Article 10 (data governance) → eval-corpus GOVERNANCE bucket + manifest SHA envelope; Article 14 (human oversight) → `HumanInTheLoopConstruct`; Article 15 (accuracy/robustness) → evaluation gate + kill-switch + circuit breaker. High-risk Articles 9–17 take effect August 2026.
+Generated compliance artifacts can use Markdown as an output format in customer-owned storage; that runtime output is separate from this repository's single-document source layout.
 
 ---
 
-## 13. Multi-account topology
+## 13. Multi-account scaling model
 
-**Adding a workload application** (per workstream): provision two accounts via Account Factory (`agenticai-<ws>-nonprod` / `-prod` under `AgenticAI-Workloads`), bootstrap both with trust to platform-nonprod, deploy `D03PlatformCoreStack` (which also emits the workstream's Identity Center permission sets + `RegistryConsumerGrant` + roster row), then a `WorkloadPipelineStack` instance. The developer then works entirely from the workstream account via the `agenticai` CLI (§1.1).
+A common enterprise landing-zone shape is:
 
-**Account closure.** `bash scripts/teardown.sh` destroys stacks in reverse dependency order (`RETAIN` resources remain by design). Manual remaining steps: empty + delete retained S3 buckets, cancel KMS keys pending deletion, `aws organizations close-account`. Accounts enter `SUSPENDED` for ≥ 90 days before Organizations deletes them.
+```text
+AWS Organization
+├── Security / Management
+│   ├── Audit and security tooling
+│   └── Log archive and CloudWatch OAM sink
+├── Agent Platform
+│   ├── Platform nonproduction
+│   └── Platform production
+└── Agent Workstreams
+    ├── Product or domain A: nonproduction + production
+    ├── Product or domain B: nonproduction + production
+    ├── Product or domain C: nonproduction + production
+    └── ...repeat from the same governed cell baseline
+```
 
-**Edge cases.** No-Control-Tower fallback (advanced; replace Account Factory with `organizations:CreateAccount` + manual baseline). Existing Log Archive/Audit via `agenticai/adoptExistingLogArchive`. Shared-services TGW via `agenticai/transitGatewayId`. CIDR conflicts via `agenticai/vpcCidr`.
+This is a logical model. Existing landing zones can map these roles differently if they preserve the trust, evidence, isolation, and ownership contracts.
+
+### 13.1 Management foundation
+
+- Owns organization policy, audit, security posture, and central observability.
+- Applies preventive controls to Platform and Workstream organizational units.
+- Receives cross-account telemetry without receiving workload mutation rights.
+- Defines the allocation, retention, and exception policies used by every cell.
+- Keeps Organizations and explicit-account OAM trust in separate policy statements.
+
+### 13.2 Platform environments
+
+- Own Registry governance, Guardrails, Inference Gateways, tool aliases, golden paths, and pipelines.
+- Separate nonproduction and production shared-service failure domains where required.
+- Grant exact aliases to exact Workstream Gateway roles.
+- Publish supported interface and template versions to teams.
+- Cannot invoke serving Workstream Runtimes unless an explicit reviewed path is added.
+
+### 13.3 Workstream fleet
+
+- Each cell has a named product owner, technical owner, cost centre, data classification, on-call, and retirement date or lifecycle state.
+- Cells consume Platform capabilities but own their deployment cadence and application outcome.
+- A team receives no direct infrastructure mutation path; GitHub and the Workload pipeline are the control surface.
+- A cell cannot mutate Registry governance, Platform aliases, or another cell's Runtime, Memory, tools, or data.
+- OAM and common tags make cells fleet-operable without collapsing account isolation.
+
+### 13.4 Onboarding factory
+
+A scalable onboarding workflow should automate:
+
+1. use-case intake, risk tier, owner, and data classification;
+2. product/domain and environment-boundary selection;
+3. account vending and baseline enrollment;
+4. scoped bootstrap policy generation and validation;
+5. repository creation from a supported golden path;
+6. Registry subscriptions and descriptor approval;
+7. Workload pipeline registration and permission handoff;
+8. nonproduction evaluation, adversarial tests, and human approval;
+9. dashboards, budgets, on-call metadata, and support registration;
+10. periodic upgrade and eventual zero-residual retirement.
+
+The first cell proves the process. Subsequent cells should require configuration and ownership decisions—not new platform architecture.
 
 ---
 
-## 14. Architecture Decision Records
+## 14. Architecture decision record
 
-MADR-lite records for the non-obvious decisions (full text in Git history / earlier tags):
+The load-bearing decisions are consolidated here so this README remains the single Markdown source of truth:
 
-- **ADR-0001** — LiteLLM in the inference path (D-01); triple-gate guardrail preserved.
-- **ADR-0002** — CDK + CloudFormation, not Terraform (D-02); AFT explicitly rejected.
-- **ADR-0003** — API Gateway fronts AgentCore Gateway as the primary auth boundary (§08 Option A).
-- **ADR-0004** — Memory namespaces static at synth (only `{actorId}`/`{memoryStrategyId}`/`{sessionId}` vary).
-- **ADR-0005** — Model allow-list as a single TypeScript constant flowing into four enforcement surfaces.
-- **ADR-0006** — EU AI Act posture: Object-Lock COMPLIANCE 7-year bucket + auto-generated conformity docs.
-- **ADR-0007** — Evaluation gates as platform infrastructure; 7-category scoring SSOT shared by the offline gate + online watchdog.
-- **ADR-0008** — Agent lifecycle: versioned manifests (SHA-256 envelope) + canary + auto-rollback.
-- **ADR-0009** — Protocol-native MCP + A2A; `MCP_PROTOCOL_VERSION = 2025-06-18` locked; qualified tool names.
-- **ADR-0010** — Kill-switch + circuit breaker as real runtime constructs (four live revoke branches; retry+fallback chain).
-- **ADR-0011** — HITL reference construct: Step Functions `WaitForTaskToken` + Cedar approver scoping.
-- **ADR-0012** — Multi-framework support (Strands / LangGraph / CrewAI) via lazy-imported adapters.
-- **ADR-0013** — AgentCore Registry as tool SSOT (replaces the TypeScript catalogue truth claim).
-- **ADR-0014** — Identity Center permission sets per workstream (`AgenticAI-WS-Dev-/Ro-/Apv-`; 16-char workstream-id cap).
-- **ADR-0015** — Developer CLI as pure-function helpers sharing the eval-scoring SSOT.
+1. **The Agent Factory is an enterprise platform product.** Golden paths, service ownership, compatibility, upgrades, and support are architecture, not optional process.
+2. **The workstream cell is the unit of organizational scale and blast-radius isolation.** Do not scale by granting more teams access to one shared mutable workload account.
+3. **AWS CDK and CloudFormation are the infrastructure implementation.** Review synthesized artifacts and effective policies, not only source intent.
+4. **A governed LLM Gateway capability is required; one gateway product is not.** The reference uses AgentCore Gateway inference targets and `LiteLLMModel`; LiteLLM or another suitable gateway can implement the same contract after independent validation.
+5. **Inference and tools remain separate capability and policy boundaries.** The reference uses AgentCore Identity and Cognito M2M/CUSTOM_JWT for inference and AWS_IAM/SigV4 for tools; alternatives must preserve equivalent separation and identity context.
+6. **Platform governs; Workstream executes.** Platform owns shared controls, approved implementation profiles, and interfaces; teams own application runtime state and outcomes.
+7. **A governed catalog is the tool source of truth.** The reference uses AWS Agent Registry; any replacement must preserve approved state, ownership, immutable descriptor identity, lifecycle, and admission enforcement.
+8. **Workstream mutation is pipeline only.** There is no fast-track direct deployment path.
+9. **Permissions are handed off and retired in dependency order.** Stable roles precede grants; grants disappear before role deletion.
+10. **Memory namespaces are static at synth except for runtime actor scope.** Dynamic tenant or agent namespace substitution is not permitted.
+11. **Rate limiting is not authorization.** It is approximate, fail-open shaping with fail-closed compensating controls.
+12. **Every behavior claim is evidence bounded.** Region, revision, identity, positive twin, denial, rollback, observability, and teardown belong to the claim.
+13. **Transaction Search is opt-in.** It is account-wide and billable.
+14. **The Lambda Cedar wrapper remains a rollback control.** Native PolicyEngine adoption does not silently delete it.
+
+Reopen a decision when a proposed change alters a trust boundary, ownership model, shared-service failure domain, provider, Region, or compensating control.
 
 ---
 
-## 15. Known limitations and honest disclaimers
+## 15. Known limitations and support envelope
 
-Know what **has** been live-verified and what **has not** before adopting.
+### Live-validated reference envelope
 
-**Live-verified on real AWS.**
+The complete **AWS reference implementation shipped by this repository** is validated in `eu-west-1` (Ireland):
 
-- **D-03 v3 full end-to-end tool-call round-trip** (2026-05-05, re-verified 2026-07-02): IAM user → AssumeRole → runtime role → MCP over the CUSTOM_JWT gateway → Gateway service role → cross-account `lambda:InvokeFunction` → tool Lambda → MCP `tools/call` reply, for both demo tools; unauthenticated gateway calls return `401`.
-- **Per-developer Cedar entitlement** (2026-07-02): non-member JWT denied (`CedarDeniedError` before user code), member JWT allowed.
-- **Gap-closure surface** (2026-05-15, re-verified 2026-07-02): eval-gates GOVERNANCE bucket, EU AI Act COMPLIANCE 7-year bucket + 3 conformity docs, agent-version GSIs + rollback Step Function, MCP probe, kill-switch Step Function (4 revoke branches), chargeback bucket, HITL Step Function, online-eval watchdog.
-- **D-03 guardrail triple-gate, `dynamodb:LeadingKeys` tenant isolation, `kms:ViaService` cross-account scoping**, and **clean teardown to zero residuals**.
+- Platform and Workload pipelines through production.
+- AWS Agent Registry record resolution and governance.
+- Generated agents using `LiteLLMModel` and `MCPClient`.
+- AgentCore Identity, Runtime, Memory, Inference Gateway, and Tool Gateway.
+- Benign and adversarial Guardrail calls with exact admitted and blocked outcomes.
+- Exact HTTP 429 behavior for an unallocated model.
+- Direct cross-account Runtime denial.
+- Runtime update cancellation, rollback, and re-run while sampled sessions remained available.
+- Evaluation gates for regression, quality, tool success, refusal, latency, and cost.
+- Management queries across linked Platform and Workstream logs and metrics.
+- Gateway application-log and OTEL span correlation after regional propagation.
+- Dependency-ordered teardown and direct zero-residual inventories across all three account roles.
 
-**Not live-verified.**
+### Outside the current envelope
 
-- **CDK Pipelines self-mutation** — synth-verified only.
-- **SCPs 01–12 org soak** — unit + regression tests only (`scp-bypass-regression.test.ts`, 13 cases); the primary IAM identity policies these SCPs defend-in-depth were verified least-privilege on the live roles.
-- **AgentCore Runtime `InvokeAgentRuntime` container handshake** — bypassed by the MCP Gateway path.
-- **No measured 24-hour cost baseline.** **Control Tower landing zone** — documented prerequisite, tested on standalone accounts.
-- **Regions** — `us-east-1` is the only live-verified region; `us-west-2` is synth-clean default. APAC removed from `PLATFORM_APPROVED_REGIONS`.
-- **VPC Lattice** private endpoints (AWS BETA, opt-in); **Entra Agent Identity** deferred to v2.
+- Any substituted LLM Gateway, Tool Gateway, runtime, memory, identity, registry, policy, delivery, observability, or safety implementation until its full contract matrix passes.
+- A demonstrated rollout to hundreds of engineers or a measured fleet-capacity benchmark.
+- Any Region other than `eu-west-1` until independently validated.
+- Legacy direct-Bedrock evaluation, online-evaluation, ECS LiteLLM, and direct circuit-breaker paths that rely on cross-Region profiles.
+- VPC Lattice private endpoints.
+- Transaction Search enabled by default.
+- Native Gateway rate limiting as a hard quota or authorization control.
+- Automatic retirement of the Lambda Cedar wrapper.
+- A compliance certification, availability SLA, or guarantee that future AWS changes preserve behavior.
 
-**Operational findings baked into the blueprint** (full detail in `CHANGELOG.md`): AgentCore supports only specific AZ IDs (`use1-az1/az2/az4` in `us-east-1`; AZ-ID filter output provided); the `MCP-Protocol-Version: 2025-06-18` header is required after `initialize`; the Gateway service role must be pre-created for stable `RoleId`; fresh custom-resource IAM roles take minutes to propagate to the AgentCore control plane (propagation gate + role-import override provided); Lambda cross-account resource policies for Gateway targets must name the exact service-role ARN; `CreateRegistry`/`CreateRegistryRecord` return only ARNs (ids derived from them) and require descriptor `inlineContent` valid against the MCP/A2A schema.
+Before enterprise-wide adoption, validate account-vending throughput, repository automation, support staffing, quotas, concurrency, rate limits, load, soak, shared-service failure modes, cell isolation, portfolio cost allocation, upgrade waves, and incident communication using your expected fleet shape.
 
-The 35 packages under `packages/` are enumerated in [`CHANGELOG.md`](CHANGELOG.md) under the development phase that introduced each one (19 in the initial build-out, 8 gap-closure + 4 self-audit, 3 developer-experience, 1 entitlement).
+A Region is supportable only after independent service-availability, model and residency, IAM/SCP, availability-zone, strict synth, positive/adversarial, rollback, observability, and teardown gates pass there. Do not extrapolate from Ireland.
 
 ---
 
 ## 16. Cleanup
 
+A single Workstream cell should be independently retireable. Removing the shared Platform or Management layers is a separate enterprise decision performed only after all cells and OAM links are gone.
+
+Always retire Platform alias grants before deleting Workstream roles:
+
+1. Set `agenticai/enableGaGatewayInvokePermissions=false` in Platform configuration.
+2. Run the Platform pipeline through production.
+3. Verify all current and stale alias policies no longer name a Workstream role principal.
+
+Then use the fail-closed teardown in this order.
+
+### 16.1 Workstream cell
+
 ```bash
-bash scripts/teardown.sh     # sweep resources CDK cannot delete (populated S3, non-empty ECR, KMS pending)
-pytest tests/teardown/       # verify zero residuals
+python3 scripts/final_teardown.py \
+  --account-role workstream \
+  --expected-account <WORKSTREAM_ACCOUNT> \
+  --region eu-west-1
+
+# After reviewing the exact dry-run plan:
+python3 scripts/final_teardown.py \
+  --account-role workstream \
+  --expected-account <WORKSTREAM_ACCOUNT> \
+  --region eu-west-1 \
+  --apply
 ```
 
-Then `cdk destroy` dependency-ordered. The EU AI Act Object-Lock COMPLIANCE 7-year bucket cannot be deleted before its retention expires — this is intentional and documented.
+### 16.2 Platform
+
+Run only when the relevant Workstream cells and grants are gone:
+
+```bash
+python3 scripts/final_teardown.py \
+  --account-role platform \
+  --expected-account <PLATFORM_ACCOUNT> \
+  --region eu-west-1
+
+python3 scripts/final_teardown.py \
+  --account-role platform \
+  --expected-account <PLATFORM_ACCOUNT> \
+  --region eu-west-1 \
+  --apply
+```
+
+### 16.3 Management and Governance
+
+Run only after every source link is absent:
+
+```bash
+python3 scripts/final_teardown.py \
+  --account-role management \
+  --expected-account <MANAGEMENT_ACCOUNT> \
+  --region eu-west-1
+
+python3 scripts/final_teardown.py \
+  --account-role management \
+  --expected-account <MANAGEMENT_ACCOUNT> \
+  --region eu-west-1 \
+  --apply
+```
+
+### 16.4 Independent inventory
+
+Measure each account directly after teardown:
+
+```bash
+python3 scripts/residue_inventory.py \
+  --expected-account <ACCOUNT_ID> \
+  --region eu-west-1 \
+  --global
+```
+
+Zero CloudFormation stacks is not sufficient. Inventory Runtime, Memory, Gateways, Registry records, Registries, Cognito pools, IAM roles and policies, log groups, ECR images, secrets, buckets, and alias-less KMS keys.
+
+Expected terminal state is zero live project resources. Customer-managed keys can remain in AWS's seven-day pending-deletion window. Object Lock can intentionally make objects undeletable until retention expires; review the plan before deploying an optional retention control.
+
+`CDKToolkit` stacks and scoped bootstrap policies can remain for future cells. Remove them only as a separate account-retirement decision.
 
 ---
 
-## 17. Contributors and License
+## 17. Contributors and license
 
-Maintained by the AI Platform team. Issues and pull requests are welcome — see the [contribution guidelines](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/CONTRIBUTING.md) and [code of conduct](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/CODE_OF_CONDUCT.md) in the parent repository. Distributed under **MIT-0** — see [`LICENSE`](LICENSE). Report security issues privately via the [AWS vulnerability reporting page](https://aws.amazon.com/security/vulnerability-reporting/), not a public issue.
+Issues and pull requests are welcome. See the repository-level [contribution guidelines](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/CONTRIBUTING.md) and [code of conduct](https://github.com/aws-samples/sample-ai-agent-factory/blob/main/CODE_OF_CONDUCT.md).
+
+This project is distributed under the MIT-0 License. See [LICENSE](LICENSE).
+
+Report security issues through the [AWS vulnerability reporting process](https://aws.amazon.com/security/vulnerability-reporting/), not a public issue.
 
 ---
 
-Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.  
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0

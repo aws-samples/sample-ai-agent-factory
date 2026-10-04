@@ -3,58 +3,76 @@
  *
  * Pins the shape of `D03WorkstreamGatewayStack` against the three-layer
  * tool-governance model (see README §3.3 v3):
- *   - Layer 1 (synth-time): unknown `allowedToolIds` fail the CDK synth.
+ *   - Layer 1 (synth-time): the stack refuses to synthesize without a
+ *     pipeline-resolved GA Registry context (the legacy `allowedToolIds`
+ *     catalogue path is retired) and re-validates every record at deploy.
  *   - Layer 3 (runtime): Gateway service role inline policy lists exactly
  *     the resolved N tool ARNs — no wildcards, no extras.
  *
  * Also pins:
  *   - Exactly one `Custom::BedrockAgentCoreGateway` resource per stack.
  *   - Exactly N `Custom::BedrockAgentCoreGatewayTarget` resources.
- *   - Each target's `lambdaArn` matches the catalogue's resolved ARN.
+ *   - Each target's `lambdaArn` matches the approved GA record's target ARN.
  *   - CfnOutputs surface `GatewayId` / `GatewayArn` / one per tool.
  *   - Stack tags include `tenant-id` and `agent-id`.
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { App } from 'aws-cdk-lib';
-import { Template } from 'aws-cdk-lib/assertions';
+import { createHash, createHmac } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { runInNewContext } from "node:vm";
 
+import { App } from "aws-cdk-lib";
+import type { GaRegistryConsumerContext } from "@agenticai/agent-registry";
+import { Template } from "aws-cdk-lib/assertions";
+
+import { type ToolId } from "@agenticai/platform-tool-catalogue";
+
+import { D03WorkstreamGatewayStack } from "../../apps/platform-account/lib/d03-workstream-gateway-stack";
 import {
-  PLATFORM_TOOL_CATALOGUE,
-  resolveTargetArn,
-  type ToolId,
-} from '@agenticai/platform-tool-catalogue';
+  FIXTURE_PLATFORM_ACCOUNT_ID,
+  GA_RECORD_IDS,
+  gaRegistryContext,
+} from "./fixtures/ga-registry-context";
 
-import { D03WorkstreamGatewayStack } from '../../apps/platform-account/lib/d03-workstream-gateway-stack';
-
-const PLATFORM_ACCOUNT_ID = '222222222222';
-const WORKLOAD_ACCOUNT_ID = '333333333333';
+const PLATFORM_ACCOUNT_ID = FIXTURE_PLATFORM_ACCOUNT_ID;
+const WORKLOAD_ACCOUNT_ID = "333333333333";
 
 interface SynthOpts {
-  readonly allowedToolIds?: readonly ToolId[];
+  readonly toolIds?: readonly ToolId[];
   readonly tenantId?: string;
   readonly agentId?: string;
   readonly cognitoDiscoveryUrl?: string;
   readonly cognitoAudience?: readonly string[];
 }
 
-function synth(opts: SynthOpts = {}): { template: Template; stack: D03WorkstreamGatewayStack } {
+/** Target ARN the GA fixture's governance record pins for one tool. */
+function recordTargetArn(toolId: ToolId): string {
+  return gaRegistryContext([toolId]).records[0].document.target.arn;
+}
+
+function synth(opts: SynthOpts = {}): {
+  template: Template;
+  stack: D03WorkstreamGatewayStack;
+} {
   const app = new App();
-  const allowedToolIds = opts.allowedToolIds ?? ['tool-echo', 'tool-ping'];
-  const tenantId = opts.tenantId ?? 'acme';
-  const agentId = opts.agentId ?? 'primary';
+  const toolIds = opts.toolIds ?? ["tool-echo", "tool-ping"];
+  const tenantId = opts.tenantId ?? "acme";
+  const agentId = opts.agentId ?? "primary";
   const stack = new D03WorkstreamGatewayStack(
     app,
     `AgenticAI-D03-WorkstreamGateway-${tenantId}-${agentId}`,
     {
-      env: { account: WORKLOAD_ACCOUNT_ID, region: 'us-east-1' },
+      env: { account: WORKLOAD_ACCOUNT_ID, region: "us-west-2" },
       tenantId,
       agentId,
-      envName: 'nonprod',
+      envName: "nonprod",
       workloadAccountId: WORKLOAD_ACCOUNT_ID,
       platformAccountId: PLATFORM_ACCOUNT_ID,
-      allowedToolIds,
+      applicationId: "demo-app",
+      costCentre: "engineering",
+      gaRegistryContext: gaRegistryContext(toolIds),
       cognitoDiscoveryUrl: opts.cognitoDiscoveryUrl,
       cognitoAudience: opts.cognitoAudience,
     },
@@ -62,38 +80,153 @@ function synth(opts: SynthOpts = {}): { template: Template; stack: D03Workstream
   return { template: Template.fromStack(stack), stack };
 }
 
-describe('Phase 10 — D03WorkstreamGatewayStack shape', () => {
-  it('emits exactly one Custom::BedrockAgentCoreGateway resource', () => {
+describe("Phase 10 — D03WorkstreamGatewayStack shape", () => {
+  it("emits exactly one Custom::BedrockAgentCoreGateway resource", () => {
     const { template } = synth();
-    const gws = template.findResources('Custom::BedrockAgentCoreGateway');
+    const gws = template.findResources("Custom::BedrockAgentCoreGateway");
     expect(Object.keys(gws)).toHaveLength(1);
   });
 
-  it('emits exactly N gateway-target resources where N = allowedToolIds.length', () => {
-    const ids: ToolId[] = ['tool-echo', 'tool-ping'];
-    const { template } = synth({ allowedToolIds: ids });
-    const targets = template.findResources('Custom::BedrockAgentCoreGatewayTarget');
+  it("retains the service-minted Gateway ID for update and rollback", () => {
+    const { template } = synth();
+    const resource = Object.values(
+      template.findResources("Custom::BedrockAgentCoreGateway"),
+    )[0] as any;
+    const rendered = JSON.stringify(resource);
+    expect(rendered).toContain(
+      '\\"physicalResourceId\\":{\\"responsePath\\":\\"gatewayId\\"}',
+    );
+    expect(rendered.match(/PHYSICAL:RESOURCEID:/g)).toHaveLength(2);
+    expect(rendered).toContain(
+      '\\"ignoreErrorCodesMatching\\":\\"ResourceNotFoundException\\"',
+    );
+    expect(rendered).not.toContain("ValidationException");
+    expect(rendered).not.toContain("AgenticAI-D03-Gateway-");
+  });
+
+  it("waits for target deletion convergence before deleting the Gateway", () => {
+    const { template } = synth({ toolIds: ["tool-echo", "tool-ping"] });
+    const resources = template.toJSON().Resources as Record<string, any>;
+    const [gatewayId] = Object.entries(resources).find(
+      ([, resource]) => resource.Type === "Custom::BedrockAgentCoreGateway",
+    )!;
+    const [barrierId, barrier] = Object.entries(resources).find(
+      ([, resource]) =>
+        resource.Type === "AWS::CloudFormation::CustomResource" &&
+        resource.Properties?.GatewayIdentifier,
+    )!;
+    expect(barrier.DependsOn).toContain(gatewayId);
+    const targets = Object.values(resources).filter(
+      (resource) => resource.Type === "Custom::BedrockAgentCoreGatewayTarget",
+    ) as any[];
+    expect(targets).toHaveLength(2);
+    for (const target of targets) {
+      expect(target.DependsOn).toContain(barrierId);
+    }
+    const waiter = Object.values(resources).find(
+      (resource: any) =>
+        resource.Type === "AWS::Lambda::Function" &&
+        resource.Properties?.Description ===
+          "Waits until AgentCore reports no targets before Gateway deletion.",
+    ) as any;
+    expect(waiter.Properties.Code.ZipFile).toContain(
+      "/gateways/' + encodeURIComponent(gatewayIdentifier) + '/targets/",
+    );
+    expect(waiter.Properties.Code.ZipFile).toContain(
+      "IsComplete: items.length === 0 && !parsed.nextToken",
+    );
+  });
+
+  it("polls target inventory until the Gateway is safe to delete", async () => {
+    const { template } = synth({ toolIds: ["tool-echo"] });
+    const waiter = Object.values(
+      template.findResources("AWS::Lambda::Function"),
+    ).find(
+      (resource: any) =>
+        resource.Properties?.Description ===
+        "Waits until AgentCore reports no targets before Gateway deletion.",
+    ) as any;
+    const responses = [
+      JSON.stringify({ items: [{ targetId: "TARGET1234" }] }),
+      JSON.stringify({ items: [] }),
+    ];
+    const fakeHttps = {
+      request: (_options: any, callback: (response: any) => void) => {
+        const request = new EventEmitter() as any;
+        request.end = () => {
+          const response = new EventEmitter() as any;
+          response.statusCode = 200;
+          callback(response);
+          response.emit("data", Buffer.from(responses.shift()!, "utf8"));
+          response.emit("end");
+        };
+        return request;
+      },
+    };
+    const exported: Record<string, any> = {};
+    runInNewContext(waiter.Properties.Code.ZipFile, {
+      exports: exported,
+      module: { exports: exported },
+      require: (name: string) => {
+        if (name === "https") return fakeHttps;
+        if (name === "crypto") return { createHash, createHmac };
+        throw new Error(`unexpected require: ${name}`);
+      },
+      process: {
+        env: {
+          AWS_REGION: "us-west-2",
+          AWS_ACCESS_KEY_ID: "test-access",
+          AWS_SECRET_ACCESS_KEY: "test-secret",
+          AWS_SESSION_TOKEN: "test-session",
+        },
+      },
+      Buffer,
+      Date,
+      JSON,
+      Promise,
+      encodeURIComponent,
+    });
+    const event = {
+      RequestType: "Delete",
+      ResourceProperties: { GatewayIdentifier: "gateway-123" },
+    };
+    await expect(exported.isComplete(event)).resolves.toEqual({
+      IsComplete: false,
+    });
+    await expect(exported.isComplete(event)).resolves.toEqual({
+      IsComplete: true,
+    });
+  });
+
+  it("emits exactly N gateway-target resources where N = subscribed GA records", () => {
+    const ids: ToolId[] = ["tool-echo", "tool-ping"];
+    const { template } = synth({ toolIds: ids });
+    const targets = template.findResources(
+      "Custom::BedrockAgentCoreGatewayTarget",
+    );
     expect(Object.keys(targets)).toHaveLength(ids.length);
   });
 
-  it('single-tool subscription emits exactly one target', () => {
-    const { template } = synth({ allowedToolIds: ['tool-echo'] });
-    const targets = template.findResources('Custom::BedrockAgentCoreGatewayTarget');
+  it("single-tool subscription emits exactly one target", () => {
+    const { template } = synth({ toolIds: ["tool-echo"] });
+    const targets = template.findResources(
+      "Custom::BedrockAgentCoreGatewayTarget",
+    );
     expect(Object.keys(targets)).toHaveLength(1);
   });
 });
 
-describe('Phase 10 — layer-3 enforcement (Gateway service role inline policy)', () => {
-  it('inline policy lists exactly the N resolved tool ARNs — no wildcards, no extras', () => {
-    const ids: ToolId[] = ['tool-echo', 'tool-ping'];
-    const { template } = synth({ allowedToolIds: ids });
+describe("Phase 10 — layer-3 enforcement (Gateway service role inline policy)", () => {
+  it("inline policy lists exactly the N resolved tool ARNs — no wildcards, no extras", () => {
+    const ids: ToolId[] = ["tool-echo", "tool-ping"];
+    const { template } = synth({ toolIds: ids });
     // The service role has a single inline policy `InvokeSubscribedTools`.
-    const roles = template.findResources('AWS::IAM::Role', {
+    const roles = template.findResources("AWS::IAM::Role", {
       Properties: {
         AssumeRolePolicyDocument: {
           Statement: [
             {
-              Principal: { Service: 'bedrock-agentcore.amazonaws.com' },
+              Principal: { Service: "bedrock-agentcore.amazonaws.com" },
             },
           ],
         },
@@ -104,42 +237,50 @@ describe('Phase 10 — layer-3 enforcement (Gateway service role inline policy)'
     expect(gwRole).toHaveLength(1);
     const policies = ((gwRole[0] as any).Properties.Policies ?? []) as Array<{
       PolicyName: string;
-      PolicyDocument: { Statement: Array<{ Effect: string; Action: unknown; Resource: unknown }> };
+      PolicyDocument: {
+        Statement: Array<{
+          Effect: string;
+          Action: unknown;
+          Resource: unknown;
+        }>;
+      };
     }>;
     expect(policies).toHaveLength(1);
     const stmts = policies[0].PolicyDocument.Statement;
     expect(stmts).toHaveLength(1);
     const stmt = stmts[0];
-    expect(stmt.Effect).toBe('Allow');
-    expect(stmt.Action).toBe('lambda:InvokeFunction');
-    const resources = Array.isArray(stmt.Resource) ? stmt.Resource : [stmt.Resource];
-    // Exact ARNs — must match what the catalogue resolves.
-    const expected = ids.map((id) =>
-      resolveTargetArn(PLATFORM_TOOL_CATALOGUE[id], PLATFORM_ACCOUNT_ID),
-    );
+    expect(stmt.Effect).toBe("Allow");
+    expect(stmt.Action).toBe("lambda:InvokeFunction");
+    const resources = Array.isArray(stmt.Resource)
+      ? stmt.Resource
+      : [stmt.Resource];
+    // Exact ARNs — must match what the approved GA records pin.
+    const expected = ids.map((id) => recordTargetArn(id));
     expect(resources).toHaveLength(expected.length);
     for (const arn of expected) {
       expect(resources).toContain(arn);
     }
     // No wildcards anywhere in the resource list.
     for (const r of resources) {
-      expect(typeof r).toBe('string');
-      expect(r as string).not.toContain('*');
+      expect(typeof r).toBe("string");
+      expect(r as string).not.toContain("*");
     }
   });
 });
 
-describe("Phase 10 — each target's lambdaArn matches the catalogue's resolved ARN", () => {
-  it('per-tool GatewayTarget carries the expected lambdaArn in its CreateGatewayTarget params', () => {
-    const ids: ToolId[] = ['tool-echo', 'tool-ping'];
-    const { template } = synth({ allowedToolIds: ids });
-    const targets = template.findResources('Custom::BedrockAgentCoreGatewayTarget');
+describe("Phase 10 — each target's lambdaArn matches the approved GA record's target ARN", () => {
+  it("per-tool GatewayTarget carries the expected lambdaArn in its CreateGatewayTarget params", () => {
+    const ids: ToolId[] = ["tool-echo", "tool-ping"];
+    const { template } = synth({ toolIds: ids });
+    const targets = template.findResources(
+      "Custom::BedrockAgentCoreGatewayTarget",
+    );
     // The custom-resource `Create` property is a JSON-in-JSON payload the
     // CDK serialises via Fn::Join — search the raw JSON.stringify output.
     // Inner quotes are therefore double-escaped (`\\\"`).
     const rendered = JSON.stringify(targets);
     for (const id of ids) {
-      const expected = resolveTargetArn(PLATFORM_TOOL_CATALOGUE[id], PLATFORM_ACCOUNT_ID);
+      const expected = recordTargetArn(id);
       expect(rendered).toContain(expected);
       // And the tool id must appear as the inlinePayload.name (the inner
       // JSON renders `"name":"<id>"` which, after one level of outer
@@ -149,182 +290,1274 @@ describe("Phase 10 — each target's lambdaArn matches the catalogue's resolved 
   });
 });
 
-describe('Phase 10 — synth-time SSOT gate (layer 1)', () => {
-  it('throws when allowedToolIds contains an id not in the catalogue', () => {
-    expect(() => synth({ allowedToolIds: ['not-a-real-tool'] })).toThrow(
-      /Unknown tool id\(s\)/,
-    );
+describe("Phase 10 — synth-time subscription gate (layer 1)", () => {
+  const baseProps = {
+    env: { account: WORKLOAD_ACCOUNT_ID, region: "us-west-2" },
+    tenantId: "acme",
+    agentId: "primary",
+    envName: "nonprod",
+    workloadAccountId: WORKLOAD_ACCOUNT_ID,
+    platformAccountId: PLATFORM_ACCOUNT_ID,
+    applicationId: "demo-app",
+    costCentre: "engineering",
+  };
+
+  it("refuses a stack without a GA Registry context (legacy path retired)", () => {
+    expect(
+      () =>
+        new D03WorkstreamGatewayStack(
+          new App(),
+          "AgenticAI-D03-WorkstreamGateway-acme-nocontext",
+          baseProps as unknown as ConstructorParameters<
+            typeof D03WorkstreamGatewayStack
+          >[2],
+        ),
+    ).toThrow(/'gaRegistryContext' is required/);
   });
 
-  it('error message lists the known catalogue keys for the operator', () => {
-    try {
-      synth({ allowedToolIds: ['bogus-tool-x'] });
-      fail('expected throw');
-    } catch (err) {
-      const msg = (err as Error).message;
-      expect(msg).toContain('bogus-tool-x');
-      expect(msg).toContain('tool-echo');
-    }
+  it("refuses the retired allowedToolIds prop from an untyped caller", () => {
+    expect(
+      () =>
+        new D03WorkstreamGatewayStack(
+          new App(),
+          "AgenticAI-D03-WorkstreamGateway-acme-legacy",
+          {
+            ...baseProps,
+            allowedToolIds: ["tool-echo"],
+          } as unknown as ConstructorParameters<
+            typeof D03WorkstreamGatewayStack
+          >[2],
+        ),
+    ).toThrow(/legacy 'allowedToolIds' catalogue path was retired/);
   });
 });
 
-describe('Phase 10 — tags + outputs surface', () => {
-  it('stack tags include tenant-id and agent-id', () => {
-    const { stack } = synth({ tenantId: 'retail', agentId: 'triage' });
+describe("Phase 10 — tags + outputs surface", () => {
+  it("stack tags include tenant-id and agent-id", () => {
+    const { stack } = synth({ tenantId: "retail", agentId: "triage" });
     const tags = stack.tags.tagValues();
-    expect(tags['tenant-id']).toBe('retail');
-    expect(tags['agent-id']).toBe('triage');
-    expect(tags['deviation']).toBe('D-03');
-    expect(tags['environment']).toBe('nonprod');
+    expect(tags["application-id"]).toBe("demo-app");
+    expect(tags["tenant-id"]).toBe("retail");
+    expect(tags["agent-id"]).toBe("triage");
+    expect(tags["cost-centre"]).toBe("engineering");
+    expect(tags["deviation"]).toBe("D-03");
+    expect(tags["environment"]).toBe("nonprod");
   });
 
-  it('CfnOutputs include GatewayId + GatewayArn', () => {
+  it("CfnOutputs include GatewayId + GatewayArn", () => {
     const { template } = synth();
-    const outputs = template.findOutputs('*');
+    const outputs = template.findOutputs("*");
     const names = Object.keys(outputs);
-    expect(names).toContain('GatewayId');
-    expect(names).toContain('GatewayArn');
-    expect(names).toContain('GatewayServiceRoleArn');
-    expect(names).toContain('SubscribedToolCount');
-    expect(names).toContain('PerTenantCedarPolicy');
+    expect(names).toContain("GatewayId");
+    expect(names).toContain("GatewayArn");
+    expect(names).toContain("GatewayServiceRoleArn");
+    expect(names).toContain("SubscribedToolCount");
+    expect(names).toContain("PerTenantCedarPolicy");
   });
 
-  it('emits one ToolTarget-<toolId> output per subscribed tool', () => {
-    const ids: ToolId[] = ['tool-echo', 'tool-ping'];
-    const { template } = synth({ allowedToolIds: ids });
-    const outputs = template.findOutputs('*');
+  it("emits one ToolTarget-<toolId> output per subscribed tool", () => {
+    const ids: ToolId[] = ["tool-echo", "tool-ping"];
+    const { template } = synth({ toolIds: ids });
+    const outputs = template.findOutputs("*");
     for (const id of ids) {
-      const key = `ToolTarget${id.replace(/-/g, '')}`;
+      const key = `ToolTarget${id.replace(/-/g, "")}`;
       // CDK strips non-alphanumeric from the logical id; just look for any
       // output whose value contains the resolved ARN.
-      const expected = resolveTargetArn(PLATFORM_TOOL_CATALOGUE[id], PLATFORM_ACCOUNT_ID);
+      const expected = recordTargetArn(id);
       const match = Object.values(outputs).find(
         (o) => JSON.stringify((o as any).Value) === JSON.stringify(expected),
       );
       expect(match).toBeDefined();
       // Sanity: the key is derived from the tool id.
-      expect(key.toLowerCase()).toContain(id.replace(/-/g, '').toLowerCase());
+      expect(key.toLowerCase()).toContain(id.replace(/-/g, "").toLowerCase());
     }
   });
 });
 
-describe('Phase 10 — v0.5.0 Registry subscription path', () => {
-  function synthRegistry(opts: {
-    readonly subscribedRegistryRecords?: readonly string[];
-    readonly registryId?: string;
-    readonly tenantId?: string;
-  }): { template: Template; stack: D03WorkstreamGatewayStack } {
+describe("Phase 10 — R2 GA Registry subscription path", () => {
+  function synthRegistry(
+    opts: {
+      readonly context?: GaRegistryConsumerContext;
+      readonly tenantId?: string;
+      readonly policyEngineMode?: "OFF" | "LOG_ONLY" | "ENFORCE";
+      readonly policyEngineIamRoleArns?: readonly string[];
+      readonly cognitoDiscoveryUrl?: string;
+      readonly cognitoAudience?: readonly string[];
+    } = {},
+  ): { template: Template; stack: D03WorkstreamGatewayStack } {
     const app = new App();
-    const tenantId = opts.tenantId ?? 'acme';
+    const tenantId = opts.tenantId ?? "acme";
     const stack = new D03WorkstreamGatewayStack(
       app,
       `AgenticAI-D03-WorkstreamGateway-${tenantId}-registry`,
       {
-        env: { account: WORKLOAD_ACCOUNT_ID, region: 'us-east-1' },
+        env: { account: WORKLOAD_ACCOUNT_ID, region: "us-west-2" },
         tenantId,
-        agentId: 'primary',
-        envName: 'nonprod',
+        agentId: "primary",
+        envName: "nonprod",
         workloadAccountId: WORKLOAD_ACCOUNT_ID,
         platformAccountId: PLATFORM_ACCOUNT_ID,
-        subscribedRegistryRecords: opts.subscribedRegistryRecords ?? ['tool-echo', 'tool-ping'],
-        registryId: opts.registryId ?? 'reg-platform-abc123',
+        applicationId: "demo-app",
+        costCentre: "engineering",
+        gaRegistryContext: opts.context ?? gaRegistryContext(),
+        policyEngineMode: opts.policyEngineMode,
+        policyEngineIamRoleArns: opts.policyEngineIamRoleArns,
+        cognitoDiscoveryUrl: opts.cognitoDiscoveryUrl,
+        cognitoAudience: opts.cognitoAudience,
       },
     );
     return { template: Template.fromStack(stack), stack };
   }
 
-  it('emits one Custom::AgenticAIRegistryRecordValidator per subscribed record', () => {
-    const ids = ['tool-echo', 'tool-ping'];
-    const { template } = synthRegistry({ subscribedRegistryRecords: ids });
-    // v0.5.0 — the read-only AwsCustomResource was replaced by a Lambda-backed
-    // Provider + CustomResource so the deploy can fail when status !== APPROVED.
-    const validators = template.findResources('Custom::AgenticAIRegistryRecordValidator');
-    expect(Object.keys(validators)).toHaveLength(ids.length);
-    // The validator Lambda must exist and carry the GetRegistryRecord IAM allow.
-    const fns = template.findResources('AWS::Lambda::Function');
-    const validatorFn = Object.values(fns).find(
-      (f: any) =>
-        typeof f?.Properties?.FunctionName === 'string' &&
-        (f.Properties.FunctionName as string).includes('reg-validator'),
+  async function executeValidator(
+    expectedDigest?: string,
+    expectedTargetArn?: string,
+    region: string = "us-west-2",
+  ) {
+    const context = gaRegistryContext(["tool-echo"]);
+    const resolved = context.records[0];
+    const descriptor = JSON.stringify(resolved.document);
+    const digest = createHash("sha256")
+      .update(descriptor, "utf8")
+      .digest("hex");
+    const template = synthRegistry({ context }).template;
+    const functions = template.findResources("AWS::Lambda::Function");
+    const validator = Object.values(functions).find(
+      (resource: any) =>
+        typeof resource.Properties?.FunctionName === "string" &&
+        resource.Properties.FunctionName.includes("reg-validator"),
+    ) as any;
+    const code = validator.Properties.Code.ZipFile as string;
+    const responses = [
+      {
+        status: 200,
+        body:
+          "<AssumeRoleResponse><Credentials><AccessKeyId>test-access</AccessKeyId>" +
+          "<SecretAccessKey>test-secret</SecretAccessKey>" +
+          "<SessionToken>test-session</SessionToken></Credentials></AssumeRoleResponse>",
+      },
+      {
+        status: 200,
+        body: JSON.stringify({
+          recordId: resolved.recordId,
+          name: resolved.document.toolId,
+          status: "APPROVED",
+          recordType: "CUSTOM",
+          recordVersion: `${resolved.document.catalogueVersion}.0.0`,
+          descriptors: { custom: { data: descriptor } },
+        }),
+      },
+    ];
+    const requests: any[] = [];
+    const fakeHttps = {
+      request: (options: any, callback: (response: any) => void) => {
+        requests.push(options);
+        const request = new EventEmitter() as any;
+        request.write = () => undefined;
+        request.end = () => {
+          const next = responses.shift();
+          if (!next) throw new Error("unexpected HTTPS request");
+          const response = new EventEmitter() as any;
+          response.statusCode = next.status;
+          callback(response);
+          response.emit("data", Buffer.from(next.body, "utf8"));
+          response.emit("end");
+        };
+        return request;
+      },
+    };
+    const exported: Record<string, any> = {};
+    runInNewContext(code, {
+      exports: exported,
+      module: { exports: exported },
+      require: (name: string) => {
+        if (name === "https") return fakeHttps;
+        if (name === "crypto") return { createHash, createHmac };
+        throw new Error(`unexpected require: ${name}`);
+      },
+      process: {
+        env: {
+          AWS_REGION: region,
+          AWS_ACCESS_KEY_ID: "test-access",
+          AWS_SECRET_ACCESS_KEY: "test-secret",
+          AWS_SESSION_TOKEN: "test-session",
+          REGISTRY_READER_ROLE_ARN: context.readerRoleArn,
+          REGISTRY_READER_EXTERNAL_ID: context.readerExternalId,
+          REGISTRY_READER_SESSION_NAME: "registry-nonprod-validator",
+          GATEWAY_AUTHORIZER_MODE: "AWS_IAM",
+        },
+      },
+      URLSearchParams,
+      Buffer,
+      Date,
+    });
+    const result = await exported.handler({
+      RequestType: "Create",
+      ResourceProperties: {
+        registryId: context.registryId,
+        recordId: resolved.recordId,
+        expectedToolId: resolved.document.toolId,
+        expectedTargetArn: expectedTargetArn ?? resolved.document.target.arn,
+        expectedDescriptorSha256: expectedDigest ?? digest,
+        validationRevision: context.sourceRevision,
+        tenantId: "acme",
+        agentId: "primary",
+      },
+    });
+    return { result, requests, digest };
+  }
+
+  it("emits one digest validator and one Gateway target per GA record", () => {
+    const { template } = synthRegistry();
+    const validators = template.findResources(
+      "Custom::AgenticAIRegistryRecordValidator",
     );
-    expect(validatorFn).toBeDefined();
+    const targets = template.findResources(
+      "Custom::BedrockAgentCoreGatewayTarget",
+    );
+    expect(Object.keys(validators)).toHaveLength(2);
+    expect(Object.keys(targets)).toHaveLength(2);
+    const renderedValidators = JSON.stringify(validators);
+    expect(renderedValidators).toContain("expectedDescriptorSha256");
+    expect(renderedValidators).toContain("expectedTargetArn");
+    expect(renderedValidators).toContain("validationRevision");
+    expect(renderedValidators).toContain("expectedToolId");
+    expect(renderedValidators).not.toContain("changeNonce");
   });
 
-  it('still emits exactly one Gateway and N Targets in Registry mode', () => {
-    const ids = ['tool-echo', 'tool-ping'];
-    const { template } = synthRegistry({ subscribedRegistryRecords: ids });
-    const gws = template.findResources('Custom::BedrockAgentCoreGateway');
-    const targets = template.findResources('Custom::BedrockAgentCoreGatewayTarget');
-    expect(Object.keys(gws)).toHaveLength(1);
-    expect(Object.keys(targets)).toHaveLength(ids.length);
-  });
-
-  it('SubscribedToolCount matches subscribedRegistryRecords.length', () => {
-    const ids = ['tool-echo'];
-    const { template } = synthRegistry({ subscribedRegistryRecords: ids });
-    const outputs = template.findOutputs('SubscribedToolCount');
-    expect(Object.values(outputs)[0]).toBeDefined();
-    expect((Object.values(outputs)[0] as any).Value).toBe('1');
-  });
-
-  it('throws when subscribedRegistryRecords is set but registryId is missing', () => {
-    expect(() =>
-      synthRegistry({ subscribedRegistryRecords: ['tool-echo'], registryId: '' }),
-    ).toThrow(/registryId/);
-  });
-
-  it('throws when both allowedToolIds and subscribedRegistryRecords are supplied', () => {
-    const app = new App();
-    expect(() =>
-      new D03WorkstreamGatewayStack(app, 'AgenticAI-D03-WorkstreamGateway-conflict', {
-        env: { account: WORKLOAD_ACCOUNT_ID, region: 'us-east-1' },
-        tenantId: 'a',
-        agentId: 'b',
-        envName: 'nonprod',
-        workloadAccountId: WORKLOAD_ACCOUNT_ID,
-        platformAccountId: PLATFORM_ACCOUNT_ID,
-        allowedToolIds: ['tool-echo'],
-        subscribedRegistryRecords: ['tool-echo'],
-        registryId: 'reg-x',
+  it("creates the exact pipeline-owned validator role with one AssumeRole target", () => {
+    const { template } = synthRegistry();
+    const roles = template.findResources("AWS::IAM::Role");
+    const validatorRole = Object.values(roles).find(
+      (role: any) =>
+        role.Properties?.RoleName ===
+        "AgenticAI-D03-nonprod-acme-primary-RegistryValidator",
+    ) as any;
+    expect(validatorRole).toBeDefined();
+    expect(
+      validatorRole.Properties.AssumeRolePolicyDocument.Statement,
+    ).toContainEqual(
+      expect.objectContaining({
+        Principal: { Service: "lambda.amazonaws.com" },
       }),
-    ).toThrow(/mutually exclusive/);
+    );
+    expect(validatorRole.Properties.Policies).toEqual([
+      {
+        PolicyName: "AssumeRegistryReader",
+        PolicyDocument: {
+          Version: "2012-10-17",
+          Statement: [
+            expect.objectContaining({
+              Action: "sts:AssumeRole",
+              Resource: `arn:aws:iam::${PLATFORM_ACCOUNT_ID}:role/AgenticAI-RegistryReader-nonprod`,
+            }),
+          ],
+        },
+      },
+    ]);
   });
 
-  it('throws when neither allowedToolIds nor subscribedRegistryRecords is supplied', () => {
+  it("pins the GA endpoint, signing name, schema, and reader session pattern", () => {
+    const { template } = synthRegistry();
+    const functions = template.findResources("AWS::Lambda::Function");
+    const validator = Object.values(functions).find(
+      (resource: any) =>
+        typeof resource.Properties?.FunctionName === "string" &&
+        resource.Properties.FunctionName.includes("reg-validator"),
+    ) as any;
+    expect(validator).toBeDefined();
+    const code = validator.Properties.Code.ZipFile as string;
+    expect(code).toContain("const service = 'agent-registry'");
+    expect(code).toContain("'agent-registry-control.' + region");
+    expect(code).toContain("agenticai.tool-governance/1.0");
+    expect(code).toContain("descriptor digest changed after pipeline synth");
+    expect(code).not.toContain("bedrock-agentcore-control.");
+    expect(
+      validator.Properties.Environment.Variables.REGISTRY_READER_SESSION_NAME,
+    ).toBe("registry-nonprod-validator");
+  });
+
+  it("executes the synthesized validator through STS and GA Registry SigV4", async () => {
+    const { result, requests, digest } = await executeValidator();
+    expect(result.Data).toMatchObject({
+      toolId: "tool-echo",
+      descriptorSha256: digest,
+      status: "APPROVED",
+    });
+    expect(requests).toHaveLength(2);
+    expect(requests[0].host).toBe("sts.us-west-2.amazonaws.com");
+    expect(requests[0].headers.Authorization).toContain(
+      "/us-west-2/sts/aws4_request",
+    );
+    expect(requests[1].host).toBe("agent-registry-control.us-west-2.api.aws");
+    expect(requests[1].headers.Authorization).toContain(
+      "/agent-registry/aws4_request",
+    );
+  });
+
+  it("keeps every validator call in the deploy Region (eu-west-1 twin)", async () => {
+    // AWS serves the global STS endpoint from us-east-1 for opt-in Regions and
+    // its session tokens are valid only in default-enabled Regions, so the
+    // validator must use the Regional endpoint of the Region it runs in.
+    const { result, requests } = await executeValidator(
+      undefined,
+      undefined,
+      "eu-west-1",
+    );
+    expect(result.Data).toMatchObject({ status: "APPROVED" });
+    expect(requests.map((r) => r.host)).toEqual([
+      "sts.eu-west-1.amazonaws.com",
+      "agent-registry-control.eu-west-1.api.aws",
+    ]);
+    expect(requests[0].headers.Authorization).toContain(
+      "/eu-west-1/sts/aws4_request",
+    );
+    expect(JSON.stringify(requests)).not.toMatch(/us-east-1|sts\.amazonaws\.com/);
+  });
+
+  it("rejects a descriptor changed after pipeline synth", async () => {
+    await expect(executeValidator("0".repeat(64))).rejects.toThrow(
+      /descriptor digest changed after pipeline synth/,
+    );
+  });
+
+  it("rejects a live target ARN different from the wired Gateway target", async () => {
+    await expect(
+      executeValidator(
+        undefined,
+        `arn:aws:lambda:us-west-2:${PLATFORM_ACCOUNT_ID}:function:rogue:PROD`,
+      ),
+    ).rejects.toThrow(/target ARN differs from the Gateway target/);
+  });
+
+  it("uses tool IDs and full Registry schemas instead of opaque record IDs", () => {
+    const { template } = synthRegistry();
+    const targets = template.findResources(
+      "Custom::BedrockAgentCoreGatewayTarget",
+    );
+    const rendered = JSON.stringify(targets);
+    const context = gaRegistryContext();
+    for (const toolId of ["tool-echo", "tool-ping"] as ToolId[]) {
+      const expected = context.records.find(
+        (record) => record.document.toolId === toolId,
+      )!.document.target.arn;
+      expect(rendered).toContain(expected);
+      expect(rendered).toContain(`\\"name\\":\\"${toolId}\\"`);
+      expect(rendered).not.toContain(GA_RECORD_IDS[toolId]);
+    }
+  });
+
+  it("is deterministic for an unchanged source revision", () => {
+    const left = synthRegistry().template.toJSON();
+    const right = synthRegistry().template.toJSON();
+    expect(right).toEqual(left);
+  });
+
+  it("preserves exact Gateway service-role Lambda resources", () => {
+    const { template } = synthRegistry();
+    const roles = template.findResources("AWS::IAM::Role");
+    const gatewayRole = Object.values(roles).find((role: any) =>
+      JSON.stringify(role.Properties.AssumeRolePolicyDocument).includes(
+        "bedrock-agentcore.amazonaws.com",
+      ),
+    ) as any;
+    const statement =
+      gatewayRole.Properties.Policies[0].PolicyDocument.Statement[0];
+    expect(statement.Action).toBe("lambda:InvokeFunction");
+    expect(statement.Resource).toEqual(
+      gaRegistryContext().records.map((record) => record.document.target.arn),
+    );
+  });
+
+  it("rejects environment/account drift and a missing Registry context", () => {
+    const wrongEnvironment = gaRegistryContext();
+    (wrongEnvironment as any).environment = "prod";
+    expect(() => synthRegistry({ context: wrongEnvironment })).toThrow(
+      /environment/,
+    );
+
     const app = new App();
-    expect(() =>
-      new D03WorkstreamGatewayStack(app, 'AgenticAI-D03-WorkstreamGateway-empty', {
-        env: { account: WORKLOAD_ACCOUNT_ID, region: 'us-east-1' },
-        tenantId: 'a',
-        agentId: 'b',
-        envName: 'nonprod',
-        workloadAccountId: WORKLOAD_ACCOUNT_ID,
-        platformAccountId: PLATFORM_ACCOUNT_ID,
+    expect(
+      () =>
+        new D03WorkstreamGatewayStack(app, "NoContext", {
+          env: { account: WORKLOAD_ACCOUNT_ID, region: "us-east-1" },
+          tenantId: "a",
+          agentId: "b",
+          envName: "nonprod",
+          workloadAccountId: WORKLOAD_ACCOUNT_ID,
+          platformAccountId: PLATFORM_ACCOUNT_ID,
+          applicationId: "demo",
+          costCentre: "engineering",
+          allowedToolIds: ["tool-echo"],
+          gaRegistryContext: gaRegistryContext(["tool-echo"]),
+        } as unknown as ConstructorParameters<
+          typeof D03WorkstreamGatewayStack
+        >[2]),
+    ).toThrow(/legacy 'allowedToolIds' catalogue path was retired/);
+
+    expect(
+      () =>
+        new D03WorkstreamGatewayStack(new App(), "Empty", {
+          env: { account: WORKLOAD_ACCOUNT_ID, region: "us-east-1" },
+          tenantId: "a",
+          agentId: "b",
+          envName: "nonprod",
+          workloadAccountId: WORKLOAD_ACCOUNT_ID,
+          platformAccountId: PLATFORM_ACCOUNT_ID,
+          applicationId: "demo",
+          costCentre: "engineering",
+        } as unknown as ConstructorParameters<
+          typeof D03WorkstreamGatewayStack
+        >[2]),
+    ).toThrow(/'gaRegistryContext' is required/);
+  });
+
+  it("preserves the R2 template when PolicyEngine mode is OFF", () => {
+    const implicit = synthRegistry().template.toJSON();
+    const explicit = synthRegistry({
+      policyEngineMode: "OFF",
+    }).template.toJSON();
+    expect(explicit).toEqual(implicit);
+    const template = Template.fromJSON(explicit);
+    template.resourceCountIs("AWS::BedrockAgentCore::PolicyEngine", 0);
+    template.resourceCountIs("AWS::BedrockAgentCore::Policy", 0);
+    template.resourceCountIs("Custom::AgenticAIPolicyEngineAssociation", 0);
+    template.resourceCountIs("Custom::AgenticAIPolicyEngineMode", 0);
+    expect(JSON.stringify(explicit)).toContain("searchType");
+    expect(JSON.stringify(explicit)).toContain("SEMANTIC");
+    expect(JSON.stringify(explicit)).not.toContain(
+      "bedrock-agentcore:AuthorizeAction",
+    );
+  });
+
+  it("changes only the mode mutation, mode-ready check, and output between LOG_ONLY and ENFORCE", () => {
+    const iamRoleArns = [
+      `arn:aws:iam::${WORKLOAD_ACCOUNT_ID}:role/AgenticAI-D03-acme-primary-runtime`,
+    ];
+    const logOnly = synthRegistry({
+      policyEngineMode: "LOG_ONLY",
+      policyEngineIamRoleArns: iamRoleArns,
+    }).template.toJSON();
+    const enforce = synthRegistry({
+      policyEngineMode: "ENFORCE",
+      policyEngineIamRoleArns: iamRoleArns,
+    }).template.toJSON();
+    const expectSearchDisabled = (renderedTemplate: any): void => {
+      const resources = Object.values(renderedTemplate.Resources) as any[];
+      const gateway = resources.find(
+        (resource) => resource.Type === "Custom::BedrockAgentCoreGateway",
+      );
+      expect(gateway).toBeDefined();
+      const createGateway = JSON.stringify(gateway.Properties.Create);
+      expect(createGateway).toContain(
+        '\\"protocolConfiguration\\":{\\"mcp\\":{\\"supportedVersions\\":[\\"2025-06-18\\"]}}',
+      );
+      expect(createGateway).not.toContain("searchType");
+      const association = resources.find(
+        (resource) =>
+          resource.Type === "Custom::AgenticAIPolicyEngineAssociation",
+      );
+      expect(association).toBeDefined();
+      expect(
+        association.Properties.GatewayUpdateParameters.protocolConfiguration,
+      ).toEqual({
+        mcp: { supportedVersions: ["2025-06-18"] },
+      });
+      expect(JSON.stringify(renderedTemplate)).not.toContain("searchType");
+      expect(JSON.stringify(renderedTemplate)).not.toContain("SEMANTIC");
+    };
+    expectSearchDisabled(logOnly);
+    expectSearchDisabled(enforce);
+
+    const changedResources = Object.keys(logOnly.Resources).filter(
+      (logicalId) =>
+        JSON.stringify(logOnly.Resources[logicalId]) !==
+        JSON.stringify(enforce.Resources[logicalId]),
+    );
+    expect(
+      changedResources.map((id) => logOnly.Resources[id].Type).sort(),
+    ).toEqual(
+      [
+        "AWS::CloudFormation::CustomResource",
+        "Custom::AgenticAIPolicyEngineMode",
+      ].sort(),
+    );
+    const changedOutputs = Object.keys(logOnly.Outputs).filter(
+      (logicalId) =>
+        JSON.stringify(logOnly.Outputs[logicalId]) !==
+        JSON.stringify(enforce.Outputs[logicalId]),
+    );
+    expect(changedOutputs).toEqual(["PolicyEngineMode"]);
+  });
+
+  it("emits strict IAM PolicyEngine resources and exact service-role access in LOG_ONLY", () => {
+    const callerRole = `arn:aws:iam::${WORKLOAD_ACCOUNT_ID}:role/AgenticAI-D03-acme-primary-runtime`;
+    const { template } = synthRegistry({
+      policyEngineMode: "LOG_ONLY",
+      policyEngineIamRoleArns: [callerRole],
+    });
+    const enabledTemplate = JSON.stringify(template.toJSON());
+    expect(enabledTemplate).toContain("supportedVersions");
+    expect(enabledTemplate).toContain("2025-06-18");
+    expect(enabledTemplate).not.toContain("searchType");
+    expect(enabledTemplate).not.toContain("SEMANTIC");
+    template.resourceCountIs("AWS::BedrockAgentCore::PolicyEngine", 1);
+    template.resourceCountIs("AWS::BedrockAgentCore::Policy", 2);
+    template.resourceCountIs("AWS::KMS::Key", 1);
+    const engine = Object.values(
+      template.findResources("AWS::BedrockAgentCore::PolicyEngine"),
+    )[0] as any;
+    expect(engine.Properties.EncryptionKeyArn).toEqual({
+      "Fn::GetAtt": [expect.any(String), "Arn"],
+    });
+    const key = Object.values(
+      template.findResources("AWS::KMS::Key"),
+    )[0] as any;
+    const keyPolicy = key.Properties.KeyPolicy.Statement;
+    expect(JSON.stringify(keyPolicy)).toContain("kms:CreateGrant");
+    expect(JSON.stringify(keyPolicy)).toContain(
+      "aws:bedrock-agentcore-policy:policy-engine-arn",
+    );
+    expect(JSON.stringify(keyPolicy)).toContain("kms:ViaService");
+    expect(JSON.stringify(keyPolicy)).toContain("aws:SourceAccount");
+    expect(JSON.stringify(keyPolicy)).not.toContain(
+      '"Service":"bedrock-agentcore.amazonaws.com"',
+    );
+    // Exact-key identity access relies on this statement for the runtime
+    // service/source/context boundary; keep the compensating controls coupled.
+    const keyCryptography = keyPolicy.find(
+      (statement: any) => statement.Sid === "AllowPolicyEngineCryptography",
+    );
+    expect(keyCryptography).toBeDefined();
+    expect(keyCryptography.Condition).toEqual(
+      expect.objectContaining({
+        StringEquals: expect.objectContaining({
+          "kms:ViaService": expect.anything(),
+          "aws:SourceAccount": expect.anything(),
+        }),
+        ArnLike: expect.objectContaining({
+          "aws:SourceArn": expect.anything(),
+        }),
+        StringLike: expect.objectContaining({
+          "kms:EncryptionContext:aws:bedrock-agentcore-policy:policy-engine-arn":
+            expect.anything(),
+        }),
       }),
-    ).toThrow(/either 'allowedToolIds'.*or 'subscribedRegistryRecords'/);
+    );
+    const resources = template.toJSON().Resources as Record<string, any>;
+    const propagation = Object.values(resources).find(
+      (resource) =>
+        resource.Type === "AWS::CloudFormation::CustomResource" &&
+        resource.Properties?.WaitMs,
+    ) as any;
+    expect(propagation.Properties.WaitMs).toBe(360000);
+    template.resourceCountIs("Custom::AgenticAIPolicyEngineAssociation", 1);
+    template.resourceCountIs("Custom::AgenticAIPolicyEngineMode", 1);
+    template.resourceCountIs("Custom::AgenticAIPolicyEngineModeRollback", 1);
+    template.resourceCountIs("Custom::AgenticAIPolicyEngineTargetReady", 1);
+
+    const policies = Object.values(
+      template.findResources("AWS::BedrockAgentCore::Policy"),
+    ) as any[];
+    for (const policy of policies) {
+      expect(policy.Properties.ValidationMode).toBe("FAIL_ON_ANY_FINDINGS");
+      expect(policy.Properties.EnforcementMode).toBe("ACTIVE");
+      const statement = JSON.stringify(
+        policy.Properties.Definition.Cedar.Statement,
+      );
+      const expectedPrincipal = JSON.stringify(
+        `AgentCore::IamEntity::"arn:aws:sts::${WORKLOAD_ACCOUNT_ID}:assumed-role/AgenticAI-D03-acme-primary-runtime"`,
+      ).slice(1, -1);
+      expect(statement).toContain(expectedPrincipal);
+      expect(statement).toContain("AgentCore::Gateway");
+      expect(statement).not.toContain("forbid(");
+      expect(statement).not.toContain("gateway/*");
+    }
+    expect(JSON.stringify(policies)).toContain("target-tool-echo___tool-echo");
+    expect(JSON.stringify(policies)).toContain("target-tool-ping___tool-ping");
+
+    const iamPolicies = Object.values(
+      template.findResources("AWS::IAM::Policy"),
+    ) as any[];
+    const access = iamPolicies.find(
+      (policy) =>
+        policy.Properties.PolicyName === "AgenticAI-nonprod-PolicyEngineAccess",
+    );
+    expect(access).toBeDefined();
+    const accessStatements = access.Properties.PolicyDocument.Statement;
+    expect(accessStatements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          Action: "bedrock-agentcore:GetPolicyEngine",
+          Resource: expect.anything(),
+        }),
+        expect.objectContaining({
+          Action: [
+            "bedrock-agentcore:AuthorizeAction",
+            "bedrock-agentcore:PartiallyAuthorizeActions",
+          ],
+          Resource: expect.any(Array),
+        }),
+      ]),
+    );
+    const decrypt = accessStatements.find(
+      (statement: any) => statement.Sid === "UsePolicyEngineKey",
+    );
+    expect(decrypt).toEqual(
+      expect.objectContaining({
+        Effect: "Allow",
+        Action: "kms:Decrypt",
+        Resource: expect.anything(),
+      }),
+    );
+    expect(decrypt.Condition).toBeUndefined();
+    const describeKey = accessStatements.find(
+      (statement: any) => statement.Sid === "ValidatePolicyEngineKey",
+    );
+    expect(describeKey).toEqual(
+      expect.objectContaining({
+        Effect: "Allow",
+        Action: "kms:DescribeKey",
+        Resource: expect.anything(),
+      }),
+    );
+    expect(describeKey.Condition).toEqual({
+      StringEquals: {
+        "kms:ViaService": {
+          "Fn::Join": [
+            "",
+            ["bedrock-agentcore.us-west-2.", { Ref: "AWS::URLSuffix" }],
+          ],
+        },
+      },
+    });
+    expect(JSON.stringify(accessStatements)).not.toContain('"Resource":"*"');
+
+    template.hasOutput("PolicyEngineMode", { Value: "LOG_ONLY" });
+    template.hasOutput("PolicyEnginePolicyCount", { Value: "2" });
+  });
+
+  it("orders target discovery and fail-closed mode rollback around policy lifecycle", () => {
+    const { template } = synthRegistry({
+      policyEngineMode: "ENFORCE",
+      policyEngineIamRoleArns: [
+        `arn:aws:iam::${WORKLOAD_ACCOUNT_ID}:role/AgenticAI-D03-acme-primary-runtime`,
+      ],
+    });
+    const resources = template.toJSON().Resources as Record<string, any>;
+    const [detachId, detach] = Object.entries(resources).find(
+      ([, resource]) =>
+        resource.Type === "AWS::CloudFormation::CustomResource" &&
+        resource.Properties?.ExpectedMode === "DETACHED",
+    )!;
+    const [associationId, association] = Object.entries(resources).find(
+      ([, resource]) =>
+        resource.Type === "Custom::AgenticAIPolicyEngineAssociation",
+    )!;
+    const [associationReadyId] = Object.entries(resources).find(
+      ([, resource]) =>
+        resource.Type === "AWS::CloudFormation::CustomResource" &&
+        resource.Properties?.ExpectedMode === "LOG_ONLY" &&
+        resource.Properties?.CheckOn === "CREATE_UPDATE",
+    )!;
+    const [modeRollbackReadyId] = Object.entries(resources).find(
+      ([, resource]) =>
+        resource.Type === "AWS::CloudFormation::CustomResource" &&
+        resource.Properties?.ExpectedMode === "LOG_ONLY" &&
+        resource.Properties?.CheckOn === "DELETE",
+    )!;
+    const [modeRollbackId, modeRollback] = Object.entries(resources).find(
+      ([, resource]) =>
+        resource.Type === "Custom::AgenticAIPolicyEngineModeRollback",
+    )!;
+    const [targetBarrierId, targetBarrier] = Object.entries(resources).find(
+      ([id, resource]) =>
+        id.startsWith("TargetDeleteBarrier") &&
+        resource.Type === "AWS::CloudFormation::CustomResource",
+    )!;
+    const [targetReadyId, targetReady] = Object.entries(resources).find(
+      ([, resource]) =>
+        resource.Type === "Custom::AgenticAIPolicyEngineTargetReady",
+    )!;
+    const targetIds = Object.entries(resources)
+      .filter(
+        ([, resource]) =>
+          resource.Type === "Custom::BedrockAgentCoreGatewayTarget",
+      )
+      .map(([id]) => id);
+    const policyIds = Object.entries(resources)
+      .filter(
+        ([, resource]) => resource.Type === "AWS::BedrockAgentCore::Policy",
+      )
+      .map(([id]) => id);
+    const [modeId, mode] = Object.entries(resources).find(
+      ([, resource]) => resource.Type === "Custom::AgenticAIPolicyEngineMode",
+    )!;
+    const [modeReadyId] = Object.entries(resources).find(
+      ([, resource]) =>
+        resource.Type === "AWS::CloudFormation::CustomResource" &&
+        resource.Properties?.ExpectedMode === "ENFORCE",
+    )!;
+
+    expect(association.DependsOn).toContain(detachId);
+    expect(association.Properties.ManageAssociation).toBe(true);
+    expect(association.Properties.GatewayUpdateParameters).toBeDefined();
+    expect(resources[associationReadyId].DependsOn).toContain(associationId);
+    expect(resources[modeRollbackReadyId].DependsOn).toContain(
+      associationReadyId,
+    );
+    expect(modeRollback.DependsOn).toContain(modeRollbackReadyId);
+    expect(JSON.stringify(modeRollback)).toContain('\\"mode\\":\\"LOG_ONLY\\"');
+    expect(targetBarrier.DependsOn).toContain(modeRollbackId);
+    for (const targetId of targetIds) {
+      expect(resources[targetId].DependsOn).toContain(targetBarrierId);
+      expect(targetReady.DependsOn).toContain(targetId);
+    }
+    expect(targetReady.Properties.Targets).toHaveLength(targetIds.length);
+    for (const policyId of policyIds) {
+      expect(resources[policyId].DependsOn).toEqual(
+        expect.arrayContaining([associationReadyId, targetReadyId]),
+      );
+      expect(mode.DependsOn).toContain(policyId);
+    }
+    expect(mode.DependsOn).toContain(modeRollbackId);
+    expect(JSON.stringify(mode)).toContain('\\"mode\\":\\"ENFORCE\\"');
+    expect(JSON.stringify(mode)).not.toContain('\\"mode\\":\\"LOG_ONLY\\"');
+    expect(resources[modeReadyId].DependsOn).toContain(modeId);
+
+    const stateWaiter = Object.values(resources).find(
+      (resource) =>
+        resource.Type === "AWS::Lambda::Function" &&
+        resource.Properties?.Description ===
+          "Waits for Gateway PolicyEngine and target readiness convergence.",
+    ) as any;
+    expect(stateWaiter.Properties.Code.ZipFile).toContain(
+      "desiredMode === 'DETACHED'",
+    );
+    expect(stateWaiter.Properties.Code.ZipFile).toContain(
+      "isRetryablePolicyEnginePropagation",
+    );
+    expect(stateWaiter.Properties.Code.ZipFile).toContain("getGatewayTarget");
+    expect(detach).toBeDefined();
+  });
+
+  it("waits for exact READY targets before native policy validation", async () => {
+    const { template } = synthRegistry({
+      policyEngineMode: "LOG_ONLY",
+      policyEngineIamRoleArns: [
+        `arn:aws:iam::${WORKLOAD_ACCOUNT_ID}:role/AgenticAI-D03-acme-primary-runtime`,
+      ],
+    });
+    const waiter = Object.values(
+      template.findResources("AWS::Lambda::Function"),
+    ).find(
+      (resource: any) =>
+        resource.Properties?.Description ===
+        "Waits for Gateway PolicyEngine and target readiness convergence.",
+    ) as any;
+    const responses = [
+      {
+        status: 200,
+        body: JSON.stringify({
+          targetId: "TARGET0001",
+          name: "target-tool-echo",
+          status: "CREATING",
+        }),
+      },
+      {
+        status: 200,
+        body: JSON.stringify({
+          targetId: "TARGET0001",
+          name: "target-tool-echo",
+          status: "READY",
+        }),
+      },
+      {
+        status: 200,
+        body: JSON.stringify({
+          targetId: "TARGET0002",
+          name: "target-tool-ping",
+          status: "READY",
+        }),
+      },
+      {
+        status: 200,
+        body: JSON.stringify({
+          targetId: "TARGET0001",
+          name: "wrong-target",
+          status: "READY",
+        }),
+      },
+      {
+        status: 200,
+        body: JSON.stringify({
+          targetId: "TARGET0002",
+          name: "target-tool-ping",
+          status: "SYNCHRONIZE_UNSUCCESSFUL",
+        }),
+      },
+      {
+        status: 200,
+        body: JSON.stringify({
+          targetId: "TARGET0001",
+          name: "target-tool-echo",
+          status: "CREATE_PENDING_AUTH",
+        }),
+      },
+    ];
+    const requests: any[] = [];
+    const fakeHttps = {
+      request: (options: any, callback: (response: any) => void) => {
+        const request = new EventEmitter() as any;
+        request.end = () => {
+          const next = responses.shift();
+          if (!next) throw new Error("unexpected HTTPS request");
+          requests.push(options);
+          const response = new EventEmitter() as any;
+          response.statusCode = next.status;
+          callback(response);
+          response.emit("data", Buffer.from(next.body, "utf8"));
+          response.emit("end");
+        };
+        return request;
+      },
+    };
+    const exported: Record<string, any> = {};
+    runInNewContext(waiter.Properties.Code.ZipFile, {
+      exports: exported,
+      module: { exports: exported },
+      require: (name: string) => {
+        if (name === "https") return fakeHttps;
+        if (name === "crypto") return { createHash, createHmac };
+        throw new Error(`unexpected require: ${name}`);
+      },
+      process: {
+        env: {
+          AWS_REGION: "us-west-2",
+          AWS_ACCESS_KEY_ID: "test-access",
+          AWS_SECRET_ACCESS_KEY: "test-secret",
+          AWS_SESSION_TOKEN: "test-session",
+        },
+      },
+      Buffer,
+      Date,
+      JSON,
+      Promise,
+      encodeURIComponent,
+    });
+    const event = {
+      RequestType: "Create",
+      LogicalResourceId: "PolicyEngineTargetActionsReady",
+      ResourceProperties: {
+        GatewayIdentifier: "gateway-123",
+        Targets: [
+          {
+            TargetIdentifier: "TARGET0001",
+            ExpectedName: "target-tool-echo",
+          },
+          {
+            TargetIdentifier: "TARGET0002",
+            ExpectedName: "target-tool-ping",
+          },
+        ],
+      },
+    };
+    await expect(exported.onEvent(event)).resolves.toEqual({
+      PhysicalResourceId:
+        "policy-engine-targets-ready-PolicyEngineTargetActionsReady",
+    });
+    await expect(exported.isComplete(event)).resolves.toEqual({
+      IsComplete: false,
+    });
+    await expect(exported.isComplete(event)).resolves.toEqual({
+      IsComplete: true,
+    });
+    expect(requests.map((request) => request.path)).toEqual([
+      "/gateways/gateway-123/targets/TARGET0001/",
+      "/gateways/gateway-123/targets/TARGET0001/",
+      "/gateways/gateway-123/targets/TARGET0002/",
+    ]);
+    for (const request of requests) {
+      expect(request.method).toBe("GET");
+      expect(request.headers.authorization).toContain("SignedHeaders=");
+      expect(request.headers["x-amz-date"]).toMatch(/^\d{8}T\d{6}Z$/);
+    }
+    const oneTargetEvent = {
+      ...event,
+      ResourceProperties: {
+        GatewayIdentifier: "gateway-123",
+        Targets: [event.ResourceProperties.Targets[0]],
+      },
+    };
+    await expect(exported.isComplete(oneTargetEvent)).rejects.toThrow(
+      "Gateway target identity changed",
+    );
+    const terminalEvent = {
+      ...event,
+      ResourceProperties: {
+        GatewayIdentifier: "gateway-123",
+        Targets: [event.ResourceProperties.Targets[1]],
+      },
+    };
+    await expect(exported.isComplete(terminalEvent)).rejects.toThrow(
+      "entered terminal state SYNCHRONIZE_UNSUCCESSFUL",
+    );
+    const pendingAuthEvent = {
+      ...event,
+      ResourceProperties: {
+        GatewayIdentifier: "gateway-123",
+        Targets: [event.ResourceProperties.Targets[0]],
+      },
+    };
+    await expect(exported.isComplete(pendingAuthEvent)).rejects.toThrow(
+      "entered unsupported authorization state CREATE_PENDING_AUTH",
+    );
+    await expect(
+      exported.isComplete({ ...event, RequestType: "Delete" }),
+    ).resolves.toEqual({ IsComplete: true });
+    expect(responses).toHaveLength(0);
+  });
+
+  it("polls PolicyEngine mode and detach convergence through the synthesized waiter", async () => {
+    const { template } = synthRegistry({
+      policyEngineMode: "LOG_ONLY",
+      policyEngineIamRoleArns: [
+        `arn:aws:iam::${WORKLOAD_ACCOUNT_ID}:role/AgenticAI-D03-acme-primary-runtime`,
+      ],
+    });
+    const waiter = Object.values(
+      template.findResources("AWS::Lambda::Function"),
+    ).find(
+      (resource: any) =>
+        resource.Properties?.Description ===
+        "Waits for Gateway PolicyEngine and target readiness convergence.",
+    ) as any;
+    const engineArn =
+      "arn:aws:bedrock-agentcore:us-west-2:333333333333:policy-engine/AgenticAI_nonprod_acme_primary_pe-abcdefghij";
+    const responses = [
+      {
+        status: "UPDATING",
+        policyEngineConfiguration: { arn: engineArn, mode: "LOG_ONLY" },
+      },
+      {
+        status: "READY",
+        policyEngineConfiguration: { arn: engineArn, mode: "LOG_ONLY" },
+      },
+      {
+        status: "READY",
+        policyEngineConfiguration: { arn: engineArn, mode: "LOG_ONLY" },
+      },
+      { status: "READY" },
+    ];
+    const fakeHttps = {
+      request: (_options: any, callback: (response: any) => void) => {
+        const request = new EventEmitter() as any;
+        request.end = () => {
+          const response = new EventEmitter() as any;
+          response.statusCode = 200;
+          callback(response);
+          response.emit(
+            "data",
+            Buffer.from(JSON.stringify(responses.shift()), "utf8"),
+          );
+          response.emit("end");
+        };
+        return request;
+      },
+    };
+    const exported: Record<string, any> = {};
+    runInNewContext(waiter.Properties.Code.ZipFile, {
+      exports: exported,
+      module: { exports: exported },
+      require: (name: string) => {
+        if (name === "https") return fakeHttps;
+        if (name === "crypto") return { createHash, createHmac };
+        throw new Error(`unexpected require: ${name}`);
+      },
+      process: {
+        env: {
+          AWS_REGION: "us-west-2",
+          AWS_ACCESS_KEY_ID: "test-access",
+          AWS_SECRET_ACCESS_KEY: "test-secret",
+          AWS_SESSION_TOKEN: "test-session",
+        },
+      },
+      Buffer,
+      Date,
+      JSON,
+      Promise,
+      encodeURIComponent,
+    });
+    const createEvent = {
+      RequestType: "Create",
+      ResourceProperties: {
+        GatewayIdentifier: "gateway-123",
+        PolicyEngineArn: engineArn,
+        ExpectedMode: "LOG_ONLY",
+        CheckOn: "CREATE_UPDATE",
+      },
+    };
+    await expect(exported.isComplete(createEvent)).resolves.toEqual({
+      IsComplete: false,
+    });
+    await expect(exported.isComplete(createEvent)).resolves.toEqual({
+      IsComplete: true,
+    });
+    const deleteEvent = {
+      RequestType: "Delete",
+      ResourceProperties: {
+        GatewayIdentifier: "gateway-123",
+        PolicyEngineArn: engineArn,
+        ExpectedMode: "DETACHED",
+        CheckOn: "DELETE",
+      },
+    };
+    await expect(exported.isComplete(deleteEvent)).resolves.toEqual({
+      IsComplete: false,
+    });
+    await expect(exported.isComplete(deleteEvent)).resolves.toEqual({
+      IsComplete: true,
+    });
+  });
+
+  it("retries only the live-proven association propagation denial", async () => {
+    const { template } = synthRegistry({
+      policyEngineMode: "LOG_ONLY",
+      policyEngineIamRoleArns: [
+        `arn:aws:iam::${WORKLOAD_ACCOUNT_ID}:role/AgenticAI-D03-acme-primary-runtime`,
+      ],
+    });
+    const waiter = Object.values(
+      template.findResources("AWS::Lambda::Function"),
+    ).find(
+      (resource: any) =>
+        resource.Properties?.Description ===
+        "Waits for Gateway PolicyEngine and target readiness convergence.",
+    ) as any;
+    const engineArn =
+      "arn:aws:bedrock-agentcore:us-west-2:333333333333:policy-engine/AgenticAI_nonprod_acme_primary_pe-abcdefghij";
+    const gatewayUpdateParameters = {
+      gatewayIdentifier: "gateway-123",
+      name: "agenticai-d03-nonprod-acme-primary-gw",
+      roleArn:
+        "arn:aws:iam::333333333333:role/AgenticAI-D03-nonprod-acme-primary-gw-svc",
+      protocolType: "MCP",
+      protocolConfiguration: {
+        mcp: { supportedVersions: ["2025-06-18"] },
+      },
+      authorizerType: "AWS_IAM",
+    };
+    const responses = [
+      { status: 200, body: JSON.stringify({ status: "READY" }) },
+      {
+        status: 400,
+        body: JSON.stringify({
+          message:
+            "Access denied while calling GetPolicyEngine on Policy Engine with Gateway role",
+        }),
+      },
+      { status: 200, body: JSON.stringify({ status: "READY" }) },
+      { status: 202, body: "{}" },
+      {
+        status: 200,
+        body: JSON.stringify({
+          status: "READY",
+          policyEngineConfiguration: { arn: engineArn, mode: "LOG_ONLY" },
+        }),
+      },
+      {
+        status: 200,
+        body: JSON.stringify({
+          status: "READY",
+          policyEngineConfiguration: { arn: engineArn, mode: "LOG_ONLY" },
+        }),
+      },
+      { status: 202, body: "{}" },
+      { status: 200, body: JSON.stringify({ status: "READY" }) },
+      { status: 200, body: JSON.stringify({ status: "READY" }) },
+      { status: 400, body: JSON.stringify({ message: "invalid protocol" }) },
+    ];
+    const requests: Array<{ options: any; body: string }> = [];
+    const fakeHttps = {
+      request: (options: any, callback: (response: any) => void) => {
+        let body = "";
+        const request = new EventEmitter() as any;
+        request.write = (chunk: unknown) => {
+          body += Buffer.isBuffer(chunk)
+            ? chunk.toString("utf8")
+            : String(chunk);
+        };
+        request.end = () => {
+          const next = responses.shift();
+          if (!next) throw new Error("unexpected HTTPS request");
+          requests.push({ options, body });
+          const response = new EventEmitter() as any;
+          response.statusCode = next.status;
+          callback(response);
+          response.emit("data", Buffer.from(next.body, "utf8"));
+          response.emit("end");
+        };
+        return request;
+      },
+    };
+    const exported: Record<string, any> = {};
+    runInNewContext(waiter.Properties.Code.ZipFile, {
+      exports: exported,
+      module: { exports: exported },
+      require: (name: string) => {
+        if (name === "https") return fakeHttps;
+        if (name === "crypto") return { createHash, createHmac };
+        throw new Error(`unexpected require: ${name}`);
+      },
+      process: {
+        env: {
+          AWS_REGION: "us-west-2",
+          AWS_ACCESS_KEY_ID: "test-access",
+          AWS_SECRET_ACCESS_KEY: "test-secret",
+          AWS_SESSION_TOKEN: "test-session",
+        },
+      },
+      Buffer,
+      Date,
+      JSON,
+      Promise,
+      encodeURIComponent,
+    });
+    const createEvent = {
+      RequestType: "Create",
+      LogicalResourceId: "PolicyEngineAssociation",
+      ResourceProperties: {
+        GatewayIdentifier: "gateway-123",
+        PolicyEngineArn: engineArn,
+        ExpectedMode: "LOG_ONLY",
+        CheckOn: "CREATE_UPDATE",
+        ManageAssociation: true,
+        PhysicalResourceId: "policy-engine-association-nonprod-acme-primary",
+        GatewayUpdateParameters: gatewayUpdateParameters,
+      },
+    };
+    await expect(exported.onEvent(createEvent)).resolves.toEqual({
+      PhysicalResourceId: "policy-engine-association-nonprod-acme-primary",
+    });
+    await expect(exported.isComplete(createEvent)).resolves.toEqual({
+      IsComplete: false,
+    });
+    await expect(exported.isComplete(createEvent)).resolves.toEqual({
+      IsComplete: false,
+    });
+    await expect(exported.isComplete(createEvent)).resolves.toEqual({
+      IsComplete: true,
+    });
+
+    const deleteEvent = { ...createEvent, RequestType: "Delete" };
+    await expect(exported.isComplete(deleteEvent)).resolves.toEqual({
+      IsComplete: false,
+    });
+    await expect(exported.isComplete(deleteEvent)).resolves.toEqual({
+      IsComplete: true,
+    });
+    await expect(exported.isComplete(createEvent)).rejects.toThrow(
+      /UpdateGateway HTTP 400.*invalid protocol/,
+    );
+
+    const puts = requests.filter(({ options }) => options.method === "PUT");
+    expect(puts).toHaveLength(4);
+    expect(puts[0].options.path).toBe("/gateways/gateway-123/");
+    expect(puts[0].options.headers["x-amz-content-sha256"]).toHaveLength(64);
+    expect(puts[0].options.headers["x-amz-date"]).toMatch(/^\d{8}T\d{6}Z$/);
+    const associationPayload = JSON.parse(puts[1].body);
+    expect(associationPayload).not.toHaveProperty("gatewayIdentifier");
+    expect(associationPayload).toEqual({
+      name: gatewayUpdateParameters.name,
+      roleArn: gatewayUpdateParameters.roleArn,
+      protocolType: gatewayUpdateParameters.protocolType,
+      protocolConfiguration: gatewayUpdateParameters.protocolConfiguration,
+      authorizerType: gatewayUpdateParameters.authorizerType,
+      policyEngineConfiguration: { arn: engineArn, mode: "LOG_ONLY" },
+    });
+    expect(JSON.parse(puts[2].body)).not.toHaveProperty(
+      "policyEngineConfiguration",
+    );
+  });
+  it("renders the live-proven quoted group candidate for CUSTOM_JWT", () => {
+    const context = gaRegistryContext(["tool-echo"]);
+    (context.records[0].document.authorization as any).allowedGroups = [
+      "retail-developers",
+    ];
+    (context.records[0].document.authorization as any).combination =
+      "GROUP_ONLY";
+    const { template } = synthRegistry({
+      context,
+      policyEngineMode: "LOG_ONLY",
+      cognitoDiscoveryUrl:
+        "https://cognito-idp.us-west-2.amazonaws.com/us-west-2_example/.well-known/openid-configuration",
+      cognitoAudience: ["aud-example"],
+    });
+    const policy = Object.values(
+      template.findResources("AWS::BedrockAgentCore::Policy"),
+    )[0] as any;
+    const statement = JSON.stringify(
+      policy.Properties.Definition.Cedar.Statement,
+    );
+    expect(statement).toContain("principal is AgentCore::OAuthUser");
+    expect(statement).toContain("cognito:groups");
+    expect(statement).toContain("retail-developers");
+    expect(statement).toContain("like");
+  });
+
+  it("fails closed on incomplete or mismatched PolicyEngine configuration", () => {
+    expect(() => synthRegistry({ policyEngineMode: "LOG_ONLY" })).toThrow(
+      /at least one exact IAM role ARN/,
+    );
+    expect(() =>
+      synthRegistry({
+        policyEngineMode: "LOG_ONLY",
+        policyEngineIamRoleArns: [
+          "arn:aws:iam::999999999999:role/ForeignRuntime",
+        ],
+      }),
+    ).toThrow(/must belong to the Workstream account/);
+    expect(() =>
+      synthRegistry({
+        policyEngineMode: "OFF",
+        policyEngineIamRoleArns: [
+          `arn:aws:iam::${WORKLOAD_ACCOUNT_ID}:role/RuntimeRole`,
+        ],
+      }),
+    ).toThrow(/require LOG_ONLY or ENFORCE/);
+    expect(() =>
+      synthRegistry({
+        policyEngineMode: "LOG_ONLY",
+        cognitoDiscoveryUrl:
+          "https://cognito-idp.us-west-2.amazonaws.com/us-west-2_example/.well-known/openid-configuration",
+        policyEngineIamRoleArns: [
+          `arn:aws:iam::${WORKLOAD_ACCOUNT_ID}:role/RuntimeRole`,
+        ],
+      }),
+    ).toThrow(/must not carry IAM role principals/);
   });
 });
 
-describe('Phase 10 — authorizer mode selection', () => {
-  it('falls back to AWS_IAM when no Cognito discoveryUrl is supplied', () => {
+describe("Phase 10 — authorizer mode selection", () => {
+  it("falls back to AWS_IAM when no Cognito discoveryUrl is supplied", () => {
     const { template } = synth({ cognitoDiscoveryUrl: undefined });
-    const gws = template.findResources('Custom::BedrockAgentCoreGateway');
+    const gws = template.findResources("Custom::BedrockAgentCoreGateway");
     // The Create prop is JSON-in-JSON so inner quotes are double-escaped.
     const rendered = JSON.stringify(gws);
     expect(rendered).toContain('\\"authorizerType\\":\\"AWS_IAM\\"');
-    expect(rendered).not.toContain('customJWTAuthorizer');
+    expect(rendered).not.toContain("customJWTAuthorizer");
   });
 
-  it('switches to CUSTOM_JWT when cognitoDiscoveryUrl is supplied', () => {
+  it("switches to CUSTOM_JWT when cognitoDiscoveryUrl is supplied", () => {
     const { template } = synth({
       cognitoDiscoveryUrl:
-        'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc/.well-known/openid-configuration',
-      cognitoAudience: ['aud-xyz'],
+        "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc/.well-known/openid-configuration",
+      cognitoAudience: ["aud-xyz"],
     });
-    const gws = template.findResources('Custom::BedrockAgentCoreGateway');
+    const gws = template.findResources("Custom::BedrockAgentCoreGateway");
     const rendered = JSON.stringify(gws);
     expect(rendered).toContain('\\"authorizerType\\":\\"CUSTOM_JWT\\"');
-    expect(rendered).toContain('customJWTAuthorizer');
+    expect(rendered).toContain("customJWTAuthorizer");
     expect(rendered).toContain('\\"allowedAudience\\":[\\"aud-xyz\\"]');
   });
 });

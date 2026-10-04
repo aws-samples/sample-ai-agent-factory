@@ -1,0 +1,148 @@
+/* ArchitecturePage.module.css */
+
+.page {
+  width: 100%;
+  padding-bottom: var(--section-padding-y);
+}
+
+.prose {
+  max-width: 72ch;
+  margin-bottom: var(--space-4);
+}
+
+/* Links inside secondary-coloured text need more than colour. */
+.atlasHub a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+/* Atlas: the SVG carries its own dark background, so it sits in a dark frame on the light page */
+/* Header figure: the Atlas on a raised panel inside the dark page header. The page header is
+   itself `--color-band`, so the raised band token and a translucent light hairline make the
+   panel read as a frame in both colour schemes. */
+.atlasFrame {
+  padding: var(--space-4);
+  background: var(--color-band-raised);
+  border: 1px solid color-mix(in srgb, var(--color-text-inverse) 18%, transparent);
+  border-radius: var(--radius-lg);
+}
+
+.atlasImage {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.atlasListIntro {
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-2);
+}
+
+.atlasProjects {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(15rem, 100%), 1fr));
+  gap: var(--space-3);
+}
+
+.atlasProject {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.atlasProjectLink {
+  display: inline-block;
+  min-height: var(--target-min);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.atlasTagline {
+  color: var(--color-text-secondary);
+}
+
+.atlasHub {
+  margin-top: var(--space-4);
+  max-width: 80ch;
+}
+
+.atlasHubLabel {
+  font-weight: 700;
+}
+
+/* Blueprint concepts: three articles stacked with one rhythm. */
+.concepts {
+  display: grid;
+  gap: var(--space-6);
+}
+
+.concept {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.concepts .concept h3 {
+  font-size: 1.25rem;
+  margin: 0;
+}
+
+/* Four planes: full-width bands, each with a 4 px left rule in one stage tint
+   (--card-accent comes from the Card's stage). */
+.planes {
+  list-style: none;
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+}
+
+.planes .plane {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-areas:
+    'number name'
+    'number text';
+  column-gap: var(--space-3);
+  row-gap: var(--space-1);
+  align-items: center;
+  border-left: 4px solid var(--card-accent, var(--color-border));
+}
+
+@media (min-width: 1024px) {
+  .planes .plane {
+    grid-template-columns: auto minmax(14rem, 18rem) 1fr;
+    grid-template-areas: 'number name text';
+    column-gap: var(--space-5);
+  }
+}
+
+.planeNumber {
+  grid-area: number;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: var(--radius-pill);
+  background: var(--stage-color, var(--color-text-primary));
+  color: var(--stage-fill-text);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  /* Transparent border so forced-colors mode still draws the circle. */
+  border: 1px solid transparent;
+}
+
+.planeName {
+  grid-area: name;
+  font-weight: 600;
+}
+
+.planeText {
+  grid-area: text;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}

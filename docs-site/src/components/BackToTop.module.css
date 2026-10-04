@@ -1,0 +1,57 @@
+/* Card-like pill fixed bottom-right. Sits under the site header (z 100) and the
+   reading progress bar (z 101). */
+.top {
+  position: fixed;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  z-index: 99;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 2.75rem;
+  min-width: 2.75rem;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.2;
+  text-decoration: none;
+}
+
+.top:hover {
+  border-color: var(--color-link);
+  color: var(--color-link-hover);
+  text-decoration: none;
+}
+
+.top:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Slide in from below the viewport over the first 40vh of scroll. Translate only: the
+   link keeps full contrast at every scroll position. Outside this support and for
+   reduced-motion readers the link is simply visible. */
+@supports (animation-timeline: scroll()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .top {
+      animation: back-to-top-rise linear both;
+      animation-timeline: scroll(root block);
+      animation-range: 0 40vh;
+    }
+  }
+}
+
+@keyframes back-to-top-rise {
+  from {
+    translate: 0 calc(100% + var(--space-6));
+  }
+
+  to {
+    translate: 0 0;
+  }
+}

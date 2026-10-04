@@ -7,6 +7,7 @@
  */
 import {
   PLATFORM_TOOL_CATALOGUE,
+  composeAgentCorePolicyDefinitions,
   composeCedarPolicyDocument,
   resolveSubscribedTools,
   resolveTargetArn,
@@ -97,12 +98,13 @@ describe('resolveSubscribedTools', () => {
 });
 
 describe('resolveTargetArn', () => {
-  it('substitutes ${PLATFORM_ACCOUNT_ID} when targetAccountId is undefined', () => {
+  it('substitutes platform Region and account placeholders', () => {
     const spec = PLATFORM_TOOL_CATALOGUE['tool-echo'];
-    const arn = resolveTargetArn(spec, '111111111111');
+    const arn = resolveTargetArn(spec, '111111111111', 'eu-west-1');
     expect(arn).toBe(
-      'arn:aws:lambda:us-east-1:111111111111:function:agenticai-d03-tool-echo:PROD',
+      'arn:aws:lambda:eu-west-1:111111111111:function:agenticai-d03-tool-echo:PROD',
     );
+    expect(arn).not.toContain('${PLATFORM_REGION}');
     expect(arn).not.toContain('${PLATFORM_ACCOUNT_ID}');
   });
 
@@ -112,7 +114,7 @@ describe('resolveTargetArn', () => {
       targetArn: 'arn:aws:lambda:us-east-1:${PLATFORM_ACCOUNT_ID}:function:agenticai-d03-tool-echo:PROD',
       targetAccountId: '999999999999',
     };
-    const arn = resolveTargetArn(spec, '111111111111');
+    const arn = resolveTargetArn(spec, '111111111111', 'eu-west-1');
     expect(arn).toBe(
       'arn:aws:lambda:us-east-1:999999999999:function:agenticai-d03-tool-echo:PROD',
     );
@@ -187,7 +189,7 @@ describe('Phase Q — allowedGroups (per-developer entitlement)', () => {
     expect(doc).toContain(
       'permit(principal in CognitoGroup::"platform-ai", action == Action::"InvokeTool", resource == Tool::"tool-echo");',
     );
-    expect(doc).toMatch(/Q-entitlement: principal-bound/);
+    expect(doc).toMatch(/entitlement: principal-bound/);
     expect(doc).not.toMatch(/permit\(principal,\s*action == Action::"InvokeTool",\s*resource == Tool::"tool-echo"\);/);
     expect(doc).toContain('Default forbid');
   });
@@ -196,7 +198,7 @@ describe('Phase Q — allowedGroups (per-developer entitlement)', () => {
     const subset = resolveSubscribedTools(['tool-echo']);
     const doc = composeCedarPolicyDocument(subset);
     expect(doc).toContain(PLATFORM_TOOL_CATALOGUE['tool-echo'].cedarPolicy.trim());
-    expect(doc).not.toMatch(/Q-entitlement/);
+    expect(doc).not.toMatch(/entitlement:/);
   });
 
   it('composeCedarPolicyDocument never emits a Cedar wildcard for a tool with allowedGroups', () => {
@@ -213,5 +215,232 @@ describe('Phase Q — allowedGroups (per-developer entitlement)', () => {
     expect(doc).not.toContain(
       'permit(principal, action == Action::"InvokeTool", resource == Tool::"tool-echo");',
     );
+  });
+});
+
+describe('Round 3 — allowedSubjects (per-developer subject entitlement)', () => {
+  it('validateToolSpec accepts a valid allowedSubjects list', () => {
+    const spec: ToolSpec = {
+      ...PLATFORM_TOOL_CATALOGUE['tool-echo'],
+      allowedSubjects: ['sub-alice', 'user:bob@example.com'],
+    };
+    expect(() => validateToolSpec(spec)).not.toThrow();
+  });
+
+  it('validateToolSpec rejects an empty allowedSubjects array', () => {
+    const spec = {
+      ...PLATFORM_TOOL_CATALOGUE['tool-echo'],
+      allowedSubjects: [],
+    } as unknown as ToolSpec;
+    expect(() => validateToolSpec(spec)).toThrow(/non-empty/);
+  });
+
+  it('validateToolSpec rejects an allowedSubjects entry with an unsafe character', () => {
+    const spec: ToolSpec = {
+      ...PLATFORM_TOOL_CATALOGUE['tool-echo'],
+      allowedSubjects: ['bad sub with spaces'],
+    };
+    expect(() => validateToolSpec(spec)).toThrow(/not a valid JWT sub value/);
+  });
+
+  it('composeCedarPolicyDocument emits a Developer permit per subject', () => {
+    const subset: readonly ToolSpec[] = [
+      {
+        ...PLATFORM_TOOL_CATALOGUE['tool-echo'],
+        allowedSubjects: ['sub-alice', 'sub-bob'],
+      },
+    ];
+    const doc = composeCedarPolicyDocument(subset);
+    expect(doc).toContain(
+      'permit(principal == Developer::"sub-alice", action == Action::"InvokeTool", resource == Tool::"tool-echo");',
+    );
+    expect(doc).toContain(
+      'permit(principal == Developer::"sub-bob", action == Action::"InvokeTool", resource == Tool::"tool-echo");',
+    );
+    expect(doc).toMatch(/entitlement: principal-bound/);
+    // The unconditional permit must be stripped once entitlement is declared.
+    expect(doc).not.toContain(
+      'permit(principal, action == Action::"InvokeTool", resource == Tool::"tool-echo");',
+    );
+  });
+
+  it('composeCedarPolicyDocument emits both group and subject permits when both are set (combined)', () => {
+    const subset: readonly ToolSpec[] = [
+      {
+        ...PLATFORM_TOOL_CATALOGUE['tool-echo'],
+        allowedGroups: ['retail-developers'],
+        allowedSubjects: ['sub-alice'],
+      },
+    ];
+    const doc = composeCedarPolicyDocument(subset);
+    expect(doc).toContain(
+      'permit(principal in CognitoGroup::"retail-developers", action == Action::"InvokeTool", resource == Tool::"tool-echo");',
+    );
+    expect(doc).toContain(
+      'permit(principal == Developer::"sub-alice", action == Action::"InvokeTool", resource == Tool::"tool-echo");',
+    );
+  });
+});
+
+
+describe('composeAgentCorePolicyDefinitions', () => {
+  const gatewayArn =
+    'arn:aws:bedrock-agentcore:us-west-2:333333333333:gateway/agenticai-d03-nonprod-demo-primary-gw-abcdefghij';
+
+  it('emits exact IAM assumed-role principals, qualified actions, and Gateway resources', () => {
+    const definitions = composeAgentCorePolicyDefinitions(
+      resolveSubscribedTools(['tool-echo']),
+      {
+        authorizerType: 'AWS_IAM',
+        gatewayArn,
+        policyNamePrefix: 'AgenticAI_nonprod_demo_primary',
+        targetNames: { 'tool-echo': 'target-tool-echo' },
+        iamRoleArns: [
+          'arn:aws:iam::333333333333:role/AgenticAI-D03-demo-primary-runtime',
+        ],
+      },
+    );
+
+    expect(definitions).toHaveLength(1);
+    expect(definitions[0].policyName).toMatch(/^[A-Za-z][A-Za-z0-9_]{0,47}$/);
+    expect(definitions[0].statement).toContain(
+      'principal == AgentCore::IamEntity::"arn:aws:sts::333333333333:assumed-role/AgenticAI-D03-demo-primary-runtime"',
+    );
+    expect(definitions[0].statement).toContain(
+      'AgentCore::Action::"target-tool-echo___tool-echo"',
+    );
+    expect(definitions[0].statement).toContain(
+      `AgentCore::Gateway::"${gatewayArn}"`,
+    );
+    expect(definitions[0].statement).not.toContain('forbid(');
+    expect(definitions[0].statement).not.toContain('*');
+  });
+
+  it('emits an authenticated OAuth permit when no group entitlement is configured', () => {
+    const [definition] = composeAgentCorePolicyDefinitions(
+      resolveSubscribedTools(['tool-ping']),
+      {
+        authorizerType: 'CUSTOM_JWT',
+        gatewayArn,
+        policyNamePrefix: 'AgenticAI_nonprod_demo_primary',
+        targetNames: { 'tool-ping': 'target-tool-ping' },
+      },
+    );
+    expect(definition.statement).toContain('principal is AgentCore::OAuthUser');
+    expect(definition.statement).not.toContain('cognito:groups');
+  });
+
+  it('uses quoted JSON element boundaries for OAuth group membership', () => {
+    const tool: ToolSpec = {
+      ...PLATFORM_TOOL_CATALOGUE['tool-echo'],
+      allowedGroups: ['retail-developers'],
+    };
+    const [definition] = composeAgentCorePolicyDefinitions([tool], {
+      authorizerType: 'CUSTOM_JWT',
+      gatewayArn,
+      policyNamePrefix: 'AgenticAI_nonprod_demo_primary',
+      targetNames: { 'tool-echo': 'target-tool-echo' },
+    });
+    expect(definition.statement).toContain(
+      'principal.hasTag("cognito:groups")',
+    );
+    expect(definition.statement).toContain(
+      'principal.getTag("cognito:groups") like "*\\"retail-developers\\"*"',
+    );
+    expect(definition.statement).not.toContain('like "*retail-developers*"');
+  });
+
+  it('rejects wildcard-bearing OAuth group names before Cedar rendering', () => {
+    const tool: ToolSpec = {
+      ...PLATFORM_TOOL_CATALOGUE['tool-echo'],
+      allowedGroups: ['retail-*'],
+    };
+    expect(() =>
+      composeAgentCorePolicyDefinitions([tool], {
+        authorizerType: 'CUSTOM_JWT',
+        gatewayArn,
+        policyNamePrefix: 'AgenticAI_nonprod_demo_primary',
+        targetNames: { 'tool-echo': 'target-tool-echo' },
+      }),
+    ).toThrow(/not a valid Cognito group name/);
+  });
+
+  it('rejects group entitlements on AWS_IAM because IAM principals have no tags', () => {
+    const tool: ToolSpec = {
+      ...PLATFORM_TOOL_CATALOGUE['tool-echo'],
+      allowedGroups: ['retail-developers'],
+    };
+    expect(() =>
+      composeAgentCorePolicyDefinitions([tool], {
+        authorizerType: 'AWS_IAM',
+        gatewayArn,
+        policyNamePrefix: 'AgenticAI_nonprod_demo_primary',
+        targetNames: { 'tool-echo': 'target-tool-echo' },
+        iamRoleArns: ['arn:aws:iam::333333333333:role/RuntimeRole'],
+      }),
+    ).toThrow(/requires CUSTOM_JWT/);
+  });
+
+  it('fails closed on missing, duplicate, pathful, wildcard, and incomplete inputs', () => {
+    const subset = resolveSubscribedTools(['tool-echo']);
+    const base = {
+      authorizerType: 'AWS_IAM' as const,
+      gatewayArn,
+      policyNamePrefix: 'AgenticAI_nonprod_demo_primary',
+      targetNames: { 'tool-echo': 'target-tool-echo' },
+    };
+    expect(() => composeAgentCorePolicyDefinitions(subset, base)).toThrow(
+      /at least one exact IAM role ARN/,
+    );
+    expect(() =>
+      composeAgentCorePolicyDefinitions(subset, {
+        ...base,
+        iamRoleArns: ['arn:aws:iam::333333333333:role/path/RuntimeRole'],
+      }),
+    ).toThrow(/pathless IAM role ARN/);
+    expect(() =>
+      composeAgentCorePolicyDefinitions(subset, {
+        ...base,
+        iamRoleArns: [
+          'arn:aws:iam::333333333333:role/RuntimeRole',
+          'arn:aws:iam::333333333333:role/RuntimeRole',
+        ],
+      }),
+    ).toThrow(/must not contain duplicates/);
+    expect(() =>
+      composeAgentCorePolicyDefinitions(subset, {
+        ...base,
+        gatewayArn: `${gatewayArn}*`,
+        iamRoleArns: ['arn:aws:iam::333333333333:role/RuntimeRole'],
+      }),
+    ).toThrow(/must not contain a wildcard/);
+    expect(() =>
+      composeAgentCorePolicyDefinitions(subset, {
+        ...base,
+        targetNames: {},
+        iamRoleArns: ['arn:aws:iam::333333333333:role/RuntimeRole'],
+      }),
+    ).toThrow(/target name.*absent or invalid/);
+  });
+
+  it('hashes overlong policy names deterministically within the 48-character limit', () => {
+    const options = {
+      authorizerType: 'CUSTOM_JWT' as const,
+      gatewayArn,
+      policyNamePrefix:
+        'AgenticAI_nonproduction_extremely_long_tenant_extremely_long_agent',
+      targetNames: { 'tool-echo': 'target-tool-echo' },
+    };
+    const left = composeAgentCorePolicyDefinitions(
+      resolveSubscribedTools(['tool-echo']),
+      options,
+    )[0].policyName;
+    const right = composeAgentCorePolicyDefinitions(
+      resolveSubscribedTools(['tool-echo']),
+      options,
+    )[0].policyName;
+    expect(left).toBe(right);
+    expect(left).toHaveLength(48);
+    expect(left).toMatch(/^[A-Za-z][A-Za-z0-9_]+$/);
   });
 });

@@ -1,0 +1,95 @@
+/* SupportEnvelopePage.module.css */
+
+.page {
+  width: 100%;
+  padding-bottom: var(--section-padding-y);
+}
+
+.intro {
+  max-width: 72ch;
+  margin: var(--space-6) 0 var(--space-2);
+}
+
+/* Validated-envelope check list (only projects that publish such a list render it). */
+.validatedIntro {
+  margin: var(--space-2) 0 var(--space-3);
+  font-size: 0.9375rem;
+  color: var(--color-text-secondary);
+}
+
+.validatedIntro a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.validatedList {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(20rem, 100%), 1fr));
+  gap: var(--space-2) var(--space-6);
+  margin: 0 0 var(--space-6);
+  padding: 0;
+}
+
+.validatedItem {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  scroll-margin-top: calc(var(--header-height) + var(--space-4));
+}
+
+.validatedIcon {
+  flex-shrink: 0;
+  margin-top: 0.2em;
+  color: var(--stage-build);
+}
+
+/* Limitations */
+.limitationList {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(20rem, 100%), 1fr));
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+}
+
+.limitation {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  scroll-margin-top: calc(var(--header-height) + var(--space-4));
+}
+
+.limitationTitle {
+  font-size: 0.9375rem;
+}
+
+/* Verbatim README text, in both the check list and the limitation cards. */
+.quote {
+  margin: 0;
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--color-border);
+  font-size: 0.9375rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.limitationSource {
+  margin-top: auto;
+  overflow-wrap: anywhere;
+}
+
+.footerNote {
+  margin-top: var(--space-10);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+}
+
+/* Links inside secondary-coloured text need more than colour to stand out. */
+.footerNote a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}

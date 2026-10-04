@@ -1,0 +1,67 @@
+.block {
+  position: relative;
+  margin: var(--space-4) 0;
+  border-radius: var(--radius-md);
+  background: var(--color-band);
+  color: var(--color-cloud);
+  overflow: hidden;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-4);
+  background: var(--color-band-raised);
+  font-size: 0.75rem;
+}
+
+.language {
+  font-family: var(--font-mono);
+  text-transform: lowercase;
+  color: var(--color-text-inverse-muted);
+}
+
+.copy {
+  min-height: 32px;
+  padding: var(--space-1) var(--space-3);
+  font: inherit;
+  font-weight: 600;
+  color: var(--color-cloud);
+  background: transparent;
+  border: 1px solid var(--color-text-inverse-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.copy:hover {
+  background: var(--color-overlay-strong);
+}
+
+.copy:focus-visible {
+  outline: 2px solid var(--color-cloud);
+  outline-offset: 2px;
+}
+
+.pre {
+  margin: 0;
+  padding: var(--space-4);
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+.pre:focus-visible {
+  outline: 2px solid var(--color-cloud);
+  outline-offset: -2px;
+}
+
+.pre code {
+  background: none;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+}

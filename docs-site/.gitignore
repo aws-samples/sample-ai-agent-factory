@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+coverage/
+
+# TypeScript build artifacts
+*.tsbuildinfo
+*.d.ts
+!src/**/*.d.ts
+*.js
+
+# Vite cache
+.vite/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+test-results/
+playwright-report/
+screenshots/
+
+# Python bytecode from scripts/validate_static.py
+__pycache__/

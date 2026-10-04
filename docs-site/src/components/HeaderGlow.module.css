@@ -1,0 +1,49 @@
+/* Two radial glows in the section hue plus a dotted grid, all translucent through
+   color-mix so the band colour underneath (and the dark theme) shows through.
+   Browsers without color-mix simply show the plain band. */
+.glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  --glow-hue: var(--stage-scale-tint);
+  --glow-a: color-mix(in srgb, var(--glow-hue) 22%, transparent);
+  --glow-b: color-mix(in srgb, var(--glow-hue) 12%, transparent);
+  --glow-dot: color-mix(in srgb, var(--color-cloud) 9%, transparent);
+  background-image:
+    radial-gradient(55% 90% at 100% 0%, var(--glow-a), transparent 65%),
+    radial-gradient(45% 70% at 0% 100%, var(--glow-b), transparent 65%),
+    radial-gradient(circle at 1px 1px, var(--glow-dot) 1px, transparent 1.6px);
+  background-size:
+    100% 100%,
+    100% 100%,
+    40px 40px;
+  background-repeat: no-repeat, no-repeat, repeat;
+  /* Fade the grid out towards the copy so text sits on a calm surface. */
+  mask-image: linear-gradient(to right, color-mix(in srgb, black 55%, transparent), black 60%);
+}
+
+.glow[data-hue='learn'] {
+  --glow-hue: var(--stage-learn-tint);
+}
+
+.glow[data-hue='build'] {
+  --glow-hue: var(--stage-build-tint);
+}
+
+.glow[data-hue='govern'] {
+  --glow-hue: var(--stage-govern-tint);
+}
+
+.glow[data-hue='scale'] {
+  --glow-hue: var(--stage-scale-tint);
+}
+
+.glow[data-hue='slate'] {
+  --glow-hue: var(--color-slate);
+}
+
+@media (forced-colors: active) {
+  .glow {
+    display: none;
+  }
+}

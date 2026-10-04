@@ -1,0 +1,38 @@
+/* Fixed under the sticky site header, above it in stacking order so the bar is never
+   hidden behind the header's bottom border. Transform-only, so it never takes layout
+   space (CLS 0) and never overlaps text. */
+.progress {
+  position: fixed;
+  top: var(--header-height);
+  left: 0;
+  width: 100%;
+  height: 3px;
+  background: var(--color-link);
+  transform-origin: 0 50%;
+  scale: 0 1;
+  z-index: 101;
+  pointer-events: none;
+  display: none;
+}
+
+/* Progressive enhancement: shown only where scroll-driven animations exist and motion is
+   welcome. Without either, the bar stays display: none. */
+@supports (animation-timeline: scroll()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .progress {
+      display: block;
+      animation: doc-progress linear both;
+      animation-timeline: scroll(root block);
+    }
+  }
+}
+
+@keyframes doc-progress {
+  from {
+    scale: 0 1;
+  }
+
+  to {
+    scale: 1 1;
+  }
+}

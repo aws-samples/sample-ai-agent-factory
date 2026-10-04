@@ -10,44 +10,49 @@
  * request parameters for the four create/update actions that can set
  * network mode.
  *
+ * SCOPE: a VPC-mode control, like SCP-03/04. `buildScpSet` emits it only
+ * when the VPC-mode AgentCore endpoint ids are supplied; the reference
+ * deployment's Runtime runs `networkMode: PUBLIC`, and this SCP would deny
+ * the pipeline's own CreateAgentRuntime/UpdateAgentRuntime (2026-09-25).
+ *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-import { toScpDefinition, type ScpDefinition } from './index';
+import { toScpDefinition, type ScpDefinition } from "./index";
 
 export function scp07DenyPublicAgentCore(): ScpDefinition {
   const body = {
-    Version: '2012-10-17',
+    Version: "2012-10-17",
     Statement: [
       {
-        Sid: 'DenyAgentCoreCreationWithoutSubnets',
-        Effect: 'Deny',
+        Sid: "DenyAgentCoreCreationWithoutSubnets",
+        Effect: "Deny",
         Action: [
-          'bedrock-agentcore:CreateAgentRuntime',
-          'bedrock-agentcore:UpdateAgentRuntime',
-          'bedrock-agentcore:CreateBrowser',
-          'bedrock-agentcore:CreateCodeInterpreter',
+          "bedrock-agentcore:CreateAgentRuntime",
+          "bedrock-agentcore:UpdateAgentRuntime",
+          "bedrock-agentcore:CreateBrowser",
+          "bedrock-agentcore:CreateCodeInterpreter",
         ],
-        Resource: '*',
+        Resource: "*",
         Condition: {
           Null: {
-            'bedrock-agentcore:subnets': 'true',
+            "bedrock-agentcore:subnets": "true",
           },
         },
       },
       {
-        Sid: 'DenyAgentCoreCreationWithoutSecurityGroups',
-        Effect: 'Deny',
+        Sid: "DenyAgentCoreCreationWithoutSecurityGroups",
+        Effect: "Deny",
         Action: [
-          'bedrock-agentcore:CreateAgentRuntime',
-          'bedrock-agentcore:UpdateAgentRuntime',
-          'bedrock-agentcore:CreateBrowser',
-          'bedrock-agentcore:CreateCodeInterpreter',
+          "bedrock-agentcore:CreateAgentRuntime",
+          "bedrock-agentcore:UpdateAgentRuntime",
+          "bedrock-agentcore:CreateBrowser",
+          "bedrock-agentcore:CreateCodeInterpreter",
         ],
-        Resource: '*',
+        Resource: "*",
         Condition: {
           Null: {
-            'bedrock-agentcore:securityGroups': 'true',
+            "bedrock-agentcore:securityGroups": "true",
           },
         },
       },
@@ -55,9 +60,9 @@ export function scp07DenyPublicAgentCore(): ScpDefinition {
   };
 
   return toScpDefinition(
-    'scp-07',
-    'AgenticAI-SCP-07-DenyPublicAgentCore',
-    'Deny AgentCore resource creation without subnets and security groups (spec §2.2.8).',
+    "scp-07",
+    "AgenticAI-SCP-07-DenyPublicAgentCore",
+    "Deny AgentCore resource creation without subnets and security groups (spec §2.2.8).",
     body,
   );
 }

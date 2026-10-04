@@ -28,9 +28,9 @@ import {
 } from 'aws-cdk-lib/aws-dynamodb';
 import { Rule, Schedule } from 'aws-cdk-lib/aws-events';
 import { LambdaFunction } from 'aws-cdk-lib/aws-events-targets';
-import { AnyPrincipal, Effect, PolicyStatement, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
+import { Effect, PolicyStatement, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import { Key } from 'aws-cdk-lib/aws-kms';
-import { Code, Function, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { Code, Function as LambdaFn, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
 import {
   BlockPublicAccess,
@@ -68,7 +68,7 @@ export class ChargebackConstruct extends Construct {
   readonly bucket: Bucket;
   readonly athenaResultsBucket: Bucket;
   readonly runsTable: Table;
-  readonly runner: Function;
+  readonly runner: LambdaFn;
   readonly schedule: Rule;
   readonly kmsKey: Key;
 
@@ -184,7 +184,7 @@ export class ChargebackConstruct extends Construct {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    this.runner = new Function(this, 'Runner', {
+    this.runner = new LambdaFn(this, 'Runner', {
       functionName: `agenticai-chargeback-${props.envName}`,
       runtime: Runtime.NODEJS_20_X,
       handler: 'index.handler',

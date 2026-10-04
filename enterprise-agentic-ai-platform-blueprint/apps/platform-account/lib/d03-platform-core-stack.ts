@@ -565,11 +565,9 @@ export class D03PlatformCoreStack extends Stack {
 
     // H-A: scope cross-account DDB access to runtime-role ARNs only via
     // identity-policy condition on the calling principal's IAM policy.
-    // (Previous attempt to put this in the DDB resource policy hit a CFN
-    // circular dep across the three tables. Defence-in-depth via the
-    // workload-side runtime role's identity policy + dynamodb:LeadingKeys
-    // continues to enforce tenant isolation; security-agent F-01 closure
-    // is documented in CHANGELOG.md as scope-narrowed in v0.4.1.)
+    // Workload-side runtime role identity policies and
+    // dynamodb:LeadingKeys enforce tenant isolation without introducing a
+    // circular dependency across these tables.
     for (const acct of props.workloadAccountIds) {
       for (const table of [this.agentTable, this.toolTable, this.experimentTable]) {
         table.grantReadData(new AccountPrincipal(acct));
@@ -842,9 +840,9 @@ export class D03PlatformCoreStack extends Stack {
     //     authenticated principal) so existing back-compat tests/live runs
     //     are unchanged. The live tester rotates the env var via
     //     `aws lambda update-function-configuration` to drive entitlement
-    //     scenarios. This is the TODO-GW-POLICY-ENGINE deviation
-    //     (README §3) — Cedar evaluation moves to the Gateway when the
-    //     AgentCore PolicyEngine API is GA.
+    //     scenarios. This is the TODO-GW-POLICY-ENGINE rollback/parity
+    //     path; the opt-in Gateway PolicyEngine runs beside it until live
+    //     parity, rollback, and zero-residual teardown pass.
     //
     // Handlers are inline because these are pure-demo Lambdas whose
     // behaviour is deterministic (echo / ping). Using `Code.fromInline` +
@@ -1099,8 +1097,8 @@ exports.handler = async (event, context) => {
     // tool with the resolved Lambda alias ARN substituted in. Records start
     // in DRAFT (or APPROVED if `registryAutoApproveOnSeed=true`).
     //
-    // The catalogue's `${PLATFORM_ACCOUNT_ID}` placeholder is resolved here
-    // (via `this.account`) so the Registry stores the concrete ARN; the
+    // The catalogue's `${PLATFORM_REGION}` and `${PLATFORM_ACCOUNT_ID}`
+    // placeholders are resolved here so the Registry stores a concrete ARN; the
     // workstream Gateway synth then reads it back as the truth source.
     if (props.enableAgentRegistry) {
       if (!props.registryName) {
@@ -1124,10 +1122,12 @@ exports.handler = async (event, context) => {
           recordSpec.descriptorType === 'MCP'
             ? {
                 ...recordSpec,
-                gatewayTargetArn: recordSpec.gatewayTargetArn.replace(
-                  '${PLATFORM_ACCOUNT_ID}',
-                  recordSpec.targetAccountId ?? this.account,
-                ),
+                gatewayTargetArn: recordSpec.gatewayTargetArn
+                  .replace('${PLATFORM_REGION}', this.region)
+                  .replace(
+                    '${PLATFORM_ACCOUNT_ID}',
+                    recordSpec.targetAccountId ?? this.account,
+                  ),
               }
             : recordSpec;
         const rec = new RegistryRecordConstruct(this, `AgentRegistryRecord-${recordSpec.recordId}`, {

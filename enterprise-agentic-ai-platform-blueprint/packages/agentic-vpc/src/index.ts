@@ -12,3 +12,7 @@
  */
 
 export { AgenticVpcConstruct, type AgenticVpcConstructProps } from './agentic-vpc-construct';
+export {
+  AGENTCORE_SUPPORTED_AVAILABILITY_ZONE_IDS,
+  resolveAgentCoreSupportedAvailabilityZoneIds,
+} from './agentcore-supported-azs';

@@ -1,0 +1,4 @@
+boto3==1.43.97
+botocore==1.43.97
+strands-agents==1.44.0
+litellm==1.89.1

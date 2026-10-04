@@ -30,7 +30,7 @@ import { SnsAction } from 'aws-cdk-lib/aws-cloudwatch-actions';
 import { Rule, Schedule } from 'aws-cdk-lib/aws-events';
 import { LambdaFunction } from 'aws-cdk-lib/aws-events-targets';
 import { Effect, PolicyStatement } from 'aws-cdk-lib/aws-iam';
-import { Code, Function, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { Code, Function as LambdaFn, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
 import { ITopic } from 'aws-cdk-lib/aws-sns';
 import { NagSuppressions } from 'cdk-nag';
@@ -96,7 +96,7 @@ function parseGatewayId(gatewayUrl: string): string | undefined {
 export const MCP_METRIC_NAMESPACE = 'AgenticAI/MCP';
 
 export class McpProbeConstruct extends Construct {
-  readonly probe: Function;
+  readonly probe: LambdaFn;
   readonly schedule: Rule;
   readonly logGroup: LogGroup;
   readonly successAlarm: Alarm;
@@ -117,7 +117,7 @@ export class McpProbeConstruct extends Construct {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    this.probe = new Function(this, 'Probe', {
+    this.probe = new LambdaFn(this, 'Probe', {
       functionName: `agenticai-mcp-probe-${props.envName}-${props.tenantId}-${props.agentId}`,
       runtime: Runtime.NODEJS_20_X,
       handler: 'index.handler',

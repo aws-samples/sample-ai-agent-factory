@@ -1,0 +1,36 @@
+{
+  "root": true,
+  "env": { "browser": true, "es2020": true },
+  "extends": [
+    "eslint:recommended",
+    "plugin:@typescript-eslint/recommended",
+    "plugin:react-hooks/recommended"
+  ],
+  "ignorePatterns": ["dist", "dist-ssr", "test-results", "playwright-report", ".eslintrc.cjs"],
+  "parser": "@typescript-eslint/parser",
+  "plugins": ["react-refresh"],
+  "rules": {
+    "react-refresh/only-export-components": [
+      "warn",
+      { "allowConstantExport": true }
+    ],
+    "@typescript-eslint/no-unused-vars": ["error", { "argsIgnorePattern": "^_" }]
+  },
+  "overrides": [
+    {
+      "files": ["src/entry-client.tsx", "src/entry-server.tsx", "src/routes.tsx", "src/**/*.test.tsx"],
+      "rules": { "react-refresh/only-export-components": "off" }
+    },
+    {
+      "files": [
+        "scripts/**/*.mjs",
+        "vite.config.ts",
+        "vitest.config.ts",
+        "src/vite-plugins/**/*.ts",
+        "src/mdx/**/*.ts"
+      ],
+      "env": { "node": true, "browser": false, "es2022": true },
+      "parserOptions": { "ecmaVersion": 2022, "sourceType": "module" }
+    }
+  ]
+}

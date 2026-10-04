@@ -1,0 +1,5 @@
+/* The band carries the whole page; the minimum height keeps the footer from sitting
+   directly under it on tall viewports. */
+.page {
+  min-height: 60vh;
+}

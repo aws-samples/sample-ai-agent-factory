@@ -1,0 +1,293 @@
+.page {
+  width: 100%;
+}
+
+/* Section bands. Dark bands also carry the global `on-dark` class. */
+.band {
+  padding: var(--section-padding-y) 0;
+}
+
+.bandAlt {
+  background: var(--color-surface);
+  border-block: 1px solid var(--color-border);
+}
+
+.bandDark {
+  background: var(--color-band);
+}
+
+/* Hero title accent on "Factory": a gradient in the two outer stage colours where the browser
+   can clip a background to text, otherwise (and for contrast tools, which read `color`) the
+   solid Scale on-dark blue, which passes 4.5:1 on the band. */
+.titleAccent {
+  color: var(--stage-scale-on-dark);
+}
+
+@supports (background-clip: text) or (-webkit-background-clip: text) {
+  .titleAccent {
+    background: linear-gradient(90deg, var(--stage-scale-on-dark), var(--stage-govern-on-dark));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+}
+
+@media (forced-colors: active) {
+  .titleAccent {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+}
+
+/* Atlas band: desktop only. Below 1024 px the hero journey strip already carries the
+   same four links, so the band would read as a duplicate. */
+.atlas {
+  display: none;
+  padding-top: var(--space-8);
+}
+
+.atlasImage {
+  width: 100%;
+  height: auto;
+}
+
+@media (min-width: 1024px) {
+  .atlas {
+    display: block;
+  }
+}
+
+/* Project tiles */
+.tileGrid {
+  list-style: none;
+  display: grid;
+  gap: var(--space-4);
+}
+
+@media (min-width: 640px) {
+  .tileGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1024px) {
+  .tileGrid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.tileHead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* Stage icon in a soft disc of the card's accent hue; `--card-accent` and `--stage-color` come from Card. */
+.tileIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--card-accent, var(--color-border)) 14%, transparent);
+  color: var(--stage-color, var(--color-text-secondary));
+}
+
+.tileIcon > svg {
+  display: block;
+}
+
+.tileTitle {
+  font-size: var(--text-lg);
+  line-height: 1.3;
+}
+
+.tileTitle a {
+  color: var(--color-text-primary);
+  text-decoration: none;
+}
+
+.tileTitle a:hover {
+  color: var(--color-link-hover);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.tileTitle a:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.tileTagline {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.tileText {
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.facts {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-1);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+/* Personas: five cards, one column, two from 640 px, three plus two from 1024 px */
+.personas {
+  list-style: none;
+  display: grid;
+  gap: var(--space-4);
+}
+
+.persona {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.personaIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+  color: var(--color-link);
+}
+
+.personaIcon > svg {
+  display: block;
+}
+
+.personaRole {
+  font-size: var(--text-lg);
+  line-height: 1.3;
+}
+
+.personaText {
+  flex: 1;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+.personaLink {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--target-min);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-link);
+  text-decoration: none;
+}
+
+.personaLink:hover {
+  color: var(--color-link-hover);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.personaLink > svg {
+  flex-shrink: 0;
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .personaLink > svg {
+    transition: translate var(--transition-fast);
+  }
+
+  .persona:hover .personaLink > svg,
+  .personaLink:focus-visible > svg {
+    translate: 2px 0;
+  }
+}
+
+@media (min-width: 640px) {
+  .personas {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1024px) {
+  .personas {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+
+  .persona {
+    grid-column: span 2;
+  }
+
+  .persona:nth-child(4) {
+    grid-column: 2 / span 2;
+  }
+
+  .persona:nth-child(5) {
+    grid-column: 4 / span 2;
+  }
+}
+
+/* Pre-deploy notice */
+.noticesHeading {
+  margin-bottom: var(--space-2);
+}
+
+.notices :global([role='note']) {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-sm);
+}
+
+@media (min-width: 640px) {
+  .notices :global([role='note']) {
+    font-size: var(--text-base);
+  }
+}
+
+.notices :global([role='note']) p a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.noticeLinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  list-style: none;
+}
+
+.noticeLinks a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--target-min);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+/* Closing call to action */
+.closing {
+  text-align: center;
+}
+
+.closingHeading {
+  margin-bottom: var(--space-4);
+}
+
+.closingActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-3);
+}

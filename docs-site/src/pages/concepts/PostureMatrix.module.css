@@ -1,0 +1,214 @@
+/* PostureMatrix.module.css: capability-by-project and control-by-project heat-maps */
+
+.scrollHint {
+  margin: var(--space-4) 0 calc(-1 * var(--space-2));
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+@media (min-width: 1280px) {
+  .scrollHint {
+    display: none;
+  }
+}
+
+.table {
+  min-width: 960px;
+  font-size: 0.9375rem;
+}
+
+.caption {
+  text-align: left;
+  font-weight: 600;
+  padding: var(--space-3);
+  caption-side: top;
+}
+
+/* `.table .x` outranks ResponsiveTable's own `.table th` rule for backgrounds. */
+.table .rowHeader {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 9rem;
+  background: var(--color-surface-sunken);
+  font-weight: 600;
+  vertical-align: top;
+  box-shadow: 1px 0 0 var(--color-border);
+  scroll-margin-top: calc(var(--header-height) + var(--space-4));
+}
+
+/* Project columns: a 3 px stage rule on top, the stage icon beside the name. */
+.table .colHeader {
+  min-width: 13rem;
+  vertical-align: top;
+  border-top: 3px solid var(--stage-tint, var(--color-border));
+}
+
+.colHeader[data-stage='learn'] {
+  --stage-color: var(--stage-learn);
+  --stage-tint: var(--stage-learn-tint);
+}
+
+.colHeader[data-stage='build'] {
+  --stage-color: var(--stage-build);
+  --stage-tint: var(--stage-build-tint);
+}
+
+.colHeader[data-stage='govern'] {
+  --stage-color: var(--stage-govern);
+  --stage-tint: var(--stage-govern-tint);
+}
+
+.colHeader[data-stage='scale'] {
+  --stage-color: var(--stage-scale);
+  --stage-tint: var(--stage-scale-tint);
+}
+
+.colHeaderName {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.colHeaderName a {
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.stageIcon {
+  flex-shrink: 0;
+  color: var(--stage-color);
+}
+
+.stageLabel {
+  display: block;
+  margin-top: var(--space-1);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+  color: var(--stage-color);
+}
+
+/* Heat-map cells: background tint by posture. Body text stays midnight on every tint (AA),
+   and the badge below keeps the icon and label, so colour is never the only cue. */
+.cell {
+  vertical-align: top;
+  background-color: var(--cell-tint, var(--color-surface));
+}
+
+.cell[data-posture='enforced'] {
+  --cell-tint: var(--tint-green);
+}
+
+.cell[data-posture='advisory'] {
+  --cell-tint: var(--tint-amber);
+}
+
+.cell[data-posture='illustrative'] {
+  --cell-tint: var(--tint-blue);
+}
+
+.cell[data-posture='outside-envelope'] {
+  --cell-tint: var(--tint-violet);
+}
+
+.cell[data-posture='not-applicable'] {
+  --cell-tint: var(--color-surface-sunken);
+}
+
+/* Row hover: a translucent overlay layered over the tint (and over the sticky row header). */
+@media (hover: hover) {
+  .row:hover > th,
+  .row:hover > td {
+    background-image: linear-gradient(var(--color-overlay-hover), var(--color-overlay-hover));
+  }
+}
+
+.cellText {
+  margin: var(--space-2) 0 0;
+  line-height: 1.5;
+}
+
+.cellSource {
+  margin: var(--space-2) 0 0;
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+
+.cellSource a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+/* Posture badges: icon plus text on the card surface with a distinct border style per
+   posture, in the tint heading colours (4.5:1 or better on the surface). */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--target-min);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--badge-border, var(--color-border));
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--badge-color, var(--color-text-secondary));
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.badgeIcon {
+  flex-shrink: 0;
+}
+
+.badge[data-posture='enforced'] {
+  --badge-color: var(--tint-heading-green);
+  --badge-border: var(--stage-build-tint);
+}
+
+.badge[data-posture='advisory'] {
+  --badge-color: var(--tint-heading-amber);
+  --badge-border: var(--stage-learn-tint);
+  border-style: dashed;
+}
+
+.badge[data-posture='illustrative'] {
+  --badge-color: var(--tint-heading-blue);
+  --badge-border: var(--stage-scale-tint);
+  border-style: dotted;
+}
+
+.badge[data-posture='outside-envelope'] {
+  --badge-color: var(--tint-heading-violet);
+  --badge-border: var(--stage-govern-tint);
+  border-style: double;
+}
+
+/* Legend */
+.legend {
+  margin: var(--space-4) 0;
+}
+
+.legendList {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
+  gap: var(--space-3) var(--space-6);
+}
+
+.legendItem {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: flex-start;
+}
+
+.legendMeaning {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
