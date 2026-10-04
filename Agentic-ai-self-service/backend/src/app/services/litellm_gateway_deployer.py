@@ -50,8 +50,13 @@ import urllib.parse
 import urllib.request
 
 from app.services.gateway_deployer import (
-    _put_connector_secret,
+    ConnectorSecretBindingError,
+    ConnectorSecretDeletionRefused,
+    _create_secrets_client,
+    _read_connector_secret_key,
     _validate_outbound_url,
+    bind_connector_secret_for_deployment,
+    delete_deployment_bound_secret,
 )
 
 logger = logging.getLogger(__name__)
@@ -141,18 +146,52 @@ def resolve_gateway_provider(gateway_config: dict | None) -> str:
     """Which provider deploys this gateway node.
 
     Per-agent choice on the canvas wins; the platform Settings default applies
-    only when the node says nothing. An unrecognized value falls back to
-    ``agentcore`` rather than failing the deploy — the model layer already
-    rejects bad values at the API boundary, so reaching here with garbage means
-    a legacy stored canvas, and the old behavior is the safe answer.
+    only when the node says nothing.
+
+    An unrecognized *non-empty* value fails closed. It used to fall back to
+    ``agentcore``, justified by "the model layer already rejects bad values at
+    the API boundary" — which is not true on the CloudFormation export path.
+    ``DeployRequest.gateway_config`` is declared ``dict | None``
+    (deployment_models.py:556), so ``GatewayConfiguration`` is never constructed
+    there and nothing validates the provider before it reaches this function.
+    Measured live: a canvas carrying the typo ``gatewayProvider: "lite-llm"``
+    exported an ``AWS::BedrockAgentCore::Gateway`` plus four Cognito resources
+    and silently discarded ``litellmBaseUrl`` — the wrong architecture, with the
+    proxy URL and key reference dropped, and no error anywhere. Setting
+    ``DEFAULT_GATEWAY_PROVIDER=litellm`` did not help, because this branch
+    returned before the default was ever consulted.
+
+    A silent fallback is only defensible if the misrouted deploy is harmless, and
+    it is not: one typed character changes which backend the agent talks to. A
+    legacy stored canvas does not reach this branch — it omits the key entirely
+    and takes the ``default_gateway_provider()`` path below — so failing here
+    costs nothing and closes the gap. ARCC returned nothing directly on point for
+    enum fail-closed defaults; the nearest guidance (cnt_fImfV93NdsOrCd) warns
+    against designing for which callers *should* reach a backend rather than
+    which ones *can*, which is exactly this failure.
     """
-    raw = (gateway_config or {}).get("gateway_provider") or (gateway_config or {}).get("gatewayProvider")
-    provider = str(raw or "").strip().lower()
+    # Both spellings are read and must agree. ``a or b`` on the raw values let a
+    # whitespace-only ``gateway_provider`` (truthy) hide a real ``gatewayProvider``, and
+    # the empty result then took the platform default -- the silent wrong-backend path
+    # this function exists to close, reachable from imported JSON and direct API calls.
+    cfg = gateway_config or {}
+    spelled = {str(cfg.get(k) or "").strip().lower() for k in ("gateway_provider", "gatewayProvider")}
+    spelled.discard("")
+    if len(spelled) > 1:
+        raise ValueError(
+            f"Conflicting gateway provider values {sorted(spelled)!r} under 'gateway_provider' and "
+            "'gatewayProvider'. Refusing to pick one: they name different backends."
+        )
+    provider = next(iter(spelled), "")
     if provider in _VALID_PROVIDERS:
         return provider
     if provider:
-        logger.warning("Unrecognized gateway_provider %r — falling back to agentcore", provider)
-        return "agentcore"
+        raise ValueError(
+            f"Unrecognized gateway provider {provider!r}. Valid values are "
+            f"{list(_VALID_PROVIDERS)}. Refusing to guess: falling back to "
+            "'agentcore' would deploy a different backend than the canvas asked "
+            "for and silently drop any LiteLLM proxy URL and key reference."
+        )
 
     fallback = default_gateway_provider()
     if fallback == "litellm" and _looks_like_an_agentcore_node(gateway_config):
@@ -241,7 +280,7 @@ def _get_json(url: str, api_key: str, servers: list[str] | None = None) -> objec
     req = urllib.request.Request(validated, headers=_headers(api_key, servers), method="GET")
     # nosemgrep: dynamic-urllib-use-detected -- validated on the line above
     # (https-only + DNS-resolved private/IMDS denylist).
-    with urllib.request.urlopen(req, timeout=_PROBE_TIMEOUT) as resp:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=_PROBE_TIMEOUT) as resp:  # nosec B310  # noqa: S310
         return json.loads(resp.read().decode("utf-8") or "null")
 
 
@@ -392,6 +431,8 @@ def deploy_litellm_gateway(
     region: str,
     owner_sub: str = "",
     deployment_id: str | None = None,
+    secrets_client=None,
+    resource_tags: dict | None = None,
     **_ignored,
 ) -> dict:
     """Wire a canvas Gateway node to a customer-run LiteLLM MCP Gateway.
@@ -402,6 +443,13 @@ def deploy_litellm_gateway(
     ``custom_tools``, ``connectors``, …) that the call sites pass positionally by
     name; they have no meaning for an external gateway and are deliberately not
     silently half-applied.
+
+    ``resource_tags`` is declared EXPLICITLY rather than left to ``**_ignored`` on
+    purpose: it is not an AgentCore-only kwarg. This path still creates one durable
+    AWS resource -- the Secrets Manager secret holding the LiteLLM virtual key -- so
+    the P0-B governance tags apply to it exactly as they do on the AgentCore path.
+    Absorbed into ``**_ignored`` it would have been dropped with no error, and the
+    only symptom would have been an untagged secret nobody looks at.
     """
     name = gateway_config.get("name") or "litellm-gateway"
     raw_base = gateway_config.get("litellm_base_url") or gateway_config.get("litellmBaseUrl") or ""
@@ -429,31 +477,58 @@ def deploy_litellm_gateway(
     raw_key = gateway_config.get("litellm_api_key") or gateway_config.get("litellmApiKey") or ""
     secret_arn = gateway_config.get("litellm_api_key_ref") or gateway_config.get("litellmApiKeyRef") or ""
 
-    api_key = str(raw_key)
-    if not api_key and secret_arn:
-        try:
-            api_key = _read_secret_key(region, secret_arn)
-        except Exception as e:  # noqa: BLE001
-            return {"success": False, "error": f"Could not read the stored LiteLLM key: {type(e).__name__}"}
-
-    if not api_key:
+    if not raw_key and not secret_arn:
         return {
             "success": False,
             "error": "LiteLLM gateway requires a virtual key (litellm_api_key or litellm_api_key_ref).",
         }
 
+    if not deployment_id:
+        return {
+            "success": False,
+            "error": "LiteLLM gateway credentials require a deployment id before they can be stored or reused.",
+        }
+
+    sm = secrets_client or _create_secrets_client(region)
+    try:
+        secret_arn, created_here = bind_connector_secret_for_deployment(
+            region=region,
+            owner_sub=owner_sub,
+            deployment_id=deployment_id,
+            payload_key="apiKey",
+            raw_value=str(raw_key) if raw_key else None,
+            secret_ref=str(secret_arn) if secret_arn else None,
+            secrets_client=sm,
+            resource_tags=resource_tags,
+        )
+        api_key = str(raw_key) if raw_key else _read_secret_key(region, secret_arn, secrets_client=sm)
+    except ConnectorSecretBindingError as e:
+        return {
+            "success": False,
+            "error": (
+                f"{e} For LiteLLM, provide the virtual key in litellm_api_key; "
+                "the platform will store a fresh deployment-bound copy."
+            ),
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"success": False, "error": f"Could not read the stored LiteLLM key: {type(e).__name__}"}
+
     try:
         probe = probe_litellm_gateway(base_url, api_key, servers)
     except LiteLLMGatewayError as e:
+        if created_here:
+            try:
+                delete_deployment_bound_secret(
+                    region=region,
+                    deployment_id=deployment_id,
+                    secret_ref=secret_arn,
+                    secrets_client=sm,
+                )
+            except ConnectorSecretDeletionRefused:
+                logger.error("LiteLLM probe rollback refused because exact credential ownership was not proven")
+            except Exception as cleanup_exc:  # noqa: BLE001
+                logger.error("LiteLLM probe rollback failed: %s", type(cleanup_exc).__name__)
         return {"success": False, "error": str(e)}
-
-    # Mint the key only AFTER the probe proves it works, so a typo does not leave
-    # an orphan secret behind on every failed attempt.
-    if not secret_arn:
-        try:
-            secret_arn = _put_connector_secret(region, owner_sub, {"apiKey": api_key})
-        except Exception as e:  # noqa: BLE001
-            return {"success": False, "error": f"Could not store the LiteLLM key: {type(e).__name__}"}
 
     gateway_url = resolve_mcp_url(base_url, servers)
     tools = probe["tools"]
@@ -493,10 +568,7 @@ def deploy_litellm_gateway(
     }
 
 
-def _read_secret_key(region: str, secret_arn: str) -> str:
+def _read_secret_key(region: str, secret_arn: str, *, secrets_client=None) -> str:
     """Read back a previously minted virtual key. Never logged."""
-    import boto3
-
-    sm = boto3.client("secretsmanager", region_name=region)
-    payload = json.loads(sm.get_secret_value(SecretId=secret_arn)["SecretString"])
-    return str(payload.get("apiKey") or "")
+    sm = secrets_client or _create_secrets_client(region)
+    return _read_connector_secret_key(sm, secret_arn, "apiKey")

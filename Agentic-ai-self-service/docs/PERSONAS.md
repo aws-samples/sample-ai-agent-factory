@@ -28,10 +28,11 @@ identity + group assignment is an AWS/IdP responsibility; the platform only
 | Group | Scopes | Persona |
 |---|---|---|
 | `g-admins-super` / `org-admin` | `admin` (implies all) + invoke | **Super admin** — everything |
-| `g-admins-registry` / `registry-admin` | `registry:read`, `registry:write` | Registry approver (publish/approve/reject) |
-| `g-admins-security` | `settings:read/write`, `observability:read` | Security / settings admin |
+| `g-admins-registry` / `registry-admin` | `registry:read`, `registry:write` | Registry approver (publish/approve/reject); `g-admins-super` / `org-admin` approve too |
+| `g-admins-security` | `settings:read/write`, `observability:read`, `tag:read/write` | Security / settings and tag-governance admin |
 | `g-admins-cost` | `cost:read/write` | FinOps admin |
-| `g-users-default` | `invoke`, `agent:read`, `cost:read`, `prompt:read`, `registry:read` | **Standard user** — build/deploy/invoke own agents, browse + **clone** the registry |
+| `registry-developer` | `registry:read`, `registry:write` | Registry publisher — publish and maintain own entries; cannot approve/reject |
+| `g-users-default` | `invoke`, `agent:read`, `agent:write`, `cost:read`, `prompt:read`, `registry:read`, `tag:read` | **Standard user** — build/deploy/invoke own agents, select governed tags, browse + **clone** the registry |
 | `editor` (legacy) | invoke + all read/write | generic editor |
 | `viewer` (legacy) | invoke + all read | generic read-only |
 
@@ -43,21 +44,23 @@ hitl, observability, settings`.
 
 - **Browse + view + search + clone** need `registry:read` → standard users CAN
   use the org catalog (clone is a *consume* action, not a write).
-- **Publish, approve, reject, update, delete** need `registry:write` → registry
-  admins only.
+- **Publish, update, and delete** need `registry:write`; a
+  `registry-developer` may perform them on entries they own.
+- **Approve and reject** additionally require a registry-approver group:
+  `g-admins-registry`, `g-admins-super`, `registry-admin`, or `org-admin`.
 - **Visibility filtering** still applies on top of scopes: a user sees APPROVED
   org/public entries + their own (incl. pending); pending entries from others are
   hidden until approved. Cross-tenant private entries are never shown (404).
 
 ## Assigning a user to a persona (AWS-side)
 
-> **New users start in NO group.** `AdminCreateUser` (and the `COGNITO_USERS`
-> deploy var, which calls it) creates the user but assigns **no group**, so they
-> sign in with an empty `cognito:groups` claim → **zero scopes**. The UI fails
-> closed on missing scopes (e.g. the registry **Clone** button, gated on
-> `registry:read`, is disabled) even though the advisory backend still lets them
-> browse. Assign a group below to grant capabilities. Changes take effect on the
-> **next token issuance** — the user must sign out/in.
+> **`COGNITO_USERS` users start as standard users.** The deploy's user
+> provisioner puts each one in `g-users-default` + `t-user`. A user created any
+> other way (a bare `AdminCreateUser`, the Cognito console) is in **no group**, so
+> they sign in with an empty `cognito:groups` claim → **zero scopes** → `403` on
+> every call, because the API enforces by default. Admin personas are always a
+> manual grant. Changes take effect on the **next token issuance** — the user
+> must sign out/in.
 
 ```bash
 aws cognito-idp admin-add-user-to-group \
@@ -71,14 +74,15 @@ aws cognito-idp admin-add-user-to-group \
 If Cognito is federated to Okta/Entra, map the IdP group claim to these names and
 assignment happens in your IdP — zero platform code change.
 
-## Enforcement is opt-in
+## Enforcement is on by default
 
-RBAC ships **advisory** (`RBAC_ENFORCE=false`): would-be denials are logged +
-surfaced as a CloudWatch `WouldDeny` metric, but allowed. Flip to enforce with
-`RBAC_ENFORCE=true ./scripts/deploy.sh` (or the Lambda env var directly) once group
-grants are validated — see `RBAC_ROLLOUT.md`, which explains why this must go
-through `deploy.sh` rather than a raw `cdk deploy`. In local dev (no Cognito) every
-scope is granted.
+RBAC ships **enforcing** (`RBAC_ENFORCE=true`): a caller without a route's scope
+gets `403`. Every API route declares a scope except `/health` and
+`/api/identity/token-info` (pinned by `backend/tests/test_rbac_route_coverage.py`).
+`RBAC_ENFORCE=false ./scripts/deploy.sh` is the advisory escape hatch: would-be
+denials are logged + surfaced as a CloudWatch `WouldDeny` metric, but allowed — see
+`RBAC_ROLLOUT.md`, which explains why this must go through `deploy.sh` rather than a
+raw `cdk deploy`. In local dev (no Cognito) every scope is granted.
 
 ## Changing personas
 

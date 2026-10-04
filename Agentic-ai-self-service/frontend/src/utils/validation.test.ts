@@ -505,6 +505,84 @@ describe('Validation Engine Utilities', () => {
     expect(areComponentsCompatible('identity', 'memory')).toBe(false);
   });
 
+  describe('a gateway must have something to serve', () => {
+    const runtime = (id: string, protocol: 'HTTP' | 'MCP' = 'HTTP'): WorkflowNode => ({
+      id,
+      type: 'runtime',
+      data: {
+        configuration: {
+          name: id,
+          framework: 'strands',
+          systemPrompt: 'You are helpful.',
+          model: { modelId: 'us.anthropic.claude-haiku-4-5-20251001-v1:0' },
+          protocol,
+        } as unknown as RuntimeConfiguration,
+      },
+    });
+    const gateway = (id: string, config: Partial<GatewayConfiguration> = {}): WorkflowNode => ({
+      id,
+      type: 'gateway',
+      data: { configuration: { name: id, enableSemanticSearch: true, ...config } as GatewayConfiguration },
+    });
+    const tool = (id: string): WorkflowNode => ({
+      id,
+      type: 'tool',
+      data: { configuration: { name: id, toolId: 'get_order' } as never },
+    });
+    const edge = (source: string, target: string): WorkflowEdge => ({ id: `${source}-${target}`, source, target, type: 'data' });
+    const gatewayErrors = (nodes: WorkflowNode[], edges: WorkflowEdge[]) =>
+      validateWorkflow(nodes, edges).errors.filter((e) => e.componentId === 'gw').map((e) => e.field);
+
+    it('rejects a gateway with no explicit target, no tool and no MCP runtime (the shipped strands shape)', () => {
+      // Live, 2026-09-28: the deployer refused "a declared target that has no payload" while the
+      // canvas read "Ready to deploy". A bare { type: 'lambda' } placeholder is not a target either.
+      const result = validateWorkflow([runtime('rt'), gateway('gw')], [edge('rt', 'gw')]);
+      expect(result.isReadyToDeploy).toBe(false);
+      expect(result.nodeStates.get('gw')?.status).toBe('error');
+      expect(gatewayErrors([runtime('rt'), gateway('gw')], [edge('rt', 'gw')])).toContain('targets');
+      // A single legacy placeholder target reports under the legacy field path.
+      expect(
+        gatewayErrors([runtime('rt'), gateway('gw', { targetType: 'lambda', targetConfig: { type: 'lambda' } as never })], [edge('rt', 'gw')]),
+      ).toContain('targetConfig.functionArn');
+    });
+
+    it('accepts a gateway served by a connected tool node (the blueprint shape)', () => {
+      const result = validateWorkflow(
+        [runtime('rt'), gateway('gw'), tool('t1')],
+        [edge('rt', 'gw'), edge('gw', 't1')],
+      );
+      expect(result.errors.filter((e) => e.componentId === 'gw')).toEqual([]);
+    });
+
+    it('accepts a gateway served by a connected MCP-protocol runtime (the MCP-server-target shape)', () => {
+      const result = validateWorkflow(
+        [runtime('rt'), gateway('gw'), runtime('mcp', 'MCP')],
+        [edge('rt', 'gw'), edge('gw', 'mcp')],
+      );
+      expect(result.errors.filter((e) => e.componentId === 'gw')).toEqual([]);
+    });
+
+    it('accepts a gateway with an explicit Lambda target that carries its ARN', () => {
+      const result = validateWorkflow(
+        [runtime('rt'), gateway('gw', { targets: [{ type: 'lambda', functionArn: 'arn:aws:lambda:us-east-1:123456789012:function:tool' }] as never })],
+        [edge('rt', 'gw')],
+      );
+      expect(result.errors.filter((e) => e.componentId === 'gw')).toEqual([]);
+    });
+
+    it('does not apply the rule to a LiteLLM gateway', () => {
+      const result = validateWorkflow(
+        [runtime('rt'), gateway('gw', { gatewayProvider: 'litellm', litellmBaseUrl: 'https://proxy.example', litellmApiKey: 'k' } as never)],
+        [edge('rt', 'gw')],
+      );
+      expect(result.errors.filter((e) => e.componentId === 'gw' && e.field === 'targets')).toEqual([]);
+    });
+
+    it('no longer requires a target type as a bare field, so templates need no placeholder', () => {
+      expect(REQUIRED_FIELDS.gateway).toEqual(['name']);
+    });
+  });
+
   it('validates Lambda ARN format in gateway config', () => {
     const validConfig: GatewayConfiguration = {
       name: 'Test Gateway',
@@ -539,6 +617,98 @@ describe('Validation Engine Utilities', () => {
     const arnError = result.errors.find(e => e.field === 'targetConfig.functionArn');
     expect(arnError).toBeDefined();
     expect(arnError?.message).toContain('Invalid Lambda ARN');
+  });
+
+  // ------------------------------------------------------------------
+  // Every target the deploy sends must be validated.
+  //
+  // These checks used to read `targetType` / `targetConfig` only. Once the
+  // multi-target editor landed, `resolveGatewayTargets` ignores `targetConfig`
+  // whenever `targets[]` is non-empty — so the array that actually reaches the
+  // backend went out completely unvalidated, and an incomplete target was
+  // dropped server-side while the deployment reported success.
+  // ------------------------------------------------------------------
+
+  it('rejects an empty Lambda ARN, not just a malformed one', () => {
+    // createDefaultTargetConfig hands out functionArn: '', so this is the state of
+    // every freshly added Lambda target. It produced a green deploy with no tool.
+    const result = validateComponentConfiguration('test-node', 'gateway', {
+      name: 'Test Gateway',
+      targetType: 'lambda',
+      targetConfig: { type: 'lambda', functionArn: '' },
+      enableSemanticSearch: false,
+    } as GatewayConfiguration);
+
+    const err = result.errors.find((e) => e.field === 'targetConfig.functionArn');
+    expect(err).toBeDefined();
+    expect(err?.message).toContain('required');
+  });
+
+  it('validates each entry of a multi-target gateway, not the legacy single target', () => {
+    const result = validateComponentConfiguration('test-node', 'gateway', {
+      name: 'Test Gateway',
+      // The legacy pair is VALID and is what the old code looked at...
+      targetType: 'lambda',
+      targetConfig: { type: 'lambda', functionArn: 'arn:aws:lambda:us-east-1:123456789012:function:ok' },
+      // ...while every entry the deploy actually sends is incomplete.
+      targets: [
+        { type: 'lambda', functionArn: '' },
+        { type: 'openapi' },
+        { type: 'mcp_server' },
+      ],
+      enableSemanticSearch: false,
+    } as GatewayConfiguration);
+
+    expect(result.errors.map((e) => e.field)).toEqual(
+      expect.arrayContaining(['targets[0].functionArn', 'targets[1]', 'targets[2].serverId'])
+    );
+  });
+
+  it('accepts a fully-specified multi-target gateway', () => {
+    const result = validateComponentConfiguration('test-node', 'gateway', {
+      name: 'Test Gateway',
+      targetType: 'lambda',
+      targetConfig: { type: 'lambda', functionArn: 'arn:aws:lambda:us-east-1:123456789012:function:ok' },
+      targets: [
+        { type: 'lambda', functionArn: 'arn:aws:lambda:us-east-1:123456789012:function:ok' },
+        { type: 'openapi', specUrl: 'https://api.example.com/openapi.json' },
+        { type: 'mcp_server', serverId: 'aws-knowledge' },
+        { type: 'mcp_server', serverId: '__custom__', serverUrl: 'https://mcp.example.com/mcp' },
+      ],
+      enableSemanticSearch: true,
+    } as GatewayConfiguration);
+
+    // A refusal-only suite would pass while rejecting everything; pin the happy path.
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it('rejects a custom MCP target with no endpoint URL', () => {
+    const result = validateComponentConfiguration('test-node', 'gateway', {
+      name: 'Test Gateway',
+      targetType: 'mcp_server',
+      targetConfig: { type: 'mcp_server', serverId: '__custom__' },
+      enableSemanticSearch: false,
+    } as GatewayConfiguration);
+
+    expect(result.errors.find((e) => e.field === 'targetConfig.serverUrl')).toBeDefined();
+  });
+
+  it('rejects a Smithy target, which can never deploy', () => {
+    const result = validateComponentConfiguration('test-node', 'gateway', {
+      name: 'Test Gateway',
+      targetType: 'smithy',
+      targetConfig: { type: 'smithy', modelName: 'dynamodb' },
+      enableSemanticSearch: false,
+    } as GatewayConfiguration);
+
+    const err = result.errors.find((e) => e.field === 'targetConfig.type');
+    expect(err).toBeDefined();
+    expect(err?.message).toContain('not supported');
+  });
+
+  it('no longer offers Smithy as a target family', async () => {
+    const { TARGET_TYPE_OPTIONS } = await import('./gatewayConfig');
+    expect(TARGET_TYPE_OPTIONS.map((o) => o.value)).not.toContain('smithy');
   });
 
   it('validates identity configuration', () => {
@@ -578,6 +748,170 @@ describe('Validation Engine Utilities', () => {
 });
 
 // ============================================================================
+// Code-generation composition boundary
+// ============================================================================
+
+describe('Code-generation component composition', () => {
+  const runtimeConfig = (
+    overrides: Partial<RuntimeConfiguration> = {}
+  ): RuntimeConfiguration => ({
+    name: 'Composition Runtime',
+    entrypoint: 'agent.py',
+    framework: 'strands_agents',
+    model: {
+      provider: 'anthropic',
+      modelId: 'us.anthropic.claude-sonnet-5',
+      temperature: 0.7,
+      topP: 0.9,
+    },
+    systemPrompt: 'Use every connected capability.',
+    deploymentType: 'direct_code_deploy',
+    pythonRuntime: 'PYTHON_3_13',
+    protocol: 'HTTP',
+    idleTimeout: 300,
+    maxLifetime: 3600,
+    enableOtel: false,
+    modelProvider: 'bedrock',
+    multiAgentPattern: 'none',
+    ...overrides,
+  });
+
+  it('blocks A2A plus another connected capability before deployment', () => {
+    const nodes: WorkflowNode[] = [
+      {
+        id: 'runtime',
+        type: 'runtime',
+        data: { configuration: runtimeConfig() },
+      },
+      {
+        id: 'a2a',
+        type: 'a2a',
+        data: {
+          configuration: {
+            name: 'Peer Network',
+            enabled: true,
+            pattern: 'peer_to_peer',
+            agentEndpoints: [],
+            timeoutSeconds: 30,
+            maxRetries: 3,
+            enableParallelExecution: false,
+            enableMessageRouting: false,
+            routingStrategy: 'round_robin',
+            shareContext: false,
+            contextWindowSize: 10,
+          },
+        },
+      },
+      {
+        id: 'browser',
+        type: 'browser',
+        data: { configuration: { name: 'Browser', enabled: true } },
+      },
+    ];
+    const edges: WorkflowEdge[] = [
+      { id: 'runtime-a2a', source: 'runtime', target: 'a2a' },
+      { id: 'runtime-browser', source: 'runtime', target: 'browser' },
+    ];
+
+    const result = validateWorkflow(nodes, edges);
+
+    expect(result.isReadyToDeploy).toBe(false);
+    expect(result.nodeStates.get('runtime')?.status).toBe('error');
+    const message = result.nodeStates
+      .get('runtime')
+      ?.errors.find((error) => error.field === 'connectedComponents')?.message;
+    expect(message).toContain('A2A');
+    expect(message).toContain('Browser');
+  });
+
+  it('blocks multi-agent plus a Knowledge Base reached through its Gateway', () => {
+    const nodes: WorkflowNode[] = [
+      {
+        id: 'runtime',
+        type: 'runtime',
+        data: {
+          configuration: runtimeConfig({
+            multiAgentPattern: 'graph',
+            multiAgentConfig: { agents: [] },
+          }),
+        },
+      },
+      {
+        id: 'gateway',
+        type: 'gateway',
+        data: {
+          configuration: {
+            name: 'Composition Gateway',
+            targetType: 'lambda',
+            targetConfig: {
+              type: 'lambda',
+              functionArn: 'arn:aws:lambda:us-east-1:123456789012:function:composition',
+            },
+            enableSemanticSearch: true,
+          },
+        },
+      },
+      {
+        id: 'knowledge-base',
+        type: 'tool',
+        data: {
+          configuration: {
+            name: 'Knowledge Base',
+            toolId: 'knowledge_base',
+            description: 'Retrieve grounded context.',
+            enabled: true,
+            isKnowledgeBase: true,
+          },
+        },
+      },
+    ];
+    const edges: WorkflowEdge[] = [
+      { id: 'runtime-gateway', source: 'runtime', target: 'gateway' },
+      { id: 'gateway-kb', source: 'gateway', target: 'knowledge-base' },
+    ];
+
+    const result = validateWorkflow(nodes, edges);
+
+    expect(result.isReadyToDeploy).toBe(false);
+    const message = result.nodeStates
+      .get('runtime')
+      ?.errors.find((error) => error.field === 'connectedComponents')?.message;
+    expect(message).toContain('Multi-Agent Graph');
+    expect(message).toContain('Gateway');
+    expect(message).toContain('Knowledge Base');
+  });
+
+  it('keeps feasible single-agent compositions deployable', () => {
+    const nodes: WorkflowNode[] = [
+      {
+        id: 'runtime',
+        type: 'runtime',
+        data: { configuration: runtimeConfig() },
+      },
+      {
+        id: 'memory',
+        type: 'memory',
+        data: { configuration: { name: 'Memory', enabled: true } },
+      },
+      {
+        id: 'browser',
+        type: 'browser',
+        data: { configuration: { name: 'Browser', enabled: true } },
+      },
+    ];
+    const edges: WorkflowEdge[] = [
+      { id: 'runtime-memory', source: 'runtime', target: 'memory' },
+      { id: 'runtime-browser', source: 'runtime', target: 'browser' },
+    ];
+
+    const result = validateWorkflow(nodes, edges);
+
+    expect(result.isReadyToDeploy).toBe(true);
+    expect(result.nodeStates.get('runtime')?.status).not.toBe('error');
+  });
+});
+
+// ============================================================================
 // Gateway provider validation (Workstream A)
 // ============================================================================
 
@@ -601,14 +935,19 @@ describe('LiteLLM gateway validation', () => {
     expect(result.errors).toHaveLength(0);
   });
 
-  it('still requires targetType and targetConfig for an AgentCore gateway', () => {
-    // The pre-existing rule must survive the LiteLLM carve-out.
+  it('no longer demands targetType/targetConfig as bare fields on an AgentCore gateway', () => {
+    // Requiring them at the field level is what made templates ship a { type: 'lambda' }
+    // placeholder that the deployer then refused as a target with no payload. Whether a
+    // gateway has something to serve is decided by validateWorkflow against the whole graph
+    // (explicit targets, connected tools, or a connected MCP runtime); see
+    // 'a gateway must have something to serve'.
     const result = validateComponentConfiguration('n1', 'gateway', {
       name: 'gw',
       enableSemanticSearch: true,
     } as unknown as GatewayConfiguration);
-    expect(result.errors.map((e) => e.field)).toContain('targetType');
-    expect(result.errors.map((e) => e.field)).toContain('targetConfig');
+    expect(result.errors.map((e) => e.field)).not.toContain('targetType');
+    expect(result.errors.map((e) => e.field)).not.toContain('targetConfig');
+    expect(result.errors).toEqual([]);  // a name is present, and nothing else is required at this level
   });
 
   it('requires a base URL', () => {

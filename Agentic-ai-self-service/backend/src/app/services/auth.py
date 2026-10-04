@@ -208,15 +208,17 @@ def get_caller_role(request: Request) -> str:
     return best
 
 
-# Registry RBAC: approvers belong to the 'registry-admin' Cognito group. We also
-# accept the legacy 'org-admin' group so existing platform admins keep approval
-# rights without a re-grant. This is distinct from get_caller_role/_ROLE_PRECEDENCE
-# (which workspace_acl depends on) — do NOT fold these together.
-_REGISTRY_ADMIN_GROUPS = {"registry-admin", "org-admin"}
+# Registry RBAC: approvers belong to a registry admin group. The platform's own
+# user pool creates g-admins-registry and g-admins-super (rbac.GROUP_SCOPES), so
+# both are approvers; 'registry-admin' and legacy 'org-admin' stay accepted so
+# existing admins keep approval rights without a re-grant. This is distinct from
+# get_caller_role/_ROLE_PRECEDENCE (which workspace_acl depends on) — do NOT fold
+# these together. Mirrored by frontend/src/auth/useIsRegistryAdmin.ts.
+_REGISTRY_ADMIN_GROUPS = {"g-admins-registry", "g-admins-super", "registry-admin", "org-admin"}
 
 
 def is_registry_admin(request: Request) -> bool:
-    """True if the caller is a registry approver (group registry-admin/org-admin).
+    """True if the caller is a registry approver (any of _REGISTRY_ADMIN_GROUPS).
 
     Reuses the shared cognito:groups claim parsing (extract_cognito_groups). In
     local dev (no aws.event) returns True, mirroring get_caller_role's

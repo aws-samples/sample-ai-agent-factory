@@ -8,7 +8,7 @@ from aws_cdk import aws_logs as logs
 from aws_cdk import aws_stepfunctions as sfn
 from aws_cdk import aws_stepfunctions_tasks as sfn_tasks
 
-from .config import PlatformConfig
+from .config import DEPLOYMENT_STATE_MACHINE_TIMEOUT_MINUTES, PlatformConfig
 from .tables import Tables
 
 
@@ -29,13 +29,21 @@ def build_state_machine(
     Requirements: 1.3, 1.4, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 7.1
     """
     # Failure handler — writes error to DynamoDB
+    # 150s, in lockstep with the status_update Lambda's own 120s timeout (see
+    # step_lambdas.py, where the reasoning for raising it from 15s lives). This is the
+    # task that runs the auto-cleanup teardown, so it is the one that most needs the
+    # room. Deliberately LONGER than the Lambda's timeout rather than equal to it: at
+    # equal values the Step Functions task can give up while the Lambda is still running
+    # and still deleting, which surfaces as States.Timeout and — because this task has
+    # add_retry — starts the whole destructive pass over on top of the one in flight.
     failure_handler = _create_step_task(
         stack,
         "StatusUpdateFailure",
         step_lambdas["status_update"],
-        timeout_seconds=15,
+        timeout_seconds=150,
         result_path="$.failure_result",
     )
+    failure_handler.add_retry(**_finalizer_retry_kwargs())
     failure_handler.add_retry(**_retry_kwargs())
     fail_state = sfn.Fail(stack, "DeploymentFailed", cause="Deployment failed", error="DeploymentError")
     failure_handler.next(fail_state)
@@ -47,17 +55,23 @@ def build_state_machine(
         stack,
         "ValidateWorkflow",
         step_lambdas["validate"],
-        timeout_seconds=30,
+        # The task clock starts when Step Functions submits the invocation,
+        # before the Lambda execution clock. Equality is therefore not a margin.
+        timeout_seconds=60,
         result_path="$",
     )
     validate.add_retry(**_retry_kwargs())
-    validate.add_catch(**_catch_kwargs(failure_handler))
+    # NOTE: validate's add_catch is deliberately NOT here with the others. It must route
+    # through the no-resources marker, which is defined with the validation gate further
+    # down. Wiring it to failure_handler directly -- as every other step correctly does --
+    # would make a thrown validate error persist delete_retained, claiming an unproven
+    # orphan for the one task that runs before anything can be created. See the gate below.
 
     guardrails = _create_step_task(
         stack,
         "CreateGuardrails",
         step_lambdas["guardrails"],
-        timeout_seconds=120,
+        timeout_seconds=150,
         result_path="$",
     )
     guardrails.add_retry(**_retry_kwargs())
@@ -67,7 +81,10 @@ def build_state_machine(
         stack,
         "DeployMCPServer",
         step_lambdas["mcp_server"],
-        timeout_seconds=600,
+        # The Lambda itself is capped at 600s. Keep a positive orchestration
+        # margin so Step Functions cannot time out and retry while the first
+        # resource-creating invocation is still alive.
+        timeout_seconds=660,
         result_path="$",
     )
     mcp_server.add_retry(**_retry_kwargs())
@@ -77,7 +94,7 @@ def build_state_machine(
         stack,
         "GenerateCode",
         step_lambdas["codegen"],
-        timeout_seconds=90,
+        timeout_seconds=120,
         result_path="$",
     )
     codegen.add_retry(**_retry_kwargs())
@@ -102,10 +119,11 @@ def build_state_machine(
         step_lambdas["gateway"],
         # Bug 134: the gateway step now also resolves + waits for the target
         # MCP tool manifest (up to ~90s) so the policy step gets authoritative
-        # tool action names. Raise the cap in lockstep with the Lambda timeout
-        # (Bug 56) so a slow manifest sync surfaces as a real failure, not a
-        # retryable States.Timeout that could mask a broken policy.
-        timeout_seconds=720,
+        # tool action names. Kept strictly above the Lambda's 720s (Bug 56), not
+        # equal: the retry carries the same claim token, so an invocation Step
+        # Functions abandoned mid-create would share the gateway-name lease with its
+        # own retry and both could create (test_a_step_task_outlives_its_lambda).
+        timeout_seconds=780,
         result_path="$",
     )
     gateway.add_retry(**_retry_kwargs())
@@ -115,7 +133,8 @@ def build_state_machine(
         stack,
         "CreateKnowledgeBase",
         step_lambdas["knowledge_base"],
-        timeout_seconds=600,
+        # Keep failure cleanup outside the resource-creating invocation.
+        timeout_seconds=660,
         result_path="$",
     )
     knowledge_base.add_retry(**_retry_kwargs())
@@ -125,21 +144,38 @@ def build_state_machine(
         stack,
         "CreateMemory",
         step_lambdas["memory"],
-        timeout_seconds=120,
+        # The same Lambda now performs one bounded create/journal operation and
+        # returns without waiting for ACTIVE. Keep the task outside the function's
+        # 420s cap so an IAM-propagation retry cannot leave an invocation running
+        # after Step Functions has started another mutating attempt.
+        timeout_seconds=450,
         result_path="$",
     )
     memory_step.add_retry(**_retry_kwargs())
     memory_step.add_catch(**_catch_kwargs(failure_handler))
 
+    memory_readiness_check = _create_step_task(
+        stack,
+        "CheckMemoryReady",
+        step_lambdas["memory"],
+        # Read-only ownership + status observation. The function itself retains
+        # the larger create budget, so preserve the same outer ordering while
+        # keeping readiness retries safe and side-effect free.
+        timeout_seconds=450,
+        result_path="$",
+    )
+    memory_readiness_check.add_retry(**_retry_kwargs())
+    memory_readiness_check.add_catch(**_catch_kwargs(failure_handler))
+
     policy_step = _create_step_task(
         stack,
         "CreatePolicy",
         step_lambdas["policy"],
-        # Bug 177 + Cedar IGNORE_ALL_FINDINGS convergence: matched to the 600s
+        # Bug 177 + Cedar IGNORE_ALL_FINDINGS convergence: outside the 600s
         # Lambda budget — the engine CREATING->ACTIVE + up to 12 policy-create
         # retries (as the engine<->gateway authorization converges) can take
         # several minutes on a freshly-created gateway.
-        timeout_seconds=600,
+        timeout_seconds=660,
         result_path="$",
     )
     policy_step.add_retry(**_retry_kwargs())
@@ -149,12 +185,12 @@ def build_state_machine(
         stack,
         "ConfigureRuntime",
         step_lambdas["runtime_configure"],
-        # Match the underlying Lambda timeout (240s — bumped for Bug 54).
+        # Outlive the underlying Lambda timeout (240s — bumped for Bug 54).
         # The IAM-propagation retry loop inside `create_agent_runtime` can
         # legitimately spend up to 75s waiting for AgentCore's IAM cache.
-        # See tasks/lessons.md Bug 56 — SFN task TimeoutSeconds is the
-        # outer cap and must match the Lambda's.
-        timeout_seconds=240,
+        # The outer margin prevents cleanup from overlapping an invocation
+        # still creating or journaling the runtime.
+        timeout_seconds=300,
         result_path="$",
     )
     runtime_configure.add_retry(**_retry_kwargs())
@@ -164,20 +200,20 @@ def build_state_machine(
         stack,
         "LaunchRuntime",
         step_lambdas["runtime_launch"],
-        timeout_seconds=600,
+        timeout_seconds=660,
         result_path="$",
     )
     runtime_launch.add_retry(**_retry_kwargs())
     runtime_launch.add_catch(**_catch_kwargs(failure_handler))
 
     # Phase B — AgentCore Harness deploy task (parallel to the codegen →
-    # iam → configure → launch Runtime path). Matches the SFN task timeout
-    # to the Lambda budget (300s). Shares the same retry/catch wrappers.
+    # iam → configure → launch Runtime path). The task outlives the 300s
+    # Lambda budget so cleanup cannot overlap a live creator.
     harness_step = _create_step_task(
         stack,
         "DeployHarness",
         step_lambdas["harness"],
-        timeout_seconds=300,
+        timeout_seconds=360,
         result_path="$",
     )
     harness_step.add_retry(**_retry_kwargs())
@@ -187,7 +223,7 @@ def build_state_machine(
         stack,
         "CreateEvaluation",
         step_lambdas["evaluation"],
-        timeout_seconds=120,
+        timeout_seconds=150,
         result_path="$",
     )
     evaluation_step.add_retry(**_retry_kwargs())
@@ -197,19 +233,24 @@ def build_state_machine(
         stack,
         "ConfigureJWTAuth",
         step_lambdas["auth"],
-        timeout_seconds=60,
+        timeout_seconds=90,
         result_path="$",
     )
     auth.add_retry(**_retry_kwargs())
     auth.add_catch(**_catch_kwargs(failure_handler))
 
+    # 150s to match StatusUpdateFailure above — same Lambda, same 120s function timeout,
+    # so the task timeout has to clear it on both paths. The success path does not run the
+    # cleanup, but a task timeout shorter than the function's would still abandon an
+    # in-flight invocation and retry it.
     status_update = _create_step_task(
         stack,
         "UpdateStatusSuccess",
         step_lambdas["status_update"],
-        timeout_seconds=15,
+        timeout_seconds=150,
         result_path="$",
     )
+    status_update.add_retry(**_finalizer_retry_kwargs())
     status_update.add_retry(**_retry_kwargs())
     status_update.add_catch(**_catch_kwargs(failure_handler))
 
@@ -240,9 +281,116 @@ def build_state_machine(
     skip_policy = sfn.Pass(stack, "SkipPolicy")
     skip_evaluation = sfn.Pass(stack, "SkipEvaluation")
     skip_auth = sfn.Pass(stack, "SkipAuth")
+    wait_for_memory = sfn.Wait(
+        stack,
+        "WaitForMemoryReady",
+        time=sfn.WaitTime.duration(Duration.seconds(10)),
+    )
+    memory_is_ready = sfn.Condition.and_(
+        sfn.Condition.is_present("$.memory_result.ready"),
+        sfn.Condition.is_boolean("$.memory_result.ready"),
+        sfn.Condition.boolean_equals("$.memory_result.ready", True),
+    )
+    memory_ready_choice = sfn.Choice(stack, "IsMemoryReady?")
 
-    # validate → guardrails choice
-    validate.next(sfn.Choice(stack, "HasGuardrails?").when(has_guardrails, guardrails).otherwise(skip_guardrails))
+    # validate → THE VALIDATION GATE → guardrails choice
+    #
+    # F-55. Until this Choice existed, ValidateWorkflow's verdict was computed and then
+    # discarded: `grep -rn "is_valid" infra/stacks/` returned ZERO, and `validate.next(...)`
+    # went straight to the guardrails choice. Proven live on acfe2e-p0920 by an execution
+    # that SUCCEEDED while emitting
+    #
+    #   is_valid = False, errors = ["Workflow 'd47f6a7b85' not found"]  # pragma: allowlist secret
+    #
+    # and then ran DeployMCPServer, GenerateCode, CreateIAMRole, ConfigureRuntime,
+    # LaunchRuntime and UpdateStatusSuccess anyway. A green deployment was not evidence the
+    # input was valid; it was not even evidence the input existed.
+    #
+    # The `add_catch` on validate (see above) is not this gate and never could be: it catches
+    # a thrown exception, and the handler converts every failure -- including its own
+    # catch-all -- into a SUCCESSFUL Lambda return carrying is_valid=False. The Catch is
+    # unreachable by design, which is exactly what made fail-open look safe on a skim.
+    #
+    # ORDERING NOTE, and it is part of the finding rather than an implementation detail:
+    # this gate must not be added before the validator actually receives the deployment
+    # payload. Closing it alone, while the handler still looked up a workflow id in a table
+    # that never receives the canvas, would have turned a 100%-fail-open gate into a
+    # 100%-outage gate. The handler change lands with this one.
+    #
+    # Fails closed on MISSING as well as on false. `boolean_equals` alone would raise
+    # States.Runtime if an older Lambda version returned no `is_valid` at all, and a
+    # States.Runtime here routes to the catch rather than to this branch -- so the three
+    # conditions are ANDed to make absence and a wrong TYPE both take the invalid path
+    # deliberately instead of by accident.
+    workflow_is_valid = sfn.Condition.and_(
+        sfn.Condition.is_present("$.is_valid"),
+        sfn.Condition.is_boolean("$.is_valid"),
+        sfn.Condition.boolean_equals("$.is_valid", True),
+    )
+
+    # The invalid branch MUST inject an error before StatusUpdateFailure. status_update_step
+    # reads `event["error"]` and then falls back to `error_info.Cause`; it never reads
+    # `is_valid` or `errors`. Routing straight to the failure handler would therefore mark
+    # the deployment failed with an empty reason -- failed for the wrong reason, which is
+    # worse than a clear refusal because it sends the operator looking at the wrong step.
+    #
+    # This Pass writes only the FALLBACK. The validate handler sets a specific `error`
+    # summarizing the actual validation errors, and `error` wins the precedence above, so a
+    # normal refusal carries its real reasons and this static Cause only surfaces when the
+    # handler produced no `error` at all (the missing-or-wrong-type case above).
+    invalid_input = sfn.Pass(
+        stack,
+        "DeploymentInputInvalid",
+        parameters={
+            "Error": "DeploymentInputInvalid",
+            "Cause": (
+                "ValidateWorkflow rejected the deployment payload, or returned no usable "
+                "is_valid verdict. No resource-creating step ran. See the deployment "
+                "record's error_details for the specific validation errors."
+            ),
+        },
+        result_path="$.error_info",
+    )
+
+    # ...and it must ALSO say that nothing was created, or the fix trades fail-open for a
+    # false orphan report. StatusUpdateFailure runs `_auto_cleanup_on_failure`, which on an
+    # empty manifest records delete_status=delete_retained with "could not prove that the
+    # empty manifest represented a deployment that created no resources"
+    # (status_update_step.py:558-573). That message is correct when a deploy died at an
+    # unknown point, and wrong here: ValidateWorkflow is the FIRST task in the machine, so on
+    # this branch the empty manifest is not an unproven absence, it is a certainty. Sending
+    # the operator to hunt for orphans that provably cannot exist is the same class of defect
+    # as F-56's delete_failed on a resource that no longer existed.
+    #
+    # Written by the state machine rather than only by the handler because this branch is
+    # also the one taken when `is_valid` is absent entirely -- in which case the handler that
+    # would have set it is precisely the thing that did not run as expected.
+    no_resources_created = sfn.Pass(
+        stack,
+        "NoResourcesCreatedOnInvalidInput",
+        result_path="$.no_resources_created",
+        parameters={"proven": True, "reason": "rejected at ValidateWorkflow, before any resource-creating task"},
+    )
+    invalid_input.next(no_resources_created)
+    no_resources_created.next(failure_handler)
+
+    # The THROWN path needs the same marker, for the same reason. A Lambda service error,
+    # timeout or permission failure in ValidateWorkflow is not a verdict, but it is equally
+    # proof that no resource was created -- validate is the first task in the machine. Sending
+    # it straight to failure_handler (which is what every other step correctly does, because
+    # for them the manifest genuinely is unproven) would persist delete_retained and claim an
+    # orphan that cannot exist.
+    #
+    # `_catch_kwargs` supplies result_path="$.error_info", so the thrown error's Error/Cause is
+    # preserved and lands in the same field status_update already reads. The marker Pass is
+    # already chained to failure_handler above, so no second .next() is needed here -- and CDK
+    # would reject one.
+    validate.add_catch(**_catch_kwargs(no_resources_created))
+
+    guardrails_choice = sfn.Choice(stack, "HasGuardrails?").when(has_guardrails, guardrails).otherwise(skip_guardrails)
+    validate.next(
+        sfn.Choice(stack, "IsDeploymentInputValid?").when(workflow_is_valid, guardrails_choice).otherwise(invalid_input)
+    )
     guardrails.next(skip_guardrails)
 
     # → mcp_server choice
@@ -261,7 +409,16 @@ def build_state_machine(
 
     # → memory choice
     skip_gateway.next(sfn.Choice(stack, "HasMemory?").when(has_memory, memory_step).otherwise(skip_memory))
-    memory_step.next(skip_memory)
+    # CreateMemory journals the id and returns promptly. Every enabled memory
+    # then gets at least one 10-second settle interval; transitional resources
+    # loop through read-only checks until two ACTIVE observations prove both
+    # control-plane readiness and a data-plane settle margin. DELETING, FAILED,
+    # unknown states, or an exhausted check budget raise into the normal failure
+    # cleanup path rather than being adopted as ready.
+    memory_step.next(memory_ready_choice)
+    memory_ready_choice.when(memory_is_ready, skip_memory).otherwise(wait_for_memory)
+    wait_for_memory.next(memory_readiness_check)
+    memory_readiness_check.next(memory_ready_choice)
 
     # → policy choice (only meaningful when gateway exists, but handler handles gracefully)
     skip_memory.next(sfn.Choice(stack, "HasPolicy?").when(has_policy, policy_step).otherwise(skip_policy))
@@ -325,7 +482,9 @@ def build_state_machine(
         state_machine_name=f"{cfg.project}-{cfg.env}-deployment",
         definition_body=sfn.DefinitionBody.from_chainable(validate),
         role=sm_role,
-        timeout=Duration.minutes(30),
+        # F-82: shared with the deploy API, which derives how long a "pending" AgentVersion row
+        # may hold a friendly name from this exact ceiling. See config.py.
+        timeout=Duration.minutes(DEPLOYMENT_STATE_MACHINE_TIMEOUT_MINUTES),
         tracing_enabled=True,
         logs=sfn.LogOptions(
             destination=logs.LogGroup(
@@ -383,6 +542,23 @@ def _retry_kwargs() -> dict:
             "Lambda.TooManyRequestsException",
         ],
         "interval": Duration.seconds(2),
+        "max_attempts": 3,
+        "backoff_rate": 2.0,
+    }
+
+
+def _finalizer_retry_kwargs() -> dict:
+    """Serialize finalizer attempts instead of overlapping their side effects.
+
+    The status Lambda's exclusive lease lasts 300 seconds and outlives its
+    120-second function timeout. A replacement invocation that sees the live
+    lease raises ``FinalizerLeaseBusy``. With waits of 60s, 120s, and 240s, even
+    an immediate duplicate reaches a retry after the bounded lease has expired;
+    a retry following a Lambda timeout reaches that point sooner.
+    """
+    return {
+        "errors": ["FinalizerLeaseBusy"],
+        "interval": Duration.seconds(60),
         "max_attempts": 3,
         "backoff_rate": 2.0,
     }

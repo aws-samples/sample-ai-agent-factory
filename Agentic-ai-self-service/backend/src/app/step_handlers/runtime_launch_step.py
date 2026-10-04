@@ -43,7 +43,10 @@ def handler(event: dict, context) -> dict:
         )
 
         runtime_id = event.get("runtime_id", "")
-        region = _get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1"))
+        region = event.get("target_region") or _get_env(
+            "APP_AWS_REGION",
+            _get_env("AWS_REGION", "us-east-1"),
+        )
 
         if not runtime_id:
             raise RuntimeError("No runtime_id provided from configure step")
@@ -55,7 +58,13 @@ def handler(event: dict, context) -> dict:
         # the configure manifest write). Best-effort: never fails the deploy.
         store.record_resource(
             deployment_id,
-            {"type": "agent_runtime", "id": runtime_id, "region": region},
+            {
+                "type": "agent_runtime",
+                "id": runtime_id,
+                "name": event.get("friendly_runtime_name") or runtime_id,
+                "region": region,
+                "created_by_deployment": ((event.get("configure_result") or {}).get("created_by_deployment") is True),
+            },
         )
 
         result = wait_for_runtime_ready(agentcore_ctrl, runtime_id, timeout=540)
@@ -87,6 +96,11 @@ def handler(event: dict, context) -> dict:
                 runtime_id=runtime_id,
                 runtime_name=friendly_name,
                 region=region,
+                cloudwatch_client=step_clients.client(
+                    event,
+                    "cloudwatch",
+                    region_name=region,
+                ),
             )
         except Exception:
             logger.exception(

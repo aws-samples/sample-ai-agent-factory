@@ -1,0 +1,31 @@
+# The infra test/synth environment as a uv project: the SAME exact pins as requirements.txt (kept for CI), locked with
+# hashes in uv.lock so the certifier can prove infra/.venv matches these bound files offline (`uv sync --locked
+# --offline --dry-run --extra dev` must report "Would make no changes"). Not a distributable package.
+[project]
+name = "agentcore-workflow-infra"
+version = "0.0.0"
+description = "CDK stacks for the platform (test/synth environment lock)"
+requires-python = ">=3.13"
+dependencies = [
+    "aws-cdk-lib==2.261.0",
+    "constructs==10.6.0",
+    "cdk-nag==2.37.55",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    # the Cognito provisioner handler tests import botocore; the system site used to supply it silently
+    "boto3>=1.43.66",
+    # route-parity, ownership and tool-sandbox tests import the backend application (app.*): its real dependency set
+    # comes from the backend project itself, never from a system site
+    "agentcore-workflow-backend",
+    # test_the_platform_template_can_actually_deploy imports cfnlint.api (importorskip would otherwise hide it)
+    "cfn-lint==1.57.0",
+]
+
+[tool.uv.sources]
+agentcore-workflow-backend = { path = "../backend", editable = true }
+
+[tool.uv]
+package = false

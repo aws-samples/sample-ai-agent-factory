@@ -16,13 +16,37 @@ tree — no AWS in the hot path.
 from __future__ import annotations
 
 import logging
-import time
+import re
 
 import boto3
 
-from app.services.cost_tracking import log_group_for_runtime
+from app.services.cost_tracking import (
+    RuntimeLogQueryError,
+    is_logs_resource_not_found,
+    log_group_for_runtime,
+    query_runtime_log_groups,
+)
 
 logger = logging.getLogger(__name__)
+
+_W3C_TRACE_ID = re.compile(r"^[0-9a-fA-F]{32}$")
+_XRAY_TRACE_ID = re.compile(r"^1-[0-9a-fA-F]{8}-[0-9a-fA-F]{24}$")
+
+
+def validate_trace_id_filter(trace_id: str | None) -> str | None:
+    """Return a canonical trace id safe to embed in a Logs Insights query.
+
+    AgentCore traces use W3C ids, while AWS/X-Ray integrations may expose the
+    ``1-<epoch>-<random>`` form.  Accept only those two wire formats: this is
+    both a useful caller error boundary and the injection boundary for the
+    query string assembled below.
+    """
+    if trace_id is None:
+        return None
+    value = trace_id.strip()
+    if not (_W3C_TRACE_ID.fullmatch(value) or _XRAY_TRACE_ID.fullmatch(value)):
+        raise ValueError("traceId must be a W3C or X-Ray trace identifier")
+    return value.lower()
 
 
 def _ns_to_ms(ns) -> float:
@@ -103,16 +127,21 @@ def fetch_trace_waterfall(
     to_ts: int,
     region: str,
     *,
+    logs_client=None,
     trace_id: str | None = None,
     poll_seconds: float = 10.0,
 ) -> dict:
     """Query the runtime's OTEL spans in [from_ts, to_ts] and build a waterfall.
 
-    Reuses the Logs Insights machinery from cost_tracking. Returns
-    build_waterfall(...) plus {log_group_name, query_status}. Empty (not error)
-    when the log group doesn't exist yet.
+    Reuses the qualifier-aware Logs Insights machinery from cost_tracking.
+    Returns build_waterfall(...) plus {log_group_name, log_group_names,
+    query_status}. Empty (not error) when no runtime group exists yet.
     """
-    logs_client = boto3.client("logs", region_name=region)
+    trace_id = validate_trace_id_filter(trace_id)
+    # The caller may have resolved a same-account/non-home or cross-account
+    # runtime.  Reusing its Logs client is what preserves those credentials;
+    # constructing an ambient client here would query the platform account.
+    logs_client = logs_client or boto3.client("logs", region_name=region)
     log_group = log_group_for_runtime(runtime_id)
     empty = {
         "trace_id": trace_id,
@@ -120,6 +149,7 @@ def fetch_trace_waterfall(
         "total_ms": 0,
         "spans": [],
         "log_group_name": log_group,
+        "log_group_names": [],
         "query_status": "Empty",
     }
 
@@ -136,39 +166,27 @@ def fetch_trace_waterfall(
     )
 
     try:
-        start_resp = logs_client.start_query(
-            logGroupName=log_group,
-            startTime=int(from_ts),
-            endTime=int(to_ts),
-            queryString=query_string,
+        rows, status, log_groups = query_runtime_log_groups(
+            logs_client,
+            runtime_id,
+            from_ts,
+            to_ts,
+            query_string,
+            poll_seconds=poll_seconds,
         )
-        query_id = start_resp.get("queryId")
-        if not query_id:
+    except Exception as exc:
+        if is_logs_resource_not_found(exc, logs_client):
             return empty
-    except logs_client.exceptions.ResourceNotFoundException:
-        return empty
-    except Exception:
-        logger.exception("fetch_trace_waterfall: start_query failed")
-        return empty
+        raise
 
-    deadline = time.time() + poll_seconds
-    rows: list[dict] = []
-    status = "Running"
-    while time.time() < deadline:
-        get_resp = logs_client.get_query_results(queryId=query_id)
-        status = get_resp.get("status", "Running")
-        if status in ("Complete", "Failed", "Cancelled"):
-            for row in get_resp.get("results", []):
-                rows.append({f["field"]: f["value"] for f in row})
-            break
-        time.sleep(0.5)
-    if status == "Running":
-        try:
-            logs_client.stop_query(queryId=query_id)
-        except Exception:  # noqa: BLE001 — best-effort cancel; partial results are still returned
-            logger.debug("stop_query %s failed", query_id, exc_info=True)
+    if status not in {"Complete", "Empty"}:
+        raise RuntimeLogQueryError(f"runtime trace query ended with status {status}")
+
+    if not log_groups:
+        return empty
 
     result = build_waterfall(rows)
     result["log_group_name"] = log_group
+    result["log_group_names"] = log_groups
     result["query_status"] = status
     return result

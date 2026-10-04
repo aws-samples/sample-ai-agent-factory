@@ -171,7 +171,7 @@ export const projects: Project[] = [
       'CloudFormation and Python export',
       'Real SaaS connectors: Jira, Asana, Slack, GitHub, Salesforce, or any OpenAPI spec',
       '13 model providers',
-      'Scope-based RBAC (advisory by default) and Cedar policy enforcement per Policy node',
+      'Scope-based RBAC (enforced by default) and Cedar policy enforcement per Policy node',
       'Agent registry with approval workflow, versioning and rollback, cost budgets, audit analytics',
       'Manifest-driven teardown with no orphans',
     ],

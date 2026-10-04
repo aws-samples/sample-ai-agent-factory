@@ -17,6 +17,8 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, "src")
 
+from tests.registry_fakes import registry_snapshot_body  # noqa: E402
+
 moto = pytest.importorskip("moto")
 from app.routers import registry as registry_router_mod  # noqa: E402
 from app.services import registry_store as rs_mod  # noqa: E402
@@ -88,6 +90,11 @@ def _client(caller: str) -> TestClient:
     return TestClient(app)
 
 
+# The minimal accepted publish body lives in tests/registry_fakes.py so this file and
+# test_registry_providers.py cannot drift into two different ideas of it.
+_snap = registry_snapshot_body
+
+
 # ---------------------------------------------------------------------------
 # slugify
 # ---------------------------------------------------------------------------
@@ -155,7 +162,7 @@ def test_publish_and_get(store: RegistryStore):
             "description": "researches stocks",
             "tags": ["finance"],
             "visibility": "org",
-            "canvas_snapshot": {"nodes": [{"type": "runtime"}], "edges": []},
+            "canvas_snapshot": _snap("Stock Bot", nodes=[{"type": "runtime"}]),
         },
     )
     assert resp.status_code == 200, resp.text
@@ -170,14 +177,21 @@ def test_publish_and_get(store: RegistryStore):
 
 def test_private_entry_invisible_to_others(store: RegistryStore):
     alice = _client("alice")
-    alice.post(
+    published = alice.post(
         "/api/registry",
         json={
             "display_name": "Secret Bot",
             "visibility": "private",
-            "canvas_snapshot": {"nodes": [], "edges": []},
+            "canvas_snapshot": _snap("Secret Bot"),
         },
     )
+    # This assertion is the whole reason the test means anything. With the stale
+    # pre-V2 snapshot body the publish was a 422, so there was no private entry for
+    # Bob to be refused, and the two 404s below passed against an empty table. The
+    # test stayed green while measuring nothing. Prove the thing exists before
+    # proving it is hidden.
+    assert published.status_code == 200, published.text
+    assert store.get(DEFAULT_ORG_ID, "secret-bot") is not None
     bob = _client("bob")
     # Bob can't GET Alice's private entry.
     assert bob.get("/api/registry/secret-bot").status_code == 404
@@ -193,7 +207,7 @@ def test_org_entry_visible_to_same_org(store: RegistryStore):
         json={
             "display_name": "Shared Bot",
             "visibility": "org",
-            "canvas_snapshot": {"nodes": [], "edges": []},
+            "canvas_snapshot": _snap("Shared Bot"),
         },
     )
     # Publishing now creates a 'pending' entry (approval workflow). An admin
@@ -215,7 +229,7 @@ def test_clone_increments_usage_and_returns_snapshot(store: RegistryStore):
         json={
             "display_name": "Clonable",
             "visibility": "org",
-            "canvas_snapshot": {"nodes": [{"type": "runtime"}], "edges": []},
+            "canvas_snapshot": _snap("Clonable", nodes=[{"type": "runtime"}]),
         },
     )
     # Publishing now creates a 'pending' entry; approve it so a non-owner can
@@ -236,9 +250,12 @@ def test_non_owner_cannot_update_or_delete(store: RegistryStore):
         json={
             "display_name": "Alice Only",
             "visibility": "org",
-            "canvas_snapshot": {"nodes": [], "edges": []},
+            "canvas_snapshot": _snap("Alice Only"),
         },
     )
+    # Same vacuity trap as the private-visibility test: a 422 here left nothing for
+    # Bob to be refused, so both 404s below were free.
+    assert store.get(DEFAULT_ORG_ID, "alice-only") is not None
     bob = _client("bob")
     # Update → 404 (assert_owner hides existence).
     assert bob.put("/api/registry/alice-only", json={"description": "hax"}).status_code == 404
@@ -250,14 +267,15 @@ def test_non_owner_cannot_update_or_delete(store: RegistryStore):
 
 def test_publish_slug_collision_disambiguates(store: RegistryStore):
     # Alice publishes "dup".
-    _client("alice").post(
+    alice_resp = _client("alice").post(
         "/api/registry",
-        json={"display_name": "Dup", "visibility": "org", "canvas_snapshot": {}},
+        json={"display_name": "Dup", "visibility": "org", "canvas_snapshot": _snap("Dup")},
     )
+    assert alice_resp.status_code == 200, alice_resp.text
     # Bob publishes the same display name → must NOT overwrite Alice's entry.
     bob_resp = _client("bob").post(
         "/api/registry",
-        json={"display_name": "Dup", "visibility": "org", "canvas_snapshot": {}},
+        json={"display_name": "Dup", "visibility": "org", "canvas_snapshot": _snap("Dup")},
     )
     assert bob_resp.status_code == 200
     assert bob_resp.json()["agent_slug"] != "dup"  # disambiguated
@@ -269,14 +287,21 @@ def test_publish_slug_collision_disambiguates(store: RegistryStore):
 
 def test_owner_can_republish_same_slug(store: RegistryStore):
     alice = _client("alice")
-    alice.post(
+    resp1 = alice.post(
         "/api/registry",
-        json={"display_name": "Mine", "visibility": "org", "canvas_snapshot": {"v": 1}},
+        json={"display_name": "Mine", "visibility": "org", "canvas_snapshot": _snap("first revision")},
     )
+    assert resp1.status_code == 200, resp1.text
     # Re-publish same name as same owner → overwrites in place, same slug.
     resp2 = alice.post(
         "/api/registry",
-        json={"display_name": "Mine", "visibility": "public", "canvas_snapshot": {"v": 2}},
+        json={"display_name": "Mine", "visibility": "public", "canvas_snapshot": _snap("second revision")},
     )
     assert resp2.json()["agent_slug"] == "mine"
     assert resp2.json()["visibility"] == "public"
+    # The two snapshots were distinguishable sentinels (`{"v": 1}` / `{"v": 2}`) before
+    # the V2 model, but nothing ever asserted on them, so "overwrites in place" was only
+    # ever checked as "same slug". A republish that kept the FIRST snapshot would have
+    # passed. Carry the sentinel in `name` and check the stored row actually moved.
+    stored = store.get(DEFAULT_ORG_ID, "mine")
+    assert stored.canvas_snapshot["name"] == "second revision", stored.canvas_snapshot

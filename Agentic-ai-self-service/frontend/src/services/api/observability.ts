@@ -18,12 +18,40 @@ export interface DashboardUrlSummary {
 }
 
 // Phase 2 Gap 2B — cost analytics.
+export interface CostModelUsage {
+  input_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_write_input_tokens?: number;
+  total_input_tokens?: number;
+  output_tokens?: number;
+  cost?: number;
+  count?: number;
+  cache_read_reports?: number;
+  cache_write_reports?: number;
+  cache_read_complete?: boolean;
+  cache_write_complete?: boolean;
+}
+
+export interface CacheReportingSummary {
+  cache_read_complete: boolean;
+  cache_write_complete: boolean;
+  invocations: number;
+  cache_read_reports: number;
+  cache_write_reports: number;
+}
+
 export interface CostSummary {
   runtime_name?: string;
   total_cost: number;
+  /** Ordinary, non-cached input tokens. Kept for backward compatibility. */
   total_in: number;
+  total_cache_read?: number;
+  total_cache_write?: number;
+  /** Ordinary input + cache reads + cache writes. */
+  total_input_tokens?: number;
   total_out: number;
-  by_model: Record<string, { input_tokens?: number; output_tokens?: number; cost?: number }>;
+  by_model: Record<string, CostModelUsage>;
+  cache_reporting?: CacheReportingSummary;
   from_ts?: number;
   to_ts?: number;
   currency?: string;

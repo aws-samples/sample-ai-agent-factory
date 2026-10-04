@@ -20,10 +20,8 @@ Why a custom resource and not AWS::Cognito::UserPoolUser?
 
 from __future__ import annotations
 
-import json
 import secrets
 import string
-import urllib.request
 
 import boto3
 from botocore.exceptions import ClientError
@@ -76,6 +74,14 @@ def _create_user(user_pool_id: str, email: str, temporary_password: str) -> None
         )
 
 
+def _add_to_groups(user_pool_id: str, email: str, groups: list[str]) -> None:
+    """Grant the user its groups. Without one, an enforcing API (RBAC_ENFORCE)
+    gives the user zero scopes and 403s every call. AdminAddUserToGroup is
+    idempotent, so an existing membership is not an error."""
+    for group in groups:
+        cognito.admin_add_user_to_group(UserPoolId=user_pool_id, Username=email, GroupName=group)
+
+
 def _delete_user(user_pool_id: str, email: str) -> None:
     try:
         cognito.admin_delete_user(UserPoolId=user_pool_id, Username=email)
@@ -85,52 +91,35 @@ def _delete_user(user_pool_id: str, email: str) -> None:
             raise
 
 
-def _send_cfn_response(event: dict, context, status: str, physical_id: str, reason: str = "") -> None:
-    body = json.dumps(
-        {
-            "Status": status,
-            "Reason": reason or f"See CloudWatch logs: {context.log_group_name}/{context.log_stream_name}",
-            "PhysicalResourceId": physical_id,
-            "StackId": event["StackId"],
-            "RequestId": event["RequestId"],
-            "LogicalResourceId": event["LogicalResourceId"],
-            "NoEcho": True,
-            "Data": {},
-        }
-    ).encode("utf-8")
+def handler(event: dict, context) -> dict:
+    """The onEvent handler of a CDK Provider (cognito_auth.py), which owns the reply.
 
-    # ResponseURL is a CloudFormation-issued pre-signed S3 URL; enforce https
-    # so a forged event can't make urlopen dereference file:// or similar.
-    if not event["ResponseURL"].startswith("https://"):
-        raise ValueError("ResponseURL must be https")
-    req = urllib.request.Request(
-        event["ResponseURL"],
-        data=body,
-        method="PUT",
-        headers={"Content-Type": "", "Content-Length": str(len(body))},
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310  # https enforced above
-        resp.read()
-
-
-def handler(event: dict, context) -> None:
+    The framework invokes this function with the real ResponseURL and then submits
+    its own response built from the return value. A handler that also PUT to the
+    URL sent two replies with different physical ids; which one CloudFormation took
+    decided whether an Update was a replacement, whose Delete removes the user.
+    Return the id and raise on failure; never reply directly.
+    """
     props = event.get("ResourceProperties", {})
     user_pool_id = props["UserPoolId"]
     email = props["Email"]
-    physical_id = f"{user_pool_id}:{email}"
+    groups = [g for g in props.get("Groups", []) if g]
+    old = event.get("OldResourceProperties", {})
+    request = event["RequestType"]
 
-    try:
-        if event["RequestType"] in ("Create", "Update"):
-            _create_user(user_pool_id, email, _generate_password())
-        elif event["RequestType"] == "Delete":
-            _delete_user(user_pool_id, email)
-        else:
-            _send_cfn_response(
-                event, context, "FAILED", physical_id, reason=f"Unknown RequestType: {event['RequestType']}"
-            )
-            return
-
-        _send_cfn_response(event, context, "SUCCESS", physical_id)
-    except Exception as exc:  # noqa: BLE001
-        _send_cfn_response(event, context, "FAILED", physical_id, reason=str(exc)[:1000])
-        raise
+    if request == "Update" and (old.get("UserPoolId"), old.get("Email")) == (user_pool_id, email):
+        # Same user, other properties changed (its groups). Re-running the create
+        # would reset a live user's password to a new temporary one. The id is kept:
+        # a changed id is a replacement, and its cleanup Delete removes this user.
+        _add_to_groups(user_pool_id, email, groups)
+        return {"PhysicalResourceId": event["PhysicalResourceId"]}
+    if request in ("Create", "Update"):
+        # A new pool or email is a new user: a new id makes CloudFormation delete
+        # the old one once this succeeds.
+        _create_user(user_pool_id, email, _generate_password())
+        _add_to_groups(user_pool_id, email, groups)
+        return {"PhysicalResourceId": f"{user_pool_id}:{email}"}
+    if request == "Delete":
+        _delete_user(user_pool_id, email)
+        return {"PhysicalResourceId": event["PhysicalResourceId"]}
+    raise ValueError(f"Unknown RequestType: {request}")

@@ -1,12 +1,25 @@
 /**
  * TemplateGallery - Modal displaying prebuilt workflow templates.
+ *
+ * This modal hand-rolls its own scrim and panel rather than using `ModalShell`, whose
+ * docstring says it "Enforces consistent modal UX across the app". Measured against
+ * the deployed bundle, it therefore had none of what ModalShell supplies: Escape did
+ * not dismiss it, nothing carried `role="dialog"` or `aria-modal`, and the close
+ * button had no text, no `aria-label` and no `title`, so its accessible name was the
+ * empty string. A keyboard-only user who opened the gallery had no way out, and a
+ * screen-reader user was offered an unnamed button.
+ *
+ * Dismissal, naming, focus containment, and the replace-workflow confirmation all use
+ * the shared accessible dialog primitives below.
  */
 
-import { useCallback } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { m } from 'motion/react';
 import { popIn, tween } from '../../lib/motion';
 import type { WorkflowTemplate, TemplateDifficulty } from '../../types/templates';
 import { WORKFLOW_TEMPLATES } from '../../data/templates';
+import { ConfirmDialog } from '../common/ConfirmDialog';
+import { useDialogFocusTrap } from '../../hooks/useDialogFocusTrap';
 
 // ============================================================================
 // Props
@@ -55,18 +68,39 @@ const COMPONENT_LABELS: Record<string, string> = {
 // ============================================================================
 
 export function TemplateGallery({ isOpen, onClose, onSelectTemplate, hasExistingNodes }: TemplateGalleryProps) {
-  const handleSelect = useCallback(
+  const [pendingTemplate, setPendingTemplate] = useState<WorkflowTemplate | null>(null);
+  const [lastIsOpen, setLastIsOpen] = useState(isOpen);
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  if (isOpen !== lastIsOpen) {
+    setLastIsOpen(isOpen);
+    if (!isOpen && pendingTemplate) setPendingTemplate(null);
+  }
+
+  const closeGallery = useCallback(() => {
+    setPendingTemplate(null);
+    onClose();
+  }, [onClose]);
+  useDialogFocusTrap(isOpen, dialogRef, undefined, closeGallery);
+
+  const selectAndClose = useCallback(
     (template: WorkflowTemplate) => {
-      if (hasExistingNodes) {
-        const confirmed = window.confirm(
-          'This will replace your current workflow. Are you sure?'
-        );
-        if (!confirmed) return;
-      }
+      setPendingTemplate(null);
       onSelectTemplate(template);
       onClose();
     },
-    [hasExistingNodes, onSelectTemplate, onClose]
+    [onSelectTemplate, onClose],
+  );
+
+  const handleSelect = useCallback(
+    (template: WorkflowTemplate) => {
+      if (hasExistingNodes) {
+        setPendingTemplate(template);
+        return;
+      }
+      selectAndClose(template);
+    },
+    [hasExistingNodes, selectAndClose],
   );
 
   if (!isOpen) return null;
@@ -77,7 +111,7 @@ export function TemplateGallery({ isOpen, onClose, onSelectTemplate, hasExisting
       <m.div
         className="fixed inset-0 z-40"
         style={{ background: 'rgba(11, 18, 32, 0.44)', backdropFilter: 'blur(3px)' }}
-        onClick={onClose}
+        onClick={closeGallery}
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         transition={tween.base}
@@ -88,6 +122,11 @@ export function TemplateGallery({ isOpen, onClose, onSelectTemplate, hasExisting
         <m.div
           className="pointer-events-auto bg-white rounded-xl w-full max-w-3xl max-h-[80vh] flex flex-col overflow-hidden border border-[#e9ebed]"
           style={{ boxShadow: 'var(--elevation-4)' }}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="template-gallery-title"
+          ref={dialogRef}
+          tabIndex={-1}
           variants={popIn}
           initial="hidden"
           animate="visible"
@@ -101,12 +140,14 @@ export function TemplateGallery({ isOpen, onClose, onSelectTemplate, hasExisting
                 </svg>
               </div>
               <div>
-                <h2 className="font-semibold text-white text-sm">Workflow Templates</h2>
+                <h2 id="template-gallery-title" className="font-semibold text-white text-sm">Workflow Templates</h2>
                 <p className="text-[11px] text-white/50">Start with a pre-configured workflow</p>
               </div>
             </div>
             <button
-              onClick={onClose}
+              type="button"
+              onClick={closeGallery}
+              aria-label="Close the workflow templates gallery"
               className="p-1.5 rounded-md hover:bg-white/10 transition-colors"
             >
               <svg className="w-4 h-4 text-white/50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -136,12 +177,22 @@ export function TemplateGallery({ isOpen, onClose, onSelectTemplate, hasExisting
                       {/* Built-in Tools */}
                       {template.builtInTools.length > 0 && (
                         <div className="mb-3 p-2.5 bg-slate-50 rounded-lg border border-slate-200">
-                          <div className="text-[10px] uppercase tracking-wide text-slate-400 font-semibold mb-1.5">Built-in Tools</div>
+                          <div
+                            className="text-[10px] uppercase tracking-wide font-semibold mb-1.5"
+                            style={{ color: 'var(--color-text-secondary)' }}
+                          >
+                            Built-in Tools
+                          </div>
                           <div className="flex flex-wrap gap-1.5">
                             {template.builtInTools.map((tool) => (
                               <span
                                 key={tool.name}
-                                className="inline-flex items-center gap-1 px-2 py-1 bg-white border border-slate-200 rounded-md text-[11px] text-slate-700 font-medium"
+                                className="inline-flex items-center gap-1 px-2 py-1 border rounded-md text-[11px] font-medium"
+                                style={{
+                                  color: 'var(--color-text-primary)',
+                                  background: 'var(--color-surface)',
+                                  borderColor: 'var(--color-border)',
+                                }}
                                 title={tool.description}
                               >
                                 <span>{tool.icon}</span>
@@ -188,12 +239,25 @@ export function TemplateGallery({ isOpen, onClose, onSelectTemplate, hasExisting
 
           {/* Footer */}
           <div className="px-6 py-2.5 border-t border-[#e9ebed] bg-[#fafafa]">
-            <p className="text-[10px] text-[#8d99a8] text-center">
+            <p className="text-[10px] text-center" style={{ color: 'var(--color-text-secondary)' }}>
               Templates are fully customizable — double-click any node to edit its configuration
             </p>
           </div>
         </m.div>
       </div>
+
+      <ConfirmDialog
+        isOpen={pendingTemplate !== null}
+        title="Replace current workflow?"
+        message="This will replace every node and connection in your current workflow."
+        confirmLabel="Replace workflow"
+        cancelLabel="Keep current workflow"
+        variant="danger"
+        onConfirm={() => {
+          if (pendingTemplate) selectAndClose(pendingTemplate);
+        }}
+        onCancel={() => setPendingTemplate(null)}
+      />
     </>
   );
 }

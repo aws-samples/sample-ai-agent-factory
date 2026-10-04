@@ -1,30 +1,106 @@
 /**
  * DeployPanel component for deploying and testing AgentCore Runtime.
+ *
+ * Like `TemplateGallery`, this drawer hand-rolls its scrim and panel rather than using
+ * `ModalShell`, and so had none of ModalShell's dialog affordances. Measured against
+ * the deployed bundle: Escape did not dismiss it, nothing carried `role="dialog"` or
+ * `aria-modal`, and the header's close button had no accessible name at all. The only
+ * exits were a mouse click on the scrim or on an unnamed icon button.
+ *
+ * Escape closes, deliberately doing exactly what the scrim and the X already do — it
+ * is not suppressed mid-deployment, because a deployment that is still running is
+ * recoverable through `ActiveDeploymentBanner`, and an Escape that sometimes works is
+ * worse than one that always does. The shared focus trap keeps both keyboard and
+ * programmatic focus inside the topmost dialog.
  */
 
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { m } from 'motion/react';
 import { spring, tween } from '../../lib/motion';
 import type { RuntimeConfiguration, GatewayConfiguration, IdentityConfiguration } from '../../types/components';
 import { authFetch } from '../../auth/authFetch';
+import { useScopes } from '../../auth/scopes';
 import { WORKFLOW_TEMPLATES } from '../../data/templates';
 import { useWorkflowStore } from '../../store/workflowStore';
-import { publishToRegistryApi } from '../../services/api';
+import {
+  createRegistryCanvasSnapshot,
+  publishToRegistryApi,
+} from '../../services/api';
 import { VersionsList } from './VersionsList';
 import { EvaluationResultsPanel } from './EvaluationResultsPanel';
 import { CostPanel } from './CostPanel';
 import { ObservabilityPanel } from './ObservabilityPanel';
 import { TraceWaterfall } from '../observability/TraceWaterfall';
 import { TriggersPanel } from './TriggersPanel';
-import { ResourceTagFields, type ResourceTagState } from './ResourceTagFields';
+import { ResourceTagFields } from './ResourceTagFields';
+import {
+  governanceTagsFromResourceState,
+  resourceTagStateFromGovernance,
+  type ResourceTagState,
+  type TagGovernanceStatus,
+} from './resourceTagState';
+import {
+  ResourceNamingFields,
+  resourceNamingStateFromProfile,
+  type ResourceNamingState,
+} from './ResourceNamingFields';
 import { ConfigSummary } from './ConfigSummary';
 import { DeployProgress } from './DeployProgress';
 import { DeployResult } from './DeployResult';
 import { DeployActions } from './DeployActions';
+import {
+  DeploymentTargetFields,
+  type DeploymentTargetSelection,
+} from './DeploymentTargetFields';
 import { useDeployment } from './useDeployment';
 import { mapGatewayDeployTargets } from '../../utils/gatewayConfig';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { ChatInterface } from './ChatInterface';
+import { McpToolsPanel } from './McpToolsPanel';
+import { useDialogFocusTrap } from '../../hooks/useDialogFocusTrap';
+import { runtimeConfigForRequest } from '../../utils/runtimeRequestConfig';
+
+const PYTHON_EXPORT_GOVERNANCE_MESSAGE =
+  'Standalone Python export contains no AWS resources, so tags and tag profiles cannot be applied. Clear the governance settings, or use the CloudFormation export or platform deploy instead.';
+
+/** The backend's FastAPI ``detail`` as text: a string, or a validation list of ``{msg}``. */
+async function responseDetail(response: Response, fallback: string): Promise<string> {
+  if (response.status >= 500) return fallback;
+  const body = await response.json().catch(() => null);
+  const detail = body?.detail;
+  if (typeof detail === 'string' && detail) return detail;
+  if (Array.isArray(detail)) {
+    const parts = detail
+      .map((d) => (typeof d === 'string' ? d : typeof d?.msg === 'string' ? d.msg : ''))
+      .filter(Boolean);
+    if (parts.length) return parts.join('; ');
+  }
+  if (detail && typeof detail === 'object' && typeof detail.message === 'string') return detail.message;
+  return fallback;
+}
+
+type DeployPanelTab =
+  | 'deploy'
+  | 'chat'
+  | 'tools'
+  | 'versions'
+  | 'evals'
+  | 'cost'
+  | 'observability'
+  | 'triggers';
+
+type CfnDataRetentionPolicy = 'Retain' | 'Delete';
+
+const DEPLOY_PANEL_TABS: ReadonlyArray<{ id: DeployPanelTab; label: string }> = [
+  { id: 'deploy', label: 'Deploy' },
+  { id: 'chat', label: 'Chat' },
+  { id: 'tools', label: 'MCP Tools' },
+  { id: 'versions', label: 'Versions' },
+  { id: 'evals', label: 'Eval' },
+  { id: 'cost', label: 'Cost' },
+  { id: 'observability', label: 'Observe' },
+  { id: 'triggers', label: 'Triggers' },
+];
 
 interface TestResult {
   success: boolean;
@@ -64,6 +140,8 @@ export interface DeployConnector {
 export interface DeployPanelProps {
   config: RuntimeConfiguration | null;
   nodeId: string | null;
+  /** Saved flow containing the node, if this is a visual-canvas deploy. */
+  flowId?: string | null;
   connectedTools?: string[];
   gatewayConfig?: GatewayConfiguration | null;
   gatewayTools?: string[];
@@ -83,8 +161,10 @@ export interface DeployPanelProps {
   isVisible: boolean;
   onClose: () => void;
   restoredDeployment?: {
+    deploymentId?: string;
     runtimeId: string;
     endpoint: string;
+    runtimeProtocol?: 'HTTP' | 'MCP' | 'A2A';
     gatewayUrl?: string;
   } | null;
 }
@@ -92,6 +172,7 @@ export interface DeployPanelProps {
 export function DeployPanel({
   config,
   nodeId,
+  flowId,
   connectedTools = [],
   gatewayConfig,
   gatewayTools = [],
@@ -112,14 +193,68 @@ export function DeployPanel({
   onClose,
   restoredDeployment,
 }: DeployPanelProps) {
+  const { hasScope } = useScopes();
+  const governance = useWorkflowStore((state) => state.governance);
+  const setGovernance = useWorkflowStore((state) => state.setGovernance);
+  // The canvas validator's verdict gates every side-effecting action here. Live (2026-09-28) a
+  // gateway with no target read "Ready to deploy", deployed, and was refused by the deployer
+  // minutes later; the "1 Error" badge sat behind this very panel. Deploy, the CloudFormation
+  // export and the Python export all send the canvas, so all three wait for a valid one.
+  // Keyed on a verdict that EXISTS: every store mutation that changes the canvas runs
+  // validation (see validation-on-canvas-change), so a null verdict means an empty, never
+  // hydrated canvas, which has no config to deploy anyway.
+  const canvasIsValid = useWorkflowStore((state) => state.validationState?.isValid ?? null);
+  const firstValidationError = useWorkflowStore(
+    (state) => state.validationState?.errors[0]?.message ?? null,
+  );
+  const validationBlockedReason = canvasIsValid === null || canvasIsValid
+    ? null
+    : firstValidationError
+      ? `Fix the canvas first: ${firstValidationError}`
+      : 'Fix the canvas validation errors first';
   const [testInput, setTestInput] = useState('');
   const [, setTestResult] = useState<TestResult | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [activeTab, setActiveTab] = useState<'deploy' | 'chat' | 'versions' | 'evals' | 'cost' | 'observability' | 'triggers'>('deploy');
+  const [activeTab, setActiveTab] = useState<DeployPanelTab>('deploy');
   const [versionsRefreshKey, setVersionsRefreshKey] = useState(0);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [resourceTagState, setResourceTagState] = useState<ResourceTagState>({ tags: {}, profileName: null });
+  const resourceTagState = useMemo(
+    () => resourceTagStateFromGovernance(governance.tags),
+    [governance.tags],
+  );
+  const setResourceTagState = useCallback((next: ResourceTagState) => {
+    setGovernance((current) => ({
+      ...current,
+      tags: governanceTagsFromResourceState(next),
+    }));
+  }, [setGovernance]);
+  const [tagGovernanceStatus, setTagGovernanceStatus] = useState<TagGovernanceStatus>({
+    state: 'loading',
+    message: 'Loading tag governance…',
+    missingRequired: false,
+  });
+  const [resourceNamingState, setResourceNamingState] = useState<ResourceNamingState>(
+    () => resourceNamingStateFromProfile(governance.namingProfile),
+  );
+  const namingProfileKey = JSON.stringify(governance.namingProfile);
+  const lastNamingProfileKeyRef = useRef(namingProfileKey);
+  useEffect(() => {
+    if (lastNamingProfileKeyRef.current !== namingProfileKey) {
+      lastNamingProfileKeyRef.current = namingProfileKey;
+      setResourceNamingState(resourceNamingStateFromProfile(governance.namingProfile));
+    }
+  }, [governance.namingProfile, namingProfileKey]);
+  const handleResourceNamingChange = useCallback((next: ResourceNamingState) => {
+    setResourceNamingState(next);
+    if (!next.error) {
+      setGovernance((current) => ({
+        ...current,
+        namingProfile: next.profile,
+      }));
+    }
+  }, [setGovernance]);
+  const [deploymentTarget, setDeploymentTarget] = useState<DeploymentTargetSelection>({});
   const [conversationHistory, setConversationHistory] = useState<Array<{role: string, content: string}>>([]);
   const [chatMessages, setChatMessages] = useState<Array<{
     id: string;
@@ -129,6 +264,9 @@ export function DeployPanel({
     latencyMs?: number;
   }>>([]);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  useDialogFocusTrap(isVisible, panelRef, undefined, onClose);
 
   const activeTemplate = useMemo(() => {
     if (!templateId) return null;
@@ -153,8 +291,21 @@ export function DeployPanel({
 
   const [isDownloadingCfn, setIsDownloadingCfn] = useState(false);
   const [isExportingPython, setIsExportingPython] = useState(false);
+  const [cfnDataRetentionPolicy, setCfnDataRetentionPolicy] =
+    useState<CfnDataRetentionPolicy>('Retain');
+  // An export failure belongs to the button that failed, NOT to the deployment:
+  // writing it into deploymentStatus hid a live runtime's Chat/Delete, and from idle
+  // it hid the very settings to correct and turned the CTA into "Retry Deployment".
+  const [exportError, setExportError] = useState<{ kind: 'cfn' | 'python'; message: string } | null>(null);
+  useEffect(() => {
+    setExportError(null);
+  }, [cfnDataRetentionPolicy, resourceTagState, resourceNamingState]);
   const [isPublishing, setIsPublishing] = useState(false);
   const [publishMsg, setPublishMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const governanceReady = (
+    tagGovernanceStatus.state === 'ready'
+    && !tagGovernanceStatus.missingRequired
+  );
 
   const warmupRuntime = useCallback((runtimeId: string, endpoint?: string) => {
     authFetch('/api/test-runtime', {
@@ -164,6 +315,8 @@ export function DeployPanel({
         endpoint: endpoint || '',
         input: 'ping',
         runtimeId,
+        // Tells a Memory agent this ping is not a conversation turn, so it is not stored.
+        warmup: true,
       }),
     }).catch(() => {});
   }, []);
@@ -171,6 +324,7 @@ export function DeployPanel({
   const { deploymentStatus, setDeploymentStatus, handleDeploy } = useDeployment({
     config,
     nodeId,
+    flowId,
     deploymentMode,
     connectedTools,
     gatewayConfig: gatewayConfigForDeploy || null,
@@ -189,37 +343,95 @@ export function DeployPanel({
     observabilityConfig: observabilityConfig || null,
     a2aConfig: a2aConfig || null,
     resourceTagState,
+    targetAccountId: deploymentTarget.targetAccountId,
+    targetRegion: deploymentTarget.targetRegion,
     warmupRuntime,
     onVersionsRefresh: () => setVersionsRefreshKey((k) => k + 1),
     onTabChange: (tab) => setActiveTab(tab),
   });
+  const isMcpDeployment = (
+    deploymentStatus.state === 'deployed'
+    && deploymentStatus.runtimeProtocol === 'MCP'
+  );
+  const isMcpProtocol = (
+    isMcpDeployment
+    || config?.protocol === 'MCP'
+  );
+  const visibleTabs = useMemo(
+    () => DEPLOY_PANEL_TABS.filter((tab) => {
+      if (tab.id === 'chat') return !isMcpProtocol;
+      if (tab.id === 'tools') return isMcpProtocol;
+      if (tab.id === 'triggers') return !isMcpProtocol;
+      return true;
+    }),
+    [isMcpProtocol],
+  );
+
+  useEffect(() => {
+    if (visibleTabs.some((tab) => tab.id === activeTab)) return;
+    setActiveTab(isMcpDeployment ? 'tools' : 'deploy');
+  }, [activeTab, isMcpDeployment, visibleTabs]);
+
+  const handleTabKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLButtonElement>, currentTab: DeployPanelTab) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+
+      const enabledTabs = visibleTabs.filter(
+        (tab) => (
+          (tab.id !== 'chat' && tab.id !== 'tools')
+          || deploymentStatus.state === 'deployed'
+        ),
+      );
+      const currentIndex = Math.max(
+        0,
+        enabledTabs.findIndex((tab) => tab.id === currentTab),
+      );
+      let nextIndex = currentIndex;
+      if (event.key === 'Home') nextIndex = 0;
+      if (event.key === 'End') nextIndex = enabledTabs.length - 1;
+      if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % enabledTabs.length;
+      if (event.key === 'ArrowLeft') {
+        nextIndex = (currentIndex - 1 + enabledTabs.length) % enabledTabs.length;
+      }
+
+      event.preventDefault();
+      const nextTab = enabledTabs[nextIndex].id;
+      setActiveTab(nextTab);
+      document.getElementById(`deploy-panel-tab-${nextTab}`)?.focus();
+    },
+    [deploymentStatus.state, visibleTabs],
+  );
 
 
   useEffect(() => {
     if (restoredDeployment && deploymentStatus.state === 'idle') {
       setDeploymentStatus({
         state: 'deployed',
+        deploymentId: restoredDeployment.deploymentId,
         message: 'Restored from previous deployment',
         runtimeId: restoredDeployment.runtimeId,
         endpoint: restoredDeployment.endpoint,
+        runtimeProtocol: restoredDeployment.runtimeProtocol || 'HTTP',
         gatewayUrl: restoredDeployment.gatewayUrl,
       });
-      setActiveTab('chat');
+      setActiveTab(restoredDeployment.runtimeProtocol === 'MCP' ? 'tools' : 'chat');
     }
   }, [restoredDeployment]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const pythonExportBlockedReason =
+    Object.keys(resourceTagState.tags).length || resourceTagState.profileName
+      ? PYTHON_EXPORT_GOVERNANCE_MESSAGE
+      : null;
+
   const handleExportPython = useCallback(async () => {
-    if (!config || !nodeId) return;
+    if (!config || !nodeId || !governanceReady || validationBlockedReason) return;
+    // Refused here as well as by the disabled button: nothing is sent, and the
+    // reason is rendered next to the button rather than the settings vanishing.
+    if (pythonExportBlockedReason) return;
+    setExportError(null);
     setIsExportingPython(true);
     try {
-      const fullConfig = {
-        ...config,
-        entrypoint: config.entrypoint || 'agent.py',
-        deploymentType: config.deploymentType || 'S3_CODE_DEPLOY',
-        idleTimeout: config.idleTimeout ?? 900,
-        maxLifetime: config.maxLifetime ?? 28800,
-        enableOtel: config.enableOtel ?? false,
-      };
+      const fullConfig = runtimeConfigForRequest(config, templateId);
       const response = await authFetch('/api/export-python', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -245,11 +457,15 @@ export function DeployPanel({
           knowledgeBaseConfig: knowledgeBaseConfig || undefined,
           observabilityConfig: observabilityConfig || undefined,
           a2aConfig: a2aConfig || undefined,
+          // Sent, not dropped: a standalone project creates no AWS resources, so the
+          // route refuses governance tags with a 400 whose detail is shown below.
           resourceTags: Object.keys(resourceTagState.tags).length ? resourceTagState.tags : undefined,
           tagProfile: resourceTagState.profileName || undefined,
         }),
       });
-      if (!response.ok) throw new Error(`Python export failed (${response.status})`);
+      if (!response.ok) {
+        throw new Error(await responseDetail(response, `Python export failed (${response.status})`));
+      }
       const result = await response.json();
       if (result.download_url) {
         const a = document.createElement('a');
@@ -272,24 +488,18 @@ export function DeployPanel({
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Python export failed';
-      setDeploymentStatus({ state: 'error', message });
+      setExportError({ kind: 'python', message });
     } finally {
       setIsExportingPython(false);
     }
-  }, [config, nodeId, connectedTools, gatewayConfigForDeploy, externalMcpServers, gatewayTools, templateId, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, observabilityConfig, a2aConfig, identityConfig, resourceTagState, setDeploymentStatus]);
+  }, [config, nodeId, governanceReady, validationBlockedReason, connectedTools, gatewayConfigForDeploy, externalMcpServers, gatewayTools, templateId, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, observabilityConfig, a2aConfig, identityConfig, resourceTagState, pythonExportBlockedReason]);
 
   const handleDownloadCfn = useCallback(async () => {
-    if (!config || !nodeId) return;
+    if (!config || !nodeId || resourceNamingState.error || !governanceReady || validationBlockedReason) return;
+    setExportError(null);
     setIsDownloadingCfn(true);
     try {
-      const fullConfig = {
-        ...config,
-        entrypoint: config.entrypoint || 'agent.py',
-        deploymentType: config.deploymentType || 'S3_CODE_DEPLOY',
-        idleTimeout: config.idleTimeout ?? 900,
-        maxLifetime: config.maxLifetime ?? 28800,
-        enableOtel: config.enableOtel ?? false,
-      };
+      const fullConfig = runtimeConfigForRequest(config, templateId);
       const response = await authFetch('/api/generate-cfn-template', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -317,9 +527,22 @@ export function DeployPanel({
           a2aConfig: a2aConfig || undefined,
           resourceTags: Object.keys(resourceTagState.tags).length ? resourceTagState.tags : undefined,
           tagProfile: resourceTagState.profileName || undefined,
+          policyRevision: resourceTagState.policyRevision || undefined,
+          tagProfileUpdatedAt: resourceTagState.profileName
+            ? resourceTagState.profileUpdatedAt || undefined
+            : undefined,
+          namingProfile: resourceNamingState.profile || undefined,
+          dataRetentionPolicy: cfnDataRetentionPolicy,
         }),
       });
-      if (!response.ok) throw new Error(`Template generation failed (${response.status})`);
+      if (!response.ok) {
+        // A 4xx here is the generator refusing a canvas it cannot export
+        // faithfully (e.g. a LiteLLM gateway), and its `detail` names the
+        // workaround. Surface it verbatim — the bare status code this used to
+        // throw told the user nothing about how to proceed. Shared with the
+        // Python export so a 422 validation list reads the same on both.
+        throw new Error(await responseDetail(response, `Template generation failed (${response.status})`));
+      }
       const result = await response.json();
       if (result.download_url) {
         const a = document.createElement('a');
@@ -342,24 +565,35 @@ export function DeployPanel({
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Template generation failed';
-      setDeploymentStatus({ state: 'error', message });
+      setExportError({ kind: 'cfn', message });
     } finally {
       setIsDownloadingCfn(false);
     }
-  }, [config, nodeId, connectedTools, gatewayConfigForDeploy, externalMcpServers, gatewayTools, templateId, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, identityConfig, a2aConfig, observabilityConfig, resourceTagState, setDeploymentStatus]);
+  }, [config, nodeId, governanceReady, validationBlockedReason, connectedTools, gatewayConfigForDeploy, externalMcpServers, gatewayTools, templateId, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, identityConfig, a2aConfig, observabilityConfig, resourceTagState, resourceNamingState, cfnDataRetentionPolicy]);
 
   const handlePublishToRegistry = useCallback(async () => {
-    if (!config) return;
+    if (!config || !hasScope('registry:write') || !governanceReady) return;
     setIsPublishing(true);
     setPublishMsg(null);
     try {
-      const { nodes, edges } = useWorkflowStore.getState();
+      const {
+        nodes,
+        edges,
+        viewport,
+        governance,
+      } = useWorkflowStore.getState();
       const display = config.name || 'Untitled Agent';
       await publishToRegistryApi({
         display_name: display,
         description: config.systemPrompt?.slice(0, 280) || `Deployed agent ${display}`,
         visibility: 'org',
-        canvas_snapshot: { name: display, nodes, edges },
+        canvas_snapshot: createRegistryCanvasSnapshot(
+          display,
+          nodes,
+          edges,
+          viewport,
+          governance,
+        ),
         source_runtime_name: config.name || undefined,
       });
       setPublishMsg({ kind: 'ok', text: `Published "${display}" to the registry.` });
@@ -369,9 +603,10 @@ export function DeployPanel({
     } finally {
       setIsPublishing(false);
     }
-  }, [config]);
+  }, [config, governanceReady, hasScope]);
 
   const handleTest = useCallback(async () => {
+    if (deploymentStatus.runtimeProtocol === 'MCP') return;
     if (!deploymentStatus.endpoint && !deploymentStatus.runtimeId) return;
     setIsTesting(true);
     setTestResult(null);
@@ -399,7 +634,13 @@ export function DeployPanel({
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 120000);
-        const response = await fetch('/api/test-runtime-stream', {
+        // authFetch, NOT bare fetch: the endpoint requires a bearer token like
+        // every other one, and this was the only call in the file that skipped it.
+        // The failure was invisible — a 401 returns false below, which silently
+        // falls through to the non-streaming path, so chat kept working and
+        // streaming was simply never reachable in a deployed UI. Measured live:
+        // POST /api/test-runtime-stream -> 401 on every message.
+        const response = await authFetch('/api/test-runtime-stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(requestBody),
@@ -604,7 +845,7 @@ export function DeployPanel({
     } finally {
       setIsTesting(false);
     }
-  }, [deploymentStatus.endpoint, deploymentStatus.simulated, deploymentStatus.runtimeId, testInput, sessionId, conversationHistory]);
+  }, [deploymentStatus.endpoint, deploymentStatus.simulated, deploymentStatus.runtimeId, deploymentStatus.runtimeProtocol, testInput, sessionId, conversationHistory]);
 
   const handleNewSession = useCallback(() => {
     setSessionId(null);
@@ -621,23 +862,48 @@ export function DeployPanel({
   }, [testInput, isTesting, handleTest]);
 
   const handleDelete = useCallback(async () => {
-    if (!deploymentStatus.runtimeId) return;
+    const deleteTargetId = deploymentStatus.runtimeId || deploymentStatus.deploymentId;
+    if (!deleteTargetId) return;
+    const isPartialDeployment = !deploymentStatus.runtimeId;
     setShowDeleteConfirm(false);
+    setDeleteError(null);
     setIsDeleting(true);
     try {
-      const response = await authFetch(`/api/runtime/${deploymentStatus.runtimeId}`, { method: 'DELETE' });
-      const result = await response.json();
+      const response = await authFetch(
+        `/api/runtime/${encodeURIComponent(deleteTargetId)}`,
+        { method: 'DELETE' },
+      );
+      const result = await response.json().catch(() => ({})) as {
+        success?: boolean;
+        message?: string;
+        detail?: string;
+      };
+      if (!response.ok || !result.success) {
+        throw new Error(
+          result.message
+          || result.detail
+          || `${isPartialDeployment ? 'Deployment cleanup' : 'Runtime deletion'} failed (${response.status})`,
+        );
+      }
       if (result.success) {
         setDeploymentStatus({ state: 'idle' });
         setTestResult(null);
         setActiveTab('deploy');
       }
     } catch (error) {
-      console.error('Delete failed:', error);
+      setDeleteError(
+        error instanceof Error
+          ? error.message
+          : `${isPartialDeployment ? 'Deployment cleanup' : 'Runtime deletion'} failed`,
+      );
     } finally {
       setIsDeleting(false);
     }
-  }, [deploymentStatus.runtimeId, setDeploymentStatus]);
+  }, [
+    deploymentStatus.deploymentId,
+    deploymentStatus.runtimeId,
+    setDeploymentStatus,
+  ]);
 
   if (!isVisible) return null;
 
@@ -653,8 +919,13 @@ export function DeployPanel({
       />
 
       <m.div
+        ref={panelRef}
         className="fixed right-0 top-0 bottom-0 w-[420px] bg-white z-50 flex flex-col overflow-hidden border-l border-[#e9ebed]"
         style={{ boxShadow: 'var(--elevation-4)' }}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="deploy-panel-title"
+        tabIndex={-1}
         initial={{ x: '100%' }}
         animate={{ x: 0 }}
         transition={spring.gentle}
@@ -667,50 +938,90 @@ export function DeployPanel({
               </svg>
             </div>
             <div>
-              <h3 className="font-semibold text-white text-sm">Deploy & Test</h3>
+              <h2 id="deploy-panel-title" className="font-semibold text-white text-sm">Deploy &amp; Test</h2>
               <p className="text-[11px] text-white/50">{deploymentMode === 'harness' ? 'AgentCore Harness' : 'AgentCore Runtime'}</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-md hover:bg-white/10 transition-colors">
+          <button type="button" onClick={onClose} aria-label="Close the deploy and test panel" className="p-1.5 rounded-md hover:bg-white/10 transition-colors">
             <svg className="w-4 h-4 text-white/50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
 
-        <div className="flex border-b border-[#e9ebed]">
-          <button onClick={() => setActiveTab('deploy')} className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${activeTab === 'deploy' ? 'text-[#0972d3]' : 'text-[#5f6b7a] hover:text-[#16191f]'}`}>
-            Deploy
-            {activeTab === 'deploy' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />}
-          </button>
-          <button onClick={() => setActiveTab('chat')} disabled={deploymentStatus.state !== 'deployed'} className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${activeTab === 'chat' ? 'text-[#0972d3]' : deploymentStatus.state === 'deployed' ? 'text-[#5f6b7a] hover:text-[#16191f]' : 'text-[#d1d5db] cursor-not-allowed'}`}>
-            Chat
-            {deploymentStatus.state === 'deployed' && <span className="ml-1.5 w-1.5 h-1.5 bg-emerald-500 rounded-full inline-block" />}
-            {activeTab === 'chat' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />}
-          </button>
-          <button onClick={() => setActiveTab('versions')} className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${activeTab === 'versions' ? 'text-[#0972d3]' : 'text-[#5f6b7a] hover:text-[#16191f]'}`}>
-            Versions
-            {activeTab === 'versions' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />}
-          </button>
-          <button onClick={() => setActiveTab('evals')} className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${activeTab === 'evals' ? 'text-[#0972d3]' : 'text-[#5f6b7a] hover:text-[#16191f]'}`}>
-            Eval
-            {activeTab === 'evals' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />}
-          </button>
-          <button onClick={() => setActiveTab('cost')} className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${activeTab === 'cost' ? 'text-[#0972d3]' : 'text-[#5f6b7a] hover:text-[#16191f]'}`}>
-            Cost
-            {activeTab === 'cost' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />}
-          </button>
-          <button onClick={() => setActiveTab('observability')} className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${activeTab === 'observability' ? 'text-[#0972d3]' : 'text-[#5f6b7a] hover:text-[#16191f]'}`}>
-            Observe
-            {activeTab === 'observability' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />}
-          </button>
-          <button onClick={() => setActiveTab('triggers')} className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${activeTab === 'triggers' ? 'text-[#0972d3]' : 'text-[#5f6b7a] hover:text-[#16191f]'}`}>
-            Triggers
-            {activeTab === 'triggers' && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />}
-          </button>
+        <div
+          className="flex border-b border-[#e9ebed]"
+          role="tablist"
+          aria-label="Deploy and test views"
+        >
+          {visibleTabs.map((tab) => {
+            const isActive = activeTab === tab.id;
+            const isDisabled = (
+              (tab.id === 'chat' || tab.id === 'tools')
+              && deploymentStatus.state !== 'deployed'
+            );
+            return (
+              <button
+                key={tab.id}
+                id={`deploy-panel-tab-${tab.id}`}
+                type="button"
+                role="tab"
+                aria-selected={isActive}
+                aria-controls={`deploy-panel-tabpanel-${tab.id}`}
+                tabIndex={isActive ? 0 : -1}
+                disabled={isDisabled}
+                onClick={() => setActiveTab(tab.id)}
+                onKeyDown={(event) => handleTabKeyDown(event, tab.id)}
+                className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${
+                  isDisabled ? 'cursor-not-allowed' : ''
+                }`}
+                style={{
+                  color: isActive
+                    ? 'var(--color-aws-blue)'
+                    : isDisabled
+                      ? 'var(--color-text-placeholder)'
+                      : 'var(--color-text-secondary)',
+                }}
+              >
+                {tab.label}
+                {(tab.id === 'chat' || tab.id === 'tools') && deploymentStatus.state === 'deployed' && (
+                  <span
+                    className="ml-1.5 w-1.5 h-1.5 bg-emerald-500 rounded-full inline-block"
+                    aria-hidden="true"
+                  />
+                )}
+                {isActive && (
+                  <span
+                    className="absolute bottom-0 left-0 right-0 h-0.5"
+                    style={{ background: 'var(--color-aws-blue)' }}
+                    aria-hidden="true"
+                  />
+                )}
+              </button>
+            );
+          })}
         </div>
 
-        <div className={`flex-1 min-h-0 ${activeTab === 'chat' ? 'flex flex-col' : 'overflow-y-auto'}`}>
+        {deleteError && (
+          <div
+            role="alert"
+            className="mx-4 mt-3 flex-shrink-0 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+          >
+            {deploymentStatus.runtimeId ? 'Runtime deletion' : 'Deployment cleanup'} failed: {deleteError}
+          </div>
+        )}
+
+        <div
+          className={`flex-1 min-h-0 ${
+            activeTab === 'chat' || activeTab === 'tools'
+              ? 'flex flex-col'
+              : 'overflow-y-auto'
+          }`}
+          role="tabpanel"
+          id={`deploy-panel-tabpanel-${activeTab}`}
+          aria-labelledby={`deploy-panel-tab-${activeTab}`}
+          tabIndex={0}
+        >
           {activeTab === 'deploy' && (
             <div className="p-5 space-y-5">
               {config && (
@@ -724,8 +1035,26 @@ export function DeployPanel({
                 />
               )}
 
-              {deploymentStatus.state === 'idle' && (
-                <ResourceTagFields onChange={setResourceTagState} />
+              {(deploymentStatus.state === 'idle' || deploymentStatus.state === 'deployed') && (
+                <DeploymentTargetFields
+                  value={deploymentTarget}
+                  onChange={setDeploymentTarget}
+                />
+              )}
+
+              {(deploymentStatus.state === 'idle' || deploymentStatus.state === 'deployed') && (
+                <ResourceTagFields
+                  value={resourceTagState}
+                  onChange={setResourceTagState}
+                  onStatusChange={setTagGovernanceStatus}
+                />
+              )}
+
+              {(deploymentStatus.state === 'idle' || deploymentStatus.state === 'deployed') && (
+                <ResourceNamingFields
+                  value={resourceNamingState}
+                  onChange={handleResourceNamingChange}
+                />
               )}
 
               {deploymentStatus.state === 'deploying' && (
@@ -737,10 +1066,14 @@ export function DeployPanel({
                   message={deploymentStatus.message || 'Deployed successfully!'}
                   simulated={deploymentStatus.simulated}
                   runtimeId={deploymentStatus.runtimeId}
+                  runtimeProtocol={deploymentStatus.runtimeProtocol}
                   endpoint={deploymentStatus.endpoint}
                   gatewayUrl={deploymentStatus.gatewayUrl}
                   onRedeploy={() => setDeploymentStatus({ state: 'idle' })}
-                  onDelete={() => setShowDeleteConfirm(true)}
+                  onDelete={() => {
+                    setDeleteError(null);
+                    setShowDeleteConfirm(true);
+                  }}
                   isDeleting={isDeleting}
                 />
               )}
@@ -755,26 +1088,118 @@ export function DeployPanel({
                     </div>
                     <span className="text-red-700 text-sm">{deploymentStatus.message}</span>
                   </div>
-                  <button
-                    onClick={handleDeploy}
-                    className="w-full py-2.5 px-4 bg-[#ff9900] text-[#232f3e] rounded-md font-semibold hover:bg-[#ec7211] transition-colors text-sm"
-                  >
-                    Retry Deployment
-                  </button>
+                  {deploymentStatus.deploymentId && !deploymentStatus.runtimeId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDeleteError(null);
+                        setShowDeleteConfirm(true);
+                      }}
+                      disabled={isDeleting}
+                      className="w-full py-2.5 px-4 border border-red-300 rounded-xl text-red-600 hover:bg-red-50 transition-colors text-sm flex items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isDeleting ? 'Cleaning up...' : 'Clean up partial deployment'}
+                    </button>
+                  )}
                 </div>
               )}
 
+              {(deploymentStatus.state === 'idle' || deploymentStatus.state === 'deployed') && (
+                <fieldset
+                  className="rounded-lg border border-[#d5dbdb] bg-[#fafafa] p-3.5"
+                  aria-describedby="cfn-data-retention-help"
+                >
+                  <legend className="px-1 text-sm font-semibold text-[#232f3e]">
+                    CloudFormation data retention
+                  </legend>
+                  <p id="cfn-data-retention-help" className="mb-3 text-xs text-[#5f6b7a]">
+                    Applies only to the downloaded CloudFormation bundle when its stack is deleted.
+                  </p>
+                  <div className="space-y-2">
+                    <label className="flex cursor-pointer items-start gap-2.5 rounded-md p-2 hover:bg-white">
+                      <input
+                        type="radio"
+                        name="cfn-data-retention-policy"
+                        value="Retain"
+                        checked={cfnDataRetentionPolicy === 'Retain'}
+                        onChange={() => setCfnDataRetentionPolicy('Retain')}
+                        aria-describedby="cfn-data-retention-help"
+                        className="mt-0.5"
+                      />
+                      <span>
+                        <span className="block text-sm font-medium text-[#232f3e]">
+                          Retain (recommended)
+                        </span>
+                        <span className="block text-xs text-[#5f6b7a]">
+                          Preserve stateful resources when the exported stack is deleted.
+                        </span>
+                      </span>
+                    </label>
+                    <label className="flex cursor-pointer items-start gap-2.5 rounded-md p-2 hover:bg-white">
+                      <input
+                        type="radio"
+                        name="cfn-data-retention-policy"
+                        value="Delete"
+                        checked={cfnDataRetentionPolicy === 'Delete'}
+                        onChange={() => setCfnDataRetentionPolicy('Delete')}
+                        aria-describedby={
+                          cfnDataRetentionPolicy === 'Delete'
+                            ? 'cfn-data-retention-help cfn-delete-retention-warning'
+                            : 'cfn-data-retention-help'
+                        }
+                        className="mt-0.5"
+                      />
+                      <span>
+                        <span className="block text-sm font-medium text-[#232f3e]">
+                          Delete with stack
+                        </span>
+                        <span className="block text-xs text-[#5f6b7a]">
+                          Request deletion of stack-owned data when the exported stack is deleted.
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+                  {cfnDataRetentionPolicy === 'Delete' && (
+                    <p
+                      id="cfn-delete-retention-warning"
+                      role="status"
+                      className="mt-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+                    >
+                      Use Delete only for ephemeral or test environments. Stack deletion can
+                      permanently remove stack-owned data.
+                    </p>
+                  )}
+                </fieldset>
+              )}
+
               <DeployActions
-                canDeploy={!!config}
+                canDeploy={!!config && governanceReady && !validationBlockedReason}
+                canDownloadCfn={!!config && governanceReady && !resourceNamingState.error && !validationBlockedReason}
+                cfnDownloadBlockedReason={
+                  !config
+                    ? 'Add a deployable runtime to the canvas before downloading'
+                    : validationBlockedReason
+                      ? validationBlockedReason
+                    : !governanceReady
+                      ? (tagGovernanceStatus.state === 'ready'
+                        ? 'Supply every required tag before downloading'
+                        : tagGovernanceStatus.message)
+                      : resourceNamingState.error
+                        ? 'Fix the CloudFormation naming profile before downloading'
+                        : null
+                }
+                canPublish={hasScope('registry:write') && governanceReady}
                 state={deploymentStatus.state}
                 isDownloadingCfn={isDownloadingCfn}
                 isExportingPython={isExportingPython}
                 isPublishing={isPublishing}
                 publishMsg={publishMsg}
-                onDeploy={handleDeploy}
                 onDownloadCfn={handleDownloadCfn}
                 onExportPython={handleExportPython}
                 onPublish={handlePublishToRegistry}
+                pythonExportBlockedReason={pythonExportBlockedReason}
+                cfnExportError={exportError?.kind === 'cfn' ? exportError.message : null}
+                pythonExportError={exportError?.kind === 'python' ? exportError.message : null}
               />
             </div>
           )}
@@ -789,7 +1214,7 @@ export function DeployPanel({
                   </span>
                 </div>
                 <div className="flex items-center gap-3">
-                  <button onClick={handleNewSession} className="text-xs text-[#0972d3] hover:text-[#0961b9] font-medium">
+                  <button onClick={handleNewSession} className="text-xs text-blue-700 hover:text-blue-800 font-medium">
                     + New
                   </button>
                   <button onClick={() => setShowDeleteConfirm(true)} disabled={isDeleting} className="text-xs text-red-500 hover:text-red-700 font-medium">
@@ -813,6 +1238,22 @@ export function DeployPanel({
               />
             </div>
           )}
+          {activeTab === 'tools' && deploymentStatus.state === 'deployed' && (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="flex flex-shrink-0 items-center justify-between border-b border-[#e9ebed] bg-[#fafafa] px-4 py-2.5">
+                <span className="text-xs text-[#5f6b7a]">MCP protocol runtime</span>
+                <button
+                  type="button"
+                  onClick={() => setShowDeleteConfirm(true)}
+                  disabled={isDeleting}
+                  className="text-xs font-medium text-red-500 hover:text-red-700 disabled:opacity-60"
+                >
+                  {isDeleting ? 'Deleting...' : 'Delete'}
+                </button>
+              </div>
+              <McpToolsPanel deploymentId={deploymentStatus.deploymentId} />
+            </div>
+          )}
           {activeTab === 'versions' && <VersionsList runtimeName={config?.name ?? null} refreshKey={versionsRefreshKey} />}
           {activeTab === 'evals' && <EvaluationResultsPanel runtimeName={config?.name ?? null} refreshKey={versionsRefreshKey} />}
           {activeTab === 'cost' && <CostPanel runtimeName={config?.name ?? null} refreshKey={versionsRefreshKey} />}
@@ -822,15 +1263,18 @@ export function DeployPanel({
               <TraceWaterfall runtimeName={config?.name ?? null} refreshKey={versionsRefreshKey} />
             </>
           )}
-          {activeTab === 'triggers' && <TriggersPanel runtimeName={config?.name ?? null} refreshKey={versionsRefreshKey} />}
+          {activeTab === 'triggers' && !isMcpProtocol && (
+            <TriggersPanel runtimeName={config?.name ?? null} refreshKey={versionsRefreshKey} />
+          )}
         </div>
 
-        {activeTab !== 'chat' && (
+        {activeTab !== 'chat' && activeTab !== 'tools' && (
           <div className="border-t border-[#e9ebed] bg-[#fafafa] flex-shrink-0 p-3.5 space-y-2">
             {activeTab === 'deploy' && (deploymentStatus.state === 'idle' || deploymentStatus.state === 'error') && (
               <button
                 onClick={handleDeploy}
-                disabled={!config}
+                disabled={!config || !governanceReady || !!validationBlockedReason}
+                title={validationBlockedReason ?? undefined}
                 className="w-full py-3 px-4 bg-[#ff9900] text-[#232f3e] rounded-md font-semibold hover:bg-[#ec7211] disabled:bg-[#e9ebed] disabled:text-[#8d99a8] disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 text-sm"
               >
                 <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -845,7 +1289,7 @@ export function DeployPanel({
                 Deploying...
               </div>
             )}
-            <div className="flex items-center justify-center gap-1.5 text-[10px] text-[#8d99a8]">
+            <div className="flex items-center justify-center gap-1.5 text-[10px]" style={{ color: 'var(--color-text-secondary)' }}>
               <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
               </svg>
@@ -857,9 +1301,13 @@ export function DeployPanel({
 
       <ConfirmDialog
         isOpen={showDeleteConfirm}
-        title="Delete Runtime"
-        message="Are you sure you want to delete this runtime from AWS? This action cannot be undone."
-        confirmLabel="Delete"
+        title={deploymentStatus.runtimeId ? 'Delete Runtime' : 'Clean Up Partial Deployment'}
+        message={
+          deploymentStatus.runtimeId
+            ? 'Are you sure you want to delete this runtime from AWS? This action cannot be undone.'
+            : 'Clean up the AWS resources created before this deployment failed? Only resources whose ownership can be verified will be removed.'
+        }
+        confirmLabel={deploymentStatus.runtimeId ? 'Delete' : 'Clean up'}
         cancelLabel="Cancel"
         variant="danger"
         onConfirm={handleDelete}

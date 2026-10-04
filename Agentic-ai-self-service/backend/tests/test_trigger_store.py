@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Iterator
-from unittest.mock import patch
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
 import boto3
 import pytest
@@ -30,8 +31,23 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, "src")
 
 moto = pytest.importorskip("moto")
-from app.services.agent_versions_store import AgentVersion, RuntimeSlots  # noqa: E402
+from app.models.deployment_models import (  # noqa: E402
+    DeploymentState,
+    DeploymentStatusEnum,
+)
+from app.services import agent_versions_store as avs  # noqa: E402
+from app.services import runtime_target_context as _rtc  # noqa: E402
+from app.services.agent_versions_store import (  # noqa: E402
+    AgentVersion,
+    AgentVersionsStore,
+    RuntimeSlots,
+    RuntimeSlotsStore,
+)
 from app.services.auth import get_caller_sub  # noqa: E402
+from app.services.trigger_runtime import (  # noqa: E402
+    MAX_TRIGGER_EVENT_BYTES,
+    ProvisionedTriggerResources,
+)
 from app.services.trigger_store import (  # noqa: E402
     STATUS_DISABLED,
     STATUS_REGISTERED,
@@ -85,6 +101,86 @@ def store(aws: None) -> TriggerStore:
     return TriggerStore(table_name=TABLE_NAME, region="us-east-1")
 
 
+@pytest.fixture
+def claim_stores(aws: None, monkeypatch: pytest.MonkeyPatch) -> tuple[AgentVersionsStore, RuntimeSlotsStore]:
+    """Real AgentVersions + RuntimeSlots tables, wired into the singletons the router and the store use.
+
+    F-81f: a create is a transaction conditioned on the slot and version rows, so a create test
+    needs those rows to exist in a real table -- a MagicMock store can satisfy the router's read
+    but not a ``ConditionCheck``.
+    """
+    ddb = boto3.client("dynamodb", region_name="us-east-1")
+    ddb.create_table(
+        TableName="AgentVersions",
+        KeySchema=[
+            {"AttributeName": "runtime_name", "KeyType": "HASH"},
+            {"AttributeName": "version_id", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "runtime_name", "AttributeType": "S"},
+            {"AttributeName": "version_id", "AttributeType": "S"},
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    ddb.create_table(
+        TableName="RuntimeSlots",
+        KeySchema=[{"AttributeName": "runtime_name", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "runtime_name", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    vstore = AgentVersionsStore(table_name="AgentVersions", region="us-east-1")
+    sstore = RuntimeSlotsStore(table_name="RuntimeSlots", region="us-east-1")
+    monkeypatch.setattr(avs, "_versions_store", vstore, raising=False)
+    monkeypatch.setattr(avs, "_slots_store", sstore, raising=False)
+    return vstore, sstore
+
+
+@pytest.fixture(autouse=True)
+def provision_trigger_resources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep registry/router tests focused; trigger_runtime has AWS contract tests."""
+
+    def provision(trigger):
+        if trigger.type == "webhook":
+            return ProvisionedTriggerResources(
+                webhook_path=f"/hooks/{trigger.runtime_name}/{trigger.trigger_id}",
+            )
+        return ProvisionedTriggerResources(
+            eventbridge_rule_arn=(f"arn:aws:events:us-east-1:123456789012:rule/agentcore-trigger-{trigger.trigger_id}"),
+        )
+
+    monkeypatch.setattr("app.routers.triggers.provision_trigger", provision)
+
+
+@pytest.fixture(autouse=True)
+def _http_deployment_authority(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wire the strongly-consistent deployment read the create path now consults.
+
+    Before any side effect, ``create_trigger`` reads the protocol off the same
+    owner-checked deployment row that authorized the claim and fails CLOSED
+    (503) if it cannot -- an unreadable/missing row is a real outage, not an
+    eventual-consistency miss. Every router create test here targets the HTTP
+    runtime ``_seed_slot`` describes (``d1`` / ALICE / ``alice_bot_...``), so
+    return that authoritative HTTP record. Ownership-refused (Bug-122) callers
+    still resolve 404 before this read and never consult it. Home-account: clear
+    the account identifiers so the ARN's account is not rejected as foreign.
+    """
+    _slots, version = _seed_slot(ALICE)
+    deployment = DeploymentState(
+        deployment_id=version.deployment_id,
+        user_id=ALICE,
+        status=DeploymentStatusEnum.SUCCEEDED,
+        started_at=datetime.now(timezone.utc),
+        runtime_id=version.runtime_id,
+        runtime_arn=version.runtime_arn,
+        version_id=version.version_id,
+    )
+    dstore = MagicMock()
+    dstore.get.return_value = deployment
+    monkeypatch.setattr(_rtc, "_deployment_store", dstore, raising=False)
+    monkeypatch.delenv("STATE_MACHINE_ARN", raising=False)
+    monkeypatch.delenv("AWS_ACCOUNT_ID", raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Store-level tests
 # ---------------------------------------------------------------------------
@@ -106,7 +202,7 @@ def test_new_trigger_ids_are_sortable():
 
 
 def test_create_get_roundtrip_preserves_fields(store: TriggerStore):
-    trig = store.create_trigger(
+    trig = store.put_trigger_unfenced(
         runtime_name="alice_bot",
         owner_sub="alice",
         type=TYPE_CRON,
@@ -119,9 +215,9 @@ def test_create_get_roundtrip_preserves_fields(store: TriggerStore):
     assert fetched.owner_sub == "alice"
     assert fetched.type == TYPE_CRON
     assert fetched.schedule == "cron(0 12 * * ? *)"
-    # Bug 139: new triggers are REGISTERED (recorded but not yet provisioned/firing),
-    # not ACTIVE — the platform doesn't create the EventBridge/Scheduler resource yet,
-    # so claiming "active" would mislead the user.
+    # The unfenced repair/seeding helper defaults legacy rows to REGISTERED. The
+    # HTTP create path explicitly uses PROVISIONING and completes to ACTIVE only
+    # after its AWS resource or webhook path has been attached.
     assert fetched.status == STATUS_REGISTERED
     assert fetched.target_runtime_arn.endswith("runtime/alice")
     assert fetched.created_at > 0
@@ -130,7 +226,7 @@ def test_create_get_roundtrip_preserves_fields(store: TriggerStore):
 
 def test_create_preserves_pattern_dict(store: TriggerStore):
     pattern = {"source": ["aws.s3"], "detail": {"bucket": {"name": ["my-bucket"]}}}
-    trig = store.create_trigger(
+    trig = store.put_trigger_unfenced(
         runtime_name="alice_bot",
         owner_sub="alice",
         type="s3",
@@ -147,7 +243,7 @@ def test_list_for_runtime_newest_first(store: TriggerStore):
 
     ids = []
     for _ in range(3):
-        t = store.create_trigger(
+        t = store.put_trigger_unfenced(
             runtime_name="alice_bot",
             owner_sub="alice",
             type=TYPE_CRON,
@@ -161,21 +257,21 @@ def test_list_for_runtime_newest_first(store: TriggerStore):
 
 
 def test_list_for_owner_via_gsi_cross_runtime_and_isolated(store: TriggerStore):
-    store.create_trigger(
+    store.put_trigger_unfenced(
         runtime_name="alice_bot",
         owner_sub="alice",
         type=TYPE_CRON,
         target_runtime_arn="arn:rt:alice1",
         schedule="cron(0 12 * * ? *)",
     )
-    store.create_trigger(
+    store.put_trigger_unfenced(
         runtime_name="alice_other",
         owner_sub="alice",
         type=TYPE_CRON,
         target_runtime_arn="arn:rt:alice2",
         schedule="cron(0 6 * * ? *)",
     )
-    store.create_trigger(
+    store.put_trigger_unfenced(
         runtime_name="bob_bot",
         owner_sub="bob",
         type=TYPE_CRON,
@@ -193,7 +289,7 @@ def test_list_for_owner_via_gsi_cross_runtime_and_isolated(store: TriggerStore):
 
 
 def test_update_status_flips_and_stamps_handles(store: TriggerStore):
-    trig = store.create_trigger(
+    trig = store.put_trigger_unfenced(
         runtime_name="alice_bot",
         owner_sub="alice",
         type=TYPE_CRON,
@@ -205,10 +301,14 @@ def test_update_status_flips_and_stamps_handles(store: TriggerStore):
         trigger_id=trig.trigger_id,
         status=STATUS_DISABLED,
         scheduler_name="sched-123",
+        function_url="https://example.lambda-url.us-east-1.on.aws/",
+        function_name="AgentCoreTrigger-alice",
     )
     assert updated is not None
     assert updated.status == STATUS_DISABLED
     assert updated.scheduler_name == "sched-123"
+    assert updated.function_url == "https://example.lambda-url.us-east-1.on.aws/"
+    assert updated.function_name == "AgentCoreTrigger-alice"
 
 
 def test_update_status_missing_row_returns_none(store: TriggerStore):
@@ -223,7 +323,7 @@ def test_update_status_missing_row_returns_none(store: TriggerStore):
 
 
 def test_delete_is_idempotent(store: TriggerStore):
-    trig = store.create_trigger(
+    trig = store.put_trigger_unfenced(
         runtime_name="alice_bot",
         owner_sub="alice",
         type=TYPE_CRON,
@@ -254,6 +354,14 @@ def _make_client(caller_sub: str) -> TestClient:
     return TestClient(app)
 
 
+def _make_webhook_client() -> TestClient:
+    from app.routers.triggers import webhook_router
+
+    app = FastAPI()
+    app.include_router(webhook_router)
+    return TestClient(app)
+
+
 def _seed_slot(owner_sub: str, runtime_name: str = "alice_bot"):
     """Return (slots_obj, version_obj) for a production slot owned by owner_sub."""
     slots = RuntimeSlots(
@@ -268,22 +376,20 @@ def _seed_slot(owner_sub: str, runtime_name: str = "alice_bot"):
         created_at="2026-05-28T00:00:00+00:00",
         deployment_id="d1",
         agentcore_runtime_name=f"{runtime_name}_abcd1234",
-        runtime_id="rt-abcd1234",
-        runtime_arn=f"arn:aws:bedrock-agentcore:us-east-1:1:runtime/{runtime_name}",
+        runtime_id=f"{runtime_name}_abcd1234-XyZ1234567",
+        runtime_arn=(f"arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/{runtime_name}_abcd1234-XyZ1234567"),
+        status="succeeded",
     )
     return slots, version
 
 
-def test_create_stamps_owner_and_server_derived_arn(store: TriggerStore):
+def test_create_stamps_owner_and_server_derived_arn(store: TriggerStore, claim_stores):
+    vstore, sstore = claim_stores
     slots, version = _seed_slot(ALICE)
+    vstore.put(version)
+    sstore.upsert(slots)
     client = _make_client(ALICE)
-    with (
-        patch("app.routers.triggers.get_slots_store") as slots_mock,
-        patch("app.routers.triggers.get_versions_store") as versions_mock,
-        patch("app.routers.triggers.get_trigger_store", return_value=store),
-    ):
-        slots_mock.return_value.get.return_value = slots
-        versions_mock.return_value.get.return_value = version
+    with patch("app.routers.triggers.get_trigger_store", return_value=store):
         resp = client.post(
             "/api/runtimes/alice_bot/triggers",
             json={
@@ -296,7 +402,9 @@ def test_create_stamps_owner_and_server_derived_arn(store: TriggerStore):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     # Server derived the ARN from the owned version; the body value is ignored.
-    assert body["target_runtime_arn"] == ("arn:aws:bedrock-agentcore:us-east-1:1:runtime/alice_bot")
+    assert body["target_runtime_arn"] == (
+        "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/alice_bot_abcd1234-XyZ1234567"
+    )
     assert "evil" not in body["target_runtime_arn"]
     # owner_sub is stamped on the persisted row.
     stored = store.get("alice_bot", body["trigger_id"])
@@ -340,14 +448,14 @@ def test_create_404_when_no_slot(store: TriggerStore):
 
 def test_list_only_returns_callers_triggers(store: TriggerStore):
     # Seed one trigger for alice and one for bob on the same runtime_name row.
-    store.create_trigger(
+    store.put_trigger_unfenced(
         runtime_name="alice_bot",
         owner_sub=ALICE,
         type=TYPE_CRON,
         target_runtime_arn="arn:rt:alice",
         schedule="cron(0 12 * * ? *)",
     )
-    store.create_trigger(
+    store.put_trigger_unfenced(
         runtime_name="alice_bot",
         owner_sub=BOB,  # a (hypothetical) stray cross-tenant row
         type=TYPE_CRON,
@@ -371,7 +479,7 @@ def test_list_only_returns_callers_triggers(store: TriggerStore):
 
 
 def test_delete_own_trigger_succeeds(store: TriggerStore):
-    trig = store.create_trigger(
+    trig = store.put_trigger_unfenced(
         runtime_name="alice_bot",
         owner_sub=ALICE,
         type=TYPE_CRON,
@@ -392,10 +500,81 @@ def test_delete_own_trigger_succeeds(store: TriggerStore):
     assert store.get("alice_bot", trig.trigger_id) is None
 
 
+def test_delete_webhook_removes_owned_secret_before_row(store: TriggerStore):
+    secret_arn = "arn:aws:secretsmanager:us-east-1:111111111111:secret:agentcore-trigger/alice-sub-abc"
+    trig = store.put_trigger_unfenced(
+        runtime_name="alice_bot",
+        owner_sub=ALICE,
+        type="webhook",
+        target_runtime_arn="arn:rt:alice",
+        webhook_secret_ref=secret_arn,
+    )
+    slots, version = _seed_slot(ALICE)
+    client = _make_client(ALICE)
+    sm = MagicMock()
+    sm.describe_secret.return_value = {
+        "Name": "agentcore-trigger/alice-sub-abc",
+        "Tags": [
+            {"Key": "ManagedBy", "Value": "agentcore-flows"},
+            {"Key": "Purpose", "Value": "trigger-webhook-hmac"},
+            {"Key": "owner_sub", "Value": ALICE},
+        ],
+    }
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
+        patch("app.services.trigger_store.boto3.client", return_value=sm),
+    ):
+        slots_mock.return_value.get.return_value = slots
+        versions_mock.return_value.get.return_value = version
+        resp = client.delete(f"/api/runtimes/alice_bot/triggers/{trig.trigger_id}")
+
+    assert resp.status_code == 200, resp.text
+    sm.delete_secret.assert_called_once_with(
+        SecretId=secret_arn,
+        ForceDeleteWithoutRecovery=True,
+    )
+    assert store.get("alice_bot", trig.trigger_id) is None
+
+
+def test_delete_webhook_refuses_unowned_secret_and_preserves_retry_row(
+    store: TriggerStore,
+):
+    secret_arn = "arn:aws:secretsmanager:us-east-1:111111111111:secret:customer-owned/not-a-trigger"
+    trig = store.put_trigger_unfenced(
+        runtime_name="alice_bot",
+        owner_sub=ALICE,
+        type="webhook",
+        target_runtime_arn="arn:rt:alice",
+        webhook_secret_ref=secret_arn,
+    )
+    slots, version = _seed_slot(ALICE)
+    client = _make_client(ALICE)
+    sm = MagicMock()
+    sm.describe_secret.return_value = {
+        "Name": "customer-owned/not-a-trigger",
+        "Tags": [{"Key": "owner_sub", "Value": ALICE}],
+    }
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
+        patch("app.services.trigger_store.boto3.client", return_value=sm),
+    ):
+        slots_mock.return_value.get.return_value = slots
+        versions_mock.return_value.get.return_value = version
+        resp = client.delete(f"/api/runtimes/alice_bot/triggers/{trig.trigger_id}")
+
+    assert resp.status_code == 409, resp.text
+    sm.delete_secret.assert_not_called()
+    assert store.get("alice_bot", trig.trigger_id) is not None
+
+
 def test_delete_cross_tenant_trigger_returns_404(store: TriggerStore):
     """A trigger row owned by another sub -> 404 (existence-non-disclosure)."""
     # Alice owns the slot, but the trigger row is (somehow) owned by bob.
-    trig = store.create_trigger(
+    trig = store.put_trigger_unfenced(
         runtime_name="alice_bot",
         owner_sub=BOB,
         type=TYPE_CRON,
@@ -474,6 +653,43 @@ def test_oversized_pattern_rejected(store: TriggerStore):
             json={"type": "eventbridge", "pattern": big_pattern},
         )
     assert resp.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        None,
+        "aws.s3",
+        [],
+        ["custom.source"],
+        ["aws.s3", "custom.source"],
+        ["aws.s3", "aws.s3"],
+    ],
+)
+def test_s3_pattern_requires_exactly_one_aws_s3_source(
+    store: TriggerStore,
+    source,
+):
+    slots, version = _seed_slot(ALICE)
+    client = _make_client(ALICE)
+    pattern = {"detail": {"bucket": {"name": ["orders"]}}}
+    if source is not None:
+        pattern["source"] = source
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
+    ):
+        slots_mock.return_value.get.return_value = slots
+        versions_mock.return_value.get.return_value = version
+        response = client.post(
+            "/api/runtimes/alice_bot/triggers",
+            json={"type": "s3", "pattern": pattern},
+        )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == ('S3 trigger patterns must set source to ["aws.s3"]')
+    assert store.list_for_runtime("alice_bot") == []
 
 
 def test_cron_missing_schedule_rejected(store: TriggerStore):
@@ -560,18 +776,17 @@ def test_webhook_out_url_private_dns_rejected(store: TriggerStore):
     assert store.list_for_runtime("alice_bot") == []
 
 
-def test_webhook_out_url_valid_public_accepted(store: TriggerStore):
+def test_webhook_out_url_valid_public_accepted(store: TriggerStore, claim_stores):
     """A public host that resolves to a public IP is accepted and stored."""
+    vstore, sstore = claim_stores
     slots, version = _seed_slot(ALICE)
+    vstore.put(version)
+    sstore.upsert(slots)
     client = _make_client(ALICE)
     with (
-        patch("app.routers.triggers.get_slots_store") as slots_mock,
-        patch("app.routers.triggers.get_versions_store") as versions_mock,
         patch("app.services.gateway_deployer.socket.getaddrinfo") as gai_mock,
         patch("app.routers.triggers.get_trigger_store", return_value=store),
     ):
-        slots_mock.return_value.get.return_value = slots
-        versions_mock.return_value.get.return_value = version
         gai_mock.return_value = [
             (2, 1, 6, "", ("93.184.216.34", 443)),  # public (example.com)
         ]
@@ -588,18 +803,17 @@ def test_webhook_out_url_valid_public_accepted(store: TriggerStore):
     assert body["webhook_out_url"] == "https://hooks.example.com/incoming"
 
 
-def test_webhook_type_creates_owner_scoped_secret(store: TriggerStore):
+def test_webhook_type_creates_owner_scoped_secret(store: TriggerStore, claim_stores):
     """A webhook trigger mints a Secrets Manager secret; only the ARN is stored."""
+    vstore, sstore = claim_stores
     slots, version = _seed_slot(ALICE)
+    vstore.put(version)
+    sstore.upsert(slots)
     client = _make_client(ALICE)
     with (
-        patch("app.routers.triggers.get_slots_store") as slots_mock,
-        patch("app.routers.triggers.get_versions_store") as versions_mock,
         patch("app.routers.triggers.boto3.client") as boto_mock,
         patch("app.routers.triggers.get_trigger_store", return_value=store),
     ):
-        slots_mock.return_value.get.return_value = slots
-        versions_mock.return_value.get.return_value = version
         sm = boto_mock.return_value
         sm.create_secret.return_value = {
             "ARN": "arn:aws:secretsmanager:us-east-1:1:secret:agentcore-trigger/alice-sub-abc"
@@ -610,12 +824,130 @@ def test_webhook_type_creates_owner_scoped_secret(store: TriggerStore):
         )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["webhook_secret_ref"].startswith("arn:aws:secretsmanager")
     # The owner-scoped name + owner_sub tag is used.
     _, kwargs = sm.create_secret.call_args
     assert kwargs["Name"].startswith("agentcore-trigger/")
     assert {"Key": "owner_sub", "Value": ALICE} in kwargs["Tags"]
+    assert body["webhook_signing_secret"] == kwargs["SecretString"]
+    assert body["webhook_path"].startswith("/hooks/alice_bot/")
+    assert "webhook_secret_ref" not in body
+    assert resp.headers["cache-control"] == "no-store"
+    assert resp.headers["pragma"] == "no-cache"
     # The raw secret value never lands in DDB.
     stored = store.get("alice_bot", body["trigger_id"])
     assert stored is not None
     assert stored.webhook_secret_ref.startswith("arn:aws:secretsmanager")
+
+
+@pytest.mark.parametrize("content_length", ["not-a-number", "-1"])
+def test_webhook_rejects_an_invalid_content_length_before_store_access(
+    content_length: str,
+):
+    client = _make_webhook_client()
+    with patch("app.routers.triggers.get_trigger_store") as store_mock:
+        response = client.post(
+            "/hooks/alice_bot/trigger-1",
+            content=b"{}",
+            headers={"content-length": content_length},
+        )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == "Invalid Content-Length header"
+    store_mock.assert_not_called()
+
+
+def test_webhook_rejects_a_declared_oversized_body_before_store_access():
+    client = _make_webhook_client()
+    with patch("app.routers.triggers.get_trigger_store") as store_mock:
+        response = client.post(
+            "/hooks/alice_bot/trigger-1",
+            content=b"{}",
+            headers={"content-length": str(MAX_TRIGGER_EVENT_BYTES + 1)},
+        )
+
+    assert response.status_code == 413, response.text
+    assert response.json()["detail"] == "Webhook payload exceeds the size limit"
+    store_mock.assert_not_called()
+
+
+def test_webhook_rejects_actual_oversized_body_when_length_is_understated():
+    client = _make_webhook_client()
+    with patch("app.routers.triggers.get_trigger_store") as store_mock:
+        response = client.post(
+            "/hooks/alice_bot/trigger-1",
+            content=b"x" * (MAX_TRIGGER_EVENT_BYTES + 1),
+            headers={"content-length": "1"},
+        )
+
+    assert response.status_code == 413, response.text
+    assert response.json()["detail"] == "Webhook payload exceeds the size limit"
+    store_mock.assert_not_called()
+
+
+def test_invalid_webhook_url_is_rejected_before_a_secret_is_minted(
+    store: TriggerStore,
+):
+    slots, version = _seed_slot(ALICE)
+    client = _make_client(ALICE)
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.routers.triggers.boto3.client") as boto_mock,
+        patch("app.routers.triggers.get_trigger_store", return_value=store),
+    ):
+        slots_mock.return_value.get.return_value = slots
+        versions_mock.return_value.get.return_value = version
+        resp = client.post(
+            "/api/runtimes/alice_bot/triggers",
+            json={
+                "type": "webhook",
+                "webhook_out_url": "http://127.0.0.1/not-allowed",
+            },
+        )
+
+    assert resp.status_code == 400, resp.text
+    boto_mock.assert_not_called()
+    assert store.list_for_runtime("alice_bot") == []
+
+
+def test_webhook_create_compensates_secret_when_trigger_row_write_fails(
+    store: TriggerStore,
+):
+    slots, version = _seed_slot(ALICE)
+    client = _make_client(ALICE)
+    failing_store = MagicMock()
+    failing_store.create_trigger.side_effect = RuntimeError("DynamoDB unavailable")
+    secret_arn = "arn:aws:secretsmanager:us-east-1:111111111111:secret:agentcore-trigger/alice-sub-pending"
+    sm = MagicMock()
+    sm.create_secret.return_value = {"ARN": secret_arn}
+    sm.describe_secret.return_value = {
+        "Name": "agentcore-trigger/alice-sub-pending",
+        "Tags": [
+            {"Key": "ManagedBy", "Value": "agentcore-flows"},
+            {"Key": "Purpose", "Value": "trigger-webhook-hmac"},
+            {"Key": "owner_sub", "Value": ALICE},
+        ],
+    }
+    with (
+        patch("app.routers.triggers.get_slots_store") as slots_mock,
+        patch("app.routers.triggers.get_versions_store") as versions_mock,
+        patch("app.routers.triggers.boto3.client", return_value=sm),
+        patch("app.services.trigger_store.boto3.client", return_value=sm),
+        patch(
+            "app.routers.triggers.get_trigger_store",
+            return_value=failing_store,
+        ),
+    ):
+        slots_mock.return_value.get.return_value = slots
+        versions_mock.return_value.get.return_value = version
+        resp = client.post(
+            "/api/runtimes/alice_bot/triggers",
+            json={"type": "webhook"},
+        )
+
+    assert resp.status_code == 500, resp.text
+    assert resp.json()["detail"] == "Could not register trigger"
+    sm.delete_secret.assert_called_once_with(
+        SecretId=secret_arn,
+        ForceDeleteWithoutRecovery=True,
+    )

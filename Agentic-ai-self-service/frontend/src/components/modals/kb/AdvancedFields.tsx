@@ -127,7 +127,7 @@ export function TransformationFields({ config, updateField, errors }: AdvancedFi
         value={config.transformationLambdaArn || ''}
         onChange={(v) => updateField('transformationLambdaArn', v)}
         placeholder="arn:aws:lambda:us-east-1:123456789012:function:my-transform"
-        helpText="ARN of the Lambda function for custom transformation"
+        helpText="Customer Lambda must carry AgentCoreFlowsAccess=allow."
         error={getError(errors, 'transformationLambdaArn')}
       />
       {config.transformationLambdaArn && (
@@ -138,7 +138,7 @@ export function TransformationFields({ config, updateField, errors }: AdvancedFi
           onChange={(v) => updateField('transformationS3Uri', v)}
           placeholder="s3://my-bucket/intermediate/"
           required
-          helpText="S3 location for intermediate storage during transformation"
+          helpText="Customer bucket must carry AgentCoreFlowsAccess=allow."
           error={getError(errors, 'transformationS3Uri')}
         />
       )}
@@ -166,7 +166,7 @@ export function AdvancedSettingsFields({ config, updateField }: AdvancedFieldPro
         value={config.kmsKeyArn || ''}
         onChange={(v) => updateField('kmsKeyArn', v)}
         placeholder="arn:aws:kms:us-east-1:123456789012:key/12345678-..."
-        helpText="Optional: KMS key for transient data encryption. Leave empty to use AWS-managed key."
+        helpText="Optional. Customer keys require AgentCoreFlowsAccess=allow; leave empty to use an AWS-managed key."
       />
     </>
   );

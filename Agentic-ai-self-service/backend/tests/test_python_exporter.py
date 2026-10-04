@@ -8,6 +8,9 @@ Run:
 """
 
 import io
+import json
+import os
+import subprocess
 import zipfile
 
 from app.models.deployment_models import DeployRequest, RuntimeConfig
@@ -52,6 +55,7 @@ _EXPECTED_FILES = {
     "README.md",
     ".env.example",
     "run.sh",
+    "run-docker.sh",
 }
 
 
@@ -66,7 +70,7 @@ def test_build_python_project_returns_expected_files():
 
     files = build_python_project(req)
 
-    # The gap spec requires at least these five; we also ship run.sh.
+    # The gap spec requires at least these five; we also ship launchers.
     for name in ("agent.py", "requirements.txt", "Dockerfile", "README.md", ".env.example"):
         assert name in files, f"missing {name} in exported project"
     assert set(files.keys()) == _EXPECTED_FILES
@@ -95,7 +99,7 @@ def test_zip_project_contains_prefixed_files():
         names = set(zf.namelist())
 
     prefix = f"{deployment_name}-python"
-    for expected in ("agent.py", "requirements.txt", "Dockerfile", "README.md"):
+    for expected in ("agent.py", "requirements.txt", "Dockerfile", "README.md", "run-docker.sh"):
         assert f"{prefix}/{expected}" in names, f"{expected} not in zip under {prefix}/"
 
 
@@ -108,6 +112,90 @@ def test_zip_project_standalone_matches_build():
         names = set(zf.namelist())
     assert "myname-python/agent.py" in names
     assert all(n.startswith("myname-python/") for n in names)
+
+
+def test_zip_marks_launchers_executable_but_not_source_files():
+    files = build_python_project(_make_deploy_request(_make_runtime_config()))
+    zip_bytes = zip_project(files, "permissions")
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        assert zf.getinfo("permissions-python/run.sh").external_attr >> 16 & 0o111
+        assert zf.getinfo("permissions-python/run-docker.sh").external_attr >> 16 & 0o111
+        assert not zf.getinfo("permissions-python/agent.py").external_attr >> 16 & 0o111
+
+
+def test_docker_launcher_preserves_values_and_does_not_inherit_omitted_host_secrets(tmp_path):
+    marker = tmp_path / "docker-launcher-must-not-execute"
+    dangerous = f"value $(touch${{IFS}}{marker})"
+    files = build_python_project(
+        _make_deploy_request(
+            _make_runtime_config(),
+            gatewayConfig={
+                "gatewayProvider": "agentcore",
+                "gatewayUrl": dangerous,
+            },
+            identityConfig={
+                "provider": "okta",
+                "clientId": dangerous,
+                "clientSecretRef": "oauth/client-ref",
+                "scopes": ["gateway/read"],
+            },
+        )
+    )
+
+    (tmp_path / ".env").write_text(files[".env.example"])
+    launcher = tmp_path / "run-docker.sh"
+    launcher.write_text(files["run-docker.sh"])
+    launcher.chmod(0o755)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import os\n"
+        "import sys\n"
+        'names = ("GATEWAY_URL", "OAUTH_CLIENT_ID", "OAUTH_CLIENT_SECRET_REF", "GUARDRAIL_ID")\n'
+        'record = {"args": sys.argv[1:], "env": {name: os.environ.get(name) for name in names}}\n'
+        'with open(os.environ["DOCKER_ARGS_LOG"], "a", encoding="utf-8") as stream:\n'
+        '    stream.write(json.dumps(record) + "\\n")\n'
+    )
+    docker.chmod(0o755)
+    log_path = tmp_path / "docker-calls.jsonl"
+    process_env = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        "DOCKER_ARGS_LOG": str(log_path),
+        # This optional variable is absent from the generated .env. The launcher
+        # must clear it rather than accidentally forwarding a host secret.
+        "GUARDRAIL_ID": "host-secret-must-not-reach-container",
+    }
+
+    subprocess.run(
+        ["bash", str(launcher), "exported-agent"],
+        cwd=tmp_path,
+        env=process_env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert records[0]["args"] == ["build", "-t", "exported-agent", "."]
+    assert records[1]["args"][:5] == ["run", "--rm", "-p", "8080:8080", "--env"]
+    assert records[1]["args"][-1] == "exported-agent"
+    assert "GATEWAY_URL" in records[1]["args"]
+    assert "OAUTH_CLIENT_ID" in records[1]["args"]
+    assert "OAUTH_CLIENT_SECRET_REF" in records[1]["args"]
+    assert "GUARDRAIL_ID" not in records[1]["args"]
+    assert records[1]["env"]["GATEWAY_URL"] == dangerous
+    assert records[1]["env"]["OAUTH_CLIENT_ID"] == dangerous
+    assert records[1]["env"]["OAUTH_CLIENT_SECRET_REF"] == "oauth/client-ref"
+    assert records[1]["env"]["GUARDRAIL_ID"] is None
+    assert not marker.exists()
+    assert "./run-docker.sh my-agent" in files["README.md"]
+    assert "\ndocker run --rm -p 8080:8080 --env-file" not in files["README.md"]
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +329,7 @@ def test_env_example_non_bedrock_adds_blank_provider_key():
     # Provider key placeholder present and BLANK.
     assert "PROVIDER_API_KEY=" in env
     for line in env.splitlines():
-        if line.startswith("PROVIDER_API_KEY"):
+        if line.startswith("PROVIDER_API_KEY="):
             assert line.strip() == "PROVIDER_API_KEY="
 
 
@@ -259,3 +347,286 @@ def test_env_example_model_id_is_the_configured_id():
     config = _make_runtime_config(model={"modelId": "us.anthropic.claude-sonnet-5"})
     env = build_env_example(config)
     assert "MODEL_ID=us.anthropic.claude-sonnet-5" in env
+
+
+def test_non_bedrock_env_documents_key_reference_and_base_url():
+    key_ref = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:agentcore-provider/example-AbCdEf"
+    config = _make_runtime_config(
+        model={"modelId": "openai/gpt-4o"},
+        modelProvider="litellm",
+        providerApiKeyRef=key_ref,
+        providerBaseUrl="https://models.example.internal/v1",
+    )
+    env = build_env_example(config)
+    assert "PROVIDER_API_KEY=" in env
+    assert f"PROVIDER_API_KEY_SECRET_ARN={key_ref}" in env
+    assert "PROVIDER_BASE_URL=https://models.example.internal/v1" in env
+
+
+def test_prefilled_env_values_cannot_execute_shell_syntax(tmp_path):
+    marker = tmp_path / "should-not-exist"
+    dangerous_url = f"https://models.example/$(touch${{IFS}}{marker})"
+    config = _make_runtime_config(
+        model={"modelId": "openai/gpt-4o"},
+        modelProvider="openai",
+        providerBaseUrl=dangerous_url,
+    )
+    env_path = tmp_path / ".env"
+    env_path.write_text(build_env_example(config))
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -a; source "$1"; printf "%s" "$PROVIDER_BASE_URL"',
+            "bash",
+            str(env_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == dangerous_url
+    assert not marker.exists(), "sourcing the exported .env executed customer-controlled shell syntax"
+
+
+def test_litellm_gateway_is_inferred_and_fully_wired_without_connected_tools():
+    raw_key = "sk-must-never-be-exported"
+    key_ref = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:litellm-key"
+    request = _make_deploy_request(
+        _make_runtime_config(),
+        gatewayConfig={
+            "gatewayProvider": "litellm",
+            "litellmBaseUrl": "https://litellm.example.internal",
+            "litellmServers": ["github"],
+            "litellmApiKey": raw_key,
+            "litellmApiKeyRef": key_ref,
+        },
+    )
+
+    files = build_python_project(request)
+
+    assert "MCPClient" in files["agent.py"]
+    assert "GATEWAY_URL=https://litellm.example.internal/github/mcp" in files[".env.example"]
+    assert "GATEWAY_AUTH_MODE=static_bearer" in files[".env.example"]
+    assert "GATEWAY_MCP_SERVERS=github" in files[".env.example"]
+    assert f"GATEWAY_API_KEY_SECRET_ARN={key_ref}" in files[".env.example"]
+    assert all(raw_key not in content for content in files.values())
+
+
+def test_deployed_litellm_result_shape_keeps_static_bearer_auth():
+    key_ref = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:litellm-key"
+    request = _make_deploy_request(
+        _make_runtime_config(),
+        gatewayConfig={
+            "gateway_url": "https://litellm.example/github/mcp",
+            "client_info": {
+                "provider": "litellm",
+                "api_key_ref": key_ref,
+            },
+        },
+    )
+
+    env = build_python_project(request)[".env.example"]
+
+    assert "GATEWAY_AUTH_MODE=static_bearer" in env
+    assert "GATEWAY_URL=https://litellm.example/github/mcp" in env
+    assert f"GATEWAY_API_KEY_SECRET_ARN={key_ref}" in env
+
+
+def test_agentcore_gateway_export_lists_the_oauth_inputs_it_needs():
+    request = _make_deploy_request(
+        _make_runtime_config(),
+        gatewayConfig={"gatewayProvider": "agentcore", "targetType": "lambda"},
+    )
+    env = build_python_project(request)[".env.example"]
+
+    assert "GATEWAY_URL=" in env
+    assert "GATEWAY_AUTH_MODE=oauth2" in env
+    assert "COGNITO_CLIENT_ID=" in env
+    assert "COGNITO_USER_POOL_ID=" in env
+    assert "COGNITO_TOKEN_ENDPOINT=" in env
+    assert "OAUTH_CLIENT_SECRET_REF=" in env
+
+
+def test_component_configs_are_not_silently_dropped_when_tool_ids_are_omitted():
+    memory = _make_deploy_request(
+        _make_runtime_config(),
+        memoryConfig={"name": "existing-memory", "memoryId": "mem-0123456789"},
+    )
+    memory_files = build_python_project(memory)
+    assert "MemoryClient" in memory_files["agent.py"]
+    assert "MEMORY_ID=mem-0123456789" in memory_files[".env.example"]
+
+    knowledge_base = _make_deploy_request(
+        _make_runtime_config(),
+        knowledgeBaseConfig={"kbMode": "existing", "knowledgeBaseId": "KB12345678"},
+    )
+    kb_files = build_python_project(knowledge_base)
+    assert "retrieve_from_kb" in kb_files["agent.py"]
+    assert "KB_ID=KB12345678" in kb_files[".env.example"]
+
+    a2a = _make_deploy_request(
+        _make_runtime_config(),
+        a2aConfig={
+            "capabilities": ["summarize"],
+            "peerAllowlist": ["https://peer.example"],
+        },
+    )
+    a2a_files = build_python_project(a2a)
+    assert '"summarize"' in a2a_files["agent.py"]
+    assert '"https://peer.example"' in a2a_files["agent.py"]
+    assert "A2A_SELF_URL=" in a2a_files[".env.example"]
+
+
+def test_existing_guardrail_external_identity_and_otel_settings_survive_export():
+    raw_header = "Authorization=Bearer must-never-be-exported"
+    oauth_secret_ref = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:oauth/client-AbCdEf"
+    otel_secret_ref = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:agentcore-otel/team-AbCdEf"
+    request = _make_deploy_request(
+        _make_runtime_config(),
+        gatewayConfig={"gatewayProvider": "agentcore", "targetType": "lambda"},
+        identityConfig={
+            "provider": "okta",
+            "clientId": "client-for-export",
+            "clientSecretRef": oauth_secret_ref,
+            "discoveryUrl": "https://idp.example/.well-known/openid-configuration",
+            "scopes": ["gateway/read", "gateway/write"],
+        },
+        guardrailsConfig={
+            "mode": "existing",
+            "guardrailId": "gr-0123456789",
+            "guardrailVersion": "7",
+        },
+        observabilityConfig={
+            "enabled": True,
+            "otlpEndpoint": "https://otel.example/v1/traces",
+            "otlpProtocol": "http/protobuf",
+            "serviceName": "support agent",
+            "sampleRate": 0.25,
+            "resourceAttributes": {"environment": "test", "team": "agent platform"},
+            "authHeaderSecretArn": otel_secret_ref,
+            "extraHeaders": {"Authorization": "Bearer must-never-be-exported"},
+        },
+    )
+
+    files = build_python_project(request)
+    env = files[".env.example"]
+
+    assert "GUARDRAIL_ID=gr-0123456789" in env
+    assert "GUARDRAIL_VERSION=7" in env
+    assert "COGNITO_CLIENT_ID=" in env
+    assert "OAUTH_CLIENT_ID=client-for-export" in env
+    assert f"OAUTH_CLIENT_SECRET_REF={oauth_secret_ref}" in env
+    assert "OAUTH_SCOPE='gateway/read gateway/write'" in env
+    assert "OAUTH_TOKEN_ENDPOINT=" in env
+    assert "https://idp.example/.well-known/openid-configuration" not in env
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT=https://otel.example/v1/traces" in env
+    assert "OTEL_SERVICE_NAME='support agent'" in env
+    assert "OTEL_TRACES_SAMPLER_ARG=0.25" in env
+    assert "OTEL_RESOURCE_ATTRIBUTES='environment=test,team=agent platform'" in env
+    assert f"OTEL_AUTH_SECRET_ARN={otel_secret_ref}" in env
+    assert all(raw_header not in content for content in files.values())
+    assert "OTEL_EXPORTER_OTLP_HEADERS=" in env
+    assert "OTEL_EXPORTER_OTLP_EXTRA_HEADERS=" in env
+
+
+def test_create_new_component_names_are_not_misrepresented_as_existing_ids():
+    request = _make_deploy_request(
+        _make_runtime_config(),
+        memoryConfig={"name": "memory-to-create"},
+        knowledgeBaseConfig={
+            "kbMode": "create_new",
+            "kbName": "kb-to-create",
+            "dataSourceType": "s3",
+        },
+        guardrailsConfig={
+            "mode": "create_new",
+            "name": "guardrail-to-create",
+            "guardrailId": "must-not-be-used",
+        },
+    )
+
+    env = build_python_project(request)[".env.example"]
+
+    assert "\nMEMORY_ID=\n" in env
+    assert "\nKB_ID=\n" in env
+    assert "\nGUARDRAIL_ID=\n" in env
+    assert "\nGUARDRAIL_VERSION=\n" in env
+    assert "memory-to-create" not in env
+    assert "kb-to-create" not in env
+    assert "must-not-be-used" not in env
+
+
+def test_mcp_server_target_implies_gateway_but_readme_says_it_is_not_provisioned():
+    request = _make_deploy_request(
+        _make_runtime_config(),
+        mcpServerConfig={
+            "name": "support-mcp",
+            "tools": ["order_status"],
+        },
+    )
+
+    files = build_python_project(request)
+
+    assert "MCPClient" in files["agent.py"]
+    assert "GATEWAY_URL=" in files[".env.example"]
+    assert "separate\nMCP-server runtime" in files["README.md"]
+
+
+def test_every_new_prefilled_env_value_is_shell_quoted(tmp_path):
+    marker = tmp_path / "must-not-exist"
+    dangerous = f"value $(touch${{IFS}}{marker})"
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        build_env_example(
+            _make_runtime_config(enableOtel=True),
+            connected_tools=["gateway", "memory", "knowledge_base", "guardrails", "observability"],
+            gateway_config={
+                "gatewayProvider": "agentcore",
+                "gatewayUrl": dangerous,
+            },
+            identity_config={
+                "provider": "okta",
+                "clientId": dangerous,
+                "clientSecretRef": dangerous,
+                "scopes": [dangerous],
+            },
+            memory_config={"memoryId": dangerous},
+            knowledge_base_config={"kbMode": "existing", "knowledgeBaseId": dangerous},
+            guardrails_config={
+                "mode": "existing",
+                "guardrailId": dangerous,
+                "guardrailVersion": dangerous,
+            },
+            observability_config={
+                "otlpEndpoint": dangerous,
+                "serviceName": dangerous,
+                "resourceAttributes": {"unsafe": dangerous},
+                "authHeaderSecretArn": dangerous,
+            },
+        )
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'set -a; source "$1"; '
+                'printf "%s\\n" "$GATEWAY_URL" "$OAUTH_CLIENT_ID" '
+                '"$OAUTH_CLIENT_SECRET_REF" "$OAUTH_SCOPE" "$MEMORY_ID" "$KB_ID" '
+                '"$GUARDRAIL_ID" "$GUARDRAIL_VERSION" "$OTEL_EXPORTER_OTLP_ENDPOINT" '
+                '"$OTEL_SERVICE_NAME" "$OTEL_AUTH_SECRET_ARN"'
+            ),
+            "bash",
+            str(env_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.splitlines() == [dangerous] * 11
+    assert not marker.exists(), "sourcing the exported .env executed customer-controlled shell syntax"

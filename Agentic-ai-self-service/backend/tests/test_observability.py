@@ -6,8 +6,14 @@ Covers the three paths that must stay in sync (Bug 9 in tasks/lessons.md):
   3) Backward compat with the legacy enable_otel boolean
 """
 
+import json
+import os
+import subprocess
+import sys
+
 import pytest
-from app.services.code_generator import _inject_otel
+from app.models.deployment_models import RuntimeConfig
+from app.services.code_generator import OTEL_BOOTSTRAP, _inject_otel, generate_agent_code
 from app.services.observability import (
     _validate_user_otel_secret_arn,
     build_otel_env_vars,
@@ -152,6 +158,34 @@ def test_langfuse_default_without_credentials_enables_native_observability():
     assert env2 == native
 
 
+def test_no_endpoint_env_and_codegen_form_a_complete_usage_path():
+    """Pin the two Bug 194 halves together.
+
+    The env-only fix previously passed while generated code returned before
+    initializing telemetry. A no-endpoint deployment must now carry both the
+    native posture variables and the usage-log exporter.
+    """
+    env = build_otel_env_vars(
+        {"enabled": True, "provider": "custom"},
+        runtime_name="agent",
+    )
+    config = RuntimeConfig(
+        name="agent",
+        framework="strands_agents",
+        model={"modelId": "us.anthropic.claude-sonnet-5"},
+        system_prompt="Help the user.",
+        deployment_type="direct_code_deploy",
+        python_runtime="PYTHON_3_12",
+    )
+    generated = generate_agent_code(config, observability_enabled=True)
+
+    assert env["AGENT_OBSERVABILITY_ENABLED"] == "true"
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in env
+    assert "class _UsageLogExporter" in generated
+    assert "AGENTCORE_USAGE" in generated
+    assert "if not endpoint:\n        return" not in generated
+
+
 def test_langfuse_default_with_secret_uses_default_endpoint():
     """When the caller supplies credentials for langfuse, the provider default
     endpoint IS usable, so we fall back to it (no explicit endpoint needed)."""
@@ -200,9 +234,131 @@ if __name__ == "__main__":
     # Bootstrap inserted right after app = BedrockAgentCoreApp()
     assert "_otel_bootstrap()" in out
     assert "OTEL_AUTH_SECRET_ARN" in out
+    assert "AGENTCORE_USAGE" in out
     # invoke wrapped so spans flush before idle stop
     assert "_otel_invoke_wrap" in out
     assert "_otel_force_flush()" in out
+
+
+def test_no_endpoint_bootstrap_emits_allowlisted_usage_without_sensitive_span_data():
+    """Execute the generated bootstrap in a fresh interpreter.
+
+    This is the exact Bug 194 shape: observability is enabled but there is no
+    external OTLP endpoint. A real chat span must still produce one usage
+    record in runtime logs, while the parent/aggregate span and sensitive
+    attributes remain absent.
+    """
+    script = (
+        "import logging\n"
+        "logging.basicConfig(level=logging.WARNING, format='%(message)s')\n"
+        + OTEL_BOOTSTRAP
+        + """
+from opentelemetry import trace
+from strands.telemetry.tracer import get_tracer
+
+tracer = trace.get_tracer("agentcore-usage-regression")
+with tracer.start_as_current_span("aggregate") as span:
+    span.set_attribute("gen_ai.operation.name", "invoke_agent")
+    span.set_attribute("gen_ai.request.model", "must-not-be-counted")
+    span.set_attribute("gen_ai.usage.input_tokens", 999)
+    span.set_attribute("gen_ai.usage.output_tokens", 999)
+
+strands_tracer = get_tracer()
+model_span = strands_tracer.start_model_invoke_span(
+    messages=[
+        {
+            "role": "user",
+            "content": [{"text": "PROMPT-MUST-NOT-LEAK"}],
+        }
+    ],
+    model_id="anthropic.claude-test",
+    authorization="Bearer TOKEN-MUST-NOT-LEAK",
+)
+import inspect as _inspect
+
+_end_kwargs = {
+    "message": {
+        "role": "assistant",
+        "content": [{"text": "RESPONSE-MUST-NOT-LEAK"}],
+    },
+    "usage": {
+        "inputTokens": 123,
+        "outputTokens": 45,
+        "totalTokens": 168,
+        "cacheReadInputTokens": 7,
+    },
+    "stop_reason": "end_turn",
+}
+# strands changed this signature between the version installed for tests and the
+# one the runtime bundle resolves to: 1.56.0 requires `metrics`, 1.9.1 does not
+# accept it. Passing it unconditionally raises TypeError on the older one, so the
+# kwarg is driven by the installed signature. The privacy property under test is
+# the same either way; the only thing version-dependent is how to reach it.
+_end_params = _inspect.signature(strands_tracer.end_model_invoke_span).parameters
+if "metrics" in _end_params:
+    _end_kwargs["metrics"] = {}
+strands_tracer.end_model_invoke_span(model_span, **_end_kwargs)
+
+_otel_force_flush()
+"""
+    )
+    env = os.environ.copy()
+    for key in (
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "OTEL_AUTH_SECRET_ARN",
+    ):
+        env.pop(key, None)
+    env["AGENT_OBSERVABILITY_ENABLED"] = "true"
+    # Cost accounting is not trace sampling. Even a 0% external trace sample
+    # rate must retain every model call in the local usage ledger.
+    env["OTEL_TRACES_SAMPLER"] = "always_off"
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=20,
+    )
+    combined = completed.stdout + completed.stderr
+
+    assert completed.returncode == 0, combined
+    usage_lines = [line for line in combined.splitlines() if "AGENTCORE_USAGE " in line]
+    assert len(usage_lines) == 1, combined
+    record = json.loads(usage_lines[0].split("AGENTCORE_USAGE ", 1)[1])
+    # Asserted as a CONTRACT, not as one dependency version's record shape. This
+    # test previously demanded `cache_write_input_tokens: 0` exactly, which passes
+    # only where strands happens to set that span attribute -- it does on 1.9.1 and
+    # does not on 1.56.0, and the runtime bundle pins neither. The three required
+    # fields are the ones `cost_tracking.summarize_from_logs` actually parses; the
+    # two cache fields are optional by design (see _UsageLogExporter) because an
+    # absent attribute means "not reported", not "zero".
+    assert record["gen_ai.request.model"] == "anthropic.claude-test"
+    assert record["gen_ai.usage.input_tokens"] == 123
+    assert record["gen_ai.usage.output_tokens"] == 45
+    # cache_read is supplied by this test's own usage dict, so it must survive the
+    # exporter on every version; a missing one means the exporter dropped it.
+    assert record["gen_ai.usage.cache_read_input_tokens"] == 7
+    # cache_write is NOT supplied, so its presence is the instrumentation's choice.
+    # Present-and-zero or absent are both correct; any other value is not.
+    assert record.get("gen_ai.usage.cache_write_input_tokens", 0) == 0
+    # The upper bound is the load-bearing half of this assertion: the record must
+    # carry NOTHING beyond these five keys. That is what keeps a future span
+    # attribute carrying a prompt, a response or an auth header out of the usage
+    # log, and it is why this cannot go back to being a loose subset check.
+    assert set(record) <= {
+        "gen_ai.request.model",
+        "gen_ai.usage.input_tokens",
+        "gen_ai.usage.output_tokens",
+        "gen_ai.usage.cache_read_input_tokens",
+        "gen_ai.usage.cache_write_input_tokens",
+    }, record
+    assert "must-not-be-counted" not in combined
+    assert "PROMPT-MUST-NOT-LEAK" not in combined
+    assert "RESPONSE-MUST-NOT-LEAK" not in combined
+    assert "TOKEN-MUST-NOT-LEAK" not in combined
 
 
 def test_inject_otel_resilient_when_no_app_marker():

@@ -53,6 +53,9 @@ def build_api_gateway(
                 "Authorization",
                 "X-Amz-Date",
                 "X-Api-Key",
+                "X-AgentCore-Timestamp",
+                "X-AgentCore-Delivery-Id",
+                "X-AgentCore-Signature",
             ],
             max_age=Duration.minutes(5),
         ),
@@ -138,6 +141,14 @@ def build_api_gateway(
         integration=deployment_integration,
         authorizer=jwt_authorizer,
     )
+    # Read-only, sanitized deployment-target choices for users with agent:write.
+    # Role ARNs and target registration stay admin-only on /api/admin/*.
+    api.add_routes(
+        path="/api/deploy-targets",
+        methods=[apigwv2.HttpMethod.GET],
+        integration=deployment_integration,
+        authorizer=jwt_authorizer,
+    )
     api.add_routes(
         path="/api/test-runtime",
         methods=[apigwv2.HttpMethod.POST],
@@ -146,6 +157,20 @@ def build_api_gateway(
     )
     api.add_routes(
         path="/api/test-runtime-stream",
+        methods=[apigwv2.HttpMethod.POST],
+        integration=deployment_integration,
+        authorizer=jwt_authorizer,
+    )
+    # Standalone MCP-server product explorer — routers/runtime_mcp.py mounts
+    # POST /api/test-mcp-runtime/tools (discover) and POST /api/test-mcp-runtime/call
+    # (invoke a tool) on the deployment Lambda. Both sub-paths are single
+    # segments, so one {proxy+} POST route reaches them. Per Bug 21 the HTTP API
+    # needs this explicit enumeration or API Gateway 404s before the mounted
+    # router is ever reached; the invoke scope is enforced in-router via
+    # require_scopes("invoke") and the InvokeAgentRuntime grant on the deployment
+    # Lambda role (resources=["*"]) already authorizes the MCP data-plane call.
+    api.add_routes(
+        path="/api/test-mcp-runtime/{proxy+}",
         methods=[apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
@@ -174,6 +199,14 @@ def build_api_gateway(
         ],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+    )
+    # Webhook trigger ingress authenticates the exact body with a per-trigger
+    # HMAC, timestamp, and delivery id. It deliberately has no Cognito
+    # authorizer because external webhook senders do not hold platform JWTs.
+    hook_routes = api.add_routes(
+        path="/hooks/{runtime_name}/{trigger_id}",
+        methods=[apigwv2.HttpMethod.POST],
+        integration=deployment_integration,
     )
     api.add_routes(
         path="/api/generate-tool",
@@ -390,6 +423,15 @@ def build_api_gateway(
         integration=workflow_integration,
         authorizer=jwt_authorizer,
     )
+    # Model-provider API keys are accepted once by the workflow control plane,
+    # stored under a tenant-bound agentcore-provider/ source secret, and returned
+    # to the canvas by ARN only.
+    api.add_routes(
+        path="/api/provider-credentials",
+        methods=[apigwv2.HttpMethod.POST],
+        integration=workflow_integration,
+        authorizer=jwt_authorizer,
+    )
 
     # --- Health check route ---
     api.add_routes(
@@ -398,13 +440,25 @@ def build_api_gateway(
         integration=workflow_integration,
     )
 
-    # Add throttling to the default stage to prevent abuse
+    # Add throttling to the default stage to prevent abuse. The per-route settings for the
+    # webhook ingress are keyed by the route's OWN RouteKey and the Stage is given an explicit
+    # DependsOn edge to that CfnRoute: without it CloudFormation creates the Stage and the
+    # route concurrently and API Gateway rejects the Stage with "Unable to find Route by key
+    # POST /hooks/{runtime_name}/{trigger_id} within the provided RouteSettings" (404) -- the
+    # exact CREATE_FAILED that rolled back acfe2e-p0925 on 2026-09-25 (F-G03-007). Pinned by
+    # infra/tests/test_stage_route_settings_depend_on_their_routes.py.
     default_stage = api.default_stage
     if default_stage:
         cfn_stage = default_stage.node.default_child
         if cfn_stage:
             cfn_stage.add_property_override("DefaultRouteSettings.ThrottlingBurstLimit", 50)
             cfn_stage.add_property_override("DefaultRouteSettings.ThrottlingRateLimit", 100)
+            route_settings = {}
+            for route in hook_routes:
+                cfn_route = route.node.default_child
+                route_settings[f"POST {route.path}"] = {"ThrottlingBurstLimit": 10, "ThrottlingRateLimit": 20}
+                cfn_stage.add_dependency(cfn_route)
+            cfn_stage.add_property_override("RouteSettings", route_settings)
 
     # Store state machine ARN in deployment lambda env
     deployment_lambda.add_environment("STATE_MACHINE_ARN", state_machine.state_machine_arn)

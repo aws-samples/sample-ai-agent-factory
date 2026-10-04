@@ -29,11 +29,12 @@ export function useValidation(): void {
 
   // Run validation when nodes or edges change
   useEffect(() => {
-    debouncedValidation.current();
+    const validation = debouncedValidation.current;
+    validation();
 
     // Cleanup on unmount
     return () => {
-      debouncedValidation.current.cancel();
+      validation.cancel();
     };
   }, [nodes, edges]);
 }
@@ -60,6 +61,11 @@ export function useManualValidation(): {
 
   const validateDebounced = useCallback(() => {
     debouncedValidation.current();
+  }, []);
+
+  useEffect(() => {
+    const validation = debouncedValidation.current;
+    return () => validation.cancel();
   }, []);
 
   return { validate, validateDebounced };

@@ -255,12 +255,12 @@ class TestGatewayMCPPreservation:
     def test_customer_support_has_cognito_oauth(self):
         """**Validates: Requirements 3.2**
 
-        _generate_customer_support MUST contain Cognito OAuth token acquisition.
+        The customer-support template MUST contain Cognito OAuth token acquisition.
         """
-        code = code_generator._generate_customer_support(
-            "You are a support agent.",
-            "us.anthropic.claude-sonnet-5",
-            _GATEWAY_CREDS,
+        code = code_generator.generate_agent_code(
+            _make_runtime_config(),
+            gateway_config={"gateway_url": _GATEWAY_CREDS["url"]},
+            template_id="customer-support-assistant",
         )
         assert "def _get_gateway_token():" in code
         assert "grant_type" in code
@@ -387,12 +387,12 @@ class TestSystemPromptEscapingPreservation:
     **Validates: Requirements 3.8**
     """
 
-    def test_escape_triple_quotes_function(self):
+    def test_as_triple_quoted_body_function(self):
         """**Validates: Requirements 3.8**
 
-        _escape_triple_quotes MUST replace triple double-quotes.
+        _as_triple_quoted_body MUST replace triple double-quotes.
         """
-        result = code_generator._escape_triple_quotes('Hello """world"""')
+        result = code_generator._as_triple_quoted_body('Hello """world"""')
         assert '"""' not in result
         assert '\\"\\"\\"' in result
 
@@ -403,7 +403,7 @@ class TestSystemPromptEscapingPreservation:
         """
         special_prompt = "You are an agent. Handle 'quotes' and \\backslashes\\ carefully."
         code = code_generator._generate_default_agent(
-            code_generator._escape_triple_quotes(special_prompt),
+            code_generator._as_triple_quoted_body(special_prompt),
             "us.anthropic.claude-sonnet-5",
             "us-east-1",
         )
@@ -435,7 +435,7 @@ class TestSystemPromptEscapingPreservation:
         For ANY safe system prompt, _generate_default_agent MUST produce
         syntactically valid Python code.
         """
-        escaped = code_generator._escape_triple_quotes(system_prompt)
+        escaped = code_generator._as_triple_quoted_body(system_prompt)
         code = code_generator._generate_default_agent(escaped, "us.anthropic.claude-sonnet-5", "us-east-1")
         try:
             compile(code, "<test>", "exec")
@@ -489,7 +489,7 @@ class TestTemplateRoutingPreservation:
     def test_routes_customer_support(self):
         """**Validates: Requirements 3.5**
 
-        template_id="customer-support-assistant" MUST route to _generate_customer_support.
+        template_id="customer-support-assistant" MUST route to the Strands gateway agent.
         """
         config = _make_runtime_config()
         gateway_config = {

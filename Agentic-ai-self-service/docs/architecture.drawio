@@ -76,7 +76,7 @@
         </mxCell>        <mxCell id="e-apigw-wf" value="/api/workflows/*&#10;/api/flows/*" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#ED7100;strokeWidth=1.2;fontColor=#ED7100;fontSize=9;endArrow=classic;" edge="1" source="apigw" target="wf-lambda" parent="1">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
-        <mxCell id="e-apigw-dep" value="/api/deploy&#10;/api/test-runtime&#10;/api/generate-tool" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#ED7100;strokeWidth=1.2;fontColor=#ED7100;fontSize=9;endArrow=classic;" edge="1" source="apigw" target="dep-lambda" parent="1">
+        <mxCell id="e-apigw-dep" value="/api/deploy&#10;/api/test-runtime&#10;/api/test-mcp-runtime/*&#10;/api/generate-tool" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#ED7100;strokeWidth=1.2;fontColor=#ED7100;fontSize=9;endArrow=classic;" edge="1" source="apigw" target="dep-lambda" parent="1">
           <mxGeometry relative="1" as="geometry"/>
         </mxCell>
 
@@ -374,8 +374,8 @@
           <mxGeometry x="1500" y="1324" width="670" height="18" as="geometry"/>
         </mxCell>
 
-        <!-- 7 Templates label (bottom of providers box) -->
-        <mxCell id="templates-label" value="7 Built-in Templates: Web Search &#8226; Strands+Gateway &#8226; Customer Support Blueprint &#8226; Customer Support Assistant &#8226; MCP Server Runtime &#8226; MCP Server Gateway Target &#8226; Custom" style="text;html=1;fontSize=10;fontColor=#232F3E;align=center;fontStyle=1;" vertex="1" parent="1">
+        <!-- 6 Templates label (bottom of providers box) -->
+        <mxCell id="templates-label" value="6 Built-in Templates: Web Search &#8226; Strands+Gateway &#8226; Customer Support Assistant &#8226; Customer Support Blueprint &#8226; MCP Server Gateway Target &#8226; MCP Server Runtime" style="text;html=1;fontSize=10;fontColor=#232F3E;align=center;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="390" y="1520" width="1790" height="20" as="geometry"/>
         </mxCell>
 

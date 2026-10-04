@@ -134,8 +134,12 @@ teardown_decoys() {
   echo
   echo "-- Removing decoys matching ${suffix} --"
   local item
-  for item in $(aws secretsmanager list-secrets --region "${AWS_REGION}" \
+  for item in $(aws secretsmanager list-secrets --include-planned-deletion --region "${AWS_REGION}" \
     --query "SecretList[?contains(Name, '${suffix}')].ARN" --output text 2>/dev/null); do
+    # cleanup.sh deliberately uses a recoverable seven-day window. Restore the
+    # disposable decoy first so this test's EXIT trap can purge it immediately.
+    aws secretsmanager restore-secret --secret-id "${item}" \
+      --region "${AWS_REGION}" >/dev/null 2>&1 || true
     aws secretsmanager delete-secret --secret-id "${item}" \
       --force-delete-without-recovery --region "${AWS_REGION}" >/dev/null 2>&1 &&
       echo "  removed secret ${item}"
@@ -206,9 +210,16 @@ echo "── Running the real sweep_orphan_resources from cleanup.sh ──"
 source "${SCRIPT_DIR}/cleanup.sh"
 set +e
 sweep_orphan_resources
+SWEEP_RC=$?
 
 echo
 echo "── Assertions ──"
+
+if [[ "${SWEEP_RC}" -eq 0 ]]; then
+  ok "orphan sweep completed without an ownership-read/deletion failure"
+else
+  bad "orphan sweep returned ${SWEEP_RC}; cleanup would have stopped before CDK destroy"
+fi
 
 assert_gone() {
   local kind="$1" id="$2" label="$3"

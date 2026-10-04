@@ -34,9 +34,10 @@ def _deploy_sh() -> str:
 def _embedded_python() -> str:
     """Pull the email-extraction snippet out of deploy.sh so we test what ships."""
     src = _deploy_sh()
-    start = src.index("python3 -c '") + len("python3 -c '")
-    end = src.index("\n' 2>/dev/null || true)\"", start)
-    snippet = src[start:end]
+    fn = src[src.index("preserve_existing_cognito_users() {") :]
+    start = fn.index("-c '") + len("-c '")
+    end = fn.index("\n'", start)
+    snippet = fn[start:end]
     assert "UserPoolId" in snippet, "extraction snippet not found — did deploy.sh change shape?"
     return snippet
 
@@ -44,7 +45,7 @@ def _embedded_python() -> str:
 def _run(template) -> str:
     """Feed a template to the real snippet exactly as `aws ... --output json` would."""
     proc = subprocess.run(
-        [sys.executable, "-c", _embedded_python()],
+        [sys.executable, "-B", "-c", _embedded_python()],
         input=json.dumps(template),
         capture_output=True,
         text=True,
@@ -115,18 +116,23 @@ class TestEmailExtraction:
             "{}",
         ],
     )
-    def test_unparseable_input_exits_quietly(self, payload):
-        """This runs inside `$(...)` under `set -euo pipefail` on a FRESH deploy,
-        where the stack does not exist yet and the aws call prints nothing. It must
-        not raise, or it takes the whole deployment down before it starts."""
+    def test_unparseable_input_fails_closed(self, payload):
+        """P0-A2 (2026-09-25): the parser used to exit 0 silently on anything it could not read, so an AccessDenied,
+        a transient failure or an unparsed template resolved to "no existing users" and the synth could delete every
+        provisioned user. Now: a real template with no provisioners prints nothing and exits 0 ("{}" is exactly that);
+        anything unparseable exits non-zero so deploy.sh refuses before synthesis. A fresh deploy no longer reaches the
+        parser at all: deploy.sh recognises the ABSENT stack from the aws error code first."""
         proc = subprocess.run(
-            [sys.executable, "-c", _embedded_python()],
+            [sys.executable, "-B", "-c", _embedded_python()],
             input=payload,
             capture_output=True,
             text=True,
         )
-        assert proc.returncode == 0, proc.stderr
-        assert proc.stdout.strip() == ""
+        if payload == "{}":
+            assert proc.returncode == 0 and proc.stdout.strip() == "", proc.stderr
+        else:
+            assert proc.returncode != 0, (payload, proc.stdout)
+            assert proc.stdout.strip() == ""
 
 
 class TestTheGuardIsWiredIn:
@@ -134,7 +140,13 @@ class TestTheGuardIsWiredIn:
         """Order matters: it mutates COGNITO_USERS, which run_cdk_deploy passes as
         a -c context value."""
         src = _deploy_sh()
-        assert src.index("preserve_existing_cognito_users\n  run_cdk_deploy") > 0
+        main = src[src.index("\nmain() {") :]
+        certified = main[main.index('if [[ "${CERTIFIED_DEPS}" == "1" ]]; then') : main.index("  else\n")]
+        ordinary = main[main.index("  else\n") : main.index("  fi\n")]
+        # certified mode: the read-only carry-forward runs BEFORE the pinned synth that bakes COGNITO_USERS into context
+        assert certified.index("preserve_existing_cognito_users") < certified.index("cdk_synth_pinned"), certified
+        # ordinary mode: before run_cdk_deploy (which synthesizes first)
+        assert ordinary.index("preserve_existing_cognito_users") < ordinary.index("run_cdk_deploy"), ordinary
 
     def test_log_warning_is_defined(self):
         """The guard's only output is log_warning. Under `set -euo pipefail` an

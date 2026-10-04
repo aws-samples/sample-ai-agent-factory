@@ -649,6 +649,22 @@ def test_list_records_follows_next_token():
     assert second["nextToken"] == "tok1"
 
 
+def test_repeated_registry_page_token_raises_strict_and_returns_partial_leniently():
+    pages = [
+        ([{"name": "one"}], "tok1"),
+        ([{"name": "two"}], "tok1"),
+    ]
+    strict = _adapter(pages=pages)
+    with pytest.raises(ar.RegistryQueryFailed, match="repeated pagination token") as exc:
+        strict.list_records_strict()
+    assert [r["name"] for r in exc.value.partial] == ["one", "two"]
+    assert len([c for c in strict.control.calls if c[0] == "list_registry_records"]) == 2
+
+    lenient = _adapter(pages=pages)
+    assert [r["name"] for r in lenient.list_records()] == ["one", "two"]
+    assert len([c for c in lenient.control.calls if c[0] == "list_registry_records"]) == 2
+
+
 def test_list_records_passes_filters_through():
     a = _adapter(pages=[([], None)])
     a.list_records(filters=[{"name": "status", "values": ["APPROVED"]}])

@@ -14,7 +14,7 @@ import type {
 } from '../types/components';
 import type { ValidationError } from '../types/validation';
 import { CONNECTION_COMPATIBILITY, REQUIRED_FIELDS } from '../types/validation';
-import { isLiteLLMGateway, isValidLambdaArn } from './gatewayConfig';
+import { isLiteLLMGateway, isValidLambdaArn, resolveGatewayTargets } from './gatewayConfig';
 import { validateCredentialFormat } from './identityConfig';
 
 // ============================================================================
@@ -92,6 +92,11 @@ export function validateComponentConfiguration(
   let requiredFields: readonly string[] = REQUIRED_FIELDS[componentType];
   if (componentType === 'gateway' && isLiteLLMGateway(configuration as GatewayConfiguration)) {
     requiredFields = ['name', 'litellmBaseUrl'];
+  } else if (
+    componentType === 'runtime'
+    && (configuration as RuntimeConfiguration).protocol === 'MCP'
+  ) {
+    requiredFields = ['name'];
   }
   for (const field of requiredFields) {
     const value = getNestedValue(configuration as unknown as Record<string, unknown>, field);
@@ -189,7 +194,10 @@ function validateRuntimeConfig(
   }
 
   // Warning for empty system prompt
-  if (!config.systemPrompt || config.systemPrompt.trim().length === 0) {
+  if (
+    config.protocol !== 'MCP'
+    && (!config.systemPrompt || config.systemPrompt.trim().length === 0)
+  ) {
     warnings.push({
       componentId: nodeId,
       field: 'systemPrompt',
@@ -228,31 +236,85 @@ function validateGatewayConfig(
     return;
   }
 
-  // Validate Lambda ARN if target type is lambda
-  if (config.targetType === 'lambda' && config.targetConfig) {
-    const lambdaConfig = config.targetConfig as LambdaTargetConfig;
-    if (lambdaConfig.functionArn && !isValidLambdaArn(lambdaConfig.functionArn)) {
-      errors.push({
-        componentId: nodeId,
-        field: 'targetConfig.functionArn',
-        message: 'Invalid Lambda ARN format. Expected: arn:aws:lambda:<region>:<account>:function:<name>',
-        severity: 'error',
-      });
-    }
-  }
+  // Validate EVERY target the deploy will actually send.
+  //
+  // This used to read `config.targetType` / `config.targetConfig` — the legacy single
+  // target. Once the multi-target editor landed, `resolveGatewayTargets` returns
+  // `config.targets` whenever it is non-empty and ignores `targetConfig` entirely, so on
+  // every multi-target gateway these checks were validating a field the deploy no longer
+  // reads: the whole `targets[]` array went out unvalidated. Iterating the resolved list
+  // is the only way the check and the payload cannot disagree.
+  const resolvedTargets = resolveGatewayTargets(config);
+  resolvedTargets.forEach((target, index) => {
+    // Field paths stay `targetConfig.*` for a single legacy target so existing
+    // field-level UI bindings keep working, and become `targets[i].*` otherwise.
+    const fieldBase = config.targets && config.targets.length > 0 ? `targets[${index}]` : 'targetConfig';
 
-  // Validate OpenAPI spec if target type is openapi
-  if (config.targetType === 'openapi' && config.targetConfig) {
-    const openApiConfig = config.targetConfig as { specUrl?: string; specContent?: string };
-    if (!openApiConfig.specUrl && !openApiConfig.specContent) {
+    if (target.type === 'lambda') {
+      const lambdaConfig = target as LambdaTargetConfig;
+      // The ARN is REQUIRED, not merely format-checked when present.
+      // createDefaultTargetConfig hands out `{ type: 'lambda', functionArn: '' }`, so
+      // leaving the field blank passed validation, and the backend then skipped the
+      // target with a warning — a deployment that reported success with the user's tool
+      // silently absent (observed live: "Gateway lambda target #0 has no function_arn").
+      if (!lambdaConfig.functionArn) {
+        errors.push({
+          componentId: nodeId,
+          field: `${fieldBase}.functionArn`,
+          message: 'A Lambda function ARN is required for a Lambda gateway target',
+          severity: 'error',
+        });
+      } else if (!isValidLambdaArn(lambdaConfig.functionArn)) {
+        errors.push({
+          componentId: nodeId,
+          field: `${fieldBase}.functionArn`,
+          message: 'Invalid Lambda ARN format. Expected: arn:aws:lambda:<region>:<account>:function:<name>',
+          severity: 'error',
+        });
+      }
+    } else if (target.type === 'openapi') {
+      const openApiConfig = target as { specUrl?: string; specContent?: string };
+      if (!openApiConfig.specUrl && !openApiConfig.specContent) {
+        errors.push({
+          componentId: nodeId,
+          field: fieldBase,
+          message: 'OpenAPI specification URL or content is required',
+          severity: 'error',
+        });
+      }
+    } else if (target.type === 'smithy') {
+      // No longer offered in the canvas (see TARGET_TYPE_OPTIONS), but a canvas saved
+      // before it was withdrawn still carries one, and it can never deploy.
       errors.push({
         componentId: nodeId,
-        field: 'targetConfig',
-        message: 'OpenAPI specification URL or content is required',
+        field: `${fieldBase}.type`,
+        message:
+          'Smithy model targets are not supported: AgentCore needs an inline Smithy schema, ' +
+          'not a model name. Use an OpenAPI, Lambda or MCP Server target instead.',
         severity: 'error',
       });
+    } else if (target.type === 'mcp_server') {
+      // mapMcpTargetToDeployEntry drops an entry with no catalog id, and a `__custom__`
+      // entry with no URL, returning null — so an incomplete MCP target is dropped from
+      // the deploy payload silently, exactly like the lambda case.
+      const mcpConfig = target as { serverId?: string; serverUrl?: string };
+      if (!mcpConfig.serverId) {
+        errors.push({
+          componentId: nodeId,
+          field: `${fieldBase}.serverId`,
+          message: 'Select an MCP server, or choose Custom and provide an endpoint URL',
+          severity: 'error',
+        });
+      } else if (mcpConfig.serverId === '__custom__' && !mcpConfig.serverUrl) {
+        errors.push({
+          componentId: nodeId,
+          field: `${fieldBase}.serverUrl`,
+          message: 'A custom MCP server needs an endpoint URL',
+          severity: 'error',
+        });
+      }
     }
-  }
+  });
 
   // Warning for semantic search disabled
   if (!config.enableSemanticSearch) {
@@ -441,6 +503,146 @@ export function validateWorkflow(
     const state = validateConnection(edge, nodes);
     edgeStates.set(edge.id, state);
     allErrors.push(...state.errors);
+  }
+
+  // Code generation has dedicated A2A and multi-agent runtime shapes. They do
+  // not yet define which peer/sub-agent owns a connected Memory, Gateway,
+  // Browser, Code Interpreter, or Knowledge Base capability. Without this
+  // workflow-level check, the backend can create those resources and an
+  // early-returning generator can silently omit them from the emitted agent.
+  //
+  // Knowledge Base is a tool node behind a Gateway, so it is deliberately
+  // discovered one hop beyond the runtime instead of looking only at direct
+  // neighbours.
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const neighbours = (nodeId: string): WorkflowNode[] =>
+    edges.flatMap((edge) => {
+      if (edge.source === nodeId) {
+        const node = nodesById.get(edge.target);
+        return node ? [node] : [];
+      }
+      if (edge.target === nodeId) {
+        const node = nodesById.get(edge.source);
+        return node ? [node] : [];
+      }
+      return [];
+    });
+
+  const displayCapability = (capability: string): string =>
+    capability
+      .split('_')
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
+
+  // A gateway must have something to serve. The deployer refuses a declared target with no
+  // payload and would otherwise deploy an EMPTY gateway green (F-24's class): the tools are
+  // silently absent. Serving sources: explicit targets in the gateway config, connected tool
+  // nodes (deployed as Lambda targets), or a connected MCP-protocol runtime (deployed as an
+  // MCP server target). LiteLLM gateways are validated on their own terms.
+  for (const gateway of nodes.filter((node) => node.type === 'gateway')) {
+    const config = gateway.data.configuration as GatewayConfiguration | undefined;
+    if (!config || isLiteLLMGateway(config)) continue;
+    const hasExplicitTarget = resolveGatewayTargets(config).length > 0;
+    const connected = neighbours(gateway.id);
+    const hasTool = connected.some((node) => node.type === 'tool');
+    const hasMcpRuntime = connected.some(
+      (node) =>
+        node.type === 'runtime'
+        && (node.data.configuration as RuntimeConfiguration | undefined)?.protocol === 'MCP',
+    );
+    if (hasExplicitTarget || hasTool || hasMcpRuntime) continue;
+    const error: ValidationError = {
+      componentId: gateway.id,
+      field: 'targets',
+      message:
+        'This gateway has nothing to serve. Add a Lambda, OpenAPI or MCP target in its '
+        + 'configuration, or connect a tool or an MCP server runtime to it.',
+      severity: 'error',
+    };
+    const current = nodeStates.get(gateway.id);
+    if (current) {
+      nodeStates.set(gateway.id, {
+        ...current,
+        status: 'error',
+        errors: [...current.errors, error],
+      });
+    } else {
+      nodeStates.set(gateway.id, { nodeId: gateway.id, status: 'error', errors: [error], warnings: [] });
+    }
+    allErrors.push(error);
+  }
+
+  for (const runtime of nodes.filter((node) => node.type === 'runtime')) {
+    const config = runtime.data.configuration as RuntimeConfiguration | undefined;
+    if (!config) continue;
+
+    const capabilities = new Set<string>();
+    for (const connected of neighbours(runtime.id)) {
+      if (
+        connected.type === 'memory' ||
+        connected.type === 'gateway' ||
+        connected.type === 'browser' ||
+        connected.type === 'code_interpreter' ||
+        connected.type === 'a2a'
+      ) {
+        capabilities.add(connected.type);
+      }
+
+      if (connected.type === 'gateway') {
+        for (const gatewayNeighbour of neighbours(connected.id)) {
+          if (gatewayNeighbour.id === runtime.id || gatewayNeighbour.type !== 'tool') continue;
+          const toolConfig = gatewayNeighbour.data.configuration as unknown as
+            | Record<string, unknown>
+            | undefined;
+          if (toolConfig?.toolId === 'knowledge_base') {
+            capabilities.add('knowledge_base');
+          }
+        }
+      }
+    }
+
+    if (config.protocol === 'A2A') {
+      capabilities.add('a2a');
+    }
+
+    const multiAgentPattern = config.multiAgentPattern || 'none';
+    const multiAgentEnabled = multiAgentPattern !== 'none';
+    const nonA2A = [...capabilities].filter((capability) => capability !== 'a2a');
+    let message: string | undefined;
+
+    if (capabilities.has('a2a') && (nonA2A.length > 0 || multiAgentEnabled)) {
+      const requested = [...capabilities].map(displayCapability);
+      if (multiAgentEnabled) requested.push(`Multi-Agent ${displayCapability(multiAgentPattern)}`);
+      message =
+        `A2A cannot currently compose with the other requested capabilities ` +
+        `(${requested.sort().join(', ')}). Disconnect them or use a separate runtime; ` +
+        `none will be silently omitted.`;
+    } else if (multiAgentEnabled && capabilities.size > 0) {
+      message =
+        `The Multi-Agent ${displayCapability(multiAgentPattern)} pattern cannot currently ` +
+        `assign connected capabilities (${[...capabilities]
+          .map(displayCapability)
+          .sort()
+          .join(', ')}) to individual agents. Disconnect them or use a single-agent runtime.`;
+    }
+
+    if (message) {
+      const error: ValidationError = {
+        componentId: runtime.id,
+        field: 'connectedComponents',
+        message,
+        severity: 'error',
+      };
+      const current = nodeStates.get(runtime.id);
+      if (current) {
+        nodeStates.set(runtime.id, {
+          ...current,
+          status: 'error',
+          errors: [...current.errors, error],
+        });
+      }
+      allErrors.push(error);
+    }
   }
 
   const isValid = allErrors.length === 0;

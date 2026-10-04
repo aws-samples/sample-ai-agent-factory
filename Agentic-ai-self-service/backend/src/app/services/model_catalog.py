@@ -15,6 +15,7 @@ import logging
 
 import boto3
 
+from app.services.aws_pagination import list_all
 from app.services.region_models import current_region, regionalize_catalog
 
 logger = logging.getLogger(__name__)
@@ -83,8 +84,13 @@ def list_models(region: str | None = None) -> list[dict]:
 
     # 1. Inference profiles first (the cross-region ids agents invoke: us.*, eu.*).
     try:
-        resp = client.list_inference_profiles()
-        for p in resp.get("inferenceProfileSummaries", []):
+        profiles = list_all(
+            client,
+            "list_inference_profiles",
+            item_keys=("inferenceProfileSummaries",),
+            request={"maxResults": 100},
+        )
+        for p in profiles:
             if (p.get("status") or "ACTIVE") != "ACTIVE":
                 continue
             pid = p.get("inferenceProfileId", "")

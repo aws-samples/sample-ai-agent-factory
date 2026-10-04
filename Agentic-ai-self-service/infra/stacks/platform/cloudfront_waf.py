@@ -55,6 +55,19 @@ def _build_waf_rules(name_prefix: str) -> list:
                 managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
                     vendor_name="AWS",
                     name="AWSManagedRulesCommonRuleSet",
+                    # SizeRestrictions_BODY blocks every request body over 8 KB, and this ACL
+                    # fronts the whole API: measured live 2026-10-01, a 9 KB POST /api/deploy (a
+                    # canvas with a long system prompt) and a 9 KB webhook both got CloudFront's
+                    # HTML 403 before reaching the platform, while the webhook route accepts
+                    # 240 KB and answers 413 above that. The platform bounds every body itself
+                    # (route limits, API Gateway's 10 MB, Lambda's 6 MB), so this one rule only
+                    # counts; every other rule in the group still blocks.
+                    rule_action_overrides=[
+                        wafv2.CfnWebACL.RuleActionOverrideProperty(
+                            name="SizeRestrictions_BODY",
+                            action_to_use=wafv2.CfnWebACL.RuleActionProperty(count={}),
+                        )
+                    ],
                 ),
             ),
             visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
@@ -364,6 +377,14 @@ def build_cloudfront_distribution(
                 origin=api_origin,
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 allowed_methods=cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+                cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
+                origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+                response_headers_policy=security_headers,
+            ),
+            "/hooks/*": cloudfront.BehaviorOptions(
+                origin=api_origin,
+                viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
                 cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
                 origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
                 response_headers_policy=security_headers,

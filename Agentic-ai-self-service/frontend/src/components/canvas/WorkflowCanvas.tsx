@@ -24,7 +24,11 @@ import '@xyflow/react/dist/style.css';
 
 import AgentCoreNode from '../nodes/AgentCoreNode';
 import ConnectionEdge from '../edges/ConnectionEdge';
-import { useWorkflowStore, type AgentCoreNodeData } from '../../store/workflowStore';
+import {
+  useWorkflowStore,
+  type AgentCoreNode as WorkflowAgentCoreNode,
+  type AgentCoreNodeData,
+} from '../../store/workflowStore';
 import {
   areComponentsCompatible,
   determineConnectionType,
@@ -105,7 +109,7 @@ export interface WorkflowCanvasProps {
   onViewportChange?: (viewport: Viewport) => void;
   onNodeDelete?: (nodeId: string) => void;
   onEdgeDelete?: (edgeId: string) => void;
-  onNodeCreate?: (componentType: AgentCoreComponentType, position: { x: number; y: number }, toolId?: string | null) => void;
+  onNodeCreate?: (node: WorkflowAgentCoreNode) => void;
   onNodeDoubleClick?: (nodeId: string) => void;
   readOnly?: boolean;
 }
@@ -370,8 +374,9 @@ export function WorkflowCanvas({
       const newNode = createNodeFromDrop(componentType, position, toolId);
       addNode(newNode);
 
-      // Notify parent (pass toolId so connector tool nodes can open their modal)
-      onNodeCreate?.(componentType, position, toolId);
+      // Notify the parent with the exact node identity so modal routing cannot
+      // select an older same-type node at a repeated canvas position.
+      onNodeCreate?.(newNode);
 
       // Reset drag state
       setDragState(initialDragState);
@@ -434,12 +439,15 @@ export function WorkflowCanvas({
           color="transparent"
         />
 
-        {/* Zoom Controls */}
+        {/* Zoom Controls. React Flow otherwise places its default aria-label on
+            a generic role-less div, which is prohibited ARIA. Each child button
+            already has its own accessible name, so the unnamed container is correct. */}
         <Controls
           showZoom={true}
           showFitView={true}
           showInteractive={false}
           position="bottom-right"
+          aria-label=""
         />
 
         {/* Minimap for navigation */}

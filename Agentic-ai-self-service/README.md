@@ -26,21 +26,21 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 - **Visual Canvas** — Drag-and-drop AgentCore components (Runtime, Gateway, Memory, Knowledge Base, Browser, Identity, Observability, Policy, Connectors) and wire them together with real-time validation.
 - **Two authoring paths, one deploy pipeline** — Build agents on the canvas (code-generated AgentCore **Runtime**) or as a config-driven **AgentCore Harness** (`deploymentMode: "runtime" | "harness"`); both share the same Gateway, Memory, connector, test, and teardown surfaces.
 - **Real SaaS connectors** — Jira, Asana, Slack, GitHub, Salesforce, or any OpenAPI spec as Gateway targets with API-key or OAuth2 outbound auth; credentials live only in Secrets Manager.
-- **Template Gallery + CloudFormation Export** — Six one-click templates, plus downloadable self-contained CloudFormation stacks (`deploy.sh`, `teardown.sh`, code artifacts) so external users can deploy without the platform.
+- **Template Gallery + CloudFormation Export** — Six one-click templates, plus a downloadable self-contained CloudFormation bundle (`template.yaml`, `deploy.sh`, `teardown.sh`, `build-dependency-bundle.sh`, code artifacts, README) that an external recipient deploys with no access to the platform — `deploy.sh` builds and stages the dependency bundle itself. Four custom resources, all served by one bundled Lambda, cover what no native `AWS::BedrockAgentCore::*` type does yet; data-holding resources carry configurable `DeletionPolicy`/`UpdateReplacePolicy` (retained by default); a LiteLLM-provider gateway exports as a direct proxy connection whose virtual key is passed as a Secrets Manager ARN, never as a parameter value; and the stack wraps cleanly in Terraform's `aws_cloudformation_stack` via `template_url`. See [CloudFormation Export](docs/DEPLOYMENT_INTERNALS.md#cloudformation-export).
 - **AI generation** — Describe a tool or a whole agent in natural language; Claude on Bedrock generates a deployable Lambda tool or a validated canvas spec.
 - **Multi-target gateways** — One gateway can carry multiple targets of different families at once (Lambda tools, external MCP servers from a curated catalog or a custom endpoint, OpenAPI specs, Smithy models), each with the right outbound auth.
 - **Dynamic Gateway tool pipeline** — Selected tools deploy as a single Lambda behind an MCP Gateway with Cognito OAuth2; agents discover them at runtime via `tools/list`.
 - **Bring your own LiteLLM** — Point an agent at a LiteLLM MCP proxy *instead of* AgentCore Gateway, or carry it *inside* one as an MCP target, and/or make a LiteLLM proxy the authoritative agent catalog. All opt-in and additive; the AgentCore Gateway and the built-in registry remain the defaults. See [Bring your own LiteLLM](#bring-your-own-litellm).
 - **13 model providers & multi-agent patterns** — Bedrock (default), OpenAI, Anthropic, Gemini, Mistral, Ollama, Groq, DeepSeek, Together, LiteLLM, SageMaker, Writer, LlamaAPI; Graph / Swarm / Workflow orchestration via Strands Agents SDK.
-- **Knowledge Base (RAG)** — 5 data source types, 3 vector stores (S3 Vectors, OpenSearch Serverless auto-provisioned, Aurora PostgreSQL), configurable parsing/chunking, plus agentic retrieval strategies.
+- **Knowledge Base (RAG)** — 5 data source types, 3 vector stores (S3 Vectors, OpenSearch Serverless auto-provisioned, Aurora PostgreSQL), configurable parsing/chunking, plus agentic retrieval strategies. Customer-owned AWS resources require an explicit `AgentCoreFlowsAccess=allow` opt-in before the platform can grant a Knowledge Base role access.
 - **Enterprise governance** — Scope-based RBAC/ABAC, Cedar policy enforcement, agent registry with approval workflow, versioning & rollback, cost budgets, audit analytics, HITL approvals, VPC-egress runtimes, OIDC federation. See [Enterprise Capabilities](docs/ENTERPRISE_CAPABILITIES.md).
-- **Full manifest-driven teardown** — Every deploy records the sub-resources it creates; delete tears down everything (runtime, gateway, Cognito, secrets, KB, vector stores, IAM roles) with no orphans.
+- **Manifest-driven teardown with live ownership proof** — Every deploy records the sub-resources it creates; delete re-validates live ownership, confirms asynchronous removal, and reports retained or failed resources instead of claiming they were removed.
 
 ## Prerequisites
 
 - **AWS CLI** v2 — configured with credentials for the target account (`aws configure`)
-- **Node.js** 20+ (CI runs on 22)
-- **Python** 3.12+
+- **Node.js** 20+ (the version CI runs on)
+- **Python** 3.12+ (CI runs on 3.13)
 - **Any AWS region** — `us-east-1` is the default; see [Deploying to another region](#deploying-to-another-region) for the two things that differ elsewhere.
 
 No Docker installation required. CDK is invoked via `npx` (no global install needed).
@@ -104,7 +104,7 @@ distribution all live in that one region.
 
 ### First sign-in — assign a persona
 
-`COGNITO_USERS` pre-creates Cognito **users** but assigns them to **no group**. Group membership grants capability **scopes**, so a brand-new user signs in effectively read-only (browse works; Clone/publish are disabled) until you assign a group:
+`COGNITO_USERS` pre-creates Cognito **users** and puts each one in `g-users-default` + `t-user`: a standard user who can build, deploy and invoke their own agents and browse & clone the registry. The API enforces scopes by default (`RBAC_ENFORCE=true`), so a user in **no** group (for example one created in the Cognito console) gets `403` on every call until you assign one. Admin personas are always a manual grant:
 
 > **Always pass `--region <the region you deployed to>`** — `us-east-1` below, but
 > use `eu-central-1` if that is where you deployed. Without it the AWS CLI falls
@@ -259,7 +259,7 @@ proxy base URL and a virtual key:
 - **Connect & make authoritative** (or **Make authoritative** afterwards) — LiteLLM becomes the catalog.
 - **Disconnect & use platform catalog** — reverts, and clears the stored connection, so the base URL has to be re-entered to reconnect.
 
-These calls are **`registry-admin`-only**; the API answers `403` for anyone else.
+These calls are **registry-admin-only** (`g-admins-registry`, `g-admins-super`, or the legacy `registry-admin` / `org-admin`); the API answers `403` for anyone else.
 `verified: false` after a save is not an error — it means the control plane could
 not reach the proxy, which is normal for a VPC-private LiteLLM.
 
@@ -360,6 +360,15 @@ reason. `CLEANUP_INCLUDE_UNTAGGED=1` additionally sweeps untagged resources.
 memory, policy engine and credential provider in the region regardless of owner —
 use it only in a single-tenant account you are willing to empty.
 
+Customer-owned resources are a separate authority boundary from teardown
+ownership. A live Knowledge Base deployment will not use an existing KB, bucket,
+vector index, OpenSearch collection, Aurora cluster, Lambda, KMS key, or
+credential source merely because its ARN was supplied. Its owner must first add
+`AgentCoreFlowsAccess=allow`; optionally add `OwnerSubHash` to bind the opt-in to
+one Cognito caller. Credential values are copied into a deployment-bound target
+secret, and the source secret is neither granted to the runtime nor deleted with
+the deployment. See [Deployment Internals](docs/DEPLOYMENT_INTERNALS.md#live-deploy-authority-boundary).
+
 `scripts/verify-cleanup-ownership.sh` proves this against real AWS: it plants decoys
 in every swept namespace — owned by this stack, owned by a different stack, and
 untagged — runs the real sweep, and asserts only its own are gone. It removes
@@ -380,14 +389,14 @@ Integration tests run against a real deployed stack — see [Development](docs/D
 
 | Doc | Contents |
 |-----|----------|
-| [Enterprise Capabilities](docs/ENTERPRISE_CAPABILITIES.md) | Versioning & rollback, Cedar policy enforcement, evaluation, cost analytics, registry, prompt library, triggers, connectors, HITL, governance & FinOps |
+| [Enterprise Capabilities](docs/ENTERPRISE_CAPABILITIES.md) | Versioning & rollback, Cedar policy enforcement, evaluation, cost analytics, registry, prompt library, trigger definitions (preview), connectors, HITL, governance & FinOps |
 | [Security & Hardening](docs/SECURITY_HARDENING.md) | Infrastructure hardening, CDK-NAG, tenant isolation, SSRF guards, pre-commit hooks |
 | [Observability](docs/OBSERVABILITY.md) | Per-canvas and platform-level OTEL modes, OTEL deploy configuration |
 | [Deployment Internals](docs/DEPLOYMENT_INTERNALS.md) | Infrastructure & agent deploy flows, gateway tool pipeline, code architecture, CFN export, packaging, templates, project structure |
 | [API Reference](docs/API_REFERENCE.md) | Every API endpoint, configuration variables, SSM parameters |
 | [Registry & RBAC](docs/REGISTRY_AND_RBAC.md) | Agent registry roles, approval workflow, persona assignment |
 | [Personas](docs/PERSONAS.md) | Platform-wide group → scope model |
-| [RBAC Rollout](docs/RBAC_ROLLOUT.md) | Advisory → enforce rollout procedure |
+| [RBAC Rollout](docs/RBAC_ROLLOUT.md) | Enforcement, the advisory escape hatch, and upgrading an existing pool |
 | [Costs](docs/COSTS.md) | AWS resources created + infrastructure pricing estimates |
 | [Development](docs/DEVELOPMENT.md) | Local development, full test matrix, tech stack |
 | [Data Retention](docs/DATA_RETENTION.md) | TTLs, PII posture, audit access |

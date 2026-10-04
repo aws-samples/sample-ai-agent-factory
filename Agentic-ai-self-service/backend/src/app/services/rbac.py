@@ -20,10 +20,11 @@ Design invariants (do NOT violate — they mirror the security notes in auth.py)
      exception is local dev (no ``aws.event``), which grants all scopes so the
      single-user dev loop keeps working — exactly like get_caller_sub's
      ``local-dev`` sentinel and get_caller_role's org-admin default.
-  3. **Advisory rollout.** ``RBAC_ENFORCE`` env flag (default ``false``) mirrors
-     the Cedar LOG_ONLY→ENFORCE promotion. When false we log the decision and
-     allow; when true we 403 on a missing scope. This lets the platform ship
-     the group wiring and observe real traffic before flipping to fail-closed.
+  3. **Enforcing unless told otherwise.** ``RBAC_ENFORCE`` (the stack sets
+     ``true``) 403s a missing scope. Only an explicit false value (``false``,
+     ``0``, ``no``, ``off``) selects the advisory mode, which logs the decision
+     and allows — the escape hatch for an upgrade whose existing users have no
+     group yet (docs/RBAC_ROLLOUT.md). An absent or unrecognised value enforces.
 
 Tests override the ``require_scopes`` dependency's identity source the same way
 the rest of the codebase does — via ``app.dependency_overrides`` — rather than
@@ -93,9 +94,28 @@ GROUP_SCOPES: dict[str, set[str]] = {
     # --- Loom-style resource groups ---
     "g-admins-super": {SCOPE_ADMIN, SCOPE_INVOKE} | _all_read_write(),
     "g-admins-registry": {"registry:read", "registry:write"},
-    "g-admins-security": {"settings:read", "settings:write", "observability:read"},
+    "g-admins-security": {
+        "settings:read",
+        "settings:write",
+        "observability:read",
+        "tag:read",
+        "tag:write",
+    },
     "g-admins-cost": {"cost:read", "cost:write"},
-    "g-users-default": {SCOPE_INVOKE, "agent:read", "cost:read", "prompt:read", "registry:read"},
+    # A registry developer can publish and maintain entries, but is deliberately
+    # absent from auth._REGISTRY_ADMIN_GROUPS and therefore cannot approve/reject.
+    "registry-developer": {"registry:read", "registry:write"},
+    # A standard user builds, deploys and invokes their own agents (docs/PERSONAS.md);
+    # owner_sub still confines every one of those calls to the caller's own rows.
+    "g-users-default": {
+        SCOPE_INVOKE,
+        "agent:read",
+        "agent:write",
+        "cost:read",
+        "prompt:read",
+        "registry:read",
+        "tag:read",
+    },
     # --- Legacy groups (backward compatible) ---
     "org-admin": {SCOPE_ADMIN, SCOPE_INVOKE} | _all_read_write(),
     "registry-admin": {"registry:read", "registry:write"},
@@ -105,8 +125,8 @@ GROUP_SCOPES: dict[str, set[str]] = {
 
 
 def rbac_enforcing() -> bool:
-    """True when RBAC_ENFORCE is set truthy (fail-closed). Default advisory."""
-    return os.environ.get("RBAC_ENFORCE", "").strip().lower() in ("1", "true", "yes", "on")
+    """False only when RBAC_ENFORCE is explicitly false; absent or unrecognised enforces."""
+    return os.environ.get("RBAC_ENFORCE", "").strip().lower() not in ("0", "false", "no", "off")
 
 
 def caller_scopes(request: Request) -> set[str]:
@@ -181,4 +201,6 @@ def require_scopes(*required: str) -> Callable[[Request], None]:
             request.scope.get("path"),
         )
 
+    # Read by the route-coverage test, which proves every mounted route declares a scope.
+    _dep.required_scopes = required
     return _dep

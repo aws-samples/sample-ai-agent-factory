@@ -29,7 +29,7 @@ import logging
 import re
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.services.auth import assert_owner, get_caller_sub
@@ -40,7 +40,7 @@ from app.services.hitl_store import (
     HitlRequest,
     get_hitl_store,
 )
-from app.services.rbac import require_scopes
+from app.services.rbac import SCOPE_ADMIN, has_scopes, require_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -135,11 +135,21 @@ async def list_pending(
     return [HitlRequestResponse.from_model(r) for r in requests]
 
 
+def _caller_is_hitl_admin(request: Request) -> bool:
+    """F-31: only the org-wide ``admin`` scope reads other users' approval decisions.
+
+    Reuses rbac's existing super-scope rather than minting one. A FastAPI dependency so tests
+    can override it; the scope check itself is rbac's.
+    """
+    return has_scopes(request, (SCOPE_ADMIN,))
+
+
 @router.get("/logs", dependencies=[Depends(require_scopes("hitl:read"))])
 async def approval_logs(
     status: str | None = None,
     limit: int = 200,
     caller_sub: str = Depends(get_caller_sub),
+    admin: bool = Depends(_caller_is_hitl_admin),
 ) -> list[dict]:
     """Durable approval-decision history (Loom-study 2.3).
 
@@ -147,6 +157,11 @@ async def approval_logs(
     audit store (90-day retention) as ``hitl_approved`` / ``hitl_rejected``. This
     returns those, newest-first, optionally filtered by ``status``
     (approved|rejected). hitl:read scoped.
+
+    F-31: scoped to the caller's OWN decisions unless they hold the admin scope. It used
+    to return every user's decisions org-wide -- each approver's ``sub`` and the request
+    path they acted on -- to any ``hitl:read`` caller. ``limit`` bounds the org window the
+    caller's rows are drawn from, so a tenant may see fewer than ``limit`` rows.
     """
     from app.services.audit_store import get_audit_store
 
@@ -162,7 +177,7 @@ async def approval_logs(
             "path": e.path,
         }
         for e in events
-        if e.action in wanted
+        if e.action in wanted and (admin or e.actor_sub == caller_sub)
     ]
 
 

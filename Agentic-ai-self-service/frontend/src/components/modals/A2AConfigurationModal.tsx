@@ -192,6 +192,7 @@ export function A2AConfigurationModal({
                     }
                   }}
                   placeholder="e.g., research, summarize, code_generation"
+                  aria-label="New agent capability"
                   className="flex-1 border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-console-blue focus:border-transparent"
                 />
                 <button
@@ -270,6 +271,7 @@ export function A2AConfigurationModal({
                     }
                   }}
                   placeholder="https://agent.example.com"
+                  aria-label="Peer base URL"
                   className="flex-1 border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-console-blue focus:border-transparent"
                 />
                 <button

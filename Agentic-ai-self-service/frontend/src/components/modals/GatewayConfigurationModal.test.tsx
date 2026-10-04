@@ -56,16 +56,18 @@ describe('GatewayConfigurationModal — multiple targets', () => {
       target: { value: 'https://api.example.com/openapi.json' },
     });
 
-    // Add a 3rd target and make it Smithy.
+    // Add a 3rd target and make it an MCP server. This used to be Smithy, which the
+    // selector no longer offers: a Smithy target can never deploy (AgentCore wants an
+    // inline Smithy schema, not a model name) and the backend silently skipped it.
     fireEvent.click(screen.getByTestId('add-target'));
-    fireEvent.change(screen.getByTestId('field-targetType_2'), { target: { value: 'smithy' } });
+    fireEvent.change(screen.getByTestId('field-targetType_2'), { target: { value: 'mcp_server' } });
 
     fireEvent.click(screen.getByTestId('modal-save-button'));
 
     expect(onSave).toHaveBeenCalledTimes(1);
     const saved = onSave.mock.calls[0][0] as GatewayConfiguration;
     expect(saved.targets).toHaveLength(3);
-    expect(saved.targets?.map((t) => t.type)).toEqual(['lambda', 'openapi', 'smithy']);
+    expect(saved.targets?.map((t) => t.type)).toEqual(['lambda', 'openapi', 'mcp_server']);
     // Legacy single-target fields mirror targets[0] for backward compat.
     expect(saved.targetType).toBe('lambda');
     expect(saved.targetConfig.type).toBe('lambda');

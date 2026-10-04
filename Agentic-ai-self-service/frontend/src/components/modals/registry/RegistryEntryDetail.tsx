@@ -15,7 +15,7 @@
  * with a callout that seeing a row does not grant it (the server enforces).
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   getRegistryEntryApi,
   getErrorMessage,
@@ -73,6 +73,27 @@ export function RegistryEntryDetail({
     [full.canvas_snapshot],
   );
 
+  const handleTabKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLButtonElement>, currentTab: Tab) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+
+      const currentIndex = Math.max(0, TABS.indexOf(currentTab));
+      let nextIndex = currentIndex;
+      if (event.key === 'Home') nextIndex = 0;
+      if (event.key === 'End') nextIndex = TABS.length - 1;
+      if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % TABS.length;
+      if (event.key === 'ArrowLeft') {
+        nextIndex = (currentIndex - 1 + TABS.length) % TABS.length;
+      }
+
+      event.preventDefault();
+      const nextTab = TABS[nextIndex];
+      setTab(nextTab);
+      document.getElementById(`registry-detail-tab-${nextTab.toLowerCase()}`)?.focus();
+    },
+    [],
+  );
+
   const status = full.status || 'approved';
   const canClone = access.rows.find((r) => r.action === 'Clone to canvas')?.allowed ?? false;
 
@@ -116,12 +137,23 @@ export function RegistryEntryDetail({
       </div>
 
       {/* Tabs */}
-      <div className="px-6 flex gap-1 border-b" style={{ borderColor: 'var(--color-border)' }}>
+      <div
+        className="px-6 flex gap-1 border-b"
+        style={{ borderColor: 'var(--color-border)' }}
+        role="tablist"
+        aria-label={`${full.display_name} details`}
+      >
         {TABS.map((t) => (
           <button
             key={t}
+            id={`registry-detail-tab-${t.toLowerCase()}`}
             type="button"
+            role="tab"
+            aria-selected={tab === t}
+            aria-controls="registry-detail-tabpanel"
+            tabIndex={tab === t ? 0 : -1}
             onClick={() => setTab(t)}
+            onKeyDown={(event) => handleTabKeyDown(event, t)}
             className="px-3.5 py-2 text-sm border-b-2 -mb-px transition-colors"
             style={{
               color: tab === t ? 'var(--color-text-primary)' : 'var(--color-text-secondary)',
@@ -134,7 +166,13 @@ export function RegistryEntryDetail({
       </div>
 
       {/* Body */}
-      <div className="flex-1 overflow-y-auto px-6 py-4">
+      <div
+        className="flex-1 overflow-y-auto px-6 py-4"
+        id="registry-detail-tabpanel"
+        role="tabpanel"
+        aria-labelledby={`registry-detail-tab-${tab.toLowerCase()}`}
+        tabIndex={0}
+      >
         {loadError && (
           <div className="mb-3 px-3 py-2 rounded-lg border border-red-200 bg-red-50 text-xs text-red-700">
             Couldn't load full details: {loadError}

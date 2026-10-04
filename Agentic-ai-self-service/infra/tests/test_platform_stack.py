@@ -16,6 +16,8 @@ import pytest
 from aws_cdk.assertions import Match, Template
 from stacks.platform_stack import PlatformStack
 
+from tests.iam_attachment import statements_by_role
+
 
 @pytest.fixture(scope="module")
 def template():
@@ -35,6 +37,29 @@ def template():
 def template_json(template):
     """Return the raw CloudFormation template as a dict for deeper inspection."""
     return template.to_json()
+
+
+def _statements_for_role_prefix(template_json: dict, prefix: str) -> list[dict]:
+    """Collect inline and overflow-policy statements attached to one role."""
+    resources = template_json["Resources"]
+    role_ids = [
+        logical_id
+        for logical_id, resource in resources.items()
+        if resource["Type"] == "AWS::IAM::Role" and logical_id.startswith(prefix)
+    ]
+    assert len(role_ids) == 1, f"expected one {prefix} role, found {role_ids}"
+    role_id = role_ids[0]
+
+    statements: list[dict] = []
+    for policy in resources[role_id]["Properties"].get("Policies", []) or []:
+        statements.extend(policy.get("PolicyDocument", {}).get("Statement", []) or [])
+    for resource in resources.values():
+        if resource["Type"] not in ("AWS::IAM::Policy", "AWS::IAM::ManagedPolicy"):
+            continue
+        roles = resource["Properties"].get("Roles", []) or []
+        if any(isinstance(role, dict) and role.get("Ref") == role_id for role in roles):
+            statements.extend(resource["Properties"].get("PolicyDocument", {}).get("Statement", []) or [])
+    return statements
 
 
 # ---------------------------------------------------------------
@@ -60,7 +85,8 @@ class TestServerlessResourcesPresent:
         # Core tables (workflows, deployments) plus governance/feature tables
         # (approvals, cost, evaluations, registry, tags, triggers, ...). Exact
         # count so an accidental table addition/removal is caught in review.
-        template.resource_count_is("AWS::DynamoDB::Table", 14)
+        # 15th: gateway-name-claims (F-64), the atomic claim on a gateway name.
+        template.resource_count_is("AWS::DynamoDB::Table", 15)
 
     def test_has_s3_buckets(self, template):
         template.resource_count_is("AWS::S3::Bucket", 3)
@@ -81,8 +107,22 @@ class TestServerlessResourcesPresent:
 class TestRemovedResourcesAbsent:
     """Verify the template does NOT contain old ECS/VPC architecture resources."""
 
-    def test_no_vpc(self, template):
-        template.resource_count_is("AWS::EC2::VPC", 0)
+    def test_the_only_vpc_is_the_tool_sandbox(self, template_json):
+        """Was ``resource_count_is("AWS::EC2::VPC", 0)``, and that became wrong.
+
+        The intent of this class is "the old ECS/ALB/VPC application architecture is
+        gone", and it still holds -- there is no cluster, no service, no load
+        balancer, no NAT gateway. What changed is that the tool-test sandbox
+        deliberately introduced one isolated VPC to run model-written code in.
+
+        Rewritten rather than deleted or relaxed to ``>= 0``, because the original
+        assertion was doing real work: it is what would notice the app architecture
+        creeping back. Naming the one permitted VPC keeps that, and makes a second
+        VPC fail here instead of passing silently.
+        """
+        vpcs = {lid for lid, r in template_json["Resources"].items() if r["Type"] == "AWS::EC2::VPC"}
+        assert len(vpcs) == 1, f"expected exactly one VPC (the tool sandbox), found {sorted(vpcs)}"
+        assert next(iter(vpcs)).startswith("ToolSandboxVpc"), f"the one VPC is not the tool sandbox: {sorted(vpcs)}"
 
     def test_no_ecs_cluster(self, template):
         template.resource_count_is("AWS::ECS::Cluster", 0)
@@ -105,11 +145,34 @@ class TestRemovedResourcesAbsent:
     def test_no_nat_gateway(self, template):
         template.resource_count_is("AWS::EC2::NatGateway", 0)
 
-    def test_no_subnets(self, template):
-        template.resource_count_is("AWS::EC2::Subnet", 0)
+    def test_every_subnet_belongs_to_the_tool_sandbox_and_is_isolated(self, template_json):
+        """The old ALB needed public subnets; the sandbox must have none.
 
-    def test_no_security_groups(self, template):
-        template.resource_count_is("AWS::EC2::SecurityGroup", 0)
+        This is the assertion that actually matters after the rewrite above. A
+        ``PUBLIC`` subnet in the sandbox VPC would create an internet gateway and give
+        model-written code a route off the VPC, and the blanket count-of-zero this
+        replaces could not distinguish that from the isolated pair we do want.
+        """
+        subnets = {
+            lid: r["Properties"] for lid, r in template_json["Resources"].items() if r["Type"] == "AWS::EC2::Subnet"
+        }
+        assert len(subnets) == 2, f"expected the sandbox's two isolated subnets, found {sorted(subnets)}"
+        for lid, props in subnets.items():
+            assert lid.startswith("ToolSandboxVpc"), f"{lid} is not part of the tool sandbox VPC"
+            assert not props.get("MapPublicIpOnLaunch"), f"{lid} auto-assigns a public IP"
+
+    def test_every_security_group_belongs_to_the_tool_sandbox(self, template_json):
+        """Two groups: the sandbox itself, and the interface endpoint it may reach.
+
+        ``tests/test_tool_sandbox_network.py`` asserts what the rules are. This only
+        asserts that no *other* component has quietly acquired a security group,
+        which is what the count-of-zero used to cover.
+        """
+        groups = {lid for lid, r in template_json["Resources"].items() if r["Type"] == "AWS::EC2::SecurityGroup"}
+        assert len(groups) == 2, f"expected exactly the two tool-sandbox security groups, found {sorted(groups)}"
+        assert all(lid.startswith("ToolSandbox") for lid in groups), (
+            f"a non-sandbox security group exists: {sorted(groups)}"
+        )
 
 
 # ---------------------------------------------------------------
@@ -191,6 +254,31 @@ class TestIAMScoping:
                     join_parts = policy.get("Fn::Join", [None, []])[1]
                     joined = "".join(str(p) for p in join_parts if isinstance(p, str))
                     assert "FullAccess" not in joined, f"Lambda role {logical_id} has FullAccess policy"
+
+    @pytest.mark.parametrize(
+        "role_prefix",
+        ["DeploymentLambdaRole", "StreamLambdaRole"],
+    )
+    def test_cross_account_invoke_roles_assume_only_the_fixed_target_role(
+        self,
+        template_json,
+        role_prefix,
+    ):
+        statements = _statements_for_role_prefix(template_json, role_prefix)
+        assume_role = []
+        for statement in statements:
+            actions = statement.get("Action", [])
+            actions = [actions] if isinstance(actions, str) else actions
+            if "sts:AssumeRole" in actions:
+                assume_role.append(statement)
+
+        assert assume_role == [
+            {
+                "Action": "sts:AssumeRole",
+                "Effect": "Allow",
+                "Resource": ("arn:aws:iam::*:role/AgentCoreFlowsDeploymentRole"),
+            }
+        ]
 
 
 # ---------------------------------------------------------------
@@ -399,6 +487,14 @@ class TestApiGateway:
         routes = template.find_resources("AWS::ApiGatewayV2::Route")
         assert len(routes) >= 5, f"Expected at least 5 API Gateway routes, found {len(routes)}"
 
+    def test_api_gateway_exposes_the_deployer_target_catalog(self, template_json):
+        route_keys = {
+            route.get("Properties", {}).get("RouteKey")
+            for route in template_json["Resources"].values()
+            if route.get("Type") == "AWS::ApiGatewayV2::Route"
+        }
+        assert "GET /api/deploy-targets" in route_keys
+
     def test_api_gateway_protocol_is_http(self, template):
         template.has_resource_properties(
             "AWS::ApiGatewayV2::Api",
@@ -418,13 +514,24 @@ class TestApiGateway:
 class TestLambdaFunctions:
     """Verify Lambda functions have correct runtime and configuration."""
 
-    def test_all_lambdas_use_python_312(self, template):
+    def test_all_lambdas_use_python_312(self, template, template_json):
         """All application Lambda functions should use Python 3.12 runtime."""
         functions = template.find_resources("AWS::Lambda::Function")
+        custom_resource_providers = set()
+        for resource in template_json["Resources"].values():
+            resource_type = resource["Type"]
+            if not (resource_type.startswith("Custom::") or resource_type == "AWS::CloudFormation::CustomResource"):
+                continue
+            service_token = resource.get("Properties", {}).get("ServiceToken")
+            if isinstance(service_token, dict) and "Fn::GetAtt" in service_token:
+                custom_resource_providers.add(service_token["Fn::GetAtt"][0])
+
         for logical_id, fn in functions.items():
             runtime = fn.get("Properties", {}).get("Runtime")
-            # Skip CDK-managed custom resource Lambdas (e.g., S3 auto-delete)
-            if "CustomResource" in logical_id or "Custom" in logical_id:
+            # CDK-managed providers choose their own runtime. Derive them from the
+            # custom resources' ServiceToken references rather than relying on
+            # generated logical-id spelling.
+            if logical_id in custom_resource_providers:
                 continue
             assert runtime == "python3.12", f"Lambda {logical_id} should use python3.12, got {runtime}"
 
@@ -566,20 +673,114 @@ class TestStepLambdaCognitoGrants:
         with AccessDeniedException — the tags are not silently dropped — so the
         gateway deploy dies at the first step.
         """
+        # Paired by ROLE, not by policy document: CDK spills statements past the inline
+        # size limit into <Role>OverflowPolicy<N>, so a role can hold the two halves in
+        # different documents (tests/iam_attachment.py).
         offenders = []
-        for logical_id, resource in template_json.get("Resources", {}).items():
-            if resource.get("Type") != "AWS::IAM::Policy":
-                continue
-            statements = resource["Properties"]["PolicyDocument"]["Statement"]
+        holders = []
+        for role_id, statements in statements_by_role(template_json).items():
             granted = set()
-            for statement in statements:
+            for _source, statement in statements:
                 if statement.get("Effect") != "Allow":
                     continue
                 action = statement.get("Action", [])
                 granted.update([action] if isinstance(action, str) else action)
-            if "cognito-idp:CreateUserPool" in granted and "cognito-idp:TagResource" not in granted:
-                offenders.append(logical_id)
+            if "cognito-idp:CreateUserPool" in granted:
+                holders.append(role_id)
+                if "cognito-idp:TagResource" not in granted:
+                    offenders.append(role_id)
+
+        assert holders, "no role grants cognito-idp:CreateUserPool; the pairing check would pass vacuously"
+        assert not offenders, (
+            f"these roles grant cognito-idp:CreateUserPool without cognito-idp:TagResource: {offenders}"
+        )
+
+
+class TestPolicyPathCanCallTheGateway:
+    """Creating a gateway-scoped Cedar policy requires calling the gateway.
+
+    AgentCore resolves the gateway named in a Cedar statement AS THE CALLER, so a
+    principal that creates such a policy needs bedrock-agentcore:InvokeGateway on
+    the gateway ARN. Without it create_policy ends CREATE_FAILED "Insufficient
+    permissions to call gateway with ID <id>" in BOTH validation modes — proven
+    live on the customer-export path, which had the identical gap.
+
+    Worse here than there: policy_step classifies that message as transient, so a
+    missing grant is retried six times and then attached in ENFORCE fail-closed,
+    i.e. every tool denied, and handed to a promoter running as a principal that
+    also lacked the action. A permanent deny-all logged as a race.
+
+    Asserted on the SYNTHESIZED template, so it holds for what CloudFormation
+    actually receives rather than for how the CDK source happens to be written.
+
+    Grouped BY ROLE across both AWS::IAM::Policy and AWS::IAM::ManagedPolicy,
+    which is not incidental: the deployment Lambda role has so many grants that
+    the CDK spills them out of its inline document into a generated
+    `...OverflowPolicy...` MANAGED policy. A check that walks AWS::IAM::Policy
+    only reports that role as clean no matter what it holds — the first version of
+    this test did exactly that and passed while the grant was deliberately broken.
+    """
+
+    @staticmethod
+    def _roles_to_statements(template_json):
+        """Map role logical id -> every Allow statement attached to it.
+
+        Both document types, unioned per role, because an action and the action it
+        must be paired with can land in different documents for the same role.
+        """
+        by_role = {}
+        for resource in template_json.get("Resources", {}).values():
+            if resource.get("Type") not in ("AWS::IAM::Policy", "AWS::IAM::ManagedPolicy"):
+                continue
+            props = resource["Properties"]
+            for role in props.get("Roles", []) or []:
+                logical_id = role.get("Ref") if isinstance(role, dict) else role
+                for statement in props["PolicyDocument"]["Statement"]:
+                    if statement.get("Effect") != "Allow":
+                        continue
+                    action = statement.get("Action", [])
+                    actions = set([action] if isinstance(action, str) else action)
+                    by_role.setdefault(logical_id, []).append((statement, actions))
+        return by_role
+
+    def test_every_policy_creating_role_can_invoke_the_gateway(self, template_json):
+        offenders = []
+        for role, statements in self._roles_to_statements(template_json).items():
+            granted = set().union(*(actions for _s, actions in statements)) if statements else set()
+            if "bedrock-agentcore:CreatePolicy" in granted and "bedrock-agentcore:InvokeGateway" not in granted:
+                offenders.append(role)
 
         assert not offenders, (
-            f"these policies grant cognito-idp:CreateUserPool without cognito-idp:TagResource: {offenders}"
+            "these roles are granted bedrock-agentcore:CreatePolicy without "
+            f"bedrock-agentcore:InvokeGateway: {offenders} — every gateway-scoped "
+            "Cedar policy they try to create will end CREATE_FAILED, and the "
+            "fail-closed engine will deny every tool until someone reads the IAM"
+        )
+
+    def test_that_grant_is_scoped_to_gateway_arns(self, template_json):
+        """It is a DATA-plane verb: `*` would let a deploy-time Lambda call the
+        tools of every gateway in the account.
+
+        Only checked on roles that create policies. The shared agent runtime role
+        also holds InvokeGateway on `*` — that is the agent calling its own
+        gateway at request time, a different principal with a different
+        justification, and it creates no policies.
+        """
+        unscoped = []
+        for role, statements in self._roles_to_statements(template_json).items():
+            granted = set().union(*(actions for _s, actions in statements)) if statements else set()
+            if "bedrock-agentcore:CreatePolicy" not in granted:
+                continue
+            for statement, actions in statements:
+                if "bedrock-agentcore:InvokeGateway" not in actions:
+                    continue
+                resources = statement.get("Resource", [])
+                resources = [resources] if isinstance(resources, str) else resources
+                if not all(isinstance(r, str) and ":gateway/" in r for r in resources):
+                    unscoped.append((role, resources))
+
+        assert not unscoped, (
+            f"InvokeGateway is granted on non-gateway resources in {unscoped} — "
+            "the ARN prefix is knowable at synth time, so a data-plane invoke verb "
+            'must not ride along on the control-plane resources=["*"] statement'
         )

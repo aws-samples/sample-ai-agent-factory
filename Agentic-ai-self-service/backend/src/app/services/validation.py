@@ -175,6 +175,18 @@ class ValidationEngine:
 
         # Check required fields
         for field in required_fields:
+            # A LiteLLM gateway points at an already-running proxy and therefore
+            # has no AgentCore target_type/target_config. The Pydantic model owns
+            # that provider split; repeating the AgentCore-only requirement here
+            # made POST /validate and POST /deploy reject (and then crash on)
+            # an otherwise valid LiteLLM node.
+            if (
+                component.type == AgentCoreComponentType.GATEWAY
+                and isinstance(component.data, GatewayConfiguration)
+                and component.data.gateway_provider == "litellm"
+                and field in {"target_type", "target_config"}
+            ):
+                continue
             field_errors = self._validate_required_field(component.id, component.data, field)
             errors.extend(field_errors)
 
@@ -275,6 +287,15 @@ class ValidationEngine:
         config = component.data
 
         if not isinstance(config, GatewayConfiguration):
+            return errors
+
+        if config.gateway_provider == "litellm":
+            return errors
+
+        # Defensive even though GatewayConfiguration's model validator rejects
+        # this shape: model_construct/legacy records can bypass that boundary,
+        # and validation should return structured errors rather than raise.
+        if config.target_type is None or config.target_config is None:
             return errors
 
         # Target config type must match target_type

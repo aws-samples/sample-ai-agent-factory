@@ -73,7 +73,7 @@ describe('Property: clicking the row calls onOpen with the flow id', () => {
         const onOpen = vi.fn();
         const { unmount } = renderItem(flow, { onOpen });
 
-        fireEvent.click(screen.getByTestId('flow-sidebar-item'));
+        fireEvent.click(screen.getByTestId('flow-sidebar-item-open'));
         expect(onOpen).toHaveBeenCalledOnce();
         expect(onOpen).toHaveBeenCalledWith(flow.id);
 
@@ -152,6 +152,15 @@ describe('Test: pen icon starts inline rename', () => {
     expect(onRename).not.toHaveBeenCalled();
   });
 
+  it('does not open the flow when the rename control is keyboard-activated', () => {
+    const onOpen = vi.fn<OnOpenFn>();
+    renderItem(flow, { onOpen });
+
+    fireEvent.keyDown(screen.getByTestId('flow-sidebar-item-edit'), { key: 'Enter' });
+
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
   it('calls onRename with (id, currentName, newName) when the edit is confirmed', () => {
     renderItem(flow, { onRename });
 
@@ -159,6 +168,7 @@ describe('Test: pen icon starts inline rename', () => {
     const input = screen.getByTestId('flow-sidebar-item-rename-input');
     fireEvent.change(input, { target: { value: 'Renamed Flow' } });
     fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.blur(input);
 
     expect(onRename).toHaveBeenCalledOnce();
     expect(onRename).toHaveBeenCalledWith(flow.id, flow.name, 'Renamed Flow');
@@ -181,9 +191,18 @@ describe('Test: pen icon starts inline rename', () => {
     const input = screen.getByTestId('flow-sidebar-item-rename-input');
     fireEvent.change(input, { target: { value: 'Discarded' } });
     fireEvent.keyDown(input, { key: 'Escape' });
+    fireEvent.blur(input);
 
     expect(onRename).not.toHaveBeenCalled();
     expect(screen.queryByTestId('flow-sidebar-item-rename-input')).not.toBeInTheDocument();
+  });
+
+  it('gives the inline editor an explicit accessible name', () => {
+    renderItem(flow, { onRename });
+
+    fireEvent.click(screen.getByTestId('flow-sidebar-item-edit'));
+
+    expect(screen.getByRole('textbox', { name: `Rename ${flow.name}` })).toBeInTheDocument();
   });
 });
 
@@ -212,6 +231,15 @@ describe('Test: trash icon shows delete confirmation dialog', () => {
     // Dialog should now be visible
     expect(screen.getByRole('dialog')).toBeInTheDocument();
     expect(screen.getByText('Delete Flow')).toBeInTheDocument();
+  });
+
+  it('does not open the flow when the delete control is keyboard-activated', () => {
+    const onOpen = vi.fn<OnOpenFn>();
+    renderItem(flow, { onOpen });
+
+    fireEvent.keyDown(screen.getByTestId('flow-sidebar-item-delete'), { key: 'Enter' });
+
+    expect(onOpen).not.toHaveBeenCalled();
   });
 });
 

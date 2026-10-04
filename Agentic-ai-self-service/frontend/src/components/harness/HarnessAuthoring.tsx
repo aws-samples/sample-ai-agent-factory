@@ -14,7 +14,7 @@
  * the existing status polling / chat / monitor UI works unchanged.
  */
 
-import { useMemo, useState, useRef, useEffect } from 'react';
+import { lazy, Suspense, useMemo, useState, useRef, useEffect } from 'react';
 import { SelectField, TextField, TextArea, FormSection, Toggle } from '../modals/FormFields';
 import {
   PROVIDER_OPTIONS,
@@ -26,7 +26,10 @@ import { CONNECTOR_TOOL_PREFIX } from '../../types/components';
 import type { RuntimeConfiguration, StrandsModelProvider, ConnectorConfiguration } from '../../types/components';
 import { DeployPanel } from '../deploy/DeployPanel';
 import type { DeployConnector } from '../deploy/DeployPanel';
-import { ConnectorConfigModal } from '../modals/ConnectorConfigModal';
+
+const ConnectorConfigModal = lazy(() => import('../modals/ConnectorConfigModal').then(
+  (module) => ({ default: module.ConnectorConfigModal }),
+));
 
 // Harness names follow the backend regex [a-zA-Z][a-zA-Z0-9_]{0,39}
 // (underscores only, <=40 chars, must start with a letter). We sanitize here
@@ -52,8 +55,10 @@ export function HarnessAuthoring() {
   const defaults = useMemo(() => createDefaultRuntimeConfig(), []);
 
   const [name, setName] = useState('agent_harness');
-  const [provider, setProvider] = useState<StrandsModelProvider>(defaults.model.provider);
-  const [modelId, setModelId] = useState(defaults.model.modelId);
+  const [provider, setProvider] = useState<StrandsModelProvider>(
+    defaults.model?.provider || 'bedrock',
+  );
+  const [modelId, setModelId] = useState(defaults.model?.modelId || '');
   const [instructions, setInstructions] = useState('');
   const [memoryEnabled, setMemoryEnabled] = useState(false);
   // Selected built-in gateway tools (by toolId) and SaaS connectors (by id).
@@ -113,7 +118,12 @@ export function HarnessAuthoring() {
       name: sanitizeHarnessName(name),
       systemPrompt: instructions,
       modelProvider: provider,
-      model: { ...defaults.model, provider, modelId },
+      model: {
+        provider,
+        modelId,
+        temperature: defaults.model?.temperature ?? 0.7,
+        topP: defaults.model?.topP ?? 0.9,
+      },
     }),
     [defaults, name, instructions, provider, modelId],
   );
@@ -283,7 +293,7 @@ export function HarnessAuthoring() {
             >
               <div className="space-y-3">
                 <div>
-                  <div className="text-xs font-semibold uppercase tracking-wide text-[#8d99a8] mb-2">Built-in tools</div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-[#5f6b7a] mb-2">Built-in tools</div>
                   <div className="grid grid-cols-2 gap-2">
                     {BUILTIN_TOOLS.map((tool) => {
                       const id = tool.toolId!;
@@ -309,7 +319,7 @@ export function HarnessAuthoring() {
                 </div>
 
                 <div>
-                  <div className="text-xs font-semibold uppercase tracking-wide text-[#8d99a8] mb-2">Connectors</div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-[#5f6b7a] mb-2">Connectors</div>
                   <div className="grid grid-cols-2 gap-2">
                     {CONNECTOR_TOOLS.map((tool) => {
                       const id = tool.toolId!;
@@ -375,32 +385,34 @@ export function HarnessAuthoring() {
 
       {/* Connector credential modal — same component the canvas uses (Bug 193b). */}
       {connectorModalId && (
-        <ConnectorConfigModal
-          isOpen={true}
-          initialConfig={{
-            ...(connectorConfigs[connectorModalId] ?? {}),
-            connectorId: connectorModalId.slice(CONNECTOR_TOOL_PREFIX.length) as ConnectorConfiguration['connectorId'],
-            toolId: connectorModalId,
-          }}
-          onSave={(cfg) => {
-            connectorConfigsRef.current[connectorModalId] = cfg;
-            setConnectorRev((r) => r + 1);
-            setConnectorModalId(null);
-          }}
-          onClose={() => {
-            // Cancelling without credentials de-selects the connector so the user
-            // can't deploy an unconfigured connector by accident.
-            const cfg = connectorConfigs[connectorModalId];
-            if (!cfg || (!cfg.secretValue && !cfg.secretArn)) {
-              setSelectedConnectors((prev) => {
-                const next = new Set(prev);
-                next.delete(connectorModalId);
-                return next;
-              });
-            }
-            setConnectorModalId(null);
-          }}
-        />
+        <Suspense fallback={null}>
+          <ConnectorConfigModal
+            isOpen={true}
+            initialConfig={{
+              ...(connectorConfigs[connectorModalId] ?? {}),
+              connectorId: connectorModalId.slice(CONNECTOR_TOOL_PREFIX.length) as ConnectorConfiguration['connectorId'],
+              toolId: connectorModalId,
+            }}
+            onSave={(cfg) => {
+              connectorConfigsRef.current[connectorModalId] = cfg;
+              setConnectorRev((r) => r + 1);
+              setConnectorModalId(null);
+            }}
+            onClose={() => {
+              // Cancelling without credentials de-selects the connector so the user
+              // can't deploy an unconfigured connector by accident.
+              const cfg = connectorConfigs[connectorModalId];
+              if (!cfg || (!cfg.secretValue && !cfg.secretArn)) {
+                setSelectedConnectors((prev) => {
+                  const next = new Set(prev);
+                  next.delete(connectorModalId);
+                  return next;
+                });
+              }
+              setConnectorModalId(null);
+            }}
+          />
+        </Suspense>
       )}
     </div>
   );

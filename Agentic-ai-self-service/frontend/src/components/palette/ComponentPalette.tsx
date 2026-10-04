@@ -250,6 +250,16 @@ export interface ComponentPaletteProps {
   onOpenToolGenerator?: () => void;
   onOpenAgentGenerator?: () => void;
   onOpenRegistry?: () => void;
+  onOpenPromptLibrary?: () => void;
+  onAddComponent?: (componentType: AgentCoreComponentType, toolId?: string) => void;
+  /**
+   * When set, every control that would put content on the canvas is disabled and
+   * the text is announced as the reason. The App sets it until a flow is active:
+   * content on a canvas that no flow owns cannot be saved (see
+   * hydrationWouldDiscardUnboundWork), and the sidebar's auto-open would then
+   * replace it. Read-only controls (prompt library) stay available.
+   */
+  authoringDisabledReason?: string | null;
 }
 
 // ============================================================================
@@ -260,9 +270,17 @@ interface PaletteItemComponentProps {
   item: PaletteItem;
   onDragStart?: (componentType: AgentCoreComponentType, event: React.DragEvent) => void;
   onDragEnd?: () => void;
+  onAddComponent?: (componentType: AgentCoreComponentType, toolId?: string) => void;
+  disabled?: boolean;
 }
 
-function PaletteItemComponent({ item, onDragStart, onDragEnd }: PaletteItemComponentProps) {
+function PaletteItemComponent({
+  item,
+  onDragStart,
+  onDragEnd,
+  onAddComponent,
+  disabled = false,
+}: PaletteItemComponentProps) {
   const handleDragStart = useCallback(
     (event: React.DragEvent) => {
       event.dataTransfer.setData('application/agentcore-component', item.type);
@@ -293,10 +311,11 @@ function PaletteItemComponent({ item, onDragStart, onDragEnd }: PaletteItemCompo
   // (the -translate-y on hover) to avoid the gesture collision entirely.
   return (
     <div
-      draggable
-      onDragStart={handleDragStart}
+      draggable={!disabled}
+      aria-disabled={disabled || undefined}
+      onDragStart={disabled ? undefined : handleDragStart}
       onDragEnd={onDragEnd}
-      className="no-darkmap flex items-start gap-2.5 p-2.5 rounded-lg cursor-grab active:cursor-grabbing transition-all duration-150 group hover:-translate-y-0.5 active:translate-y-0"
+      className="no-darkmap flex items-start gap-2.5 p-2.5 rounded-lg cursor-grab active:cursor-grabbing aria-disabled:cursor-not-allowed aria-disabled:opacity-60 transition-all duration-150 group hover:-translate-y-0.5 active:translate-y-0"
       style={{
         background: 'var(--color-surface)',
         border: '1px solid var(--color-border)',
@@ -323,8 +342,24 @@ function PaletteItemComponent({ item, onDragStart, onDragEnd }: PaletteItemCompo
       </div>
       <div className="flex-1 min-w-0">
         <div className="no-darkmap font-medium text-[13px] transition-colors" style={{ color: 'var(--color-text-primary)' }}>{item.label}</div>
-        <div className="no-darkmap text-[11px] mt-0.5 line-clamp-2 leading-relaxed" style={{ color: 'var(--color-text-tertiary)' }}>{item.description}</div>
+        <div className="no-darkmap text-[11px] mt-0.5 line-clamp-2 leading-relaxed" style={{ color: 'var(--color-text-secondary)' }}>{item.description}</div>
       </div>
+      {onAddComponent && (
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onAddComponent(item.type, item.toolId);
+          }}
+          disabled={disabled}
+          className="no-darkmap mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border transition-colors hover:bg-[#0972d3]/10 focus:outline-none focus:ring-2 focus:ring-[#0972d3]"
+          style={{ color: accent, borderColor: `color-mix(in srgb, ${accent} 35%, transparent)` }}
+          aria-label={`Add ${item.label} to canvas`}
+          title={`Add ${item.label} to canvas`}
+        >
+          <span aria-hidden="true">+</span>
+        </button>
+      )}
     </div>
   );
 }
@@ -344,7 +379,11 @@ export function ComponentPalette({
   onOpenToolGenerator,
   onOpenAgentGenerator,
   onOpenRegistry,
+  onOpenPromptLibrary,
+  onAddComponent,
+  authoringDisabledReason = null,
 }: ComponentPaletteProps) {
+  const authoringDisabled = authoringDisabledReason !== null;
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(
     new Set(['compute', 'integration', 'security', 'tools', 'connectors'])
   );
@@ -395,7 +434,8 @@ export function ComponentPalette({
 
   if (collapsed) {
     return (
-      <div
+      <aside
+        aria-label="Workflow component palette"
         className="w-12 h-full bg-white border-r border-[#e9ebed] flex flex-col items-center py-3"
         data-testid="component-palette-collapsed"
       >
@@ -422,8 +462,13 @@ export function ComponentPalette({
             return (
               <div
                 key={item.toolId || item.type}
-                draggable
+                draggable={!authoringDisabled}
+                aria-disabled={authoringDisabled || undefined}
                 onDragStart={(e) => {
+                  if (authoringDisabled) {
+                    e.preventDefault();
+                    return;
+                  }
                   e.dataTransfer.setData('application/agentcore-component', item.type);
                   if (item.toolId) {
                     e.dataTransfer.setData('application/agentcore-tool-id', item.toolId);
@@ -435,17 +480,28 @@ export function ComponentPalette({
                 className="w-9 h-9 rounded-md bg-[#f2f3f3] hover:bg-[#0972d3]/10 flex items-center justify-center cursor-grab active:cursor-grabbing transition-colors"
                 title={item.label}
               >
-                {collapsedIcon}
+                {onAddComponent ? (
+                  <button
+                    type="button"
+                    onClick={() => onAddComponent(item.type, item.toolId)}
+                    disabled={authoringDisabled}
+                    className="flex h-full w-full items-center justify-center rounded-md focus:outline-none focus:ring-2 focus:ring-[#0972d3] disabled:cursor-not-allowed disabled:opacity-60"
+                    aria-label={`Add ${item.label} to canvas`}
+                  >
+                    {collapsedIcon}
+                  </button>
+                ) : collapsedIcon}
               </div>
             );
           })}
         </div>
-      </div>
+      </aside>
     );
   }
 
   return (
-    <div
+    <aside
+      aria-label="Workflow component palette"
       className="w-[268px] h-full bg-white border-r border-[#e9ebed] flex flex-col"
       data-testid="component-palette"
     >
@@ -496,6 +552,7 @@ export function ComponentPalette({
           <input
             type="text"
             placeholder="Filter components..."
+            aria-label="Filter components"
             value={searchQuery}
             onChange={(e) => onSearchChange?.(e.target.value)}
             className="w-full pl-8 pr-3 py-2 text-sm bg-[#f2f3f3] border border-[#e9ebed] rounded-md focus:outline-none focus:ring-2 focus:ring-[#0972d3] focus:border-transparent focus:bg-white transition-all placeholder:text-[#8d99a8]"
@@ -522,7 +579,15 @@ export function ComponentPalette({
                 <div className="flex items-center gap-2">
                   <span className="text-sm">{category.icon}</span>
                   <span className="font-medium text-[#16191f] text-[13px]">{category.label}</span>
-                  <span className="text-[11px] text-[#5f6b7a] bg-[#e9ebed] px-1.5 py-px rounded">{items.length}</span>
+                  <span
+                    className="text-[11px] px-1.5 py-px rounded"
+                    style={{
+                      color: 'var(--color-text-primary)',
+                      backgroundColor: 'var(--color-surface-hover)',
+                    }}
+                  >
+                    {items.length}
+                  </span>
                 </div>
                 <svg
                   className={`w-3.5 h-3.5 text-[#8d99a8] transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
@@ -542,6 +607,8 @@ export function ComponentPalette({
                       item={item}
                       onDragStart={onDragStart}
                       onDragEnd={onDragEnd}
+                      onAddComponent={onAddComponent}
+                      disabled={authoringDisabled}
                     />
                   ))}
                 </div>
@@ -560,11 +627,16 @@ export function ComponentPalette({
       {/* Footer */}
       <div className="p-2.5 border-t border-[#e9ebed] space-y-1.5">
         {/* Primary action group */}
-        <div className="flex gap-1.5">
+        <div
+          className="grid grid-cols-2 gap-1.5"
+          data-testid="palette-primary-actions"
+        >
           {onOpenTemplates && (
             <button
+              type="button"
               onClick={onOpenTemplates}
-              className="flex-1 py-2 px-2.5 bg-[#0972d3] hover:bg-[#0961b9] text-white rounded-md text-xs font-semibold transition-all duration-150 flex items-center justify-center gap-1.5"
+              disabled={authoringDisabled}
+              className="min-w-0 py-2 px-1.5 bg-[#0972d3] hover:bg-[#0961b9] text-white rounded-md text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60 transition-all duration-150 flex items-center justify-center gap-1"
               title="Browse pre-built templates"
               aria-label="Browse templates"
             >
@@ -576,8 +648,14 @@ export function ComponentPalette({
           )}
           {onOpenRegistry && (
             <button
+              type="button"
               onClick={onOpenRegistry}
-              className="flex-1 py-2 px-2.5 bg-white hover:bg-gray-50 text-[#0972d3] rounded-md text-xs font-semibold transition-all duration-150 flex items-center justify-center gap-1.5 border border-[#0972d3]/30 hover:border-[#0972d3]/50"
+              disabled={authoringDisabled}
+              className="min-w-0 py-2 px-1.5 bg-white hover:bg-gray-50 rounded-md text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60 transition-all duration-150 flex items-center justify-center gap-1 border"
+              style={{
+                color: 'var(--color-aws-blue)',
+                borderColor: 'color-mix(in srgb, var(--color-aws-blue) 35%, transparent)',
+              }}
               title="Browse published agents from the registry"
               aria-label="Browse agent registry"
             >
@@ -587,11 +665,41 @@ export function ComponentPalette({
               Registry
             </button>
           )}
+          {onOpenPromptLibrary && (
+            <button
+              type="button"
+              onClick={onOpenPromptLibrary}
+              className="col-span-2 min-w-0 py-2 px-2.5 bg-white hover:bg-gray-50 rounded-md text-xs font-semibold transition-all duration-150 flex items-center justify-center gap-1.5 border"
+              style={{
+                color: 'var(--color-aws-blue)',
+                borderColor: 'color-mix(in srgb, var(--color-aws-blue) 35%, transparent)',
+              }}
+              title="Manage reusable system prompts"
+              aria-label="Open prompt library"
+            >
+              <svg
+                className="w-3.5 h-3.5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M4 4h16v16H4z" />
+                <path d="M8 8h8M8 12h8M8 16h5" />
+              </svg>
+              Prompts
+            </button>
+          )}
         </div>
         {onOpenAgentGenerator && (
           <button
+            type="button"
             onClick={onOpenAgentGenerator}
-            className="w-full py-2 px-3 bg-gradient-to-r from-[#9d7eff] to-[#0972d3] hover:opacity-90 text-white rounded-md text-xs font-medium transition-opacity flex items-center justify-center gap-1.5"
+            disabled={authoringDisabled}
+            className="w-full py-2 px-3 bg-[#5b21b6] hover:bg-[#4c1d95] text-white rounded-md text-xs font-medium disabled:cursor-not-allowed disabled:opacity-60 transition-colors flex items-center justify-center gap-1.5"
           >
             <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
@@ -601,8 +709,10 @@ export function ComponentPalette({
         )}
         {onOpenToolGenerator && (
           <button
+            type="button"
             onClick={onOpenToolGenerator}
-            className="w-full py-2 px-3 bg-[#f2f3f3] hover:bg-[#e9ebed] text-[#16191f] rounded-md text-xs font-medium transition-colors flex items-center justify-center gap-1.5 border border-[#e9ebed]"
+            disabled={authoringDisabled}
+            className="w-full py-2 px-3 bg-[#f2f3f3] hover:bg-[#e9ebed] text-[#16191f] rounded-md text-xs font-medium disabled:cursor-not-allowed disabled:opacity-60 transition-colors flex items-center justify-center gap-1.5 border border-[#e9ebed]"
           >
             <svg className="w-3.5 h-3.5 text-[#0972d3]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.57-3.25 3.92L12 22" /><path d="M12 2a4 4 0 0 0-4 4c0 1.95 1.4 3.57 3.25 3.92" />
@@ -610,11 +720,22 @@ export function ComponentPalette({
             AI Tool Generator
           </button>
         )}
-        <div className="text-[10px] text-[#8d99a8] text-center pt-0.5">
-          Drag components to canvas
-        </div>
+        {authoringDisabled ? (
+          <div
+            role="status"
+            data-testid="authoring-disabled-reason"
+            className="text-[10px] text-center pt-0.5"
+            style={{ color: 'var(--color-text-secondary)' }}
+          >
+            {authoringDisabledReason}
+          </div>
+        ) : (
+          <div className="text-[10px] text-center pt-0.5" style={{ color: 'var(--color-text-secondary)' }}>
+            Drag components or use their add buttons
+          </div>
+        )}
       </div>
-    </div>
+    </aside>
   );
 }
 

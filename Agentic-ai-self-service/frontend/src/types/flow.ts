@@ -16,6 +16,12 @@ export interface Flow {
   deploymentStatus: DeploymentStatus;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Optimistic-concurrency fence (F-15). Every save advances it; a save must
+   * name the version it was built on and is refused (409) when the row moved.
+   * Optional only for responses from a backend that predates the field.
+   */
+  version?: number;
 }
 
 export interface FlowSummary {
@@ -24,6 +30,7 @@ export interface FlowSummary {
   deploymentStatus: DeploymentStatus;
   createdAt: string;
   updatedAt: string;
+  version?: number;
 }
 
 // ============================================================================
@@ -37,6 +44,8 @@ export interface FlowCreateRequest {
 export interface FlowUpdateRequest {
   name?: string;
   workflow?: WorkflowDefinition;
+  /** The `Flow.version` this update was built on; the server answers 409 if it has moved. */
+  expectedVersion?: number;
 }
 
 // ============================================================================

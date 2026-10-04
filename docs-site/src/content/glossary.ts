@@ -691,11 +691,11 @@ export const glossary: GlossaryTerm[] = [
     id: 'advisory-rbac',
     term: 'Advisory mode (RBAC)',
     definition:
-      'In the Self-Service platform, scope-based RBAC ships with RBAC_ENFORCE=false: every request is allowed and a would-be denial is logged and counted as a CloudWatch WouldDeny metric until you switch to enforce.',
+      'In the Self-Service platform, RBAC_ENFORCE=false switches scope-based RBAC from its enforcing default to advisory: every request is allowed and a would-be denial is logged and counted as a CloudWatch WouldDeny metric, so an upgrade can size its blast radius before returning to enforcing.',
     source: {
       file: SELF_SERVICE_RBAC_ROLLOUT,
-      heading: 'RBAC Enforcement Rollout Runbook',
-      quote: 'Scope-based RBAC (`services/rbac.py`) ships **advisory by default**',
+      heading: 'The advisory escape hatch',
+      quote: '`RBAC_ENFORCE=false ./scripts/deploy.sh` allows every request',
     },
   },
 ];

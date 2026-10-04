@@ -4,7 +4,7 @@
  * Requirements: 9.1, 9.2, 9.3, 9.4, 9.5
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useWorkflowStore } from '../store/workflowStore';
 import {
   createAutoSaveService,
@@ -17,7 +17,10 @@ import {
 } from '../utils/autoSave';
 import { WorkflowSerializer } from '../utils/serialization';
 import { getApiClient, isApiError } from '../services/api';
-import type { SaveStatus } from '../types/workflow';
+import {
+  normalizeDeploymentGovernance,
+  type SaveStatus,
+} from '../types/workflow';
 
 // ============================================================================
 // Types
@@ -67,7 +70,13 @@ export function useWorkflowPersistence(
     onWorkflowIdChange,
   } = options;
 
-  const { nodes, edges, viewport, setNodes, setEdges, setViewport } = useWorkflowStore();
+  const {
+    nodes,
+    edges,
+    viewport,
+    governance,
+    replaceWorkflowDocument,
+  } = useWorkflowStore();
 
   const [state, setState] = useState<WorkflowPersistenceState>({
     saveStatus: 'saved',
@@ -136,12 +145,12 @@ export function useWorkflowPersistence(
   }, [useBackend, state.workflowId, autoSaveDelay, onWorkflowIdChange, onSaveStatusChange]);
 
   // Track previous state for change detection
-  const prevStateRef = useRef({ nodes, edges, viewport });
+  const prevStateRef = useRef({ nodes, edges, viewport, governance });
 
   /**
    * Loads workflow from backend by ID.
    */
-  const loadFromBackend = async (workflowId: string): Promise<boolean> => {
+  const loadFromBackend = useCallback(async (workflowId: string): Promise<boolean> => {
     try {
       const apiClient = getApiClient();
       const workflow = await apiClient.getWorkflow(workflowId);
@@ -185,10 +194,24 @@ export function useWorkflowPersistence(
         y: workflow.viewport.y,
         zoom: Math.max(0.1, Math.min(4, workflow.viewport.zoom)),
       };
+      const restoredGovernance = normalizeDeploymentGovernance(workflow.governance);
 
-      setNodes(restoredNodes as never);
-      setEdges(restoredEdges as never);
-      setViewport(restoredViewport);
+      replaceWorkflowDocument(
+        {
+          nodes: restoredNodes as never,
+          edges: restoredEdges as never,
+          viewport: restoredViewport,
+          governance: restoredGovernance,
+        },
+        { flowId: workflowId, markDirty: false },
+      );
+      const hydratedState = useWorkflowStore.getState();
+      prevStateRef.current = {
+        nodes: hydratedState.nodes,
+        edges: hydratedState.edges,
+        viewport: hydratedState.viewport,
+        governance: hydratedState.governance,
+      };
 
       setStoredWorkflowId(workflowId);
       setState((prev) => ({
@@ -212,13 +235,13 @@ export function useWorkflowPersistence(
       onRestoreError?.(errorMessage);
       return false;
     }
-  };
+  }, [onRestoreComplete, onRestoreError, replaceWorkflowDocument, setState]);
 
   /**
    * Restores workflow from local storage or backend.
    * Requirement 9.5: WHEN the application loads, THE Workflow_Canvas SHALL restore the last saved workflow state
    */
-  const restoreWorkflow = async (): Promise<boolean> => {
+  const restoreWorkflow = useCallback(async (): Promise<boolean> => {
     // First, try to restore from backend if we have a workflow ID
     const storedWorkflowId = getStoredWorkflowId();
     if (useBackend && storedWorkflowId) {
@@ -251,12 +274,31 @@ export function useWorkflowPersistence(
       }
 
       // Deserialize and restore
-      const { nodes: restoredNodes, edges: restoredEdges, viewport: restoredViewport } =
+      const {
+        nodes: restoredNodes,
+        edges: restoredEdges,
+        viewport: restoredViewport,
+        governance: restoredGovernance,
+      } =
         WorkflowSerializer.deserialize(savedJson);
+      const restoredFlowId = getStoredWorkflowId();
 
-      setNodes(restoredNodes as never);
-      setEdges(restoredEdges as never);
-      setViewport(restoredViewport);
+      replaceWorkflowDocument(
+        {
+          nodes: restoredNodes,
+          edges: restoredEdges,
+          viewport: restoredViewport,
+          governance: restoredGovernance,
+        },
+        { flowId: restoredFlowId, markDirty: false },
+      );
+      const hydratedState = useWorkflowStore.getState();
+      prevStateRef.current = {
+        nodes: hydratedState.nodes,
+        edges: hydratedState.edges,
+        viewport: hydratedState.viewport,
+        governance: hydratedState.governance,
+      };
 
       setState((prev) => ({ ...prev, isRestored: true, error: null }));
       onRestoreComplete?.();
@@ -267,13 +309,27 @@ export function useWorkflowPersistence(
       onRestoreError?.(errorMessage);
       return false;
     }
-  };
+  }, [
+    loadFromBackend,
+    onRestoreComplete,
+    onRestoreError,
+    replaceWorkflowDocument,
+    setState,
+    useBackend,
+  ]);
 
   /**
    * Forces an immediate save.
    */
   const saveNow = async (): Promise<void> => {
-    await autoSaveServiceRef.current.saveNow(nodes, edges, viewport);
+    await autoSaveServiceRef.current.saveNow(
+      nodes,
+      edges,
+      viewport,
+      undefined,
+      undefined,
+      governance,
+    );
   };
 
   /**
@@ -289,10 +345,15 @@ export function useWorkflowPersistence(
     }
   };
 
-  // Restore workflow on mount (adjust state during render pattern)
-  if (!state.isRestored) {
-    restoreWorkflow();
-  }
+  const restoreStartedRef = useRef(false);
+  useEffect(() => {
+    if (state.isRestored || restoreStartedRef.current) return;
+    restoreStartedRef.current = true;
+    const timer = window.setTimeout(() => {
+      void restoreWorkflow();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [restoreWorkflow, state.isRestored]);
 
   // Auto-save on changes
   useEffect(() => {
@@ -303,13 +364,21 @@ export function useWorkflowPersistence(
     const hasChanged =
       nodes !== prevState.nodes ||
       edges !== prevState.edges ||
-      viewport !== prevState.viewport;
+      viewport !== prevState.viewport ||
+      governance !== prevState.governance;
 
     if (hasChanged) {
-      prevStateRef.current = { nodes, edges, viewport };
-      autoSaveServiceRef.current.scheduleAutoSave(nodes, edges, viewport);
+      prevStateRef.current = { nodes, edges, viewport, governance };
+      autoSaveServiceRef.current.scheduleAutoSave(
+        nodes,
+        edges,
+        viewport,
+        undefined,
+        undefined,
+        governance,
+      );
     }
-  }, [nodes, edges, viewport, autoSaveEnabled, state.isRestored]);
+  }, [nodes, edges, viewport, governance, autoSaveEnabled, state.isRestored]);
 
   // Cleanup on unmount
   useEffect(() => {

@@ -97,6 +97,41 @@ def region_inference_prefix(region: str | None = None) -> str:
     return "us"
 
 
+def is_inference_profile_id(model_id: str) -> bool:
+    """True when *model_id* is a cross-region inference profile, not a model.
+
+    The distinction is not cosmetic: the two take different ARNs.
+    ``arn:aws:bedrock:<region>::foundation-model/<id>`` carries no account and is what
+    a plain on-demand id needs, while a geography-prefixed id is a profile and needs
+    ``arn:aws:bedrock:<region>:<account>:inference-profile/<id>``. Getting it wrong
+    produces an ARN that names nothing — ``GetFoundationModel`` on a ``us.``-prefixed
+    id answers ResourceNotFoundException — and callers of Bedrock report that in ways
+    that point nowhere near the model ARN.
+
+    This tests ``CROSS_REGION_PREFIXES`` and NOT ``_GEO_PREFIXES``, and the difference
+    is load-bearing. The geography set deliberately excludes ``global.`` because a
+    ``global.`` id must never be *repointed* at a region — but it is still a profile.
+    Reusing the repoint set here would have given every ``global.`` model a
+    ``foundation-model`` ARN that names nothing.
+
+    Every quadrant of that claim was checked against ``bedrock-runtime converse`` in
+    us-east-1, passing the ARN itself as the model id:
+
+        us.anthropic.claude-sonnet-4-5-…      inference-profile/  ok
+                                             foundation-model/   ValidationException:
+                                                                 provided model
+                                                                 identifier is invalid
+        global.anthropic.claude-sonnet-4-5-…  inference-profile/  ok
+                                             foundation-model/   same ValidationException
+        amazon.titan-embed-text-v2:0         foundation-model/   its own modelArn
+                                             inference-profile/  ResourceNotFoundException
+
+    So the two ARN forms are mutually exclusive, and the prefix is what decides
+    which one a given id takes.
+    """
+    return model_id.startswith(CROSS_REGION_PREFIXES)
+
+
 def has_date_suffix(model_id: str) -> bool:
     """True for legacy dated IDs like ``…claude-haiku-4-5-20251001``.
 
@@ -170,6 +205,69 @@ def repoint_regional_prefix(model_id: str, region: str | None = None) -> str:
         if model_id.startswith(geo):
             return _add_legacy_version_suffix(f"{prefix}.{model_id[len(geo) :]}")
     return model_id
+
+
+# Every model provider whose model IDs name a model in a FOREIGN catalog, where a
+# geography prefix is not a namespace — it is part of the name, and the wrong name.
+#
+# Measured, which is why this set exists: an OpenAI agent deployed through the real
+# API came up with ``MODEL_ID = us.gpt-4o-mini``, because the prefix rule was applied
+# to every provider. OpenAI has no ``us.`` namespace; ``us.gpt-4o-mini`` is simply a
+# model that does not exist, and the same mangled ID is baked into the generated
+# module as a literal (``OpenAIModel(model_id="…")`` does not read MODEL_ID at all),
+# so nothing downstream can recover it. Ollama takes a local tag (``llama3``) and
+# SageMaker takes an ENDPOINT NAME, neither of which is a Bedrock ID either.
+#
+# This set is the complement, not the list, on purpose: ``_get_model_init_code`` in
+# ``code_generator`` falls through to ``BedrockModel`` for any provider string it does
+# not recognise, so an unrecognised string has to be treated as Bedrock HERE too —
+# otherwise the ID this module produces is not the ID the generated agent invokes.
+# ``backend/tests/test_region_model_prefix.py`` pins the two against each other.
+NON_BEDROCK_PROVIDERS = frozenset(
+    {
+        "openai",
+        "anthropic",
+        "gemini",
+        "litellm",
+        "mistral",
+        "ollama",
+        "sagemaker",
+        "groq",
+        "deepseek",
+        "together",
+        "writer",
+        "llamaapi",
+    }
+)
+
+
+def uses_bedrock_inference_profiles(provider: str | None) -> bool:
+    """True when *provider*'s model IDs are Bedrock IDs, so the prefix rule applies.
+
+    ``""`` and ``None`` mean Bedrock: it is the platform default everywhere
+    (``StrandsModelProvider.BEDROCK``, ``RuntimeConfig.model_provider``'s default),
+    and a config that omits the provider is a Bedrock config.
+    """
+    return str(provider or "").strip().lower() not in NON_BEDROCK_PROVIDERS
+
+
+def to_regional_model_id_for_provider(model_id: str, provider: str | None, region: str | None = None) -> str:
+    """:func:`to_regional_model_id`, but only for a provider that has profiles.
+
+    Use this at every point where the provider is known. A foreign catalog's ID is
+    returned untouched — including its absent prefix, because "add ``us.``" is as
+    wrong as "re-point ``us.`` to ``eu.``" when the catalog is OpenAI's.
+    """
+    if not uses_bedrock_inference_profiles(provider):
+        return model_id
+    return to_regional_model_id(model_id, region)
+
+
+def repoint_regional_prefix_for_provider(model_id: str, provider: str | None, region: str | None = None) -> str:
+    """:func:`repoint_regional_prefix`, but only for a provider that has profiles."""
+    if not uses_bedrock_inference_profiles(provider):
+        return model_id
+    return repoint_regional_prefix(model_id, region)
 
 
 def regionalize_catalog(models: list[dict], region: str | None = None, key: str = "modelId") -> list[dict]:

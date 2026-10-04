@@ -36,6 +36,7 @@ export function FlowSidebarItem({
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(flow.name);
   const inputRef = useRef<HTMLInputElement>(null);
+  const renameResolutionRef = useRef<'pending' | 'confirmed' | 'cancelled'>('pending');
 
   // Focus input when entering edit mode
   useEffect(() => {
@@ -51,21 +52,16 @@ export function FlowSidebarItem({
     }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (isEditing) return;
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      onOpen(flow.id);
-    }
-  };
-
   const handleRenameClick = (e: React.MouseEvent) => {
     e.stopPropagation();
+    renameResolutionRef.current = 'pending';
     setEditName(flow.name);
     setIsEditing(true);
   };
 
   const handleRenameConfirm = useCallback(() => {
+    if (renameResolutionRef.current !== 'pending') return;
+    renameResolutionRef.current = 'confirmed';
     const trimmed = editName.trim();
     if (trimmed && trimmed !== flow.name) {
       onRename(flow.id, flow.name, trimmed);
@@ -74,6 +70,8 @@ export function FlowSidebarItem({
   }, [editName, flow.id, flow.name, onRename]);
 
   const handleRenameCancel = useCallback(() => {
+    if (renameResolutionRef.current !== 'pending') return;
+    renameResolutionRef.current = 'cancelled';
     setEditName(flow.name);
     setIsEditing(false);
   }, [flow.name]);
@@ -96,15 +94,11 @@ export function FlowSidebarItem({
     <>
       <div
         data-testid="flow-sidebar-item"
-        role="button"
-        tabIndex={0}
-        className={`flex cursor-pointer items-center justify-between rounded-md border px-2 py-1.5 transition-colors ${
+        className={`flex items-center justify-between rounded-md border px-2 py-1.5 transition-colors ${
           isActive
             ? 'bg-[#0972d3]/10 border-[#0972d3]/30'
             : 'border-transparent hover:bg-[#f2f3f3]'
         }`}
-        onClick={handleRowClick}
-        onKeyDown={handleKeyDown}
       >
         {isEditing ? (
           <input
@@ -113,21 +107,35 @@ export function FlowSidebarItem({
             value={editName}
             onChange={(e) => setEditName(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') handleRenameConfirm();
-              if (e.key === 'Escape') handleRenameCancel();
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                handleRenameConfirm();
+              }
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                handleRenameCancel();
+              }
             }}
             onBlur={handleRenameConfirm}
             onClick={(e) => e.stopPropagation()}
+            aria-label={`Rename ${flow.name}`}
             className="flex-1 text-[13px] px-1.5 py-0.5 rounded border border-[#0972d3] focus:outline-none focus:ring-1 focus:ring-[#0972d3] bg-white min-w-0"
             data-testid="flow-sidebar-item-rename-input"
           />
         ) : (
-          <span
-            data-testid="flow-sidebar-item-name"
-            className="truncate text-[13px] text-[#16191f]"
+          <button
+            type="button"
+            data-testid="flow-sidebar-item-open"
+            onClick={handleRowClick}
+            className="min-w-0 flex-1 rounded px-1 py-0.5 text-left focus:outline-none focus:ring-2 focus:ring-[#0972d3]"
           >
-            {flow.name}
-          </span>
+            <span
+              data-testid="flow-sidebar-item-name"
+              className="block truncate text-[13px] text-[#16191f]"
+            >
+              {flow.name}
+            </span>
+          </button>
         )}
 
         <div className="ml-2 flex shrink-0 items-center gap-0.5">
@@ -139,7 +147,7 @@ export function FlowSidebarItem({
             onClick={handleRenameClick}
             aria-label={`Rename ${flow.name}`}
           >
-            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z" />
               <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
             </svg>
@@ -153,7 +161,7 @@ export function FlowSidebarItem({
             onClick={handleDeleteClick}
             aria-label={`Delete ${flow.name}`}
           >
-            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
             </svg>
           </button>

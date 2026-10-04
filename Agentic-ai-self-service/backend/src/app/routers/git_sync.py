@@ -43,6 +43,8 @@ from pydantic import BaseModel, Field
 from app.models import WorkflowDefinition
 from app.services import git_sync
 from app.services.auth import get_caller_sub
+from app.services.error_sanitizer import redact_secrets
+from app.services.rbac import require_scopes
 from app.services.storage import get_workflow_storage
 from app.services.workspace_acl import Acl, can_edit
 
@@ -94,7 +96,11 @@ class GitTokenRequest(BaseModel):
     path: str = Field(min_length=1, max_length=512)
 
 
-@router.post("/{workflow_id}/git-token", response_model=WorkflowDefinition)
+@router.post(
+    "/{workflow_id}/git-token",
+    response_model=WorkflowDefinition,
+    dependencies=[Depends(require_scopes("agent:write"))],
+)
 async def set_git_token(
     workflow_id: str,
     request: GitTokenRequest,
@@ -137,7 +143,11 @@ async def set_git_token(
     return result
 
 
-@router.post("/{workflow_id}/git-sync", response_model=WorkflowDefinition)
+@router.post(
+    "/{workflow_id}/git-sync",
+    response_model=WorkflowDefinition,
+    dependencies=[Depends(require_scopes("agent:write"))],
+)
 async def git_sync_workflow(
     workflow_id: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -186,6 +196,11 @@ async def git_sync_workflow(
         base["viewport"] = spec["viewport"]
     if "metadata" in spec:
         base["metadata"] = spec["metadata"]
+    # Governance is content, not authority. Preserve the stored value when an
+    # older repository spec omits it; replace it only when the repository
+    # explicitly carries the versioned governance envelope.
+    if "governance" in spec:
+        base["governance"] = spec["governance"]
     base["updated_at"] = datetime.now(timezone.utc).isoformat()
     # Force identity/ACL fields back to the stored values (last write wins).
     base["id"] = workflow.id
@@ -199,7 +214,9 @@ async def git_sync_workflow(
     except Exception as e:
         # The spec validated standalone but failed to merge (e.g. edge refers to
         # a node only present in the stored row). Surface as a 400.
-        raise HTTPException(status_code=400, detail=f"git spec merge failed: {e}") from e
+        # F-30: a pydantic message echoes the offending input, and the spec is caller content that
+        # can carry a credential; redact and bound it before it becomes a response body.
+        raise HTTPException(status_code=400, detail=f"git spec merge failed: {redact_secrets(str(e))[:300]}") from e
 
     # Carry forward the loose extra fields the model doesn't (yet) declare —
     # git_source / acl / workspace_id — from the stored row, never the spec.

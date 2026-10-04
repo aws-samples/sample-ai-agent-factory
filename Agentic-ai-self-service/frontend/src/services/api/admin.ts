@@ -11,7 +11,20 @@ import { apiRequest } from './client';
 export interface DeployTargetsConfig {
   enabled: boolean;
   regions: string[];
-  accounts: Array<{ account_id: string; role_arn: string; region: string }>;
+  region_targets?: Array<{
+    region: string;
+    account_id?: string | null;
+    artifact_bucket?: string | null;
+  }>;
+  accounts: Array<{
+    account_id: string;
+    role_arn: string;
+    runtime_role_arn: string;
+    mcp_runtime_role_arn: string;
+    harness_role_arn: string;
+    artifact_bucket: string;
+    region: string;
+  }>;
 }
 
 // ============================================================================
@@ -31,18 +44,55 @@ export async function enableDeployTargets(enabled: boolean): Promise<{ enabled: 
   });
 }
 
-/** Phase 7 — add an allowlisted deploy region. */
-export async function addDeployRegion(region: string): Promise<{ regions: string[] }> {
-  return apiRequest<{ regions: string[] }>(`/api/admin/deploy-targets/regions`, {
+/** Phase 7 — register an allowlisted region and validate its code bucket. */
+export async function addDeployRegion(
+  region: string,
+  artifactBucket?: string,
+): Promise<{
+  region: string;
+  account_id: string;
+  artifact_bucket: string;
+  validated: boolean;
+  regions: string[];
+}> {
+  return apiRequest(`/api/admin/deploy-targets/regions`, {
     method: 'POST',
-    body: JSON.stringify({ region }),
+    body: JSON.stringify({
+      region,
+      ...(artifactBucket ? { artifact_bucket: artifactBucket } : {}),
+    }),
   });
 }
 
 /** Phase 7 — register a cross-account deploy target (validated server-side). */
-export async function addDeployAccount(accountId: string, roleArn: string, region: string): Promise<{ account_id: string; validated: boolean }> {
-  return apiRequest<{ account_id: string; validated: boolean }>(`/api/admin/deploy-targets/accounts`, {
+export async function addDeployAccount(
+  accountId: string,
+  roleArn: string,
+  region: string,
+  runtimeRoleArn?: string,
+  mcpRuntimeRoleArn?: string,
+  harnessRoleArn?: string,
+  artifactBucket?: string,
+): Promise<{
+  account_id: string;
+  runtime_role_arn: string;
+  mcp_runtime_role_arn: string;
+  harness_role_arn: string;
+  artifact_bucket: string;
+  validated: boolean;
+}> {
+  return apiRequest(`/api/admin/deploy-targets/accounts`, {
     method: 'POST',
-    body: JSON.stringify({ account_id: accountId, role_arn: roleArn, region }),
+    body: JSON.stringify({
+      account_id: accountId,
+      role_arn: roleArn,
+      region,
+      ...(runtimeRoleArn ? { runtime_role_arn: runtimeRoleArn } : {}),
+      ...(mcpRuntimeRoleArn
+        ? { mcp_runtime_role_arn: mcpRuntimeRoleArn }
+        : {}),
+      ...(harnessRoleArn ? { harness_role_arn: harnessRoleArn } : {}),
+      ...(artifactBucket ? { artifact_bucket: artifactBucket } : {}),
+    }),
   });
 }

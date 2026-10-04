@@ -514,7 +514,7 @@ def _install_strands_stubs():
 
 def test_resolved_body_with_triple_quotes_codegen_safe():
     """A resolved multi-line body containing triple-quotes must be escaped by
-    _escape_triple_quotes and produce an import-safe agent module."""
+    _as_triple_quoted_body and produce an import-safe agent module."""
     from app.models.deployment_models import RuntimeConfig
     from app.services.code_generator import generate_agent_code
 

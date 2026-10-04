@@ -38,9 +38,10 @@ function VectorStoreS3VectorsFields({ config, updateField, errors }: VectorStore
     <>
       <div className="p-2.5 bg-blue-50 rounded-lg border border-blue-200">
         <p className="text-xs text-blue-700">
-          Fully managed by AWS Bedrock by default. Bedrock creates and manages the vector
-          index automatically. To attach an existing S3 Vectors bucket/index, expand
-          Advanced.
+          Leave Advanced blank and the platform creates a deployment-bound vector bucket
+          and compatible index, then removes them during teardown. To attach a customer
+          bucket, pre-create a float32/1024/cosine index and tag the bucket
+          <span className="font-mono"> AgentCoreFlowsAccess=allow</span>.
         </p>
       </div>
       <button
@@ -58,7 +59,7 @@ function VectorStoreS3VectorsFields({ config, updateField, errors }: VectorStore
             value={config.s3VectorsBucketArn || ''}
             onChange={(v) => updateField('s3VectorsBucketArn', v)}
             placeholder="arn:aws:s3vectors:us-east-1:123456789012:bucket/my-vec-bucket"
-            helpText="Optional. Leave blank for fully-managed mode."
+            helpText="Optional. Leave blank for platform-managed lifecycle; customer buckets require the access tag and a pre-created compatible index."
             error={getError(errors, 's3VectorsBucketArn')}
           />
           <TextField
@@ -94,8 +95,10 @@ function VectorStoreOpenSearchFields({ config, updateField, errors }: VectorStor
     <>
       <div className="p-2.5 bg-amber-50 rounded-lg border border-amber-200">
         <p className="text-xs text-amber-700">
-          Requires an existing OpenSearch Serverless collection with a vector index.
-          The index dimensions must match your chosen embedding model.
+          Leave Collection ARN blank and the platform creates a deployment-bound collection
+          and compatible vector index. A customer collection must already contain the named
+          compatible index and carry
+          <span className="font-mono"> AgentCoreFlowsAccess=allow</span>.
         </p>
       </div>
       <TextField
@@ -104,8 +107,7 @@ function VectorStoreOpenSearchFields({ config, updateField, errors }: VectorStor
         value={config.opensearchCollectionArn || ''}
         onChange={(v) => updateField('opensearchCollectionArn', v)}
         placeholder="arn:aws:aoss:us-east-1:123456789012:collection/abc123"
-        required
-        helpText="OpenSearch Serverless collection ARN"
+        helpText="Optional. Leave blank for platform-managed lifecycle."
         error={getError(errors, 'opensearchCollectionArn')}
       />
       <TextField
@@ -154,7 +156,8 @@ function VectorStoreRDSFields({ config, updateField, errors }: VectorStoreFieldP
       <div className="p-2.5 bg-amber-50 rounded-lg border border-amber-200">
         <p className="text-xs text-amber-700">
           Requires an existing Aurora PostgreSQL cluster with the <span className="font-mono">pgvector</span> extension
-          installed and a pre-created table with the correct schema.
+          installed and a pre-created table with the correct schema. Tag the cluster and
+          credential source secret <span className="font-mono">AgentCoreFlowsAccess=allow</span>.
         </p>
       </div>
       <TextField
@@ -174,7 +177,7 @@ function VectorStoreRDSFields({ config, updateField, errors }: VectorStoreFieldP
         onChange={(v) => updateField('rdsCredentialsSecretArn', v)}
         placeholder="arn:aws:secretsmanager:us-east-1:123456789012:secret:my-rds-creds"
         required
-        helpText="Secrets Manager ARN with database username and password"
+        helpText="Opted-in source secret; its value is copied into a deployment-bound target secret."
         error={getError(errors, 'rdsCredentialsSecretArn')}
       />
       <div className="grid grid-cols-2 gap-3">

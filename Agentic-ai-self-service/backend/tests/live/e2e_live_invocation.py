@@ -313,15 +313,10 @@ def build_patterns() -> list[dict]:
     # We'll skip this one since it needs a different bundle
     # patterns.append({...})
 
-    # --- Pattern 7: Step Functions MCP Server Runtime template ---
-    patterns.append(
-        {
-            "name": "sfn-mcp-server",
-            "code": sfn_generate_agent_code(config=sfn_cfg, template_id="mcp-server-runtime"),
-            "connected_tools": [],
-            "description": "Step Functions path: MCP Server Runtime template",
-        }
-    )
+    # The standalone mcp-server-runtime template is intentionally absent here.
+    # This legacy probe invokes every artifact as an HTTP conversational runtime;
+    # the standalone server speaks MCP and must instead be certified through the
+    # product-owned /api/test-mcp-runtime/tools and /call routes.
 
     return patterns
 

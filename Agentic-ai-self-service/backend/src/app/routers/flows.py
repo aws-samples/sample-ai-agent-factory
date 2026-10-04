@@ -26,7 +26,8 @@ from app.models import (
     FlowUpdateRequest,
 )
 from app.services.auth import assert_owner, get_caller_sub
-from app.services.flow_storage import get_flow_storage
+from app.services.flow_storage import FlowVersionConflict, get_flow_storage
+from app.services.rbac import require_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,12 @@ def _validate_flow_id(flow_id: str) -> str:
 # ============================================================================
 
 
-@router.post("", response_model=FlowResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=FlowResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_scopes("agent:write"))],
+)
 async def create_flow(
     request: FlowCreateRequest,
     caller_sub: str = Depends(get_caller_sub),
@@ -88,7 +94,7 @@ async def create_flow(
         ) from exc
 
 
-@router.get("", response_model=FlowListResponse)
+@router.get("", response_model=FlowListResponse, dependencies=[Depends(require_scopes("agent:read"))])
 async def list_flows(
     caller_sub: str = Depends(get_caller_sub),
 ) -> FlowListResponse:
@@ -118,6 +124,7 @@ async def list_flows(
                 deployment_status=c.deployment_status,
                 created_at=c.created_at,
                 updated_at=c.updated_at,
+                version=c.version,
             )
             for c in flows
         ]
@@ -134,7 +141,7 @@ async def list_flows(
         ) from exc
 
 
-@router.get("/{flow_id}", response_model=Flow)
+@router.get("/{flow_id}", response_model=Flow, dependencies=[Depends(require_scopes("agent:read"))])
 async def get_flow(
     flow_id: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -167,13 +174,17 @@ async def get_flow(
         ) from exc
 
 
-@router.put("/{flow_id}", response_model=FlowResponse)
+@router.put("/{flow_id}", response_model=FlowResponse, dependencies=[Depends(require_scopes("agent:write"))])
 async def update_flow(
     flow_id: str,
     request: FlowUpdateRequest,
     caller_sub: str = Depends(get_caller_sub),
 ) -> FlowResponse:
     """Update an existing flow name and/or workflow. Caller must own it.
+
+    The save is a compare-and-set on ``expectedVersion`` (F-15). A stale version is answered with
+    409 and the server's current version; nothing is written, so neither the caller's edits (still
+    in its browser) nor the other writer's (still on the server) are lost.
 
     Requirements: 6.2, 6.4
     """
@@ -185,11 +196,14 @@ async def update_flow(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Flow '{flow_id}' not found",
             )
+        # Ownership first: a non-owner must get the same 404 as for a missing row, never a 409
+        # whose body describes the row.
         assert_owner(getattr(existing, "owner_sub", None), caller_sub)
         updated = _get_flow_storage().update(
             flow_id,
             name=request.name,
             workflow=request.workflow,
+            expected_version=request.expected_version,
         )
         if updated is None:
             raise HTTPException(
@@ -202,6 +216,26 @@ async def update_flow(
         )
     except HTTPException:
         raise
+    except FlowVersionConflict as exc:
+        current = exc.current
+        logger.info(
+            "Flow save refused: %s built on version %s, row at %s",
+            flow_id,
+            exc.expected,
+            "missing" if current is None else current.version,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "flow_version_conflict",
+                "message": (
+                    "This flow was changed elsewhere since you loaded it. "
+                    "Reload to see the latest version, or save again to overwrite it."
+                ),
+                "currentVersion": None if current is None else current.version,
+                "updatedAt": None if current is None else current.updated_at.isoformat(),
+            },
+        ) from exc
     except ClientError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -214,7 +248,7 @@ async def update_flow(
         ) from exc
 
 
-@router.delete("/{flow_id}")
+@router.delete("/{flow_id}", dependencies=[Depends(require_scopes("agent:write"))])
 async def delete_flow(
     flow_id: str,
     caller_sub: str = Depends(get_caller_sub),

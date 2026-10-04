@@ -21,7 +21,9 @@ Run:
 from __future__ import annotations
 
 import io
+import threading
 import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 
 import pytest
@@ -89,7 +91,47 @@ def test_dynamic_tools_lambda_has_ssrf_guard_and_structured_errors():
     # Structured tool-failure contract
     assert "ToolUnavailable" in DYNAMIC_TOOLS_LAMBDA_CODE
     assert "tool_unavailable" in DYNAMIC_TOOLS_LAMBDA_CODE
+    assert "_NoRedirect" in DYNAMIC_TOOLS_LAMBDA_CODE
     compile(DYNAMIC_TOOLS_LAMBDA_CODE, "<DYNAMIC_TOOLS_LAMBDA_CODE>", "exec")
+
+
+def test_dynamic_tool_http_helper_never_follows_redirects():
+    """A public first hop must not redirect the fetcher around its SSRF guard."""
+    from app.services.codegen_templates import dynamic_tools_impl
+
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            if self.path == "/start":
+                self.send_response(302)
+                self.send_header("Location", "/private")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"redirect followed")
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(dynamic_tools_impl.ToolUnavailable):
+            dynamic_tools_impl._http_get(
+                f"http://127.0.0.1:{server.server_port}/start",
+                timeout=2,
+                retries=0,
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert seen == ["/start"], f"the redirect target was contacted: {seen}"
 
 
 def test_gateway_deployer_constants_compile():
@@ -109,9 +151,12 @@ def test_gateway_deployer_constants_compile():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("template_id", ["web-search-agent", "mcp-server-runtime"])
-def test_generated_tool_agent_code_compiles(template_id: str):
-    code = generate_agent_code(_make_config(), template_id=template_id)
+@pytest.mark.parametrize(
+    "template_id,protocol",
+    [("web-search-agent", "HTTP"), ("mcp-server-runtime", "MCP")],
+)
+def test_generated_tool_agent_code_compiles(template_id: str, protocol: str):
+    code = generate_agent_code(_make_config(protocol=protocol), template_id=template_id)
     compile(code, f"<{template_id}>", "exec")
     # Canonical impl actually landed (marker replaced, hardened fetch present).
     assert "__TOOL_IMPL__" not in code
@@ -145,21 +190,20 @@ def test_cfn_tool_lambda_zip_contains_canonical_code():
     assert bundle.tool_lambda_code, "tools pattern must ship a tool-lambdas zip"
     with zipfile.ZipFile(io.BytesIO(bundle.tool_lambda_code)) as zf:
         names = set(zf.namelist())
-        assert "dynamic_tools.py" in names
-        assert "customer_support_tools.py" in names
+        assert names == {"dynamic_tools.py"}
         dynamic = zf.read("dynamic_tools.py").decode()
-        customer = zf.read("customer_support_tools.py").decode()
 
-    # The exported Lambda is the SAME hardened code the UI deploy path ships.
+    # Web tools and the canonical order contract intentionally share the
+    # DynamicTools family on both the export and live-deploy paths.
     assert "_FETCH_BLOCKED_NETS" in dynamic
     assert "tool_unavailable" in dynamic
+    assert "_do_get_order" in dynamic
+    assert "_do_process_refund" in dynamic
     compile(dynamic, "<cfn dynamic_tools.py>", "exec")
-    assert "_do_process_refund" in customer
-    compile(customer, "<cfn customer_support_tools.py>", "exec")
 
     # Template handler wiring matches the shipped module's entrypoint name.
     assert "dynamic_tools.lambda_handler" in bundle.template_yaml
-    assert "customer_support_tools.lambda_handler" in bundle.template_yaml
+    assert "customer_support_tools.lambda_handler" not in bundle.template_yaml
 
 
 def test_cfn_kb_template_embeds_canonical_kb_lambda():

@@ -3,6 +3,11 @@
  */
 
 import { apiRequest } from './client';
+import { stripWriteOnlyCredentials } from '../../utils/credentialScrub';
+import {
+  normalizeDeploymentGovernance,
+  type DeploymentGovernanceV1,
+} from '../../types/workflow';
 
 // ============================================================================
 // Types
@@ -50,7 +55,7 @@ export interface PublishRegistryRequest {
   description?: string;
   tags?: string[];
   visibility?: 'private' | 'org' | 'public';
-  canvas_snapshot: Record<string, unknown>;
+  canvas_snapshot: RegistryCanvasSnapshotV2;
   source_runtime_name?: string;
   latest_version_id?: string;
 }
@@ -64,16 +69,56 @@ export interface PublishRegistryRequest {
  * /Edge[] when loading. (Mislabeling this as GeneratedCanvasSpec is exactly what
  * let the broken clone-apply cast compile and silently drop all edges.)
  */
-export interface RegistryCanvasSnapshot {
+export interface LegacyRegistryCanvasSnapshot {
+  schemaVersion?: 1;
   name: string;
   nodes: unknown[];
   edges: unknown[];
+  viewport?: RegistryCanvasViewport;
 }
+
+export interface RegistryCanvasViewport {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+export interface RegistryCanvasSnapshotV2 {
+  schemaVersion: 2;
+  name: string;
+  nodes: unknown[];
+  edges: unknown[];
+  viewport: RegistryCanvasViewport;
+  governance: DeploymentGovernanceV1;
+}
+
+export type RegistryCanvasSnapshot =
+  | LegacyRegistryCanvasSnapshot
+  | RegistryCanvasSnapshotV2;
 
 export interface RegistryCloneResponse {
   agent_slug: string;
   display_name: string;
   canvas_snapshot: RegistryCanvasSnapshot;
+}
+
+/** Build the only snapshot shape current publishers are allowed to emit. */
+export function createRegistryCanvasSnapshot(
+  name: string,
+  nodes: unknown[],
+  edges: unknown[],
+  viewport: RegistryCanvasViewport,
+  governance: DeploymentGovernanceV1,
+): RegistryCanvasSnapshotV2 {
+  return {
+    schemaVersion: 2,
+    name,
+    // A published snapshot is cloned into other users' canvases: never carry a raw key/secret.
+    nodes: stripWriteOnlyCredentials(nodes),
+    edges,
+    viewport: { ...viewport },
+    governance: normalizeDeploymentGovernance(governance),
+  };
 }
 
 // ============================================================================

@@ -1,6 +1,11 @@
-"""Workflow deployment engine for AWS AgentCore.
+"""Legacy compatibility helpers for the retired in-process deploy path.
 
-This module provides the WorkflowExecutor class that handles:
+``WorkflowExecutor`` is retained temporarily for code-generation compatibility
+and focused regression tests, but it is not a supported deployment entry point.
+``POST /api/workflows/{id}/deploy`` is permanently retired; production
+deployments must use ``POST /api/deploy`` and the durable Step Functions path.
+
+The legacy class still contains:
 - Deployment orchestration using bedrock-agentcore-starter-toolkit CLI
 - Configuration file generation (.bedrock_agentcore.yaml)
 - Multi-region deployment support
@@ -10,6 +15,7 @@ This module provides the WorkflowExecutor class that handles:
 Requirements: 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7
 """
 
+import ast
 import asyncio
 import logging
 import os
@@ -35,9 +41,27 @@ from app.models import (
     WorkflowDefinition,
 )
 from app.models.enums import StrandsModelProvider
-from app.services import runtime_deployer
-from app.services.observability import build_otel_env_vars, get_platform_observability_defaults
-from app.services.resource_ownership import owner_tag_list
+from app.services import codegen_templates, runtime_deployer
+from app.services.aws_pagination import list_all
+from app.services.gateway_mutation_lock import engine_is, gateway_mutation_lock
+from app.services.gateway_update import preserving_gateway_update
+from app.services.iam_boundary import create_role_kwargs, ensure_role_boundary
+from app.services.naming import (
+    regional_iam_role_name,
+    scoped_mcp_code_s3_key,
+)
+from app.services.observability import (
+    build_otel_env_vars,
+)
+from app.services.observability import (
+    get_platform_observability_defaults_lenient as get_platform_observability_defaults,
+)
+from app.services.resource_ownership import (
+    assert_this_deployment_may_mutate,
+    owner_lower_tag_list,
+    owner_tag_list,
+    owner_tags,
+)
 from app.services.runtime_deployer import (
     create_agent_runtime,
     create_runtime_iam_role,
@@ -129,6 +153,39 @@ VALID_AWS_REGIONS = [
 ]
 
 
+def canvas_connected_tools(workflow, connected_tools: list[str] | None = None) -> list[str]:
+    """The component types this deployment has, from the canvas UNION the caller's list.
+
+    Two definitions of "this canvas has a gateway" used to coexist in ``deploy()``: the
+    deploy decision counted the gateway NODE, and the codegen decision required
+    ``"gateway" in connected_tools``. Nothing derived the list from the canvas and the
+    deploy route (``routers/workflows.py``) passes none, so the codegen signal was
+    permanently False on this path. Measured consequence on a live deploy: the gateway
+    was created, ``GATEWAY_URL``/``GATEWAY_AUTH_MODE``/``GATEWAY_MCP_SERVERS``/
+    ``GATEWAY_API_KEY_SECRET_ARN`` were injected into the runtime environment and the
+    runtime role was granted the connector secret — and the generated ``agent.py``
+    contained zero references to any of them. Green deploy, READY runtime, 200 invoke,
+    zero tools, and the generator's own zero-tools wiring proof could not fire because
+    it was never emitted into the file.
+
+    The canvas is the authority, so derive from it and let every decision read one list.
+    ``AgentCoreComponentType`` values are exactly the strings the generator and the
+    per-tool IAM builders test; a string no consumer recognizes is ignored by all of them
+    (``per_agent_identity`` explicitly grants nothing for an unknown tool).
+    """
+    derived = [
+        node.type.value if hasattr(node.type, "value") else str(node.type)
+        for node in (getattr(workflow, "nodes", None) or [])
+    ]
+    # Caller-supplied first: the frontend may name tools that are not nodes (a gateway
+    # target's tool type, for one), and dedupe must not reorder what it passed.
+    merged: list[str] = []
+    for tool in list(connected_tools or []) + derived:
+        if tool not in merged:
+            merged.append(tool)
+    return merged
+
+
 class DeploymentPhase(str, Enum):
     """Phases of deployment process."""
 
@@ -216,9 +273,9 @@ def generate_unified_agent_code(
     Uses official AWS patterns from amazon-bedrock-agentcore-samples.
     """
     region = region or os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1"))
-    from app.services.code_generator import _escape_triple_quotes
+    from app.services.code_generator import _BROWSER_TOOL_SRC, _as_triple_quoted_body
 
-    system_prompt = _escape_triple_quotes(runtime_config.system_prompt)
+    system_prompt = _as_triple_quoted_body(runtime_config.system_prompt)
     model_import, model_init = _get_model_code(runtime_config, region)
     tq = '"""'
 
@@ -259,7 +316,16 @@ def generate_unified_agent_code(
         imports.append("from bedrock_agentcore.tools.code_interpreter_client import code_session")
 
     if has_browser:
-        imports.append("from bedrock_agentcore.tools.browser_client import browser_session")
+        imports.extend(
+            [
+                "from bedrock_agentcore.tools.browser_client import browser_session",
+                "import ipaddress",
+                "import socket",
+                "import time",
+                "import urllib.parse",
+                "from websockets.sync.client import connect as _ws_connect",
+            ]
+        )
 
     imports_str = "\n".join(imports)
 
@@ -270,13 +336,33 @@ def generate_unified_agent_code(
     ]
 
     if has_gateway:
-        # Don't embed credentials in source code — rely on env vars set at deploy time
+        # Don't embed credentials in source code — rely on env vars set at deploy time.
+        # And don't put the SECRET in an env var either: the deploy path injects
+        # COGNITO_USER_POOL_ID (Cognito) or OAUTH_CLIENT_SECRET_REF (external IDP)
+        # instead, and _resolve_client_secret() below dereferences one of them at
+        # runtime. COGNITO_CLIENT_SECRET stays readable so a runtime deployed before
+        # that change keeps working.
         config_lines += [
             'GATEWAY_URL = os.environ.get("GATEWAY_URL", "")',
+            # "oauth2" (AgentCore Gateway, the default) exchanges client credentials
+            # for a token. "static_bearer" (a LiteLLM MCP Gateway) sends a long-lived
+            # virtual key. This generator used to emit only the oauth2 half, so a
+            # LiteLLM canvas produced an agent that tried a Cognito token exchange with
+            # no Cognito to exchange against: empty token, no headers, no tools. The
+            # deploy path injects all four of these — see the LiteLLM branch in
+            # deploy() and _build_runtime_env — so the generated agent must read them.
+            'GATEWAY_AUTH_MODE = os.environ.get("GATEWAY_AUTH_MODE", "oauth2")',
+            'GATEWAY_API_KEY = os.environ.get("GATEWAY_API_KEY", "")',
+            'GATEWAY_API_KEY_SECRET_ARN = os.environ.get("GATEWAY_API_KEY_SECRET_ARN", "")',
+            'GATEWAY_MCP_SERVERS = os.environ.get("GATEWAY_MCP_SERVERS", "")',
             'COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")',
             'COGNITO_CLIENT_SECRET = os.environ.get("COGNITO_CLIENT_SECRET", "")',
+            'COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")',
+            'OAUTH_CLIENT_SECRET_REF = os.environ.get("OAUTH_CLIENT_SECRET_REF", "")',
             'COGNITO_TOKEN_ENDPOINT = os.environ.get("COGNITO_TOKEN_ENDPOINT", "")',
             'COGNITO_SCOPE = os.environ.get("COGNITO_SCOPE", "")',
+            "_client_secret_cache = {}",
+            "_gateway_key_cache = {}",
         ]
 
     if has_memory:
@@ -288,6 +374,21 @@ def generate_unified_agent_code(
     # --- Build helper functions ---
     helpers = []
 
+    # model_init calls _provider_api_key() for every provider that takes an API key,
+    # because the key stopped travelling as a plaintext PROVIDER_API_KEY env var
+    # (GetAgentRuntime returns those in plaintext — ARCC cnt_dAiE0OyXKvfeow). This
+    # module is the SECOND place that embeds _get_model_init_code's output, and it
+    # has to emit the resolver for exactly the same reason code_generator does:
+    # without it every non-Bedrock agent on this path NameErrors at container
+    # import, which is a deploy that goes green and an agent that never starts.
+    # _provider_key_helper_for keys off the emitted text, so it cannot disagree
+    # with what model_init actually calls.
+    from app.services.code_generator import _provider_key_helper_for
+
+    provider_key_helper = _provider_key_helper_for(model_init)
+    if provider_key_helper:
+        helpers.append(provider_key_helper)
+
     helpers.append(f"""
 def load_model():
     {model_init}
@@ -295,13 +396,122 @@ def load_model():
 """)
 
     if has_gateway:
-        helpers.append("""
+        helpers.append('''
+def _resolve_gateway_key():
+    """The LiteLLM virtual key, read at the moment of use — never held in an env var.
+
+    GetAgentRuntime returns a runtime's environment variables in plaintext, so the
+    deploy path injects GATEWAY_API_KEY_SECRET_ARN and the key is resolved here with
+    the runtime role scoped to that one secret. GATEWAY_API_KEY is still read first so
+    a runtime deployed before that change keeps working.
+
+    Cached: every MCP transport needs it and the value cannot change within a
+    container's life.
+    """
+    if GATEWAY_API_KEY:
+        return GATEWAY_API_KEY
+    if not GATEWAY_API_KEY_SECRET_ARN:
+        return ""
+    if "value" not in _gateway_key_cache:
+        import boto3
+        _sm = boto3.client("secretsmanager", region_name=REGION)
+        try:
+            _raw = _sm.get_secret_value(
+                SecretId=GATEWAY_API_KEY_SECRET_ARN)["SecretString"]
+        except _sm.exceptions.ResourceNotFoundException:
+            # Built from the container's region, not from the ARN, and a cross-region ARN
+            # comes back as a bare "can't find the specified secret" with no mention of a
+            # region -- measured live. Say which two regions disagree; keep the original
+            # error when they do not, because then it is a real not-found.
+            _arn_region = ""
+            if GATEWAY_API_KEY_SECRET_ARN.count(":") >= 4:
+                _arn_region = GATEWAY_API_KEY_SECRET_ARN.split(":")[3]
+            if _arn_region and _arn_region != REGION:
+                raise RuntimeError(
+                    "The gateway key secret is in " + _arn_region + " but this runtime runs in "
+                    + REGION + ". Secrets Manager is regional and the secret is read from the"
+                    " runtime's own region."
+                ) from None
+            raise
+        try:
+            _payload = json.loads(_raw)
+        except (ValueError, TypeError):
+            _payload = None
+        # The platform stores {"apiKey": "..."}; a secret created by hand is usually
+        # just the key as plain text. Accept both.
+        if isinstance(_payload, dict):
+            _key = str(_payload.get("apiKey") or _payload.get("api_key") or "")
+        else:
+            _key = _raw.strip()
+        if not _key:
+            # Never echo the payload — only the fact and the ARN.
+            raise RuntimeError(
+                "The gateway key secret " + GATEWAY_API_KEY_SECRET_ARN + " holds no key."
+                ' Expected either a plain-text key or {"apiKey": "<key>"}.')
+        _gateway_key_cache["value"] = _key
+    return _gateway_key_cache["value"]
+
+
+def _resolve_client_secret():
+    """The app client secret, read at the moment of use — never held in an env var.
+
+    GetAgentRuntime returns a runtime's environment variables in plaintext, and a
+    value that reaches a CloudFormation resource's properties is copied into the
+    stack's event stream for 90 days. So the deploy path hands over a POOL ID or a
+    Secrets Manager NAME and the secret is resolved here, with the runtime role
+    scoped to that one pool or that one secret.
+
+    Cached: the token mint runs on every gateway call and the value cannot change
+    within a container's life.
+    """
+    if COGNITO_CLIENT_SECRET:
+        return COGNITO_CLIENT_SECRET
+    if "value" in _client_secret_cache:
+        return _client_secret_cache["value"]
+    import boto3
+    if OAUTH_CLIENT_SECRET_REF:
+        # An external IDP: nothing in AWS can re-derive this secret, so it lives in
+        # Secrets Manager. A secret the platform wrote is a JSON object; one created
+        # by hand is usually plain text. Accept both.
+        _raw = boto3.client("secretsmanager", region_name=REGION).get_secret_value(
+            SecretId=OAUTH_CLIENT_SECRET_REF)["SecretString"]
+        try:
+            _payload = json.loads(_raw)
+        except (ValueError, TypeError):
+            _payload = None
+        _secret = ""
+        if isinstance(_payload, dict):
+            for _k in ("clientSecret", "client_secret", "secret", "value"):
+                if _payload.get(_k):
+                    _secret = str(_payload[_k])
+                    break
+        else:
+            _secret = _raw.strip()
+        if not _secret:
+            # Never echo the payload — only the fact and the reference.
+            raise RuntimeError(
+                "The OAuth client-secret reference '" + OAUTH_CLIENT_SECRET_REF
+                + "' holds no secret. Expected either plain text or a JSON object"
+                + " with a clientSecret key.")
+        _client_secret_cache["value"] = _secret
+        return _secret
+    if not COGNITO_USER_POOL_ID or not COGNITO_CLIENT_ID:
+        return ""
+    _resp = boto3.client("cognito-idp", region_name=REGION).describe_user_pool_client(
+        UserPoolId=COGNITO_USER_POOL_ID, ClientId=COGNITO_CLIENT_ID)
+    _client_secret_cache["value"] = _resp["UserPoolClient"].get("ClientSecret", "")
+    return _client_secret_cache["value"]
+
+
 def _get_oauth_token():
+    if GATEWAY_AUTH_MODE == "static_bearer":
+        # LiteLLM: the virtual key IS the credential — no token exchange exists.
+        return _resolve_gateway_key()
     if not COGNITO_CLIENT_ID or not COGNITO_TOKEN_ENDPOINT:
         return ""
     try:
         form = {"grant_type": "client_credentials", "client_id": COGNITO_CLIENT_ID,
-                "client_secret": COGNITO_CLIENT_SECRET}
+                "client_secret": _resolve_client_secret()}
         if COGNITO_SCOPE:
             form["scope"] = COGNITO_SCOPE
         data = urllib.parse.urlencode(form).encode()
@@ -316,7 +526,17 @@ def _get_oauth_token():
 
 def _create_transport():
     token = _get_oauth_token()
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    if GATEWAY_AUTH_MODE == "static_bearer":
+        # LiteLLM reads its virtual key from its OWN header, and scopes the request to
+        # specific MCP servers via x-mcp-servers. The value needs the "Bearer " prefix:
+        # LiteLLM's /mcp/ endpoint rejects a bare key (it falls through to a virtual-key
+        # DB lookup) and strips the prefix itself. Measured against a real 1.102.0 proxy.
+        _lkey = token if token.startswith("Bearer ") else f"Bearer {token}"
+        headers = {"x-litellm-api-key": _lkey} if token else {}
+        if GATEWAY_MCP_SERVERS:
+            headers["x-mcp-servers"] = GATEWAY_MCP_SERVERS
+    else:
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
     return streamablehttp_client(url=GATEWAY_URL, headers=headers)
 
 
@@ -351,7 +571,7 @@ def get_full_tools_list(client):
         print(f"Gateway exposed {len(tools)} tools; capping to {max_tools} to fit the model context window (set MAX_GATEWAY_TOOLS to change).")
         tools = tools[:max_tools]
     return tools
-""")
+''')
 
     if has_code_interpreter:
         helpers.append("""
@@ -373,20 +593,7 @@ def execute_python(code: str, description: str = "") -> str:
 """)
 
     if has_browser:
-        helpers.append("""
-@tool
-def browse_web(url: str, task: str = "") -> str:
-    \"\"\"Browse a web page and extract information. Provide a URL and optionally a task describing what to look for.\"\"\"
-    with browser_session(REGION) as client:
-        response = client.invoke("navigateAndExtract", {
-            "url": url,
-            "task": task or f"Extract main content from {url}",
-        })
-    for event in response.get("stream", [response]):
-        result = event.get("result", event)
-        return json.dumps(result) if isinstance(result, dict) else str(result)
-    return "No content extracted"
-""")
+        helpers.append(_BROWSER_TOOL_SRC)
 
     helpers_str = "\n".join(helpers)
 
@@ -438,20 +645,31 @@ def _get_gateway_tools():
 @app.entrypoint
 def invoke(payload):
     prompt = payload.get("prompt", "Hello!")
-    session_id = payload.get("session_id", "default")
-    actor_id = payload.get("actor_id", "user")
+    session_id = payload.get("session_id") or ""
+    actor_id = payload.get("actor_id") or ""
 
-    session_manager = None
-    if MEMORY_ID:
-        mem_config = AgentCoreMemoryConfig(
-            memory_id=MEMORY_ID, session_id=session_id, actor_id=actor_id,
+    # A Memory-connected canvas must never degrade silently to a stateless agent.
+    # Missing configuration or identity is a caller/deployment error, not permission
+    # to use one shared fallback stream or to skip the connected component.
+    if not MEMORY_ID:
+        raise RuntimeError("Memory-enabled runtime is missing MEMORY_ID configuration.")
+    # A deploy-time warmup only starts this microVM. It is not a conversation turn, so
+    # it must reach neither Memory nor the model.
+    if payload.get("warmup") is True:
+        return {{"response": "", "warmup": True}}
+    if not session_id or not actor_id:
+        raise ValueError(
+            "Memory-enabled invocations require both session_id and actor_id."
         )
-        session_manager = AgentCoreMemorySessionManager(mem_config, region_name=REGION)
+    mem_config = AgentCoreMemoryConfig(
+        memory_id=MEMORY_ID, session_id=session_id, actor_id=actor_id,
+    )
+    session_manager = AgentCoreMemorySessionManager(mem_config, region_name=REGION)
 
     agent = Agent(
         model=_get_model(), system_prompt=SYSTEM_PROMPT,
         tools={all_tools_expr},
-        **({{"session_manager": session_manager}} if session_manager else {{}}),
+        session_manager=session_manager,
     )
     result = agent(prompt)
     return {{"response": str(result), "session_id": session_id}}
@@ -483,6 +701,172 @@ app = BedrockAgentCoreApp()
 if __name__ == "__main__":
     app.run()
 """
+
+
+# The tool names generate_mcp_server_code has a built-in implementation for. Any
+# other name has to arrive with its own body, or the generated server simply will not
+# have that tool — see validate_mcp_server_tools.
+MCP_BUILTIN_TOOLS = frozenset(
+    {
+        "get_order",
+        "get_customer",
+        "list_orders",
+        "process_refund",
+        "duckduckgo_search",
+        "wikipedia_search",
+    }
+)
+
+
+def validate_mcp_server_tools(tools) -> list[str]:
+    """Return the problems with an ``mcpServerConfig.tools`` list, empty if fine.
+
+    ``mcpServerConfig.tools`` is a free-form list — strings, or dicts under any of
+    three name keys and two body keys (Bug 174). That tolerance is deliberate, and it
+    means generate_mcp_server_code cannot tell a tool it does not recognise from a
+    tool the caller mistyped: both produce a server without that tool. The consequence
+    is not a Python error, it is a gateway target that fails at deploy time with "MCP
+    server ... has no tools", or worse a runtime that comes up missing one tool and
+    says nothing.
+
+    Checking here means the caller is told which entry is wrong while they can still
+    fix it, instead of reading it out of a CloudFormation event later.
+    """
+    problems: list[str] = []
+    if tools is None:
+        return problems
+    if not isinstance(tools, list):
+        return [f"mcpServerConfig.tools must be a list, got {type(tools).__name__}"]
+    if not tools:
+        # Not an error, because generate_mcp_server_code substitutes its demo tools —
+        # but silently shipping four order-management tools to somebody who asked for
+        # none is worth saying out loud.
+        return ["mcpServerConfig.tools is empty; the generated server will expose the four sample support tools"]
+    for i, tool in enumerate(tools):
+        if isinstance(tool, str):
+            name, has_body = tool, False
+        elif isinstance(tool, dict):
+            name = tool.get("toolName") or tool.get("tool_name") or tool.get("name") or ""
+            has_body = bool(tool.get("implementation") or tool.get("code"))
+        else:
+            problems.append(f"tools[{i}] must be a string or an object, got {type(tool).__name__}")
+            continue
+        if not name:
+            problems.append(f"tools[{i}] has no name (expected one of toolName, tool_name or name)")
+            continue
+        if not name.isidentifier():
+            # It becomes a Python function name in the generated server.
+            problems.append(f"tools[{i}] name {name!r} is not a valid Python identifier")
+            continue
+        if name not in MCP_BUILTIN_TOOLS and not has_body:
+            problems.append(
+                f"tools[{i}] {name!r} is not a built-in tool and carries no implementation or code, "
+                "so the generated MCP server would not expose it"
+            )
+    return problems
+
+
+def _first_function(source: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """The first top-level function in ``source``, or None if it will not parse.
+
+    Deliberately tolerant. Everything built on this is an improvement to a
+    description, never a correctness requirement, so unparseable code must fall
+    through to the existing behaviour rather than fail an export.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    return next((n for n in tree.body if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)), None)
+
+
+def _tool_code_has_no_description(source: str) -> bool:
+    func = _first_function(source)
+    return func is not None and bool(func.body) and ast.get_docstring(func) is None
+
+
+def _as_docstring_body(description: str) -> str:
+    """``description`` escaped so it is safe between a pair of ``\"\"\"``.
+
+    Escaping only the sequence ``\"\"\"`` is not enough, and this was live: a
+    description *ending* in a quote closes the literal one character early. Given
+    ``Looks up the order by "id"`` the emitted docstring is
+    ``\"\"\"Looks up the order by "id\"\"\"\"`` -- four quotes, of which the first three
+    close the string and the fourth begins an unterminated one. The generated server
+    then fails to import, so a stray quote in one tool's description takes down every
+    tool in the export.
+
+    So escape every backslash and then every quote, which is total: no run of
+    characters can terminate the literal early, whatever the canvas sends. Real
+    newlines are left alone, because a triple-quoted literal is allowed to contain
+    them and a multi-line description stays readable in the emitted source. The
+    escapes do not reach ``__doc__`` -- Python resolves ``\\"`` back to ``"`` -- so
+    the description FastMCP advertises is the one the author typed.
+
+    Delegates rather than repeating the two ``replace`` calls: the system-prompt path
+    had the identical bug, so there is now one place for this to be correct and no way
+    for the docstring rule and the prompt rule to drift apart.
+    """
+    from app.services.code_generator import _as_triple_quoted_body
+
+    return _as_triple_quoted_body(description)
+
+
+def _ensure_tool_docstring(source: str, description: str) -> str:
+    """Give a verbatim-code tool a docstring, if its author did not.
+
+    FastMCP takes a tool's description from its docstring, and an AgentCore gateway
+    that receives an empty description invents one from the tool's own name --
+    observed live as "Tool which performs MCPServerRuntime___msv_probe_marker".
+    That is what the model then reads when it decides whether to call the tool, so
+    an empty docstring is not cosmetic: it is the tool-selection signal missing.
+
+    The dict-defined path below has always emitted the canvas's ``description`` as
+    the docstring. This is the path that did not: code supplied as a complete
+    ``def`` is emitted verbatim, so a function written without a docstring lost the
+    description the canvas had for it.
+
+    An existing docstring always wins -- the author wrote it against their own
+    function, and it is more specific than the canvas field. On any parse failure
+    the source is returned untouched, because this is a nicety and must never be
+    the reason an export fails.
+    """
+    if not _tool_code_has_no_description(source):
+        return source
+    func = _first_function(source)
+    # Defensive even though _tool_code_has_no_description returns False when
+    # there is no function. An assert disappears under ``python -O``; this
+    # helper must preserve the source rather than crash or dereference None if
+    # the two parsers ever drift.
+    if func is None:
+        return source
+    first = func.body[0]
+    lines = source.splitlines()
+    line = lines[first.lineno - 1]
+    # Everything on the first statement's line that comes before it. Normally just
+    # indentation; the exception is what the branch below is for.
+    prefix = line[: first.col_offset]
+    docstring = f'"""{_as_docstring_body(description)}"""'
+    if prefix.strip():
+        # ``def quick() -> str: return 'x'`` -- the body shares its line with the
+        # header, so there is no line to insert in front of. Doing it anyway put the
+        # docstring above the ``def`` at the body's column, and the generated module
+        # then failed to compile with ``unexpected indent``: one tool written on one
+        # line took down every tool in the export. So split the line instead, which
+        # keeps the description rather than dropping it. Semicolons in the body are
+        # fine -- they move across intact and stay valid.
+        indent = " " * (func.col_offset + 4)
+        lines[first.lineno - 1 : first.lineno] = [
+            prefix.rstrip(),
+            f"{indent}{docstring}",
+            f"{indent}{line[first.col_offset :]}",
+        ]
+    else:
+        # Insert immediately before the first statement, reusing its own leading
+        # whitespace, so a multi-line or decorated signature does not need to be parsed
+        # for where the body begins -- and so a tab-indented function stays tab-indented.
+        lines.insert(first.lineno - 1, f"{prefix}{docstring}")
+    return "\n".join(lines)
 
 
 def generate_mcp_server_code(
@@ -521,15 +905,22 @@ def generate_mcp_server_code(
     # --- Tool implementations ---
     tool_impls: list[str] = []
 
+    # The four order-family tools are thin MCP wrappers over the CANONICAL
+    # handlers embedded below (codegen_templates/customer_support_impl.py). The
+    # wrapper adapts MCP's typed tool arguments to the handlers' event-dict
+    # contract and returns their JSON string verbatim, so a hosted MCP server, a
+    # Gateway dynamic-tools target and a CFN export all return byte-identical
+    # payloads. Before unification this path defined its own divergent bodies +
+    # fixtures ("Widget A"/qty/Alice Smith), so the same order id answered
+    # differently per deploy shape; the integration oracle pins the canonical
+    # shape (test_integration_harness_contract: Wireless Headphones / quantity /
+    # total_spent 354.97 / John Doe).
     if "get_order" in tool_names:
         tool_impls.append('''
 @mcp.tool()
 def get_order(order_id: str) -> str:
     """Look up order details by order ID. Returns order items, status, dates, and total."""
-    order = ORDERS.get(order_id)
-    if not order:
-        return json.dumps({"error": f"Order {order_id} not found. Try ORD-12345 or ORD-67890."})
-    return json.dumps(order)
+    return _do_get_order({"order_id": order_id})
 ''')
 
     if "get_customer" in tool_names:
@@ -537,22 +928,15 @@ def get_order(order_id: str) -> str:
 @mcp.tool()
 def get_customer(customer_id: str) -> str:
     """Look up customer info and order summary by customer ID."""
-    customer = CUSTOMERS.get(customer_id)
-    if not customer:
-        return json.dumps({"error": f"Customer {customer_id} not found. Try CUST-001 or CUST-002."})
-    return json.dumps(customer)
+    return _do_get_customer({"customer_id": customer_id})
 ''')
 
     if "list_orders" in tool_names:
         tool_impls.append('''
 @mcp.tool()
-def list_orders(customer_id: str = "") -> str:
-    """List orders, optionally filtered by customer ID."""
-    if customer_id:
-        orders = [o for o in ORDERS.values() if o["customer_id"] == customer_id]
-    else:
-        orders = list(ORDERS.values())
-    return json.dumps(orders)
+def list_orders(customer_id: str = "", limit: int = 10) -> str:
+    """List a customer's orders, most recent first."""
+    return _do_list_orders({"customer_id": customer_id, "limit": limit})
 ''')
 
     if "process_refund" in tool_names:
@@ -560,21 +944,7 @@ def list_orders(customer_id: str = "") -> str:
 @mcp.tool()
 def process_refund(order_id: str, amount: float = 0, reason: str = "") -> str:
     """Process a refund for an order with amount validation."""
-    order = ORDERS.get(order_id)
-    if not order:
-        return json.dumps({"error": f"Order {order_id} not found"})
-    max_refund = order["total"]
-    if amount <= 0:
-        amount = max_refund
-    if amount > max_refund:
-        return json.dumps({"error": f"Refund amount {amount} exceeds order total {max_refund}"})
-    return json.dumps({
-        "refund_id": f"REF-{order_id[-5:]}",
-        "order_id": order_id,
-        "amount": amount,
-        "reason": reason or "Customer request",
-        "status": "approved",
-    })
+    return _do_process_refund({"order_id": order_id, "amount": amount, "reason": reason})
 ''')
 
     if "duckduckgo_search" in tool_names:
@@ -619,7 +989,8 @@ def wikipedia_search(query: str) -> str:
         ct_name = re.sub(r"[^a-zA-Z0-9_]", "_", ct_name_raw)
         if not ct_name or not ct_name[0].isalpha():
             ct_name = "tool_" + ct_name
-        ct_desc = ct.get("description", "A custom tool").replace('"""', r"\"\"\"")
+        ct_desc_given = ct.get("description")
+        ct_desc = _as_docstring_body(ct_desc_given or "A custom tool")
         # Bug 174: the body can arrive as `implementation` (a function BODY) or as
         # `code` (often a COMPLETE `def name(...): ...`). If `code` already defines
         # the function, emit it verbatim under @mcp.tool() (just ensure the def name
@@ -630,6 +1001,16 @@ def wikipedia_search(query: str) -> str:
             # Point the decorator at whatever function the code defines (its name
             # becomes the MCP tool name). Normalise the registered name to ct_name
             # only if the code's def name is unsafe; otherwise keep the author's.
+            if _tool_code_has_no_description(body):
+                if ct_desc_given:
+                    body = _ensure_tool_docstring(body, ct_desc_given)
+                else:
+                    logger.warning(
+                        "MCP server export: tool %r has neither a docstring nor a description, so "
+                        "the gateway will advertise a description it invents from the tool name and "
+                        "the model has nothing real to select on",
+                        ct_name_raw,
+                    )
             tool_impls.append(f"\n@mcp.tool()\n{body}\n")
             continue
         ct_impl = ct.get("implementation") or ct.get("code") or "return {'result': 'ok'}"
@@ -663,34 +1044,27 @@ def {ct_name}({params_str}) -> str:
 
     tools_str = "\n".join(tool_impls)
 
-    # Only include mock data if any customer support tools are used
+    # Embed the CANONICAL customer-support demo data + handlers only when one of
+    # the four order-family tools is used. This is the exact same source
+    # (codegen_templates/customer_support_impl.py) that the Gateway dynamic-tools
+    # Lambda (dynamic_tools_lambda_source) and the CFN-exported customer-support
+    # Lambda (customer_support_tools_lambda_source) embed, so one bugfix in the
+    # canonical module lands on every deploy shape and there is no brace-escaping
+    # of the fixture literals (they arrive as an already-rendered string here,
+    # not through the outer f-string). The wrappers above call its _do_* handlers.
     has_customer_tools = any(t in tool_names for t in ["get_order", "get_customer", "list_orders", "process_refund"])
     mock_data = ""
     if has_customer_tools:
-        mock_data = """
-ORDERS = {
-    "ORD-12345": {
-        "order_id": "ORD-12345", "customer_id": "CUST-001", "status": "delivered",
-        "items": [{"name": "Widget A", "qty": 2, "price": 9.99}],
-        "total": 19.98, "date": "2025-01-15",
-    },
-    "ORD-67890": {
-        "order_id": "ORD-67890", "customer_id": "CUST-002", "status": "shipped",
-        "items": [{"name": "Gadget B", "qty": 1, "price": 49.99}, {"name": "Widget C", "qty": 3, "price": 12.00}],
-        "total": 85.99, "date": "2025-02-01",
-    },
-    "ORD-11111": {
-        "order_id": "ORD-11111", "customer_id": "CUST-001", "status": "processing",
-        "items": [{"name": "Premium Widget", "qty": 1, "price": 149.99}],
-        "total": 149.99, "date": "2025-03-01",
-    },
-}
+        mock_data = "\n" + codegen_templates.load_impl("customer_support_impl") + "\n"
 
-CUSTOMERS = {
-    "CUST-001": {"customer_id": "CUST-001", "name": "Alice Smith", "email": "alice@example.com", "total_orders": 5},
-    "CUST-002": {"customer_id": "CUST-002", "name": "Bob Jones", "email": "bob@example.com", "total_orders": 3},
-}
-"""
+    # Name + instructions reach the generated source as ``repr()`` literals so a
+    # server name or system prompt carrying quotes, backslashes or newlines is a
+    # safe Python string literal and cannot break the module (the same total-
+    # escaping the hostile-description tests pin for tool docstrings). FastMCP
+    # advertises ``instructions`` to the model as server-level guidance; omit it
+    # (None) when the canvas left the system prompt empty rather than sending "".
+    server_name_lit = repr(server_name or "MCP Server Agent")
+    instructions_lit = repr(system_prompt) if system_prompt else "None"
 
     return f"""{tq}MCP Server Agent -- exposes tools via MCP protocol on AgentCore Runtime.{tq}
 import json
@@ -706,7 +1080,7 @@ from mcp.server.fastmcp import FastMCP
 # initialization time exceeded ... 30s" and the gateway served 0 tools. Default
 # to 8000; honour PORT only if AgentCore ever overrides it.
 PORT = int(os.environ.get("PORT", "8000"))
-mcp = FastMCP(host="0.0.0.0", port=PORT, stateless_http=True)
+mcp = FastMCP(name={server_name_lit}, instructions={instructions_lit}, host="0.0.0.0", port=PORT, stateless_http=True)
 {mock_data}
 {tools_str}
 
@@ -736,10 +1110,65 @@ def generate_requirements(runtime_config: RuntimeConfiguration) -> str:
 # ============================================================================
 
 
-class WorkflowExecutor:
-    """Handles workflow deployment to AWS AgentCore.
+def _await_policies_active(agentcore_ctrl, engine_id: str, policy_names: list) -> None:
+    """Block until every named policy on *engine_id* is ACTIVE, or fail.
 
-    Uses the bedrock-agentcore-starter-toolkit CLI for deployment.
+    ``CreatePolicy`` is asynchronous in a way that is easy to miss: it returns 200
+    with ``status: CREATING`` for statements the engine goes on to refuse, and the
+    refusal appears only in ``statusReasons`` on a later read. Reporting success on
+    the 200 is how a deployment ends up with an ENFORCE policy engine holding no
+    policy — and under default-deny that is an agent whose every tool call is denied.
+
+    A stricter ``validationMode`` is not the answer, and asking for one makes things
+    worse — see policy_step._create_policy_when_engine_ready: on a gateway created
+    moments ago the validation step cannot reach the gateway to resolve action
+    schemas, and FAIL_ON_ANY_FINDINGS leaves the policy CREATE_FAILED for 8+ minutes
+    over an authorization race rather than a bad statement. Polling the real status is
+    what distinguishes the two.
+    """
+    import time as _t
+
+    wanted = set(policy_names)
+    deadline = _t.monotonic() + 180
+    while wanted and _t.monotonic() < deadline:
+        seen = {}
+        try:
+            policies = list_all(
+                agentcore_ctrl,
+                "list_policies",
+                item_keys=("policies", "items", "policySummaries"),
+                request={"policyEngineId": engine_id, "maxResults": 100},
+            )
+            for item in policies:
+                seen[item.get("name")] = item
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not list policies on engine %s: %s", engine_id, exc)
+
+        for name in sorted(wanted):
+            item = seen.get(name)
+            if not item:
+                continue
+            status_value = item.get("status", "")
+            if status_value in ("ACTIVE", "READY"):
+                wanted.discard(name)
+            elif status_value.endswith("_FAILED") or status_value in ("DELETING", "DELETED"):
+                reasons = "; ".join(item.get("statusReasons", [])) or "no reason reported"
+                raise RuntimeError(f"Cedar policy {name} on engine {engine_id} is {status_value}: {reasons}")
+        if wanted:
+            _t.sleep(5)
+
+    if wanted:
+        raise RuntimeError(
+            f"Cedar policies {sorted(wanted)} on engine {engine_id} did not become ACTIVE within 180s. "
+            "Refusing to attach a policy engine whose policies are not in force."
+        )
+
+
+class WorkflowExecutor:
+    """Legacy, unsupported in-process workflow deployment implementation.
+
+    No router or package-level service export may instantiate this class.
+    Production uses the durable Step Functions deployment state machine.
     """
 
     def __init__(self, region: str = "us-east-1"):
@@ -803,7 +1232,10 @@ class WorkflowExecutor:
             DeploymentResult with status and endpoint URL
         """
         deployment_id = str(uuid.uuid4())
-        connected_tools = connected_tools or []
+        # One list, derived from the canvas, so the deploy decisions and the codegen
+        # decision cannot disagree about what this workflow contains. See
+        # canvas_connected_tools for the live measurement that made this necessary.
+        connected_tools = canvas_connected_tools(workflow, connected_tools)
         gateway_tools = gateway_tools or []
         custom_tools = custom_tools or []
         connectors = connectors or []
@@ -856,8 +1288,9 @@ class WorkflowExecutor:
                 # runtime name (Bug 61) — AgentCore IAM cache is keyed on
                 # (role, S3 prefix) so per-deploy prefixes hit a 17-20 min race.
                 bucket = os.environ.get("ARTIFACTS_BUCKET_NAME", "")
-                mcp_s3_key = (
-                    f"deployments/by-name/{runtime_deployer.sanitize_runtime_name(mcp_name)}/mcp-server-code.zip"
+                mcp_s3_key = scoped_mcp_code_s3_key(
+                    runtime_config.name,
+                    mcp_name,
                 )
                 if bucket:
                     s3_client = boto3.client("s3", region_name=self.region)
@@ -877,6 +1310,8 @@ class WorkflowExecutor:
                         "",
                         "agent.py",
                         deps_bundle=deps_bundle,
+                        region=self.region,
+                        deployment_id=deployment_id,
                     )
                     logger.info("Uploaded MCP server code to s3://%s/%s", bucket, mcp_s3_key)
 
@@ -884,18 +1319,30 @@ class WorkflowExecutor:
                 sts = boto3.client("sts")
                 account_id = sts.get_caller_identity()["Account"]
                 iam_client = boto3.client("iam")
-                _mcp_role_name = f"{mcp_name}-mcp-role"
-                mcp_role_arn = create_runtime_iam_role(
+                _mcp_role_name = regional_iam_role_name(
+                    f"{mcp_name}-mcp-role",
+                    self.region,
+                )
+                _mcp_role_result = create_runtime_iam_role(
                     iam_client,
                     _mcp_role_name,
                     account_id,
                     self.region,
                     [],  # MCP server doesn't need extra tool permissions
+                    return_provenance=True,
                 )
+                if isinstance(_mcp_role_result, tuple):
+                    mcp_role_arn, mcp_role_created = _mcp_role_result
+                else:
+                    mcp_role_arn, mcp_role_created = _mcp_role_result, False
                 _record_resource_best_effort(
                     deployment_id,
                     self.region,
-                    {"type": "iam_role", "name": _mcp_role_name},
+                    {
+                        "type": "iam_role",
+                        "name": _mcp_role_name,
+                        "created_by_deployment": mcp_role_created,
+                    },
                 )
 
                 # Create MCP server runtime (protocol=MCP)
@@ -910,13 +1357,18 @@ class WorkflowExecutor:
                     python_runtime="PYTHON_3_13",
                     protocol="MCP",
                     env_vars={"AWS_REGION": self.region},
+                    region=self.region,
                 )
                 mcp_server_runtime_id = mcp_runtime_result["runtime_id"]
                 logger.info("Created MCP server runtime: %s", mcp_server_runtime_id)
                 _record_resource_best_effort(
                     deployment_id,
                     self.region,
-                    {"type": "agent_runtime", "id": mcp_server_runtime_id},
+                    {
+                        "type": "agent_runtime",
+                        "id": mcp_server_runtime_id,
+                        "created_by_deployment": (mcp_runtime_result.get("created_by_deployment") is True),
+                    },
                 )
 
                 # Wait for MCP server runtime to be ready
@@ -983,21 +1435,28 @@ class WorkflowExecutor:
                     )
                 else:
                     from app.services.gateway_deployer import (
+                        connector_identity_mode,
+                    )
+                    from app.services.gateway_deployer import (
                         deploy_gateway as boto3_deploy_gateway,
                     )
 
-                    gateway_result = await asyncio.to_thread(
-                        boto3_deploy_gateway,
-                        gateway_config=gw_config_dict,
-                        region=self.region,
-                        template_id=template_id,
-                        gateway_tools=gateway_tools,
-                        identity_config=identity_config,
-                        custom_tools=custom_tools,
-                        connectors=connectors,
-                        owner_sub=owner_sub,
-                        mcp_server_runtime_arn=mcp_server_runtime_arn,
-                    )
+                    # F-01 (b): the Cognito client secret deploy_gateway mints must carry this
+                    # deployment's identity mode; to_thread copies the context into the worker.
+                    with connector_identity_mode(identity_config):
+                        gateway_result = await asyncio.to_thread(
+                            boto3_deploy_gateway,
+                            gateway_config=gw_config_dict,
+                            region=self.region,
+                            template_id=template_id,
+                            gateway_tools=gateway_tools,
+                            identity_config=identity_config,
+                            custom_tools=custom_tools,
+                            connectors=connectors,
+                            owner_sub=owner_sub,
+                            mcp_server_runtime_arn=mcp_server_runtime_arn,
+                            deployment_id=deployment_id,
+                        )
 
                 if not gateway_result.get("success"):
                     raise RuntimeError(f"Gateway deployment failed: {gateway_result.get('error', 'unknown')}")
@@ -1015,37 +1474,88 @@ class WorkflowExecutor:
                 _gw = gateway_result
                 if _gw.get("gateway_id"):
                     _record_resource_best_effort(
-                        deployment_id, self.region, {"type": "gateway", "id": _gw["gateway_id"]}
+                        deployment_id,
+                        self.region,
+                        {
+                            "type": "gateway",
+                            "id": _gw["gateway_id"],
+                            "created_by_deployment": (_gw.get("gateway_created_by_deployment") is True),
+                        },
                     )
                 # Gated on gateway_id, not gateway_name: the AgentCoreGateway-*
                 # execution role only exists when an AgentCore Gateway was actually
                 # created. A LiteLLM gateway reports a name but no id, and recording
                 # a phantom role would make teardown attempt (and log) a delete of
                 # something that never existed.
-                if _gw.get("gateway_id") and _gw.get("gateway_name"):
+                if _gw.get("gateway_role_name"):
                     _record_resource_best_effort(
                         deployment_id,
                         self.region,
-                        {"type": "iam_role", "name": f"AgentCoreGateway-{_gw['gateway_name']}"},
+                        {
+                            "type": "iam_role",
+                            "name": _gw["gateway_role_name"],
+                            "created_by_deployment": (_gw.get("gateway_role_created_by_deployment") is True),
+                        },
                     )
-                _gw_pool = (_gw.get("client_info") or {}).get("user_pool_id")
-                if _gw_pool:
+                _gw_ci = _gw.get("client_info") or {}
+                _gw_pool = _gw_ci.get("user_pool_id")
+                # Never record the shared platform gateway-auth pool as deletable —
+                # see the same guard in gateway_step._record_gateway_resources.
+                if _gw_pool and not _gw_ci.get("shared_pool"):
                     _record_resource_best_effort(
-                        deployment_id, self.region, {"type": "cognito_user_pool", "id": _gw_pool}
+                        deployment_id,
+                        self.region,
+                        {
+                            "type": "cognito_user_pool",
+                            "id": _gw_pool,
+                            "created_by_deployment": True,
+                        },
                     )
+                # Imported here, like every other gateway_deployer use in this module: the
+                # module-level import is circular.
+                from app.services.gateway_deployer import custom_tool_manifest_row
+
+                _bindings = _gw.get("custom_tool_bindings") or {}
+                _pairs = _gw.get("custom_tool_pairs") or {}
                 for _fn in [
                     _gw.get("lambda_function_name"),
                     _gw.get("kb_lambda_name"),
                     *(_gw.get("custom_tool_lambdas") or []),
                 ]:
                     if _fn:
-                        _record_resource_best_effort(deployment_id, self.region, {"type": "lambda", "name": _fn})
+                        # F-7d: exact scope, required on teardown. Built by the shared helper so
+                        # this writer and gateway_step's cannot drift on what a row carries.
+                        _row = custom_tool_manifest_row("lambda", _fn, _bindings, _pairs)
+                        _row["created_by_deployment"] = True
+                        _record_resource_best_effort(deployment_id, self.region, _row)
                 for _rn in _gw.get("custom_tool_roles") or []:
                     if _rn:
-                        _record_resource_best_effort(deployment_id, self.region, {"type": "iam_role", "name": _rn})
+                        _row = custom_tool_manifest_row("iam_role", _rn, _bindings, _pairs)
+                        _row["created_by_deployment"] = True
+                        _record_resource_best_effort(deployment_id, self.region, _row)
+                # F-66: reused by this redeploy, so recorded as a live reference only. F-74c:
+                # the binding goes on these too — the last deployment standing is the one that
+                # must reclaim them, and it is by construction holding an ADOPTED row.
+                for _rtype, _key in (
+                    ("lambda", "custom_tool_lambdas_adopted"),
+                    ("iam_role", "custom_tool_roles_adopted"),
+                ):
+                    for _n in _gw.get(_key) or []:
+                        if _n:
+                            _row = custom_tool_manifest_row(_rtype, _n, _bindings, _pairs)
+                            _row["created_by_deployment"] = False
+                            _record_resource_best_effort(deployment_id, self.region, _row)
                 for _sa in _gw.get("connector_secret_arns") or []:
                     if _sa:
-                        _record_resource_best_effort(deployment_id, self.region, {"type": "secret", "id": _sa})
+                        _record_resource_best_effort(
+                            deployment_id,
+                            self.region,
+                            {
+                                "type": "secret",
+                                "id": _sa,
+                                "created_by_deployment": True,
+                            },
+                        )
                 for _entry in _gw.get("connector_credential_providers") or []:
                     if not _entry:
                         continue
@@ -1055,7 +1565,15 @@ class WorkflowExecutor:
                     _ptype = (
                         "api_key_credential_provider" if _kind.upper() == "API_KEY" else "oauth2_credential_provider"
                     )
-                    _record_resource_best_effort(deployment_id, self.region, {"type": _ptype, "name": _pname})
+                    _record_resource_best_effort(
+                        deployment_id,
+                        self.region,
+                        {
+                            "type": _ptype,
+                            "name": _pname,
+                            "created_by_deployment": True,
+                        },
+                    )
 
             # ------------------------------------------------------------------
             # Phase 1.5: Deploy Policy Engine (if policy node is connected)
@@ -1078,8 +1596,17 @@ class WorkflowExecutor:
                         engine_id = None
                         engine_arn = None
                         try:
-                            existing = agentcore_ctrl_policy.list_policy_engines(maxResults=100)
-                            for pe in existing.get("policyEngines", existing.get("items", [])):
+                            existing = list_all(
+                                agentcore_ctrl_policy,
+                                "list_policy_engines",
+                                item_keys=(
+                                    "policyEngines",
+                                    "items",
+                                    "policyEngineSummaries",
+                                ),
+                                request={"maxResults": 100},
+                            )
+                            for pe in existing:
                                 if pe.get("name") == engine_name:
                                     engine_id = pe.get("policyEngineId")
                                     engine_arn = pe.get("policyEngineArn")
@@ -1091,96 +1618,187 @@ class WorkflowExecutor:
                             pe_resp = agentcore_ctrl_policy.create_policy_engine(
                                 name=engine_name,
                                 description=f"Policy engine for gateway {gateway_id}",
+                                tags=owner_tags(self.region),
                             )
                             engine_id = pe_resp.get("policyEngineId", "")
                             engine_arn = pe_resp.get("policyEngineArn", "")
 
-                            # Wait for engine to be ready
+                            # Recorded before anything else can fail, so teardown
+                            # reclaims it. Without this a failed policy phase leaves
+                            # a policy engine behind that nothing owns; the Step
+                            # Functions path records it for exactly this reason.
+                            _record_resource_best_effort(
+                                deployment_id,
+                                self.region,
+                                {
+                                    "type": "policy_engine",
+                                    "id": engine_id,
+                                    "region": self.region,
+                                    "created_by_deployment": True,
+                                },
+                            )
+
+                            # Wait for the engine to be usable. The old loop read the
+                            # status and then fell through regardless, so a
+                            # CREATE_FAILED engine went on to have policies written to
+                            # it and be attached to the gateway.
                             import time as _time_pe
 
-                            for _ in range(12):
-                                pe_status = agentcore_ctrl_policy.get_policy_engine(policyEngineId=engine_id)
-                                if pe_status.get("status") in ("ACTIVE", "READY"):
+                            engine_status = ""
+                            for _ in range(24):
+                                engine_status = agentcore_ctrl_policy.get_policy_engine(policyEngineId=engine_id).get(
+                                    "status", ""
+                                )
+                                if engine_status in ("ACTIVE", "READY") or engine_status.endswith("_FAILED"):
                                     break
                                 _time_pe.sleep(5)
+                            if engine_status not in ("ACTIVE", "READY"):
+                                raise RuntimeError(
+                                    f"Policy engine {engine_id} is {engine_status or 'unreadable'} rather than "
+                                    "ACTIVE; refusing to bind policies to it."
+                                )
 
-                        # Create policies from config or default permit-all
-                        _pc_policies = _pc.get("policies", [])
-                        if _pc_policies:
-                            for pol in _pc_policies:
-                                pol_name = pol.get("name", "policy")
-                                pol_statement = pol.get("statement", "")
-                                if not pol_statement:
-                                    continue
-                                try:
-                                    agentcore_ctrl_policy.create_policy(
-                                        policyEngineId=engine_id,
-                                        name=pol_name,
-                                        description=pol.get("description", ""),
-                                        definition={"cedar": {"statement": pol_statement}},
-                                    )
-                                except Exception as pol_err:
-                                    if "already exists" not in str(pol_err).lower():
-                                        logger.warning("Could not create policy %s: %s", pol_name, pol_err)
-                        else:
-                            # Default permit-all (Cedar requires a when clause)
-                            default_statement = (
-                                f'permit(principal, action, resource == AgentCore::Gateway::"{gateway_arn}")\nwhen {{ true }};'
+                        # Create policies from config, or a permit over the tools the
+                        # gateway actually exposes.
+                        #
+                        # There is no permit-all in AgentCore. This branch used to
+                        # emit `permit(principal, action, resource == <gateway>)
+                        # when { true }`, and every deployment that took it shipped a
+                        # policy engine with NOTHING in it: CreatePolicy returns 200
+                        # and CREATING, the engine then rejects the statement as
+                        # "Overly Permissive ... (Any Future Tools)" seconds later,
+                        # and the except below logged that at WARNING and carried on
+                        # to attach the engine in ENFORCE mode. Default-deny plus an
+                        # empty policy set means every tool call the agent makes is
+                        # denied, on a deployment that reported success.
+                        #
+                        # The Step Functions path (step_handlers/policy_step.py) had
+                        # already worked this out against the live engine. The tool
+                        # enumeration is imported from there rather than reimplemented
+                        # so the two paths cannot drift: a Cedar action must name a
+                        # tool that exists in the gateway manifest as
+                        # AgentCore::Action::"{Target}___{tool}", and the list form is
+                        # required even for a single tool (`action ==` is rejected the
+                        # same way a bare `action` is).
+                        from app.step_handlers.policy_step import (
+                            _create_policy_when_engine_ready,
+                            _read_gateway_tool_actions,
+                        )
+
+                        _pc_policies = [p for p in (_pc.get("policies") or []) if p.get("statement")]
+                        if not _pc_policies:
+                            qualified_tools = _read_gateway_tool_actions(agentcore_ctrl_policy, gateway_id)
+                            if not qualified_tools:
+                                # Fail closed rather than attach an ENFORCE engine
+                                # with no policy on it. An empty policy set under
+                                # default-deny is a gateway that serves no tools, and
+                                # nothing downstream would report why.
+                                raise RuntimeError(
+                                    f"Gateway {gateway_id} exposes no tool whose Cedar action can be named, so "
+                                    "no authorization policy can be created. Refusing to attach a policy engine "
+                                    "that would deny every tool call."
+                                )
+                            principal_type = _pc.get("principal_type") or "AgentCore::OAuthUser"
+                            resource_scope = (
+                                f'resource == AgentCore::Gateway::"{gateway_arn}"'
                                 if gateway_arn
-                                else "permit(principal, action, resource is AgentCore::Gateway)\nwhen { true };"
+                                else "resource is AgentCore::Gateway"
                             )
+                            action_list = ", ".join(f'AgentCore::Action::"{q}"' for q in qualified_tools)
+                            _pc_policies = [
+                                {
+                                    "name": "allow_permitted_tools",
+                                    "description": f"Permits the {len(qualified_tools)} tool(s) this gateway exposes",
+                                    "statement": (
+                                        f"permit(principal is {principal_type}, "
+                                        f"action in [{action_list}], {resource_scope});"
+                                    ),
+                                }
+                            ]
+
+                        # Policy names are ACCOUNT-global, not engine-scoped, and
+                        # CreatePolicy caps the name well under 50 characters — both
+                        # established live on the Step Functions path. Two gateways
+                        # emitting the same policy name collide with a
+                        # ConflictException, so the engine name prefixes every name to
+                        # keep it unique across gateways while staying stable across a
+                        # retry of this same deployment.
+                        created_names = []
+                        for pol in _pc_policies:
+                            base_name = re.sub(r"[^A-Za-z0-9_]", "_", pol.get("name", "policy"))
+                            prefix = engine_name[: max(0, 48 - len(base_name) - 1)]
+                            pol_name = (f"{prefix}_{base_name}" if prefix else base_name)[:48]
+                            created_names.append(pol_name)
                             try:
-                                agentcore_ctrl_policy.create_policy(
-                                    policyEngineId=engine_id,
-                                    name="default_permit_all",
-                                    description="Default permit-all policy for gateway tools",
-                                    definition={"cedar": {"statement": default_statement}},
+                                # The Step Functions path's helper, not a second copy
+                                # of it: it also retries the ConflictException where
+                                # the engine reports ACTIVE but the first
+                                # create_policy still says "is CREATING", and it
+                                # carries the validationMode reasoning.
+                                _create_policy_when_engine_ready(
+                                    agentcore_ctrl_policy,
+                                    engine_id,
+                                    pol_name,
+                                    pol.get("description", ""),
+                                    pol["statement"],
                                 )
                             except Exception as pol_err:
-                                if "already exists" not in str(pol_err).lower():
-                                    logger.warning("Could not create policy: %s", pol_err)
+                                if "already exists" in str(pol_err).lower():
+                                    continue
+                                # Not a warning. A policy that does not exist is a
+                                # tool the agent cannot call once the engine is
+                                # attached in ENFORCE mode below.
+                                raise RuntimeError(f"Could not create Cedar policy {pol_name}: {pol_err}") from pol_err
 
-                        # Attach policy engine to gateway
-                        gw_detail = agentcore_ctrl_policy.get_gateway(gatewayIdentifier=gateway_id)
-                        update_params = {
-                            "gatewayIdentifier": gateway_id,
-                            "name": gw_detail.get("name", ""),
-                            "roleArn": gw_detail.get("roleArn", ""),
-                            "protocolType": gw_detail.get("protocolType", "MCP"),
-                            "policyEngineConfiguration": {
-                                "arn": engine_arn,
-                                # Bug 134 (proper fix): ENFORCE works now that the
-                                # baseline permit + schema-correct principal/action
-                                # let the principal discover+call tools. ENFORCE is
-                                # the default; LOG_ONLY available for audit dry-runs.
-                                "mode": _pc.get("mode", "ENFORCE"),
-                            },
-                        }
-                        for opt_field in (
-                            "description",
-                            "authorizerType",
-                            "authorizerConfiguration",
-                            "protocolConfiguration",
-                        ):
-                            if gw_detail.get(opt_field):
-                                update_params[opt_field] = gw_detail[opt_field]
-                        agentcore_ctrl_policy.update_gateway(**update_params)
+                        # And CreatePolicy returning 200 does not mean the policy
+                        # exists: the validation findings land asynchronously in
+                        # statusReasons. Poll to a terminal status so a rejection
+                        # fails this phase instead of surfacing later as an agent
+                        # with no tools.
+                        _await_policies_active(agentcore_ctrl_policy, engine_id, created_names)
+
+                        # Attach policy engine to gateway, under its write lock (F-66e).
+                        _mode = _pc.get("mode", "ENFORCE")
+                        with gateway_mutation_lock(agentcore_ctrl_policy, self.region, gateway_id) as gw_lock:
+                            # A full replace: everything else the gateway holds is
+                            # re-sent (F-62).
+                            gw_lock.update(
+                                preserving_gateway_update(
+                                    gw_lock.read(),
+                                    gateway_id,
+                                    overrides={
+                                        "policyEngineConfiguration": {
+                                            "arn": engine_arn,
+                                            # Bug 134 (proper fix): ENFORCE works now that the
+                                            # baseline permit + schema-correct principal/action
+                                            # let the principal discover+call tools. ENFORCE is
+                                            # the default; LOG_ONLY available for audit dry-runs.
+                                            "mode": _mode,
+                                        },
+                                    },
+                                ),
+                                engine_is(engine_arn, _mode),
+                            )
                         logger.info(
                             "Attached policy engine %s to gateway %s",
                             engine_id,
                             gateway_id,
                         )
-
-                        # Wait for gateway to be ready again
-                        import time as _time_gw
-
-                        for _ in range(24):
-                            gw = agentcore_ctrl_policy.get_gateway(gatewayIdentifier=gateway_id)
-                            if gw.get("status") == "READY":
-                                break
-                            _time_gw.sleep(5)
                 except Exception as policy_err:
-                    logger.warning("Policy deployment failed (non-fatal): %s", policy_err)
+                    # Not "non-fatal", which is what this used to log before carrying
+                    # on. Both ways this phase can fail leave the deployment worse
+                    # than the caller was told:
+                    #
+                    #   * failing before the engine is attached means the
+                    #     authorization the caller asked for is simply absent, and the
+                    #     gateway serves every tool to every principal;
+                    #   * failing after it is attached means an ENFORCE engine with no
+                    #     policy in force, which under default-deny is an agent whose
+                    #     every tool call is denied.
+                    #
+                    # Neither is something to report as a successful deployment, so
+                    # the phase fails and rollback reclaims what it created.
+                    raise RuntimeError(f"Policy engine deployment failed: {policy_err}") from policy_err
 
             # ------------------------------------------------------------------
             # Phase 1.6: Deploy Guardrails (if guardrails node is connected)
@@ -1219,6 +1837,7 @@ class WorkflowExecutor:
                             "name": gr_name,
                             "blockedInputMessaging": "Request blocked by guardrail.",
                             "blockedOutputsMessaging": "Response blocked by guardrail.",
+                            "tags": owner_lower_tag_list(self.region),
                         }
                         cf = _build_content_filter_config(
                             guardrails_config.get("contentFilters") or guardrails_config.get("content_filters") or {}
@@ -1290,28 +1909,28 @@ class WorkflowExecutor:
                     # only arn, id, status, createdAt, updatedAt.
                     # The name is embedded as id prefix: "{name}-{suffix}"
                     try:
-                        mems = memory_client.list_memories(maxResults=100)
-                        mems_keys = [k for k in mems.keys() if k != "ResponseMetadata"]
-                        for k in mems_keys:
-                            v = mems[k]
-                            if not isinstance(v, list):
+                        memories = list_all(
+                            memory_client,
+                            "list_memories",
+                            item_keys=("memories", "memorySummaries", "items"),
+                            request={"maxResults": 100},
+                        )
+                        for m in memories:
+                            if not isinstance(m, dict):
                                 continue
-                            for m in v:
-                                if not isinstance(m, dict):
-                                    continue
-                                m_id = m.get("id") or m.get("memoryId") or ""
-                                if m.get("name") == mem_name or m_id.startswith(f"{mem_name}-") or m_id == mem_name:
-                                    memory_id = m_id
-                                    if not memory_id:
-                                        arn = m.get("arn", m.get("memoryArn", ""))
-                                        if ":memory/" in arn:
-                                            memory_id = arn.split(":memory/")[-1]
-                                    logger.info(
-                                        "Found existing memory '%s': %s",
-                                        mem_name,
-                                        memory_id,
-                                    )
-                                    break
+                            m_id = m.get("id") or m.get("memoryId") or ""
+                            if m.get("name") == mem_name or m_id.startswith(f"{mem_name}-") or m_id == mem_name:
+                                memory_id = m_id
+                                if not memory_id:
+                                    arn = m.get("arn", m.get("memoryArn", ""))
+                                    if ":memory/" in arn:
+                                        memory_id = arn.split(":memory/")[-1]
+                                logger.info(
+                                    "Found existing memory '%s': %s",
+                                    mem_name,
+                                    memory_id,
+                                )
+                                break
                             if memory_id:
                                 break
                     except Exception as exc:
@@ -1319,7 +1938,10 @@ class WorkflowExecutor:
 
                     if not memory_id:
                         # Create IAM role for memory
-                        memory_role_name = f"AgentCoreMemory-{mem_name}"
+                        memory_role_name = regional_iam_role_name(
+                            f"AgentCoreMemory-{mem_name}",
+                            self.region,
+                        )
                         trust_policy = {
                             "Version": "2012-10-17",
                             "Statement": [
@@ -1340,6 +1962,7 @@ class WorkflowExecutor:
                                 # account-global, so only this tag distinguishes one
                                 # deployment's memory roles from another's.
                                 Tags=owner_tag_list(self.region),
+                                **create_role_kwargs(),
                             )
                             memory_role_arn = role_resp["Role"]["Arn"]
                             iam_client.put_role_policy(
@@ -1354,8 +1977,13 @@ class WorkflowExecutor:
                                                 "Action": [
                                                     "bedrock:InvokeModel",
                                                     "bedrock:InvokeModelWithResponseStream",
+                                                    # One namespace covers both planes: there is no
+                                                    # `bedrock-agentcore-control:` IAM prefix, so the entry that
+                                                    # used to sit here authorized nothing. An IAM service prefix is
+                                                    # the SigV4 signing name, and both the data-plane and
+                                                    # control-plane clients sign as `bedrock-agentcore`. See the
+                                                    # prefix note in services/per_agent_identity.py.
                                                     "bedrock-agentcore:*",
-                                                    "bedrock-agentcore-control:*",
                                                 ],
                                                 "Resource": "*",
                                             }
@@ -1369,10 +1997,25 @@ class WorkflowExecutor:
                             _record_resource_best_effort(
                                 deployment_id,
                                 self.region,
-                                {"type": "iam_role", "name": memory_role_name},
+                                {
+                                    "type": "iam_role",
+                                    "name": memory_role_name,
+                                    "created_by_deployment": True,
+                                },
                             )
                         except iam_client.exceptions.EntityAlreadyExistsException:
-                            memory_role_arn = iam_client.get_role(RoleName=memory_role_name)["Role"]["Arn"]
+                            # Same account-global name collision as the Step Functions
+                            # memory step: prove the role is this deployment's before
+                            # passing it to create_memory as memoryExecutionRoleArn.
+                            _existing_mem_role = iam_client.get_role(RoleName=memory_role_name)["Role"]
+                            assert_this_deployment_may_mutate(
+                                f"IAM role {memory_role_name}",
+                                _existing_mem_role.get("Tags"),
+                                self.region,
+                            )
+                            memory_role_arn = _existing_mem_role["Arn"]
+                            # F-06: retrofit the permissions boundary once ownership is proven.
+                            ensure_role_boundary(iam_client, memory_role_name, role=_existing_mem_role)
 
                         create_params = {
                             "clientToken": str(uuid.uuid4()),
@@ -1381,6 +2024,7 @@ class WorkflowExecutor:
                             "memoryExecutionRoleArn": memory_role_arn,
                             "memoryStrategies": [],
                             "eventExpiryDuration": (memory_config or {}).get("eventExpiryDuration", 90),
+                            "tags": owner_tags(self.region),
                         }
 
                         # Add strategies from frontend memory_config
@@ -1459,7 +2103,11 @@ class WorkflowExecutor:
                             _record_resource_best_effort(
                                 deployment_id,
                                 self.region,
-                                {"type": "memory", "id": memory_id},
+                                {
+                                    "type": "memory",
+                                    "id": memory_id,
+                                    "created_by_deployment": True,
+                                },
                             )
 
                         if memory_id:
@@ -1488,23 +2136,30 @@ class WorkflowExecutor:
                             import time as _time
 
                             _time.sleep(3)  # eventual consistency
-                            mems = memory_client.list_memories(maxResults=100)
-                            mems_keys = [k for k in mems.keys() if k != "ResponseMetadata"]
-                            for k in mems_keys:
-                                v = mems[k]
-                                if not isinstance(v, list):
+                            memories = list_all(
+                                memory_client,
+                                "list_memories",
+                                item_keys=(
+                                    "memories",
+                                    "memorySummaries",
+                                    "items",
+                                ),
+                                request={"maxResults": 100},
+                            )
+                            for m in memories:
+                                if not isinstance(m, dict):
                                     continue
-                                for m in v:
-                                    if not isinstance(m, dict):
-                                        continue
-                                    m_id = m.get("id") or m.get("memoryId") or ""
-                                    if m.get("name") == mem_name or m_id.startswith(f"{mem_name}-") or m_id == mem_name:
-                                        memory_id = m_id
-                                        if not memory_id:
-                                            arn = m.get("arn", m.get("memoryArn", ""))
-                                            if ":memory/" in arn:
-                                                memory_id = arn.split(":memory/")[-1]
-                                        break
+                                m_id = m.get("id") or m.get("memoryId") or ""
+                                if m.get("name") == mem_name or m_id.startswith(f"{mem_name}-") or m_id == mem_name:
+                                    memory_id = m_id
+                                    if not memory_id:
+                                        arn = m.get(
+                                            "arn",
+                                            m.get("memoryArn", ""),
+                                        )
+                                        if ":memory/" in arn:
+                                            memory_id = arn.split(":memory/")[-1]
+                                    break
                                 if memory_id:
                                     break
                         except Exception as exc2:
@@ -1552,15 +2207,29 @@ class WorkflowExecutor:
                 # Thread the connected model/memory/gateway ARNs so the harness
                 # exec role is scoped to those resources (least privilege) —
                 # parity with harness_step.py on the SFN path.
-                harness_role_arn = harness_deployer.get_shared_or_new_harness_role(
+                _harness_role_result = harness_deployer.get_shared_or_new_harness_role(
                     iam_client,
                     harness_name,
                     model_id=runtime_config.model.model_id or None,
                     memory_arn=memory_arn,
                     gateway_arn=gateway_arn,
+                    region=self.region,
+                    return_provenance=True,
                 )
+                if isinstance(_harness_role_result, tuple):
+                    harness_role_arn, harness_role_created = _harness_role_result
+                else:
+                    harness_role_arn, harness_role_created = _harness_role_result, False
 
                 agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=self.region)
+                # No `resource_tags=` here, and that is not an oversight in the P0-B
+                # governance-tag plumbing: this module is the RETIRED in-process deploy path
+                # (see the module docstring -- POST /api/workflows/{id}/deploy is permanently
+                # gone), so there is no tag policy resolution upstream of it to thread. The
+                # resources it would create still carry ManagedBy + AgentCoreStack, so teardown
+                # and ownership are unaffected. If this path is ever revived, a tag policy has
+                # to be resolved in `deploy` first -- inventing an empty one here would make an
+                # untagged deploy look governed.
                 create_result = harness_deployer.create_harness(
                     agentcore_ctrl,
                     harness_name,
@@ -1569,6 +2238,7 @@ class WorkflowExecutor:
                     system_prompt=runtime_config.system_prompt or None,
                     gateway_arn=gateway_arn,
                     memory_arn=memory_arn,
+                    region=self.region,
                 )
                 harness_id = create_result.get("harness_id", "")
                 if not harness_id:
@@ -1579,13 +2249,21 @@ class WorkflowExecutor:
                 _record_resource_best_effort(
                     deployment_id,
                     self.region,
-                    {"type": "harness", "id": harness_id},
+                    {
+                        "type": "harness",
+                        "id": harness_id,
+                        "created_by_deployment": (create_result.get("created_by_deployment") is True),
+                    },
                 )
                 if not os.environ.get("SHARED_HARNESS_ROLE_ARN", ""):
                     _record_resource_best_effort(
                         deployment_id,
                         self.region,
-                        {"type": "iam_role", "name": f"AgentCoreHarness-{harness_name}"},
+                        {
+                            "type": "iam_role",
+                            "name": str(harness_role_arn).rsplit("/", 1)[-1],
+                            "created_by_deployment": harness_role_created,
+                        },
                     )
 
                 # ORPHAN GUARD (Bug 153): the AWS harness resource now exists.
@@ -1787,6 +2465,26 @@ class WorkflowExecutor:
                 except Exception as e:
                     logger.warning("Failed to download deps bundle %s: %s", bundle_key, e)
 
+                # The model-provider SDK, on this path too. Neither bundle above carries
+                # one, and this path honours ``model_provider`` exactly like the Step
+                # Functions path does (``_get_model_code`` → ``_get_model_init_code``), so
+                # a non-Bedrock agent deployed here emitted
+                # ``from strands.models.openai import OpenAIModel`` over a container that
+                # had no ``openai`` — a deploy that reports success and a runtime that
+                # dies at import, surfaced only as AgentCore's 30s init timeout.
+                # Fail-closed for the same reason codegen_step does: continuing produces
+                # the least actionable failure the platform can emit.
+                #
+                # Call the step handler's helper rather than re-implementing the download
+                # loop, the same way this path already borrows _create_policy_when_engine_
+                # ready and _build_pii_config. A second copy of a fail-closed check is a
+                # second copy that can drift open, and the first version of this block did
+                # drift: it raised only on a download error and said nothing when no
+                # artifacts bucket was configured at all.
+                from app.step_handlers.codegen_step import _provider_bundles
+
+                extra_bundles = _provider_bundles(s3_client, bucket, runtime_config)
+
                 upload_code_to_s3(
                     s3_client,
                     bucket,
@@ -1795,6 +2493,9 @@ class WorkflowExecutor:
                     requirements_txt,
                     "agent.py",
                     deps_bundle=deps_bundle,
+                    extra_bundles=extra_bundles,
+                    region=self.region,
+                    deployment_id=deployment_id,
                 )
                 logger.info("Uploaded code zip to s3://%s/%s", bucket, s3_key)
             else:
@@ -1818,19 +2519,51 @@ class WorkflowExecutor:
                 _otel_secret = (observability_config or {}).get("auth_header_secret_arn") or (
                     observability_config or {}
                 ).get("authHeaderSecretArn")
-            _runtime_role_name = f"{runtime_config.name}-role"
-            role_arn = create_runtime_iam_role(
+            _runtime_role_name = regional_iam_role_name(
+                f"{runtime_config.name}-role",
+                self.region,
+            )
+            # The agent resolves its gateway OAuth client secret at the moment of use
+            # (no env var holds it), so the role needs the one read that requires:
+            # DescribeUserPoolClient on this deploy's pool, or GetSecretValue on the
+            # external IDP's secret. Both derived from the same helper the Step
+            # Functions path uses, so the two cannot drift.
+            _pool_arn, _client_secret_arn = runtime_deployer.client_secret_grant_targets(
+                (gateway_result or {}).get("client_info"), self.region, account_id
+            )
+            # The same two ARNs the env vars below carry by reference, resolved from the
+            # ONE shared decision so the grant and the injection cannot disagree. Computed
+            # here rather than at the env-var block because the role is created first and
+            # a role without these reads is an agent that starts, imports, and then fails
+            # its first model call with AccessDeniedException.
+            _provider_key_arn, _gateway_key_arn = runtime_deployer.runtime_key_grant_targets(
+                runtime_config, gateway_result
+            )
+            _runtime_role_result = create_runtime_iam_role(
                 iam_client,
                 _runtime_role_name,
                 account_id,
                 self.region,
                 connected_tools,
                 otel_secret_arn=_otel_secret,
+                user_pool_arn=_pool_arn,
+                client_secret_arn=_client_secret_arn,
+                provider_key_secret_arn=_provider_key_arn,
+                gateway_key_secret_arn=_gateway_key_arn,
+                return_provenance=True,
             )
+            if isinstance(_runtime_role_result, tuple):
+                role_arn, runtime_role_created = _runtime_role_result
+            else:
+                role_arn, runtime_role_created = _runtime_role_result, False
             _record_resource_best_effort(
                 deployment_id,
                 self.region,
-                {"type": "iam_role", "name": _runtime_role_name},
+                {
+                    "type": "iam_role",
+                    "name": _runtime_role_name,
+                    "created_by_deployment": runtime_role_created,
+                },
             )
 
             agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=self.region)
@@ -1842,12 +2575,76 @@ class WorkflowExecutor:
                 "SYSTEM_PROMPT": runtime_config.system_prompt,
             }
 
+            # The model provider's API key and a LiteLLM gateway's virtual key, BY
+            # REFERENCE. Same single decision the Step Functions path makes
+            # (runtime_configure_step injects, iam_step grants) so the two cannot drift:
+            # a grant with no injection is a dead statement, an injection with no grant is
+            # an agent that deploys green and raises AccessDeniedException on its first
+            # model call. This path injected NEITHER, so a non-Bedrock agent deployed here
+            # imported its SDK — once the bundle fix above landed — and then had no key at
+            # all. ARCC cnt_n8LpZcqYi2t3I2: never the key itself, only the ARN.
+            # _provider_key_arn / _gateway_key_arn come from the role creation above — one
+            # call, so the grant and the injection are the same decision by construction.
+            if _provider_key_arn:
+                env_vars["PROVIDER_API_KEY_SECRET_ARN"] = _provider_key_arn
+            if runtime_deployer.needs_provider_api_key(runtime_config):
+                _base_url = getattr(runtime_config, "provider_base_url", None)
+                if _base_url:
+                    env_vars["PROVIDER_BASE_URL"] = str(_base_url)
+
             if gateway_result:
                 client_info = gateway_result.get("client_info", {})
                 env_vars["GATEWAY_URL"] = gateway_result.get("gateway_url", "")
+
+            # A LiteLLM MCP gateway authenticates with a static virtual key, not an OAuth2
+            # client-credentials exchange, so the Cognito variables below are not merely
+            # useless to it — COGNITO_CLIENT_ID with no pool sends the generated agent to a
+            # token endpoint that does not exist. This path had no provider branch at all
+            # and treated every gateway as Cognito; the twin in runtime_configure_step is
+            # the contract being mirrored.
+            if gateway_result and str(client_info.get("provider") or "") == "litellm":
+                env_vars["GATEWAY_AUTH_MODE"] = "static_bearer"
+                _litellm_servers = [str(s) for s in (gateway_result.get("litellm_servers") or []) if str(s).strip()]
+                if _litellm_servers:
+                    env_vars["GATEWAY_MCP_SERVERS"] = ",".join(_litellm_servers)
+                if _gateway_key_arn:
+                    env_vars["GATEWAY_API_KEY_SECRET_ARN"] = _gateway_key_arn
+                else:
+                    logger.warning("LiteLLM gateway produced no api_key_ref; the agent will have no gateway key")
+            elif gateway_result:
                 env_vars["COGNITO_CLIENT_ID"] = client_info.get("client_id", "")
-                env_vars["COGNITO_CLIENT_SECRET"] = client_info.get("client_secret", "")
-                env_vars["COGNITO_TOKEN_ENDPOINT"] = client_info.get("token_endpoint", "")
+                # COGNITO_USER_POOL_ID, *not* COGNITO_CLIENT_SECRET — same contract as
+                # the Step Functions path (runtime_configure_step.py) and the CFN
+                # export. GetAgentRuntime returns a runtime's environment variables in
+                # plaintext, so the generated agent re-reads the secret itself with
+                # DescribeUserPoolClient from exactly these two values. An external
+                # IDP has no such fallback, so its secret travels by Secrets Manager
+                # name. ARCC cnt_n8LpZcqYi2t3I2 / cnt_77BHvX7WzuG1X8.
+                #
+                # The reference now WINS for Cognito too, and the pool id is a fallback
+                # for pre-existing deployments only. Reason, same as the SFN path: the
+                # pool id is only usable with a DescribeUserPoolClient grant, Cognito
+                # IAM cannot scope below the pool, and so that grant reads every other
+                # gateway's client secret in the pool. The two branches must stay
+                # mutually exclusive — emitting both would leave the pool id in the
+                # runtime environment as a standing invitation to re-add the grant.
+                _external_ref = client_info.get("client_secret_ref") or client_info.get("clientSecretRef")
+                if _external_ref:
+                    env_vars["OAUTH_CLIENT_SECRET_REF"] = _external_ref
+                elif client_info.get("user_pool_id"):
+                    env_vars["COGNITO_USER_POOL_ID"] = client_info["user_pool_id"]
+                # Same F-6 guard as runtime_configure_step: the agent POSTs its client
+                # secret to this endpoint from inside the runtime, so a cleartext or
+                # link-local endpoint must fail the deploy rather than be handed over.
+                # Empty stays empty — this path has always emitted the key
+                # unconditionally, and an empty value is "no token endpoint
+                # configured", not a destination.
+                _te = client_info.get("token_endpoint", "")
+                if _te:
+                    from app.services.gateway_deployer import validate_token_endpoint_shape
+
+                    _te = validate_token_endpoint_shape(_te, label="COGNITO_TOKEN_ENDPOINT")
+                env_vars["COGNITO_TOKEN_ENDPOINT"] = _te
                 env_vars["COGNITO_SCOPE"] = client_info.get("scope", "")
 
             if memory_id:
@@ -1884,12 +2681,17 @@ class WorkflowExecutor:
                 else "PYTHON_3_13",
                 runtime_config.protocol.value if hasattr(runtime_config.protocol, "value") else "HTTP",
                 env_vars,
+                region=self.region,
             )
             state.runtime_id = runtime_result["runtime_id"]
             _record_resource_best_effort(
                 deployment_id,
                 self.region,
-                {"type": "agent_runtime", "id": state.runtime_id},
+                {
+                    "type": "agent_runtime",
+                    "id": state.runtime_id,
+                    "created_by_deployment": (runtime_result.get("created_by_deployment") is True),
+                },
             )
 
             # ------------------------------------------------------------------
@@ -1902,8 +2704,19 @@ class WorkflowExecutor:
                 raise RuntimeError(launch_result.get("error", "Runtime failed to become ready"))
 
             try:
-                endpoints_resp = agentcore_ctrl.list_agent_runtime_endpoints(agentRuntimeId=state.runtime_id)
-                endpoints = endpoints_resp.get("agentRuntimeEndpoints", endpoints_resp.get("endpoints", []))
+                endpoints = list_all(
+                    agentcore_ctrl,
+                    "list_agent_runtime_endpoints",
+                    item_keys=(
+                        "agentRuntimeEndpoints",
+                        "runtimeEndpoints",
+                        "endpoints",
+                    ),
+                    request={
+                        "agentRuntimeId": state.runtime_id,
+                        "maxResults": 100,
+                    },
+                )
                 if endpoints:
                     endpoint_url = endpoints[0].get("url", endpoints[0].get("endpoint", ""))
                 else:
@@ -1986,41 +2799,17 @@ class WorkflowExecutor:
                     )
                 )
 
-        # Destroy gateway using boto3 (no CLI delete command exists)
+        # The gateway is never deleted here. This retired path matched it by NAME, with no
+        # ownership proof and outside the gateway write lock (F-66e), so a same-named
+        # gateway of another deployment or account would have been deleted. The supported
+        # teardown is DELETE /api/deploy/{id}, which proves ownership under the lock.
         if state.gateway_name:
-            try:
-                import boto3
-
-                control_client = boto3.client("bedrock-agentcore-control", region_name=self.region)
-                # List gateways to find the one matching by name
-                gateways = control_client.list_gateways()
-                for gw in gateways.get(
-                    "items",
-                    gateways.get("gateways", gateways.get("gatewaySummaries", [])),
-                ):
-                    if gw.get("name") == state.gateway_name:
-                        # Delete all targets first
-                        targets = control_client.list_gateway_targets(gatewayIdentifier=gw["gatewayId"])
-                        for target in targets.get(
-                            "items",
-                            targets.get("targets", targets.get("gatewayTargetSummaries", [])),
-                        ):
-                            control_client.delete_gateway_target(
-                                gatewayIdentifier=gw["gatewayId"],
-                                targetId=target["targetId"],
-                            )
-                        # Delete the gateway
-                        control_client.delete_gateway(gatewayIdentifier=gw["gatewayId"])
-                        logger.info(f"Deleted gateway: {state.gateway_name}")
-                        break
-
-            except Exception as e:
-                errors.append(
-                    RollbackError(
-                        resource_arn=f"gateway:{state.gateway_name}",
-                        error_message=str(e),
-                    )
+            errors.append(
+                RollbackError(
+                    resource_arn=f"gateway:{state.gateway_name}",
+                    error_message="not deleted by the legacy rollback; use DELETE /api/deploy/{id}",
                 )
+            )
 
         return RollbackResult(
             success=len(errors) == 0,

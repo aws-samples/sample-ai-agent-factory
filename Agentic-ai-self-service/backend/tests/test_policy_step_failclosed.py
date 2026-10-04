@@ -19,6 +19,8 @@ from unittest.mock import MagicMock, patch
 
 from app.step_handlers import policy_step
 
+from tests.gateway_fakes import applying_updates
+
 
 def _ctrl_with_persistent_create_failed():
     """Control client where every created policy ends CREATE_FAILED with the
@@ -40,9 +42,10 @@ def _ctrl_with_persistent_create_failed():
         "name": "gw",
         "roleArn": "arn:role",
         "protocolType": "MCP",
+        "authorizerType": "CUSTOM_JWT",
         "status": "READY",
     }
-    return ctrl
+    return applying_updates(ctrl)
 
 
 def _event(**pc_extra):
@@ -82,6 +85,57 @@ def test_enforce_validation_failure_stays_enforce_by_default():
     assert pr["enforce_pending"], "promoter payload must be recorded"
     _, kw = ctrl.update_gateway.call_args
     assert kw["policyEngineConfiguration"]["mode"] == "ENFORCE"
+
+
+def test_a_persistent_gateway_permission_failure_names_the_missing_grant():
+    """ "Insufficient permissions to call gateway" has two causes, not one.
+
+    One is the engine<->gateway race this module retries for. The other is a
+    missing ``bedrock-agentcore:InvokeGateway`` on the calling role, proven live
+    on the customer-export path — and that one never converges: six retries, then
+    a deny-all engine handed to a promoter whose principal lacks the same action.
+    Because the step classifies the string as transient, the permanent cause used
+    to be reported as a race, which is the worst possible label for an IAM gap:
+    it sends the next reader to wait instead of to the role.
+
+    So when the retries are exhausted, the reason on the deployment record must
+    say which cause is still standing.
+    """
+    out, _ctrl = _run(_event())
+    reason = out["policy_result"]["downgrade_reason"]
+    assert "bedrock-agentcore:InvokeGateway" in reason, (
+        "a gateway-permission failure that survived every retry is an IAM gap, and the reason does not say so"
+    )
+    assert "step_lambdas.py" in reason and "lambdas.py" in reason, (
+        "the reason names no role to go and check — both the policy step role and "
+        "the deployment Lambda role (which runs the promoter) need the grant"
+    )
+
+
+def test_a_transient_failure_that_clears_says_nothing_about_iam():
+    """The hint must not fire on the race it would misdescribe.
+
+    A policy that fails once and validates on retry is the genuine convergence
+    case; pointing at IAM there would just move the misattribution.
+    """
+    ctrl = _ctrl_with_persistent_create_failed()
+    ctrl.get_policy.side_effect = [
+        {"status": "CREATE_FAILED", "statusReasons": ["Insufficient permissions to call gateway with ID gw-1"]},
+        {"status": "ACTIVE"},
+        {"status": "ACTIVE"},
+        {"status": "ACTIVE"},
+    ]
+    ctrl.list_policies.return_value = {"policies": [{"name": "x", "status": "ACTIVE", "policyId": "p1"}]}
+    with (
+        patch.object(policy_step, "_get_deployment_store", return_value=MagicMock()),
+        patch.object(policy_step, "step_clients") as sc,
+        patch("time.sleep"),
+    ):
+        sc.client.return_value = ctrl
+        out = policy_step.handler(_event(), None)
+    pr = out["policy_result"]
+    assert pr["enforce_validation_pending"] is False, "the retry succeeded; nothing should be pending"
+    assert "InvokeGateway" not in (pr["downgrade_reason"] or "")
 
 
 def test_explicit_log_only_opt_in_downgrades():

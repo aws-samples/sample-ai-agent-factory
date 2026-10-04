@@ -120,16 +120,23 @@ describe('FlowSidebar', () => {
 
     await renderSidebar();
 
+    const toggle = screen.getByRole('button', { name: 'Flows' });
+    expect(toggle).toBe(screen.getByTestId('flow-sidebar-header'));
+    expect(toggle).toHaveAttribute('aria-controls', 'flow-sidebar-list');
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+
     // Initially expanded — list should be visible
     expect(screen.getByTestId('flow-sidebar-list')).toBeInTheDocument();
 
     // Click header to collapse
-    fireEvent.click(screen.getByTestId('flow-sidebar-header'));
+    fireEvent.click(toggle);
     expect(screen.queryByTestId('flow-sidebar-list')).not.toBeInTheDocument();
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
 
     // Click header again to expand
-    fireEvent.click(screen.getByTestId('flow-sidebar-header'));
+    fireEvent.click(toggle);
     expect(screen.getByTestId('flow-sidebar-list')).toBeInTheDocument();
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
   });
 
   // --------------------------------------------------------------------------
@@ -151,7 +158,9 @@ describe('FlowSidebar', () => {
     const input = screen.getByTestId('flow-sidebar-create-input');
     fireEvent.change(input, { target: { value: 'New Flow' } });
     fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.blur(input);
 
+    expect(mockCreateFlow).toHaveBeenCalledOnce();
     expect(mockCreateFlow).toHaveBeenCalledWith('New Flow');
     // Input closes after confirming.
     expect(screen.queryByTestId('flow-sidebar-create-input')).not.toBeInTheDocument();
@@ -167,9 +176,20 @@ describe('FlowSidebar', () => {
     const input = screen.getByTestId('flow-sidebar-create-input');
     fireEvent.change(input, { target: { value: 'Discarded' } });
     fireEvent.keyDown(input, { key: 'Escape' });
+    fireEvent.blur(input);
 
     expect(mockCreateFlow).not.toHaveBeenCalled();
     expect(screen.queryByTestId('flow-sidebar-create-input')).not.toBeInTheDocument();
+  });
+
+  it('gives the inline create field an explicit accessible name', async () => {
+    mockStoreState.flows = sampleFlows;
+    mockStoreState.activeFlowId = 'flow-1';
+
+    await renderSidebar();
+    fireEvent.click(screen.getByTestId('flow-sidebar-create'));
+
+    expect(screen.getByRole('textbox', { name: 'New flow name' })).toBeInTheDocument();
   });
 
   // --------------------------------------------------------------------------

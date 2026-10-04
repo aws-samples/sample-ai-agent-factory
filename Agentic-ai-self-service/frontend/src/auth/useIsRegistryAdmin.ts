@@ -1,11 +1,18 @@
 /**
  * Hook to determine if the current user is a registry admin.
- * Reads cognito:groups from the ID token — admin if it contains
- * 'registry-admin' or legacy 'org-admin'.
+ * Reads cognito:groups from the ID token — admin if it contains any of
+ * REGISTRY_ADMIN_GROUPS. MUST match backend services/auth.py _REGISTRY_ADMIN_GROUPS.
  */
 
 import { useState, useEffect } from 'react';
 import { fetchAuthSession } from 'aws-amplify/auth';
+
+export const REGISTRY_ADMIN_GROUPS: readonly string[] = [
+  'g-admins-registry',
+  'g-admins-super',
+  'registry-admin',
+  'org-admin',
+];
 
 export function useIsRegistryAdmin(): boolean {
   const [isAdmin, setIsAdmin] = useState(false);
@@ -34,7 +41,7 @@ export function useIsRegistryAdmin(): boolean {
           }
         }
 
-        const admin = groupList.some((g) => g === 'registry-admin' || g === 'org-admin');
+        const admin = groupList.some((g) => REGISTRY_ADMIN_GROUPS.includes(g));
         if (!cancelled) {
           setIsAdmin(admin);
         }

@@ -9,6 +9,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { generateToolApi, testToolApi } from '../../services/api';
 import type { GeneratedTool, TestCase, TestResult } from '../../services/api';
+import { useDialogFocusTrap } from '../../hooks/useDialogFocusTrap';
 
 // ============================================================================
 // Types
@@ -24,6 +25,8 @@ interface ChatMessage {
   testCases?: TestCase[];
   testResults?: TestResult[];
   testPhase?: TestPhase;
+  /** Why the sandbox itself failed the test, when it did. See ToolTestResponse.note. */
+  testNote?: string;
 }
 
 export interface ToolGeneratorPanelProps {
@@ -33,6 +36,15 @@ export interface ToolGeneratorPanelProps {
 }
 
 const MAX_AUTO_FIX_RETRIES = 2;
+
+function splitTestNote(note: string): string[] {
+  return (
+    note
+      .match(/[^.!?]+(?:[.!?]+(?=\s|$)|$)/g)
+      ?.map((sentence) => sentence.trim())
+      .filter(Boolean) ?? [note]
+  );
+}
 
 // ============================================================================
 // Component
@@ -48,18 +60,48 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
   const [autoFixCount, setAutoFixCount] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const focusOriginRef = useRef<HTMLElement | null>(null);
+  const wasBusyRef = useRef(false);
+  useDialogFocusTrap(isVisible, panelRef, inputRef, onClose);
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTesting]);
 
-  // Focus input when panel opens
+  // A submitted button becomes disabled while the request runs. Browsers then
+  // commonly drop focus to <body>; jsdom leaves it stranded on the disabled
+  // button. Return to the conversational input in either case, but do not steal
+  // focus if the user deliberately moved to another control while waiting.
   useEffect(() => {
-    if (isVisible) {
-      setTimeout(() => inputRef.current?.focus(), 300);
+    if (!isVisible) {
+      wasBusyRef.current = false;
+      focusOriginRef.current = null;
+      return;
     }
-  }, [isVisible]);
+
+    if (isGenerating || isTesting) {
+      wasBusyRef.current = true;
+      return;
+    }
+
+    if (!wasBusyRef.current) return;
+    wasBusyRef.current = false;
+
+    const origin = focusOriginRef.current;
+    focusOriginRef.current = null;
+    const active = document.activeElement;
+    if (
+      origin &&
+      (active === origin ||
+        active === document.body ||
+        active === inputRef.current ||
+        (active instanceof HTMLElement && !active.isConnected))
+    ) {
+      inputRef.current?.focus();
+    }
+  }, [isVisible, isGenerating, isTesting]);
 
   // Run tests on a generated tool
   const runTests = useCallback(async (tool: GeneratedTool, testCases: TestCase[], msgId: string) => {
@@ -81,7 +123,9 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
       // Update message with test results
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === msgId ? { ...m, testResults: result.results, testPhase: phase } : m,
+          m.id === msgId
+            ? { ...m, testResults: result.results, testPhase: phase, testNote: result.note }
+            : m,
         ),
       );
 
@@ -116,6 +160,11 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
   const handleAutoFix = useCallback(
     async (failedResults: TestResult[], tool: GeneratedTool, testCases: TestCase[]) => {
       if (autoFixCount >= MAX_AUTO_FIX_RETRIES) return;
+
+      if (!focusOriginRef.current) {
+        focusOriginRef.current =
+          document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      }
 
       const failureDetails = failedResults
         .filter((r) => !r.passed)
@@ -188,6 +237,9 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
     const prompt = inputValue.trim();
     if (!prompt || isGenerating || isTesting) return;
 
+    focusOriginRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
     const userMsg: ChatMessage = {
       id: `user-${Date.now()}`,
       role: 'user',
@@ -246,8 +298,20 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
         if (response.testCases && response.testCases.length > 0) {
           const testResult = await runTests(response.tool, response.testCases, msgId);
 
-          // Auto-fix if tests failed and we haven't exceeded retries
-          if (testResult && !testResult.allPassed && autoFixCount < MAX_AUTO_FIX_RETRIES) {
+          // Auto-fix if tests failed and we haven't exceeded retries.
+          //
+          // NOT when `note` is set. That means the isolated test sandbox is what
+          // failed the test — a tool that calls an HTTP API cannot succeed in a
+          // network with no egress, and works once deployed. Auto-fixing there asks
+          // the model twice to repair correct code, and the only "fix" available to
+          // it is to remove the network call the user asked for. The result would be
+          // a silently worse tool that passes.
+          if (
+            testResult &&
+            !testResult.allPassed &&
+            !testResult.note &&
+            autoFixCount < MAX_AUTO_FIX_RETRIES
+          ) {
             await handleAutoFix(testResult.results, response.tool, response.testCases);
           }
         }
@@ -345,7 +409,7 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
 
     return (
       <div className="mt-2 space-y-1.5">
-        <div className="text-xs text-gray-400 font-medium">Test Results:</div>
+        <div className="text-xs text-gray-600 font-medium">Test Results:</div>
         {msg.testResults.map((tr, i) => (
           <div
             key={i}
@@ -365,13 +429,18 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
             <div className="flex-1 min-w-0">
               <div className={`font-medium ${tr.passed ? 'text-green-800' : 'text-red-800'}`}>
                 {tr.testCaseName}
-                <span className="font-normal text-gray-400 ml-2">{tr.durationMs}ms</span>
+                <span className="font-normal text-gray-600 ml-2">{tr.durationMs}ms</span>
               </div>
-              {tr.error && <div className="text-red-600 mt-0.5 break-words">{tr.error}</div>}
+              {tr.error && <div className="text-red-700 mt-0.5 break-words">{tr.error}</div>}
               {tr.actualOutput && !tr.passed && (
                 <details className="mt-1">
                   <summary className="cursor-pointer text-gray-500 hover:text-gray-700">Show output</summary>
-                  <pre className="mt-1 p-1.5 bg-white rounded text-[10px] overflow-x-auto text-gray-600">
+                  <pre
+                    role="region"
+                    aria-label={`Actual output for ${tr.testCaseName}`}
+                    tabIndex={0}
+                    className="mt-1 p-1.5 bg-white rounded text-[10px] overflow-x-auto text-gray-600"
+                  >
                     {JSON.stringify(tr.actualOutput, null, 2).slice(0, 500)}
                   </pre>
                 </details>
@@ -380,11 +449,26 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
           </div>
         ))}
 
+        {/* The sandbox, not the tool, failed this test. Explained rather than
+            silently presented as a code failure, and the auto-fix button below is
+            hidden in this case: the only repair available to the model is to delete
+            the network call the user asked for. */}
+        {msg.testNote && (
+          <div className="p-2 rounded-lg text-xs bg-blue-50 border border-blue-200 text-blue-800">
+            <p className="font-medium">Network calls cannot be tested here</p>
+            {splitTestNote(msg.testNote).map((sentence, index) => (
+              <p key={`${msg.id}-test-note-${index}`} className="mt-0.5 break-words">
+                {sentence}
+              </p>
+            ))}
+          </div>
+        )}
+
         {/* Auto-fix button for failures */}
-        {msg.testPhase === 'failed' && msg.tool && msg.testCases && autoFixCount < MAX_AUTO_FIX_RETRIES && !isGenerating && !isTesting && (
+        {msg.testPhase === 'failed' && !msg.testNote && msg.tool && msg.testCases && autoFixCount < MAX_AUTO_FIX_RETRIES && !isGenerating && !isTesting && (
           <button
             onClick={() => msg.testResults && msg.tool && msg.testCases && handleAutoFix(msg.testResults, msg.tool, msg.testCases)}
-            className="w-full mt-1 py-1.5 px-3 bg-amber-500 text-white rounded-md text-xs font-medium hover:bg-amber-600 transition-colors"
+            className="w-full mt-1 py-1.5 px-3 bg-[#92400e] text-white rounded-md text-xs font-medium hover:bg-[#78350f] transition-colors"
           >
             Auto-fix ({MAX_AUTO_FIX_RETRIES - autoFixCount} retries left)
           </button>
@@ -400,28 +484,38 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
         <div
           className="fixed inset-0 bg-black/20 z-40 transition-opacity"
           onClick={onClose}
+          aria-hidden="true"
         />
       )}
 
       {/* Panel */}
       <div
+        ref={panelRef}
+        data-testid="tool-generator-panel"
         className={`fixed top-0 right-0 h-full w-[480px] bg-white shadow-2xl z-50 flex flex-col transition-transform duration-300 ease-in-out ${
-          isVisible ? 'translate-x-0' : 'translate-x-full'
+          isVisible ? 'translate-x-0' : 'translate-x-full pointer-events-none'
         }`}
+        role={isVisible ? 'dialog' : undefined}
+        aria-modal={isVisible ? 'true' : undefined}
+        aria-labelledby={isVisible ? 'tool-generator-title' : undefined}
+        aria-hidden={!isVisible}
+        inert={!isVisible}
+        tabIndex={-1}
       >
         {/* Header */}
         <div className="h-14 flex items-center justify-between px-4 border-b border-gray-200 flex-shrink-0" style={{ background: 'var(--color-bg-subtle)' }}>
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center">
+            <div className="w-8 h-8 rounded-lg bg-[#5b21b6] flex items-center justify-center">
               <span className="text-white text-sm">AI</span>
             </div>
-            <span className="font-semibold text-gray-800">AI Tool Generator</span>
+            <h2 id="tool-generator-title" className="font-semibold text-gray-800">AI Tool Generator</h2>
           </div>
           <div className="flex items-center gap-1">
             <button
               onClick={handleNewChat}
               className="p-2 rounded-lg hover:bg-white/60 transition-colors text-gray-500 hover:text-gray-700"
               title="New conversation"
+              aria-label="Start a new tool-generation conversation"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -430,6 +524,7 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
             <button
               onClick={onClose}
               className="p-2 rounded-lg hover:bg-white/60 transition-colors text-gray-500 hover:text-gray-700"
+              aria-label="Close the AI tool generator"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -442,8 +537,8 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {messages.length === 0 && (
             <div className="text-center py-12">
-              <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-purple-100 to-indigo-100 flex items-center justify-center">
-                <span className="text-3xl">AI</span>
+              <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-[#ede9fe] flex items-center justify-center">
+                <span className="text-3xl text-[#4c1d95]">AI</span>
               </div>
               <h3 className="text-lg font-medium text-gray-700 mb-2">Create Tools with AI</h3>
               <p className="text-sm text-gray-500 mb-6 max-w-xs mx-auto">
@@ -475,7 +570,7 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
               <div
                 className={`max-w-[90%] rounded-xl px-4 py-3 ${
                   msg.role === 'user'
-                    ? 'bg-gradient-to-r from-purple-500 to-indigo-600 text-white'
+                    ? 'bg-[#5b21b6] text-white'
                     : 'bg-gray-100 text-gray-800'
                 }`}
               >
@@ -495,7 +590,7 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
                     {/* Input Schema Summary */}
                     {msg.tool.inputSchema?.properties != null && typeof msg.tool.inputSchema.properties === 'object' && (
                       <div className="mb-2">
-                        <div className="text-xs text-gray-400 mb-1">Parameters:</div>
+                        <div className="text-xs text-gray-600 mb-1">Parameters:</div>
                         <div className="flex flex-wrap gap-1">
                           {Object.entries(msg.tool.inputSchema.properties as Record<string, { type?: string }>).map(
                             ([key, val]) => (
@@ -528,32 +623,47 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
                     </button>
 
                     {showCode && (
-                      <pre className="text-[11px] bg-gray-900 text-green-400 p-3 rounded-lg overflow-x-auto max-h-64 overflow-y-auto mb-2">
-                        <code>{msg.tool.lambdaCode}</code>
+                      <pre
+                        role="region"
+                        aria-label={`Generated Lambda code for ${msg.tool.displayName}`}
+                        tabIndex={0}
+                        className="text-[11px] bg-gray-900 text-green-400 p-3 rounded-lg overflow-x-auto max-h-64 overflow-y-auto mb-2"
+                      >
+                        {msg.tool.lambdaCode}
                       </pre>
                     )}
 
                     {/* Test Results */}
                     {renderTestResults(msg)}
 
-                    {/* Add to Canvas Button — only enabled after tests pass */}
+                    {/* A sandbox network limitation is not a failed tool. Let the
+                        user carry that tool forward for deployment-time validation,
+                        while genuine logic failures remain blocked. */}
                     <button
                       onClick={() => msg.tool && handleAddToCanvas(msg.tool)}
-                      disabled={msg.testPhase !== 'passed'}
+                      disabled={msg.testPhase !== 'passed' && !msg.testNote}
                       className={`w-full mt-2 py-2 px-3 rounded-md text-sm font-medium transition-colors ${
-                        msg.testPhase === 'passed'
+                        msg.testPhase === 'passed' || msg.testNote
                           ? 'bg-[#0972d3] text-white hover:bg-[#0961b9]'
                           : 'bg-gray-200 text-gray-400 cursor-not-allowed'
                       }`}
                     >
-                      {msg.testPhase === 'passed' ? 'Add to Canvas' : msg.testPhase === 'testing' ? 'Testing...' : msg.testPhase === 'failed' ? 'Tests Must Pass' : 'Waiting for Tests'}
+                      {msg.testNote
+                        ? 'Add to Canvas — test after deployment'
+                        : msg.testPhase === 'passed'
+                          ? 'Add to Canvas'
+                          : msg.testPhase === 'testing'
+                            ? 'Testing...'
+                            : msg.testPhase === 'failed'
+                              ? 'Tests Must Pass'
+                              : 'Waiting for Tests'}
                     </button>
 
                     {/* Escape hatch for power users */}
-                    {msg.testPhase === 'failed' && autoFixCount >= MAX_AUTO_FIX_RETRIES && (
+                    {msg.testPhase === 'failed' && !msg.testNote && autoFixCount >= MAX_AUTO_FIX_RETRIES && (
                       <button
                         onClick={() => msg.tool && handleAddToCanvas(msg.tool)}
-                        className="w-full mt-1 py-1 px-3 text-xs text-gray-400 hover:text-gray-600 transition-colors"
+                        className="w-full mt-1 py-1 px-3 text-xs text-gray-600 hover:text-gray-700 transition-colors"
                       >
                         Add anyway (skip tests)
                       </button>
@@ -592,25 +702,28 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Describe a tool... (e.g., 'A tool that fetches stock prices')"
+              aria-label="Tool description"
               className="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent bg-white"
               rows={2}
               disabled={isGenerating || isTesting}
             />
             <button
+              type="button"
               onClick={handleSend}
               disabled={!inputValue.trim() || isGenerating || isTesting}
+              aria-label="Send tool generation request"
               className={`self-end px-4 py-3 rounded-xl font-medium text-sm transition-all ${
                 inputValue.trim() && !isGenerating && !isTesting
-                  ? 'bg-gradient-to-r from-purple-500 to-indigo-600 text-white hover:from-purple-600 hover:to-indigo-700 shadow-lg shadow-purple-500/25'
+                  ? 'bg-[#5b21b6] text-white hover:bg-[#4c1d95] shadow-lg shadow-purple-500/25'
                   : 'bg-gray-200 text-gray-400 cursor-not-allowed'
               }`}
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19V5m0 0l-7 7m7-7l7 7" />
               </svg>
             </button>
           </div>
-          <div className="text-[10px] text-gray-400 mt-2 text-center">
+          <div className="text-[10px] mt-2 text-center" style={{ color: 'var(--color-text-secondary)' }}>
             Powered by Claude Sonnet on Amazon Bedrock
           </div>
         </div>

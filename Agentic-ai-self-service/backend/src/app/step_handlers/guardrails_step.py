@@ -17,11 +17,14 @@ import uuid
 import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services import step_clients
+from app.services.aws_pagination import list_all
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.guardrail_builders import (
     build_contextual_grounding_config,
     build_regex_filters,
 )
+from app.services.resource_ownership import assert_guardrail_owned
+from app.services.resource_tagging import governed_lower_tag_list
 
 logger = logging.getLogger(__name__)
 
@@ -186,10 +189,16 @@ def _find_guardrail_id_by_name(bedrock, name: str) -> str | None:
                 if gr.get("name") == name:
                     return gr.get("id") or gr.get("guardrailId")
     except Exception:
-        # Fallback: non-paginated call
+        # Some test doubles and older clients may not expose get_paginator.
+        # The fallback still has to enumerate every page; a same-named guardrail
+        # on page two is the resource a conflict recovery must update.
         try:
-            resp = bedrock.list_guardrails()
-            for gr in resp.get("guardrails", []):
+            for gr in list_all(
+                bedrock,
+                "list_guardrails",
+                item_keys=("guardrails",),
+                request={"maxResults": 100},
+            ):
                 if gr.get("name") == name:
                     return gr.get("id") or gr.get("guardrailId")
         except Exception:
@@ -205,7 +214,10 @@ def handler(event: dict, context) -> dict:
         store.update_step(deployment_id, DeploymentStepName.GUARDRAILS, DeploymentStatusEnum.IN_PROGRESS)
 
         guardrails_config = event.get("guardrails_config") or {}
-        region = _get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1"))
+        region = event.get("target_region") or _get_env(
+            "APP_AWS_REGION",
+            _get_env("AWS_REGION", "us-east-1"),
+        )
         mode = guardrails_config.get("mode", "existing")
 
         bedrock = step_clients.client(event, "bedrock")
@@ -317,6 +329,9 @@ def handler(event: dict, context) -> dict:
                 "contextual grounding — an empty guardrail guards nothing and AWS "
                 "rejects it."
             )
+        # P0-B: a guardrail bills per text unit evaluated, so it belongs in a cost report
+        # under the same application tag as the runtime it guards.
+        create_params["tags"] = governed_lower_tag_list(region, event.get("resource_tags"))
 
         # Bug 82: idempotent upsert. A prior partial run can leave a
         # guardrail with this name behind; create_guardrail then fails with
@@ -324,6 +339,7 @@ def handler(event: dict, context) -> dict:
         # name and update_guardrail in place, falling back to a UUID-suffixed
         # rename if the name lookup races.
         guardrail_id: str | None = None
+        guardrail_created = True
         try:
             resp = bedrock.create_guardrail(**create_params)
             guardrail_id = resp["guardrailId"]
@@ -347,11 +363,18 @@ def handler(event: dict, context) -> dict:
             existing_id = _find_guardrail_id_by_name(bedrock, name)
             if existing_id:
                 _LOG("Guardrail name %s already exists (id=%s); updating in place", name, existing_id)
+                assert_guardrail_owned(
+                    bedrock,
+                    existing_id,
+                    region,
+                )
                 # UpdateGuardrail requires `name` as a mandatory body field
                 # (separate from guardrailIdentifier).
-                update_params = {**create_params, "guardrailIdentifier": existing_id}
+                update_params = {k: v for k, v in create_params.items() if k != "tags"}
+                update_params["guardrailIdentifier"] = existing_id
                 bedrock.update_guardrail(**update_params)
                 guardrail_id = existing_id
+                guardrail_created = False
             else:
                 # Race or rename collision: retry once with a UUID-suffixed name.
                 fallback_name = f"{name}-{uuid.uuid4().hex[:8]}"
@@ -364,7 +387,15 @@ def handler(event: dict, context) -> dict:
         # Manifest: record the flow-created guardrail immediately (before the
         # READY poll, which can be killed mid-flight) so teardown never orphans it.
         if guardrail_id:
-            store.record_resource(deployment_id, {"type": "guardrail", "id": guardrail_id, "region": region})
+            store.record_resource(
+                deployment_id,
+                {
+                    "type": "guardrail",
+                    "id": guardrail_id,
+                    "region": region,
+                    "created_by_deployment": guardrail_created,
+                },
+            )
 
         # Wait for guardrail to be READY
         for attempt in range(24):  # 120s max

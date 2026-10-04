@@ -117,7 +117,9 @@ def get_platform_defaults() -> PlatformDefaultsResponse:
 
     Never returns the auth secret ARN (privileged).
     """
-    from app.services.observability import get_platform_observability_defaults
+    from app.services.observability import (
+        get_platform_observability_defaults_lenient as get_platform_observability_defaults,
+    )
 
     defaults = get_platform_observability_defaults()
     if not defaults:

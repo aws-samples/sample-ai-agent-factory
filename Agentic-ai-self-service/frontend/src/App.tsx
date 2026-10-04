@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import { lazy, Suspense, useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { ComponentPalette } from './components/palette/ComponentPalette';
 import { DeployPanel } from './components/deploy/DeployPanel';
 import { CanvasArea } from './components/canvas/CanvasArea';
@@ -9,12 +9,14 @@ import { HarnessAuthoring } from './components/harness/HarnessAuthoring';
 import type { GeneratedCanvasSpec, RegistryCanvasSnapshot } from './services/api';
 import { snapshotToCanvas } from './utils/cloneSnapshot';
 import { TemplateGallery } from './components/templates';
-import { PromptLibraryModal, type PromptSelection } from './components/modals/PromptLibraryModal';
-import { RegistryModal } from './components/modals/RegistryModal';
-import { HitlInboxModal } from './components/modals/HitlInboxModal';
+import type { PromptSelection } from './components/modals/PromptLibraryModal';
 import { ModalHost } from './components/modals/ModalHost';
-import { getModalKeyForComponentType } from './components/modals/modalRegistry';
-import { useWorkflowStore } from './store/workflowStore';
+import {
+  configurationTargetForExistingNode,
+  configurationTargetForNewNode,
+  getModalKeyForComponentType,
+} from './components/modals/modalRegistry';
+import { useWorkflowStore, type AgentCoreNode } from './store/workflowStore';
 import { useFlowStore } from './store/flowStore';
 import { useAutoSave } from './hooks/useAutoSave';
 import { instantiateTemplate } from './utils/templates';
@@ -24,18 +26,51 @@ import type { ComponentConfiguration, RuntimeConfiguration, IdentityConfiguratio
 import { CONNECTOR_TOOL_PREFIX } from './types/components';
 import type { DeployConnector } from './components/deploy/DeployPanel';
 import type { GeneratedTool } from './services/api';
-import { useScopes } from './auth/scopes';
+import { resolvePersonaRoute, useScopes } from './auth/scopes';
 import { ChatPage } from './components/chat/ChatPage';
 import { AppHeader } from './components/AppHeader';
+import { createNodeFromDrop } from './utils/dragDrop';
 import './App.css';
 
+const PromptLibraryModal = lazy(() => import('./components/modals/PromptLibraryModal').then(
+  (module) => ({ default: module.PromptLibraryModal }),
+));
+const RegistryModal = lazy(() => import('./components/modals/RegistryModal').then(
+  (module) => ({ default: module.RegistryModal }),
+));
+const HitlInboxModal = lazy(() => import('./components/modals/HitlInboxModal').then(
+  (module) => ({ default: module.HitlInboxModal }),
+));
+
 function App() {
-  const { activeFlowId, activeFlowName } = useFlowStore();
+  const {
+    activeFlowId,
+    activeFlowName,
+    error: flowError,
+    saveConflict,
+    resolveSaveConflict,
+  } = useFlowStore();
+  // Content on a canvas that no flow owns cannot be saved (useAutoSave requires
+  // documentFlowId === activeFlowId) and would be replaced by the sidebar's
+  // auto-open of the most recent flow. Measured live: a template chosen while
+  // that GET was in flight vanished with no confirmation. Until a flow is active,
+  // every control that puts content on the canvas is disabled and says why; the
+  // flow store additionally refuses to open a flow over such content.
+  const authoringDisabledReason = activeFlowId
+    ? null
+    : flowError
+      ? 'Open or create a flow to start building'
+      : 'Opening your flow…';
 
   // Loom-study Phase 3 — persona routing. t-user (non-admin) accounts land on the
   // end-user ChatPage; admins get the builder. isTypeAdmin comes from the Cognito
   // type group (t-admin). `previewAsEndUser` lets an admin preview the chat (3.2).
-  const { isTypeAdmin, loaded: scopesLoaded } = useScopes();
+  const {
+    scopes,
+    isTypeAdmin,
+    loaded: scopesLoaded,
+    hasScope,
+  } = useScopes();
   const [previewAsEndUser, setPreviewAsEndUser] = useState(false);
 
   // Auto-save active flow workflow (only saves when activeFlowId is set).
@@ -72,19 +107,29 @@ function App() {
   // receives the resolved {promptName, versionId, body} via its onSelect.
   const [showPromptLibrary, setShowPromptLibrary] = useState(false);
   const [promptPicker, setPromptPicker] = useState<((sel: PromptSelection) => void) | null>(null);
+  const openPromptPicker = useCallback(
+    (onSelect: (selection: PromptSelection) => void) => {
+      setPromptPicker(() => onSelect);
+    },
+    [],
+  );
   // Phase 2 Gap 2A — agent registry (browse/clone). Phase 2 Gap 2D — HITL inbox.
   const [showRegistry, setShowRegistry] = useState(false);
   const [showHitlInbox, setShowHitlInbox] = useState(false);
   const [restoredDeployment, setRestoredDeployment] = useState<{
+    deploymentId: string;
     runtimeId: string;
     endpoint: string;
+    runtimeProtocol: 'HTTP' | 'MCP' | 'A2A';
     gatewayUrl?: string;
   } | null>(null);
 
   const handleRestoreDeployment = useCallback((deployment: ActiveDeployment) => {
     setRestoredDeployment({
+      deploymentId: deployment.deployment_id,
       runtimeId: deployment.runtime_id || deployment.deployment_id,
       endpoint: deployment.runtime_endpoint || '',
+      runtimeProtocol: deployment.runtime_protocol || 'HTTP',
       gatewayUrl: deployment.gateway_url,
     });
     setShowDeployPanel(true);
@@ -98,13 +143,19 @@ function App() {
     initialConfig?: ComponentConfiguration;
   }>({ isOpen: false, nodeId: null, componentType: null });
 
-  // Pending node creation (to open modal after node is added)
-  const [pendingNodeConfig, setPendingNodeConfig] = useState<{
-    componentType: AgentCoreComponentType;
-    position: { x: number; y: number };
-  } | null>(null);
-
-  const { nodes, edges, updateNodeConfiguration, selectedNodeId, runValidation, loadTemplate, activeTemplateId, addNode } = useWorkflowStore();
+  const {
+    nodes,
+    edges,
+    isReadyToDeploy,
+    validationState,
+    updateNodeConfiguration,
+    selectedNodeId,
+    runValidation,
+    loadTemplate,
+    replaceWorkflowDocument,
+    activeTemplateId,
+    addNode,
+  } = useWorkflowStore();
 
   // Get selected runtime node for deployment
   const selectedNode = selectedNodeId ? nodes.find((n) => n.id === selectedNodeId) : null;
@@ -336,25 +387,6 @@ function App() {
     handleCloseConfig();
   }, [configModal.nodeId, updateNodeConfiguration, runValidation, handleCloseConfig]);
 
-  // Handle pending node creation - open modal when node appears (adjust state during render pattern)
-  if (pendingNodeConfig) {
-    const newNode = nodes.find((n) =>
-      n.data.componentType === pendingNodeConfig.componentType &&
-      Math.abs(n.position.x - pendingNodeConfig.position.x) < 20 &&
-      Math.abs(n.position.y - pendingNodeConfig.position.y) < 20
-    );
-
-    if (newNode && !configModal.isOpen) {
-      setConfigModal({
-        isOpen: true,
-        nodeId: newNode.id,
-        componentType: pendingNodeConfig.componentType,
-        initialConfig: newNode.data.configuration,
-      });
-      setPendingNodeConfig(null);
-    }
-  }
-
   // Compute activeModal props from configModal state (no effect needed)
   const activeModal = useMemo(() => {
     if (!configModal.isOpen || !configModal.componentType || !configModal.nodeId) {
@@ -374,9 +406,10 @@ function App() {
         initialConfig: configModal.initialConfig,
         // Observability needs apiBaseUrl
         ...(modalKey === 'observability' ? { apiBaseUrl: import.meta.env.VITE_API_BASE_URL ?? '' } : {}),
+        ...(modalKey === 'runtime' ? { onOpenPromptLibrary: openPromptPicker } : {}),
       },
     };
-  }, [configModal.isOpen, configModal.componentType, configModal.nodeId, configModal.initialConfig, handleCloseConfig, handleSaveConfig]);
+  }, [configModal.isOpen, configModal.componentType, configModal.nodeId, configModal.initialConfig, handleCloseConfig, handleSaveConfig, openPromptPicker]);
 
   const handleToggleCollapse = useCallback(() => {
     setPaletteCollapsed((prev) => !prev);
@@ -389,33 +422,54 @@ function App() {
   // Open config modal for a node
   const handleOpenConfig = useCallback((nodeId: string) => {
     const node = nodes.find((n) => n.id === nodeId);
-    if (node) {
-      setConfigModal({
-        isOpen: true,
-        nodeId,
-        componentType: node.data.componentType,
-        initialConfig: node.data.configuration,
-      });
-    }
+    if (!node) return;
+    const target = configurationTargetForExistingNode(node);
+    if (!target) return;
+    setConfigModal({
+      isOpen: true,
+      ...target,
+    });
   }, [nodes]);
 
-  // Handle node creation from drop - set pending to open modal when node appears.
-  // Built-in / custom tool nodes come pre-configured, so skip the modal for them.
-  // Connector tool nodes need credentials before deploy, so they DO open a modal
-  // (the pending effect resolves the new node and dispatches ConnectorConfigModal).
-  const handleNodeCreate = useCallback((componentType: AgentCoreComponentType, position: { x: number; y: number }, toolId?: string | null) => {
-    if (componentType === 'tool' && !toolId?.startsWith(CONNECTOR_TOOL_PREFIX)) return;
-    setPendingNodeConfig({ componentType, position });
+  // The creator hands us the exact node. Do not re-find it by type/position:
+  // keyboard placement wraps after nine nodes and tool nodes share one type.
+  const handleNodeCreate = useCallback((newNode: AgentCoreNode) => {
+    const target = configurationTargetForNewNode(newNode);
+    if (!target) return;
+    setConfigModal({
+      isOpen: true,
+      ...target,
+    });
   }, []);
+
+  // Keyboard and switch-device users cannot perform an HTML drag operation.
+  // Palette add buttons create the same node shape and follow the same
+  // configuration-modal path as a drop. Stagger the default position so
+  // successive additions remain individually visible on an empty viewport.
+  const handlePaletteAdd = useCallback((
+    componentType: AgentCoreComponentType,
+    toolId?: string,
+  ) => {
+    if (!activeFlowId) return;
+    const index = nodes.length;
+    const position = {
+      x: 100 + (index % 3) * 240,
+      y: 100 + (Math.floor(index / 3) % 3) * 180,
+    };
+    const newNode = createNodeFromDrop(componentType, position, toolId);
+    addNode(newNode);
+    handleNodeCreate(newNode);
+  }, [activeFlowId, addNode, handleNodeCreate, nodes.length]);
 
   // Handle template selection
   const handleSelectTemplate = useCallback((template: WorkflowTemplate) => {
+    if (!activeFlowId) return;
     // New canvas content => drop any transient connector secrets from the old one.
     connectorSecretsRef.current = {};
     setConnectorSecretsRev(r => r + 1);
     const { nodes: templateNodes, edges: templateEdges } = instantiateTemplate(template);
     loadTemplate(templateNodes, templateEdges, template.id);
-  }, [loadTemplate]);
+  }, [activeFlowId, loadTemplate]);
 
   // Phase 1 Gap 1E — apply NL-generated canvas spec.
   // Adapts the generator's spec shape onto the existing
@@ -432,18 +486,25 @@ function App() {
   // broken template. Clone REPLACES the canvas, so the snapshot's internal node
   // ids are self-consistent and need no remap.
   const handleCloneSnapshot = useCallback((snapshot: RegistryCanvasSnapshot) => {
-    const { nodes, edges } = snapshotToCanvas(snapshot);
+    if (!activeFlowId) return;
+    const cloned = snapshotToCanvas(snapshot);
+    const { nodes } = cloned;
     if (!nodes.length) {
       // Defensive: an empty/legacy snapshot — surface it rather than silently
       // loading a blank canvas that then "generates an incorrect template".
       console.warn('Clone: snapshot had no nodes; nothing to load', snapshot);
       return;
     }
-    loadTemplate(nodes, edges, `cloned-${Date.now()}`);
-    setTimeout(() => runValidation(), 10);
-  }, [loadTemplate, runValidation]);
+    connectorSecretsRef.current = {};
+    setConnectorSecretsRev((revision) => revision + 1);
+    replaceWorkflowDocument(cloned, {
+      flowId: activeFlowId,
+      markDirty: true,
+    });
+  }, [activeFlowId, replaceWorkflowDocument]);
 
   const handleApplyGeneratedSpec = useCallback((spec: GeneratedCanvasSpec) => {
+    if (!activeFlowId) return;
     const fakeTemplate = {
       id: `ai-generated-${Date.now()}`,
       name: spec.name,
@@ -473,10 +534,11 @@ function App() {
     loadTemplate(instNodes, instEdges, fakeTemplate.id);
     // Run validation after template loads to surface any issues
     setTimeout(() => runValidation(), 10);
-  }, [loadTemplate, runValidation]);
+  }, [activeFlowId, loadTemplate, runValidation]);
 
   // Handle AI-generated tool → add as custom tool node on canvas
   const handleAddGeneratedTool = useCallback((tool: GeneratedTool) => {
+    if (!activeFlowId) return;
     const toolConfig: ToolConfiguration = {
       name: tool.displayName,
       toolId: tool.toolName,
@@ -505,16 +567,60 @@ function App() {
     });
 
     setShowToolGenerator(false);
-  }, [nodes, addNode]);
+  }, [activeFlowId, nodes, addNode]);
 
   // Check if we have a valid runtime to deploy
-  const canDeploy = deployableConfig && deployableConfig.name && deployableConfig.systemPrompt;
+  const canDeploy = (
+    deployableConfig
+    && deployableConfig.name
+    && (
+      deployableConfig.protocol === 'MCP'
+      || (
+        deployableConfig.systemPrompt
+        && deployableConfig.model?.modelId
+      )
+    )
+  );
+  const personaRoute = resolvePersonaRoute({
+    loaded: scopesLoaded,
+    scopes,
+    isTypeAdmin,
+    previewAsEndUser,
+  });
 
-  // Loom-study Phase 3 — end-user chat routing. A non-admin (t-user) lands on the
-  // ChatPage; an admin can preview it via View-as. Wait for scopes to load so we
-  // don't flash the builder before resolving the persona. (Local dev with no
-  // Cognito token resolves as admin — the builder — matching the backend default.)
-  if (scopesLoaded && (!isTypeAdmin || previewAsEndUser)) {
+  if (personaRoute === 'loading') {
+    return (
+      <main
+        className="w-screen h-screen flex items-center justify-center bg-[#f2f3f3]"
+        aria-busy="true"
+      >
+        <p role="status" className="text-sm text-[#5f6b7a]">
+          Loading your workspace access…
+        </p>
+      </main>
+    );
+  }
+
+  if (personaRoute === 'denied') {
+    return (
+      <main className="w-screen h-screen flex items-center justify-center bg-[#f2f3f3] p-6">
+        <section
+          className="max-w-lg rounded-xl border border-[#d5dbdb] bg-white p-6 text-center shadow-sm"
+          aria-labelledby="workspace-access-denied"
+        >
+          <h1 id="workspace-access-denied" className="text-lg font-semibold text-[#16191f]">
+            Workspace access is not assigned
+          </h1>
+          <p className="mt-2 text-sm text-[#5f6b7a]">
+            Your account has no builder or invocation scopes. Ask an administrator to
+            assign the appropriate Cognito groups, then sign in again.
+          </p>
+        </section>
+      </main>
+    );
+  }
+
+  if (personaRoute === 'chat') {
     const banner = previewAsEndUser ? (
       <div className="px-4 py-2 text-xs flex items-center justify-between" style={{ background: 'rgba(245,166,35,.12)', borderBottom: '1px solid var(--accent)', color: 'var(--color-text-secondary)' }}>
         <span>👁 Previewing the end-user experience (View as).</span>
@@ -534,15 +640,37 @@ function App() {
           activeFlowName={activeFlowName}
           nodesCount={nodes.length}
           deployableConfig={deployableConfig}
+          isReadyToDeploy={isReadyToDeploy}
+          validationErrorCount={validationState?.errors.length ?? 0}
           authoringMode={authoringMode}
           onAuthoringModeChange={setAuthoringMode}
           onDeploy={() => setShowDeployPanel(true)}
           onOpenRegistry={() => setShowRegistry(true)}
           onPreviewAsEndUser={() => setPreviewAsEndUser(true)}
           onOpenHitlInbox={() => setShowHitlInbox(true)}
-          canDeploy={!!canDeploy}
+          canDeploy={!!canDeploy && hasScope('agent:write')}
+          canOpenRegistry={hasScope('registry:read')}
+          showAdminControls={isTypeAdmin}
+          canOpenHitlInbox={isTypeAdmin && hasScope('hitl:read')}
         />
-        <HarnessAuthoring />
+        <main className="flex-1 min-h-0 flex">
+          {/* Keep every tab's aria-controls target in the accessibility tree's DOM
+              contract even while its expensive authoring surface is unmounted. */}
+          <div
+            id="authoring-panel-visual"
+            role="tabpanel"
+            aria-labelledby="authoring-mode-visual"
+            hidden
+          />
+          <div
+            id="authoring-panel-harness"
+            role="tabpanel"
+            aria-labelledby="authoring-mode-harness"
+            className="flex-1 min-h-0 flex"
+          >
+            <HarnessAuthoring />
+          </div>
+        </main>
       </div>
     );
   }
@@ -557,7 +685,10 @@ function App() {
         onOpenTemplates={() => setShowTemplateGallery(true)}
         onOpenToolGenerator={() => setShowToolGenerator(true)}
         onOpenAgentGenerator={() => setShowAgentGenerator(true)}
-        onOpenRegistry={() => setShowRegistry(true)}
+        onOpenRegistry={hasScope('registry:read') ? () => setShowRegistry(true) : undefined}
+        onOpenPromptLibrary={hasScope('prompt:read') ? () => setShowPromptLibrary(true) : undefined}
+        onAddComponent={handlePaletteAdd}
+        authoringDisabledReason={authoringDisabledReason}
       />
 
       <div className="flex-1 relative flex flex-col">
@@ -565,33 +696,59 @@ function App() {
           activeFlowName={activeFlowName}
           nodesCount={nodes.length}
           deployableConfig={deployableConfig}
+          isReadyToDeploy={isReadyToDeploy}
+          validationErrorCount={validationState?.errors.length ?? 0}
           authoringMode={authoringMode}
           onAuthoringModeChange={setAuthoringMode}
           onDeploy={() => setShowDeployPanel(true)}
           onOpenRegistry={() => setShowRegistry(true)}
           onPreviewAsEndUser={() => setPreviewAsEndUser(true)}
           onOpenHitlInbox={() => setShowHitlInbox(true)}
-          canDeploy={!!canDeploy}
+          canDeploy={!!canDeploy && hasScope('agent:write')}
+          canOpenRegistry={hasScope('registry:read')}
+          showAdminControls={isTypeAdmin}
+          canOpenHitlInbox={isTypeAdmin && hasScope('hitl:read')}
         />
 
-        <CanvasArea
-          nodes={nodes}
-          selectedNode={selectedNode || null}
-          lastSaveError={lastSaveError ? lastSaveError.message : null}
-          onNodeCreate={handleNodeCreate}
-          onNodeDoubleClick={handleOpenConfig}
-          onRestoreDeployment={handleRestoreDeployment}
-          onClearSaveError={clearLastSaveError}
-          onOpenTemplateGallery={() => setShowTemplateGallery(true)}
-          onOpenAgentGenerator={() => setShowAgentGenerator(true)}
-          onOpenConfig={handleOpenConfig}
-        />
+        <main className="flex-1 min-h-0 flex">
+          <div
+            id="authoring-panel-visual"
+            role="tabpanel"
+            aria-labelledby="authoring-mode-visual"
+            className="flex-1 min-h-0 flex"
+          >
+            <CanvasArea
+              nodes={nodes}
+              selectedNode={selectedNode || null}
+              lastSaveError={lastSaveError && !saveConflict ? lastSaveError.message : null}
+              saveConflict={saveConflict}
+              onResolveSaveConflict={(choice) => { void resolveSaveConflict(choice); }}
+              onNodeCreate={handleNodeCreate}
+              onNodeDoubleClick={handleOpenConfig}
+              onRestoreDeployment={handleRestoreDeployment}
+              onClearSaveError={clearLastSaveError}
+              onOpenTemplateGallery={() => setShowTemplateGallery(true)}
+              onOpenAgentGenerator={() => setShowAgentGenerator(true)}
+              onOpenConfig={handleOpenConfig}
+              authoringDisabledReason={authoringDisabledReason}
+            />
+          </div>
+          {/* The Harness form stays unmounted in visual mode, but the controlled
+              tabpanel itself must exist so aria-controls is never a dangling IDREF. */}
+          <div
+            id="authoring-panel-harness"
+            role="tabpanel"
+            aria-labelledby="authoring-mode-harness"
+            hidden
+          />
+        </main>
       </div>
 
       {/* Deploy Panel */}
       <DeployPanel
         config={deployableConfig || null}
         nodeId={deployableNodeId}
+        flowId={activeFlowId}
         connectedTools={connectedTools}
         gatewayConfig={gatewayConfig}
         gatewayTools={gatewayTools}
@@ -638,29 +795,31 @@ function App() {
         hasExistingNodes={nodes.length > 0}
       />
 
-      {/* Phase 3 Gap 3H — Prompt Management Library */}
-      <PromptLibraryModal
-        isOpen={showPromptLibrary || promptPicker !== null}
-        mode={promptPicker !== null ? 'picker' : 'management'}
-        onClose={() => { setShowPromptLibrary(false); setPromptPicker(null); }}
-        onSelect={(sel) => { promptPicker?.(sel); setPromptPicker(null); }}
-      />
+      <Suspense fallback={null}>
+        {/* Phase 3 Gap 3H — Prompt Management Library */}
+        <PromptLibraryModal
+          isOpen={showPromptLibrary || promptPicker !== null}
+          mode={promptPicker !== null ? 'picker' : 'management'}
+          onClose={() => { setShowPromptLibrary(false); setPromptPicker(null); }}
+          onSelect={(sel) => { promptPicker?.(sel); setPromptPicker(null); }}
+        />
 
-      {/* Phase 2 Gap 2A — Agent Registry (browse / clone to canvas) */}
-      <RegistryModal
-        isOpen={showRegistry}
-        onClose={() => setShowRegistry(false)}
-        onClone={(snapshot) => {
-          handleCloneSnapshot(snapshot);
-          setShowRegistry(false);
-        }}
-      />
+        {/* Phase 2 Gap 2A — Agent Registry (browse / clone to canvas) */}
+        <RegistryModal
+          isOpen={showRegistry}
+          onClose={() => setShowRegistry(false)}
+          onClone={(snapshot) => {
+            handleCloneSnapshot(snapshot);
+            setShowRegistry(false);
+          }}
+        />
 
-      {/* Phase 2 Gap 2D — Human-in-the-loop approvals inbox */}
-      <HitlInboxModal
-        isOpen={showHitlInbox}
-        onClose={() => setShowHitlInbox(false)}
-      />
+        {/* Phase 2 Gap 2D — Human-in-the-loop approvals inbox */}
+        <HitlInboxModal
+          isOpen={showHitlInbox}
+          onClose={() => setShowHitlInbox(false)}
+        />
+      </Suspense>
     </div>
   );
 }

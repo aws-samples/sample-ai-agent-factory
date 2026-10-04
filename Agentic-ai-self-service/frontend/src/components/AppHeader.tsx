@@ -3,16 +3,20 @@
  * Extracted from App.tsx for better separation of concerns.
  */
 
+import { useEffect, useState } from 'react';
 import { m } from 'motion/react';
 import { spring } from '../lib/motion';
 import { ThemeToggle } from './ThemeToggle';
-import { signOut } from 'aws-amplify/auth';
+import { signOutAfterFlush } from '../auth/signOutAfterFlush';
 import type { RuntimeConfiguration } from '../types/components';
 
 interface AppHeaderProps {
   activeFlowName: string | null;
   nodesCount: number;
   deployableConfig: RuntimeConfiguration | undefined;
+  /** The canvas validator's verdict: the badge must not say "Ready" over a red canvas. */
+  isReadyToDeploy: boolean;
+  validationErrorCount: number;
   authoringMode: 'visual' | 'harness';
   onAuthoringModeChange: (mode: 'visual' | 'harness') => void;
   onDeploy: () => void;
@@ -20,12 +24,17 @@ interface AppHeaderProps {
   onPreviewAsEndUser: () => void;
   onOpenHitlInbox: () => void;
   canDeploy: boolean;
+  canOpenRegistry: boolean;
+  showAdminControls: boolean;
+  canOpenHitlInbox: boolean;
 }
 
 export function AppHeader({
   activeFlowName,
   nodesCount,
   deployableConfig,
+  isReadyToDeploy,
+  validationErrorCount,
   authoringMode,
   onAuthoringModeChange,
   onDeploy,
@@ -33,33 +42,91 @@ export function AppHeader({
   onPreviewAsEndUser,
   onOpenHitlInbox,
   canDeploy,
+  canOpenRegistry,
+  showAdminControls,
+  canOpenHitlInbox,
 }: AppHeaderProps) {
+  const [focusedAuthoringMode, setFocusedAuthoringMode] = useState(authoringMode);
+
+  useEffect(() => {
+    setFocusedAuthoringMode(authoringMode);
+  }, [authoringMode]);
+
+  const activateAuthoringMode = (mode: 'visual' | 'harness') => {
+    setFocusedAuthoringMode(mode);
+    onAuthoringModeChange(mode);
+    // App renders the two authoring surfaces through different branches, so
+    // activation can replace the header node that currently owns focus.
+    window.requestAnimationFrame(() => {
+      document.getElementById(`authoring-mode-${mode}`)?.focus();
+    });
+  };
+
+  const handleAuthoringModeKeyDown = (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    currentMode: 'visual' | 'harness',
+  ) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      activateAuthoringMode(currentMode);
+      return;
+    }
+
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+      return;
+    }
+
+    event.preventDefault();
+    const nextMode =
+      event.key === 'ArrowLeft' || event.key === 'Home'
+        ? 'visual'
+        : event.key === 'ArrowRight' || event.key === 'End'
+          ? 'harness'
+          : currentMode;
+    setFocusedAuthoringMode(nextMode);
+    window.requestAnimationFrame(() => {
+      document.getElementById(`authoring-mode-${nextMode}`)?.focus();
+    });
+  };
+
   // Authoring mode toggle segment
   const authoringToggle = (
     <div className="no-darkmap flex items-center gap-0.5 p-0.5 backdrop-blur-sm rounded-md" style={{ background: 'rgba(255,255,255,0.08)' }} role="tablist" aria-label="Authoring mode">
       <button
+        id="authoring-mode-visual"
+        type="button"
         role="tab"
         aria-selected={authoringMode === 'visual'}
-        onClick={() => onAuthoringModeChange('visual')}
+        aria-controls="authoring-panel-visual"
+        tabIndex={focusedAuthoringMode === 'visual' ? 0 : -1}
+        onFocus={() => setFocusedAuthoringMode('visual')}
+        onClick={() => activateAuthoringMode('visual')}
+        onKeyDown={(event) => handleAuthoringModeKeyDown(event, 'visual')}
         className="no-darkmap px-2.5 py-1 rounded text-xs font-semibold transition-colors duration-200"
         style={{
           transitionTimingFunction: 'var(--ease-out-quint)',
           background: authoringMode === 'visual' ? 'var(--accent)' : 'transparent',
-          color: authoringMode === 'visual' ? '#06080f' : 'rgba(255,255,255,0.88)',
+          color: authoringMode === 'visual' ? 'var(--accent-foreground)' : 'rgba(255,255,255,0.88)',
           boxShadow: authoringMode === 'visual' ? '0 0 14px -4px var(--accent)' : 'none',
         }}
       >
         Visual Canvas
       </button>
       <button
+        id="authoring-mode-harness"
+        type="button"
         role="tab"
         aria-selected={authoringMode === 'harness'}
-        onClick={() => onAuthoringModeChange('harness')}
+        aria-controls="authoring-panel-harness"
+        tabIndex={focusedAuthoringMode === 'harness' ? 0 : -1}
+        onFocus={() => setFocusedAuthoringMode('harness')}
+        onClick={() => activateAuthoringMode('harness')}
+        onKeyDown={(event) => handleAuthoringModeKeyDown(event, 'harness')}
         className="no-darkmap px-2.5 py-1 rounded text-xs font-semibold transition-colors duration-200"
         style={{
           transitionTimingFunction: 'var(--ease-out-quint)',
           background: authoringMode === 'harness' ? 'var(--accent)' : 'transparent',
-          color: authoringMode === 'harness' ? '#06080f' : 'rgba(255,255,255,0.88)',
+          color: authoringMode === 'harness' ? 'var(--accent-foreground)' : 'rgba(255,255,255,0.88)',
           boxShadow: authoringMode === 'harness' ? '0 0 14px -4px var(--accent)' : 'none',
         }}
       >
@@ -69,7 +136,7 @@ export function AppHeader({
   );
 
   return (
-    <div
+    <header
       className="no-darkmap h-12 flex items-center justify-between px-4 z-20 relative"
       style={{
         background: 'var(--header-bg)',
@@ -91,7 +158,12 @@ export function AppHeader({
               <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
             </svg>
           </div>
-          <span className="font-semibold text-sm tracking-tight u-neon-text">AgentCore Flows</span>
+          <h1
+            className="font-semibold text-sm tracking-tight"
+            style={{ color: 'var(--header-fg)' }}
+          >
+            AgentCore Flows
+          </h1>
         </div>
         <div className="h-5 w-px bg-white/25" />
         <span className="font-medium text-white/95 text-sm">
@@ -106,7 +178,7 @@ export function AppHeader({
       </div>
 
       <div className="flex items-center gap-3">
-        {deployableConfig && (
+        {deployableConfig && isReadyToDeploy && (
           <m.div
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
@@ -117,47 +189,74 @@ export function AppHeader({
             Ready to deploy
           </m.div>
         )}
+        {deployableConfig && !isReadyToDeploy && (
+          <m.div
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={spring.bouncy}
+            role="status"
+            data-testid="canvas-validation-badge"
+            className="no-darkmap flex items-center gap-1.5 px-2.5 py-1 backdrop-blur-sm rounded-md text-xs font-semibold border"
+            style={{ backgroundColor: 'rgba(245, 158, 11, 0.12)', borderColor: 'rgba(245, 158, 11, 0.5)', color: '#fbbf24' }}
+          >
+            <div className="w-1.5 h-1.5 rounded-full" style={{ background: '#fbbf24', boxShadow: '0 0 8px #fbbf24' }} />
+            {validationErrorCount === 1
+              ? '1 validation error'
+              : `${validationErrorCount} validation errors`}
+          </m.div>
+        )}
 
-        <button
-          onClick={onOpenRegistry}
-          className="px-3 py-1.5 rounded-md text-sm text-white/85 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
-          style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
-          title="Browse the agent registry"
-          aria-label="Browse agent registry"
-        >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
-          </svg>
-          Registry
-        </button>
+        {canOpenRegistry && (
+          <button
+            onClick={onOpenRegistry}
+            className="px-3 py-1.5 rounded-md text-sm text-white/85 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
+            style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
+            title="Browse the agent registry"
+            aria-label="Browse agent registry"
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+            </svg>
+            Registry
+          </button>
+        )}
 
-        <button
-          onClick={onPreviewAsEndUser}
-          className="px-3 py-1.5 rounded-md text-sm text-white/85 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
-          style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
-          title="Preview the end-user chat experience"
-          aria-label="View as end-user"
-        >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" />
-          </svg>
-          View as user
-        </button>
+        {showAdminControls && (
+          <button
+            onClick={onPreviewAsEndUser}
+            className="px-3 py-1.5 rounded-md text-sm text-white/85 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
+            style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
+            title="Preview the end-user chat experience"
+            aria-label="View as end-user"
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" />
+            </svg>
+            View as user
+          </button>
+        )}
 
-        <button
-          onClick={onOpenHitlInbox}
-          className="px-3 py-1.5 rounded-md text-sm text-white/85 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
-          style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
-          title="Human-in-the-loop approvals"
-          aria-label="Human-in-the-loop approvals inbox"
-        >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" />
-          </svg>
-          Approvals
-        </button>
+        {canOpenHitlInbox && (
+          <button
+            onClick={onOpenHitlInbox}
+            className="px-3 py-1.5 rounded-md text-sm text-white/85 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
+            style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
+            title="Human-in-the-loop approvals"
+            aria-label="Human-in-the-loop approvals inbox"
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" />
+            </svg>
+            Approvals
+          </button>
+        )}
 
         <m.button
+          // The shipped deploy control. `deploy-button` previously existed only on
+          // DeployButton.tsx, which nothing rendered, so every UI test that reached
+          // for it waited on an element that was never in the DOM while a working
+          // Deploy button sat right here.
+          data-testid="deploy-button"
           onClick={onDeploy}
           disabled={!canDeploy}
           whileHover={canDeploy ? { scale: 1.03 } : undefined}
@@ -191,7 +290,7 @@ export function AppHeader({
         </m.button>
         <ThemeToggle />
         <button
-          onClick={() => signOut()}
+          onClick={() => { void signOutAfterFlush(); }}
           className="px-3 py-1.5 rounded-md text-sm text-white/80 hover:text-white hover:bg-white/10 transition-colors duration-200"
           style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
           title="Sign out"
@@ -200,6 +299,6 @@ export function AppHeader({
           Sign out
         </button>
       </div>
-    </div>
+    </header>
   );
 }

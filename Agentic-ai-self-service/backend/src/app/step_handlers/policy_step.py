@@ -18,7 +18,23 @@ import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services import step_clients
 from app.services.aws_errors import is_error
+from app.services.aws_pagination import list_all
 from app.services.deployment_state_store import DeploymentStateStore
+from app.services.gateway_mutation_lock import engine_is, gateway_mutation_lock
+from app.services.gateway_update import preserving_gateway_update
+from app.services.policy_lifecycle import (
+    delete_policy_confirmed,
+    policy_child_row,
+    reconcile_managed_policy_set,
+    reconcile_policy_definition,
+    refuse_incompatible_coresidency,
+    refuse_shared_parent_engine,
+)
+from app.services.resource_ownership import (
+    ResourceDeletionRefused,
+    assert_agentcore_resource_owned,
+)
+from app.services.resource_tagging import governed_tags
 
 logger = logging.getLogger(__name__)
 
@@ -111,8 +127,12 @@ def _read_gateway_tool_actions(agentcore_ctrl, gateway_id: str) -> list:
     """
     out = []
     try:
-        targets = agentcore_ctrl.list_gateway_targets(gatewayIdentifier=gateway_id, maxResults=50)
-        items = targets.get("items", targets.get("gatewayTargetSummaries", []))
+        items = list_all(
+            agentcore_ctrl,
+            "list_gateway_targets",
+            item_keys=("items", "targets", "gatewayTargetSummaries"),
+            request={"gatewayIdentifier": gateway_id, "maxResults": 50},
+        )
         for t in items:
             tname = t.get("name", "")
             tid = t.get("targetId") or t.get("gatewayTargetId")
@@ -120,7 +140,12 @@ def _read_gateway_tool_actions(agentcore_ctrl, gateway_id: str) -> list:
                 continue
             try:
                 detail = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway_id, targetId=tid)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "Could not inspect gateway target %s while deriving policy actions (%s)",
+                    tid,
+                    type(exc).__name__,
+                )
                 continue
             tc = detail.get("targetConfiguration", {}) or {}
             schema = (
@@ -209,7 +234,10 @@ def handler(event: dict, context) -> dict:
         store.update_step(deployment_id, DeploymentStepName.POLICY, DeploymentStatusEnum.IN_PROGRESS)
 
         policy_config = event.get("policy_config") or {}
-        region = _get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1"))
+        region = event.get("target_region") or _get_env(
+            "APP_AWS_REGION",
+            _get_env("AWS_REGION", "us-east-1"),
+        )
         gateway_result = event.get("gateway_result") or {}
 
         if not policy_config.get("enabled", True):
@@ -305,15 +333,45 @@ def handler(event: dict, context) -> dict:
         # Create or reuse policy engine
         engine_id = None
         engine_arn = None
+        engine_reused = False
 
         try:
-            existing = agentcore_ctrl.list_policy_engines(maxResults=100)
-            for pe in existing.get("policyEngines", existing.get("items", [])):
+            existing = list_all(
+                agentcore_ctrl,
+                "list_policy_engines",
+                item_keys=("policyEngines", "items"),
+                request={"maxResults": 100},
+            )
+            for pe in existing:
                 if pe.get("name") == engine_name:
                     engine_id = pe.get("policyEngineId")
                     engine_arn = pe.get("policyEngineArn")
+                    if engine_id:
+                        assert_agentcore_resource_owned(
+                            agentcore_ctrl,
+                            "policy_engine",
+                            engine_id,
+                            region,
+                        )
                     logger.info("Reusing existing policy engine: %s", engine_id)
+                    engine_reused = True
+                    if engine_id:
+                        store.record_resource(
+                            deployment_id,
+                            {
+                                "type": "policy_engine",
+                                "id": engine_id,
+                                "region": region,
+                                "created_by_deployment": False,
+                            },
+                        )
                     break
+        except ResourceDeletionRefused:
+            # A same-named engine exists but its live tags do not prove that this
+            # stack owns it.  This is not a transient ListPolicyEngines failure:
+            # swallowing it and trying CreatePolicyEngine would merely turn the
+            # ownership refusal into a less actionable name-conflict error.
+            raise
         except Exception as e:
             logger.warning("Could not list policy engines: %s", e)
 
@@ -321,6 +379,11 @@ def handler(event: dict, context) -> dict:
             resp = agentcore_ctrl.create_policy_engine(
                 name=engine_name,
                 description=f"Policy engine for gateway {gateway_id}",
+                # P0-B: the governance set, not ownership alone. A policy engine is an
+                # auditable resource an ABAC condition can name, and ARCC guidance on
+                # tagging (cnt_SaTYaDCgBBJTcv) treats incomplete tag propagation as a
+                # security failure rather than only a cost-reporting one.
+                tags=governed_tags(region, event.get("resource_tags")),
             )
             engine_id = resp.get("policyEngineId", "")
             engine_arn = resp.get("policyEngineArn", "")
@@ -331,7 +394,12 @@ def handler(event: dict, context) -> dict:
             if engine_id:
                 store.record_resource(
                     deployment_id,
-                    {"type": "policy_engine", "id": engine_id, "region": region},
+                    {
+                        "type": "policy_engine",
+                        "id": engine_id,
+                        "region": region,
+                        "created_by_deployment": True,
+                    },
                 )
 
             # Wait for it to be ready
@@ -416,6 +484,7 @@ def handler(event: dict, context) -> dict:
 
         created_policy_ids = []
         created_count = 0
+        policy_children: list[dict] = []  # durable receipts (Stage 80 reads these, never created_resources)
         for pol in policies:
             base_name = re.sub(r"[^A-Za-z0-9_]", "_", pol.get("name", "default_policy"))
             # Bug 137: AgentCore policy names are ACCOUNT-GLOBAL, not engine-scoped
@@ -452,6 +521,17 @@ def handler(event: dict, context) -> dict:
                     pol_name,
                 )
                 continue
+            if engine_reused:
+                # Creation isolation: a NEW permit on an engine another live deployment references would expand
+                # THAT deployment's authorization. Account-bound, fail-closed on an unreadable table.
+                refuse_shared_parent_engine(
+                    store,
+                    deployment_id,
+                    engine_id,
+                    region,
+                    event.get("target_account_id"),
+                    action="create a policy",
+                )
             try:
                 cp = _create_policy_when_engine_ready(
                     agentcore_ctrl,
@@ -468,6 +548,35 @@ def handler(event: dict, context) -> dict:
                 pid = cp.get("policyId")
                 if pid:
                     created_policy_ids.append((pol_name, pid))
+                    # F-G09-003: the policy is a first-class managed child, recorded STRICTLY the moment it exists
+                    # (before the ACTIVE poll, like the engine). A row that cannot be written durably is not a row:
+                    # the policy is compensate-deleted by its exact ids and the step fails, so a process death can
+                    # never leave a policy nobody's manifest names.
+                    child = policy_child_row(
+                        policy_id=pid,
+                        engine_id=engine_id,
+                        name=pol_name,
+                        region=region,
+                        created_by_deployment=True,
+                        statement=_stmt,
+                        gateway_id=gateway_id,
+                        account=event.get("target_account_id"),
+                    )
+                    try:
+                        store.record_resource_strict(deployment_id, child)
+                        policy_children.append(child)
+                    except Exception as record_exc:
+                        logger.error(
+                            "Policy '%s' (%s) created but its manifest row could not be written (%s); compensating",
+                            pol_name,
+                            pid,
+                            type(record_exc).__name__,
+                        )
+                        delete_policy_confirmed(agentcore_ctrl, engine_id, str(pid))
+                        raise RuntimeError(
+                            f"Policy '{pol_name}' was created on engine {engine_id} but its manifest row could not be "
+                            "written durably; the policy was deleted again and the deploy fails closed."
+                        ) from record_exc
             except Exception as e:
                 # "already exists" fallback kept: conflicts can surface as a
                 # ValidationException whose message says "already exists".
@@ -480,15 +589,65 @@ def handler(event: dict, context) -> dict:
                     # empty deny-all engine.
                     existing_pid = None
                     try:
-                        lp = agentcore_ctrl.list_policies(policyEngineId=engine_id, maxResults=100)
-                        for ep in lp.get("policies", lp.get("items", [])):
+                        for ep in list_all(
+                            agentcore_ctrl,
+                            "list_policies",
+                            item_keys=("policies", "items", "policySummaries"),
+                            request={
+                                "policyEngineId": engine_id,
+                                "maxResults": 100,
+                            },
+                        ):
                             if ep.get("name") == pol_name:
                                 existing_pid = ep.get("policyId")
                                 break
                     except Exception as le:  # noqa: BLE001
                         logger.warning("Could not list policies on conflict: %s", le)
                     if existing_pid:
-                        logger.info("Policy '%s' already in engine %s; will validate", pol_name, engine_id)
+                        # F-G05-001: an existing same-named policy is NOT the desired policy until its LIVE Cedar
+                        # equals the desired Cedar. Record the adopted child first (co-residency checked against
+                        # other live deployments' desired digests), then reconcile in place on the stable id;
+                        # unreadable / non-terminal / undesired-after-update all raise (fail closed).
+                        row = policy_child_row(
+                            policy_id=existing_pid,
+                            engine_id=engine_id,
+                            name=pol_name,
+                            region=region,
+                            created_by_deployment=False,
+                            statement=_stmt,
+                            gateway_id=gateway_id,
+                            account=event.get("target_account_id"),
+                        )
+                        # Isolation: an engine another live deployment references authorizes THAT deployment by its
+                        # current policies; changing a policy on it is a change to their authorization. Refused.
+                        refuse_shared_parent_engine(
+                            store,
+                            deployment_id,
+                            engine_id,
+                            region,
+                            event.get("target_account_id"),
+                            action="reconcile an existing policy",
+                        )
+                        refuse_incompatible_coresidency(store, deployment_id, row)
+                        store.record_resource_strict(deployment_id, row)  # no durable row, no mutation
+                        policy_children.append(row)
+                        # Re-check after our row is durable: a co-resident deployment that appended a different
+                        # desired digest between the first check and the append must still stop this mutation.
+                        refuse_incompatible_coresidency(store, deployment_id, row)
+                        outcome = reconcile_policy_definition(
+                            agentcore_ctrl,
+                            engine_id,
+                            existing_pid,
+                            _stmt,
+                            pol.get("description", "") or f"Policy {pol_name}",
+                        )
+                        logger.warning(
+                            "Policy '%s' reused in engine %s: definition %s (%s)",
+                            pol_name,
+                            engine_id,
+                            "UPDATED to the desired Cedar" if outcome["updated"] else "already the desired Cedar",
+                            outcome["digest"][:19],
+                        )
                         created_count += 1
                         created_policy_ids.append((pol_name, existing_pid))
                     else:
@@ -500,6 +659,44 @@ def handler(event: dict, context) -> dict:
                 else:
                     logger.error("Failed to create policy '%s': %s", pol_name, e)
                     raise RuntimeError(f"Policy creation failed for '{pol_name}': {e}. Aborting.") from e
+
+        _desired_by_name: dict[str, dict] = {}
+        for _pol in policies:
+            _base = re.sub(r"[^A-Za-z0-9_]", "_", _pol.get("name", "default_policy"))
+            _pref = engine_name[: max(0, 48 - len(_base) - 1)]
+            _nm = (f"{_pref}_{_base}" if _pref else _base)[:48]
+            if (_pol.get("statement") or "").strip():
+                _desired_by_name[_nm] = _pol
+
+        # F-G05-001 (set semantics): on a REUSED engine, a platform-managed policy the canvas no longer desires (an
+        # explicit permit that was removed) must not stay ACTIVE. Remove it (confirmed) when no other live
+        # deployment records it; fail closed when one does. Foreign (non-namespace) policies are reported, never
+        # touched.
+        set_outcome = {"removed": [], "foreign": []}
+        if engine_reused:
+            set_outcome = reconcile_managed_policy_set(
+                agentcore_ctrl,
+                store,
+                deployment_id,
+                engine_id=engine_id,
+                engine_name=engine_name,
+                desired_names={name for name, _pid in created_policy_ids},
+                region=region,
+                account=event.get("target_account_id"),
+                list_policies=lambda: list_all(
+                    agentcore_ctrl,
+                    "list_policies",
+                    item_keys=("policies", "items", "policySummaries"),
+                    request={"policyEngineId": engine_id, "maxResults": 100},
+                ),
+            )
+            if set_outcome["removed"] or set_outcome["foreign"]:
+                logger.warning(
+                    "Reused engine %s: removed stale managed policies %s; foreign policies present %s",
+                    engine_id,
+                    set_outcome["removed"],
+                    set_outcome["foreign"],
+                )
 
         # Bug 134: create_policy is ASYNC — it returns CREATING then validates
         # against the gateway schema. A policy that references a non-existent tool,
@@ -548,10 +745,28 @@ def handler(event: dict, context) -> dict:
             # same `action in [...]` permit, CREATE_FAILED then ACTIVE on retry).
             # So before degrading to LOG_ONLY, RETRY each transiently-failed policy
             # (delete + recreate with backoff). Only a persistent failure degrades.
+            #
+            # CAUTION: the first string has TWO causes and only one of them is
+            # transient. The other is a missing `bedrock-agentcore:InvokeGateway`
+            # on THIS role — AgentCore resolves the gateway named in the statement
+            # as the caller — and that one never converges, so retrying it just
+            # spends 6 attempts before attaching a deny-all engine. Proven live on
+            # the customer-export path: same principal, same statement, gateway
+            # READY for many minutes, the grant as the only variable. The grant is
+            # now in infra/stacks/platform/step_lambdas.py, so the transient cause
+            # is again the likely one — but if the retries are exhausted, say so
+            # (see _PERMISSION_HINT below) rather than reporting IAM as a race.
             _TRANSIENT = (
                 "insufficient permissions to call gateway",
                 "is creating",
                 "please wait till it is active",
+            )
+            _PERMISSION_HINT = (
+                " — NOTE: 'insufficient permissions to call gateway' that does NOT clear on retry "
+                "is not the engine<->gateway race; it means this role is missing "
+                "bedrock-agentcore:InvokeGateway on the gateway ARN. Check the policy step role "
+                "(infra/stacks/platform/step_lambdas.py) and the deployment Lambda role, which "
+                "runs the promoter (infra/stacks/platform/lambdas.py)."
             )
             name_to_stmt = {}
             for pol in policies:
@@ -603,6 +818,12 @@ def handler(event: dict, context) -> dict:
                     failed.append((pol_name, reason))
             if failed:
                 failure_detail = "; ".join(f"{n}: {r}" for n, r in failed)
+                # Retries are exhausted, so the gateway-call failure that survived
+                # them is the IAM cause, not the convergence one. Name it in the
+                # reason that reaches the deployment record, or the next reader
+                # repeats the misattribution this comment block describes.
+                if any("insufficient permissions to call gateway" in r.lower() for _n, r in failed):
+                    failure_detail += _PERMISSION_HINT
                 if fail_open_requested:
                     downgrade_to_log_only = True
                     downgrade_reason = (
@@ -661,8 +882,15 @@ def handler(event: dict, context) -> dict:
             active_on_engine = 0
             for _attempt in range(10):
                 try:
-                    lp = agentcore_ctrl.list_policies(policyEngineId=engine_id, maxResults=100)
-                    pols = lp.get("policies", lp.get("items", []))
+                    pols = list_all(
+                        agentcore_ctrl,
+                        "list_policies",
+                        item_keys=("policies", "items", "policySummaries"),
+                        request={
+                            "policyEngineId": engine_id,
+                            "maxResults": 100,
+                        },
+                    )
                     active_on_engine = sum(1 for p in pols if p.get("status") == "ACTIVE")
                     if active_on_engine > 0:
                         break
@@ -703,41 +931,24 @@ def handler(event: dict, context) -> dict:
             mode = "ENFORCE"
         if downgrade_to_log_only:
             mode = "LOG_ONLY"
-        # Get current gateway config to preserve existing fields
-        gw_detail = agentcore_ctrl.get_gateway(gatewayIdentifier=gateway_id)
-
-        update_params = {
-            "gatewayIdentifier": gateway_id,
-            "name": gw_detail.get("name", ""),
-            "roleArn": gw_detail.get("roleArn", ""),
-            "protocolType": gw_detail.get("protocolType", "MCP"),
-            "policyEngineConfiguration": {"arn": engine_arn, "mode": mode},
-        }
-        # Preserve optional fields if present
-        for optional_field in (
-            "description",
-            "authorizerType",
-            "authorizerConfiguration",
-            "protocolConfiguration",
-            "kmsKeyArn",
-        ):
-            if gw_detail.get(optional_field):
-                update_params[optional_field] = gw_detail[optional_field]
-
-        agentcore_ctrl.update_gateway(**update_params)
-        logger.info(
-            "Attached policy engine %s to gateway %s in %s mode",
-            engine_id,
-            gateway_id,
-            mode,
-        )
-
-        # Wait for gateway to be ready again
-        for _ in range(24):
-            gw = agentcore_ctrl.get_gateway(gatewayIdentifier=gateway_id)
-            if gw.get("status") == "READY":
-                break
-            time.sleep(5)
+        # F-66e: the attach re-sends the authorizer it reads, so the read, the
+        # update and the wait for READY all happen under the gateway's write lock.
+        with gateway_mutation_lock(agentcore_ctrl, region, gateway_id) as gw_lock:
+            # A full replace: everything else the gateway holds is re-sent (F-62).
+            gw_lock.update(
+                preserving_gateway_update(
+                    gw_lock.read(),
+                    gateway_id,
+                    overrides={"policyEngineConfiguration": {"arn": engine_arn, "mode": mode}},
+                ),
+                engine_is(engine_arn, mode),
+            )
+            logger.info(
+                "Attached policy engine %s to gateway %s in %s mode",
+                engine_id,
+                gateway_id,
+                mode,
+            )
 
         # Bug 178 (lazy ENFORCE promotion): when ENFORCE was requested but we
         # attached LOG_ONLY because the gateway's policy-authorization plane had
@@ -764,6 +975,7 @@ def handler(event: dict, context) -> dict:
                 )
             enforce_pending = {
                 "engine_id": engine_id,
+                "engine_name": engine_name,
                 "gateway_id": gateway_id,
                 "gateway_arn": gateway_arn,
                 "policies": _plist,
@@ -776,6 +988,22 @@ def handler(event: dict, context) -> dict:
                 "engine_id": engine_id,
                 "engine_arn": engine_arn,
                 "engine_name": engine_name,
+                "engine_reused": engine_reused,
+                "stale_managed_policies_removed": set_outcome["removed"],
+                "foreign_policies_present": set_outcome["foreign"],
+                # The EXACT managed intent (name, Cedar, description) this deployment stands for. Recovery reconciles
+                # to this and to nothing else; live text is never treated as intent (F-G05-001 recovery).
+                # Exact receipts of every managed child this step created or adopted (engine, policy, account,
+                # region, provenance, desired digest): a manifest cannot attest to its own completeness.
+                "policy_children": policy_children,
+                "desired_policies": [
+                    {
+                        "name": _n,
+                        "statement": _p.get("statement", ""),
+                        "description": _p.get("description", "") or f"Policy {_n}",
+                    }
+                    for _n, _p in _desired_by_name.items()
+                ],
                 "mode": mode,
                 # Bug 170: when ENFORCE was requested but couldn't validate, the
                 # engine is attached in LOG_ONLY and we report the downgrade so the

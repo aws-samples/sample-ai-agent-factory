@@ -83,6 +83,8 @@ def _bearer() -> dict:
 #   live_testable bool — end-to-end testable with NO vendor creds
 # ---------------------------------------------------------------------------
 
+_DATABRICKS_OIDC_ENDPOINT = "https://{workspace_hostname}/oidc/v1/token"
+
 MCP_SERVERS: dict[str, dict] = {
     # ---- Tier 1: direct, no credentials (live-verified) --------------------
     "aws-knowledge": {
@@ -310,7 +312,7 @@ MCP_SERVERS: dict[str, dict] = {
         "auth_type": "oauth2_client_credentials",
         "oauth_descriptor": {
             "grant_type": "CLIENT_CREDENTIALS",
-            "token_url": "https://{workspace_hostname}/oidc/v1/token",
+            "token_url": _DATABRICKS_OIDC_ENDPOINT,
             "service_paths": [
                 "genie/{space_id}",
                 "functions/{catalog}/{schema}",

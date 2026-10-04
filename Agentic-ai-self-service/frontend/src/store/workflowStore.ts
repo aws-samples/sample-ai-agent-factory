@@ -7,7 +7,14 @@
 import { create } from 'zustand';
 import type { Node, Edge, Viewport, NodeChange, EdgeChange } from '@xyflow/react';
 import { applyNodeChanges, applyEdgeChanges } from '@xyflow/react';
-import type { AgentCoreComponentType, ValidationStatus, ConnectionType } from '../types/workflow';
+import {
+  createEmptyDeploymentGovernance,
+  normalizeDeploymentGovernance,
+  type AgentCoreComponentType,
+  type ConnectionType,
+  type DeploymentGovernanceV1,
+  type ValidationStatus,
+} from '../types/workflow';
 import type { ComponentConfiguration } from '../types/components';
 import type { ValidationError } from '../types/validation';
 import {
@@ -46,6 +53,22 @@ export interface AgentCoreNodeData extends Record<string, unknown> {
 
 export type AgentCoreNode = Node<AgentCoreNodeData>;
 
+export interface WorkflowDocument {
+  nodes: AgentCoreNode[];
+  edges: Edge[];
+  viewport: Viewport;
+  governance: DeploymentGovernanceV1;
+}
+
+export interface ReplaceWorkflowDocumentOptions {
+  flowId: string | null;
+  /**
+   * Hydration must never auto-save itself. User-initiated full replacements
+   * (for example a registry clone) are marked dirty and do auto-save.
+   */
+  markDirty?: boolean;
+}
+
 // ============================================================================
 // Store State Interface
 // ============================================================================
@@ -55,6 +78,13 @@ export interface WorkflowState {
   nodes: AgentCoreNode[];
   edges: Edge[];
   viewport: Viewport;
+  governance: DeploymentGovernanceV1;
+
+  // Persistence identity/versioning. A hydration bump cancels pending saves from
+  // the previous document; persistenceRevision advances only for user changes.
+  documentFlowId: string | null;
+  hydrationVersion: number;
+  persistenceRevision: number;
 
   // Selection state
   selectedNodeId: string | null;
@@ -72,6 +102,16 @@ export interface WorkflowState {
   setNodes: (nodes: AgentCoreNode[]) => void;
   setEdges: (edges: Edge[]) => void;
   setViewport: (viewport: Viewport) => void;
+  setGovernance: (
+    governance:
+      | DeploymentGovernanceV1
+      | ((current: DeploymentGovernanceV1) => DeploymentGovernanceV1),
+  ) => void;
+  replaceWorkflowDocument: (
+    document: WorkflowDocument,
+    options: ReplaceWorkflowDocumentOptions,
+  ) => void;
+  resetWorkflowDocument: (flowId: string | null) => void;
 
   // Node operations
   onNodesChange: (changes: NodeChange<AgentCoreNode>[]) => void;
@@ -137,6 +177,25 @@ function toValidationEdges(edges: Edge[]): WorkflowEdge[] {
   }));
 }
 
+/**
+ * A hydration (`markDirty: false`) replaces the whole canvas. Content on a canvas
+ * that no flow owns can never be auto-saved (useAutoSave requires
+ * documentFlowId === activeFlowId), so replacing it is silent data loss.
+ *
+ * Measured live: FlowSidebar auto-opens the most recent flow after sign-in; a
+ * template chosen while that GET was in flight loaded onto the empty canvas and
+ * was then overwritten by the arriving flow with no confirmation. flowStore
+ * checks this before activating a flow; the store refuses as a tripwire.
+ */
+export function hydrationWouldDiscardUnboundWork(
+  state: Pick<WorkflowState, 'documentFlowId' | 'nodes'>,
+): boolean {
+  return state.documentFlowId === null && state.nodes.length > 0;
+}
+
+export const UNBOUND_WORK_HYDRATION_ERROR =
+  'Cannot open a flow over unsaved work on a canvas that is not bound to any flow';
+
 // Create a single undo/redo manager instance for the store
 const undoRedoManager: UndoRedoManager = createUndoRedoManager();
 
@@ -148,6 +207,10 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   nodes: [],
   edges: [],
   viewport: { x: 0, y: 0, zoom: 1 },
+  governance: createEmptyDeploymentGovernance(),
+  documentFlowId: null,
+  hydrationVersion: 0,
+  persistenceRevision: 0,
   selectedNodeId: null,
   selectedEdgeId: null,
   validationState: null,
@@ -157,21 +220,103 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   activeTemplateId: null,
 
   // Setters
-  setNodes: (nodes) => set({ nodes }),
-  setEdges: (edges) => set({ edges }),
-  setViewport: (viewport) => set({ viewport }),
+  setNodes: (nodes) => set((state) => ({
+    nodes,
+    persistenceRevision: state.persistenceRevision + 1,
+  })),
+  setEdges: (edges) => set((state) => ({
+    edges,
+    persistenceRevision: state.persistenceRevision + 1,
+  })),
+  setViewport: (viewport) => set((state) => ({
+    viewport,
+    persistenceRevision: state.persistenceRevision + 1,
+  })),
+  setGovernance: (governance) => {
+    set((state) => {
+      const next = typeof governance === 'function'
+        ? governance(state.governance)
+        : governance;
+      const normalized = normalizeDeploymentGovernance(next);
+      if (JSON.stringify(state.governance) === JSON.stringify(normalized)) return state;
+      return {
+        governance: normalized,
+        persistenceRevision: state.persistenceRevision + 1,
+      };
+    });
+  },
+  replaceWorkflowDocument: (document, options) => {
+    const governance = normalizeDeploymentGovernance(document.governance);
+    const current = get();
+    if (options.markDirty && options.flowId === null) {
+      throw new Error('A user-initiated workflow replacement requires an open flow');
+    }
+    if (options.markDirty && options.flowId !== current.documentFlowId) {
+      throw new Error(
+        'A user-initiated workflow replacement must target the currently hydrated flow',
+      );
+    }
+    if (!options.markDirty && hydrationWouldDiscardUnboundWork(current)) {
+      throw new Error(UNBOUND_WORK_HYDRATION_ERROR);
+    }
+    undoRedoManager.clear();
+    previousState = null;
+    set((state) => ({
+      nodes: document.nodes,
+      edges: document.edges,
+      viewport: document.viewport,
+      governance,
+      documentFlowId: options.flowId,
+      hydrationVersion: options.markDirty
+        ? state.hydrationVersion
+        : state.hydrationVersion + 1,
+      persistenceRevision: options.markDirty
+        ? state.persistenceRevision + 1
+        : 0,
+      selectedNodeId: null,
+      selectedEdgeId: null,
+      validationState: null,
+      isReadyToDeploy: false,
+      canUndo: false,
+      canRedo: false,
+      activeTemplateId: null,
+    }));
+    get().runValidation();
+  },
+  resetWorkflowDocument: (flowId) => {
+    undoRedoManager.clear();
+    previousState = null;
+    set((state) => ({
+      nodes: [],
+      edges: [],
+      viewport: { x: 0, y: 0, zoom: 1 },
+      governance: createEmptyDeploymentGovernance(),
+      documentFlowId: flowId,
+      hydrationVersion: state.hydrationVersion + 1,
+      persistenceRevision: 0,
+      selectedNodeId: null,
+      selectedEdgeId: null,
+      validationState: null,
+      isReadyToDeploy: false,
+      canUndo: false,
+      canRedo: false,
+      activeTemplateId: null,
+    }));
+  },
 
   // React Flow change handlers
   onNodesChange: (changes) => {
-    set({
-      nodes: applyNodeChanges(changes, get().nodes),
-    });
+    set((state) => ({
+      nodes: applyNodeChanges(changes, state.nodes),
+      persistenceRevision: state.persistenceRevision + 1,
+    }));
   },
 
   onEdgesChange: (changes) => {
-    set({
-      edges: applyEdgeChanges(changes, get().edges),
-    });
+    set((state) => ({
+      edges: applyEdgeChanges(changes, state.edges),
+      persistenceRevision: state.persistenceRevision + 1,
+    }));
   },
 
   // Node operations
@@ -183,10 +328,20 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     set((state) => ({
       nodes: [...state.nodes, node],
       activeTemplateId: null,
+      persistenceRevision: state.persistenceRevision + 1,
     }));
 
     // Record the action
     get().recordAction('ADD_NODE');
+    // Every structural mutation must re-validate. The debounced `useValidation`
+    // hook exists but is mounted nowhere, so before this the only validation
+    // triggers were `loadTemplate` and `updateNodeConfiguration` — dragging a
+    // pre-configured tool node on (which deliberately opens no config modal) left
+    // the canvas indicator reading a verdict for the PREVIOUS shape of the graph,
+    // or "Validation Pending" if none had ever run. Calling it here is safe;
+    // mounting `useValidation` is not, because `runValidation` rebuilds the nodes
+    // array and would re-trigger its own `[nodes, edges]` effect forever.
+    get().runValidation();
   },
 
   deleteNode: (nodeId) => {
@@ -201,10 +356,14 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       ),
       selectedNodeId: state.selectedNodeId === nodeId ? null : state.selectedNodeId,
       activeTemplateId: null,
+      persistenceRevision: state.persistenceRevision + 1,
     }));
 
     // Record the action
     get().recordAction('REMOVE_NODE');
+    // Deleting a node can only change the verdict — e.g. removing the node that
+    // held the only error must clear the error count, not leave it on screen.
+    get().runValidation();
   },
 
   updateNodePosition: (nodeId, position) => {
@@ -216,6 +375,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       nodes: state.nodes.map((node) =>
         node.id === nodeId ? { ...node, position } : node
       ),
+      persistenceRevision: state.persistenceRevision + 1,
     }));
 
     // Record the action
@@ -243,6 +403,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
             }
           : node
       ),
+      persistenceRevision: state.persistenceRevision + 1,
     }));
 
     // Record the action and run validation
@@ -282,10 +443,14 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     set((state) => ({
       edges: [...state.edges, edge],
       activeTemplateId: null,
+      persistenceRevision: state.persistenceRevision + 1,
     }));
 
     // Record the action
     get().recordAction('ADD_EDGE');
+    // Connection validity (validateConnection) is only computed by runValidation,
+    // so without this an illegal connection the user just drew renders as valid.
+    get().runValidation();
   },
 
   deleteEdge: (edgeId) => {
@@ -297,10 +462,12 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       edges: state.edges.filter((edge) => edge.id !== edgeId),
       selectedEdgeId: state.selectedEdgeId === edgeId ? null : state.selectedEdgeId,
       activeTemplateId: null,
+      persistenceRevision: state.persistenceRevision + 1,
     }));
 
     // Record the action
     get().recordAction('REMOVE_EDGE');
+    get().runValidation();
   },
 
   // Template operations
@@ -308,13 +475,14 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     const state = get();
     previousState = state._getUndoRedoState();
 
-    set({
+    set((current) => ({
       nodes: templateNodes,
       edges: templateEdges,
       selectedNodeId: null,
       selectedEdgeId: null,
       activeTemplateId: templateId || null,
-    });
+      persistenceRevision: current.persistenceRevision + 1,
+    }));
 
     get().recordAction('ADD_NODE');
     get().runValidation();
@@ -406,6 +574,9 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         canUndo: undoRedoManager.canUndo(),
         canRedo: undoRedoManager.canRedo(),
       });
+      // The restored graph is a different graph; its verdict must be recomputed
+      // or the indicator keeps describing the state we just undid.
+      get().runValidation();
     }
   },
 
@@ -421,6 +592,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         canUndo: undoRedoManager.canUndo(),
         canRedo: undoRedoManager.canRedo(),
       });
+      get().runValidation();
     }
   },
 
@@ -454,11 +626,12 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   },
 
   _setFromUndoRedoState: (undoRedoState: UndoRedoWorkflowState) => {
-    set({
+    set((state) => ({
       nodes: undoRedoState.nodes,
       edges: undoRedoState.edges,
       viewport: undoRedoState.viewport,
-    });
+      persistenceRevision: state.persistenceRevision + 1,
+    }));
   },
 }));
 

@@ -239,13 +239,10 @@ class PromptLibraryStore:
         return True
 
     def delete(self, org_id: str, prompt_name: str) -> bool:
-        try:
-            self._table.delete_item(Key={"org_id": org_id, "prompt_name": prompt_name})
-            logger.info("Deleted prompt %s/%s", org_id, prompt_name)
-            return True
-        except Exception as e:
-            logger.warning("Failed to delete prompt %s/%s: %s", org_id, prompt_name, e)
-            return False
+        """Delete the prompt; RAISES when DynamoDB refuses (F-34, see registry_store.delete)."""
+        self._table.delete_item(Key={"org_id": org_id, "prompt_name": prompt_name})
+        logger.info("Deleted prompt %s/%s", org_id, prompt_name)
+        return True
 
     # -- reads -----------------------------------------------------------
 

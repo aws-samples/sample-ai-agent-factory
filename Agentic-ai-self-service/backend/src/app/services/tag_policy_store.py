@@ -24,8 +24,11 @@ caller returns HTTP 400). Optional policies contribute only if supplied.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
+from collections.abc import Iterable
 from datetime import datetime, timezone
 
 import boto3
@@ -67,8 +70,81 @@ class TagResolutionError(ValueError):
     """Raised when a required tag has no value and no default (→ HTTP 400)."""
 
 
+class TagGovernanceStaleError(ValueError):
+    """The caller's captured policy revision or profile timestamp is not the current one.
+
+    P0-B: the UI resolves the effective tags in the browser against the policy set it
+    loaded, and a deploy started minutes later would otherwise apply THOSE values under
+    policies an admin has since changed (a new required tag, a changed default, a deleted
+    policy, an edited profile). The values the caller saw and approved are no longer the
+    values the org governs, so the deploy is refused and the caller re-reads. Distinct from
+    ``TagResolutionError`` because the remedy is different: reload, do not supply a value.
+    """
+
+
+class ResolvedGovernance(BaseModel):
+    """The effective tags plus the exact state they were resolved against.
+
+    One read produces all three, which is the point: computing the revision from a second
+    read would let a policy change slip between the check and the values that get applied.
+    """
+
+    tags: dict[str, str] = Field(default_factory=dict)
+    policy_revision: str = ""
+    profile_updated_at: str | None = None
+
+
+def compute_policy_revision(policies: Iterable[TagPolicy]) -> str:
+    """Hash the governed policy set into a stable ``sha256:<hex>`` revision.
+
+    Byte-for-byte identical to the browser's ``computeTagPolicyRevision``
+    (frontend/src/components/deploy/resourceTagState.ts): the same six fields in the same
+    order, records sorted by key with a CODE-POINT comparison (not ``localeCompare``, which
+    is locale- and ICU-dependent and orders mixed-case keys differently), compact JSON
+    separators, and non-ASCII emitted raw -- ``json.dumps(..., separators=(",", ":"),
+    ensure_ascii=False)`` is what ``JSON.stringify`` produces. ``created_at`` participates
+    because deleting and recreating an otherwise identical policy is a distinct governance
+    decision. Both sides pin the same digest for one adversarial fixture
+    (``tests/test_tag_policy_revision_parity.py`` and ``resourceTagState.test.ts``), because
+    a drift here is not a crash: the two runtimes simply never agree again, and every deploy
+    carrying tags is refused as stale.
+    """
+    canonical = [
+        {
+            "key": policy.key,
+            "default_value": policy.default_value,
+            "required": policy.required,
+            "show_on_card": policy.show_on_card,
+            "created_at": policy.created_at or "",
+            "updated_at": policy.updated_at,
+        }
+        for policy in sorted(policies, key=lambda p: p.key)
+    ]
+    payload = json.dumps(canonical, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def same_instant(a: str | None, b: str | None) -> bool:
+    """True when two ISO-8601 timestamps name the same instant.
+
+    The catalog spells its timestamps with ``+00:00`` (``_now``); a workflow document round-trips
+    the captured profile timestamp through a pydantic ``datetime`` and comes back spelled with
+    ``Z``. Measured live (2026-09-27): the same instant in the two spellings was refused as "the
+    profile changed" by every governed export of a reloaded workflow. Unparseable values fall back
+    to exact string equality so a malformed token is still a mismatch, never a pass.
+    """
+    if a == b:
+        return True
+    if not a or not b:
+        return False
+    try:
+        return datetime.fromisoformat(a) == datetime.fromisoformat(b)
+    except ValueError:
+        return False
 
 
 class TagPolicyStore:
@@ -159,16 +235,69 @@ class TagPolicyStore:
         Missing REQUIRED tag with no default → TagResolutionError (HTTP 400).
         Optional policies + ad-hoc supplied keys pass through when present.
         """
+        return self.resolve_governance(org_id, supplied=supplied, profile_name=profile_name).tags
+
+    def resolve_governance(
+        self,
+        org_id: str,
+        supplied: dict[str, str] | None = None,
+        profile_name: str | None = None,
+        *,
+        expected_policy_revision: str | None = None,
+        expected_profile_updated_at: str | None = None,
+    ) -> ResolvedGovernance:
+        """Resolve the tags AND report the policy state they were resolved against.
+
+        P0-B: the caller (browser or API client) may pass the ``policy_revision`` and the
+        profile ``updated_at`` it resolved its own values against. They are checked against
+        THIS read, before any AWS side effect, and a mismatch raises
+        ``TagGovernanceStaleError``. Checking them here rather than in the route is what
+        keeps the check and the applied values on one read of the table.
+        """
         supplied = dict(supplied or {})
+        policies = self.list_policies(org_id)
+        revision = compute_policy_revision(policies)
+        if expected_policy_revision and expected_policy_revision != revision:
+            raise TagGovernanceStaleError(
+                "The tag policies changed after this deployment's tags were resolved "
+                f"(captured {expected_policy_revision}, current {revision}). Reload the "
+                "deploy panel so the values you approve are the ones the org governs now; "
+                "nothing was deployed."
+            )
+
         profile_values: dict[str, str] = {}
+        profile_updated_at: str | None = None
         if profile_name:
             profile = self.get_profile(org_id, profile_name)
             if profile is None:
+                if expected_profile_updated_at:
+                    # A profile the caller DID capture and that is now gone is stale
+                    # governance, not a bad request: an admin deleted it after the panel
+                    # loaded. Raising TagResolutionError here would answer 400 ("supply a
+                    # value") for a state whose only remedy is to reload -- and would do it
+                    # before any staleness check ran, so a deletion was the one profile
+                    # change that could not be reported as such.
+                    raise TagGovernanceStaleError(
+                        f"Tag profile '{profile_name}' no longer exists; it was deleted after "
+                        "this deployment's tags were resolved. Reload the deploy panel and "
+                        "choose a profile that still exists; nothing was deployed."
+                    )
                 raise TagResolutionError(f"Unknown tag profile '{profile_name}'")
             profile_values = dict(profile.values)
+            profile_updated_at = profile.updated_at
+            if expected_profile_updated_at and not same_instant(expected_profile_updated_at, profile_updated_at):
+                raise TagGovernanceStaleError(
+                    f"Tag profile '{profile_name}' changed after this deployment's tags were "
+                    f"resolved (captured {expected_profile_updated_at}, current "
+                    f"{profile_updated_at}). Reload the deploy panel; nothing was deployed."
+                )
+        elif expected_profile_updated_at:
+            raise TagGovernanceStaleError(
+                "A tag profile timestamp was supplied without a profile name, so there is "
+                "nothing to check it against. Reload the deploy panel; nothing was deployed."
+            )
 
         resolved: dict[str, str] = {}
-        policies = self.list_policies(org_id)
         policy_keys = {p.key for p in policies}
 
         for policy in policies:
@@ -184,7 +313,11 @@ class TagPolicyStore:
         for k, v in {**profile_values, **supplied}.items():
             if k not in policy_keys and v:
                 resolved[k] = v
-        return resolved
+        return ResolvedGovernance(
+            tags=resolved,
+            policy_revision=revision,
+            profile_updated_at=profile_updated_at,
+        )
 
     # -- internals -------------------------------------------------------
 

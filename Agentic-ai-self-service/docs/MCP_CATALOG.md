@@ -125,6 +125,48 @@ Re-runnable end-to-end proof (creates a real Gateway + target, invokes, tears do
 AWS_REGION=us-west-2 python3 scripts/verify-external-mcp.py aws-knowledge
 ```
 
-Proven on `166827918465`/us-west-2 on 2026-07-16: the Gateway exposed
+Proven on `123456789012`/us-west-2 on 2026-07-16: the Gateway exposed
 `mcp-aws-knowledge___aws___search_documentation` and a `tools/call` returned real
 AWS documentation for "Amazon Bedrock AgentCore Gateway". All resources torn down.
+
+For the production protocol gate, run the read-only verifier against the endpoint
+created through the product rather than treating target creation alone as proof:
+
+```bash
+export MCP_VERIFY_URL="https://example.gateway.bedrock-agentcore.us-west-2.amazonaws.com/mcp"
+export MCP_VERIFY_BEARER_TOKEN="<short-lived token>"
+export MCP_VERIFY_PROTOCOL_VERSIONS_JSON='[
+  "2025-11-25",
+  "2025-06-18",
+  "2025-03-26"
+]'
+export MCP_VERIFY_CALLS_JSON='[
+  {
+    "name": "mcp-aws-knowledge___aws___search_documentation",
+    "arguments": {"search_phrase": "Amazon Bedrock AgentCore Gateway"},
+    "expectContains": ["agentcore", "gateway"]
+  }
+]'
+python3 scripts/verify-mcp-protocol.py
+```
+
+Set `MCP_VERIFY_REQUIRE_ALL_TOOLS=true` only when the call matrix supplies inert,
+valid arguments and a real-result canary for every discovered tool. The protocol
+version list is deliberately mandatory: set it to the exact versions configured
+on the product-created Gateway (or the exact legacy version implemented by a
+standalone MCP Runtime). For every listed version the verifier repeats auth,
+discovery, pagination, tool calls and unknown-tool rejection. It also checks
+legacy session binding/termination, or the 2026-07-28 stateless
+`server/discover`, `_meta`, `Mcp-Method`, `Mcp-Name` and `x-mcp-header` routing
+contract as applicable.
+
+The product pin intentionally excludes `2026-07-28`. A live AgentCore Gateway
+accepted and advertised that version but omitted the mandatory `resultType`
+field from `server/discover` on 2026-09-22. The verifier still implements the
+strict 2026 path so the version can be re-tested and added only after the
+managed service conforms.
+
+The bearer token is read from the environment and is never printed or placed in
+curl's process arguments. Curl configuration files are disabled before the
+mode-0600 header file is read, so a local `.curlrc` cannot turn on tracing or
+redirect those credentials.

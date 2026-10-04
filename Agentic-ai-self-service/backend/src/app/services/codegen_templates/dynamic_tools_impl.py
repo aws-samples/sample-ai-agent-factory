@@ -52,17 +52,29 @@ class ToolUnavailable(Exception):
     pass
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never let a validated public URL redirect a tool into a private network."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ANN201
+        return None
+
+
+_HTTP_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def _http_get(url, timeout=10, retries=2):
     # Refuse non-http(s) schemes outright — urlopen would happily follow
     # file:// or ftp:// (Bandit B310); the SSRF net-range guard in
     # _do_fetch_webpage covers hosts, this covers schemes for every caller.
+    # Redirects are disabled as well: validating the first host and then
+    # following a 302 to IMDS/private space would bypass that host check.
     if urllib.parse.urlparse(url).scheme not in ("http", "https"):
         raise ToolUnavailable(f"unsupported URL scheme: {url.split(':', 1)[0]}")
     last_err = None
     for attempt in range(retries + 1):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310  # scheme validated above
+            with _HTTP_OPENER.open(req, timeout=timeout) as resp:
                 return resp.read()
         except Exception as e:
             last_err = e

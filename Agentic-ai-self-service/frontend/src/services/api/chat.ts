@@ -3,7 +3,7 @@
  */
 
 import { authFetch } from '../../auth/authFetch';
-import { API_BASE_URL } from './client';
+import { API_BASE_URL, apiErrorFromResponse, apiRequest } from './client';
 
 // ============================================================================
 // Types
@@ -22,13 +22,21 @@ export interface DeployedAgentSummary {
 // Chat Operations
 // ============================================================================
 
-/** List the caller's own succeeded deployments (the chat agent picker). */
+/** List the caller's own succeeded deployments (the chat agent picker).
+ *
+ *  Goes through `apiRequest` rather than calling `authFetch` directly. It used to
+ *  do the latter and `throw new Error("Agent list failed (" + status + ")")`,
+ *  which is an error with no `status` field — so none of this module's
+ *  status-aware handling applied to it, and an expired session showed the end
+ *  user "Agent list failed (401)" in the chat sidebar. Measured live against the
+ *  deployed app. There is nothing special about this endpoint that justified
+ *  hand-rolling the fetch. */
 export async function listMyAgents(baseUrl: string = API_BASE_URL): Promise<DeployedAgentSummary[]> {
-  const response = await authFetch(`${baseUrl}/api/deployments?status=succeeded`, { method: 'GET' });
-  if (!response.ok) {
-    throw new Error(`Agent list failed (${response.status})`);
-  }
-  return (await response.json()) as DeployedAgentSummary[];
+  return apiRequest<DeployedAgentSummary[]>(
+    '/api/deployments?status=succeeded',
+    { method: 'GET' },
+    baseUrl,
+  );
 }
 
 /**
@@ -53,6 +61,14 @@ export async function streamInvoke(
     headers: { 'Content-Type': 'application/json' },
     body,
   });
+  // An authentication failure is not "SSE is unavailable here", so do not fall
+  // through to the non-streaming path for it: that would make a second doomed
+  // request and then report `data.error || 'Invocation failed'`, which tells a
+  // signed-out user nothing about why. Throw the normalized shape so the 401
+  // becomes the session message.
+  if (resp.status === 401 || resp.status === 403) {
+    throw await apiErrorFromResponse(resp);
+  }
   const ct = resp.headers.get('content-type') || '';
   if (resp.ok && resp.body && ct.includes('text/event-stream')) {
     const reader = resp.body.getReader();
@@ -96,6 +112,12 @@ export async function streamInvoke(
     headers: { 'Content-Type': 'application/json' },
     body,
   });
+  // `r2.ok` was never checked here, so an HTTP-level failure fell into the
+  // `data.success` branch below and surfaced as a flat "Invocation failed" with
+  // the status thrown away.
+  if (!r2.ok) {
+    throw await apiErrorFromResponse(r2);
+  }
   const data = (await r2.json()) as { success?: boolean; response?: string; error?: string; sessionId?: string };
   if (!data.success) throw new Error(data.error || 'Invocation failed');
   const text = data.response || '';

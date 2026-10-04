@@ -11,27 +11,68 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+from botocore.exceptions import ClientError
+
 from app.models import Flow
 from app.models.enums import DeploymentStatus
+from app.services.credential_scrub import scrub_write_only_credentials
 from app.services.region_models import current_region
 
 from .dynamodb_storage import (
+    _conditional_put_item,
     _convert_decimals_to_floats,
     _convert_floats_to_decimals,
     _delete_item,
     _get_dynamodb_resource,
     _get_item,
     _get_table,
-    _put_item,
     _scan_table,
 )
 
 logger = logging.getLogger(__name__)
 
 
+class FlowVersionConflict(Exception):
+    """A save was built on a ``Flow.version`` the row no longer has (F-15).
+
+    Nothing was written. ``current`` is the row as the server holds it now, so the caller can tell
+    the client which version to reload or to adopt before saving again. ``current`` is ``None``
+    only if the row vanished between the refused write and the re-read.
+    """
+
+    def __init__(self, flow_id: str, expected: int | None, current: Flow | None) -> None:
+        self.flow_id = flow_id
+        self.expected = expected
+        self.current = current
+        actual = "missing" if current is None else str(current.version)
+        super().__init__(f"Flow '{flow_id}' is at version {actual}, save was built on version {expected}")
+
+
+def _version_fence(expected: int) -> tuple[str, dict]:
+    """The DynamoDB condition that says "the row is still at ``expected``".
+
+    A row written before the ``version`` attribute existed reads as 0 (the model default), so a
+    fence on 0 must also accept the attribute being absent; otherwise every legacy row would be
+    unsaveable forever.
+    """
+    if expected == 0:
+        return "attribute_not_exists(version) OR version = :expected", {":expected": 0}
+    return "version = :expected", {":expected": expected}
+
+
 # ============================================================================
 # Serialization Helpers
 # ============================================================================
+
+
+def _persistable_workflow(workflow: dict) -> dict:
+    """The workflow as either store may hold AND return it.
+
+    ``model_copy(update=...)`` runs no validator, so a workflow handed straight to ``update`` would
+    otherwise be returned -- and, in memory, kept -- with a raw credential in it even though the
+    DynamoDB bytes are scrubbed by ``_serialize_flow``. Scrub once here, before the copy.
+    """
+    return scrub_write_only_credentials(workflow)
 
 
 def _serialize_flow(flow: Flow) -> dict:
@@ -46,7 +87,8 @@ def _serialize_flow(flow: Flow) -> dict:
     Returns:
         Dict suitable for DynamoDB put_item
     """
-    item = flow.model_dump(mode="json")
+    # Belt and braces: the model validators already scrubbed; a future model path must not undo it.
+    item = scrub_write_only_credentials(flow.model_dump(mode="json"))
     item["flow_id"] = item.pop("id")
     item = _convert_floats_to_decimals(item)
     return item
@@ -163,15 +205,19 @@ class FlowStorage:
         flow_id: str,
         name: str | None = None,
         workflow: dict | None = None,
+        expected_version: int | None = None,
     ) -> Flow | None:
         """Update an existing flow with partial fields.
 
-        Preserves unchanged fields and advances updated_at.
+        Preserves unchanged fields, advances updated_at and ``version``.
 
         Args:
             flow_id: The ID of the flow to update
             name: New name (optional, preserves existing if None)
             workflow: New workflow (optional, preserves existing if None)
+            expected_version: The ``Flow.version`` the caller built this save on; when given and
+                different from the stored one, nothing is written and
+                :class:`FlowVersionConflict` is raised.
 
         Returns:
             The updated flow if found, None otherwise
@@ -180,12 +226,17 @@ class FlowStorage:
             return None
 
         existing = self._flows[flow_id]
-        updates: dict = {"updated_at": datetime.now(timezone.utc)}
+        if expected_version is not None and existing.version != expected_version:
+            raise FlowVersionConflict(flow_id, expected_version, existing)
+        updates: dict = {
+            "updated_at": datetime.now(timezone.utc),
+            "version": existing.version + 1,
+        }
 
         if name is not None:
             updates["name"] = name
         if workflow is not None:
-            updates["workflow"] = workflow
+            updates["workflow"] = _persistable_workflow(workflow)
 
         updated = existing.model_copy(update=updates)
         self._flows[flow_id] = updated
@@ -311,7 +362,8 @@ class DynamoDBFlowStorage:
         )
 
         item = _serialize_flow(flow)
-        _put_item(self._table, item)
+        # A create must never land on an existing row (uuid collision or a replayed request).
+        _conditional_put_item(self._table, item, condition_expression="attribute_not_exists(flow_id)")
         logger.info("Created flow: %s", flow_id)
         return flow
 
@@ -334,36 +386,67 @@ class DynamoDBFlowStorage:
         flow_id: str,
         name: str | None = None,
         workflow: dict | None = None,
+        expected_version: int | None = None,
     ) -> Flow | None:
-        """Update an existing flow in DynamoDB.
+        """Update an existing flow in DynamoDB as a compare-and-set.
 
-        Accepts partial fields, preserves unchanged fields,
-        and advances updated_at.
+        Accepts partial fields, preserves unchanged fields, and advances updated_at and
+        ``version``. The write is conditioned on the row still being at the version this method
+        read (F-15): the in-Python ``expected_version`` check catches a client whose copy is stale,
+        and the DynamoDB ``ConditionExpression`` catches the write that lands between our read and
+        our put. Either way nothing is written and :class:`FlowVersionConflict` carries the row as
+        the server holds it now.
 
         Args:
             flow_id: The ID of the flow to update
             name: New name (optional, preserves existing if None)
             workflow: New workflow (optional, preserves existing if None)
+            expected_version: The ``Flow.version`` the caller built this save on (None for a
+                pre-fence client, which is then fenced only on the row as read here)
 
         Returns:
             The updated flow if found, None otherwise
+
+        Raises:
+            FlowVersionConflict: the row is not at ``expected_version`` / moved under the write
         """
         existing_item = _get_item(self._table, {"flow_id": flow_id})
         if existing_item is None:
             return None
 
         existing = _deserialize_flow(existing_item)
-        updates: dict = {"updated_at": datetime.now(timezone.utc)}
+        if expected_version is not None and existing.version != expected_version:
+            raise FlowVersionConflict(flow_id, expected_version, existing)
+        updates: dict = {
+            "updated_at": datetime.now(timezone.utc),
+            "version": existing.version + 1,
+        }
 
         if name is not None:
             updates["name"] = name
         if workflow is not None:
-            updates["workflow"] = workflow
+            updates["workflow"] = _persistable_workflow(workflow)
 
         updated = existing.model_copy(update=updates)
         item = _serialize_flow(updated)
-        _put_item(self._table, item)
-        logger.info("Updated flow: %s", flow_id)
+        condition, values = _version_fence(existing.version)
+        try:
+            _conditional_put_item(
+                self._table,
+                item,
+                condition_expression=condition,
+                expression_attribute_values=values,
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
+            # Somebody landed between our read and our put. Report the row as it is now.
+            current_item = _get_item(self._table, {"flow_id": flow_id})
+            current = _deserialize_flow(current_item) if current_item is not None else None
+            raise FlowVersionConflict(
+                flow_id, expected_version if expected_version is not None else existing.version, current
+            ) from exc
+        logger.info("Updated flow: %s (version %s)", flow_id, updated.version)
         return updated
 
     def delete(self, flow_id: str) -> bool:

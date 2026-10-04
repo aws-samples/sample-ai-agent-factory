@@ -128,7 +128,7 @@ export function LiteLLMRegistryPanel() {
         <span className="text-sm font-medium">LiteLLM Registry</span>
         <span className={
           active ? 'text-xs text-green-500'
-          : configured ? 'text-xs text-amber-500' : 'text-xs text-gray-400'
+          : configured ? 'text-xs text-amber-500' : 'text-xs text-gray-600'
         }>
           {active ? (cfg?.verified ? 'Authoritative' : 'Authoritative (unverified)')
             : configured ? 'Connected — platform catalog still authoritative'
@@ -157,6 +157,7 @@ export function LiteLLMRegistryPanel() {
           <input
             className="w-full rounded bg-black/20 border border-white/10 px-2 py-1 text-sm"
             placeholder="https://litellm.example.com"
+            aria-label="LiteLLM base URL"
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
           />
@@ -165,6 +166,7 @@ export function LiteLLMRegistryPanel() {
             autoComplete="off"
             className="w-full rounded bg-black/20 border border-white/10 px-2 py-1 text-sm"
             placeholder="LiteLLM virtual key (sk-…)"
+            aria-label="LiteLLM virtual key"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
           />

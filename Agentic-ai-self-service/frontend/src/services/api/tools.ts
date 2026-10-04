@@ -57,6 +57,18 @@ export interface ToolTestResponse {
   results: TestResult[];
   allPassed: boolean;
   error?: string;
+  /**
+   * Whether the sandbox that ran this code had no network route off its VPC.
+   * Undefined for a response that never reached the sandbox (a validation
+   * refusal, a timeout, an HTTP failure) — "we do not know" is not "it was open".
+   */
+  sandboxIsolated?: boolean;
+  /**
+   * Set when the isolated sandbox is itself what failed a test case — a tool that
+   * calls an HTTP API cannot succeed in a network with no egress, and will work
+   * once deployed. Without this the user sees a timeout from correct code.
+   */
+  note?: string;
 }
 
 // ============================================================================
@@ -156,9 +168,20 @@ export async function testTool(
 
   const { testId } = await startResponse.json() as { testId: string };
 
-  // Step 2: Poll for results (every 3s, up to 2 minutes)
+  // Step 2: Poll for results.
+  //
+  // This was 40 attempts / 2 minutes, which was shorter than the backend's own
+  // budget once the tool-test sandbox moved into a VPC: a function with a VpcConfig
+  // waits on AWS building a Hyperplane ENI, measured live at 223.3s / 223.9s / 6.1s
+  // across three consecutive runs. The browser therefore reported "Test timed out"
+  // on runs the backend went on to complete successfully -- a false failure, and the
+  // worst kind, because the user is told their correct tool is broken.
+  //
+  // 150 attempts covers the backend's worst case (tool_tester.ACTIVE_WAIT_SECONDS_VPC
+  // is 300s, plus the test cases after it) with headroom. Only the first test after
+  // a period of inactivity pays that; once the ENI mapping is warm it is seconds.
   const pollUrl = `${baseUrl}/api/test-tool/${testId}`;
-  const maxAttempts = 40;
+  const maxAttempts = 150;
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise(r => setTimeout(r, 3000));
 
@@ -166,7 +189,15 @@ export async function testTool(
       const pollResponse = await authFetch(pollUrl);
       if (!pollResponse.ok) continue;
 
-      const result = await pollResponse.json() as { status: string; success?: boolean; allPassed?: boolean; results?: TestResult[]; error?: string };
+      const result = await pollResponse.json() as {
+        status: string;
+        success?: boolean;
+        allPassed?: boolean;
+        results?: TestResult[];
+        error?: string;
+        sandboxIsolated?: boolean;
+        note?: string;
+      };
       if (result.status === 'running') continue;
 
       // Test completed
@@ -175,6 +206,11 @@ export async function testTool(
         allPassed: result.allPassed ?? false,
         results: result.results ?? [],
         error: result.error,
+        // Not defaulted: `undefined` means the row predates this field or the run
+        // never reached the sandbox, and `false` means it ran with egress. Coercing
+        // the first into the second would misreport the security posture.
+        sandboxIsolated: result.sandboxIsolated,
+        note: result.note,
       };
     } catch {
       // Network error, retry
@@ -182,5 +218,13 @@ export async function testTool(
     }
   }
 
-  return { success: false, results: [], allPassed: false, error: 'Test timed out after 2 minutes' };
+  return {
+    success: false,
+    results: [],
+    allPassed: false,
+    error:
+      'The test did not finish within 7 minutes. The first test after a period of ' +
+      'inactivity waits on AWS provisioning the isolated sandbox network; retrying ' +
+      'usually completes in seconds.',
+  };
 }

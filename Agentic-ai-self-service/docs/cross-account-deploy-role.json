@@ -1,59 +1,229 @@
 {
-  "_README": "Phase 7 (opt-in) cross-account deployment. In EACH target AWS account, pre-provision THREE things (all name-by-convention; the platform references them without per-deploy creation, which also avoids the fresh-role IAM-propagation race that CREATE_FAILs runtimes for ~17-20 min): (1) role 'AgentCoreFlowsDeploymentRole' — assumed by the platform to run the deploy; (2) role 'AgentCoreFlowsRuntimeRole' — the AgentCore runtime execution role, passed to CreateAgentRuntime (trusts bedrock-agentcore.amazonaws.com, reads the code zip from the target-account bucket + the deps bundle); (3) S3 bucket 'agentcore-flows-artifacts-<TARGET_ACCOUNT_ID>-<REGION>' — AgentCore's runtime code-fetch is SAME-ACCOUNT-ONLY, so the final code.zip is uploaded HERE (the platform's deps bundle is read cross-account during codegen and bundled in). On the PLATFORM side: add the target account id to the stack context `-c deploy_target_accounts=<id>` + redeploy (grants the deploy role read on the platform deps bundle), THEN register the account via the admin API. Replace <PLATFORM_ACCOUNT_ID> with the platform/home account. VERIFIED LIVE: agent deployed + runtime confirmed present in a second account.",
-
+  "_README": "Phase 7 (opt-in) cross-account deployment. In EACH target AWS account, pre-provision FIVE things before registration: (1) role 'AgentCoreFlowsDeploymentRole' \u2014 assumed by the platform for every target-account control-plane call; (2) role 'AgentCoreFlowsRuntimeRole' \u2014 stable, model-capable AgentCore Runtime execution role for Strands agents; (3) role 'AgentCoreFlowsMCPRuntimeRole' \u2014 stable, deliberately MODEL-FREE AgentCore Runtime execution role for protocol-only FastMCP servers (it grants artifact read and logging only, never bedrock:* / bedrock-agentcore:*, so a tool-only runtime cannot invoke models); (4) role 'AgentCoreFlowsHarnessRole' \u2014 stable AgentCore Harness execution role; (5) S3 bucket 'agentcore-flows-artifacts-<TARGET_ACCOUNT_ID>-<REGION>' \u2014 final runtime code.zip, hosted-MCP code, oversized Gateway specs, and BDA supplemental storage. Stable execution roles avoid the fresh-role IAM-propagation race that can CREATE_FAIL AgentCore resources for ~17-20 minutes. Registration is atomic: the API assumes (1), proves (2), (3) and (4) exist in the target account and trust bedrock-agentcore.amazonaws.com, then proves (5) is owned by <TARGET_ACCOUNT_ID>, accessible to the deployment role, and physically in <REGION>; only then does it persist the target. Optional custom execution-role ARNs and a custom bucket name may be supplied. Replace <TARGET_RUNTIME_ROLE_ARN>, <TARGET_MCP_RUNTIME_ROLE_ARN>, <TARGET_HARNESS_ROLE_ARN>, and <TARGET_ARTIFACT_BUCKET> with the exact registered values; when defaults are used they are arn:aws:iam::<TARGET_ACCOUNT_ID>:role/AgentCoreFlowsRuntimeRole, arn:aws:iam::<TARGET_ACCOUNT_ID>:role/AgentCoreFlowsMCPRuntimeRole, arn:aws:iam::<TARGET_ACCOUNT_ID>:role/AgentCoreFlowsHarnessRole, and agentcore-flows-artifacts-<TARGET_ACCOUNT_ID>-<REGION>. Platform dependency bundles remain in the platform bucket and are read with the platform session; they are never copied from the target role. A basic cross-account runtime was verified live; the full component matrix still requires a fresh live gate before production sign-off.",
   "_STEP_2_runtime-role-trust.json": {
     "Version": "2012-10-17",
     "Statement": [
       {
         "Sid": "TrustAgentCoreRuntime",
         "Effect": "Allow",
-        "Principal": { "Service": "bedrock-agentcore.amazonaws.com" },
+        "Principal": {
+          "Service": "bedrock-agentcore.amazonaws.com"
+        },
         "Action": "sts:AssumeRole"
       }
     ]
   },
-
   "_STEP_2_runtime-role-permissions.json": {
     "Version": "2012-10-17",
     "Statement": [
       {
         "Sid": "RuntimeBedrock",
         "Effect": "Allow",
-        "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "bedrock:Converse", "bedrock:ConverseStream"],
+        "Action": [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream",
+          "bedrock:Converse",
+          "bedrock:ConverseStream"
+        ],
         "Resource": "*"
       },
       {
         "Sid": "RuntimeArtifactsRead",
         "Effect": "Allow",
-        "Action": ["s3:GetObject"],
-        "Resource": "arn:aws:s3:::agentcore-workflow-*-artifacts-*/*",
-        "_note": "The runtime reads its code zip from the PLATFORM artifacts bucket cross-account — the bucket policy (deploy_target_accounts context) grants this role GetObject on deployments/*."
+        "Action": [
+          "s3:GetObject"
+        ],
+        "Resource": "arn:aws:s3:::<TARGET_ARTIFACT_BUCKET>/*"
+      },
+      {
+        "Sid": "RuntimeAgentCoreTools",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock-agentcore:StartBrowserSession",
+          "bedrock-agentcore:StopBrowserSession",
+          "bedrock-agentcore:GetBrowserSession",
+          "bedrock-agentcore:ListBrowserSessions",
+          "bedrock-agentcore:UpdateBrowserStream",
+          "bedrock-agentcore:InvokeBrowser",
+          "bedrock-agentcore:ConnectBrowserAutomationStream",
+          "bedrock-agentcore:GetBrowser",
+          "bedrock-agentcore:ListBrowsers",
+          "bedrock-agentcore:StartCodeInterpreterSession",
+          "bedrock-agentcore:StopCodeInterpreterSession",
+          "bedrock-agentcore:InvokeCodeInterpreter",
+          "bedrock-agentcore:GetCodeInterpreterSession",
+          "bedrock-agentcore:ListCodeInterpreterSessions",
+          "bedrock-agentcore:GetCodeInterpreter",
+          "bedrock-agentcore:ListCodeInterpreters",
+          "bedrock-agentcore:InvokeGateway",
+          "bedrock-agentcore:ListGateways",
+          "bedrock-agentcore:GetGateway",
+          "bedrock-agentcore:GetMemory",
+          "bedrock-agentcore:CreateEvent",
+          "bedrock-agentcore:GetEvent",
+          "bedrock-agentcore:ListEvents",
+          "bedrock-agentcore:DeleteEvent",
+          "bedrock-agentcore:ListSessions",
+          "bedrock-agentcore:ListActors",
+          "bedrock-agentcore:RetrieveMemoryRecords",
+          "bedrock-agentcore:GetMemoryRecord",
+          "bedrock-agentcore:ListMemoryRecords",
+          "bedrock:ApplyGuardrail",
+          "bedrock:GetGuardrail",
+          "bedrock:Retrieve",
+          "bedrock:RetrieveAndGenerate"
+        ],
+        "Resource": "*"
       },
       {
         "Sid": "RuntimeLogs",
         "Effect": "Allow",
-        "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        "Resource": "*"
+      },
+      {
+        "Sid": "RuntimeSecretReferences",
+        "Effect": "Allow",
+        "Action": [
+          "secretsmanager:GetSecretValue"
+        ],
+        "Resource": [
+          "arn:aws:secretsmanager:*:<TARGET_ACCOUNT_ID>:secret:agentcore-connector/*"
+        ]
+      }
+    ]
+  },
+  "_STEP_2_runtime-role-notes": "Create AgentCoreFlowsRuntimeRole with _STEP_2_runtime-role-trust.json, attach _STEP_2_runtime-role-permissions.json, replace <TARGET_ARTIFACT_BUCKET>, then wait for IAM propagation before registering the target. Both the primary Runtime and any hosted MCP Runtime use this stable role and read their final code zips from the target bucket. The platform validates long-lived provider/OTEL source secrets, then stages deployment-bound copies under agentcore-connector/ in the target account. The runtime receives only those copied ARNs and dereferences them itself because GetAgentRuntime exposes environment variables; without RuntimeSecretReferences a deploy can reach SUCCESS while every model or gateway call fails with AccessDenied. The stable runtime role deliberately cannot read agentcore-provider/ or agentcore-otel/ source namespaces. Cross-account HITL is not yet supported because the approval queue and API are platform-account data; admission rejects that combination rather than silently pointing a target Runtime at the wrong DynamoDB table.",
+  "_STEP_3_mcp-runtime-role-trust.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "TrustAgentCoreMcpRuntime",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "bedrock-agentcore.amazonaws.com"
+        },
+        "Action": "sts:AssumeRole"
+      }
+    ]
+  },
+  "_STEP_3_mcp-runtime-role-permissions.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "McpRuntimeArtifactsRead",
+        "Effect": "Allow",
+        "Action": [
+          "s3:GetObject"
+        ],
+        "Resource": "arn:aws:s3:::<TARGET_ARTIFACT_BUCKET>/*"
+      },
+      {
+        "Sid": "McpRuntimeLogs",
+        "Effect": "Allow",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
         "Resource": "*"
       }
-    ],
-    "_note": "Create AgentCoreFlowsRuntimeRole with runtime-role-trust.json, attach these perms, then WAIT ~20 min (or until a test CreateAgentRuntime succeeds) before first real use so AgentCore's IAM cache has propagated — exactly why the home account pre-creates its shared role at stack-init."
+    ]
   },
-
+  "_STEP_3_mcp-runtime-role-notes": "Create AgentCoreFlowsMCPRuntimeRole with _STEP_3_mcp-runtime-role-trust.json and attach _STEP_3_mcp-runtime-role-permissions.json. This role is used ONLY by standalone/hosted protocol-only FastMCP servers. It is intentionally model-free: it carries artifact read and CloudWatch logging and nothing else \u2014 no bedrock:*, no bedrock-agentcore:* Gateway/Memory/Browser/CodeInterpreter authority, no model actions. Reusing the model-capable AgentCoreFlowsRuntimeRole for an MCP server would let a tool-only runtime invoke arbitrary models, contradicting the model-free runtime contract the platform enforces for home-account MCP deployments. Wait for IAM propagation before registering the target.",
+  "_STEP_3_harness-role-trust.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "TrustAgentCoreHarness",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "bedrock-agentcore.amazonaws.com"
+        },
+        "Action": "sts:AssumeRole"
+      }
+    ]
+  },
+  "_STEP_3_harness-role-permissions.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "HarnessBedrock",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream"
+        ],
+        "Resource": "*"
+      },
+      {
+        "Sid": "HarnessAgentCoreDataPlane",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock-agentcore:GetMemory",
+          "bedrock-agentcore:CreateEvent",
+          "bedrock-agentcore:GetEvent",
+          "bedrock-agentcore:ListEvents",
+          "bedrock-agentcore:ListSessions",
+          "bedrock-agentcore:RetrieveMemoryRecords",
+          "bedrock-agentcore:ListMemoryRecords",
+          "bedrock-agentcore:InvokeAgentRuntime",
+          "bedrock-agentcore:InvokeGateway",
+          "bedrock-agentcore:GetGateway",
+          "bedrock-agentcore:ListGatewayTargets",
+          "bedrock-agentcore:ListGateways",
+          "bedrock-agentcore:GetResourceOauth2Token",
+          "bedrock-agentcore:GetResourceApiKey"
+        ],
+        "Resource": "*"
+      },
+      {
+        "Sid": "HarnessIdentityVaultSecretRead",
+        "Effect": "Allow",
+        "Action": [
+          "secretsmanager:GetSecretValue"
+        ],
+        "Resource": "arn:aws:secretsmanager:*:<TARGET_ACCOUNT_ID>:secret:bedrock-agentcore-identity!*"
+      },
+      {
+        "Sid": "HarnessLogs",
+        "Effect": "Allow",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        "Resource": [
+          "arn:aws:logs:*:<TARGET_ACCOUNT_ID>:log-group:/aws/bedrock-agentcore/*",
+          "arn:aws:logs:*:<TARGET_ACCOUNT_ID>:log-group:/aws/bedrock-agentcore/*:log-stream:*"
+        ]
+      }
+    ]
+  },
+  "_STEP_3_harness-role-notes": "Create AgentCoreFlowsHarnessRole with _STEP_3_harness-role-trust.json, attach _STEP_3_harness-role-permissions.json, and wait for IAM propagation before registration. This stable role serves many Harness deployments, so connected Gateway and Memory ARNs are not known at onboarding time; the data-plane action set is explicit but Resource is '*'. The role is intentionally never written into a per-deployment teardown manifest.",
+  "_STEP_4_artifact-bucket-notes": "Create <TARGET_ARTIFACT_BUCKET> in <REGION> and <TARGET_ACCOUNT_ID>, enable S3 Block Public Access, and retain default or stronger server-side encryption. The deployment role needs the TargetArtifactBucket and TargetArtifactBucketList grants below. The registration API calls HeadBucket and GetBucketLocation with ExpectedBucketOwner=<TARGET_ACCOUNT_ID>; a missing, foreign, wrong-region, or unreadable bucket is rejected before any target configuration is persisted.",
   "trust-policy.json": {
     "Version": "2012-10-17",
     "Statement": [
       {
         "Sid": "TrustPlatformAccountToAssume",
         "Effect": "Allow",
-        "Principal": { "AWS": "arn:aws:iam::<PLATFORM_ACCOUNT_ID>:root" },
+        "Principal": {
+          "AWS": "arn:aws:iam::<PLATFORM_ACCOUNT_ID>:root"
+        },
         "Action": "sts:AssumeRole",
         "Condition": {
-          "StringEquals": { "sts:RoleSessionName": "agentcore-flows-deploy" }
+          "StringEquals": {
+            "sts:RoleSessionName": "agentcore-flows-deploy"
+          }
         }
       }
     ]
   },
-
   "permissions-policy.json": {
     "Version": "2012-10-17",
     "Statement": [
@@ -68,65 +238,540 @@
           "bedrock-agentcore:ListAgentRuntimes",
           "bedrock-agentcore:InvokeAgentRuntime",
           "bedrock-agentcore:CreateAgentRuntimeEndpoint",
+          "bedrock-agentcore:GetAgentRuntimeEndpoint",
+          "bedrock-agentcore:UpdateAgentRuntimeEndpoint",
           "bedrock-agentcore:DeleteAgentRuntimeEndpoint",
+          "bedrock-agentcore:ListAgentRuntimeEndpoints",
           "bedrock-agentcore:CreateGateway",
           "bedrock-agentcore:GetGateway",
+          "bedrock-agentcore:UpdateGateway",
           "bedrock-agentcore:DeleteGateway",
+          "bedrock-agentcore:ListGateways",
           "bedrock-agentcore:CreateGatewayTarget",
+          "bedrock-agentcore:GetGatewayTarget",
+          "bedrock-agentcore:UpdateGatewayTarget",
           "bedrock-agentcore:DeleteGatewayTarget",
           "bedrock-agentcore:ListGatewayTargets",
           "bedrock-agentcore:SynchronizeGatewayTargets",
+          "bedrock-agentcore:InvokeGateway",
           "bedrock-agentcore:CreateOauth2CredentialProvider",
           "bedrock-agentcore:GetOauth2CredentialProvider",
+          "bedrock-agentcore:UpdateOauth2CredentialProvider",
           "bedrock-agentcore:DeleteOauth2CredentialProvider",
+          "bedrock-agentcore:ListOauth2CredentialProviders",
           "bedrock-agentcore:CreateApiKeyCredentialProvider",
+          "bedrock-agentcore:GetApiKeyCredentialProvider",
+          "bedrock-agentcore:UpdateApiKeyCredentialProvider",
           "bedrock-agentcore:DeleteApiKeyCredentialProvider",
+          "bedrock-agentcore:ListApiKeyCredentialProviders",
+          "bedrock-agentcore:CreateTokenVault",
+          "bedrock-agentcore:GetTokenVault",
+          "bedrock-agentcore:ListTokenVaults",
+          "bedrock-agentcore:GetResourceOauth2Token",
+          "bedrock-agentcore:GetResourceApiKey",
           "bedrock-agentcore:CreateMemory",
           "bedrock-agentcore:GetMemory",
+          "bedrock-agentcore:UpdateMemory",
           "bedrock-agentcore:DeleteMemory",
+          "bedrock-agentcore:ListMemories",
+          "bedrock-agentcore:CreateEvent",
+          "bedrock-agentcore:GetEvent",
+          "bedrock-agentcore:DeleteEvent",
+          "bedrock-agentcore:ListEvents",
+          "bedrock-agentcore:ListActors",
+          "bedrock-agentcore:ListSessions",
+          "bedrock-agentcore:GetMemoryRecord",
+          "bedrock-agentcore:ListMemoryRecords",
+          "bedrock-agentcore:RetrieveMemoryRecords",
           "bedrock-agentcore:CreateWorkloadIdentity",
           "bedrock-agentcore:GetWorkloadIdentity",
-          "bedrock-agentcore:DeleteWorkloadIdentity"
+          "bedrock-agentcore:DeleteWorkloadIdentity",
+          "bedrock-agentcore:ListWorkloadIdentities",
+          "bedrock-agentcore:GetWorkloadAccessToken",
+          "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
+          "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
+          "bedrock-agentcore:CreatePolicyEngine",
+          "bedrock-agentcore:GetPolicyEngine",
+          "bedrock-agentcore:DeletePolicyEngine",
+          "bedrock-agentcore:ListPolicyEngines",
+          "bedrock-agentcore:CreatePolicy",
+          "bedrock-agentcore:GetPolicy",
+          "bedrock-agentcore:UpdatePolicy",
+          "bedrock-agentcore:DeletePolicy",
+          "bedrock-agentcore:ListPolicies",
+          "bedrock-agentcore:ManageAdminPolicy",
+          "bedrock-agentcore:ManageResourceScopedPolicy",
+          "bedrock-agentcore:Evaluate",
+          "bedrock-agentcore:CreateOnlineEvaluationConfig",
+          "bedrock-agentcore:GetOnlineEvaluationConfig",
+          "bedrock-agentcore:UpdateOnlineEvaluationConfig",
+          "bedrock-agentcore:DeleteOnlineEvaluationConfig",
+          "bedrock-agentcore:ListOnlineEvaluationConfigs",
+          "bedrock-agentcore:CreateHarness",
+          "bedrock-agentcore:GetHarness",
+          "bedrock-agentcore:UpdateHarness",
+          "bedrock-agentcore:DeleteHarness",
+          "bedrock-agentcore:ListHarnesses",
+          "bedrock-agentcore:InvokeHarness"
         ],
-        "Resource": "*",
-        "_note": "Wildcard Resource: AgentCore resource ARNs are created dynamically at deploy time. Scope by tag/condition in a hardened deployment."
-      },
-      {
-        "Sid": "BedrockModelInvoke",
-        "Effect": "Allow",
-        "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "bedrock:Converse", "bedrock:ConverseStream"],
         "Resource": "*"
       },
       {
-        "Sid": "RuntimeExecRoleManagement",
+        "Sid": "AgentCoreRuntimeOwnershipTagging",
         "Effect": "Allow",
         "Action": [
-          "iam:CreateRole", "iam:GetRole", "iam:DeleteRole",
-          "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:AttachRolePolicy",
-          "iam:DetachRolePolicy", "iam:TagRole", "iam:ListRolePolicies",
-          "iam:PassRole"
+          "bedrock-agentcore:TagResource"
         ],
         "Resource": [
-          "arn:aws:iam::*:role/AgentCoreRuntime-*",
-          "arn:aws:iam::*:role/AgentCoreGateway-*",
-          "arn:aws:iam::*:role/AgentCoreMemory-*"
+          "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:runtime/*",
+          "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:workload-identity-directory/default",
+          "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:workload-identity-directory/default/workload-identity/*"
+        ],
+        "Condition": {
+          "StringEquals": {
+            "aws:RequestTag/ManagedBy": "agentcore-flows",
+            "aws:RequestTag/AgentCoreStack": "<PLATFORM_PROJECT>-<PLATFORM_ENV>-<REGION>"
+          },
+          "ForAllValues:StringEquals": {
+            "aws:TagKeys": [
+              "ManagedBy",
+              "AgentCoreStack"
+            ]
+          }
+        }
+      },
+      {
+        "Sid": "AgentCoreOwnershipTagRead",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock-agentcore:ListTagsForResource"
+        ],
+        "Resource": [
+          "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:runtime/*",
+          "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:gateway/*",
+          "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:memory/*",
+          "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:policy-engine/*",
+          "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:harness/*",
+          "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:token-vault/default",
+          "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:token-vault/default/oauth2credentialprovider/*",
+          "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:token-vault/default/apikeycredentialprovider/*"
         ]
       },
       {
-        "Sid": "SupportingServices",
+        "Sid": "CallerIdentity",
         "Effect": "Allow",
         "Action": [
-          "s3:GetObject", "s3:PutObject",
-          "logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents",
-          "logs:StartQuery", "logs:GetQueryResults", "logs:DescribeLogGroups",
-          "secretsmanager:CreateSecret", "secretsmanager:GetSecretValue",
-          "secretsmanager:DeleteSecret",
-          "cognito-idp:CreateUserPool", "cognito-idp:DeleteUserPool",
-          "cognito-idp:CreateUserPoolClient", "cognito-idp:CreateUserPoolDomain"
+          "sts:GetCallerIdentity"
         ],
-        "Resource": "*",
-        "_note": "Tighten per-resource in a hardened target-account deployment."
+        "Resource": "*"
       }
     ]
-  }
+  },
+  "permissions-policy-bedrock-and-storage.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "BedrockModelsKnowledgeBasesAndGuardrails",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream",
+          "bedrock:Converse",
+          "bedrock:ConverseStream",
+          "bedrock:ListFoundationModels",
+          "bedrock:ListInferenceProfiles",
+          "bedrock:CreateKnowledgeBase",
+          "bedrock:GetKnowledgeBase",
+          "bedrock:DeleteKnowledgeBase",
+          "bedrock:ListKnowledgeBases",
+          "bedrock:ListTagsForResource",
+          "bedrock:CreateDataSource",
+          "bedrock:GetDataSource",
+          "bedrock:DeleteDataSource",
+          "bedrock:ListDataSources",
+          "bedrock:StartIngestionJob",
+          "bedrock:GetIngestionJob",
+          "bedrock:ListIngestionJobs",
+          "bedrock:Retrieve",
+          "bedrock:RetrieveAndGenerate",
+          "bedrock:CreateGuardrail",
+          "bedrock:GetGuardrail",
+          "bedrock:UpdateGuardrail",
+          "bedrock:DeleteGuardrail",
+          "bedrock:ListGuardrails",
+          "bedrock:CreateGuardrailVersion",
+          "bedrock:ApplyGuardrail"
+        ],
+        "Resource": "*"
+      },
+      {
+        "Sid": "TargetArtifactBucket",
+        "Effect": "Allow",
+        "Action": [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject"
+        ],
+        "Resource": "arn:aws:s3:::<TARGET_ARTIFACT_BUCKET>/*"
+      },
+      {
+        "Sid": "TargetArtifactBucketList",
+        "Effect": "Allow",
+        "Action": [
+          "s3:ListBucket",
+          "s3:GetBucketLocation"
+        ],
+        "Resource": "arn:aws:s3:::<TARGET_ARTIFACT_BUCKET>"
+      },
+      {
+        "Sid": "CustomerS3AuthorizationTags",
+        "Effect": "Allow",
+        "Action": [
+          "s3:GetBucketTagging"
+        ],
+        "Resource": "arn:aws:s3:::*"
+      },
+      {
+        "Sid": "S3VectorsLifecycle",
+        "Effect": "Allow",
+        "Action": [
+          "s3vectors:CreateVectorBucket",
+          "s3vectors:GetVectorBucket",
+          "s3vectors:DescribeVectorBucket",
+          "s3vectors:DeleteVectorBucket",
+          "s3vectors:ListVectorBuckets",
+          "s3vectors:CreateIndex",
+          "s3vectors:GetIndex",
+          "s3vectors:DescribeIndex",
+          "s3vectors:DeleteIndex",
+          "s3vectors:ListIndexes",
+          "s3vectors:ListTagsForResource"
+        ],
+        "Resource": "*"
+      },
+      {
+        "Sid": "OpenSearchServerlessLifecycle",
+        "Effect": "Allow",
+        "Action": [
+          "aoss:BatchGetCollection",
+          "aoss:ListCollections",
+          "aoss:CreateCollection",
+          "aoss:DeleteCollection",
+          "aoss:CreateIndex",
+          "aoss:DescribeIndex",
+          "aoss:DeleteIndex",
+          "aoss:APIAccessAll",
+          "aoss:CreateSecurityPolicy",
+          "aoss:GetSecurityPolicy",
+          "aoss:DeleteSecurityPolicy",
+          "aoss:CreateAccessPolicy",
+          "aoss:GetAccessPolicy",
+          "aoss:DeleteAccessPolicy",
+          "aoss:ListTagsForResource"
+        ],
+        "Resource": "*"
+      },
+      {
+        "Sid": "CustomerResourceAuthorizationTags",
+        "Effect": "Allow",
+        "Action": [
+          "rds:ListTagsForResource",
+          "lambda:ListTags",
+          "kms:ListResourceTags"
+        ],
+        "Resource": [
+          "arn:aws:rds:<REGION>:<TARGET_ACCOUNT_ID>:cluster:*",
+          "arn:aws:lambda:<REGION>:<TARGET_ACCOUNT_ID>:function:*",
+          "arn:aws:kms:<REGION>:<TARGET_ACCOUNT_ID>:key/*"
+        ]
+      }
+    ]
+  },
+  "permissions-policy-provisioning.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "AgentCoreRoleLifecycle",
+        "Effect": "Allow",
+        "Action": [
+          "iam:CreateRole",
+          "iam:GetRole",
+          "iam:DeleteRole",
+          "iam:PutRolePolicy",
+          "iam:UpdateAssumeRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:DetachRolePolicy",
+          "iam:TagRole",
+          "iam:ListRolePolicies",
+          "iam:ListAttachedRolePolicies"
+        ],
+        "Resource": "arn:aws:iam::<TARGET_ACCOUNT_ID>:role/AgentCore*"
+      },
+      {
+        "Sid": "ReadStableExecutionRoles",
+        "Effect": "Allow",
+        "Action": [
+          "iam:GetRole"
+        ],
+        "Resource": [
+          "<TARGET_RUNTIME_ROLE_ARN>",
+          "<TARGET_HARNESS_ROLE_ARN>",
+          "arn:aws:iam::<TARGET_ACCOUNT_ID>:role/AgentCoreFlowsMCPRuntimeRole",
+          "<TARGET_MCP_RUNTIME_ROLE_ARN>"
+        ]
+      },
+      {
+        "Sid": "PassOnlyAgentCoreManagedRoles",
+        "Effect": "Allow",
+        "Action": [
+          "iam:PassRole"
+        ],
+        "Resource": [
+          "arn:aws:iam::<TARGET_ACCOUNT_ID>:role/AgentCore*",
+          "<TARGET_RUNTIME_ROLE_ARN>",
+          "<TARGET_HARNESS_ROLE_ARN>",
+          "arn:aws:iam::<TARGET_ACCOUNT_ID>:role/AgentCoreFlowsMCPRuntimeRole",
+          "<TARGET_MCP_RUNTIME_ROLE_ARN>"
+        ],
+        "Condition": {
+          "StringEquals": {
+            "iam:PassedToService": [
+              "bedrock-agentcore.amazonaws.com",
+              "bedrock.amazonaws.com",
+              "lambda.amazonaws.com"
+            ]
+          }
+        }
+      },
+      {
+        "Sid": "AttachOnlyApprovedLambdaPolicies",
+        "Effect": "Allow",
+        "Action": [
+          "iam:AttachRolePolicy"
+        ],
+        "Resource": "arn:aws:iam::<TARGET_ACCOUNT_ID>:role/AgentCore*",
+        "Condition": {
+          "ArnEquals": {
+            "iam:PolicyARN": [
+              "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+            ]
+          }
+        }
+      },
+      {
+        "Sid": "AgentCoreNetworkServiceLinkedRole",
+        "Effect": "Allow",
+        "Action": [
+          "iam:CreateServiceLinkedRole"
+        ],
+        "Resource": "arn:aws:iam::<TARGET_ACCOUNT_ID>:role/aws-service-role/network.bedrock-agentcore.amazonaws.com/AWSServiceRoleForBedrockAgentCoreNetwork*",
+        "Condition": {
+          "StringEquals": {
+            "iam:AWSServiceName": "network.bedrock-agentcore.amazonaws.com"
+          }
+        }
+      },
+      {
+        "Sid": "ManagedLambdaLifecycle",
+        "Effect": "Allow",
+        "Action": [
+          "lambda:CreateFunction",
+          "lambda:GetFunction",
+          "lambda:UpdateFunctionCode",
+          "lambda:UpdateFunctionConfiguration",
+          "lambda:DeleteFunction",
+          "lambda:InvokeFunction",
+          "lambda:AddPermission",
+          "lambda:GetPolicy",
+          "lambda:RemovePermission",
+          "lambda:ListTags",
+          "lambda:TagResource",
+          "lambda:PutFunctionConcurrency"
+        ],
+        "Resource": "arn:aws:lambda:<REGION>:<TARGET_ACCOUNT_ID>:function:AgentCore*"
+      },
+      {
+        "Sid": "OptedInCustomerLambdaPolicyReadAndRemoval",
+        "Effect": "Allow",
+        "Action": [
+          "lambda:GetPolicy",
+          "lambda:RemovePermission"
+        ],
+        "Resource": "arn:aws:lambda:<REGION>:<TARGET_ACCOUNT_ID>:function:*",
+        "Condition": {
+          "StringEquals": {
+            "aws:ResourceTag/AgentCoreGatewayTarget": "allow"
+          }
+        }
+      },
+      {
+        "Sid": "OptedInCustomerLambdaGatewayGrant",
+        "Effect": "Allow",
+        "Action": [
+          "lambda:AddPermission"
+        ],
+        "Resource": "arn:aws:lambda:<REGION>:<TARGET_ACCOUNT_ID>:function:*",
+        "Condition": {
+          "StringEquals": {
+            "aws:ResourceTag/AgentCoreGatewayTarget": "allow"
+          },
+          "StringLike": {
+            "lambda:Principal": "arn:aws:iam::<TARGET_ACCOUNT_ID>:role/AgentCoreGateway-*"
+          }
+        }
+      },
+      {
+        "Sid": "CognitoGatewayAndMcpLifecycle",
+        "Effect": "Allow",
+        "Action": [
+          "cognito-idp:CreateUserPool",
+          "cognito-idp:DescribeUserPool",
+          "cognito-idp:DeleteUserPool",
+          "cognito-idp:CreateUserPoolClient",
+          "cognito-idp:DescribeUserPoolClient",
+          "cognito-idp:DeleteUserPoolClient",
+          "cognito-idp:ListUserPoolClients",
+          "cognito-idp:CreateUserPoolDomain",
+          "cognito-idp:DeleteUserPoolDomain",
+          "cognito-idp:CreateResourceServer",
+          "cognito-idp:DescribeResourceServer",
+          "cognito-idp:DeleteResourceServer",
+          "cognito-idp:AdminCreateUser",
+          "cognito-idp:AdminSetUserPassword",
+          "cognito-idp:AdminInitiateAuth",
+          "cognito-idp:TagResource"
+        ],
+        "Resource": "*"
+      },
+      {
+        "Sid": "DeploymentCredentialLifecycle",
+        "Effect": "Allow",
+        "Action": [
+          "secretsmanager:CreateSecret",
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:PutSecretValue",
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:TagResource",
+          "secretsmanager:DeleteSecret"
+        ],
+        "Resource": [
+          "arn:aws:secretsmanager:<REGION>:<TARGET_ACCOUNT_ID>:secret:AgentCore*",
+          "arn:aws:secretsmanager:<REGION>:<TARGET_ACCOUNT_ID>:secret:agentcore-connector/*",
+          "arn:aws:secretsmanager:<REGION>:<TARGET_ACCOUNT_ID>:secret:bedrock-agentcore-*"
+        ]
+      },
+      {
+        "Sid": "DeploymentCredentialSources",
+        "Effect": "Allow",
+        "Action": [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ],
+        "Resource": [
+          "arn:aws:secretsmanager:*:<TARGET_ACCOUNT_ID>:secret:agentcore-provider/*",
+          "arn:aws:secretsmanager:*:<TARGET_ACCOUNT_ID>:secret:agentcore-otel/*"
+        ]
+      },
+      {
+        "Sid": "KnowledgeBaseCredentialSources",
+        "Effect": "Allow",
+        "Action": [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ],
+        "Resource": "arn:aws:secretsmanager:*:<TARGET_ACCOUNT_ID>:secret:*",
+        "Condition": {
+          "StringEquals": {
+            "aws:ResourceTag/AgentCoreFlowsAccess": "allow"
+          }
+        }
+      },
+      {
+        "Sid": "CredentialInventory",
+        "Effect": "Allow",
+        "Action": [
+          "secretsmanager:ListSecrets"
+        ],
+        "Resource": "*"
+      }
+    ]
+  },
+  "permissions-policy-observability.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "RuntimeDashboardsAndMetrics",
+        "Effect": "Allow",
+        "Action": [
+          "cloudwatch:PutDashboard",
+          "cloudwatch:GetDashboard",
+          "cloudwatch:DeleteDashboards",
+          "cloudwatch:PutMetricData"
+        ],
+        "Resource": "*"
+      },
+      {
+        "Sid": "EvaluationAndRuntimeLogs",
+        "Effect": "Allow",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DeleteLogGroup",
+          "logs:DescribeLogGroups",
+          "logs:DescribeLogStreams",
+          "logs:GetLogEvents",
+          "logs:FilterLogEvents",
+          "logs:StartQuery",
+          "logs:GetQueryResults",
+          "logs:StopQuery",
+          "logs:DescribeIndexPolicies",
+          "logs:DescribeFieldIndexes",
+          "logs:PutIndexPolicy"
+        ],
+        "Resource": "*"
+      },
+      {
+        "Sid": "RuntimeLogGroupGovernance",
+        "Effect": "Allow",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:PutRetentionPolicy"
+        ],
+        "Resource": "arn:aws:logs:<REGION>:<TARGET_ACCOUNT_ID>:log-group:/aws/bedrock-agentcore/runtimes/*"
+      },
+      {
+        "Sid": "ToolLambdaLogGroupGovernance",
+        "Effect": "Allow",
+        "Action": [
+          "logs:CreateLogGroup",
+          "logs:PutRetentionPolicy"
+        ],
+        "Resource": "arn:aws:logs:<REGION>:<TARGET_ACCOUNT_ID>:log-group:/aws/lambda/AgentCore*"
+      },
+      {
+        "Sid": "EvaluationTraceDiscovery",
+        "Effect": "Allow",
+        "Action": [
+          "xray:GetIndexingRules",
+          "xray:UpdateIndexingRule",
+          "xray:GetGroup",
+          "xray:GetGroups",
+          "xray:CreateGroup",
+          "xray:UpdateGroup",
+          "xray:GetTraceSummaries",
+          "xray:BatchGetTraces",
+          "xray:GetTraceGraph",
+          "xray:GetServiceGraph",
+          "xray:GetSamplingRules",
+          "application-signals:Get*",
+          "application-signals:List*",
+          "application-signals:BatchGet*"
+        ],
+        "Resource": "*"
+      }
+    ]
+  },
+  "_permissions-policy-notes": "Attach every permissions-policy*.json fragment to AgentCoreFlowsDeploymentRole. The fragments are split so each remains within IAM inline/managed policy size limits and can be reviewed by service domain. AgentCore create/list resources and several service collection APIs require Resource '*'; the action set is explicit because bedrock-agentcore:* is not a reliable authorization wildcard. The platform still requires a full live target-account component matrix before this document can be called deployment-proven. ALREADY-PROVISIONED ROLES MUST BE RE-APPLIED: four changes were made after the first release of this document, and all are fail-closed, so a target account still carrying the older policy set fails its next deployment rather than degrading. (1) permissions-policy.json / AgentCoreRuntimeOwnershipTagging: CreateAgentRuntime's tags= argument is authorized as bedrock-agentcore:TagResource on the runtime being created, NOT as part of CreateAgentRuntime, and create_agent_runtime always sends the two ownership tags with no untagged fallback -- without it every runtime-creating deploy fails with AccessDeniedException naming bedrock-agentcore:TagResource (observed live in the home account before the grant existed). It is a separate conditioned statement rather than another action inside AgentCoreControlPlane because the resource ids cannot be known in advance, so the resources must stay globbed; the pinned request tags bound what it may write to this platform's own ownership pair, which is strictly less than preventing it from touching a runtime this account did not create (see RESIDUAL below). (3) permissions-policy.json / AgentCoreRuntimeOwnershipTagging gained the two workload-identity-directory resources alongside runtime/*. create_agent_runtime does not only tag the runtime: it mints and tags a workload identity in the same call, and AgentCore authorizes that against BOTH the container ARN workload-identity-directory/default AND the per-identity child, returning a 403 that names whichever check it reached first. runtime/* alone therefore denies every runtime-creating deploy at the workload-identity tag rather than at the runtime tag. This is the same container-vs-child defect measured in the platform's own account on 2026-09-22 (see AGENTCORE_TYPE_ARN_TAIL in infra/stacks/platform/step_lambdas.py, which carries the verbatim 403s); it is listed here because a fix applied to the in-account step roles and not to this document leaves cross-account deploys broken in exactly the way the in-account fix just repaired. Both container and child are required: granting only what a given 403 names still leaves the other check to fail, which five throwaway roles proved for the DeleteWorkloadIdentity verbs. (4) permissions-policy.json / AgentCoreOwnershipTagRead: bedrock-agentcore:ListTagsForResource, the READ half of the same ownership model, which this document shipped without. TagResource lets the platform stamp ownership; without the read it can never check it back, and deployment_handler.py performs that check on every delete in the cascade (assert_agentcore_resource_owned at :2365, :2389, :2410, :2430, :2551, :3706, :3733, :3806 and delete_owned_credential_provider at :2484 and :4171), all of which run against THIS assumed target session. Each read raises AccessDeniedException, which resource_ownership converts to ResourceDeletionRefused: the delete is refused -- correctly, since an unreadable owner is not proof of ownership -- and the resource is LEFT RUNNING AND BILLING in the target account. Deliberately UNCONDITIONED, unlike the tagging statement directly above it: a ListTagsForResource call sends no tags, so copying those aws:RequestTag conditions down would be unsatisfiable and would deny every read, failing closed into the very outage this statement fixes. A tighter aws:ResourceTag condition was also rejected: it would produce the right OUTCOME but replace the diagnosable refusal 'resource belongs to deployment X' with 'live ownership could not be read (AccessDeniedException)', which is indistinguishable from this bug. Its blast radius is tag metadata only -- not resource contents, configuration, or invoke. BOTH credential-provider namespaces are listed even though the manifest records only one per provider: delete_owned_credential_provider probes both for back-compat with older manifests that recorded an API-key provider as OAuth, deletes the OAuth one FIRST, and re-raises on AccessDenied because only a MISSING resource is skipped -- so a role holding the read for one namespace tears down half the providers and then fails, which is worse than failing closed. (2) permissions-policy-observability.json / RuntimeLogGroupGovernance: the runtime log group is created outside CloudFormation without retention, and applying retention is fail-closed after the manifest row is written. ToolLambdaLogGroupGovernance is the same for the gateway's tool functions: Lambda creates /aws/lambda/<function> on the first invocation without retention, so the gateway step creates or adopts it with the platform's retention before the function's target exists, fail-closed, after the function is in the deploy's abort inventory. Teardown leaves both kinds of group to expire, so neither statement grants logs:DeleteLogGroup. Note what is deliberately NOT granted in either: logs:TagResource over the account-wide runtime prefix, which would authorize relabelling every historical and foreign group under it.   BOTH ownership tag VALUES are pinned on AgentCoreRuntimeOwnershipTagging, not just ManagedBy. Pinning ManagedBy and the key list alone still authorizes bedrock-agentcore:TagResource against ANY existing runtime in the target account, because a request carrying ManagedBy=agentcore-flows plus an arbitrary AgentCoreStack value satisfies it -- and AgentCoreStack is the value teardown matches on, so that gap would let the platform forge or strip another deployment's ownership. Replace <PLATFORM_PROJECT> and <PLATFORM_ENV> with the PLATFORM stack's project and environment names (the values of PROJECT_NAME / ENVIRONMENT on the platform's step Lambdas), not the target account's: the tags are computed platform-side as {project}-{env}-{deploy region}. <REGION> is the same region you substitute everywhere else in this document: an account target is registered with exactly ONE onboarding region (its artifact bucket is regional) and a deploy requesting a different region is rejected before Step Functions starts, so this role is single-region by construction and a literal is exact. Deliberately NOT an IAM policy variable here: ${...} is Terraform interpolation syntax and would need escaping as $${...} in a heredoc/templatefile, which is a silent breakage for the Terraform consumers this document is written for. (The platform's own in-account step-role grant does use ${aws:RequestedRegion}, because there the resource region is * and the deploy region genuinely is not known when the policy is authored.) An unreplaced <PLATFORM_*> placeholder fails closed and loudly: every runtime-creating deploy is denied at CreateAgentRuntime rather than silently mis-tagging. RESIDUAL, stated rather than implied: even fully pinned, this statement still permits stamping the platform's ownership onto a runtime in the target account that the platform did not create, which would make that runtime a teardown candidate. bedrock-agentcore:TagResource has no create-only condition key (its only action condition keys are aws:RequestTag/${TagKey} and aws:TagKeys), so a dependent tag-on-create cannot be distinguished from a standalone retag in policy. Do not onboard an account that holds foreign AgentCore runtimes you are unwilling to expose to that risk. The Sid deliberately does NOT say OnCreate: bedrock-agentcore:TagResource has no create-only condition key, so nothing in this statement confines it to the tag-on-create that CreateAgentRuntime performs, and a Sid claiming otherwise would mislead the reviewer who reads only the Sid."
 }

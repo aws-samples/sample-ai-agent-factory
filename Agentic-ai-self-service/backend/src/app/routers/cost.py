@@ -13,11 +13,13 @@ Endpoint:
   ``{total_cost, total_in, total_out, by_model, from_ts, to_ts, ...}`` for
   the production version's runtime over the requested window.
 
-Ownership is enforced via the ``RuntimeSlots`` + ``AgentVersions`` tables,
-mirroring ``evaluations._resolve_owned_runtime_id``. Cross-tenant requests
-return 404 (existence-non-disclosure). The endpoint never trusts a
-tenant-supplied runtime_id — it resolves it from the owner-checked production
-slot, so the Bug-122 tenant-keyed-table collision can't occur here.
+Ownership is enforced through
+``runtime_target_context.resolve_owned_runtime_target``: an owner-checked
+``RuntimeSlots`` row selects an owner-checked ``AgentVersions`` row, whose
+immutable deployment id binds the exact target account, region, and role.
+Cross-tenant requests return 404 (existence-non-disclosure). The endpoint never
+trusts a tenant-supplied runtime_id, so the Bug-122 tenant-keyed-table collision
+can't occur here.
 """
 
 from __future__ import annotations
@@ -27,17 +29,16 @@ import os
 import re
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from app.services.agent_versions_store import (
-    get_slots_store,
-    get_versions_store,
-)
-from app.services.auth import assert_owner, get_caller_sub
+from app.services.auth import get_caller_sub
+from app.services.aws_errors import error_code
 from app.services.cost_tracking import summarize_from_logs
-from app.services.rbac import require_scopes
+from app.services.rbac import SCOPE_ADMIN, has_scopes, require_scopes
+from app.services.runtime_target_context import resolve_owned_runtime_target
 
 logger = logging.getLogger(__name__)
+_OBSERVABILITY_UNAVAILABLE = "Runtime observability is temporarily unavailable. Try again shortly."
 
 
 # Window guards: default to last 24h, cap at 90 days to bound the Logs
@@ -61,22 +62,15 @@ def _region() -> str:
 router = APIRouter(prefix="/api/runtimes", tags=["cost"])
 
 
-def _resolve_owned_runtime_id(runtime_name: str, caller_sub: str) -> tuple[str, str]:
-    """Return (runtime_id, version_id) for the production version owned by
-    *caller_sub*, or 404 if either the runtime or the slot is missing.
-
-    Mirrors ``evaluations._resolve_owned_runtime_id`` exactly: assert_owner
-    on BOTH the slot row and the version row so a bypass on either can't pass.
-    """
-    slots = get_slots_store().get(runtime_name)
-    if slots is None or not slots.production_version_id:
-        raise HTTPException(status_code=404, detail="Not found")
-    assert_owner(slots.owner_sub, caller_sub)
-    version = get_versions_store().get(runtime_name, slots.production_version_id)
-    if version is None or not version.runtime_id:
-        raise HTTPException(status_code=404, detail="Not found")
-    assert_owner(version.owner_sub, caller_sub)
-    return version.runtime_id, version.version_id
+def _service_unavailable(operation: str, exc: Exception) -> HTTPException:
+    code = error_code(exc)
+    logger.warning(
+        "%s failed: %s%s",
+        operation,
+        type(exc).__name__,
+        f" {code}" if code else "",
+    )
+    return HTTPException(status_code=503, detail=_OBSERVABILITY_UNAVAILABLE)
 
 
 def _resolve_window(from_: int | None, to: int | None) -> tuple[int, int]:
@@ -108,10 +102,28 @@ async def get_runtime_traces(
     """
     runtime_name = _validate_runtime_name(runtime_name)
     from_ts, to_ts = _resolve_window(from_, to)
-    runtime_id, version_id = _resolve_owned_runtime_id(runtime_name, caller_sub)
-    from app.services.trace_query import fetch_trace_waterfall
+    from app.services.trace_query import (
+        fetch_trace_waterfall,
+        validate_trace_id_filter,
+    )
 
-    wf = fetch_trace_waterfall(runtime_id, from_ts, to_ts, _region(), trace_id=trace_id)
+    try:
+        trace_id = validate_trace_id_filter(trace_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    target = resolve_owned_runtime_target(runtime_name, caller_sub)
+    runtime_id, version_id = target.runtime_id, target.version_id
+    try:
+        wf = fetch_trace_waterfall(
+            runtime_id,
+            from_ts,
+            to_ts,
+            target.region,
+            logs_client=target.client("logs"),
+            trace_id=trace_id,
+        )
+    except Exception as exc:
+        raise _service_unavailable("query runtime traces", exc) from exc
     wf.update({"runtime_name": runtime_name, "version_id": version_id})
     return wf
 
@@ -129,9 +141,19 @@ async def get_runtime_cost(
     """
     runtime_name = _validate_runtime_name(runtime_name)
     from_ts, to_ts = _resolve_window(from_, to)
-    runtime_id, version_id = _resolve_owned_runtime_id(runtime_name, caller_sub)
+    target = resolve_owned_runtime_target(runtime_name, caller_sub)
+    runtime_id, version_id = target.runtime_id, target.version_id
 
-    summary = summarize_from_logs(runtime_id, from_ts, to_ts, _region())
+    try:
+        summary = summarize_from_logs(
+            runtime_id,
+            from_ts,
+            to_ts,
+            target.region,
+            logs_client=target.client("logs"),
+        )
+    except Exception as exc:
+        raise _service_unavailable("query runtime cost", exc) from exc
     summary.update(
         {
             "runtime_name": runtime_name,
@@ -210,45 +232,77 @@ def _budget_key_for_scope(scope: str, key: str, caller_sub: str) -> str:
     return key
 
 
+def _caller_is_budget_admin(request: Request) -> bool:
+    """F-12: only the org-wide ``admin`` scope sees or changes another tenant's agent/tag budgets.
+
+    Reuses rbac's existing super-scope (``g-admins-super`` / legacy ``org-admin``) rather than
+    minting a budget-specific one. ``g-admins-cost`` holds cost:read/write and is a tenant here.
+    A FastAPI dependency so tests can override it; the scope check itself is rbac's.
+    """
+    return has_scopes(request, (SCOPE_ADMIN,))
+
+
+def _not_found() -> HTTPException:
+    # Same wording and status as auth.assert_owner: a 403 would confirm the row exists.
+    return HTTPException(status_code=404, detail="Not found")
+
+
 @budgets_router.get("/budgets", dependencies=[Depends(require_scopes("cost:read"))])
-async def list_budgets(caller_sub: str = Depends(get_caller_sub)) -> list[dict]:
+async def list_budgets(
+    caller_sub: str = Depends(get_caller_sub),
+    admin: bool = Depends(_caller_is_budget_admin),
+) -> list[dict]:
     from app.services.budget_store import get_budget_store
 
-    budgets = get_budget_store().list_all("default")
-    # Only surface the caller's own owner-budget + shared agent/tag budgets.
-    out = []
-    for b in budgets:
-        if b.scope == "owner" and b.key != caller_sub:
-            continue
-        out.append(
-            {"scope": b.scope, "key": b.key, "limit_usd": b.limit_usd, "warn_pct": b.warn_pct, "period": b.period}
-        )
-    return out
+    # F-12: the caller's own budgets only. Listing every agent-scope row disclosed other tenants'
+    # runtime names; a legacy row with no owner is an admin's to see, nobody else's.
+    budgets = get_budget_store().list_visible("default", caller_sub=caller_sub, admin=admin)
+    return [
+        {"scope": b.scope, "key": b.key, "limit_usd": b.limit_usd, "warn_pct": b.warn_pct, "period": b.period}
+        for b in budgets
+    ]
 
 
 @budgets_router.post("/budgets", dependencies=[Depends(require_scopes("cost:write"))])
-async def upsert_budget(body: BudgetRequest, caller_sub: str = Depends(get_caller_sub)) -> dict:
-    from app.services.budget_store import Budget, get_budget_store
+async def upsert_budget(
+    body: BudgetRequest,
+    caller_sub: str = Depends(get_caller_sub),
+    admin: bool = Depends(_caller_is_budget_admin),
+) -> dict:
+    from app.services.budget_store import Budget, BudgetOwnedByAnother, get_budget_store
 
     key = _budget_key_for_scope(body.scope, body.key, caller_sub)
-    b = get_budget_store().put(
-        Budget(
-            org_id="default",
-            scope=body.scope,
-            key=key,  # type: ignore[arg-type]
-            limit_usd=body.limit_usd,
-            warn_pct=body.warn_pct,
+    try:
+        b = get_budget_store().put_owned(
+            Budget(
+                org_id="default",
+                scope=body.scope,
+                key=key,  # type: ignore[arg-type]
+                limit_usd=body.limit_usd,
+                warn_pct=body.warn_pct,
+            ),
+            caller_sub=caller_sub,
+            admin=admin,
         )
-    )
+    except BudgetOwnedByAnother as exc:
+        raise _not_found() from exc
     return {"scope": b.scope, "key": b.key, "limit_usd": b.limit_usd, "warn_pct": b.warn_pct}
 
 
 @budgets_router.delete("/budgets/{scope}/{key}", dependencies=[Depends(require_scopes("cost:write"))])
-async def delete_budget(scope: str, key: str, caller_sub: str = Depends(get_caller_sub)) -> dict:
+async def delete_budget(
+    scope: str,
+    key: str,
+    caller_sub: str = Depends(get_caller_sub),
+    admin: bool = Depends(_caller_is_budget_admin),
+) -> dict:
     if scope not in ("owner", "agent", "tag"):
         raise HTTPException(status_code=400, detail="Invalid scope")
-    from app.services.budget_store import get_budget_store
+    from app.services.budget_store import BudgetOwnedByAnother, get_budget_store
 
     resolved_key = _budget_key_for_scope(scope, key, caller_sub)
-    get_budget_store().delete("default", scope, resolved_key)  # type: ignore[arg-type]
+    try:
+        get_budget_store().delete_owned("default", scope, resolved_key, caller_sub=caller_sub, admin=admin)  # type: ignore[arg-type]
+    except BudgetOwnedByAnother as exc:
+        raise _not_found() from exc
     return {"deleted": {"scope": scope, "key": resolved_key}}

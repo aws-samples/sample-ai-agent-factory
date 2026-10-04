@@ -55,12 +55,12 @@ def test_target_account_delegates_to_deploy_target(monkeypatch):
     monkeypatch.setattr("app.services.deploy_target.session_for_target", _fake_session_for_target)
     sc.session_for_event(
         {
-            "target_account_id": "986177197847",
+            "target_account_id": "444455556666",
             "target_region": "us-east-1",
-            "target_role_arn": "arn:aws:iam::986177197847:role/AgentCoreFlowsDeploymentRole",
+            "target_role_arn": "arn:aws:iam::444455556666:role/AgentCoreFlowsDeploymentRole",
         }
     )
-    assert called["account_id"] == "986177197847"
+    assert called["account_id"] == "444455556666"
     assert called["region"] == "us-east-1"
     assert called["require_gate"] is False  # step path trusts the deploy-time gate
     assert called["role_arn"].endswith("AgentCoreFlowsDeploymentRole")
@@ -77,5 +77,5 @@ def test_step_path_does_not_regate(monkeypatch):
         return boto3.Session(region_name="us-east-1")
 
     monkeypatch.setattr("app.services.deploy_target.session_for_target", _fake)
-    sc.session_for_event({"target_account_id": "986177197847", "target_role_arn": "arn:...role/X"})
+    sc.session_for_event({"target_account_id": "444455556666", "target_role_arn": "arn:...role/X"})
     assert seen["require_gate"] is False

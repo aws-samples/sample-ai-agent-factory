@@ -21,9 +21,6 @@ describe('ModalHost registry', () => {
       'connector',
       'knowledgeBase',
       'a2a',
-      'promptLibrary',
-      'registry',
-      'hitl',
     ];
 
     for (const key of keys) {

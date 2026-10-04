@@ -16,11 +16,26 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
+import uuid
 
 import boto3
 
 from app.services.aws_errors import is_error
+from app.services.aws_pagination import list_all
+from app.services.deletion_confirmation import (
+    DeletionFailedAfterAccept,
+    wait_until_absent,
+)
+from app.services.iam_boundary import create_role_kwargs, ensure_role_boundary
+from app.services.naming import regional_iam_role_name
+from app.services.resource_ownership import (
+    ResourceDeletionRefused,
+    assert_agentcore_resource_owned,
+    assert_this_deployment_may_mutate,
+)
+from app.services.resource_tagging import governed_tag_list, governed_tags
 
 logger = logging.getLogger(__name__)
 
@@ -135,10 +150,14 @@ def create_harness_iam_role(
     iam_client,
     role_name: str,
     *,
+    harness_name: str,
     model_id: str | None = None,
     memory_arn: str | None = None,
     gateway_arn: str | None = None,
-) -> str:
+    region: str | None = None,
+    return_provenance: bool = False,
+    resource_tags: dict | None = None,
+) -> str | tuple[str, bool]:
     """Create or reuse an execution role the Harness can assume.
 
     The Harness needs to invoke Bedrock models, read/write AgentCore Memory,
@@ -152,6 +171,15 @@ def create_harness_iam_role(
     is omitted entirely (no ``Resource: "*"`` fallback) — the harness-owned
     default memory and account-level discovery verbs have their own dedicated,
     tightly-scoped statements, so a bare harness still works.
+
+    *harness_name* is REQUIRED, and required rather than optional on purpose. It
+    is the only way to scope the auto-provisioned default memory (see the
+    ``AgentCoreHarnessOwnedMemory`` statement below), and neither fallback for a
+    missing value is acceptable: ``memory/*`` would let any harness read every
+    other agent's conversation memory in the account (ARCC ``cnt_L4ZLZgjrCctfxl``,
+    least privilege), and omitting the statement would silently reproduce the
+    outage that statement exists to prevent. A missing argument is therefore a
+    TypeError at the call site instead of a quiet grant or a quiet denial.
     """
     import json
 
@@ -165,19 +193,38 @@ def create_harness_iam_role(
             }
         ],
     }
-    managed_tag = [{"Key": "ManagedBy", "Value": "agentcore-flows"}]
+    # `governed_tag_list`, not a bare ManagedBy: that names the PRODUCT, so a role
+    # carrying only it is indistinguishable from another deployment's role in the
+    # same account, and the already-exists branch below has to be able to tell. The
+    # governance half is additive to that pair, never a substitute for it -- the
+    # already-exists branch still matches on ManagedBy + AgentCoreStack, so a tag
+    # policy cannot change what this role is allowed to reuse (ARCC cnt_6gBImtb08AJqCB
+    # is why the tags are here; ownership is deliberately not one of them).
+    managed_tag = governed_tag_list(region, resource_tags)
     try:
         resp = iam_client.create_role(
             RoleName=role_name,
             AssumeRolePolicyDocument=json.dumps(trust_policy),
             Description=f"Execution role for AgentCore Harness {role_name}",
             Tags=managed_tag,
+            **create_role_kwargs(),
         )
         role_arn = resp["Role"]["Arn"]
+        role_created = True
         logger.info("Created harness IAM role: %s", role_arn)
     except iam_client.exceptions.EntityAlreadyExistsException:
-        role_arn = iam_client.get_role(RoleName=role_name)["Role"]["Arn"]
+        # Prove it is ours before tagging it and overwriting its inline policy below.
+        _existing = iam_client.get_role(RoleName=role_name)["Role"]
+        assert_this_deployment_may_mutate(
+            f"IAM role {role_name}",
+            _existing.get("Tags"),
+            region,
+        )
+        role_arn = _existing["Arn"]
+        role_created = False
         logger.info("Reusing existing harness IAM role: %s", role_arn)
+        # F-06: retrofit the permissions boundary once ownership is proven.
+        ensure_role_boundary(iam_client, role_name, role=_existing)
         try:
             iam_client.tag_role(RoleName=role_name, Tags=managed_tag)
         except Exception as e:  # noqa: BLE001
@@ -240,16 +287,47 @@ def create_harness_iam_role(
                 "Resource": scoped_resources,
             }
         )
+    # Sanitized here rather than trusting the caller: this string is interpolated
+    # into an IAM Resource pattern, and ``sanitize_harness_name`` restricts it to
+    # ``[a-zA-Z][a-zA-Z0-9_]{0,39}`` — no ``*`` or ``?``, so a hostile agent name
+    # cannot widen the pattern. It is also idempotent, so the callers that already
+    # sanitized (harness_step.py:90) get the identical name CreateHarness receives,
+    # which is what makes the prefix match at all.
+    _harness_memory_prefix = sanitize_harness_name(harness_name)
     statements += [
         {
-            # CreateHarness ALWAYS auto-provisions a DEFAULT AgentCore Memory
-            # for the harness session (memory/harness_<name>_*), whose ARN is
-            # NOT known when this role policy is built (it's minted later by the
-            # harness service). Without memory data-plane perms on that ARN, the
-            # first InvokeHarness fails with AccessDenied on ListEvents
-            # (verified live: "not authorized to perform bedrock-agentcore:
-            # ListEvents on resource memory/harness_<name>_..."). Scope the
-            # memory data-plane verbs to the harness-owned memory name prefix.
+            # CreateHarness ALWAYS auto-provisions a DEFAULT AgentCore Memory for
+            # the harness session, whose ARN is NOT known when this role policy is
+            # built (it is minted later by the harness service). Without memory
+            # data-plane perms on it, the first InvokeHarness fails on ListEvents.
+            #
+            # The memory is named ``<harnessName>-<10 alnum>`` -- the harness's own
+            # name with a random tail, the same shape as the harnessId. It is NOT
+            # under any ``harness_`` prefix. This statement used to say
+            # ``memory/harness_*``, which matches only a harness a user happened to
+            # name ``harness_*``; the harness name is the user's agent name run
+            # through ``sanitize_harness_name``, so for every normally-named agent
+            # this granted nothing and harness authoring mode was dead on first
+            # invoke. The old "verified live" note was true of a probe whose name
+            # began with ``harness_`` -- a self-fulfilling sample. Measured live
+            # 2026-09-24 on acfe2e-p0920, deployment aa3f6767, via the product's own
+            # POST /api/test-runtime:
+            #   User: .../assumed-role/AgentCoreHarness-p0bharn1790232124_dda45e47/
+            #   BedrockAgentCore-0f0aa378-... is not authorized to perform:
+            #   bedrock-agentcore:ListEvents on resource:
+            #   arn:aws:bedrock-agentcore:us-east-1:...:memory/
+            #   p0bharn1790232124_dda45e47-sfd0kpCXwL
+            # The route returns a generic "Harness invocation failed" (CodeQL
+            # py/stack-trace-exposure), so this is recoverable from the deployment
+            # Lambda's log group and nowhere else -- which is how it shipped.
+            #
+            # ``<harnessName>-*`` is safe at the MAXIMUM name length, which is the
+            # one case that could have broken it: the name caps at 40 and the memory
+            # id would be 51, so truncation of the name portion would make this
+            # pattern miss. Measured with a deliberately 40-char name
+            # (deployment e641c575): harnessName 40 chars, memory id 51 chars,
+            # ``p0bharnlongnamemeasuringtruncation40chr_-Sit25JGw75`` -- the name is
+            # carried whole and only the tail is appended. No truncation.
             "Sid": "AgentCoreHarnessOwnedMemory",
             "Effect": "Allow",
             "Action": [
@@ -262,8 +340,8 @@ def create_harness_iam_role(
                 "bedrock-agentcore:ListMemoryRecords",
             ],
             "Resource": [
-                "arn:aws:bedrock-agentcore:*:*:memory/harness_*",
-                "arn:aws:bedrock-agentcore:*:*:memory/harness_*/*",
+                f"arn:aws:bedrock-agentcore:*:*:memory/{_harness_memory_prefix}-*",
+                f"arn:aws:bedrock-agentcore:*:*:memory/{_harness_memory_prefix}-*/*",
             ],
         },
         {
@@ -315,6 +393,8 @@ def create_harness_iam_role(
         PolicyName="HarnessExecutionPolicy",
         PolicyDocument=json.dumps(policy),
     )
+    if return_provenance:
+        return role_arn, role_created
     return role_arn
 
 
@@ -361,30 +441,60 @@ def build_harness_tools(
 
 
 def ensure_gateway_outbound_provider(
-    agentcore_ctrl, harness_name: str, gateway_client_info: dict
-) -> tuple[str | None, list]:
+    agentcore_ctrl,
+    harness_name: str,
+    gateway_client_info: dict,
+    *,
+    secrets_client=None,
+    cognito_client=None,
+    return_provenance: bool = False,
+    region: str | None = None,
+    resource_tags: dict | None = None,
+) -> tuple[str | None, list] | tuple[str | None, list, bool]:
     """Register an OAuth2 credential provider so a harness can call a CUSTOM_JWT
     gateway, derived from that gateway's Cognito client_info.
 
-    Returns (provider_arn, scopes). Returns (None, []) if client_info lacks the
-    fields needed (then the caller wires the gateway with no outbound auth).
+    Returns ``(provider_arn, scopes)`` by default.  With
+    ``return_provenance=True`` it returns
+    ``(provider_arn, scopes, created_by_deployment)`` so the manifest does not
+    turn a conflict-recovered provider into deletion authority. Returns an empty
+    ARN/scopes (and ``False`` provenance) if client_info lacks the fields needed.
     Mirrors the internal-MCP CustomOauth2 registration in gateway_deployer.
     """
     import re
 
+    from app.services.gateway_deployer import _pool_region, resolve_client_secret
+
+    def _result(
+        provider_arn: str | None,
+        scopes: list,
+        created_by_deployment: bool,
+    ):
+        if return_provenance:
+            return provider_arn, scopes, created_by_deployment
+        return provider_arn, scopes
+
     discovery_url = gateway_client_info.get("discovery_url")
     client_id = gateway_client_info.get("client_id")
-    client_secret = gateway_client_info.get("client_secret")
+    # `client_info` no longer carries the secret itself — it is re-read from
+    # Cognito (or dereferenced from Secrets Manager) at the moment of use, because
+    # client_info travels through the Step Functions execution history, the
+    # DynamoDB deployment item and GET /api/deploy/{id}. See resolve_client_secret.
+    client_secret = resolve_client_secret(
+        gateway_client_info,
+        secrets_client=secrets_client,
+        cognito_client=cognito_client,
+    )
     scope = gateway_client_info.get("scope", "")
     user_pool_id = gateway_client_info.get("user_pool_id")
-    region = gateway_client_info.get("region")
+    region = region or gateway_client_info.get("region")
 
     # Cognito gateways created by deploy_gateway expose user_pool_id but derive the
     # discovery URL from it; reconstruct if absent.
     if not discovery_url and user_pool_id:
         # region is embedded in the pool id prefix (e.g. us-west-2_abc); fall back
         # to the provided region or parse from the token endpoint.
-        reg = region
+        reg = gateway_client_info.get("user_pool_region") or _pool_region(user_pool_id)
         if not reg:
             te = gateway_client_info.get("token_endpoint", "")
             m = re.search(r"\.auth\.([a-z0-9-]+)\.amazoncognito", te)
@@ -396,9 +506,10 @@ def ensure_gateway_outbound_provider(
             "Gateway client_info lacks discovery_url/client_id/client_secret; "
             "harness gateway tool will have NO outbound auth (401 likely if gateway is CUSTOM_JWT)"
         )
-        return None, []
+        return _result(None, [], False)
 
     provider_name = (re.sub(r"[^a-zA-Z0-9_-]", "-", f"harness-gw-{harness_name}")[:60]) or "harness-gw-cred"
+    provider_created = False
     try:
         resp = agentcore_ctrl.create_oauth2_credential_provider(
             name=provider_name,
@@ -410,8 +521,10 @@ def ensure_gateway_outbound_provider(
                     "clientSecret": client_secret,
                 }
             },
+            tags=governed_tags(region, resource_tags),
         )
         provider_arn = resp["credentialProviderArn"]
+        provider_created = True
         logger.info("Created harness gateway outbound OAuth provider %s", provider_name)
     except Exception as e:  # noqa: BLE001
         # "already exists" fallback kept: conflicts can surface as a
@@ -419,14 +532,24 @@ def ensure_gateway_outbound_provider(
         if is_error(e, "ConflictException") or "already exists" in str(e):
             try:
                 got = agentcore_ctrl.get_oauth2_credential_provider(name=provider_name)
+                assert_agentcore_resource_owned(
+                    agentcore_ctrl,
+                    "oauth2_credential_provider",
+                    provider_name,
+                    region,
+                )
                 provider_arn = got.get("credentialProviderArn", "")
-            except Exception:  # noqa: BLE001
-                logger.warning("Outbound provider %s conflicted but lookup failed; continuing without", provider_name)
-                return None, []
+            except Exception as lookup_exc:  # noqa: BLE001
+                raise RuntimeError(
+                    "A harness outbound OAuth provider with this name already "
+                    "exists, but its ownership and ARN could not be verified. "
+                    "Refusing to create a harness that would silently omit or "
+                    "reuse an untrusted gateway credential."
+                ) from lookup_exc
         else:
             raise
     scopes = [scope] if scope else []
-    return provider_arn, scopes
+    return _result(provider_arn, scopes, provider_created)
 
 
 def create_harness(
@@ -443,6 +566,8 @@ def create_harness(
     max_tokens: int = 4096,
     temperature: float = 0.7,
     env_vars: dict | None = None,
+    region: str | None = None,
+    resource_tags: dict | None = None,
 ) -> dict:
     """Create an AgentCore Harness. Returns {harness_id, arn, status}.
 
@@ -454,6 +579,7 @@ def create_harness(
     create_params: dict = {
         "harnessName": harness_name,
         "executionRoleArn": role_arn,
+        "tags": governed_tags(region, resource_tags),
     }
     if model_id:
         model_config = {
@@ -528,6 +654,13 @@ def create_harness(
             logger.info("Harness '%s' already exists, looking up", harness_name)
             existing = _find_harness_by_name(agentcore_ctrl, harness_name)
             if existing:
+                assert_agentcore_resource_owned(
+                    agentcore_ctrl,
+                    "harness",
+                    existing["harness_id"],
+                    region,
+                )
+                existing["created_by_deployment"] = False
                 return existing
         raise
 
@@ -537,33 +670,75 @@ def create_harness(
     harness_id = h.get("harnessId", "")
     arn = h.get("arn", h.get("harnessArn", ""))
     logger.info("Created harness: id=%s, arn=%s", harness_id, arn)
-    return {"harness_id": harness_id, "arn": arn, "status": h.get("status", "CREATING")}
+    return {
+        "harness_id": harness_id,
+        "arn": arn,
+        "status": h.get("status", "CREATING"),
+        "created_by_deployment": True,
+    }
 
 
 def _find_harness_by_name(agentcore_ctrl, harness_name: str) -> dict | None:
     """Paginate list_harnesses to find one by name. Returns {harness_id,arn,status}."""
-    next_token = None
-    for _ in range(20):
-        kwargs = {}
-        if next_token:
-            kwargs["nextToken"] = next_token
-        try:
-            resp = agentcore_ctrl.list_harnesses(**kwargs)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("list_harnesses failed: %s", e)
-            return None
-        items = resp.get("harnesses", resp.get("harnessSummaries", resp.get("items", [])))
-        for h in items:
-            if h.get("harnessName") == harness_name:
-                return {
-                    "harness_id": h.get("harnessId", ""),
-                    "arn": h.get("arn", h.get("harnessArn", "")),
-                    "status": h.get("status", ""),
-                }
-        next_token = resp.get("nextToken")
-        if not next_token:
-            break
+    try:
+        items = list_all(
+            agentcore_ctrl,
+            "list_harnesses",
+            item_keys=("harnesses", "harnessSummaries", "items"),
+            request={"maxResults": 100},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("list_harnesses failed: %s", e)
+        return None
+    for h in items:
+        if h.get("harnessName") == harness_name:
+            return {
+                "harness_id": h.get("harnessId", ""),
+                "arn": h.get("arn", h.get("harnessArn", "")),
+                "status": h.get("status", ""),
+            }
     return None
+
+
+#: Every field name AgentCore has been observed to report a lifecycle failure under, in the
+#: order they are tried. Not a guess at one name: gateways use ``statusReasons`` (a list),
+#: runtimes use ``failureReason``, and the harness shape is undocumented and unverified, so
+#: the reader accepts all of them rather than betting on one.
+_HARNESS_FAILURE_REASON_KEYS = (
+    "failureReason",
+    "statusReason",
+    "statusReasons",
+    "failureReasons",
+)
+
+
+def _harness_failure_reason(harness: dict) -> str:
+    """Best-effort human-readable failure reason out of a get_harness/delete_harness body.
+
+    Returns ``""`` when the body carries none, so the caller can fall back to the status
+    alone rather than printing an empty separator. Values may be a string or a list of
+    strings; a list is joined rather than indexed, because a truncated multi-reason failure
+    is how the underlying cause gets hidden.
+
+    Deliberately total: this runs on an already-failing path, so it must never be the thing
+    that raises. A malformed body costs the reason, not the error.
+    """
+    if not isinstance(harness, dict):
+        return ""
+    parts: list[str] = []
+    for key in _HARNESS_FAILURE_REASON_KEYS:
+        value = harness.get(key)
+        if not value:
+            continue
+        if isinstance(value, str):
+            parts.append(value.strip())
+        elif isinstance(value, (list, tuple)):
+            parts.extend(str(v).strip() for v in value if v)
+        else:
+            parts.append(str(value).strip())
+    # Deduplicate while preserving order: the same text often arrives under two keys, and
+    # printing it twice reads like two separate failures.
+    return "; ".join(dict.fromkeys(p for p in parts if p))
 
 
 def wait_for_harness_ready(agentcore_ctrl, harness_id: str, timeout: int = 600) -> dict:
@@ -576,18 +751,38 @@ def wait_for_harness_ready(agentcore_ctrl, harness_id: str, timeout: int = 600) 
             status = h.get("status", "")
             logger.info("Harness %s status: %s", harness_id, status)
             if status in ("READY", "ACTIVE"):
+                environment = (h.get("environment") or {}).get("agentCoreRuntimeEnvironment") or {}
                 return {
                     "success": True,
                     "harness_id": harness_id,
                     "arn": h.get("arn", h.get("harnessArn", "")),
                     "status": status,
+                    # The runtime AgentCore created to host this harness. Its DEFAULT log group holds every
+                    # conversation the harness serves (harness_step bounds it).
+                    "backing_runtime_id": str(environment.get("agentRuntimeId") or ""),
                 }
             if "FAILED" in status:
+                # Carry the service's OWN reason, not just the status. Measured live
+                # 2026-09-22 on acfe2e-p0920: a harness reached CREATE_FAILED because
+                # CreateHarness asynchronously creates and tags a backing agent runtime
+                # under the CALLER's role, and that role held no TagResource on runtime/*.
+                # The 403 (Service: BedrockAgentcoreRuntimeControl, a different service
+                # from the API that was called) appeared in NO log group -- a full sweep of
+                # every step log group found nothing. It existed only in this response
+                # body. Returning "Harness entered CREATE_FAILED" and dropping `h` on the
+                # floor made a plain IAM denial look like an unexplained service failure,
+                # and it is what made the grant take a second live round to find.
+                #
+                # Every key is tried because the field name is not contractual here and an
+                # absent one must not mask a present one: AgentCore spells this
+                # `statusReasons` (a list) on gateways and `failureReason` on runtimes, and
+                # the harness shape is unverified. Unknown-but-present beats silent.
+                reason = _harness_failure_reason(h)
                 return {
                     "success": False,
                     "harness_id": harness_id,
                     "status": status,
-                    "error": f"Harness entered {status}",
+                    "error": f"Harness entered {status}{f': {reason}' if reason else ''}",
                 }
         except Exception as e:  # noqa: BLE001
             logger.warning("Error checking harness status: %s", e)
@@ -599,6 +794,26 @@ def wait_for_harness_ready(agentcore_ctrl, harness_id: str, timeout: int = 600) 
     }
 
 
+_W3C_TRACE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def normalize_trace_id(trace_id: str | None) -> str:
+    """Return a W3C trace id (32 lowercase hex chars), minting one if needed.
+
+    Accepts a W3C id, or an X-Ray root (``1-<8 hex>-<24 hex>``) which is folded
+    into its 32-hex form. Anything else is replaced by a fresh id so the invoke
+    never fails on a malformed caller value.
+    """
+    if trace_id:
+        candidate = trace_id.strip().lower()
+        if candidate.startswith("1-") and candidate.count("-") == 2:
+            candidate = candidate.replace("-", "")[1:]
+        if _W3C_TRACE_ID_RE.match(candidate):
+            return candidate
+        logger.warning("invoke_harness: ignoring malformed trace_id %r", trace_id[:64])
+    return uuid.uuid4().hex
+
+
 def invoke_harness(
     region: str,
     harness_arn: str,
@@ -606,18 +821,32 @@ def invoke_harness(
     session_id: str,
     *,
     timeout_seconds: int | None = None,
+    trace_id: str | None = None,
+    agentcore_data_client=None,
 ) -> dict:
     """Invoke a Harness (data plane) and collect the streamed response.
 
-    Returns {success, output, stop_reason, tool_calls, error}. The session id is
-    padded to the >= 33 char requirement. Reuse the same session id to continue a
-    conversation in the same environment (memory continuity).
+    Returns {success, output, stop_reason, tool_calls, error, trace_id}. The
+    session id is padded to the >= 33 char requirement. Reuse the same session id
+    to continue a conversation in the same environment (memory continuity).
+
+    Trace correlation (verified live 2026-09-14): InvokeHarness accepts
+    ``traceId`` and ``traceParent``; only the W3C ``traceParent`` is honoured
+    for propagation — with ``traceId`` alone the harness mints its own id. The
+    trace id we send flows to every downstream AgentCore span, including the
+    Memory ``CreateEvent``/``ListEvents`` spans in ``aws/spans``. Memory APPLICATION_LOGS never carry a trace id, so this is the
+    only handle that ties a harness turn to its memory activity — we ALWAYS send
+    one (caller-supplied or minted here) and hand it back as ``trace_id``. See
+    ``services/memory_trace_lookup.py`` for the log -> span -> trace join.
     """
-    data = _create_agentcore_client(region)
+    data = agentcore_data_client or _create_agentcore_client(region)
+    trace_id = normalize_trace_id(trace_id)
     params: dict = {
         "harnessArn": harness_arn,
         "runtimeSessionId": pad_session_id(session_id),
         "messages": [{"role": "user", "content": [{"text": prompt}]}],
+        "traceId": trace_id,
+        "traceParent": f"00-{trace_id}-{uuid.uuid4().hex[:16]}-01",
     }
     if timeout_seconds:
         params["timeoutSeconds"] = timeout_seconds
@@ -635,6 +864,7 @@ def invoke_harness(
             "output": "",
             "stop_reason": "",
             "tool_calls": [],
+            "trace_id": trace_id,
         }
 
     text_parts: list[str] = []
@@ -665,6 +895,7 @@ def invoke_harness(
             "output": "".join(text_parts),
             "stop_reason": stop_reason,
             "tool_calls": tool_calls,
+            "trace_id": trace_id,
         }
 
     # Loom-study 2.4 — HITL for MANAGED (harness) agents. Direct-code agents get
@@ -684,6 +915,7 @@ def invoke_harness(
         "tool_calls": tool_calls,
         "approval_required": approval_required,
         "error": error,
+        "trace_id": trace_id,
     }
 
 
@@ -769,7 +1001,15 @@ def _harness_name_from_id(harness_id: str) -> str:
     return harness_id
 
 
-def destroy_harness(harness_id: str, region: str) -> dict:
+def destroy_harness(
+    harness_id: str,
+    region: str,
+    *,
+    agentcore_ctrl=None,
+    confirmation_attempts: int = 70,
+    confirmation_interval: float = 8.0,
+    confirmation_deadline: float | None = None,
+) -> dict:
     """Delete a Harness and its harness->gateway outbound OAuth provider. Idempotent.
 
     The outbound provider is named deterministically (``harness-gw-<harness_name>``)
@@ -780,27 +1020,98 @@ def destroy_harness(harness_id: str, region: str) -> dict:
     Note: this boto3/service build exposes only Create/Get/List/Update/Delete
     Harness — there are no separate harness-endpoint operations.
     """
-    agentcore_ctrl = _create_agentcore_control_client(region)
+    agentcore_ctrl = agentcore_ctrl or _create_agentcore_control_client(region)
     resolved = _resolve_harness_identifier(agentcore_ctrl, harness_id)
     harness_name = _harness_name_from_id(resolved)
 
     result: dict
     try:
-        agentcore_ctrl.delete_harness(harnessId=resolved)
-        logger.info("Deleted harness %s", resolved)
-        result = {"success": True, "harness_id": resolved}
-    except Exception as e:  # noqa: BLE001
-        if is_error(e, "ResourceNotFoundException", "NotFoundException"):
-            result = {"success": True, "harness_id": resolved, "note": "already gone"}
+        assert_agentcore_resource_owned(
+            agentcore_ctrl,
+            "harness",
+            resolved,
+            region,
+        )
+    except ResourceDeletionRefused as exc:
+        return {
+            "success": False,
+            "harness_id": resolved,
+            "protected": True,
+            "retained": True,
+            "note": str(exc),
+        }
+    except Exception as exc:  # noqa: BLE001
+        if is_error(exc, "ResourceNotFoundException", "NotFoundException"):
+            result = {
+                "success": True,
+                "harness_id": resolved,
+                "note": "already gone",
+            }
         else:
-            result = {"success": False, "harness_id": resolved, "error": str(e)}
+            return {
+                "success": False,
+                "harness_id": resolved,
+                "error": f"Harness ownership read failed ({type(exc).__name__})",
+            }
+    else:
+        result = {}
+
+    if not result:
+        try:
+            agentcore_ctrl.delete_harness(harnessId=resolved)
+            wait_until_absent(
+                resource_label=f"harness {resolved}",
+                read=lambda: agentcore_ctrl.get_harness(harnessId=resolved),
+                max_attempts=confirmation_attempts,
+                delay_seconds=confirmation_interval,
+                deadline_monotonic=confirmation_deadline,
+            )
+            logger.info("Confirmed harness %s deleted", resolved)
+            result = {"success": True, "harness_id": resolved}
+        except DeletionFailedAfterAccept as e:
+            result = {
+                "success": False,
+                "harness_id": resolved,
+                "error": str(e),
+            }
+        except ResourceDeletionRefused as e:
+            result = {
+                "success": False,
+                "harness_id": resolved,
+                "retained": True,
+                "note": str(e),
+            }
+        except Exception as e:  # noqa: BLE001
+            if is_error(e, "ResourceNotFoundException", "NotFoundException"):
+                result = {"success": True, "harness_id": resolved, "note": "already gone"}
+            else:
+                result = {"success": False, "harness_id": resolved, "error": str(e)}
+
+    # The provider is part of the harness's attached graph.  If DeleteHarness
+    # failed, removing its credential provider would leave a still-live harness
+    # unable to call its gateway.  Only clean the provider after the harness is
+    # conclusively deleted/already absent.
+    if not result.get("success", False):
+        return result
 
     # Best-effort delete of the outbound OAuth provider (no orphan).
     provider_name = f"harness-gw-{harness_name}"[:60]
     try:
+        assert_agentcore_resource_owned(
+            agentcore_ctrl,
+            "oauth2_credential_provider",
+            provider_name,
+            region,
+        )
         agentcore_ctrl.delete_oauth2_credential_provider(name=provider_name)
         logger.info("Deleted harness gateway outbound provider %s", provider_name)
         result["outbound_provider_deleted"] = provider_name
+    except ResourceDeletionRefused as exc:
+        logger.warning(
+            "Harness outbound provider retained: %s",
+            exc,
+        )
+        result["outbound_provider_retained"] = provider_name
     except Exception as e:  # noqa: BLE001
         if not is_error(e, "ResourceNotFoundException", "NotFoundException"):
             logger.warning("Harness outbound provider %s delete: %s", provider_name, str(e)[:120])
@@ -823,7 +1134,10 @@ def get_shared_or_new_harness_role(
     model_id: str | None = None,
     memory_arn: str | None = None,
     gateway_arn: str | None = None,
-) -> str:
+    region: str | None = None,
+    return_provenance: bool = False,
+    resource_tags: dict | None = None,
+) -> str | tuple[str, bool]:
     """Return a harness execution role ARN.
 
     Prefers a pre-created shared role (env SHARED_HARNESS_ROLE_ARN, mirroring the
@@ -833,11 +1147,22 @@ def get_shared_or_new_harness_role(
     """
     shared = os.environ.get("SHARED_HARNESS_ROLE_ARN", "")
     if shared:
-        return shared
+        return (shared, False) if return_provenance else shared
     return create_harness_iam_role(
         iam_client,
-        f"AgentCoreHarness-{sanitize_harness_name(harness_name)}",
+        regional_iam_role_name(
+            f"AgentCoreHarness-{sanitize_harness_name(harness_name)}",
+            region,
+        ),
+        # The SAME name that becomes the harness name, so the exec role's memory
+        # pattern matches the memory CreateHarness derives from it. Passing the role
+        # name here instead would scope to ``memory/AgentCoreHarness-<name>-*`` and
+        # silently restore the outage.
+        harness_name=harness_name,
         model_id=model_id,
         memory_arn=memory_arn,
         gateway_arn=gateway_arn,
+        region=region,
+        return_provenance=return_provenance,
+        resource_tags=resource_tags,
     )

@@ -255,7 +255,7 @@ export const facts: Record<ProjectId, ProjectFacts> = {
         },
         {
           file: SELF_SERVICE_README,
-          quote: 'pre-creates Cognito **users** but assigns them to **no group**',
+          quote: 'pre-creates Cognito **users** and puts each one in `g-users-default` + `t-user`',
         },
       ],
     },
@@ -306,10 +306,10 @@ export const facts: Record<ProjectId, ProjectFacts> = {
     },
     authAndPolicy: {
       value:
-        'Cognito user pool with group-based scopes (RBAC advisory by default), owner-scoped tenant isolation, and Cedar ENFORCE per Policy node',
+        'Cognito user pool with group-based scopes (RBAC enforced by default), owner-scoped tenant isolation, and Cedar ENFORCE per Policy node',
       source: {
         file: SELF_SERVICE_README,
-        quote: 'pre-creates Cognito **users** but assigns them to **no group**',
+        quote: 'pre-creates Cognito **users** and puts each one in `g-users-default` + `t-user`',
       },
     },
     status: {

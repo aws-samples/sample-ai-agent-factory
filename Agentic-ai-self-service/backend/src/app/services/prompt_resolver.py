@@ -3,7 +3,7 @@
 When a runtime config references a library prompt instead of inlining the
 body, this hook resolves the reference to the actual prompt text BEFORE the
 config is serialized into the Step Functions input. The resolved body then
-flows through codegen unchanged, where ``_escape_triple_quotes`` already makes
+flows through codegen unchanged, where ``_as_triple_quoted_body`` already makes
 multi-line bodies injection-safe.
 
 Two reference forms are supported:

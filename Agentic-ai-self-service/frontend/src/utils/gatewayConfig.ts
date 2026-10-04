@@ -108,10 +108,22 @@ export interface TargetTypeOption {
   description: string;
 }
 
+/**
+ * Target families offered in the canvas.
+ *
+ * `smithy` is deliberately NOT offered. It was, labelled "Use pre-configured Smithy
+ * models (e.g., DynamoDB)", and it could never deploy: AgentCore's `smithyModel` takes
+ * an `ApiSchemaConfiguration` — an inline or S3-staged Smithy JSON AST, with no notion
+ * of a model *name* — and nothing in this platform turns `modelName: 'dynamodb'` into
+ * one. The backend skipped the target with a warning and the deployment reported
+ * success, so picking this option produced an agent silently missing its tool. The
+ * `smithy` type, its editor case and the backend branch all remain, so an API caller
+ * that supplies real `model_content` still works; only the dead choice is withdrawn.
+ * Offering it again means shipping a source of Smithy models first.
+ */
 export const TARGET_TYPE_OPTIONS: TargetTypeOption[] = [
   { value: 'openapi', label: 'OpenAPI', description: 'Import tools from OpenAPI specification' },
   { value: 'lambda', label: 'AWS Lambda', description: 'Invoke Lambda functions as tools' },
-  { value: 'smithy', label: 'Smithy Model', description: 'Use pre-configured Smithy models (e.g., DynamoDB)' },
   { value: 'mcp_server', label: 'MCP Server', description: 'Connect to existing MCP servers' },
 ];
 

@@ -42,9 +42,40 @@ sys.path.insert(0, os.path.join(_HERE, "..", "backend", "src"))
 
 REGION = os.environ.get("AWS_REGION", "us-west-2")
 SUFFIX = "mcpext"
+# Every resource name is prefixed with this, so a run in a shared account is
+# attributable and sweepable by prefix. Default "" keeps the historical names.
+NAME_PREFIX = os.environ.get("MCP_VERIFY_NAME_PREFIX", "").strip()
 CATALOG_ID = sys.argv[1] if len(sys.argv) > 1 else "aws-knowledge"
 # "catalog" (default) or "custom" — see the module docstring.
 TARGET_MODE = os.environ.get("MCP_TARGET_MODE", "catalog").strip().lower()
+
+# Per-server probe: which tool to call through the gateway, with what arguments,
+# and the canary substrings a REAL upstream answer must contain. Keyed by
+# catalog id because each Tier-1 server exposes a different tool set — a single
+# hardcoded tool name only ever verified aws-knowledge and made the other three
+# Tier-1 ids unrunnable.
+PROBES = {
+    "aws-knowledge": (
+        "search_documentation",
+        {"search_phrase": "What is Amazon Bedrock AgentCore Gateway"},
+        ("agentcore", "gateway", "bedrock"),
+    ),
+    "deepwiki": (
+        "ask_question",
+        {"repoName": "modelcontextprotocol/python-sdk", "question": "What transport does the server support?"},
+        ("mcp", "server", "transport"),
+    ),
+    "cloudflare-docs": (
+        "search_cloudflare_documentation",
+        {"query": "How do I bind a KV namespace to a Worker?"},
+        ("worker", "cloudflare", "kv"),
+    ),
+    "shopify-storefront": (
+        "search_shop_policies_and_faqs",
+        {"query": "What is the refund policy?"},
+        ("policy", "refund", "shop"),
+    ),
+}
 ctrl = boto3.client("bedrock-agentcore-control", region_name=REGION)
 cog = boto3.client("cognito-idp", region_name=REGION)
 
@@ -85,11 +116,11 @@ def cleanup():
 
 def main():
     # 1. Cognito pool + resource server + M2M client
-    pool = cog.create_user_pool(PoolName=f"mcp-ext-{SUFFIX}")["UserPool"]
+    pool = cog.create_user_pool(PoolName=f"{NAME_PREFIX}mcp-ext-{SUFFIX}")["UserPool"]
     pid = pool["Id"]
     created["pool_id"] = pid
     log(f"pool {pid}")
-    domain = f"mcpext-{pid.split('_')[1].lower()}"
+    domain = f"{NAME_PREFIX.lower()}mcpext-{pid.split('_')[1].lower()}"
     cog.create_user_pool_domain(Domain=domain, UserPoolId=pid)
     created["domain"] = domain
     scope = "gateway/invoke"
@@ -114,13 +145,18 @@ def main():
     time.sleep(8)  # let pool/domain settle
 
     # 2. Gateway with CUSTOM_JWT authorizer
+    # Pinned exactly as the product pins it (F-62): unpinned, the gateway negotiates only
+    # 2025-03-26 and this probe would verify a gateway the product no longer builds.
+    from app.services.mcp_gateway_protocol import pinned_protocol_configuration
+
     role_arn = _ensure_gateway_role()
     gw = ctrl.create_gateway(
-        name=f"mcpextgw{SUFFIX}",
+        name=f"{NAME_PREFIX}mcpextgw{SUFFIX}",
         roleArn=role_arn,
         protocolType="MCP",
         authorizerType="CUSTOM_JWT",
         authorizerConfiguration={"customJWTAuthorizer": {"discoveryUrl": disc, "allowedClients": [cid]}},
+        protocolConfiguration=pinned_protocol_configuration(),
     )
     gid = gw["gatewayId"]
     created["gateway_id"] = gid
@@ -151,7 +187,7 @@ def main():
             ctrl,
             gid,
             REGION,
-            [{"name": "aws-knowledge", "endpoint": raw_endpoint, "auth_type": "none"}],
+            [{"name": CATALOG_ID, "endpoint": raw_endpoint, "auth_type": "none"}],
         )
         log(f"custom MCP target result: {json.dumps(res)[:300]}")
     else:
@@ -181,21 +217,21 @@ def main():
     tools = _mcp(mcp_url, tok, "tools/list", {})
     names = [t["name"] for t in tools.get("result", {}).get("tools", [])]
     log(f"gateway tools/list -> {names}")
-    # find the search tool (qualified <target>___search_documentation)
-    search = next((n for n in names if "search_documentation" in n), None)
-    assert search, f"search_documentation not exposed; got {names}"
-    call = _mcp(
-        mcp_url,
-        tok,
-        "tools/call",
-        {"name": search, "arguments": {"search_phrase": "What is Amazon Bedrock AgentCore Gateway"}},
-    )
+    # Pick the probe for THIS catalog id. The gateway qualifies every tool as
+    # <target>___<tool>, so match on the suffix rather than an exact name.
+    probe_tool, probe_args, canaries = PROBES[CATALOG_ID]
+    search = next((n for n in names if n.split("___")[-1] == probe_tool), None)
+    assert search, f"{probe_tool} not exposed; got {names}"
+    call = _mcp(mcp_url, tok, "tools/call", {"name": search, "arguments": probe_args})
     blob = json.dumps(call)
     log(f"tools/call result (first 500): {blob[:500]}")
-    # CANARY: a real AWS-doc answer must mention agentcore / gateway / bedrock
+    # CANARY: a real upstream answer must contain upstream-specific content, and
+    # an MCP error result (isError) is a failure even though JSON-RPC returned 200.
+    assert not call.get("error"), f"JSON-RPC error from tools/call: {call.get('error')}"
+    assert not call.get("result", {}).get("isError"), f"MCP tool reported isError: {blob[:400]}"
     low = blob.lower()
-    assert any(k in low for k in ("agentcore", "gateway", "bedrock")), "no real AWS-doc content returned"
-    log("✅ CANARY PASS — external AWS Knowledge MCP reachable through the Gateway with real doc content")
+    assert any(k in low for k in canaries), f"no real upstream content returned (wanted one of {canaries})"
+    log(f"✅ CANARY PASS — {CATALOG_ID} reachable through the Gateway with real upstream content")
 
 
 def _ensure_gateway_role():

@@ -83,7 +83,7 @@ LITELLM_OWNER_SENTINEL = "litellm:catalog"
 
 # Secrets Manager namespace for the registry credential. Deliberately its own
 # prefix — see the module docstring.
-SECRET_NAMESPACE = "agentcore-registry/"
+REGISTRY_NAMESPACE = "agentcore-registry/"
 
 _CONFIG_SK = "SETTING#litellm_registry"
 
@@ -188,7 +188,7 @@ def put_registry_secret(api_key: str, region: str | None = None) -> str:
 
     sm = boto3.client("secretsmanager", region_name=region or _region())
     resp = sm.create_secret(
-        Name=f"{SECRET_NAMESPACE}litellm/{_uuid.uuid4().hex[:12]}",
+        Name=f"{REGISTRY_NAMESPACE}litellm/{_uuid.uuid4().hex[:12]}",
         SecretString=json.dumps({"apiKey": api_key}),
         Description="AgentCore LiteLLM registry credential (auto-managed)",
     )
@@ -214,9 +214,9 @@ def validate_secret_ref(api_key_ref: str) -> str:
     without it a tenant could point the registry at an arbitrary foreign secret
     and have the control plane read it back for them.
     """
-    if api_key_ref and f":secret:{SECRET_NAMESPACE}" not in api_key_ref:
+    if api_key_ref and f":secret:{REGISTRY_NAMESPACE}" not in api_key_ref:
         raise ValueError(
-            f"api_key_ref must be a Secrets Manager ARN in the {SECRET_NAMESPACE} namespace",
+            f"api_key_ref must be a Secrets Manager ARN in the {REGISTRY_NAMESPACE} namespace",
         )
     return api_key_ref
 

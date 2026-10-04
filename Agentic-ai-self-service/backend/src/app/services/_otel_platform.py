@@ -43,7 +43,7 @@ def _resolve_auth_header() -> None:
         if value:
             os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = value
     except Exception as e:
-        logger.warning("Could not resolve OTEL auth secret: %s", e)
+        logger.warning("Could not resolve OTEL authentication material (%s)", type(e).__name__)
 
 
 def _setup_tracer_provider() -> None:

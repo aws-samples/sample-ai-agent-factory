@@ -115,8 +115,10 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
         label: 'MCP Gateway',
         configuration: {
           name: 'agent_gateway',
-          targetType: 'lambda',
-          targetConfig: { type: 'lambda' },
+          // No placeholder target: a gateway's targets come from connected tool nodes, a connected
+          // MCP-protocol runtime, or targets the user adds in the gateway modal. A bare
+          // { type: 'lambda' } placeholder satisfied the required-field check and was then refused
+          // by the deployer as a target with no payload (live, 2026-09-28).
           enableSemanticSearch: true,
         } as GatewayConfiguration,
       },
@@ -201,8 +203,10 @@ Guidelines:
         label: 'Support Gateway',
         configuration: {
           name: 'support_gateway',
-          targetType: 'lambda',
-          targetConfig: { type: 'lambda' },
+          // No placeholder target: a gateway's targets come from connected tool nodes, a connected
+          // MCP-protocol runtime, or targets the user adds in the gateway modal. A bare
+          // { type: 'lambda' } placeholder satisfied the required-field check and was then refused
+          // by the deployer as a target with no payload (live, 2026-09-28).
           enableSemanticSearch: true,
         } as GatewayConfiguration,
       },
@@ -230,6 +234,15 @@ Guidelines:
         configuration: {
           name: 'support_memory',
           enabled: true,
+          // "Persistent" must mean it: without a strategy AgentCore Memory is short-term only
+          // (memory_step sends memoryStrategies: [] and nothing survives the session).
+          strategies: [
+            {
+              type: 'semantic',
+              name: 'support_semantic',
+              description: 'Long-term facts about the customer and their orders, recalled across sessions',
+            },
+          ],
         } as MemoryConfiguration,
       },
       {
@@ -310,8 +323,10 @@ Demo customers: CUST-001 (John Doe), CUST-002 (Jane Smith)`,
         label: 'Support Gateway',
         configuration: {
           name: 'support_gateway',
-          targetType: 'lambda',
-          targetConfig: { type: 'lambda' },
+          // No placeholder target: a gateway's targets come from connected tool nodes, a connected
+          // MCP-protocol runtime, or targets the user adds in the gateway modal. A bare
+          // { type: 'lambda' } placeholder satisfied the required-field check and was then refused
+          // by the deployer as a target with no payload (live, 2026-09-28).
           enableSemanticSearch: true,
         } as GatewayConfiguration,
       },
@@ -371,6 +386,15 @@ Demo customers: CUST-001 (John Doe), CUST-002 (Jane Smith)`,
         configuration: {
           name: 'support_memory',
           enabled: true,
+          // "Persistent" must mean it: without a strategy AgentCore Memory is short-term only
+          // (memory_step sends memoryStrategies: [] and nothing survives the session).
+          strategies: [
+            {
+              type: 'semantic',
+              name: 'support_semantic',
+              description: 'Long-term facts about the customer and their orders, recalled across sessions',
+            },
+          ],
         } as MemoryConfiguration,
       },
     ],
@@ -434,8 +458,10 @@ Demo customers: CUST-001 (John Doe), CUST-002 (Jane Smith)`,
         label: 'MCP Gateway',
         configuration: {
           name: 'mcp_server_gateway',
-          targetType: 'lambda',
-          targetConfig: { type: 'lambda' },
+          // No placeholder target: a gateway's targets come from connected tool nodes, a connected
+          // MCP-protocol runtime, or targets the user adds in the gateway modal. A bare
+          // { type: 'lambda' } placeholder satisfied the required-field check and was then refused
+          // by the deployer as a target with no payload (live, 2026-09-28).
           enableSemanticSearch: true,
         } as GatewayConfiguration,
       },
@@ -478,7 +504,7 @@ Demo customers: CUST-001 (John Doe), CUST-002 (Jane Smith)`,
     id: 'mcp-server-runtime',
     name: 'MCP Server Runtime',
     description: 'Host tools directly on the Runtime via MCP protocol — no Gateway or Lambda needed.',
-    longDescription: 'Deploy an agent with embedded tools served directly on the AgentCore Runtime. Tools (weather, web search, URL fetch) are Python functions bundled into the runtime. No Gateway, Lambda, or external infrastructure required — the simplest path to a tool-using agent.',
+    longDescription: 'Deploy a standalone MCP server with weather, web search, and URL fetch tools served directly from AgentCore Runtime. No language-model loop, Gateway, Lambda, or external tool infrastructure is required.',
     icon: '🛠️',
     difficulty: 'intermediate',
     tags: ['mcp', 'server', 'embedded-tools', 'no-gateway'],
@@ -487,36 +513,23 @@ Demo customers: CUST-001 (John Doe), CUST-002 (Jane Smith)`,
       { name: 'Weather Lookup', icon: '🌤️', description: 'Get current weather for any city via wttr.in' },
       { name: 'Web Search', icon: '🔍', description: 'DuckDuckGo search for quick information retrieval' },
       { name: 'URL Fetcher', icon: '🌐', description: 'Fetch and extract text from web pages' },
-      { name: 'Converse Tool Loop', icon: '🔧', description: 'Automatic tool routing via boto3 Converse API' },
+      { name: 'MCP Tool Discovery', icon: '🔧', description: 'Discover and invoke typed tools through the MCP protocol' },
     ],
     nodes: [
       {
         idSuffix: 'runtime',
         type: 'runtime',
         position: { x: 400, y: 250 },
-        label: 'MCP Server Agent',
+        label: 'MCP Tool Server',
         configuration: {
           name: 'mcp_server_agent',
           entrypoint: 'agent.py',
-          framework: 'strands_agents',
-          model: {
-            provider: 'anthropic',
-            modelId: rm('us.anthropic.claude-haiku-4-5-20251001-v1:0'),
-            temperature: 0.7,
-            topP: 0.9,
-          },
-          systemPrompt: 'You are a helpful assistant with embedded tools. Use the get_weather tool to check weather, search_web to find information, and fetch_url to read web pages. Always use tools when the user asks for real-time data.',
           deploymentType: 'direct_code_deploy',
           pythonRuntime: 'PYTHON_3_13',
-          // Generated agent uses BedrockAgentCoreApp HTTP entrypoint, not FastMCP.
-          // Setting protocol: 'MCP' makes AgentCore reject every invocation with 406.
-          // See tasks/lessons.md Bug 28. (A real FastMCP server is a v2 effort.)
-          protocol: 'HTTP',
+          protocol: 'MCP',
           idleTimeout: 300,
           maxLifetime: 3600,
           enableOtel: false,
-          modelProvider: 'bedrock',
-          multiAgentPattern: 'none',
         } as RuntimeConfiguration,
       },
     ],

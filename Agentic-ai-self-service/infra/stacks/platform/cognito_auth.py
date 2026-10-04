@@ -10,6 +10,10 @@ from aws_cdk import custom_resources as cr
 
 from .config import PlatformConfig
 
+# The groups every provisioned user joins: a standard user's scopes (g-users-default,
+# services/rbac.py GROUP_SCOPES) and the end-user UI (t-user).
+PROVISIONED_USER_GROUPS = ("g-users-default", "t-user")
+
 
 def build_cognito(stack: cdk.Stack, cfg: PlatformConfig) -> tuple:
     """Create Cognito User Pool, client, and pre-set users."""
@@ -67,13 +71,31 @@ def build_cognito(stack: cdk.Stack, cfg: PlatformConfig) -> tuple:
     # the serverless-correct fit. Enabled only when oidc_* context is set, so
     # the default password-auth flow is undisturbed. Config:
     #   -c oidc_provider_name=Okta -c oidc_issuer=https://... \
-    #   -c oidc_client_id=... -c oidc_client_secret=... \
+    #   -c oidc_client_id=... -c oidc_client_secret_arn=arn:aws:secretsmanager:...:secret:... \
+    #   [-c oidc_client_secret_json_key=client_secret] \
     #   [-c oidc_groups_claim=groups] [-c oidc_hosted_domain_prefix=...]
+    #
+    # F-07 (signoff-g10): the client secret used to arrive as `-c oidc_client_secret=<value>`
+    # and was written verbatim into ProviderDetails, i.e. into cdk.out/*.template.json,
+    # GetTemplate, `cdk diff` output and every stack event. ARCC cnt_9OT33u5q3kyAPq: a
+    # sensitive value in a CloudFormation template must be a Secrets Manager dynamic
+    # reference, which CloudFormation resolves at deploy time and never retains, logs or
+    # passes on. The context value is now the SECRET's ARN (or name); the operator stores the
+    # client secret in Secrets Manager once. The legacy key is refused, not ignored: an
+    # operator still passing it would otherwise believe federation was configured while the
+    # `if` below silently skipped it.
     _oidc_name = stack.node.try_get_context("oidc_provider_name")
     _oidc_issuer = stack.node.try_get_context("oidc_issuer")
     _oidc_client_id = stack.node.try_get_context("oidc_client_id")
-    _oidc_client_secret = stack.node.try_get_context("oidc_client_secret")
-    if _oidc_name and _oidc_issuer and _oidc_client_id and _oidc_client_secret:
+    _oidc_client_secret_ref = stack.node.try_get_context("oidc_client_secret_arn")
+    if stack.node.try_get_context("oidc_client_secret") is not None:
+        raise ValueError(
+            "The CDK context key `oidc_client_secret` (a plaintext client secret) is no longer accepted: it "
+            "would be written into the CloudFormation template. Store the client secret in AWS Secrets Manager "
+            "and pass its ARN or name as `-c oidc_client_secret_arn=...` (optionally "
+            "`-c oidc_client_secret_json_key=<field>` when the secret is a JSON object)."
+        )
+    if _oidc_name and _oidc_issuer and _oidc_client_id and _oidc_client_secret_ref:
         _configure_oidc_federation(
             stack,
             cfg,
@@ -82,7 +104,8 @@ def build_cognito(stack: cdk.Stack, cfg: PlatformConfig) -> tuple:
             provider_name=str(_oidc_name),
             issuer=str(_oidc_issuer),
             client_id=str(_oidc_client_id),
-            client_secret=str(_oidc_client_secret),
+            client_secret_ref=str(_oidc_client_secret_ref),
+            client_secret_json_key=stack.node.try_get_context("oidc_client_secret_json_key"),
             groups_claim=str(stack.node.try_get_context("oidc_groups_claim") or "groups"),
             domain_prefix=str(
                 stack.node.try_get_context("oidc_hosted_domain_prefix") or f"{cfg.project}-{cfg.env}-{stack.account}"
@@ -116,7 +139,8 @@ def build_cognito(stack: cdk.Stack, cfg: PlatformConfig) -> tuple:
     #   * type groups (t-admin / t-user) drive which UI sections render;
     #   * resource groups (g-admins-* / g-users-*) grant capability scopes.
     # A user belongs to one type group + one or more resource groups.
-    # Enforcement is advisory until RBAC_ENFORCE=true on the API Lambda.
+    # The API Lambdas enforce by default (RBAC_ENFORCE=true), so a user in no
+    # g-* group holds no scopes; the provisioner below grants the defaults.
     _rbac_groups = [
         ("TypeAdminGroup", "t-admin", "UI: all admin sections", 1),
         ("TypeUserGroup", "t-user", "UI: end-user sections only", 20),
@@ -124,10 +148,11 @@ def build_cognito(stack: cdk.Stack, cfg: PlatformConfig) -> tuple:
         ("AdminRegistryGroup", "g-admins-registry", "registry:read/write", 5),
         ("AdminSecurityGroup", "g-admins-security", "settings + observability", 5),
         ("AdminCostGroup", "g-admins-cost", "cost:read/write", 5),
-        ("UserDefaultGroup", "g-users-default", "invoke + read-only defaults", 20),
+        ("UserDefaultGroup", "g-users-default", "Build, deploy and invoke own agents", 20),
     ]
+    rbac_groups = {}
     for _cid, _gname, _desc, _prec in _rbac_groups:
-        cognito.CfnUserPoolGroup(
+        rbac_groups[_gname] = cognito.CfnUserPoolGroup(
             stack,
             _cid,
             user_pool_id=pool.user_pool_id,
@@ -175,6 +200,7 @@ def build_cognito(stack: cdk.Stack, cfg: PlatformConfig) -> tuple:
                     "cognito-idp:AdminCreateUser",
                     "cognito-idp:AdminSetUserPassword",
                     "cognito-idp:AdminDeleteUser",
+                    "cognito-idp:AdminAddUserToGroup",
                 ],
                 resources=[pool.user_pool_arn],
             )
@@ -196,9 +222,14 @@ def build_cognito(stack: cdk.Stack, cfg: PlatformConfig) -> tuple:
                 properties={
                     "UserPoolId": pool.user_pool_id,
                     "Email": email,
+                    # A standard user (services/rbac.py): without a g-* group the
+                    # enforcing API grants no scopes. Admin groups stay a manual grant.
+                    "Groups": list(PROVISIONED_USER_GROUPS),
                 },
             )
             user_cr.node.add_dependency(pool)
+            for group in PROVISIONED_USER_GROUPS:
+                user_cr.node.add_dependency(rbac_groups[group])
 
     return pool, client
 
@@ -212,11 +243,17 @@ def _configure_oidc_federation(
     provider_name: str,
     issuer: str,
     client_id: str,
-    client_secret: str,
+    client_secret_ref: str,
+    client_secret_json_key: str | None,
     groups_claim: str,
     domain_prefix: str,
 ) -> None:
     """Attach an external OIDC IdP to the Cognito pool (Loom-study 1.1).
+
+    ``client_secret_ref`` is a Secrets Manager secret ARN or name, never the secret: it is
+    rendered as a ``{{resolve:secretsmanager:...}}`` dynamic reference (F-07, ARCC
+    cnt_9OT33u5q3kyAPq). ``client_secret_json_key`` selects one field when the secret is a
+    JSON object; ``None`` means the whole SecretString is the client secret.
 
     Adds (1) an OIDC identity provider with attribute mapping (email + the
     external group claim mapped to the Cognito ``custom:ext_groups`` attribute
@@ -229,6 +266,16 @@ def _configure_oidc_federation(
     maps OIDC claims to standard/custom attributes; the group claim is carried
     through and read by the backend group resolver.
     """
+    # `unsafe_unwrap` is the CDK escape hatch for placing a SecretValue in a plain string
+    # property. It is safe HERE because the value being unwrapped is the dynamic-reference
+    # token itself ("{{resolve:secretsmanager:<ref>[:SecretString:<key>]}}"), not a secret:
+    # CloudFormation substitutes the real value at deploy time and it never enters the
+    # template, the cloud assembly or a stack event. The check is
+    # infra/tests/test_f07_oidc_client_secret_is_a_dynamic_reference.py.
+    client_secret_reference = cdk.SecretValue.secrets_manager(
+        client_secret_ref,
+        json_field=client_secret_json_key or None,
+    ).unsafe_unwrap()
     idp = cognito.CfnUserPoolIdentityProvider(
         stack,
         "OidcIdentityProvider",
@@ -237,7 +284,7 @@ def _configure_oidc_federation(
         provider_type="OIDC",
         provider_details={
             "client_id": client_id,
-            "client_secret": client_secret,
+            "client_secret": client_secret_reference,
             "oidc_issuer": issuer,
             "authorize_scopes": "openid email profile",
             "attributes_request_method": "GET",

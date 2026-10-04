@@ -128,7 +128,7 @@ export const evidence: Record<ProjectId, ProjectEvidence> = {
         {
           file: SELF_SERVICE_DEVELOPMENT,
           heading: 'Integration Tests',
-          quote: 'invoke the deployed runtimes, verify responses, and clean up all resources',
+          quote: 'The gallery matrix deploys all six built-in templates.',
         },
       ],
     },

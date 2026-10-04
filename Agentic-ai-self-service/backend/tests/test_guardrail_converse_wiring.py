@@ -2,8 +2,8 @@
 VALID single-brace dict splat — never literal ``{{`` double braces.
 
 Bug (brace doubling): the converse host generators
-(``_generate_langchain_web_search``, ``_generate_mcp_server_runtime``,
-``_generate_default_agent``) are f-strings, so their ``{{``/``}}`` already
+(``_generate_langchain_web_search`` and ``_generate_default_agent``) are
+f-strings, so their ``{{``/``}}`` already
 collapse to single braces in the RETURNED code. ``_inject_guardrails`` then
 splices ``guardrailConfig`` via a plain ``str.replace`` — NOT ``.format`` — so a
 double-braced replacement string lands LITERAL ``{{...}}`` in the deployed file.
@@ -44,7 +44,7 @@ _VALID_SPLAT = (
 )
 
 # Converse-based templates routed through generate_agent_code().
-_CONVERSE_TEMPLATES = ["web-search-agent", "mcp-server-runtime"]
+_CONVERSE_TEMPLATES = ["web-search-agent"]
 
 
 def _cfg() -> RuntimeConfig:

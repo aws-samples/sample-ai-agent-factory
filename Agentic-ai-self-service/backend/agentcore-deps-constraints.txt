@@ -1,0 +1,123 @@
+# Pins for the AgentCore Runtime dependency bundles built by
+# scripts/install-agentcore-deps.sh, and for the test environment that is supposed to
+# exercise the same code paths (backend/pyproject.toml's `dev` extra).
+#
+# This is a pip CONSTRAINT file, not a requirements file. It is passed as
+# `--constraint` to every install_packages call in that script, so it pins TRANSITIVE
+# resolutions too without adding a package to any bundle that did not ask for one.
+# backend/tests/test_runtime_bundle_pins_match_the_test_environment.py holds the three
+# things that have to agree: this file, the `dev` extra, and the interpreter actually
+# running the tests.
+#
+# A fourth copy travels with every CloudFormation export: DEPENDENCY_BUNDLE_CONSTRAINTS in
+# backend/src/app/services/cfn_template_generator.py, which the exported
+# build-dependency-bundle.sh passes as --constraint so a recipient builds the same set the
+# platform deploys. The Lambda asset does not ship this file, so the generator mirrors it, and
+# backend/tests/test_the_bundle_build_uses_a_capable_pinned_pip.py fails when the two differ.
+#
+# WHY THIS FILE EXISTS. The bundles floated every version here, and the drift was not
+# theoretical -- three separate consequences were measured:
+#
+#   1. `strands_agents` resolved to 1.56.0 in the built bundle while the test interpreter
+#      had 1.9.1, and `Tracer.end_model_invoke_span` has a DIFFERENT SIGNATURE between
+#      them: 1.9.1 is (span, message, usage, stop_reason, error=None) and 1.56.0 is
+#      (span, message, usage, metrics, stop_reason). So the observability instrumentation
+#      that tests green locally raises TypeError in the deployed container, and no source
+#      diff causes it -- only a bundle rebuild.
+#   2. The OpenTelemetry graph drifted 1.37.0 -> 1.44.0 (and semconv 0.58b0 -> 0.65b0).
+#      Those packages own the span-attribute NAMES that cost_tracking.py's CloudWatch
+#      Insights query parses out of the usage log. A renamed attribute is a silently empty
+#      cost report, not an error.
+#   3. `mcp` was the one package the script already pinned -- and the pin was
+#      `mcp<2`, a compatibility BOUND rather than a version, applied to three of the
+#      eleven bundles. It still floated 1.23.3 (test env) against 1.30.0 (bundle), and
+#      the eight provider-<extra>.zip deltas never received it at all, so each of them
+#      shipped a partial mcp 2.1.1 tree that lands on top of the pinned 1.30.0 at
+#      container start. See the module docstring of the test named above for the
+#      measurement.
+#
+# HOW THE VERSIONS WERE CHOSEN. Every version below is the one the bundle in
+# backend/agentcore-deps/ actually resolved to when it was built on 2026-09-20 -- the
+# artifact set that has been deployed and exercised live. So this file does not choose new
+# versions, it records the ones already proven, and a rebuild reproduces them rather than
+# moving. Bump any line deliberately and re-run the bundle build plus
+# backend/tests/test_observability.py, which is where a strands signature change shows up.
+#
+# ONE EXCEPTION, called out because it breaks that rule deliberately: `websockets` is pinned
+# to 16.1.1, which is NOT what a free resolve produces. See its own comment below -- the
+# baseline has to sit inside the intersection of every provider extra's range, and its free
+# resolution did not.
+#
+# DELIBERATELY NOT PINNED, so that the omissions are decisions rather than oversights:
+#
+#   boto3 / botocore -- must move forward. This package requires boto3>=1.43.66 for the
+#     GA agent-registry service models, and boto3's surface is additive: a newer one adds
+#     API shapes, it does not change the ones the generated agent calls. Pinning it would
+#     freeze the bundle out of every new AgentCore API.
+#   The eight model-provider SDKs in provider-<extra>.zip (openai, anthropic, litellm,
+#     google-genai, mistralai, ollama, llama-api-client, and the sagemaker stubs) -- a new
+#     Claude or GPT model is usable only with a provider SDK new enough to name it, so
+#     pinning these would make the platform's model catalogue go stale on a schedule
+#     nobody is watching. This is a KNOWN RESIDUAL, not a clean result: those bundles are
+#     therefore still not reproducible, and a provider SDK major bump can break an emitted
+#     import the same way mcp 2.x did. The mitigation in place is that
+#     test_provider_sdks_ship_in_a_bundle.py asserts the emitted import line resolves
+#     against what the bundle carries.
+#
+# Byte-identical bundles are NOT the claim and are not achievable here: `zip -r` embeds
+# mtimes, so two builds of the same tree differ. The claim is behavioural
+# reproducibility -- the same import surface and the same signatures.
+
+# ── The agent framework. Signature drift here is a deployed-container TypeError. ──
+strands-agents==1.56.0
+strands-agents-tools==0.8.9
+
+# ── The AgentCore runtime harness. Generated agents import BedrockAgentCoreApp from it. ──
+bedrock-agentcore==1.23.1
+
+# ── MCP. Pinned to an exact 1.x, not `<2`: see reason 3 above. Bump this only together
+#    with the emitted imports in backend/src/app/services/{code_generator,deployment}.py,
+#    which use the 1.x spellings `mcp.client.streamable_http.streamablehttp_client` and
+#    `mcp.server.fastmcp.FastMCP`. Both were renamed in 2.x with no back-compat alias.
+mcp==1.30.0
+
+# ── websockets. Pinned BELOW its newest release, which is the one case where this file
+#    does not simply record what a free resolution produced.
+#
+#    Nothing in the strands-mcp baseline caps it (bedrock-agentcore asks websockets>=13.0
+#    with no upper bound), so a free resolve took 17.1. But EVERY published google-genai
+#    -- 1.67.0 through 2.24.0, checked -- requires websockets<17.0, and google-genai is
+#    what strands-agents[gemini] installs. That combination is unsatisfiable, so the
+#    provider-gemini delta could not be built against a 17.1 baseline at all: pip returned
+#    ResolutionImpossible naming `The user requested (constraint) websockets==17.1`.
+#
+#    Before the delta constraints existed, this did not fail -- it succeeded WRONGLY.
+#    provider-gemini.zip resolved websockets 16.1.1 on its own and shipped it over the
+#    baseline's 17.1, and because the delta subtracts by file path the two versions merged
+#    into one tree in the container. So the build error is the defect becoming visible, not
+#    a new one.
+#
+#    The fix has to be here rather than in the delta: a shared distribution must resolve to
+#    ONE version across the baseline and all eight providers, which means the baseline is
+#    obliged to sit in the intersection of every provider's range, not at the newest
+#    version it can reach alone. 16.1.1 satisfies all of them -- bedrock-agentcore
+#    (>=13.0), strands-agents' bidi extras (>=16.0.0,<17.0.0), slack-sdk's optional extra
+#    (>=16.1.1,<17 on Python >=3.10) and google-genai (>=13.0.0,<17.0). Verified by
+#    resolving the baseline and the gemini delta separately against this pin: both rc=0,
+#    both websockets 16.1.1, google-genai 2.24.0.
+#
+#    Raise this only after checking google-genai's cap has moved; the build will tell you
+#    loudly if it has not.
+websockets==16.1.1
+
+# ── OpenTelemetry. These own the span attribute names the cost ledger parses. The 0.x
+#    versioned packages track the 1.x ones (1.44.0 <-> 0.65b0) and must be bumped as a set,
+#    because opentelemetry-sdk pins its semantic-conventions peer narrowly.
+opentelemetry-api==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-semantic-conventions==0.65b0
+opentelemetry-proto==1.44.0
+opentelemetry-exporter-otlp-proto-common==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.44.0
+opentelemetry-instrumentation==0.65b0
+opentelemetry-instrumentation-threading==0.65b0

@@ -6,6 +6,7 @@ import sys
 
 sys.path.insert(0, "src")
 
+from app.services.agent_versions_store import AgentVersion, RuntimeSlots  # noqa: E402
 from app.services.budget_store import Budget  # noqa: E402
 from app.step_handlers import cost_reconcile_step as crs  # noqa: E402
 
@@ -57,6 +58,43 @@ def test_agent_budget_under_no_breach(monkeypatch):
     out = crs.handler({"now_epoch": NOW})
     assert out["reconciled"] == 1 and out["breached"] == 0
     assert emitted == []
+
+
+def test_agent_budget_resolves_production_with_consistent_reads(monkeypatch):
+    class _SlotsStore:
+        def get(self, runtime_name, *, consistent=False):
+            assert runtime_name == "my-agent"
+            assert consistent is True
+            return RuntimeSlots(
+                runtime_name=runtime_name,
+                owner_sub="alice",
+                production_version_id="v1",
+            )
+
+    class _VersionsStore:
+        def get(self, runtime_name, version_id, *, consistent=False):
+            assert (runtime_name, version_id) == ("my-agent", "v1")
+            assert consistent is True
+            return AgentVersion(
+                runtime_name=runtime_name,
+                version_id=version_id,
+                owner_sub="alice",
+                created_at="2026-09-24T00:00:00+00:00",
+                deployment_id="dep-1",
+                agentcore_runtime_name="my_agent_deadbeef",
+                runtime_id="rt-current",
+            )
+
+    monkeypatch.setattr(
+        "app.services.agent_versions_store.get_slots_store",
+        lambda: _SlotsStore(),
+    )
+    monkeypatch.setattr(
+        "app.services.agent_versions_store.get_versions_store",
+        lambda: _VersionsStore(),
+    )
+
+    assert crs._agent_runtime_id("my-agent") == "rt-current"
 
 
 def test_tag_budget_is_skipped(monkeypatch):

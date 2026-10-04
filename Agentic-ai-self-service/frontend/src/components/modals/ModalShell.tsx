@@ -7,9 +7,10 @@
  * primitive uplifts every modal built on it at once.
  */
 
-import { useEffect, useCallback, type ReactNode } from 'react';
+import { useCallback, useRef, type ReactNode } from 'react';
 import { AnimatePresence, m } from 'motion/react';
 import { popIn, scrim } from '../../lib/motion';
+import { useDialogFocusTrap } from '../../hooks/useDialogFocusTrap';
 
 // ============================================================================
 // Types
@@ -38,17 +39,8 @@ export function ModalShell({
   width = 'var(--modal-width, 540px)',
   'data-testid': dataTestId = 'modal',
 }: ModalShellProps) {
-  // Handle escape key to close modal
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
-        onClose();
-      }
-    };
-
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocusTrap(isOpen, dialogRef, undefined, onClose);
 
   const handleBackdropClick = useCallback(
     (e: React.MouseEvent) => {
@@ -79,6 +71,8 @@ export function ModalShell({
             role="dialog"
             aria-modal="true"
             aria-labelledby={`${dataTestId}-title`}
+            ref={dialogRef}
+            tabIndex={-1}
             variants={popIn}
             initial="hidden"
             animate="visible"

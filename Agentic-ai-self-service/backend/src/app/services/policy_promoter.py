@@ -10,6 +10,16 @@ statement validates ACTIVE once the gateway settles (proven live). This matches
 the AWS policy workshop, where policy attachment is a SEPARATE lifecycle step
 from gateway creation, not a single-shot deploy.
 
+That message has a SECOND cause, and this module is the one that used to be
+unable to recover from it. AgentCore resolves the gateway named in a Cedar
+statement as the CALLER, so a principal without
+``bedrock-agentcore:InvokeGateway`` on the gateway ARN gets the same wording
+permanently — no amount of promotion converges it, and the fail-closed engine
+stays deny-all. Proven live on the customer-export path (same API, same account,
+that action as the only variable). The grant is now on the deployment Lambda role
+that runs this module, in ``infra/stacks/platform/lambdas.py``; if this text
+turns up again and never clears, check the role before blaming consistency.
+
 Blocking the deploy pipeline for 5 minutes per policy flow is poor UX, so the
 policy step attaches the engine in LOG_ONLY immediately (tools work, policies are
 still evaluated + logged) and records an ``enforce_pending`` payload on the
@@ -33,6 +43,18 @@ import time
 import boto3
 
 from app.services.aws_errors import is_error
+from app.services.aws_pagination import list_all
+from app.services.gateway_mutation_lock import engine_is, gateway_mutation_lock
+from app.services.gateway_update import preserving_gateway_update
+from app.services.policy_lifecycle import (
+    PolicyCoResidencyConflict,
+    PolicyStateUnreadable,
+    delete_policy_confirmed,
+    policy_child_row,
+    reconcile_policy_definition,
+    refuse_incompatible_coresidency,
+    refuse_shared_parent_engine,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,26 +68,90 @@ def _get_policies_from_response(resp: dict) -> list:
     return resp.get("policies", resp.get("items", resp.get("policySummaries", [])))
 
 
+def _list_all_policies(ctrl, engine_id: str) -> list[dict]:
+    """Read every policy page for one engine."""
+    return list_all(
+        ctrl,
+        "list_policies",
+        item_keys=("policies", "items", "policySummaries"),
+        request={"policyEngineId": engine_id, "maxResults": 100},
+    )
+
+
 def _active_policy_count(ctrl, engine_id: str) -> int:
     try:
-        lp = ctrl.list_policies(policyEngineId=engine_id, maxResults=100)
-        pols = lp.get("policies", lp.get("items", []))
+        pols = _list_all_policies(ctrl, engine_id)
         return sum(1 for p in pols if p.get("status") == "ACTIVE")
     except Exception:  # noqa: BLE001
         return 0
 
 
-def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
-    """Make sure the intended policies exist + are ACTIVE on the engine.
+def _adopted_row_recorded(
+    store, deployment_id, engine_id, policy_id, name, region, statement, account=None, children=None
+) -> bool:
+    """Write the adopted-policy child row durably before an existing policy is mutated.
 
-    Recreates any that are missing or CREATE_FAILED (now that the gateway has
-    converged the recreate should validate). Returns the count of ACTIVE policies.
+    Without a store there is nothing to write into: the caller (the status/invoke touchpoint) has to pass one
+    (``try_promote_to_enforce(..., store=...)``); until it does, the mutation proceeds and the gap is logged loudly,
+    because a reused engine's stale ACTIVE permit is the larger hazard (F-G05-001). With a store, a failed write means
+    no mutation.
+    """
+    if store is None or not deployment_id:
+        logger.warning(
+            "promote: mutating policy %s on engine %s without a manifest store; the adopted child row is NOT recorded",
+            name,
+            engine_id,
+        )
+        return True
+    row = policy_child_row(
+        policy_id=str(policy_id),
+        engine_id=engine_id,
+        name=name,
+        region=region or "",
+        created_by_deployment=False,
+        statement=statement or "",
+        account=account,
+    )
+    # Isolation before any write: the engine must not serve another live deployment (a legacy manifest names only
+    # the engine), and no other live deployment may desire this policy -- bound to account + region -- differently.
+    refuse_shared_parent_engine(store, deployment_id, engine_id, region, account, action="reconcile a policy")
+    refuse_incompatible_coresidency(store, deployment_id, row)
+    try:
+        store.record_resource_strict(deployment_id, row)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("promote: could not record adopted policy %s (%s); leaving it untouched", name, type(exc).__name__)
+        return False
+    refuse_incompatible_coresidency(store, deployment_id, row)  # re-check after our row is durable
+    if children is not None:
+        children.append(row)
+    return True
+
+
+def _ensure_policies_active(
+    ctrl,
+    engine_id: str,
+    policies: list,
+    *,
+    store=None,
+    deployment_id: str | None = None,
+    region: str | None = None,
+    account: str | None = None,
+    children: list[dict] | None = None,
+) -> int:
+    """Make sure the intended policies exist, hold the DESIRED definition, and are ACTIVE on the engine.
+
+    Recreates any that are missing or CREATE_FAILED (now that the gateway has converged the recreate should
+    validate). An ACTIVE policy whose live Cedar differs from the desired statement is reconciled in place
+    (F-G05-001) -- ACTIVE alone is not success. Returns the count of ACTIVE policies holding the desired definition.
+
+    Lazy creation happens AFTER deployment finalization, so a created policy is recorded durably
+    (``record_resource_strict``) before it counts; when the row cannot be written the policy is compensate-deleted
+    and not counted (F-G09-003). Without a store nothing is recorded and nothing new is created.
     """
     # Index existing by name.
     existing = {}
     try:
-        lp = ctrl.list_policies(policyEngineId=engine_id, maxResults=100)
-        for p in lp.get("policies", lp.get("items", [])):
+        for p in _list_all_policies(ctrl, engine_id):
             existing[p.get("name")] = p
     except Exception as e:  # noqa: BLE001
         logger.warning("promote: list_policies failed: %s", str(e)[:120])
@@ -79,10 +165,30 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
         # statement because the policy already exists — recover it in place
         # using its own live definition. A brand-new policy still needs a
         # statement to create.
-        if not name or (not stmt and not cur):
+        if not name or not stmt:
+            # No exact statement = no intent: live text is never re-driven as if it were desired.
             continue
         status = (cur or {}).get("status", "")
+        _desc = pol.get("description") or "Auto-permit for allowed gateway tools (ENFORCE)."
         if status == "ACTIVE":
+            if stmt:
+                pid = cur.get("policyId") or cur.get("id")
+                if not _adopted_row_recorded(
+                    store, deployment_id, engine_id, pid, name, region, stmt, account, children
+                ):
+                    continue  # no durable row, no mutation
+                try:
+                    outcome = reconcile_policy_definition(ctrl, engine_id, pid, stmt, _desc)
+                except PolicyStateUnreadable as exc:
+                    logger.warning("promote: policy %s is ACTIVE but could not be reconciled: %s", name, str(exc)[:160])
+                    continue
+                if outcome["updated"]:
+                    logger.warning(
+                        "promote: policy %s reconciled to the desired Cedar (%s)", name, outcome["digest"][:19]
+                    )
+                if outcome["status"] != "ACTIVE":
+                    logger.warning("promote: policy %s is %s after reconciliation", name, outcome["status"])
+                    continue
             active += 1
             continue
         # RACE GUARD (root cause of the never-converging permit): this promoter
@@ -100,21 +206,17 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
         if status in ("CREATING", "DELETING", "UPDATING"):
             logger.info("promote: policy %s is %s (another run owns it) — skipping", name, status)
             continue
-        _desc = pol.get("description") or "Auto-permit for allowed gateway tools (ENFORCE)."
         # Reconcile-in-place with no supplied statement: re-drive the policy's
         # OWN live definition (fetched via get_policy) so a regressed
         # UPDATE_FAILED policy re-validates without needing the original Cedar.
-        _defn = {"cedar": {"statement": stmt}} if stmt else None
-        if _defn is None and cur:
-            try:
-                _live = ctrl.get_policy(engineId=engine_id, policyId=cur.get("policyId") or cur.get("id"))
-            except TypeError:
-                _live = ctrl.get_policy(policyEngineId=engine_id, policyId=cur.get("policyId") or cur.get("id"))
-            _defn = _live.get("definition")
-        if _defn is None:
-            continue
+        _defn = {"cedar": {"statement": stmt}}
         try:
             if cur:
+                _pid = cur.get("policyId") or cur.get("id")
+                if not _adopted_row_recorded(
+                    store, deployment_id, engine_id, _pid, name, region, stmt or "", account, children
+                ):
+                    continue  # no durable row, no mutation (the no-statement reconcile class included)
                 # RECOVER IN PLACE (the elegant race-free fix): a CREATE_FAILED
                 # policy already occupies this account-global name. The old code
                 # deleted it and recreated — but delete_policy is ASYNC, opening a
@@ -140,6 +242,19 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
                     validationMode="IGNORE_ALL_FINDINGS",
                 )
             else:
+                # Creation isolation: the engine the promoter re-drives always pre-exists; a NEW permit on it must not
+                # expand another live deployment's authorization (account-bound, unreadable table = refusal).
+                refuse_shared_parent_engine(
+                    store, deployment_id or "", engine_id, region, account, action="create a policy"
+                )
+                if store is None or not deployment_id:
+                    # Post-finalization creation without a manifest to record into would be an untracked leak.
+                    logger.warning(
+                        "promote: policy %s missing on engine %s but no manifest store given; not creating",
+                        name,
+                        engine_id,
+                    )
+                    continue
                 cp = ctrl.create_policy(
                     policyEngineId=engine_id,
                     name=name,
@@ -152,6 +267,29 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
                     validationMode="IGNORE_ALL_FINDINGS",
                 )
                 pid = cp.get("policyId")
+                row = policy_child_row(
+                    policy_id=pid,
+                    engine_id=engine_id,
+                    name=name,
+                    region=region or "",
+                    created_by_deployment=True,
+                    statement=stmt,
+                    account=account,
+                )
+                try:
+                    store.record_resource_strict(deployment_id, row)
+                    if children is not None:
+                        children.append(row)
+                except Exception as exc:  # noqa: BLE001
+                    # F-G09-003: a created policy nobody can find later is a permanent leak. Compensate now.
+                    logger.error(
+                        "promote: could not record policy %s (%s); compensate-deleting it", name, type(exc).__name__
+                    )
+                    try:
+                        delete_policy_confirmed(ctrl, engine_id, str(pid))
+                    except Exception:  # noqa: BLE001
+                        logger.exception("promote: compensating delete of policy %s failed", name)
+                    continue
             # Poll THIS policy's own status to terminal — do NOT rely on a fresh
             # list_policies(), which is eventually-consistent and returns 0 right
             # after a create (the bug that made promotion always report "not
@@ -185,7 +323,13 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
     return active
 
 
-def try_promote_to_enforce(deployment_state: dict, region: str) -> dict | None:
+def try_promote_to_enforce(
+    deployment_state: dict,
+    region: str,
+    *,
+    control_client=None,
+    store=None,
+) -> dict | None:
     """Promote a pending LOG_ONLY engine to ENFORCE if the gateway has converged.
 
     Returns a dict describing the outcome, or None when there is nothing to do
@@ -212,11 +356,37 @@ def try_promote_to_enforce(deployment_state: dict, region: str) -> dict | None:
         if not engine_id:
             return None
         try:
-            _ctrl_r = _ctrl(region)
-            _pols = _get_policies_from_response(_ctrl_r.list_policies(policyEngineId=engine_id, maxResults=100))
+            _ctrl_r = control_client or _ctrl(region)
+            _pols = _list_all_policies(_ctrl_r, engine_id)
             _unhealthy = [p for p in _pols if p.get("status") not in ("ACTIVE", "CREATING", "UPDATING", "DELETING")]
             if not _unhealthy:
                 return None  # all healthy — nothing to reconcile
+            # Recovery reconciles to the EXACT persisted intent, never to the drifted live text. A legacy record
+            # without intent cannot be recovered safely: redeploy instead of revalidating unknown Cedar.
+            intent = {
+                str(spec.get("name")): spec
+                for spec in (pr.get("desired_policies") or pr.get("managed_policies") or [])
+                if isinstance(spec, dict) and spec.get("name") and (spec.get("statement") or "").strip()
+            }
+            if not intent:
+                logger.error(
+                    "policy reconcile: engine %s has %d non-ACTIVE policy(ies) but the record carries no exact policy "
+                    "intent; refusing to revalidate live text — redeploy the agent",
+                    engine_id,
+                    len(_unhealthy),
+                )
+                return {
+                    "promoted": False,
+                    "mode": pr.get("mode"),
+                    "reason": "legacy record without exact policy intent (desired_policies); redeploy required",
+                }
+            missing_intent = [p.get("name") for p in _unhealthy if str(p.get("name")) not in intent]
+            if missing_intent:
+                return {
+                    "promoted": False,
+                    "mode": pr.get("mode"),
+                    "reason": f"no exact intent for non-ACTIVE policy(ies) {missing_intent}; redeploy required",
+                }
             logger.warning(
                 "policy reconcile: engine %s has %d non-ACTIVE policy(ies) under ENFORCE — re-driving",
                 engine_id,
@@ -228,7 +398,14 @@ def try_promote_to_enforce(deployment_state: dict, region: str) -> dict | None:
             pending = {
                 "engine_id": engine_id,
                 "gateway_id": pr.get("gateway_id") or (pr.get("engine_arn") or ""),
-                "policies": [{"name": p.get("name", ""), "statement": ""} for p in _unhealthy],
+                "policies": [
+                    {
+                        "name": str(p.get("name")),
+                        "statement": intent[str(p.get("name"))].get("statement", ""),
+                        "description": intent[str(p.get("name"))].get("description", ""),
+                    }
+                    for p in _unhealthy
+                ],
                 "_reconcile": True,
             }
         except Exception:  # noqa: BLE001
@@ -242,16 +419,27 @@ def try_promote_to_enforce(deployment_state: dict, region: str) -> dict | None:
     if not engine_id or not gateway_id:
         return {"promoted": False, "mode": pr.get("mode"), "reason": "missing engine/gateway id"}
 
-    ctrl = _ctrl(region)
+    ctrl = control_client or _ctrl(region)
+    children: list[dict] = []  # receipts of policies this call created/adopted; the caller persists them
     try:
         # 1. Ensure the intended policies are ACTIVE (recreate if the gateway has
         #    only now converged). If none are ACTIVE, stay LOG_ONLY (never deny-all).
-        active = _ensure_policies_active(ctrl, engine_id, pending.get("policies") or [])
+        active = _ensure_policies_active(
+            ctrl,
+            engine_id,
+            pending.get("policies") or [],
+            store=store,
+            deployment_id=(deployment_state or {}).get("deployment_id"),
+            region=region,
+            account=(deployment_state or {}).get("target_account_id"),
+            children=children,
+        )
         if active == 0:
             return {
                 "promoted": False,
                 "mode": pr.get("mode") or "LOG_ONLY",
                 "reason": "policies not ACTIVE yet (gateway still converging)",
+                "policy_children": children,  # a created, still-converging policy is already a receipt
             }
 
         # Fail-closed path (P-PLAT-027): the gateway is ALREADY in ENFORCE; the
@@ -263,31 +451,51 @@ def try_promote_to_enforce(deployment_state: dict, region: str) -> dict | None:
                 "promoted": True,
                 "mode": "ENFORCE",
                 "reason": f"{active} ACTIVE policy(ies); fail-closed ENFORCE now serving permitted tools",
+                "policy_children": children,
             }
 
         # 2. Flip the gateway's engine config to ENFORCE, preserving other fields.
-        gw = ctrl.get_gateway(gatewayIdentifier=gateway_id)
-        # Prefer the gateway's OWN attached engine arn (authoritative), then the
-        # recorded engine_arn — but only if it's a real arn (guard against a stale
-        # placeholder that would fail UpdateGateway validation).
-        gw_arn = (gw.get("policyEngineConfiguration") or {}).get("arn")
-        rec_arn = pr.get("engine_arn")
-        engine_arn = gw_arn or (rec_arn if str(rec_arn).startswith("arn:") else None)
-        if not engine_arn:
-            return {"promoted": False, "mode": pr.get("mode"), "reason": "no valid engine arn to attach"}
-        update = {
-            "gatewayIdentifier": gateway_id,
-            "name": gw.get("name", ""),
-            "roleArn": gw.get("roleArn", ""),
-            "protocolType": gw.get("protocolType", "MCP"),
-            "policyEngineConfiguration": {"arn": engine_arn, "mode": "ENFORCE"},
-        }
-        for opt in ("description", "authorizerType", "authorizerConfiguration", "protocolConfiguration", "kmsKeyArn"):
-            if gw.get(opt):
-                update[opt] = gw[opt]
-        ctrl.update_gateway(**update)
+        # F-66e: the flip re-sends the authorizer it reads, so it reads, writes and
+        # waits for READY under the gateway's write lock.
+        with gateway_mutation_lock(ctrl, region, gateway_id) as gw_lock:
+            gw = gw_lock.read()
+            # Prefer the gateway's OWN attached engine arn (authoritative), then the
+            # recorded engine_arn — but only if it's a real arn (guard against a stale
+            # placeholder that would fail UpdateGateway validation).
+            gw_arn = (gw.get("policyEngineConfiguration") or {}).get("arn")
+            rec_arn = pr.get("engine_arn")
+            engine_arn = gw_arn or (rec_arn if str(rec_arn).startswith("arn:") else None)
+            if not engine_arn:
+                return {"promoted": False, "mode": pr.get("mode"), "reason": "no valid engine arn to attach"}
+            # A full replace: everything else the gateway holds is re-sent (F-62).
+            gw_lock.update(
+                preserving_gateway_update(
+                    gw,
+                    gateway_id,
+                    overrides={"policyEngineConfiguration": {"arn": engine_arn, "mode": "ENFORCE"}},
+                ),
+                engine_is(engine_arn, "ENFORCE"),
+            )
         logger.info("promote: flipped gateway %s engine %s to ENFORCE", gateway_id, engine_id)
-        return {"promoted": True, "mode": "ENFORCE", "reason": f"{active} ACTIVE policy(ies); gateway converged"}
+        return {
+            "promoted": True,
+            "mode": "ENFORCE",
+            "reason": f"{active} ACTIVE policy(ies); gateway converged",
+            "policy_children": children,
+        }
+    except PolicyCoResidencyConflict as e:
+        logger.error("promote: refused (co-residency): %s", str(e)[:200])
+        return {
+            "promoted": False,
+            "mode": pr.get("mode"),
+            "reason": f"co-residency refusal: {str(e)[:160]}",
+            "policy_children": children,
+        }
     except Exception as e:  # noqa: BLE001
         logger.warning("promote: could not flip to ENFORCE (will retry next call): %s", str(e)[:200])
-        return {"promoted": False, "mode": pr.get("mode"), "reason": f"transient: {str(e)[:120]}"}
+        return {
+            "promoted": False,
+            "mode": pr.get("mode"),
+            "reason": f"transient: {str(e)[:120]}",
+            "policy_children": children,
+        }

@@ -98,11 +98,11 @@ export const faq: FaqEntry[] = [
   },
   {
     id: 'self-service-first-sign-in',
-    question: 'Why is my new Self-Service user read-only after signing in?',
+    question: 'Why does my new Self-Service user get 403 on every call after signing in?',
     answer:
-      'COGNITO_USERS pre-creates Cognito users but assigns them to no group, and group membership grants the capability scopes. Add the user to groups such as g-admins-super, t-admin and registry-admin (or g-users-default and t-user) with the AWS CLI, passing the region you deployed to, then sign out and back in so the new scopes are read from the ID token.',
+      'Group membership grants the capability scopes and the API enforces them by default. COGNITO_USERS puts each pre-created user in g-users-default and t-user, so those users can build, deploy and invoke; a user created any other way (for example in the Cognito console) is in no group and gets 403 on every call. Add groups such as g-admins-super, t-admin and registry-admin with the AWS CLI, passing the region you deployed to, then sign out and back in so the new scopes are read from the ID token.',
     sources: [
-      { file: SELF_SERVICE_README, quote: 'pre-creates Cognito **users** but assigns them to **no group**' },
+      { file: SELF_SERVICE_README, quote: 'pre-creates Cognito **users** and puts each one in `g-users-default` + `t-user`' },
       { file: SELF_SERVICE_README, quote: '**Sign out and back in** after changing groups' },
     ],
     projectIds: ['self-service'],

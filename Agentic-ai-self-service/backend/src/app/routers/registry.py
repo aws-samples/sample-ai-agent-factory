@@ -38,8 +38,9 @@ from datetime import datetime, timezone
 from typing import Any, Literal, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.models.workflow import DeploymentGovernanceV1, Viewport
 from app.services.auth import (
     _LOCAL_DEV_SUB,
     assert_owner,
@@ -176,12 +177,50 @@ router = APIRouter(prefix="/api/registry", tags=["registry"])
 # ---------------------------------------------------------------------------
 
 
+class LegacyRegistryCanvasSnapshot(BaseModel):
+    """Read-compatible shape for snapshots written before governance schema V2."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    schema_version: Literal[1] = Field(default=1, alias="schemaVersion")
+    name: str = Field(default="", max_length=200)
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    edges: list[dict[str, Any]] = Field(default_factory=list)
+    viewport: Viewport = Field(default_factory=Viewport)
+
+
+class RegistryCanvasSnapshotV2(BaseModel):
+    """Current registry blueprint boundary; governance is mandatory and typed."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    schema_version: Literal[2] = Field(alias="schemaVersion")
+    name: str = Field(min_length=1, max_length=200)
+    nodes: list[dict[str, Any]]
+    edges: list[dict[str, Any]]
+    viewport: Viewport
+    governance: DeploymentGovernanceV1
+
+    @model_validator(mode="before")
+    @classmethod
+    def _never_publish_raw_credentials(cls, value):
+        # A published snapshot is cloned into other users' canvases: a raw LiteLLM key, MCP
+        # apiKey or OAuth clientSecret anywhere in it (nodes, edges, viewport, governance) would be
+        # handed to every cloner. Scrub the WHOLE snapshot, not one field of it.
+        from app.services.credential_scrub import scrub_write_only_credentials
+
+        return scrub_write_only_credentials(value) if isinstance(value, dict) else value
+
+
+RegistryCanvasSnapshot = LegacyRegistryCanvasSnapshot | RegistryCanvasSnapshotV2
+
+
 class PublishRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=2000)
     tags: list[str] = Field(default_factory=list, max_length=20)
     visibility: Literal["private", "org", "public"] = "org"
-    canvas_snapshot: dict
+    canvas_snapshot: RegistryCanvasSnapshotV2
     source_runtime_name: str | None = None
     latest_version_id: str | None = None
 
@@ -219,7 +258,7 @@ class RegistryEntryResponse(BaseModel):
     # Populated ONLY on single-entry GET (detail view's Components tab), never in
     # the list response — including the full snapshot in every browse-grid card
     # would bloat the list payload. None on list items by design.
-    canvas_snapshot: dict | None = None
+    canvas_snapshot: RegistryCanvasSnapshot | None = None
 
     @classmethod
     def from_entry(
@@ -249,14 +288,14 @@ class RegistryEntryResponse(BaseModel):
             rejection_reason=e.rejection_reason,
             source=getattr(e, "source", "platform"),
             read_only=read_only,
-            canvas_snapshot=e.canvas_snapshot if include_snapshot else None,
+            canvas_snapshot=e.canvas_snapshot if include_snapshot and e.canvas_snapshot else None,
         )
 
 
 class CloneResponse(BaseModel):
     agent_slug: str
     display_name: str
-    canvas_snapshot: dict
+    canvas_snapshot: RegistryCanvasSnapshot
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +343,7 @@ async def publish(
         existing = store.get(org_id, slug)  # re-check the disambiguated slug
 
     own_existing = existing if (existing and existing.owner_sub == caller_sub) else None
+    snapshot = body.canvas_snapshot.model_dump(mode="json", by_alias=True)
 
     # Status on (re)publish (PR #3 review — mNemlaghi):
     #   * brand-new entry            -> pending (needs approval)
@@ -314,7 +354,7 @@ async def publish(
     #     deployed blueprint differs from what was approved, so re-review).
     if own_existing is None:
         status = "pending"
-    elif own_existing.canvas_snapshot == body.canvas_snapshot:
+    elif own_existing.canvas_snapshot == snapshot:
         status = own_existing.status or "pending"
     else:
         status = "pending"
@@ -328,7 +368,7 @@ async def publish(
         tags=body.tags,
         visibility=body.visibility,
         latest_version_id=body.latest_version_id,
-        canvas_snapshot=body.canvas_snapshot,
+        canvas_snapshot=snapshot,
         source_runtime_name=body.source_runtime_name,
         usage_count=(own_existing.usage_count if own_existing else 0),
         status=status,
@@ -869,8 +909,16 @@ async def delete_entry(
     # existence disclosure), so check admin before falling back to assert_owner.
     if not is_admin:
         assert_owner(entry.owner_sub, caller_sub)  # 404 on mismatch
-    ok = store.delete(org_id, slug)
-    return {"success": ok, "agent_slug": slug}
+    # F-34: a delete that did not happen is not a 200. The store raises; the exception type
+    # (never its text, which can echo the request) is logged and the client gets a 503 to retry.
+    try:
+        store.delete(org_id, slug)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Registry entry %s/%s was not deleted (%s)", org_id, slug, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="The entry could not be deleted. Try again.") from exc
+    return {"success": True, "agent_slug": slug}
 
 
 # ---------------------------------------------------------------------------

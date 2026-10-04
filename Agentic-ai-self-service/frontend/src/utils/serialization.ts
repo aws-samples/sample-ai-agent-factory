@@ -5,12 +5,18 @@
  */
 
 import type { Viewport } from '@xyflow/react';
+import { stripWriteOnlyCredentials } from './credentialScrub';
 import type { AgentCoreNode } from '../store/workflowStore';
 import type { Edge } from '@xyflow/react';
 import type {
   AgentCoreComponentType,
+  DeploymentGovernanceV1,
   ValidationStatus,
   DeploymentStatus,
+} from '../types/workflow';
+import {
+  createEmptyDeploymentGovernance,
+  normalizeDeploymentGovernance,
 } from '../types/workflow';
 import { getDeploymentRegion } from './awsRegion';
 
@@ -27,6 +33,8 @@ export interface SerializedWorkflow {
   edges: SerializedEdge[];
   viewport: SerializedViewport;
   metadata: SerializedMetadata;
+  /** Optional only when reading a legacy pre-governance document. */
+  governance?: DeploymentGovernanceV1;
   createdAt: string;
   updatedAt: string;
 }
@@ -91,9 +99,17 @@ export class WorkflowSerializer {
     edges: Edge[],
     viewport: Viewport,
     metadata?: Partial<SerializedMetadata>,
-    workflowInfo?: { id?: string; name?: string; description?: string; version?: string }
+    workflowInfo?: { id?: string; name?: string; description?: string; version?: string },
+    governance?: DeploymentGovernanceV1,
   ): string {
-    const serializedWorkflow = this.toSerializedWorkflow(nodes, edges, viewport, metadata, workflowInfo);
+    const serializedWorkflow = this.toSerializedWorkflow(
+      nodes,
+      edges,
+      viewport,
+      metadata,
+      workflowInfo,
+      governance,
+    );
     return JSON.stringify(serializedWorkflow, null, 2);
   }
 
@@ -105,7 +121,8 @@ export class WorkflowSerializer {
     edges: Edge[],
     viewport: Viewport,
     metadata?: Partial<SerializedMetadata>,
-    workflowInfo?: { id?: string; name?: string; description?: string; version?: string }
+    workflowInfo?: { id?: string; name?: string; description?: string; version?: string },
+    governance?: DeploymentGovernanceV1,
   ): SerializedWorkflow {
     const now = new Date().toISOString();
 
@@ -118,6 +135,9 @@ export class WorkflowSerializer {
       edges: edges.map(this.serializeEdge),
       viewport: this.serializeViewport(viewport),
       metadata: this.serializeMetadata(metadata),
+      governance: normalizeDeploymentGovernance(
+        governance ?? createEmptyDeploymentGovernance(),
+      ),
       createdAt: now,
       updatedAt: now,
     };
@@ -132,6 +152,7 @@ export class WorkflowSerializer {
     edges: Edge[];
     viewport: Viewport;
     metadata: SerializedMetadata;
+    governance: DeploymentGovernanceV1;
     workflowInfo: { id: string; name: string; description: string; version: string };
   } {
     const parsed = JSON.parse(json) as SerializedWorkflow;
@@ -146,6 +167,7 @@ export class WorkflowSerializer {
     edges: Edge[];
     viewport: Viewport;
     metadata: SerializedMetadata;
+    governance: DeploymentGovernanceV1;
     workflowInfo: { id: string; name: string; description: string; version: string };
   } {
     return {
@@ -153,6 +175,7 @@ export class WorkflowSerializer {
       edges: serialized.edges.map(this.deserializeEdge),
       viewport: this.deserializeViewport(serialized.viewport),
       metadata: serialized.metadata,
+      governance: normalizeDeploymentGovernance(serialized.governance),
       workflowInfo: {
         id: serialized.id,
         name: serialized.name,
@@ -235,6 +258,20 @@ export class WorkflowSerializer {
       errors.push(...metadataErrors);
     }
 
+    // Legacy exports have no governance field and migrate to an empty V1 object.
+    // A present field is deployment authority, so malformed content is refused
+    // instead of silently erased.
+    if (Object.prototype.hasOwnProperty.call(workflow, 'governance')) {
+      try {
+        normalizeDeploymentGovernance(workflow.governance);
+      } catch (error) {
+        errors.push({
+          field: 'governance',
+          message: error instanceof Error ? error.message : 'Invalid governance metadata',
+        });
+      }
+    }
+
     return errors;
   }
 
@@ -250,7 +287,8 @@ export class WorkflowSerializer {
       data: {
         label: node.data.label,
         componentType: node.data.componentType,
-        configuration: node.data.configuration,
+        // Persisted/exported canvases never carry a raw key or secret; only references survive.
+        configuration: stripWriteOnlyCredentials(node.data.configuration),
         validationStatus: node.data.validationStatus,
       },
       selected: node.selected ?? false,
@@ -489,7 +527,9 @@ export function areWorkflowsEquivalent(
   // Compare viewport
   if (!areViewportsEquivalent(a.viewport, b.viewport)) return false;
 
-  return true;
+  // Missing is the legacy spelling of an empty V1 object.
+  return JSON.stringify(normalizeDeploymentGovernance(a.governance))
+    === JSON.stringify(normalizeDeploymentGovernance(b.governance));
 }
 
 function areNodesEquivalent(a: SerializedNode, b: SerializedNode): boolean {
