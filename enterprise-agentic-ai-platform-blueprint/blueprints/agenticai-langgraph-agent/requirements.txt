@@ -1,6 +1,16 @@
 # Pinned to exact tested versions (security review: supply-chain hygiene).
 # Bump deliberately after re-running test_real_integration.py against the new set.
-langgraph==0.2.60
-langchain-aws==0.2.10
-boto3==1.35.90
-pytest==8.3.4
+# langgraph 1.0.10 fixes the unsafe msgpack deserialization of checkpoints
+# (GHSA-g48c-2wqr-h844 / CVE-2026-28277, affects <= 1.0.9). The fix exists only
+# on the 1.x line, and langgraph 1.x requires langchain-core >= 1.0, so
+# langchain-aws and boto3 must move in the same commit: langchain-aws 0.2.10
+# caps langchain-core < 0.4, and boto3 1.35.90 holds langchain-aws on its 0.1.x
+# line. The three pins are therefore one coordinated bump, not three.
+# Re-verified against test_agent.py + test_real_integration.py.
+langgraph==1.0.10
+langchain-aws==1.8.0
+boto3==1.43.108
+# pytest 9.0.3 fixes the insecure /tmp/pytest-of-$USER handling
+# (GHSA-6w46-j5rx-g56g / CVE-2025-71176). There is no 8.x backport, so the
+# major bump is the only fix; dev/test-only dependency.
+pytest==9.0.3
