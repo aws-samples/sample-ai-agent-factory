@@ -6,7 +6,7 @@ Enterprise LLM Gateway deployed on AWS ECS Fargate using [LiteLLM Proxy](https:/
 
 - **API Gateway HTTP API** — HTTPS front door (public endpoint)
 - **Internal ALB** — routes to LiteLLM via VPC Link (private, not publicly accessible)
-- **LiteLLM Proxy** (`litellm-database:v1.84.0`, pinned for supply-chain reproducibility) on ECS Fargate — port 4000
+- **LiteLLM Proxy** (`litellm-database:v1.88.6`, pinned for supply-chain reproducibility) on ECS Fargate — port 4000
 - **PostgreSQL 16.7 sidecar** (Debian, pinned tag) for virtual keys, teams, and spend tracking
 - **EFS** for PostgreSQL data persistence
 - **IAM Task Role** for Amazon Bedrock + Guardrails access (no API keys needed)

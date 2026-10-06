@@ -52,7 +52,7 @@ Notice the model name is `claude-sonnet` (the friendly alias), not the full Bedr
 Because the gateway is OpenAI-compatible, the standard `openai` package works:
 
 :::code{showCopyAction=true showLineNumbers=false language=bash}
-# Pinned for supply-chain reproducibility; matches the openai floor litellm 1.84.0 requires
+# Pinned for supply-chain reproducibility; matches the openai floor litellm 1.88.6 requires
 pip install "openai==2.54.0" --quiet
 
 python3 << 'PYEOF'

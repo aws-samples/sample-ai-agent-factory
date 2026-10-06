@@ -75,7 +75,7 @@ The ECS Fargate task runs **two containers** in the same task definition:
 
 | Container | Image | Port | Purpose |
 |-----------|-------|------|---------|
-| `litellm` | `litellm-database:v1.84.0` | 4000 | LLM proxy, virtual keys, spend tracking, Admin UI |
+| `litellm` | `litellm-database:v1.88.6` | 4000 | LLM proxy, virtual keys, spend tracking, Admin UI |
 | `postgres` | `postgres:16.7` (Debian) | 5432 | Stores virtual keys, teams, spend logs |
 
 PostgreSQL data is persisted on EFS, so it survives task restarts. The LiteLLM container waits for PostgreSQL to be healthy before starting.

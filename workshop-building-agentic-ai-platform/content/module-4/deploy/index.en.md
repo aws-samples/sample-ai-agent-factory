@@ -313,13 +313,13 @@ REQ=patterns/strands-travel-agent/requirements.txt
 # Re-runnable by design: drop any pin a previous run of this block added, then
 # append. A bare `>>` grows the file every time you run it, and the moment the
 # pinned version differs from the one already there the container build dies on
-# "Because you require litellm==1.83.0 and litellm==1.84.0 ... unsatisfiable".
+# "Because you require litellm==1.83.0 and litellm==1.88.6 ... unsatisfiable".
 # Only these two lines are removed; FAST's own `strands-agents==1.32.0` stays.
 grep -vE '^(litellm|strands-agents\[litellm\])==' "$REQ" > "$REQ.new" && mv "$REQ.new" "$REQ"
-# Pinned for supply-chain reproducibility. litellm==1.84.0 matches the Module 2
+# Pinned for supply-chain reproducibility. litellm==1.88.6 matches the Module 2
 # gateway version; strands-agents==1.32.0 matches the version FAST v0.4.1 already
 # pins in this pattern's requirements.txt (the [litellm] extra adds no version drift).
-printf '%s\n' 'litellm==1.84.0' 'strands-agents[litellm]==1.32.0' >> "$REQ"
+printf '%s\n' 'litellm==1.88.6' 'strands-agents[litellm]==1.32.0' >> "$REQ"
 cat "$REQ"
 :::
 

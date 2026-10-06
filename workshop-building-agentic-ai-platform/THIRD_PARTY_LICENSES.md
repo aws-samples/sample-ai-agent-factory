@@ -14,7 +14,7 @@ Installed into participant environments via `requirements.txt` under each module
 | `botocore` | `==1.43.72` | Apache-2.0 | https://github.com/boto/botocore |
 | `requests` | `==2.33.0` | Apache-2.0 | https://github.com/psf/requests |
 | `pydantic` | `==2.13.4` | MIT | https://github.com/pydantic/pydantic |
-| `litellm` | `==1.84.0` (Modules 2–3 IDE kernel); `==1.83.0` (Module 4 FAST agent pattern) | MIT | https://github.com/BerriAI/litellm |
+| `litellm` | `==1.88.6` (Modules 2–3 IDE kernel and Module 4 FAST agent pattern) | MIT | https://github.com/BerriAI/litellm |
 | `strands-agents` | `[litellm,openai]==1.52.0` (Modules 2–3 IDE kernel); `[litellm]==1.32.0` (Module 4 FAST agent pattern, matching FAST v0.4.1) | Apache-2.0 | https://github.com/strands-agents/sdk-python |
 | `openai` | `==2.54.0` | Apache-2.0 | https://github.com/openai/openai-python |
 | `httpx` | `==0.28.1` | BSD-3-Clause | https://github.com/encode/httpx |
@@ -56,7 +56,7 @@ Pulled at workshop deploy time by ECS/Fargate task definitions.
 
 | Image | Workshop version | SPDX license | Upstream |
 |---|---|---|---|
-| `docker.litellm.ai/berriai/litellm-database` | `v1.84.0` (`LiteLLMImageTag` default) | MIT | https://github.com/BerriAI/litellm |
+| `ghcr.io/berriai/litellm-database` | `v1.88.6` (`LiteLLMImageTag` default) | MIT | https://github.com/BerriAI/litellm |
 | Grafana OSS (mirrored to workshop ECR with baked-in dashboards) | `mcpgateway/grafana:v1.0.16` (pinned) | AGPL-3.0 | https://github.com/grafana/grafana |
 | PostgreSQL (official `postgres` image, LiteLLM metadata DB sidecar) | `16.7` (`PostgresImageTag` default) | PostgreSQL License | https://github.com/docker-library/postgres |
 | ADOT Collector (AWS-maintained OpenTelemetry distribution used by the observability stack) | `v0.43.3` | Apache-2.0 | https://github.com/aws-observability/aws-otel-collector |
