@@ -28,22 +28,22 @@ function asPolicy(p: Record<string, unknown>): PolicyDoc {
 describe('renderInlinePolicy — Developer', () => {
   it('grants Registry consumer permissions scoped to the platform-account registry ARN when supplied', () => {
     const p = asPolicy(renderInlinePolicy('Developer', { platformAccountId: '222222222222' }));
-    const consumerStmt = p.Statement.find((s) => s.Sid === 'AgentCoreRegistryConsumer');
+    const consumerStmt = p.Statement.find((s) => s.Sid === 'AgentRegistryConsumer');
     expect(consumerStmt).toBeDefined();
     const resources = Array.isArray(consumerStmt!.Resource)
       ? consumerStmt!.Resource
       : [consumerStmt!.Resource ?? ''];
-    expect(resources).toContain('arn:aws:bedrock-agentcore:*:222222222222:registry/*');
-    expect(resources).toContain('arn:aws:bedrock-agentcore:*:222222222222:registry/*/record/*');
+    expect(resources).toContain('arn:aws:agent-registry:*:222222222222:registry/*');
+    expect(resources).toContain('arn:aws:agent-registry:*:222222222222:registry/*/record/*');
   });
 
   it('falls back to a wildcard account scope when platformAccountId is not supplied', () => {
     const p = asPolicy(renderInlinePolicy('Developer'));
-    const consumerStmt = p.Statement.find((s) => s.Sid === 'AgentCoreRegistryConsumer');
+    const consumerStmt = p.Statement.find((s) => s.Sid === 'AgentRegistryConsumer');
     const resources = Array.isArray(consumerStmt!.Resource)
       ? consumerStmt!.Resource
       : [consumerStmt!.Resource ?? ''];
-    expect(resources).toContain('arn:aws:bedrock-agentcore:*:*:registry/*');
+    expect(resources).toContain('arn:aws:agent-registry:*:*:registry/*');
   });
 
   it('emits a Deny statement guarding agenticai:owner=platform tagged resources (defense-in-depth for SCP-12)', () => {
@@ -57,6 +57,13 @@ describe('renderInlinePolicy — Developer', () => {
     const actions = Array.isArray(denyStmt!.Action) ? denyStmt!.Action : [denyStmt!.Action];
     expect(actions).toContain('bedrock-agentcore:Update*');
     expect(actions).toContain('bedrock-agentcore:Delete*');
+    // The GA Agent Registry signs as its own service, so the
+    // `bedrock-agentcore:*` wildcards above do not reach it. Both namespaces
+    // must be denied, the same reason SCP-11 covers both.
+    expect(actions).toContain('agent-registry:Update*');
+    expect(actions).toContain('agent-registry:Delete*');
+    expect(actions).toContain('agent-registry:Create*');
+    expect(actions).toContain('agent-registry:Put*');
     expect(actions).toContain('iam:Update*');
     expect(actions).toContain('lambda:Update*');
     expect(actions).toContain('kms:ScheduleKeyDeletion');
@@ -106,14 +113,18 @@ describe('renderInlinePolicy — Developer', () => {
 });
 
 describe('renderInlinePolicy — ReadOnly', () => {
-  it('grants observability + Registry read but NOT InvokeRegistryMcp', () => {
+  it('grants observability + Registry read but NOT the active Discoverable search verb', () => {
     const p = asPolicy(renderInlinePolicy('ReadOnly', { platformAccountId: '222222222222' }));
-    const consumerStmt = p.Statement.find((s) => s.Sid === 'AgentCoreRegistryConsumerReadOnly');
+    const consumerStmt = p.Statement.find((s) => s.Sid === 'AgentRegistryConsumerReadOnly');
     expect(consumerStmt).toBeDefined();
     const actions = Array.isArray(consumerStmt!.Action) ? consumerStmt!.Action : [consumerStmt!.Action];
-    expect(actions).toContain('bedrock-agentcore:SearchRegistryRecords');
-    expect(actions).toContain('bedrock-agentcore:GetRegistryRecord');
-    expect(actions).not.toContain('bedrock-agentcore:InvokeRegistryMcp');
+    expect(actions).toContain('agent-registry:GetRegistry');
+    expect(actions).toContain('agent-registry:GetRegistryRecord');
+    expect(actions).toContain('agent-registry:ListDiscoverableRegistryRecords');
+    // ReadOnly must not carry the active search verb the Developer persona has.
+    expect(actions).not.toContain('agent-registry:SearchDiscoverableRegistryRecords');
+    // And no preview-namespace action may survive the GA migration.
+    expect(actions.some((a) => String(a).startsWith('bedrock-agentcore:'))).toBe(false);
   });
 
   it('does not grant any pipeline or codebuild actions', () => {

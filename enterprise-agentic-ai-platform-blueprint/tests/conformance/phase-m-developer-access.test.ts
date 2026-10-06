@@ -81,7 +81,7 @@ describe('Phase M — WorkstreamPermissionSets resource shape', () => {
     expect(personas.sort()).toEqual(['Approver', 'Developer', 'ReadOnly']);
   });
 
-  it('Developer persona inline policy contains the AgentCoreRegistryConsumer Sid', () => {
+  it('Developer persona inline policy contains the AgentRegistryConsumer Sid', () => {
     const { template } = synth();
     const sets = template.findResources('AWS::SSO::PermissionSet');
     const developer = Object.values(sets).find(
@@ -93,7 +93,7 @@ describe('Phase M — WorkstreamPermissionSets resource shape', () => {
     const inline = (developer as { Properties: { InlinePolicy: { Statement: Array<{ Sid?: string }> } } })
       .Properties.InlinePolicy;
     const sids = inline.Statement.map((s) => s.Sid);
-    expect(sids).toContain('AgentCoreRegistryConsumer');
+    expect(sids).toContain('AgentRegistryConsumer');
     expect(sids).toContain('DenyPlatformOwnedMutation');
     expect(sids).toContain('PipelineDeployForOwnWorkstream');
     expect(sids).toContain('ObservabilityRead');

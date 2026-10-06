@@ -66,11 +66,6 @@ import { Construct } from 'constructs';
 import { PlatformBaselineGuardrail } from '@agenticai/bedrock-guardrails';
 import { allowedBedrockResources, PLATFORM_ALLOWED_MODELS } from '@agenticai/platform-baselines';
 import {
-  PlatformRegistryConstruct,
-  RegistryRecordConstruct,
-  toolSpecToRegistryRecordSpec,
-} from '@agenticai/agent-registry';
-import {
   PLATFORM_TOOL_CATALOGUE,
   composeCedarPolicyDocument,
 } from '@agenticai/platform-tool-catalogue';
@@ -118,29 +113,6 @@ export interface D03PlatformCoreStackProps extends StackProps {
    * 7-day pending window.
    */
   readonly retainDataKeys?: boolean;
-  /**
-   * v0.5.0 — when true, provision a single platform-account
-   * `PlatformRegistryConstruct` (AWS Bedrock AgentCore Registry) and seed it
-   * from `PLATFORM_TOOL_CATALOGUE` via one `RegistryRecordConstruct` per tool.
-   *
-   * Defaults to `false` to keep the v0.4.0 D-03 v3 path bit-identical for
-   * back-compat — the platform-tool-catalogue SSOT remains the synth-time
-   * authority for existing deployments. Set to `true` once the workstream
-   * gateway stack is wired to consume `subscribedRegistryRecords` (Phase L
-   * cutover).
-   */
-  readonly enableAgentRegistry?: boolean;
-  /**
-   * AgentCore Registry name (slug). Required when `enableAgentRegistry` is
-   * true. AWS pattern: `([0-9a-zA-Z][-]?){1,100}`.
-   */
-  readonly registryName?: string;
-  /**
-   * When true and `enableAgentRegistry` is set, every record seeded from the
-   * tool catalogue is auto-submitted + auto-approved on create. Recommended
-   * only for nonprod / dev pipelines. Defaults to `false`.
-   */
-  readonly registryAutoApproveOnSeed?: boolean;
 }
 
 export class D03PlatformCoreStack extends Stack {
@@ -155,10 +127,6 @@ export class D03PlatformCoreStack extends Stack {
   readonly invocationLogGroup: LogGroup;
   /** Application inference profiles keyed by `${tenantId}__${agentId}`. */
   readonly appInferenceProfiles: Record<string, CfnApplicationInferenceProfile> = {};
-  /** v0.5.0 — present when `enableAgentRegistry: true`. */
-  readonly agentRegistry?: PlatformRegistryConstruct;
-  /** v0.5.0 — record constructs keyed by stable record-id slug (== ToolId). */
-  readonly agentRegistryRecords: Record<string, RegistryRecordConstruct> = {};
 
   constructor(scope: Construct, id: string, props: D03PlatformCoreStackProps) {
     super(scope, id, props);
@@ -1090,106 +1058,6 @@ exports.handler = async (event, context) => {
       ],
       true,
     );
-
-    // ---- v0.5.0: AgentCore Registry (optional) ----
-    // When `enableAgentRegistry` is set, provision a single platform-account
-    // Registry and seed it from PLATFORM_TOOL_CATALOGUE — one MCP record per
-    // tool with the resolved Lambda alias ARN substituted in. Records start
-    // in DRAFT (or APPROVED if `registryAutoApproveOnSeed=true`).
-    //
-    // The catalogue's `${PLATFORM_REGION}` and `${PLATFORM_ACCOUNT_ID}`
-    // placeholders are resolved here so the Registry stores a concrete ARN; the
-    // workstream Gateway synth then reads it back as the truth source.
-    if (props.enableAgentRegistry) {
-      if (!props.registryName) {
-        throw new Error(
-          "D03PlatformCoreStack: 'registryName' is required when 'enableAgentRegistry' is true.",
-        );
-      }
-      this.agentRegistry = new PlatformRegistryConstruct(this, 'AgentRegistry', {
-        registryName: props.registryName,
-        description:
-          'Platform-owned AgentCore Registry. Source of truth for the workstream tool catalogue. v0.5.0+.',
-        inboundAuthType: 'AWS_IAM',
-        autoApproval: false,
-      });
-      const autoApprove = props.registryAutoApproveOnSeed ?? false;
-      for (const toolSpec of Object.values(PLATFORM_TOOL_CATALOGUE)) {
-        const recordSpec = toolSpecToRegistryRecordSpec(toolSpec);
-        // Substitute `${PLATFORM_ACCOUNT_ID}` so the Registry holds a
-        // concrete ARN. This mirrors `resolveTargetArn` semantics.
-        const resolvedSpec =
-          recordSpec.descriptorType === 'MCP'
-            ? {
-                ...recordSpec,
-                gatewayTargetArn: recordSpec.gatewayTargetArn
-                  .replace('${PLATFORM_REGION}', this.region)
-                  .replace(
-                    '${PLATFORM_ACCOUNT_ID}',
-                    recordSpec.targetAccountId ?? this.account,
-                  ),
-              }
-            : recordSpec;
-        const rec = new RegistryRecordConstruct(this, `AgentRegistryRecord-${recordSpec.recordId}`, {
-          registryId: this.agentRegistry.registryId,
-          spec: resolvedSpec,
-          autoApproveOnCreate: autoApprove,
-          approvalReason: autoApprove
-            ? `Auto-seeded from PLATFORM_TOOL_CATALOGUE (tool=${toolSpec.toolId})`
-            : undefined,
-        });
-        // Do not create records until the registry is READY (live-verified
-        // race). Depend on the readiness gate, not just the registry resource.
-        rec.node.addDependency(this.agentRegistry.readyGate);
-        this.agentRegistryRecords[recordSpec.recordId] = rec;
-      }
-      // GatewayAdminRole carries write access to the Registry record-status
-      // surface so a curator job can promote DRAFT → APPROVED via the
-      // platform principal. SCP-11 backs this up at the org level.
-      gatewayAdminRole.addToPolicy(
-        new PolicyStatement({
-          sid: 'CuratePlatformRegistryRecords',
-          effect: Effect.ALLOW,
-          actions: [
-            'bedrock-agentcore:SubmitRegistryRecordForApproval',
-            'bedrock-agentcore:UpdateRegistryRecordStatus',
-            'bedrock-agentcore:UpdateRegistryRecord',
-            'bedrock-agentcore:GetRegistryRecord',
-            'bedrock-agentcore:ListRegistryRecords',
-          ],
-          // Record ARN shape: <registry-arn>/record/<id>. Scope to this registry.
-          resources: [
-            this.agentRegistry.registryArn,
-            `${this.agentRegistry.registryArn}/record/*`,
-          ],
-        }),
-      );
-      // The `record/*` grant above is a per-record wildcard within a single
-      // registry — the curator must promote any record's status. cdk-nag
-      // flags the `/record/*` suffix; suppress with evidence (scoped to this
-      // registry only, backed by SCP-11 at the org layer).
-      NagSuppressions.addResourceSuppressions(
-        gatewayAdminRole,
-        [
-          {
-            id: 'AwsSolutions-IAM5',
-            reason:
-              'SEC-027: registry curator (GatewayAdmin) must act on any record within THIS registry to promote DRAFT→APPROVED. Scoped to <registryArn>/record/*; org-level SCP-11 restricts who may assume the role.',
-          },
-        ],
-        true,
-      );
-      new CfnOutput(this, 'AgentRegistryId', {
-        value: this.agentRegistry.registryId,
-        description: 'Stable AgentCore Registry id. Workstream gateway stacks consume this as agenticai/d03RegistryId.',
-        exportName: 'AgenticAI-D03-AgentRegistryId',
-      });
-      new CfnOutput(this, 'AgentRegistryArn', {
-        value: this.agentRegistry.registryArn,
-        description: 'AgentCore Registry ARN. Consumer IAM grants scope here.',
-        exportName: 'AgenticAI-D03-AgentRegistryArn',
-      });
-    }
 
     // Outputs consumed by the workload stack (via context / SSM).
     new CfnOutput(this, 'GatewayAdminRoleArn', {
