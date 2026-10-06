@@ -281,6 +281,12 @@ Shared governance and inference services live in Platform; agent execution, Memo
 - **Tenancy:** identities, Registry records, aliases, Memory actors, application tags, and environment context remain explicit at every boundary.
 - **Cost attribution:** application tags and supported inference attribution records stay outside the agent's ability to rewrite.
 
+### 3.4 Dependency exceptions
+
+`npm audit --package-lock-only` reports one accepted high-severity finding in this package: a `brace-expansion` copy bundled inside the `aws-cdk-lib` tarball, where npm `overrides` cannot reach it and no newer `aws-cdk-lib` release exists. It is a build-time denial-of-service issue in glob expansion, reachable only from the synthesizing project's own patterns and never from deployed infrastructure.
+
+Anything beyond that single finding is new and needs fixing. See [DEPENDENCY_EXCEPTIONS.md](DEPENDENCY_EXCEPTIONS.md) for the exposure analysis and the retirement condition.
+
 ---
 
 ## 4. AWS services used
