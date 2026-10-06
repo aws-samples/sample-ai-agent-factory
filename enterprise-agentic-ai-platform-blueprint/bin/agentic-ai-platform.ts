@@ -612,23 +612,6 @@ switch (stage) {
       : typeof rawAllocations === "string"
         ? (JSON.parse(rawAllocations) as unknown[])
         : undefined;
-    // v0.5.0 — opt-in AgentCore Registry seed. Default off for back-compat
-    // with the v0.4.0 D-03 v3 path. When `agenticai/d03EnableAgentRegistry`
-    // is true, the platform stack provisions a single AgentCore Registry and
-    // seeds it from PLATFORM_TOOL_CATALOGUE (one MCP record per lambda tool).
-    const enableAgentRegistryRaw = app.node.tryGetContext(
-      "agenticai/d03EnableAgentRegistry",
-    );
-    const enableAgentRegistry =
-      enableAgentRegistryRaw === true || enableAgentRegistryRaw === "true";
-    const registryName =
-      app.node.tryGetContext("agenticai/d03RegistryName") ??
-      "agenticai-platform-registry";
-    const registryAutoApproveRaw = app.node.tryGetContext(
-      "agenticai/d03RegistryAutoApproveOnSeed",
-    );
-    const registryAutoApproveOnSeed =
-      registryAutoApproveRaw === true || registryAutoApproveRaw === "true";
     new D03PlatformCoreStack(app, "AgenticAI-D03-PlatformCoreStack", {
       env: { account, region },
       workloadAccountIds,
@@ -636,9 +619,6 @@ switch (stage) {
       tenantAllocations: tenantAllocations as
         | import("../apps/platform-account/lib/d03-platform-core-stack").D03TenantAllocation[]
         | undefined,
-      enableAgentRegistry,
-      registryName: typeof registryName === "string" ? registryName : undefined,
-      registryAutoApproveOnSeed,
     });
     // Note: the D-03 PrivateLink primitive (PlatformInferenceGatewayConstruct
     // in packages/platform-inference-gateway) is consumed by a platform

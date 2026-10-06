@@ -1,45 +1,19 @@
 /**
  * @agenticai/agent-registry — public export surface.
  *
- * AWS Bedrock AgentCore Registry constructs + helpers used by the platform
- * stack to provision the org-wide registry, by per-workstream Gateway synth
- * to resolve subscriptions, and by the developer CLI to drive the publish /
- * search / approve workflow.
+ * AWS Agent Registry (GA) constructs and helpers. `GaPlatformRegistryConstruct`
+ * provisions the platform-owned registry via the native
+ * `AWS::AgentRegistry::Registry` resource; `GaPlatformToolsConstruct` owns the
+ * Lambda tool aliases it points at; `ga-registry-consumer-context` carries
+ * resolved records into per-workstream Gateway synth.
+ *
+ * The preview `bedrock-agentcore` Registry constructs were removed on
+ * 2026-10-06 — AWS ended preview Registry support on 2026-09-17. See
+ * docs/AGENT_REGISTRY_GA_MIGRATION.md.
  *
  * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  * SPDX-License-Identifier: MIT-0
  */
-
-export {
-  PlatformRegistryConstruct,
-  type PlatformRegistryConstructProps,
-} from "./platform-registry-construct";
-
-export {
-  RegistryRecordConstruct,
-  type RegistryRecordConstructProps,
-} from "./registry-record-construct";
-
-export {
-  grantRegistryConsumer,
-  type RegistryConsumerGrantOptions,
-} from "./registry-consumer-grant";
-
-export {
-  validateRegistryRecordSpec,
-  resolveGatewayTargetArn,
-  renderMcpDescriptorPayload,
-  renderA2aDescriptorPayload,
-  toolSpecToRegistryRecordSpec,
-  type RegistryRecordSpec,
-  type McpRegistryRecordSpec,
-  type A2aRegistryRecordSpec,
-  type AgentSkillsRegistryRecordSpec,
-  type CustomRegistryRecordSpec,
-  type RegistryRecordId,
-  type RegistryRecordStatus,
-  type RegistryInboundAuthType,
-} from "./registry-record-spec";
 
 export {
   GaPlatformRegistryConstruct,

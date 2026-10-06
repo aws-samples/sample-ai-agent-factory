@@ -9,7 +9,7 @@
  *
  *   - **Developer**  (`AgenticAI-WS-Dev-<workstream>`)
  *       Build, deploy via the workload pipeline, read all observability,
- *       consume the platform Registry (SearchRegistryRecords / InvokeRegistryMcp).
+ *       consume the platform Agent Registry (GA read + Discoverable search).
  *       Cannot mutate the Gateway, the Registry control-plane, or any resource
  *       tagged `agenticai:owner=platform` (SCPs 09 / 11 / 12 enforce at the
  *       Org boundary; the inline policy here is the *positive* grant).
@@ -100,11 +100,14 @@ export interface WorkstreamPermissionSetsProps {
   readonly sessionDuration?: string;
 
   /**
-   * Platform-account id hosting the AgentCore Registry. When supplied, the
+   * Platform-account id hosting the AWS Agent Registry. When supplied, the
    * Registry consumer permissions in the Developer + ReadOnly inline
-   * policies scope to `arn:aws:bedrock-agentcore:*:<platformAccountId>:registry/*`
+   * policies scope to `arn:aws:agent-registry:*:<platformAccountId>:registry/*`
    * instead of `*` — keeping consumer reads off any other account's registry
    * that might ever exist in this Organization.
+   *
+   * GA namespace. The preview `bedrock-agentcore` Registry APIs these grants
+   * previously named stopped being supported on 2026-09-17.
    */
   readonly platformAccountId?: string;
 
@@ -138,8 +141,8 @@ export function renderInlinePolicy(
   } = {},
 ): Record<string, unknown> {
   const registryArnScope = opts.platformAccountId
-    ? `arn:aws:bedrock-agentcore:*:${opts.platformAccountId}:registry/*`
-    : 'arn:aws:bedrock-agentcore:*:*:registry/*';
+    ? `arn:aws:agent-registry:*:${opts.platformAccountId}:registry/*`
+    : 'arn:aws:agent-registry:*:*:registry/*';
   const recordArnScope = `${registryArnScope}/record/*`;
   // SEC (security review): per-workstream CI/CD resource scoping. The blueprint
   // convention names a workstream's pipeline/repo/build project with the
@@ -223,15 +226,24 @@ export function renderInlinePolicy(
           Resource: codebuildArns,
         },
         {
-          Sid: 'AgentCoreRegistryConsumer',
+          Sid: 'AgentRegistryConsumer',
           Effect: 'Allow',
+          // GA read + discovery surface, mirroring the grant in
+          // GaPlatformRegistryConstruct and AGENT_BUILDER_INSPECT_ACTIONS.
+          // The GA API has no `SearchRegistryRecords` and no
+          // `InvokeRegistryMcp`; discovery is the `*Discoverable*` family,
+          // which only returns APPROVED records. There is no GA
+          // `ListRegistries` either — consumers are scoped to the one
+          // platform registry, so enumerating registries is not a capability
+          // this persona needs.
           Action: [
-            'bedrock-agentcore:SearchRegistryRecords',
-            'bedrock-agentcore:InvokeRegistryMcp',
-            'bedrock-agentcore:GetRegistry',
-            'bedrock-agentcore:ListRegistries',
-            'bedrock-agentcore:ListRegistryRecords',
-            'bedrock-agentcore:GetRegistryRecord',
+            'agent-registry:GetRegistry',
+            'agent-registry:ListRegistryRecords',
+            'agent-registry:GetRegistryRecord',
+            'agent-registry:GetDiscoverableRegistryRecord',
+            'agent-registry:ListDiscoverableRegistryRecords',
+            'agent-registry:SearchDiscoverableRegistryRecords',
+            'agent-registry:ListTagsForResource',
           ],
           Resource: [registryArnScope, recordArnScope],
         },
@@ -246,6 +258,13 @@ export function renderInlinePolicy(
             'bedrock-agentcore:Delete*',
             'bedrock-agentcore:Create*',
             'bedrock-agentcore:Put*',
+            // GA Agent Registry signs as its own service, so the
+            // `bedrock-agentcore:*` wildcards above do not reach it. Mirrors
+            // SCP-11, which denies both namespaces for the same reason.
+            'agent-registry:Update*',
+            'agent-registry:Delete*',
+            'agent-registry:Create*',
+            'agent-registry:Put*',
             'iam:Update*',
             'iam:Delete*',
             'iam:Put*',
@@ -297,14 +316,19 @@ export function renderInlinePolicy(
           Resource: '*',
         },
         {
-          Sid: 'AgentCoreRegistryConsumerReadOnly',
+          Sid: 'AgentRegistryConsumerReadOnly',
           Effect: 'Allow',
+          // Same GA surface as the Developer persona minus
+          // `SearchDiscoverableRegistryRecords`. That mirrors the previous
+          // split, where Developer carried the active data-plane search verb
+          // (`InvokeRegistryMcp`) and ReadOnly did not.
           Action: [
-            'bedrock-agentcore:SearchRegistryRecords',
-            'bedrock-agentcore:GetRegistry',
-            'bedrock-agentcore:ListRegistries',
-            'bedrock-agentcore:ListRegistryRecords',
-            'bedrock-agentcore:GetRegistryRecord',
+            'agent-registry:GetRegistry',
+            'agent-registry:ListRegistryRecords',
+            'agent-registry:GetRegistryRecord',
+            'agent-registry:GetDiscoverableRegistryRecord',
+            'agent-registry:ListDiscoverableRegistryRecords',
+            'agent-registry:ListTagsForResource',
           ],
           Resource: [registryArnScope, recordArnScope],
         },
