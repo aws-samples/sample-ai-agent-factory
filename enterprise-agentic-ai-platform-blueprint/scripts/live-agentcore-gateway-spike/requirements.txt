@@ -1,4 +1,8 @@
 boto3==1.43.97
 botocore==1.43.97
 strands-agents==1.44.0
-litellm==1.89.1
+# litellm 1.89.7 patches the authenticated SSRF and provider-credential
+# exfiltration via unvalidated request-body routing parameters
+# (GHSA-3cv6-jpf6-8222 / CVE-2026-84377, affects >= 1.89.0 < 1.89.7). Smallest
+# release on the live-proven 1.89 line that clears it.
+litellm==1.89.7

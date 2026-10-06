@@ -11,7 +11,7 @@
 #   * boto3/botocore            -> AgentCore Memory data-plane client
 #
 # Pins match the versions live-proven by the inference-Gateway and Identity M2M
-# spikes (strands-agents 1.44.0, litellm 1.89.1, boto3/botocore 1.43.97/.98).
+# spikes (strands-agents 1.44.0, litellm 1.89.7, boto3/botocore 1.43.97/.98).
 # Keep an exact pin for every dependency actually installed; the image is built
 # and vulnerability-scanned before any Runtime consumes it.
 #
@@ -25,5 +25,9 @@ boto3==1.43.98
 botocore==1.43.98
 strands-agents==1.44.0
 strands-agents-tools==0.2.9
-litellm==1.89.1
+# litellm 1.89.7 patches the authenticated SSRF and provider-credential
+# exfiltration via unvalidated request-body routing parameters
+# (GHSA-3cv6-jpf6-8222 / CVE-2026-84377, affects >= 1.89.0 < 1.89.7). Smallest
+# release on the live-proven 1.89 line that clears it.
+litellm==1.89.7
 bedrock-agentcore==1.23.1

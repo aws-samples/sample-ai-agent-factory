@@ -3,4 +3,7 @@
 langgraph==0.2.60
 langchain-aws==0.2.10
 boto3==1.35.90
-pytest==8.3.4
+# pytest 9.0.3 fixes the insecure /tmp/pytest-of-$USER handling
+# (GHSA-6w46-j5rx-g56g / CVE-2025-71176). There is no 8.x backport, so the
+# major bump is the only fix; dev/test-only dependency.
+pytest==9.0.3
