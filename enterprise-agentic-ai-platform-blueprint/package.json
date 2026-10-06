@@ -42,5 +42,8 @@
     "constructs": "^10.3.0",
     "source-map-support": "^0.5.21",
     "tsconfig-paths": "^4.2.0"
+  },
+  "overrides": {
+    "argparse": "^2.0.1"
   }
 }
