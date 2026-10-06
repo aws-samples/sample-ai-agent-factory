@@ -14,7 +14,7 @@ Installed into participant environments via `requirements.txt` under each module
 | `botocore` | `==1.43.72` | Apache-2.0 | https://github.com/boto/botocore |
 | `requests` | `==2.33.0` | Apache-2.0 | https://github.com/psf/requests |
 | `pydantic` | `==2.13.4` | MIT | https://github.com/pydantic/pydantic |
-| `litellm` | `==1.84.0` (Modules 2–3 IDE kernel); `==1.83.0` (Module 4 FAST agent pattern) | MIT | https://github.com/BerriAI/litellm |
+| `litellm` | `==1.88.6` (Modules 2–3 IDE kernel and Module 4 FAST agent pattern) | MIT | https://github.com/BerriAI/litellm |
 | `strands-agents` | `[litellm,openai]==1.52.0` (Modules 2–3 IDE kernel); `[litellm]==1.32.0` (Module 4 FAST agent pattern, matching FAST v0.4.1) | Apache-2.0 | https://github.com/strands-agents/sdk-python |
 | `openai` | `==2.54.0` | Apache-2.0 | https://github.com/openai/openai-python |
 | `httpx` | `==0.28.1` | BSD-3-Clause | https://github.com/encode/httpx |

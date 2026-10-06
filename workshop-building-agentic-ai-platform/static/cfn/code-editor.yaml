@@ -1219,7 +1219,7 @@ Resources:
                 # future release in and makes the kernel non-reproducible, and the
                 # old 'strands-agents==0.1.5' pin conflicted with the litellm the
                 # module-2 notebooks install (0.1.5's openai extra caps
-                # openai<2.0.0 while litellm 1.84.0 needs openai>=2.8.0, which
+                # openai<2.0.0 while litellm 1.88.6 needs openai>=2.8.0, which
                 # made `pip install -r requirements.txt` a no-op).
                 # This set MUST stay in step with
                 # source/module-2-llm-gateway/requirements.txt.
@@ -1232,7 +1232,7 @@ Resources:
                     jupyter==1.0.0 ipykernel==6.29.4 nbformat==5.10.4 nbconvert==7.16.4 \
                     pyyaml==6.0.3 requests==2.33.0 httpx==0.28.1 \
                     boto3==1.43.72 botocore==1.43.72 \
-                    pydantic==2.13.4 openai==2.54.0 litellm==1.84.0 \
+                    pydantic==2.13.4 openai==2.54.0 litellm==1.88.6 \
                     'strands-agents[litellm,openai]==1.52.0'
                 # Register an ipykernel under a unique name so VS Code auto-selects it
                 # without colliding with the system python3 interpreter.
@@ -1298,7 +1298,7 @@ Resources:
                     jupyter==1.0.0 ipykernel==6.29.4 nbformat==5.10.4 nbconvert==7.16.4 \
                     pyyaml==6.0.3 requests==2.33.0 httpx==0.28.1 \
                     boto3==1.43.72 botocore==1.43.72 \
-                    pydantic==2.13.4 openai==2.54.0 litellm==1.84.0 \
+                    pydantic==2.13.4 openai==2.54.0 litellm==1.88.6 \
                     'strands-agents[litellm,openai]==1.52.0'
                 - !Sub |
                   sudo -u ${CodeEditorUser} python3 -m ipykernel install --user \
