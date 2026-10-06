@@ -7,12 +7,20 @@ requests==2.33.0
 # pydantic 2.13.4: 2.10.6 is too old for strands-agents 1.52.0 (pip reports
 # ResolutionImpossible), and 2.9.x lacked a prebuilt cp313 pydantic-core wheel.
 pydantic==2.13.4
-# litellm 1.84.0 patches the auth-bypass (host-header injection), SQL injection
+# litellm 1.88.6 patches the auth-bypass (host-header injection), SQL injection
 # in proxy key verification, SSTI, MCP stdio command execution, and the
-# custom-code guardrail sandbox escape (GHSA advisories, < 1.84.0).
-litellm==1.84.0
+# custom-code guardrail sandbox escape (GHSA advisories, < 1.84.0), plus the
+# authenticated SSRF and provider-credential exfiltration via unvalidated
+# request-body routing parameters (GHSA-3cv6-jpf6-8222 / CVE-2026-84377,
+# first patched on this line at 1.88.6).
+#
+# Must stay equal to LiteLLMImageTag in
+# static/cfn/llm-gateway/workshop-llm-gateway-stack.yaml: that parameter, not
+# this file, pins the proxy that actually runs, and this pin is the client the
+# notebooks and scripts/test_gateway.py drive it with.
+litellm==1.88.6
 # strands-agents 1.52.0 with BOTH extras. 0.1.5 caps openai<2.0.0 via its
-# `openai` extra, but litellm 1.84.0 requires openai>=2.8.0 — pinning both made
+# `openai` extra, but litellm requires openai>=2.8.0 — pinning both made
 # pip resolution impossible, so `pip install -r` installed NOTHING and every
 # script here died on `import boto3`.
 strands-agents[litellm,openai]==1.52.0

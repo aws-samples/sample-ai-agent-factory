@@ -15,21 +15,25 @@ Parameters:
   # floating tags like main-stable / 16) for supply-chain reproducibility.
   LiteLLMImageTag:
     Type: String
-    # v1.84.0 is the first release that patches the full set of LiteLLM
-    # advisories affecting < 1.84.0: auth bypass via host-header injection, SQL
-    # injection in proxy API-key verification, SSTI in /prompts/test, command
-    # execution via MCP stdio test endpoints, and the custom-code guardrail
-    # sandbox escape (plus the earlier CVE-2026-47101/47102/40217 priv-esc/RCE).
+    # v1.88.6 carries the full set of LiteLLM advisory fixes affecting
+    # < 1.84.0 (auth bypass via host-header injection, SQL injection in proxy
+    # API-key verification, SSTI in /prompts/test, command execution via MCP
+    # stdio test endpoints, the custom-code guardrail sandbox escape, plus the
+    # earlier CVE-2026-47101/47102/40217 priv-esc/RCE) and additionally the
+    # authenticated SSRF and provider-credential exfiltration via unvalidated
+    # request-body routing parameters (GHSA-3cv6-jpf6-8222 / CVE-2026-84377),
+    # whose first patch on this line is 1.88.6. This parameter, not
+    # source/module-2-llm-gateway/requirements.txt, pins the proxy that runs.
     # Pinned to a specific release for supply-chain reproducibility.
     #
     # No `-stable` suffix: LiteLLM stopped publishing `vX.Y.Z-stable` tags after
     # the v1.83.x line, so `v1.84.0-stable` does not exist in the registry and
     # ECS fails with CannotPullContainerError ~20 minutes into the deploy.
     # scripts/verify-images.py checks every pin against its registry.
-    Default: v1.84.0
+    Default: v1.88.6
     Description: >
       Tag for the LiteLLM Docker image
-      (docker.litellm.ai/berriai/litellm-database). Pinned to a specific
+      (ghcr.io/berriai/litellm-database). Pinned to a specific
       release for supply-chain reproducibility.
 
   PostgresImageTag:
@@ -469,7 +473,7 @@ Resources:
       ContainerDefinitions:
         # --- LiteLLM Proxy ---
         - Name: litellm
-          Image: !Sub 'docker.litellm.ai/berriai/litellm-database:${LiteLLMImageTag}'
+          Image: !Sub 'ghcr.io/berriai/litellm-database:${LiteLLMImageTag}'
           Essential: true
           PortMappings:
             - ContainerPort: 4000

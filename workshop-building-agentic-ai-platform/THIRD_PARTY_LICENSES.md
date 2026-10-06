@@ -56,7 +56,7 @@ Pulled at workshop deploy time by ECS/Fargate task definitions.
 
 | Image | Workshop version | SPDX license | Upstream |
 |---|---|---|---|
-| `docker.litellm.ai/berriai/litellm-database` | `v1.84.0` (`LiteLLMImageTag` default) | MIT | https://github.com/BerriAI/litellm |
+| `ghcr.io/berriai/litellm-database` | `v1.88.6` (`LiteLLMImageTag` default) | MIT | https://github.com/BerriAI/litellm |
 | Grafana OSS (mirrored to workshop ECR with baked-in dashboards) | `mcpgateway/grafana:v1.0.16` (pinned) | AGPL-3.0 | https://github.com/grafana/grafana |
 | PostgreSQL (official `postgres` image, LiteLLM metadata DB sidecar) | `16.7` (`PostgresImageTag` default) | PostgreSQL License | https://github.com/docker-library/postgres |
 | ADOT Collector (AWS-maintained OpenTelemetry distribution used by the observability stack) | `v0.43.3` | Apache-2.0 | https://github.com/aws-observability/aws-otel-collector |
