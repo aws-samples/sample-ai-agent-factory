@@ -363,9 +363,7 @@ if __name__ == "__main__":
 def test_deployment_paths_receive_the_api_workforce_identity(template):
     fns = _resources(template, "AWS::Lambda::Function")
     deployment_paths = {
-        lid: resource
-        for lid, resource in fns.items()
-        if lid.startswith("DeploymentLambda") or lid.startswith("Step")
+        lid: resource for lid, resource in fns.items() if lid.startswith("DeploymentLambda") or lid.startswith("Step")
     }
     assert deployment_paths
     for lid, resource in deployment_paths.items():
