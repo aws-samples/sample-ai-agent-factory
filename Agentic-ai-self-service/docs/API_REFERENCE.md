@@ -155,6 +155,7 @@ the IAM roles and parameters in the account where the customer deploys it.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| `POST` | `/api/runtimes/{name}/invoke` | Stable external client alias; invokes only the owner-checked production slot and rejects target/slot authority in the body |
 | `GET` | `/api/runtimes/{name}/versions` | List a runtime's version history (newest first), including its frozen release policy and attested evidence |
 | `GET` | `/api/runtimes/{name}/slots` | Get the production / staging slot pointers |
 | `POST` | `/api/runtimes/{name}/versions/{version_id}/promote` | Promote to staging, or to production only when required evidence is fresh and valid |

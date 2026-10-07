@@ -172,11 +172,29 @@ export async function verifyProductionBuild({
     throw new Error(`The entry script does not reference its AWS vendor chunk: ${awsVendorChunk}`);
   }
 
+  const widgetPath = resolve(resolvedDist, 'agentcore-chat-v1.js');
+  const widgetTypesPath = resolve(resolvedDist, 'agentcore-chat-v1.d.ts');
+  const [widgetStats, widgetTypesStats, widgetSource] = await Promise.all([
+    stat(widgetPath),
+    stat(widgetTypesPath),
+    readFile(widgetPath, 'utf8'),
+  ]);
+  if (!widgetStats.isFile() || !widgetTypesStats.isFile()) {
+    throw new Error('External AgentCore client/widget artifacts are not files.');
+  }
+  if (!widgetSource.includes('/api/runtimes/${encodeURIComponent(runtime)}/invoke')) {
+    throw new Error('External AgentCore client does not use the stable production invoke alias.');
+  }
+  if (widgetSource.includes("getAttribute('access-token')")) {
+    throw new Error('External AgentCore widget reads a bearer token from HTML attributes.');
+  }
+
   return {
     distDir: resolvedDist,
     entryScript: basename(entryPath),
     authChunk,
     awsVendorChunk,
+    widget: basename(widgetPath),
     javascriptFiles: javascriptFiles.length,
     apiOrigin: expectedApiOrigin,
     awsRegion: expectedAwsRegion,
@@ -194,7 +212,7 @@ async function main() {
   });
   console.log(
     `Production frontend verified: ${result.entryScript}, ${result.authChunk}, `
-      + `${result.awsVendorChunk}, API ${result.apiOrigin}, region ${result.awsRegion}`,
+      + `${result.awsVendorChunk}, ${result.widget}, API ${result.apiOrigin}, region ${result.awsRegion}`,
   );
 }
 

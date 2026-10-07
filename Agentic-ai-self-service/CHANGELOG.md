@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — versioned external browser delivery
+
+- `POST /api/runtimes/{name}/invoke` is a stable production-only alias over the existing exact
+  slot/version/deployment target resolver. Request bodies accept conversational input only;
+  staging, Runtime id/ARN, account, Region, endpoint, warmup, and simulation fields are `422`
+  before resolution or dispatch.
+- Every CloudFront frontend ships dependency-free `agentcore-chat-v1.js` and TypeScript
+  declarations. `AgentCoreClient` and `<agentcore-chat>` accept only a host callback for a current
+  JWT, use no cookies/storage, omit credentials, never auto-retry a POST, expose typed
+  401/403/409/429/503 metadata, and render model output through `textContent`.
+- CloudFront's shared response policy now permits non-credentialed cross-origin module/API use,
+  explicitly allows `Authorization`/`Content-Type`, and exposes `Retry-After`; CSP
+  `frame-ancestors 'none'` remains because the integration is a Web Component, not an iframe.
+  Production build verification fails when either artifact is missing, the client leaves the
+  stable alias, or widget code reads an access-token HTML attribute.
+
 ### Fixed — JIT approval cannot race a recorded rejection
 
 - Approval conditionally leases `PENDING → APPLYING` before IAM, applies the deterministic

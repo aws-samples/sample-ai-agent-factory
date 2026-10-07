@@ -315,6 +315,29 @@ async def invoke_runtime_slot(
 
 
 @router.post(
+    "/{runtime_name}/invoke",
+    response_model=SlotInvokeResponse,
+    response_model_by_alias=True,
+    dependencies=[Depends(require_scopes("invoke"))],
+)
+async def invoke_runtime_client(
+    runtime_name: str,
+    body: SlotInvokeRequest,
+    raw_request: Request,
+    caller_sub: str = Depends(get_caller_sub),
+) -> SlotInvokeResponse:
+    """Stable client surface pinned to the owner-checked production slot."""
+
+    return await invoke_runtime_slot(
+        runtime_name,
+        "production",
+        body,
+        raw_request,
+        caller_sub,
+    )
+
+
+@router.post(
     "/{runtime_name}/versions/{version_id}/promote",
     response_model=PromoteResponse,
     dependencies=[Depends(require_scopes("agent:write"))],

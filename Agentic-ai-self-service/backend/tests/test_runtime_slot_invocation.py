@@ -402,6 +402,34 @@ def test_request_cannot_supply_any_target_authority(monkeypatch, forbidden):
     resolver.assert_not_called()
 
 
+def test_stable_client_alias_invokes_exact_production_slot(harness):
+    response = harness.client.post(
+        f"/api/runtimes/{NAME}/invoke",
+        json={"input": "hello from client"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["slot"] == "production"
+    assert response.json()["versionId"] == V1
+    assert response.json()["deploymentId"] == f"dep-{V1[-8:]}"
+    assert harness.agentcore.invocations[-1]["agentRuntimeArn"] == _runtime_arn(V1)
+
+
+def test_stable_client_alias_refuses_slot_or_target_injection(harness):
+    before = list(harness.agentcore.invocations)
+    response = harness.client.post(
+        f"/api/runtimes/{NAME}/invoke",
+        json={
+            "input": "try staging",
+            "slot": "staging",
+            "runtimeId": V2,
+        },
+    )
+
+    assert response.status_code == 422
+    assert harness.agentcore.invocations == before
+
+
 def test_slot_invoke_requires_the_invoke_scope(monkeypatch):
     monkeypatch.setenv("RBAC_ENFORCE", "true")
     resolver = MagicMock()
