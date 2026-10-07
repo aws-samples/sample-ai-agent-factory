@@ -13,12 +13,19 @@ All notable changes to this project are documented here. The format follows
   before every append. Live/UI/rollback/teardown events require both a Region and the exact 12-digit
   AWS account ID. Sensitive detail keys, credential-like values, symlinks, hard links, oversized
   artifacts, and non-finite numbers are refused.
+- `production-readiness-traceability.json` binds every required kind to fixed argv command arrays,
+  existing committed test selectors, or named live scenarios. Offline events must name a mapped
+  suite; non-offline events must name a mapped scenario. Finalization requires every mapped suite
+  and scenario, so one generic pass cannot stand in for frontend, infrastructure, package, synth,
+  lifecycle, or per-Region proof.
 - Failed and blocked attempts remain active until an explicit same-scope supersession. Finalization
-  requires every control/kind tuple, every global lifecycle/UI gate, and an independent pass for each
-  selected EMEA Region; any active failure or missing Region prevents a seal.
+  requires every control/kind/suite/scenario tuple, every global lifecycle/UI gate, and an
+  independent pass for each selected EMEA Region; any active failure or missing tuple prevents a
+  seal.
 - Run, event, event-set, and final digests are independently verified from a detached clean clone.
-  Mutation tests remove a Region event, alter event content, drift contract bytes, dirty the source,
-  and exercise concurrent appends to prove each guard fails closed.
+  Mutation tests remove a Region event and a required suite, alter event content, drift contract
+  bytes, dirty the source, resolve every committed selector, and exercise concurrent appends to prove
+  each guard fails closed.
 - The dated Region matrix cites AWS Documentation and bounds core, Memory, Agent Registry, and Web
   Search scenarios independently. It is a release-input contract, not a claim that a live campaign
   has already passed.

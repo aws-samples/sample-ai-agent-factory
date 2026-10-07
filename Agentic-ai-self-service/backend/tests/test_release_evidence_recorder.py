@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import shutil
@@ -17,6 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "release_evidence.py"
 CONTROLS_PATH = PROJECT_ROOT / "release" / "production-readiness-controls.json"
 REGIONS_PATH = PROJECT_ROOT / "release" / "emea-agentcore-regions.json"
+TRACEABILITY_PATH = PROJECT_ROOT / "release" / "production-readiness-traceability.json"
 TEST_ACCOUNT_ID = "123456789012"
 
 SPEC = importlib.util.spec_from_file_location("release_evidence", SCRIPT_PATH)
@@ -47,6 +49,7 @@ def evidence_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     scripts_dir.mkdir()
     shutil.copy2(CONTROLS_PATH, release_dir / CONTROLS_PATH.name)
     shutil.copy2(REGIONS_PATH, release_dir / REGIONS_PATH.name)
+    shutil.copy2(TRACEABILITY_PATH, release_dir / TRACEABILITY_PATH.name)
     shutil.copy2(SCRIPT_PATH, scripts_dir / SCRIPT_PATH.name)
     (project / ".gitignore").write_text("build/\n", encoding="utf-8")
     (project / "README.md").write_text("# Evidence fixture\n", encoding="utf-8")
@@ -59,9 +62,11 @@ def evidence_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
 
     fixture_controls = release_dir / CONTROLS_PATH.name
     fixture_regions = release_dir / REGIONS_PATH.name
+    fixture_traceability = release_dir / TRACEABILITY_PATH.name
     monkeypatch.setattr(release_evidence, "PROJECT_ROOT", project)
     monkeypatch.setattr(release_evidence, "CONTROLS_PATH", fixture_controls)
     monkeypatch.setattr(release_evidence, "REGIONS_PATH", fixture_regions)
+    monkeypatch.setattr(release_evidence, "TRACEABILITY_PATH", fixture_traceability)
     monkeypatch.setattr(
         release_evidence,
         "DEFAULT_OUTPUT_ROOT",
@@ -72,6 +77,7 @@ def evidence_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
         "project": project,
         "controls_path": fixture_controls,
         "regions_path": fixture_regions,
+        "traceability_path": fixture_traceability,
         "script_path": scripts_dir / SCRIPT_PATH.name,
         "output_root": tmp_path / "evidence",
         "tmp_path": tmp_path,
@@ -87,36 +93,57 @@ def _event_region(kind: str) -> str | None:
 def _record_complete_run(run_dir: Path) -> list[dict]:
     controls = json.loads(release_evidence.CONTROLS_PATH.read_text(encoding="utf-8"))
     regions = json.loads(release_evidence.REGIONS_PATH.read_text(encoding="utf-8"))
+    traceability = json.loads(release_evidence.TRACEABILITY_PATH.read_text(encoding="utf-8"))
+    traced_by_id = {item["id"]: item["evidence"] for item in traceability["controls"]}
     events = []
     for control in controls["controls"]:
+        control_id = control["id"]
+        traced = traced_by_id[control_id]
         for kind in control["required_kinds"]:
-            events.append(
-                release_evidence.record_event(
-                    run_dir,
-                    control_id=control["id"],
-                    kind=kind,
-                    status="pass",
-                    region=_event_region(kind),
-                    account_id=(TEST_ACCOUNT_ID if kind in release_evidence._REGION_REQUIRED_KINDS else None),
-                    details={"test_case": f"{control['id']}:{kind}"},
-                )
-            )
+            if kind.startswith("offline_"):
+                for suite_id in sorted({item["suite"] for item in traced[kind]}):
+                    events.append(
+                        release_evidence.record_event(
+                            run_dir,
+                            control_id=control_id,
+                            kind=kind,
+                            status="pass",
+                            suite_id=suite_id,
+                            details={"test_case": f"{control_id}:{kind}:{suite_id}"},
+                        )
+                    )
+            else:
+                for scenario_id in traced[kind]:
+                    events.append(
+                        release_evidence.record_event(
+                            run_dir,
+                            control_id=control_id,
+                            kind=kind,
+                            status="pass",
+                            region=_event_region(kind),
+                            account_id=(TEST_ACCOUNT_ID if kind in release_evidence._REGION_REQUIRED_KINDS else None),
+                            scenario_id=scenario_id,
+                            details={"test_case": f"{control_id}:{kind}:{scenario_id}"},
+                        )
+                    )
         regional_kind = control.get("required_region_kind")
         selector = control.get("region_selector")
         if regional_kind and selector:
             for entry in regions["regions"]:
                 if entry[selector]:
-                    events.append(
-                        release_evidence.record_event(
-                            run_dir,
-                            control_id=control["id"],
-                            kind=regional_kind,
-                            status="pass",
-                            region=entry["region"],
-                            account_id=TEST_ACCOUNT_ID,
-                            details={"test_case": f"{control['id']}:{entry['region']}"},
+                    for scenario_id in traced[regional_kind]:
+                        events.append(
+                            release_evidence.record_event(
+                                run_dir,
+                                control_id=control_id,
+                                kind=regional_kind,
+                                status="pass",
+                                region=entry["region"],
+                                account_id=TEST_ACCOUNT_ID,
+                                scenario_id=scenario_id,
+                                details={"test_case": f"{control_id}:{entry['region']}:{scenario_id}"},
+                            )
                         )
-                    )
     return events
 
 
@@ -142,6 +169,36 @@ def test_release_contract_requires_positive_adversarial_and_mutation_twins():
         "rollback",
         "teardown_zero",
     }
+
+
+def test_traceability_maps_every_required_kind_to_an_existing_check():
+    controls = json.loads(CONTROLS_PATH.read_text(encoding="utf-8"))
+    traceability = json.loads(TRACEABILITY_PATH.read_text(encoding="utf-8"))
+    suite_map, trace_map = release_evidence._validate_traceability(controls, traceability)
+    assert set(trace_map) == {control["id"] for control in controls["controls"]}
+
+    for traced in trace_map.values():
+        for kind, requirements in traced["evidence"].items():
+            if not kind.startswith("offline_"):
+                continue
+            for requirement in requirements:
+                suite = suite_map[requirement["suite"]]
+                selector = requirement["selector"]
+                if selector in suite.get("check_ids", []):
+                    continue
+                path_text, test_name = selector.split("::", 1)
+                test_path = PROJECT_ROOT / path_text
+                assert test_path.is_file(), selector
+                source = test_path.read_text(encoding="utf-8")
+                if suite["selector_type"] == "pytest":
+                    functions = {
+                        node.name
+                        for node in ast.walk(ast.parse(source))
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    }
+                    assert test_name in functions, selector
+                else:
+                    assert test_name in source, selector
 
 
 def test_emea_matrix_matches_documented_feature_boundaries():
@@ -184,6 +241,7 @@ def test_record_rechecks_source_and_contract_fingerprints(evidence_project: dict
             control_id="release.integrity",
             kind="exact_commit",
             status="pass",
+            scenario_id="source-commit-tree-and-contract-digests-match",
         )
 
 
@@ -200,6 +258,7 @@ def test_contract_byte_drift_is_rejected_even_if_git_status_hides_it(evidence_pr
             control_id="release.integrity",
             kind="exact_commit",
             status="pass",
+            scenario_id="source-commit-tree-and-contract-digests-match",
         )
 
 
@@ -212,6 +271,7 @@ def test_artifacts_are_digest_only_and_sensitive_details_are_rejected(evidence_p
         control_id="release.integrity",
         kind="exact_commit",
         status="pass",
+        scenario_id="source-commit-tree-and-contract-digests-match",
         details={"exit_code": 0, "test_count": 12, "verified": True},
         artifacts={"test-output": artifact},
     )
@@ -233,6 +293,7 @@ def test_artifacts_are_digest_only_and_sensitive_details_are_rejected(evidence_p
                 control_id="release.integrity",
                 kind="offline_positive",
                 status="pass",
+                suite_id="backend",
                 details=details,
             )
 
@@ -249,6 +310,7 @@ def test_symlink_and_excess_artifacts_are_rejected(evidence_project: dict):
             control_id="release.integrity",
             kind="exact_commit",
             status="pass",
+            scenario_id="source-commit-tree-and-contract-digests-match",
             artifacts={"linked": link},
         )
     with pytest.raises(release_evidence.EvidenceError, match="At most 32"):
@@ -257,6 +319,7 @@ def test_symlink_and_excess_artifacts_are_rejected(evidence_project: dict):
             control_id="release.integrity",
             kind="exact_commit",
             status="pass",
+            scenario_id="source-commit-tree-and-contract-digests-match",
             artifacts={f"artifact-{index}": artifact for index in range(33)},
         )
 
@@ -268,6 +331,7 @@ def test_failure_remains_open_until_explicitly_superseded(evidence_project: dict
         control_id="release.integrity",
         kind="offline_positive",
         status="fail",
+        suite_id="backend",
         details={"reason_code": "intentional-break"},
     )
     assert len(release_evidence.status_run(run_dir)["coverage"]["open_events"]) == 1
@@ -279,6 +343,7 @@ def test_failure_remains_open_until_explicitly_superseded(evidence_project: dict
                 control_id="release.integrity",
                 kind="offline_positive",
                 status="pass",
+                suite_id="backend",
                 supersedes=failed["event_id"],
                 details={"reason_code": reason},
             )
@@ -306,6 +371,7 @@ def test_live_region_requires_a_selected_matrix_region(evidence_project: dict):
             control_id="regional.emea_core",
             kind="live_region",
             status="pass",
+            scenario_id="core-runtime-gateway-identity-policy-evaluation",
             region="us-west-2",
             account_id=TEST_ACCOUNT_ID,
         )
@@ -315,6 +381,7 @@ def test_live_region_requires_a_selected_matrix_region(evidence_project: dict):
             control_id="regional.emea_core",
             kind="live_region",
             status="pass",
+            scenario_id="core-runtime-gateway-identity-policy-evaluation",
             region="eu-west-1",
         )
     with pytest.raises(release_evidence.EvidenceError, match="12-digit AWS account ID"):
@@ -323,6 +390,7 @@ def test_live_region_requires_a_selected_matrix_region(evidence_project: dict):
             control_id="regional.emea_core",
             kind="live_region",
             status="pass",
+            scenario_id="core-runtime-gateway-identity-policy-evaluation",
             region="eu-west-1",
             account_id="12345678901",
         )
@@ -332,6 +400,27 @@ def test_live_region_requires_a_selected_matrix_region(evidence_project: dict):
             control_id="regional.emea_core",
             kind="live_region",
             status="pass",
+            scenario_id="core-runtime-gateway-identity-policy-evaluation",
+        )
+
+
+def test_unmapped_suite_and_scenario_are_rejected(evidence_project: dict):
+    run_dir = release_evidence.start_run(evidence_project["output_root"], "trace-boundary")
+    with pytest.raises(release_evidence.EvidenceError, match="mapped suite"):
+        release_evidence.record_event(
+            run_dir,
+            control_id="release.integrity",
+            kind="offline_positive",
+            status="pass",
+            suite_id="unmapped",
+        )
+    with pytest.raises(release_evidence.EvidenceError, match="mapped scenario"):
+        release_evidence.record_event(
+            run_dir,
+            control_id="release.integrity",
+            kind="exact_commit",
+            status="pass",
+            scenario_id="generic-pass",
         )
 
 
@@ -344,6 +433,7 @@ def test_parallel_records_are_not_lost(evidence_project: dict):
             control_id="release.integrity",
             kind="offline_positive",
             status="pass",
+            suite_id="backend",
             details={"worker": index},
         )
         return event["event_id"]
@@ -372,6 +462,7 @@ def test_complete_run_seals_verifies_and_is_portable_to_clean_clone(
                 control_id="release.integrity",
                 kind="exact_commit",
                 status="pass",
+                scenario_id="source-commit-tree-and-contract-digests-match",
                 details={"race_probe": True},
             )
         except release_evidence.EvidenceError as exc:
@@ -393,6 +484,7 @@ def test_complete_run_seals_verifies_and_is_portable_to_clean_clone(
                 release_evidence._load_run(run_dir),
                 release_evidence._load_contract(release_evidence.CONTROLS_PATH),
                 release_evidence._load_contract(release_evidence.REGIONS_PATH),
+                release_evidence._load_contract(release_evidence.TRACEABILITY_PATH),
             )[0]
         }
 
@@ -412,9 +504,33 @@ def test_complete_run_seals_verifies_and_is_portable_to_clean_clone(
         "control_id": "regional.emea_core",
         "kind": "live_region",
         "region": "eu-west-3",
+        "suite_id": None,
+        "scenario_id": "core-runtime-gateway-identity-policy-evaluation",
     } in mutated_status["coverage"]["missing"]
     with pytest.raises(release_evidence.EvidenceError, match="incomplete"):
         release_evidence.finalize_run(mutation_run)
+
+    suite_mutation_run = _copy_run(run_dir, evidence_project["tmp_path"] / "suite-mutation")
+    (suite_mutation_run / "final.json").unlink()
+    frontend_event = next(
+        event
+        for event in events
+        if event["control_id"] == "release.integrity"
+        and event["kind"] == "offline_positive"
+        and event["suite_id"] == "frontend"
+    )
+    (suite_mutation_run / "events" / f"{frontend_event['event_id']}.json").unlink()
+    suite_status = release_evidence.status_run(suite_mutation_run)
+    assert {
+        "scope": "suite",
+        "control_id": "release.integrity",
+        "kind": "offline_positive",
+        "region": None,
+        "suite_id": "frontend",
+        "scenario_id": None,
+    } in suite_status["coverage"]["missing"]
+    with pytest.raises(release_evidence.EvidenceError, match="incomplete"):
+        release_evidence.finalize_run(suite_mutation_run)
 
     tampered_run = _copy_run(run_dir, evidence_project["tmp_path"] / "digest-mutation")
     event_path = next((tampered_run / "events").glob("*.json"))
@@ -438,6 +554,11 @@ def test_complete_run_seals_verifies_and_is_portable_to_clean_clone(
         release_evidence,
         "REGIONS_PATH",
         clone_project / "release" / REGIONS_PATH.name,
+    )
+    monkeypatch.setattr(
+        release_evidence,
+        "TRACEABILITY_PATH",
+        clone_project / "release" / TRACEABILITY_PATH.name,
     )
     assert release_evidence.verify_run(run_dir)["final_digest"] == final["final_digest"]
 
@@ -474,6 +595,8 @@ def test_cli_records_bounded_event_and_refuses_incomplete_finalization(evidence_
             "exact_commit",
             "--status",
             "pass",
+            "--scenario-id",
+            "source-commit-tree-and-contract-digests-match",
             "--detail",
             "exit_code=0",
         ],
@@ -497,6 +620,8 @@ def test_cli_records_bounded_event_and_refuses_incomplete_finalization(evidence_
         "offline_positive",
         "--status",
         "pass",
+        "--suite-id",
+        "backend",
     ]
     processes = [
         subprocess.Popen(

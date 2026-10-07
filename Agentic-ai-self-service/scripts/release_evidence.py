@@ -28,6 +28,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "build" / "release-evidence"
 CONTROLS_PATH = PROJECT_ROOT / "release" / "production-readiness-controls.json"
 REGIONS_PATH = PROJECT_ROOT / "release" / "emea-agentcore-regions.json"
+TRACEABILITY_PATH = PROJECT_ROOT / "release" / "production-readiness-traceability.json"
 _STATUS_VALUES = frozenset({"pass", "fail", "blocked"})
 _SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 _SAFE_REGION = re.compile(r"^(?:local|[a-z]{2}(?:-gov)?-[a-z0-9-]+-\d)$")
@@ -349,6 +350,126 @@ def _validate_contracts(
     return control_map, region_map
 
 
+def _validate_traceability(
+    controls: dict[str, Any], traceability: dict[str, Any]
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    control_map = {control["id"]: control for control in controls["controls"]}
+    raw_suites = traceability.get("suites")
+    if not isinstance(raw_suites, list) or not raw_suites:
+        raise EvidenceError("Traceability contract must define release suites")
+    suite_map: dict[str, dict[str, Any]] = {}
+    for suite in raw_suites:
+        if not isinstance(suite, dict):
+            raise EvidenceError("Every release suite must be an object")
+        suite_id = suite.get("id")
+        if not isinstance(suite_id, str) or not _SAFE_NAME.fullmatch(suite_id):
+            raise EvidenceError(f"Unsafe release suite id: {suite_id}")
+        if suite_id in suite_map:
+            raise EvidenceError(f"Duplicate release suite id: {suite_id}")
+        working_directory = suite.get("working_directory")
+        if not isinstance(working_directory, str):
+            raise EvidenceError(f"Release suite {suite_id} lacks a working_directory")
+        relative = Path(working_directory)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise EvidenceError(f"Release suite {suite_id} has an unsafe working_directory")
+        selector_type = suite.get("selector_type")
+        if selector_type not in {"pytest", "javascript", "command"}:
+            raise EvidenceError(f"Release suite {suite_id} has an invalid selector_type")
+        commands = suite.get("commands")
+        if not isinstance(commands, list) or not commands:
+            raise EvidenceError(f"Release suite {suite_id} must define commands")
+        for command in commands:
+            if (
+                not isinstance(command, list)
+                or not command
+                or any(not isinstance(part, str) or not part or len(part) > 500 or "\x00" in part for part in command)
+            ):
+                raise EvidenceError(f"Release suite {suite_id} has an invalid command array")
+        timeout = suite.get("timeout_seconds")
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 14400:
+            raise EvidenceError(f"Release suite {suite_id} has an invalid timeout")
+        required_environment = suite.get("required_environment", [])
+        if (
+            not isinstance(required_environment, list)
+            or any(
+                not isinstance(name, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", name)
+                for name in required_environment
+            )
+            or len(required_environment) != len(set(required_environment))
+        ):
+            raise EvidenceError(f"Release suite {suite_id} has invalid required_environment")
+        check_ids = suite.get("check_ids", [])
+        if (
+            not isinstance(check_ids, list)
+            or any(not isinstance(item, str) or not _SAFE_NAME.fullmatch(item) for item in check_ids)
+            or len(check_ids) != len(set(check_ids))
+        ):
+            raise EvidenceError(f"Release suite {suite_id} has invalid check_ids")
+        if selector_type == "command" and not check_ids:
+            raise EvidenceError(f"Command suite {suite_id} must define check_ids")
+        suite_map[suite_id] = suite
+
+    raw_trace_controls = traceability.get("controls")
+    if not isinstance(raw_trace_controls, list):
+        raise EvidenceError("Traceability contract controls must be a list")
+    trace_map: dict[str, dict[str, Any]] = {}
+    for traced in raw_trace_controls:
+        if not isinstance(traced, dict) or set(traced) != {"id", "evidence"}:
+            raise EvidenceError("Every traceability control must contain id and evidence")
+        control_id = traced.get("id")
+        if not isinstance(control_id, str) or control_id not in control_map:
+            raise EvidenceError(f"Traceability references unknown control: {control_id}")
+        if control_id in trace_map:
+            raise EvidenceError(f"Duplicate traceability control: {control_id}")
+        evidence = traced.get("evidence")
+        expected_kinds = _control_kinds(control_map[control_id])
+        if not isinstance(evidence, dict) or set(evidence) != expected_kinds:
+            raise EvidenceError(f"Traceability kinds do not match control {control_id}")
+        for kind, requirements in evidence.items():
+            if not isinstance(requirements, list) or not requirements:
+                raise EvidenceError(f"Traceability {control_id}/{kind} must not be empty")
+            if kind.startswith("offline_"):
+                seen: set[tuple[str, str]] = set()
+                for requirement in requirements:
+                    if not isinstance(requirement, dict) or set(requirement) != {"suite", "selector"}:
+                        raise EvidenceError(f"Traceability {control_id}/{kind} has an invalid selector")
+                    suite_id = requirement.get("suite")
+                    selector = requirement.get("selector")
+                    suite = suite_map.get(str(suite_id))
+                    if suite is None or not isinstance(selector, str) or len(selector) > 500:
+                        raise EvidenceError(f"Traceability {control_id}/{kind} has an invalid suite selector")
+                    pair = (str(suite_id), selector)
+                    if pair in seen:
+                        raise EvidenceError(f"Traceability {control_id}/{kind} repeats selector {selector}")
+                    seen.add(pair)
+                    if selector in suite.get("check_ids", []):
+                        continue
+                    if suite["selector_type"] not in {"pytest", "javascript"} or "::" not in selector:
+                        raise EvidenceError(f"Traceability selector is not declared by suite {suite_id}: {selector}")
+                    path_text, test_name = selector.split("::", 1)
+                    selector_path = Path(path_text)
+                    if (
+                        selector_path.is_absolute()
+                        or ".." in selector_path.parts
+                        or not test_name
+                        or len(test_name) > 240
+                    ):
+                        raise EvidenceError(f"Traceability selector is unsafe: {selector}")
+                    suite_root = str(suite["working_directory"]).rstrip("/")
+                    if suite_root != "." and not path_text.startswith(f"{suite_root}/"):
+                        raise EvidenceError(f"Traceability selector leaves suite {suite_id}: {selector}")
+            else:
+                if any(not isinstance(item, str) or not _SAFE_NAME.fullmatch(item) for item in requirements) or len(
+                    requirements
+                ) != len(set(requirements)):
+                    raise EvidenceError(f"Traceability {control_id}/{kind} has invalid scenarios")
+        trace_map[control_id] = traced
+    if set(trace_map) != set(control_map):
+        missing = sorted(set(control_map) - set(trace_map))
+        raise EvidenceError(f"Traceability is missing controls: {missing}")
+    return suite_map, trace_map
+
+
 def _contract_fingerprint(path: Path, value: dict[str, Any]) -> dict[str, Any]:
     sha256, size = _sha256_file(path)
     return {
@@ -359,15 +480,18 @@ def _contract_fingerprint(path: Path, value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _load_contract_bundle() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+def _load_contract_bundle() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     controls = _load_contract(CONTROLS_PATH)
     regions = _load_contract(REGIONS_PATH)
+    traceability = _load_contract(TRACEABILITY_PATH)
     _validate_contracts(controls, regions)
+    _validate_traceability(controls, traceability)
     fingerprints = {
         "controls": _contract_fingerprint(CONTROLS_PATH, controls),
         "regions": _contract_fingerprint(REGIONS_PATH, regions),
+        "traceability": _contract_fingerprint(TRACEABILITY_PATH, traceability),
     }
-    return controls, regions, fingerprints
+    return controls, regions, traceability, fingerprints
 
 
 def _check_self_digest(document: dict[str, Any], field: str, description: str) -> None:
@@ -447,27 +571,27 @@ def _load_run(run_dir: Path) -> dict[str, Any]:
         if not isinstance(source.get(field), str) or not source[field]:
             raise EvidenceError(f"Evidence run source lacks {field}")
     contracts = run.get("contracts")
-    if not isinstance(contracts, dict) or set(contracts) != {"controls", "regions"}:
+    if not isinstance(contracts, dict) or set(contracts) != {"controls", "regions", "traceability"}:
         raise EvidenceError("Evidence run contract fingerprints are incomplete")
     return run
 
 
 def _require_run_context(
     run_dir: Path,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     run = _load_run(run_dir)
     _require_same_clean_source(run["source"])
-    controls, regions, fingerprints = _load_contract_bundle()
+    controls, regions, traceability, fingerprints = _load_contract_bundle()
     if fingerprints != run["contracts"]:
         raise EvidenceError("Release contracts changed after the evidence run started")
-    return run, controls, regions
+    return run, controls, regions, traceability
 
 
 def start_run(output_root: Path = DEFAULT_OUTPUT_ROOT, run_id: str | None = None) -> Path:
     identity = _source_identity()
     if not identity["clean"]:
         raise EvidenceError("Project tree is dirty; commit it before starting evidence")
-    _, _, fingerprints = _load_contract_bundle()
+    _, _, _, fingerprints = _load_contract_bundle()
     if run_id is None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         run_id = f"release-{stamp}-{uuid.uuid4().hex[:12]}"
@@ -538,6 +662,29 @@ def _validate_event_scope(
             raise EvidenceError(f"Region {region} is not selected for {control_id} live_region evidence")
 
 
+def _validate_event_reference(
+    control_id: str,
+    kind: str,
+    suite_id: str | None,
+    scenario_id: str | None,
+    controls: dict[str, Any],
+    traceability: dict[str, Any],
+) -> None:
+    _, trace_map = _validate_traceability(controls, traceability)
+    requirements = trace_map[control_id]["evidence"][kind]
+    if kind.startswith("offline_"):
+        allowed_suites = {requirement["suite"] for requirement in requirements}
+        if suite_id not in allowed_suites:
+            raise EvidenceError(f"Evidence {control_id}/{kind} requires one mapped suite: {sorted(allowed_suites)}")
+        if scenario_id is not None:
+            raise EvidenceError(f"Offline evidence {control_id}/{kind} cannot claim a live scenario")
+    else:
+        if scenario_id not in requirements:
+            raise EvidenceError(f"Evidence {control_id}/{kind} requires one mapped scenario: {requirements}")
+        if suite_id is not None:
+            raise EvidenceError(f"Non-offline evidence {control_id}/{kind} cannot claim a suite")
+
+
 def _secure_artifact_digest(path: Path) -> tuple[str, int]:
     path = path.expanduser()
     try:
@@ -590,6 +737,8 @@ def _validate_event_document(
     run: dict[str, Any],
     control_map: dict[str, dict[str, Any]],
     region_map: dict[str, dict[str, Any]],
+    controls: dict[str, Any],
+    traceability: dict[str, Any],
 ) -> None:
     expected_fields = {
         "schema_version",
@@ -600,6 +749,8 @@ def _validate_event_document(
         "status",
         "region",
         "account_id",
+        "suite_id",
+        "scenario_id",
         "details",
         "artifacts",
         "supersedes",
@@ -622,13 +773,20 @@ def _validate_event_document(
     kind = event.get("kind")
     region = event.get("region")
     account_id = event.get("account_id")
+    suite_id = event.get("suite_id")
+    scenario_id = event.get("scenario_id")
     if not isinstance(control_id, str) or not isinstance(kind, str):
         raise EvidenceError(f"Evidence event {event_id} has an invalid scope")
     if region is not None and not isinstance(region, str):
         raise EvidenceError(f"Evidence event {event_id} has an invalid Region")
     if account_id is not None and not isinstance(account_id, str):
         raise EvidenceError(f"Evidence event {event_id} has an invalid AWS account ID")
+    if suite_id is not None and not isinstance(suite_id, str):
+        raise EvidenceError(f"Evidence event {event_id} has an invalid suite_id")
+    if scenario_id is not None and not isinstance(scenario_id, str):
+        raise EvidenceError(f"Evidence event {event_id} has an invalid scenario_id")
     _validate_event_scope(control_id, kind, region, account_id, control_map, region_map)
+    _validate_event_reference(control_id, kind, suite_id, scenario_id, controls, traceability)
     if event.get("status") not in _STATUS_VALUES:
         raise EvidenceError(f"Evidence event {event_id} has an invalid status")
 
@@ -675,6 +833,7 @@ def _load_events(
     run: dict[str, Any],
     controls: dict[str, Any],
     regions: dict[str, Any],
+    traceability: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], set[str]]:
     events_dir = _safe_existing_directory(run_dir / "events", "Evidence events directory")
     control_map, region_map = _validate_contracts(controls, regions)
@@ -684,7 +843,15 @@ def _load_events(
         if path.suffix != ".json" or not path.is_file() or path.is_symlink():
             raise EvidenceError(f"Unexpected entry in evidence events directory: {path.name}")
         event = _read_json(path)
-        _validate_event_document(event, path.name, run, control_map, region_map)
+        _validate_event_document(
+            event,
+            path.name,
+            run,
+            control_map,
+            region_map,
+            controls,
+            traceability,
+        )
         event_id = event["event_id"]
         if event_id in by_id:
             raise EvidenceError(f"Duplicate evidence event id: {event_id}")
@@ -703,7 +870,7 @@ def _load_events(
             raise EvidenceError(f"Evidence event {target_id} is superseded more than once")
         if target_id == event["event_id"]:
             raise EvidenceError("An evidence event cannot supersede itself")
-        scope = ("control_id", "kind", "region", "account_id")
+        scope = ("control_id", "kind", "region", "account_id", "suite_id", "scenario_id")
         if any(target[field] != event[field] for field in scope):
             raise EvidenceError(f"Evidence event {event['event_id']} changes scope while superseding {target_id}")
         superseded.add(target_id)
@@ -728,6 +895,8 @@ def _record_event_unlocked(
     status: str,
     region: str | None = None,
     account_id: str | None = None,
+    suite_id: str | None = None,
+    scenario_id: str | None = None,
     details: dict[str, Any] | None = None,
     artifacts: dict[str, Path] | None = None,
     supersedes: str | None = None,
@@ -735,15 +904,16 @@ def _record_event_unlocked(
     run_dir = _safe_existing_directory(run_dir, "Evidence run directory")
     if (run_dir / "final.json").exists():
         raise EvidenceError("Finalized evidence runs are immutable")
-    run, controls, regions = _require_run_context(run_dir)
+    run, controls, regions, traceability = _require_run_context(run_dir)
     control_map, region_map = _validate_contracts(controls, regions)
     if status not in _STATUS_VALUES:
         raise EvidenceError(f"Evidence status must be one of: {', '.join(sorted(_STATUS_VALUES))}")
     _validate_event_scope(control_id, kind, region, account_id, control_map, region_map)
+    _validate_event_reference(control_id, kind, suite_id, scenario_id, controls, traceability)
     clean_details = _validate_details(details or {})
     artifact_records = _artifact_records(artifacts)
 
-    events, superseded = _load_events(run_dir, run, controls, regions)
+    events, superseded = _load_events(run_dir, run, controls, regions, traceability)
     by_id = {event["event_id"]: event for event in events}
     if supersedes is not None:
         target = by_id.get(supersedes)
@@ -751,13 +921,22 @@ def _record_event_unlocked(
             raise EvidenceError(f"Cannot supersede unknown event: {supersedes}")
         if supersedes in superseded:
             raise EvidenceError(f"Cannot supersede inactive event: {supersedes}")
-        if (target["control_id"], target["kind"], target["region"], target["account_id"]) != (
+        if (
+            target["control_id"],
+            target["kind"],
+            target["region"],
+            target["account_id"],
+            target["suite_id"],
+            target["scenario_id"],
+        ) != (
             control_id,
             kind,
             region,
             account_id,
+            suite_id,
+            scenario_id,
         ):
-            raise EvidenceError("A superseding event must keep control, kind, Region, and AWS account")
+            raise EvidenceError("A superseding event must keep control, kind, Region, AWS account, suite, and scenario")
 
     event: dict[str, Any] = {
         "schema_version": 1,
@@ -768,6 +947,8 @@ def _record_event_unlocked(
         "status": status,
         "region": region,
         "account_id": account_id,
+        "suite_id": suite_id,
+        "scenario_id": scenario_id,
         "details": clean_details,
         "artifacts": artifact_records,
         "supersedes": supersedes,
@@ -796,40 +977,90 @@ def _validate_run_entries(run_dir: Path, *, finalized: bool) -> None:
 def _coverage_report(
     controls: dict[str, Any],
     regions: dict[str, Any],
+    traceability: dict[str, Any],
     events: list[dict[str, Any]],
     superseded: set[str],
 ) -> dict[str, Any]:
     control_map, region_map = _validate_contracts(controls, regions)
+    _, trace_map = _validate_traceability(controls, traceability)
     active = [event for event in events if event["event_id"] not in superseded]
     passing = [event for event in active if event["status"] == "pass"]
     missing: list[dict[str, Any]] = []
 
+    def has_pass(
+        control_id: str,
+        kind: str,
+        *,
+        suite_id: str | None = None,
+        scenario_id: str | None = None,
+        region: str | None = None,
+    ) -> bool:
+        return any(
+            event["control_id"] == control_id
+            and event["kind"] == kind
+            and (suite_id is None or event["suite_id"] == suite_id)
+            and (scenario_id is None or event["scenario_id"] == scenario_id)
+            and (region is None or event["region"] == region)
+            for event in passing
+        )
+
+    def add_missing(
+        scope: str,
+        control_id: str | None,
+        kind: str,
+        *,
+        suite_id: str | None = None,
+        scenario_id: str | None = None,
+        region: str | None = None,
+    ) -> None:
+        missing.append(
+            {
+                "scope": scope,
+                "control_id": control_id,
+                "kind": kind,
+                "region": region,
+                "suite_id": suite_id,
+                "scenario_id": scenario_id,
+            }
+        )
+
     for control_id, control in sorted(control_map.items()):
+        traced = trace_map[control_id]["evidence"]
         for kind in control["required_kinds"]:
-            if not any(event["control_id"] == control_id and event["kind"] == kind for event in passing):
-                missing.append({"scope": "control", "control_id": control_id, "kind": kind, "region": None})
+            requirements = traced[kind]
+            if kind.startswith("offline_"):
+                for suite_id in sorted({requirement["suite"] for requirement in requirements}):
+                    if not has_pass(control_id, kind, suite_id=suite_id):
+                        add_missing("suite", control_id, kind, suite_id=suite_id)
+            else:
+                for scenario_id in requirements:
+                    if not has_pass(control_id, kind, scenario_id=scenario_id):
+                        add_missing("scenario", control_id, kind, scenario_id=scenario_id)
+
         regional_kind = control.get("required_region_kind")
         selector = control.get("region_selector")
         if isinstance(regional_kind, str) and isinstance(selector, str):
             for region, entry in sorted(region_map.items()):
                 if entry.get(selector) is not True:
                     continue
-                if not any(
-                    event["control_id"] == control_id and event["kind"] == regional_kind and event["region"] == region
-                    for event in passing
-                ):
-                    missing.append(
-                        {
-                            "scope": "region",
-                            "control_id": control_id,
-                            "kind": regional_kind,
-                            "region": region,
-                        }
-                    )
+                for scenario_id in traced[regional_kind]:
+                    if not has_pass(
+                        control_id,
+                        regional_kind,
+                        scenario_id=scenario_id,
+                        region=region,
+                    ):
+                        add_missing(
+                            "region",
+                            control_id,
+                            regional_kind,
+                            scenario_id=scenario_id,
+                            region=region,
+                        )
 
     for kind in controls["global_required_kinds"]:
         if not any(event["kind"] == kind for event in passing):
-            missing.append({"scope": "global", "control_id": None, "kind": kind, "region": None})
+            add_missing("global", None, kind)
 
     open_events = [
         {
@@ -838,6 +1069,8 @@ def _coverage_report(
             "kind": event["kind"],
             "region": event["region"],
             "account_id": event["account_id"],
+            "suite_id": event["suite_id"],
+            "scenario_id": event["scenario_id"],
             "status": event["status"],
         }
         for event in active
@@ -862,6 +1095,8 @@ def _coverage_report(
                 str(item["control_id"]),
                 str(item["kind"]),
                 str(item["region"]),
+                str(item["suite_id"]),
+                str(item["scenario_id"]),
                 str(item["event_id"]),
             ),
         ),
@@ -881,15 +1116,15 @@ def _status_run_unlocked(run_dir: Path) -> dict[str, Any]:
     run_dir = _safe_existing_directory(run_dir, "Evidence run directory")
     finalized = (run_dir / "final.json").exists()
     _validate_run_entries(run_dir, finalized=finalized)
-    run, controls, regions = _require_run_context(run_dir)
-    events, superseded = _load_events(run_dir, run, controls, regions)
+    run, controls, regions, traceability = _require_run_context(run_dir)
+    events, superseded = _load_events(run_dir, run, controls, regions, traceability)
     return {
         "schema_version": 1,
         "run_id": run["run_id"],
         "source": run["source"],
         "finalized": finalized,
         "event_set_digest": _event_set_digest(events),
-        "coverage": _coverage_report(controls, regions, events, superseded),
+        "coverage": _coverage_report(controls, regions, traceability, events, superseded),
     }
 
 
@@ -898,9 +1133,9 @@ def _finalize_run_unlocked(run_dir: Path) -> dict[str, Any]:
     if (run_dir / "final.json").exists():
         raise EvidenceError("Evidence run is already finalized")
     _validate_run_entries(run_dir, finalized=False)
-    run, controls, regions = _require_run_context(run_dir)
-    events, superseded = _load_events(run_dir, run, controls, regions)
-    coverage = _coverage_report(controls, regions, events, superseded)
+    run, controls, regions, traceability = _require_run_context(run_dir)
+    events, superseded = _load_events(run_dir, run, controls, regions, traceability)
+    coverage = _coverage_report(controls, regions, traceability, events, superseded)
     if not coverage["complete"]:
         raise EvidenceError(
             "Evidence coverage is incomplete "
@@ -927,8 +1162,8 @@ def _verify_run_unlocked(run_dir: Path) -> dict[str, Any]:
     if not (run_dir / "final.json").exists():
         raise EvidenceError("Evidence run is not finalized")
     _validate_run_entries(run_dir, finalized=True)
-    run, controls, regions = _require_run_context(run_dir)
-    events, superseded = _load_events(run_dir, run, controls, regions)
+    run, controls, regions, traceability = _require_run_context(run_dir)
+    events, superseded = _load_events(run_dir, run, controls, regions, traceability)
     final = _read_json(run_dir / "final.json")
     expected_fields = {
         "schema_version",
@@ -946,7 +1181,7 @@ def _verify_run_unlocked(run_dir: Path) -> dict[str, Any]:
         raise EvidenceError("Final evidence document has an invalid schema")
     _require_timestamp(final.get("finalized_at"), "Final evidence document")
     _check_self_digest(final, "final_digest", "Final evidence document")
-    coverage = _coverage_report(controls, regions, events, superseded)
+    coverage = _coverage_report(controls, regions, traceability, events, superseded)
     expected_values = {
         "run_id": run["run_id"],
         "status": "pass",
@@ -1033,6 +1268,8 @@ def _build_parser() -> argparse.ArgumentParser:
     record.add_argument("--status", choices=sorted(_STATUS_VALUES), required=True)
     record.add_argument("--region")
     record.add_argument("--account-id")
+    record.add_argument("--suite-id")
+    record.add_argument("--scenario-id")
     record.add_argument("--detail", action="append", default=[])
     record.add_argument("--artifact", action="append", default=[])
     record.add_argument("--supersedes")
@@ -1058,6 +1295,8 @@ def main(argv: list[str] | None = None) -> int:
                 status=args.status,
                 region=args.region,
                 account_id=args.account_id,
+                suite_id=args.suite_id,
+                scenario_id=args.scenario_id,
                 details=_parse_assignments(args.detail),
                 artifacts=_parse_assignments(args.artifact, artifacts=True),
                 supersedes=args.supersedes,

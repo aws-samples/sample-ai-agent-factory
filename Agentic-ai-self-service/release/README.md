@@ -4,7 +4,8 @@ This directory defines the executable release contract for the self-service proj
 
 | File | Purpose |
 |---|---|
-| `production-readiness-controls.json` | Control-to-evidence traceability: positive, adversarial, mutation, live, UI, rollback, and teardown requirements. |
+| `production-readiness-controls.json` | Control-to-evidence requirements: positive, adversarial, mutation, live, UI, rollback, and teardown kinds. |
+| `production-readiness-traceability.json` | Exact suite commands, committed test selectors, and named live scenarios that satisfy each required kind. |
 | `emea-agentcore-regions.json` | Dated AWS Documentation-derived EMEA capability matrix and the bounded production envelope. |
 | `../scripts/release_evidence.py` | Append-only recorder, completeness checker, finalizer, and independent verifier. |
 
@@ -12,9 +13,10 @@ This directory defines the executable release contract for the self-service proj
 
 A finalized run proves that:
 
-* every event names a declared control and required evidence kind;
-* failures and blockers remain open until a later event explicitly supersedes the same control/kind/Region tuple;
-* all seven documented EMEA core Regions have independent `live_region` passes;
+* every event names a declared control, required evidence kind, and exact mapped suite or scenario;
+* every suite mapped to an offline kind passes; one generic pass cannot stand in for missing backend, infrastructure, frontend, static, package, or synthesis gates;
+* every named live scenario passes, including all seven documented EMEA core Regions for `live_region`;
+* failures and blockers remain open until a later event explicitly supersedes the same control/kind/Region/account/suite/scenario tuple;
 * artifacts are represented only by labels, byte counts, and SHA-256 digests;
 * the run, every event, the complete event set, and the final result are digest-bound;
 * every mutation came from the same clean Git commit and `Agentic-ai-self-service` subtree;
@@ -25,6 +27,8 @@ The recorder does not decide whether a test was truthful, copy raw logs, retain 
 ## Record a release candidate
 
 **Execution context:** local clean clone of this repository; no AWS account or Region is used by these recorder commands. Commit all project changes first. Keep raw logs under ignored `build/` storage or another controlled evidence store; never put credentials or raw API responses in event details.
+
+Run every command array declared for a suite in `production-readiness-traceability.json`, substituting only the named executable/output placeholders. Capture the combined exit status and log as one suite artifact. Because a suite command runs its complete gate, one passing suite event covers all exact selectors mapped to that suite; finalization still requires every distinct mapped suite.
 
 ```bash
 python3 scripts/release_evidence.py start \
@@ -41,12 +45,13 @@ python3 scripts/release_evidence.py record \
   --control safety.guardrails \
   --kind offline_positive \
   --status pass \
+  --suite-id backend \
   --detail test_count=42 \
   --detail exit_code=0 \
   --artifact pytest=build/release-logs/guardrails-positive.log
 ```
 
-Live evidence kinds require both `--region` and `--account-id`; the latter must be the 12-digit account whose resources produced the result. `live_region` is accepted only for a Region selected by that control in `emea-agentcore-regions.json`.
+Offline kinds require `--suite-id`; only suites mapped to that control/kind are accepted. Non-offline kinds require `--scenario-id`; generic scenario names are refused. Live evidence additionally requires both `--region` and `--account-id`, where the latter is the 12-digit account whose resources produced the result. `live_region` is accepted only for a Region selected by that control in `emea-agentcore-regions.json`.
 
 ```bash
 python3 scripts/release_evidence.py record \
@@ -56,6 +61,7 @@ python3 scripts/release_evidence.py record \
   --status pass \
   --region eu-west-1 \
   --account-id 123456789012 \
+  --scenario-id core-runtime-gateway-identity-policy-evaluation \
   --artifact probe=build/release-logs/eu-west-1-core.json
 ```
 
