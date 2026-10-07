@@ -109,11 +109,13 @@ def test_contextual_grounding_wired_into_create_params(monkeypatch):
         "guardrails_config": {
             "mode": "create_new",
             "name": "g1",
+            "baselineProfile": "production-v1",
             "contextualGrounding": {"groundingThreshold": 0.8, "relevanceThreshold": 0.6},
         },
     }
-    gs.handler(event, None)
+    result = gs.handler(event, None)
 
+    assert result["guardrails_result"]["baseline_profile"] == "production-v1"
     cg = fake.create_params.get("contextualGroundingPolicyConfig")
     assert cg == {
         "filtersConfig": [

@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — production safety controls are mandatory and non-bypassable
+
+- Production-like deploy admission injects the platform-managed `production-v1` Bedrock Guardrail
+  when none is supplied and raises caller settings to `HIGH` content/prompt-attack filtering plus
+  credential/common-PII anonymization. Custom topics, words, regexes, and stronger PII blocking
+  remain additive. Unattested `existing` Guardrails are refused before persistence or AWS work.
+- Generated Strands agents disable Guardrail trace while retaining input and output redaction,
+  preventing original matched sensitive text or blocked output from being returned in traces.
+- `production_evaluation_gate=false` is valid only in development-like environments. Production
+  now rejects the bypass both during CDK synthesis and at deploy admission; malformed values also
+  fail closed.
+
 ### Fixed — OBO connectors now carry the authenticated workforce identity end to end
 
 - End-user chat now invokes the server-resolved production slot, which freezes the immutable

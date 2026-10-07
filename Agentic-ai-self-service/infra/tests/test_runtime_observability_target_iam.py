@@ -181,9 +181,18 @@ def test_deployment_api_receives_an_explicit_dev_gate_default(template):
 def test_production_evaluation_gate_context_is_strict():
     from stacks.platform.lambdas import _production_evaluation_gate_value
 
-    app = cdk.App(context={"production_evaluation_gate": "false"})
-    stack = cdk.Stack(app, "ExplicitGate")
-    assert _production_evaluation_gate_value(stack, "prod") == "false"
+    with pytest.raises(ValueError, match="cannot be disabled"):
+        _production_evaluation_gate_value(
+            cdk.Stack(cdk.App(context={"production_evaluation_gate": "false"}), "ExplicitGate"),
+            "prod",
+        )
+    assert (
+        _production_evaluation_gate_value(
+            cdk.Stack(cdk.App(context={"production_evaluation_gate": "false"}), "DevOverride"),
+            "dev",
+        )
+        == "false"
+    )
     assert _production_evaluation_gate_value(cdk.Stack(cdk.App(), "ProdGate"), "prod") == "true"
     assert _production_evaluation_gate_value(cdk.Stack(cdk.App(), "DevGate"), "dev") == "false"
     with pytest.raises(ValueError, match="must be true or false"):

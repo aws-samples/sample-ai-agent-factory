@@ -244,6 +244,8 @@ def handler(event: dict, context) -> dict:
                     "guardrail_id": guardrail_id,
                     "guardrail_version": guardrail_version,
                     "created_by_flow": False,
+                    "baseline_profile": guardrails_config.get("baselineProfile")
+                    or guardrails_config.get("baseline_profile"),
                 },
             }
 
@@ -422,6 +424,8 @@ def handler(event: dict, context) -> dict:
                 "guardrail_id": guardrail_id,
                 "guardrail_version": guardrail_version,
                 "created_by_flow": True,
+                "baseline_profile": guardrails_config.get("baselineProfile")
+                or guardrails_config.get("baseline_profile"),
             },
         }
 

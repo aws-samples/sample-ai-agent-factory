@@ -135,6 +135,10 @@ from app.services.invocation_identity import (
     memory_invocation_identity,
 )
 from app.services.policy_lifecycle import delete_policy_confirmed
+from app.services.production_safety import (
+    ProductionSafetyConfigurationError,
+    enforce_production_guardrail_baseline,
+)
 from app.services.promotion_evidence import (
     PromotionPolicyConfigurationError,
     load_promotion_policy,
@@ -1681,6 +1685,14 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
                 "run and attest the required AgentCore batch evaluation, then promote the version."
             ),
         )
+
+    # Production Guardrails are an admission invariant, not an optional canvas
+    # hint. Resolve the managed baseline before every read/write boundary below so
+    # a refusal costs zero rows, secrets, executions, or AWS resources.
+    try:
+        request.guardrails_config = enforce_production_guardrail_baseline(request.guardrails_config)
+    except ProductionSafetyConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # THIRD, still before any side effect: if the caller named a flow, it must be a flow that
     # exists and that THEY own. ``flow_id`` is caller-supplied and becomes part of the persisted

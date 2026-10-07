@@ -30,6 +30,7 @@ pitfall, which is why the ordering is the thing under test.
 
 from __future__ import annotations
 
+import json
 import sys
 
 sys.path.insert(0, "src")
@@ -619,7 +620,6 @@ def test_a_malformed_state_machine_arn_weakens_one_check_and_breaks_nothing(spy,
 # id into ``workflow_id`` would pass them all, and nothing would distinguish the two fields.
 # --------------------------------------------------------------------------------------
 
-import json  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 FLOW = "7d1e0c2a-5b9f-4f7e-8a31-2c6d9e0b4a17"
@@ -880,3 +880,79 @@ def test_dev_environment_preserves_direct_production_default(spy, monkeypatch):
     version = spy.versions.put.call_args.args[0]
     assert version.production_gate_required is False
     assert json.loads(spy.start.input_json)["deployment_slot"] == "production"
+
+
+# --------------------------------------------------------------------------------------
+# Production safety: mandatory Guardrails and non-bypassable evaluation gating.
+# --------------------------------------------------------------------------------------
+
+
+def _enable_production_admission(monkeypatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    monkeypatch.delenv("PRODUCTION_EVALUATION_GATE", raising=False)
+    monkeypatch.setenv(
+        "EVALUATION_EVIDENCE_KMS_KEY_ARN",
+        f"arn:aws:kms:{REGION}:{ACCOUNT}:key/11111111-2222-3333-4444-555555555555",
+    )
+
+
+def test_production_deploy_injects_guardrail_baseline_before_execution(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+
+    response = _client().post("/api/deploy", json=_body())
+
+    assert response.status_code == 202, response.text
+    execution = json.loads(spy.start.input_json)
+    guardrail = execution["guardrails_config"]
+    assert guardrail["enabled"] is True
+    assert guardrail["mode"] == "create_new"
+    assert guardrail["baselineProfile"] == "production-v1"
+    assert set(guardrail["contentFilters"].values()) == {"HIGH"}
+    assert "guardrails" in execution["connected_tools"]
+
+
+def test_production_deploy_raises_weak_guardrail_settings_to_platform_floor(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+    body = _body(
+        guardrailsConfig={
+            "enabled": False,
+            "mode": "create_new",
+            "contentFilters": {"hate": "NONE", "prompt_attack": "LOW"},
+            "piiFilters": [{"type": "EMAIL", "action": "BLOCK"}],
+        }
+    )
+
+    response = _client().post("/api/deploy", json=body)
+
+    assert response.status_code == 202, response.text
+    guardrail = json.loads(spy.start.input_json)["guardrails_config"]
+    assert guardrail["enabled"] is True
+    assert guardrail["contentFilters"]["hate"] == "HIGH"
+    assert guardrail["contentFilters"]["prompt_attack"] == "HIGH"
+    pii = {item["type"]: item["action"] for item in guardrail["piiFilters"]}
+    assert pii["EMAIL"] == "BLOCK"
+    assert pii["AWS_SECRET_KEY"] == "ANONYMIZE"
+
+
+def test_production_existing_guardrail_is_refused_before_any_side_effect(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(guardrailsConfig={"mode": "existing", "guardrailId": "gr-unattested"}),
+    )
+
+    assert response.status_code == 400, response.text
+    assert "cannot be attested" in response.text
+    assert spy.side_effects == []
+
+
+def test_production_evaluation_gate_disable_is_refused_before_any_side_effect(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+    monkeypatch.setenv("PRODUCTION_EVALUATION_GATE", "false")
+
+    response = _client().post("/api/deploy", json=_body())
+
+    assert response.status_code == 503, response.text
+    assert "evaluation policy is invalid" in response.text
+    assert spy.side_effects == []

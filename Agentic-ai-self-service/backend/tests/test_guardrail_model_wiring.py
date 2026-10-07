@@ -72,6 +72,8 @@ def test_default_strands_path_wires_guardrail_into_model():
     # including OUTPUT redaction (defaults False in Strands → must set True).
     assert '"guardrail_id": GUARDRAIL_ID' in code
     assert '"guardrail_version": GUARDRAIL_VERSION or "DRAFT"' in code
+    assert '"guardrail_trace": "disabled"' in code
+    assert '"guardrail_trace": "enabled"' not in code
     assert '"guardrail_redact_output": True' in code
 
     # The splat must be ON the constructor line, not floating somewhere else.

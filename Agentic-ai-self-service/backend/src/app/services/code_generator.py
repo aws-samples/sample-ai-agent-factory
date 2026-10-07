@@ -3835,10 +3835,12 @@ _HITL_TOOLS = [human_approval]
 # splat it into the constructor (``**_GUARDRAIL_KWARGS``) so a no-guardrail deploy
 # is a no-op. ``guardrail_redact_output`` defaults to False in Strands, so we set
 # it True explicitly for OUTPUT redaction; input redaction already defaults True.
+# Trace is disabled because Bedrock trace can contain the original matched PII,
+# regex content, or blocked model output even when the served response is masked.
 _GUARDRAIL_KWARGS_ASSIGN = (
     '_GUARDRAIL_KWARGS = {"guardrail_id": GUARDRAIL_ID, '
     '"guardrail_version": GUARDRAIL_VERSION or "DRAFT", '
-    '"guardrail_trace": "enabled", '
+    '"guardrail_trace": "disabled", '
     '"guardrail_redact_output": True} if GUARDRAIL_ID else {}'
 )
 

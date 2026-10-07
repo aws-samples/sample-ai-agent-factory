@@ -20,6 +20,8 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
+from app.services.production_safety import is_production_like_environment
+
 DEFAULT_PROMOTION_POLICY: dict[str, Any] = {
     "schema_version": 1,
     "minimum_sessions": 5,
@@ -36,7 +38,6 @@ DEFAULT_PROMOTION_POLICY: dict[str, Any] = {
 
 _POLICY_ENV = "PRODUCTION_EVALUATION_POLICY_JSON"
 _GATE_ENV = "PRODUCTION_EVALUATION_GATE"
-_DEV_ENVIRONMENTS = frozenset({"dev", "development", "test", "sandbox", "preview", "local"})
 _ALLOWED_POLICY_KEYS = frozenset(DEFAULT_PROMOTION_POLICY)
 _EVALUATOR_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 _BATCH_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -84,19 +85,21 @@ def _strict_bool(name: str, value: str) -> bool:
 
 
 def production_evaluation_gate_required() -> bool:
-    """Return the environment's production-slot policy.
+    """Return the environment's non-bypassable production-slot policy.
 
-    An explicit flag wins.  Otherwise dev-like environments preserve their
-    rapid direct-production loop; every other environment requires staged,
-    evaluated promotion.  Unknown flag values are configuration failures, not
-    an implicit bypass.
+    Production-like environments always require staged evaluation. An explicit
+    false value is accepted only for development-like environments; attempting to
+    disable the gate in production is a configuration failure, not an escape hatch.
     """
 
+    production_like = is_production_like_environment()
     explicit = os.environ.get(_GATE_ENV)
     if explicit is not None and explicit.strip():
-        return _strict_bool(_GATE_ENV, explicit)
-    environment = (os.environ.get("ENVIRONMENT") or os.environ.get("ENVIRONMENT_NAME") or "dev").strip().lower()
-    return environment not in _DEV_ENVIRONMENTS
+        enabled = _strict_bool(_GATE_ENV, explicit)
+        if production_like and not enabled:
+            raise PromotionPolicyConfigurationError(f"{_GATE_ENV} cannot be disabled in a production-like environment")
+        return enabled
+    return production_like
 
 
 def _bounded_int(document: dict[str, Any], key: str, *, minimum: int, maximum: int) -> int:

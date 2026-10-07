@@ -116,12 +116,26 @@ must present a fresh JWT; expiry is checked at the API and again by Runtime and
 Gateway. IdP revocation behavior follows the provider's access-token semantics,
 so use short access-token lifetimes where immediate revocation is required.
 
-## Production promotion gate
+## Production safety and promotion gate
 
 Dev-like environments (`dev`, `development`, `test`, `sandbox`, `preview`, and
-`local`) preserve the direct-production deployment loop. Every other
-environment defaults new versions to **staging** and rejects an explicit direct
-production deploy before it writes a row, stages a secret, or calls AWS.
+`local`) preserve optional Guardrails and the direct-production iteration loop.
+Every other environment enforces the platform-managed `production-v1` Guardrail
+baseline before any row, secret, execution, or AWS resource is created. Missing
+Guardrail configuration is injected automatically; caller-supplied content
+filters are raised to `HIGH`, credential/common-PII filters are retained at
+`ANONYMIZE` or stronger, and custom denied topics/word/regex filters remain.
+Production rejects `existing` mode because READY status alone cannot attest that
+an externally mutable Guardrail still meets this baseline. Guardrail trace is
+disabled in generated Strands models because trace output can retain original
+matched PII, regex content, or blocked model output even when the served response
+is masked.
+
+Production-like environments also default new versions to **staging** and reject
+an explicit direct production deploy before side effects. The
+`production_evaluation_gate` context may enable the gate in development but may
+not disable it in production; a false or malformed production value fails
+synthesis and deploy admission.
 
 Promote a production-gated version from the **Versions** panel:
 

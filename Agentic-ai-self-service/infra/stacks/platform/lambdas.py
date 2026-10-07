@@ -76,28 +76,27 @@ DEPLOYMENT_LAMBDA_OWNERSHIP_READ_TYPES: tuple[str, ...] = (
 
 
 def _production_evaluation_gate_value(stack: cdk.Stack, environment: str) -> str:
-    """Render an explicit Lambda flag; reject typoed context instead of bypassing."""
+    """Render the gate flag; production-like environments cannot disable it."""
 
+    development_like = environment.strip().lower() in {
+        "dev",
+        "development",
+        "test",
+        "sandbox",
+        "preview",
+        "local",
+    }
     raw = stack.node.try_get_context("production_evaluation_gate")
     if raw is None or str(raw).strip() == "":
-        return (
-            "false"
-            if environment.strip().lower()
-            in {
-                "dev",
-                "development",
-                "test",
-                "sandbox",
-                "preview",
-                "local",
-            }
-            else "true"
-        )
+        return "false" if development_like else "true"
     if isinstance(raw, bool):
-        return "true" if raw else "false"
-    normalized = str(raw).strip().lower()
-    if normalized not in {"true", "false"}:
-        raise ValueError("production_evaluation_gate context must be true or false")
+        normalized = "true" if raw else "false"
+    else:
+        normalized = str(raw).strip().lower()
+        if normalized not in {"true", "false"}:
+            raise ValueError("production_evaluation_gate context must be true or false")
+    if not development_like and normalized == "false":
+        raise ValueError("production_evaluation_gate cannot be disabled in a production-like environment")
     return normalized
 
 
