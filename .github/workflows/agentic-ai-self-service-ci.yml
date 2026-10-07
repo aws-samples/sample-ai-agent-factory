@@ -153,7 +153,7 @@ jobs:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: Agentic-ai-self-service/backend/pyproject.toml
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: "1.14.6"
           terraform_wrapper: false
