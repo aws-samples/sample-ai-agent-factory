@@ -39,6 +39,7 @@ Manager with an owner-scoped name (mirror ``observability.store_credentials``:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -59,12 +60,14 @@ from app.services.agent_versions_store import (
     get_slots_store,
     get_versions_store,
 )
+from app.services.audit_store import AuditEvent, get_audit_store
 from app.services.auth import assert_owner, get_caller_sub
 from app.services.gateway_deployer import (
     _DiscoveryUrlBlocked,
     _DiscoveryUrlInvalid,
     _validate_outbound_url,
 )
+from app.services.production_safety import is_production_like_environment
 from app.services.rbac import require_scopes
 from app.services.runtime_target_context import (
     resolve_owned_deployment_runtime_target,
@@ -767,6 +770,29 @@ async def delete_trigger(
     )
 
 
+def _record_webhook_audit(
+    trigger: Trigger,
+    *,
+    runtime_name: str,
+    trigger_id: str,
+    phase: str,
+    status_code: int,
+    correlation_id: str,
+) -> None:
+    get_audit_store().record(
+        AuditEvent(
+            org_id="default",
+            actor_sub=trigger.owner_sub,
+            action="trigger.invoke",
+            method="POST",
+            path=f"/hooks/{runtime_name}/{trigger_id}",
+            status_code=status_code,
+            phase=phase,
+            correlation_id=correlation_id,
+        )
+    )
+
+
 @webhook_router.post("/{runtime_name}/{trigger_id}")
 async def receive_webhook(
     runtime_name: str,
@@ -825,6 +851,24 @@ async def receive_webhook(
             detail="Webhook authentication failed",
         ) from None
 
+    correlation_id = "webhook-" + hashlib.sha256(delivery_id.encode("utf-8")).hexdigest()
+    if is_production_like_environment():
+        try:
+            _record_webhook_audit(
+                trigger,
+                runtime_name=runtime_name,
+                trigger_id=trigger_id,
+                phase="attempt",
+                status_code=0,
+                correlation_id=correlation_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Required authenticated webhook audit append failed (%s)", type(exc).__name__)
+            raise HTTPException(
+                status_code=503,
+                detail="Webhook audit evidence is unavailable; delivery was not queued",
+            ) from exc
+
     delivery_event = webhook_delivery_event(
         body=body,
         delivery_id=delivery_id,
@@ -836,10 +880,32 @@ async def receive_webhook(
             delivery_event=delivery_event,
         )
     except TriggerDispatchError:
+        try:
+            _record_webhook_audit(
+                trigger,
+                runtime_name=runtime_name,
+                trigger_id=trigger_id,
+                phase="outcome",
+                status_code=503,
+                correlation_id=correlation_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Webhook failure outcome audit append failed (%s)", type(exc).__name__)
         raise HTTPException(
             status_code=503,
             detail="Webhook delivery could not be queued",
         ) from None
+    try:
+        _record_webhook_audit(
+            trigger,
+            runtime_name=runtime_name,
+            trigger_id=trigger_id,
+            phase="outcome",
+            status_code=202,
+            correlation_id=correlation_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Webhook success outcome audit append failed (%s)", type(exc).__name__)
     return JSONResponse(
         status_code=202,
         content={

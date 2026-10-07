@@ -193,6 +193,25 @@ that boundary.
 Emergency rollback remains available, but only as an atomic swap to the exact
 previous production version. It cannot select an arbitrary unevaluated version.
 
+## Append-only production audit
+
+Both API Lambdas classify every write route and append correlated audit evidence.
+Authenticated API writes use the shared middleware; public webhook deliveries
+append only after HMAC/replay validation so unauthenticated traffic cannot create
+audit rows. Production records an `attempt` before route execution; if that conditional
+`PutItem` fails, the route returns 503 before application side effects. Outcomes
+are separate immutable rows. The platform roles can append/query but are
+explicitly denied update, delete, and batch-write access to the audit table.
+Every row has a canonical SHA-256 digest verified on read, and incomplete
+attempts are highlighted in the admin UI. Production events omit the `ttl`
+attribute and the table is retained/deletion-protected; DynamoDB TTL processing
+stays enabled so pre-upgrade and development rows carrying `ttl` still expire.
+
+This is an append-only, tamper-evident projection inside the platform IAM
+boundary, **not** an Object Lock/WORM compliance attestation against account
+administrators. See [`docs/DATA_RETENTION.md`](docs/DATA_RETENTION.md) for the
+pseudonymous-identifier and retention responsibilities.
+
 ## Accessing the Platform
 
 After deployment completes, the script prints two URLs:

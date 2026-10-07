@@ -674,6 +674,7 @@ def build_workflow_lambda(
     backend_code: _lambda.Code,
     workflows_table: dynamodb.Table,
     flows_table: dynamodb.Table,
+    audit_table: dynamodb.Table,
 ) -> _lambda.Function:
     """Create Workflow Lambda (FastAPI + Mangum) for CRUD operations.
 
@@ -691,6 +692,21 @@ def build_workflow_lambda(
     workflows_table.grant_read_write_data(role)
     # DynamoDB flows table: read/write
     flows_table.grant_read_write_data(role)
+    # Workflow/flow/share/GitOps/credential writes append to the shared audit
+    # projection. This application never reads it and cannot mutate prior rows.
+    audit_table.grant(role, "dynamodb:PutItem", "dynamodb:DescribeTable")
+    role.add_to_policy(
+        iam.PolicyStatement(
+            sid="NeverMutateAuditEvidence",
+            effect=iam.Effect.DENY,
+            actions=[
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:BatchWriteItem",
+            ],
+            resources=[audit_table.table_arn],
+        )
+    )
     # SSM read for app config
     role.add_to_policy(
         iam.PolicyStatement(
@@ -808,6 +824,7 @@ def build_workflow_lambda(
         environment={
             "DYNAMODB_TABLE_NAME": workflows_table.table_name,
             "DYNAMODB_FLOWS_TABLE_NAME": flows_table.table_name,
+            "AUDIT_TABLE_NAME": audit_table.table_name,
             "ENVIRONMENT": cfg.env,
             # PROJECT_NAME + ENVIRONMENT + APP_AWS_REGION form the resource-owner tag
             # in services/resource_ownership.py; routers/observability.py stamps it on
@@ -1101,8 +1118,27 @@ def build_deployment_lambda(
     tables.tag_policy.grant_read_write_data(role)
     # Phase 4 (Loom) FinOps — cost budgets (routers/cost.py budgets_router).
     tables.budget.grant_read_write_data(role)
-    # Phase 5 (Loom) — audit trail (middleware writes, /api/admin/audit reads).
-    tables.audit.grant_read_write_data(role)
+    # Append-only audit projection: the middleware can create immutable rows and
+    # the admin dashboard can query them, but this role cannot update or delete
+    # evidence even if a future code path attempts it.
+    tables.audit.grant(
+        role,
+        "dynamodb:PutItem",
+        "dynamodb:Query",
+        "dynamodb:DescribeTable",
+    )
+    role.add_to_policy(
+        iam.PolicyStatement(
+            sid="NeverMutateAuditEvidence",
+            effect=iam.Effect.DENY,
+            actions=[
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:BatchWriteItem",
+            ],
+            resources=[tables.audit.table_arn],
+        )
+    )
     # states:StartExecution on the state machine (granted after SM creation)
     # SSM read
     role.add_to_policy(
@@ -2357,13 +2393,9 @@ def build_deployment_lambda(
             "ENVIRONMENT": cfg.env,
             "PROJECT_NAME": cfg.project,
             "APP_AWS_REGION": stack.region,
-            "WORKFORCE_USER_POOL_ID": (
-                workforce_user_pool.user_pool_id if workforce_user_pool is not None else ""
-            ),
+            "WORKFORCE_USER_POOL_ID": (workforce_user_pool.user_pool_id if workforce_user_pool is not None else ""),
             "WORKFORCE_CLIENT_ID": (
-                workforce_user_pool_client.user_pool_client_id
-                if workforce_user_pool_client is not None
-                else ""
+                workforce_user_pool_client.user_pool_client_id if workforce_user_pool_client is not None else ""
             ),
             "WORKFORCE_REGION": stack.region,
             "POWERTOOLS_SERVICE_NAME": "deployment",

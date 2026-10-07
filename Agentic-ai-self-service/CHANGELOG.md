@@ -23,6 +23,20 @@ All notable changes to this project are documented here. The format follows
   now rejects the bypass both during CDK synthesis and at deploy admission; malformed values also
   fail closed.
 
+### Added — production audit is append-only and fail-closed before mutation
+
+- Both FastAPI applications now classify every write route. Production appends a correlated
+  `attempt` before route execution and refuses the request if that evidence cannot be created;
+  public webhooks append only after HMAC/replay validation and before queue side effects, so
+  unauthenticated traffic cannot amplify audit writes. Outcomes are separate rows; missing
+  outcomes remain visible as incomplete attempts.
+- Audit rows use conditional creates plus canonical SHA-256 integrity digests verified on read.
+  Production audit events omit TTL, the table remains retained/deletion-protected, and both Lambda roles
+  are explicitly denied update/delete/batch-write access. Development keeps its 90-day TTL.
+- The admin API no longer fabricates an empty production history on storage/integrity failure, and
+  the UI highlights incomplete attempts. The documented claim is append-only/tamper-evident inside
+  the platform IAM boundary, not account-administrator-resistant Object Lock/WORM.
+
 ### Fixed — OBO connectors now carry the authenticated workforce identity end to end
 
 - End-user chat now invokes the server-resolved production slot, which freezes the immutable

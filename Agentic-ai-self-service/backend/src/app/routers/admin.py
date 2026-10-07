@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.services.auth import get_caller_sub
+from app.services.production_safety import is_production_like_environment
 from app.services.rbac import require_scopes
 
 logger = logging.getLogger(__name__)
@@ -26,18 +27,31 @@ async def get_audit(
     limit: int = Query(default=200, ge=1, le=1000),
     _caller_sub: str = Depends(get_caller_sub),
 ) -> dict:
-    """Return {total, by_action, by_actor, events[]} over recent audit events.
-
-    Best-effort: if the audit table is unavailable (fresh stack) return an empty
-    summary rather than 500 — the dashboard renders an empty state.
-    """
+    """Return verified audit analytics and incomplete production attempts."""
     try:
         from app.services.audit_store import get_audit_store
 
         return get_audit_store().summarize("default", limit=limit)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("audit summarize failed (returning empty): %s", exc)
-        return {"total": 0, "by_action": {}, "by_actor": {}, "events": []}
+        logger.error("audit summarize failed (%s)", type(exc).__name__)
+        if is_production_like_environment():
+            raise HTTPException(
+                status_code=503,
+                detail="Audit evidence is unavailable or failed integrity verification.",
+            ) from exc
+        return {
+            "total": 0,
+            "audit_records": 0,
+            "incomplete_attempts": 0,
+            "unverified_legacy_events": 0,
+            "distinct_actors": 0,
+            "distinct_sessions": 0,
+            "by_action": {},
+            "by_actor": {},
+            "by_day": [],
+            "events": [],
+            "incomplete_events": [],
+        }
 
 
 # ---------------------------------------------------------------------------

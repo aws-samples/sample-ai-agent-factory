@@ -228,6 +228,16 @@ def spy(monkeypatch):
     monkeypatch.setattr(reg, "unapproved_integrations", lambda idents: [])
     monkeypatch.setattr(dh, "resolve_system_prompt", lambda *a, **k: None, raising=False)
 
+    # Production admission now requires an append-only audit intent before the
+    # route executes. This suite tests the route's own ordering, not audit outage
+    # behavior (covered by test_audit_production_contract), so provide a durable
+    # no-op sink rather than letting ambient AWS credentials decide the result.
+    import app.services.audit_middleware as audit_middleware
+
+    audit_sink = MagicMock()
+    monkeypatch.setattr(audit_middleware, "get_audit_store", lambda: audit_sink)
+    s.audit_sink = audit_sink
+
     return s
 
 

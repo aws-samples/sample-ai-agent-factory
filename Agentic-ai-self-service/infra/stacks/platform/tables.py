@@ -617,10 +617,10 @@ def _create_budget_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamodb.Tabl
 
 
 def _create_audit_table(stack: cdk.Stack, cfg: PlatformConfig) -> dynamodb.Table:
-    """Phase 5 (Loom) — action-audit trail.
+    """Append-only action-audit projection.
 
-    PK ``org_id``, SK ``<ts_iso>#<event_id>`` (sortable). TTL on ``ttl``
-    (90-day) bounds growth. See services/audit_store.
+    DynamoDB TTL stays enabled so pre-upgrade/development rows carrying ``ttl``
+    expire. New production events omit that attribute and therefore never expire.
     """
     return dynamodb.Table(
         stack,

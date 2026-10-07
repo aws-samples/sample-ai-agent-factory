@@ -198,6 +198,7 @@ class PlatformStack(cdk.Stack):
             backend_code=self.backend_code,
             workflows_table=tables.workflows,
             flows_table=tables.flows,
+            audit_table=tables.audit,
         )
         # Where a generated tool gets executed. Its own isolated VPC: no internet
         # gateway, no NAT gateway, and outbound only to a CloudWatch Logs interface

@@ -53,6 +53,7 @@ from app.models.tool_generation_models import (
     ToolGenerateResponse,
     ToolTestRequest,
 )
+from app.services.audit_middleware import audit_http_request
 from app.services.aws_errors import is_error
 from app.services.aws_pagination import list_all
 from app.services.config import load_config
@@ -1045,47 +1046,11 @@ deployment_app.add_middleware(
 )
 
 
-# Phase 5 (Loom) audit trail — record WRITE-ish control-plane actions to the
-# audit store for the admin dashboard. Fixed action vocabulary (audit_store.
-# classify_action); reads are ignored. Best-effort: an audit failure NEVER
-# affects the underlying response (wrapped, logged, swallowed).
+# Shared append-only audit contract. Production write requests persist an intent
+# before route execution; both production and development append the outcome.
 @deployment_app.middleware("http")
 async def _audit_middleware(request, call_next):
-    response = await call_next(request)
-    try:
-        from app.services.audit_store import (
-            AuditEvent,
-            classify_action,
-            get_audit_store,
-        )
-
-        action = classify_action(request.method, request.url.path)
-        if action is not None:
-            from app.services.auth import get_caller_sub as _gcs
-
-            try:
-                actor = _gcs(request)
-            except Exception:  # noqa: BLE001
-                actor = "unknown"
-            # Loom-study 0.5: populate session_uuid from the per-browser-session
-            # id the frontend sends as X-Session-Id (was always empty). Lets admin
-            # analytics distinguish activity streams on a shared account and build
-            # a per-session timeline. Bounded to avoid unbounded header abuse.
-            _sid = (request.headers.get("x-session-id") or "")[:128] or None
-            get_audit_store().record(
-                AuditEvent(
-                    org_id="default",
-                    actor_sub=actor,
-                    action=action,
-                    method=request.method,
-                    path=request.url.path,
-                    status_code=getattr(response, "status_code", 0),
-                    session_uuid=_sid,
-                )
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("audit middleware skipped: %s", exc)
-    return response
+    return await audit_http_request(request, call_next)
 
 
 # Phase 1 Gap 1A — version + slot management endpoints. Mounted on the
