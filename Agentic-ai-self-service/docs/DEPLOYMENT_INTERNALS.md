@@ -817,7 +817,8 @@ Policy --> Runtime, Gateway
 .
 +-- backend/
 |   +-- pyproject.toml                    # Python deps and build config
-|   +-- requirements-lambda.txt           # Lambda-specific dependencies (installed to lib/)
+|   +-- requirements-lambda.in            # Direct Lambda dependency inputs
+|   +-- requirements-lambda.txt           # Generated x86_64/Python 3.12 hash lock (installed to lib/)
 |   +-- src/app/
 |   |   +-- main.py                       # FastAPI entry point (auto-selects storage backend)
 |   |   +-- lambda_handler.py             # Mangum wrapper for Workflow Lambda

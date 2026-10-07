@@ -131,9 +131,11 @@ BACKEND_ASSET_EXCLUDE: tuple[str, ...] = (
     ".mypy_cache",
     "*.egg-info",
     ".DS_Store",
-    # Dependency-resolution metadata is a build input, not something any
-    # deployed handler reads. Keep it out of every Lambda asset.
+    # Dependency-resolution metadata and inputs are build-time only. The deploy script
+    # materializes their locked packages into lib/ before synthesis; no handler reads them.
     "uv.lock",
+    "requirements-lambda.in",
+    "requirements-lambda.txt",
     # Read only by scripts/install-agentcore-deps.sh when it BUILDS the dependency
     # bundles, and only on a developer machine or in CI. Nothing in the deployed
     # handler opens it, and shipping it would put the exact pinned version of every

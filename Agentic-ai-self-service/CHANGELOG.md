@@ -32,6 +32,23 @@ All notable changes to this project are documented here. The format follows
   Search scenarios independently. It is a release-input contract, not a claim that a live campaign
   has already passed.
 
+### Fixed — deployment dependency artifacts reproduce byte-for-byte
+
+- The AgentCore bundle constraint contract now locks all 113 distributions across the
+  baseline and eight provider deltas, including boto3/botocore and each provider SDK.
+  Every installed tree is validated against the complete lock before packaging; an
+  unexpected transitive, version drift, duplicate version, symlink, or partial bundle set
+  fails before synthesis.
+- `package-agentcore-deps.py` writes sorted fixed-metadata archives and excludes console
+  scripts plus `dist-info/RECORD`, whose shebangs/hashes encoded the checkout path. Two
+  full 11-bundle rebuilds now produce identical bytes.
+- Lambda dependencies now compile from `requirements-lambda.in` to a 38-package,
+  target-specific hash lock and install with `--require-hashes`. Path-dependent console
+  scripts, RECORD files, bytecode, caches, and symlinks are excluded before CDK hashing.
+- Repeated validation produces identical Lambda tree digests, wheels, source
+  distributions, CloudFormation templates, and CDK asset manifests. Positive,
+  adversarial, and lock-mutation tests prevent weakening these controls.
+
 ### Fixed — Gemini provider bundle resolves reproducibly
 
 - The live deploy bundle build exposed a new transitive conflict: the unconstrained Strands baseline

@@ -109,6 +109,16 @@ REQUIRED_PINS = frozenset(
         "opentelemetry-sdk",
         "opentelemetry-semantic-conventions",
         "opentelemetry-exporter-otlp-proto-http",
+        "boto3",
+        "botocore",
+        "openai",
+        "anthropic",
+        "google-genai",
+        "litellm",
+        "mistralai",
+        "ollama",
+        "llama-api-client",
+        "mypy-boto3-sagemaker-runtime",
     }
 )
 
@@ -174,10 +184,10 @@ def test_every_pin_is_exact(constraint_pins: dict[str, str]) -> None:
     a couple of entries -- every other test here compares intersections, and an almost
     empty constraint file would make all of them pass.
     """
-    assert len(constraint_pins) >= 12, (
-        f"{CONSTRAINTS.name} declares only {len(constraint_pins)} pins: "
-        f"{sorted(constraint_pins)}. The OpenTelemetry graph alone is 8 packages; a file "
-        "this short means transitive resolutions are floating again."
+    assert len(constraint_pins) >= 100, (
+        f"{CONSTRAINTS.name} declares only {len(constraint_pins)} pins. The complete "
+        "11-bundle graph contains more than 100 distributions; a shorter file means "
+        "provider or transitive dependencies are floating again."
     )
 
 
@@ -359,6 +369,23 @@ def built_bundles(build_script: str) -> dict[str, dict[str, str]]:
     return {name: _distributions(DEPS_DIR / name) for name in sorted(present)}
 
 
+def test_every_built_distribution_matches_the_complete_lock(
+    constraint_pins: dict[str, str], built_bundles: dict[str, dict[str, str]]
+) -> None:
+    observed: dict[str, set[str]] = {}
+    for bundle, distributions in built_bundles.items():
+        for name, version in distributions.items():
+            observed.setdefault(name, set()).add(version)
+            assert name in constraint_pins, f"{bundle} contains unlocked distribution {name}=={version}"
+            assert constraint_pins[name] == version, (
+                f"{bundle} contains {name}=={version}, but the canonical lock requires {constraint_pins[name]}"
+            )
+    assert len(observed) >= 100, (
+        f"only {len(observed)} distributions were observed across all bundles; the "
+        "complete provider/runtime graph was not built"
+    )
+
+
 def test_no_provider_delta_carries_a_distribution_the_baseline_already_has(
     built_bundles: dict[str, dict[str, str]],
 ) -> None:
@@ -405,10 +432,10 @@ def test_no_provider_delta_carries_a_distribution_the_baseline_already_has(
         f"only mean it resolved to a different version: {offenders}. The two trees merge "
         "into one directory at container start, so the result is a single package tree "
         "holding modules from two versions plus two dist-info directories. Fix it at the "
-        "build, not by pinning the individual package: install-agentcore-deps.sh emits the "
-        "baseline's own resolution as constraints for the deltas (emit_tree_constraints), "
-        "so rebuild rather than adding a pin. If pip now fails on a provider extra, that "
-        "extra genuinely cannot accept a baseline version and is not expressible as a "
+        "build, not by exempting the individual package: every baseline and provider "
+        "distribution must be exact in agentcore-deps-constraints.txt, and the packager "
+        "refuses anything missing or different. If pip now fails on a provider extra, "
+        "that extra genuinely cannot accept a baseline version and is not expressible as a "
         "delta at all -- which is a decision to make, not a pin to add."
     )
 
@@ -675,9 +702,10 @@ def test_shared_paths_across_provider_deltas_are_byte_identical(
     not from anything about the packages. That makes the artifact non-deterministic in a way
     no version check can detect, which is why this compares CRCs rather than names.
 
-    Note deliberately what this does NOT claim: the zips are not byte-reproducible builds.
-    ``zip -r`` records mtimes, so two builds of an identical tree differ. This compares
-    entries WITHIN one build set, where mtime differences do not enter a CRC.
+    The archive itself is now byte-reproducible: every distribution is exact, path-dependent
+    console scripts and RECORD hashes are removed, and package-agentcore-deps.py fixes member
+    metadata and order. This test remains focused on a second property: two provider deltas
+    that contribute the same runtime path must contribute identical bytes.
     """
     deltas = sorted(n for n in built_bundles if n.startswith("provider-"))
     assert len(deltas) >= 8, f"expected at least 8 provider deltas, found {deltas}"

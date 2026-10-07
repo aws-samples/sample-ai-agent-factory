@@ -80,9 +80,15 @@ python3 scripts/release_evidence.py verify --run-dir "$RUN_DIR"
 **Execution context:** a second local clone, detached at the exact commit printed in `run.json`; no AWS account or Region is used.
 
 1. Make the completed run directory available read-only to the second clone.
-2. Check out the recorded commit in detached mode.
-3. Run `python3 scripts/release_evidence.py verify --run-dir <shared-run-directory>`.
-4. Compare the printed `final_digest` with the digest published by the reviewed release process.
+2. Check out the recorded commit in detached mode and install only from the committed
+   backend/infra/npm locks.
+3. Rebuild Lambda dependencies, all 11 AgentCore bundles, frontend, wheel/source
+   distribution, and the strict production CDK assembly. Require byte-identical Runtime
+   ZIPs, Lambda tree digest, wheel, source distribution, template, and asset manifest.
+4. Rerun every offline suite from `production-readiness-traceability.json` with zero
+   missing-tool or generated-artifact skips.
+5. Run `python3 scripts/release_evidence.py verify --run-dir <shared-run-directory>`.
+6. Compare the printed `final_digest` with the digest published by the reviewed release process.
 
 Repository paths and branch names may differ in the second clone. Verification binds the commit, project-relative path, subtree Git object, contract bytes, events, and final seal.
 

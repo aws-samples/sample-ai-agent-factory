@@ -134,7 +134,7 @@ def test_the_exported_pins_are_exactly_the_platforms_pins():
     """One list, mirrored. The generator cannot read the file: the Lambda asset excludes it."""
     exported = _pins(DEPENDENCY_BUNDLE_CONSTRAINTS)
     platform = _pins(CONSTRAINTS_FILE.read_text().splitlines())
-    assert len(platform) >= 12, "the constraint file was emptied; this comparison would be vacuous"
+    assert len(platform) >= 100, "the complete bundle lock was truncated; this comparison would be vacuous"
     assert exported == platform
 
 

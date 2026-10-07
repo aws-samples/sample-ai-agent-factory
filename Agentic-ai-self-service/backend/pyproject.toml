@@ -6,11 +6,10 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
     "pydantic>=2.10.0",
-    # 1.43.66 is the first release with the GA `agent-registry-control` /
-    # `agent-registry` service models (Agent Registry left the
-    # `bedrock-agentcore` namespace at GA).
-    # 1.43.94 adds AgentCore batch evaluation, used by the production promotion gate.
-    "boto3>=1.43.94",
+    # 1.43.66 first added GA Agent Registry; 1.43.94 added AgentCore batch
+    # evaluation. Keep this exact and advance it only with the runtime/Lambda locks so
+    # tests exercise the same service models as deployed code.
+    "boto3==1.43.109",
     "uvicorn>=0.32.0",
     "python-dotenv>=1.0.0",
     "mangum>=0.19.0",

@@ -3693,20 +3693,119 @@ DEPENDENCY_BUNDLE_PIP_FLAGS = [
 #: platform's build: a constraint fixes a version without installing anything, so only the pins
 #: for packages a recipe actually installs take effect.
 DEPENDENCY_BUNDLE_CONSTRAINTS: tuple[str, ...] = (
-    "strands-agents==1.56.0",
-    "strands-agents-tools==0.8.9",
+    "aiohappyeyeballs==2.7.1",
+    "aiohttp==3.14.4",
+    "aiosignal==1.4.0",
+    "annotated-types==0.8.0",
+    "anthropic==0.125.0",
+    "anyio==4.15.1",
+    "attrs==26.1.0",
+    "aws-bedrock-token-generator==1.1.0",
+    "aws-requests-auth==0.4.3",
+    "beautifulsoup4==4.15.0",
     "bedrock-agentcore==1.23.1",
+    "boto3==1.43.109",
+    "boto3-stubs==1.43.108",
+    "botocore==1.43.109",
+    "botocore-stubs==1.43.67",
+    "certifi==2026.7.22",
+    "cffi==2.1.1",
+    "charset-normalizer==3.5.2",
+    "click==8.5.0",
+    "cryptography==50.0.2",
+    "dill==0.4.1",
+    "distro==1.9.0",
+    "docstring-parser==0.18.0",
+    "eval-type-backport==0.4.0",
+    "fastuuid==0.14.0",
+    "filelock==4.0.12",
+    "frozenlist==1.8.0",
+    "fsspec==2026.9.0",
+    "google-auth==2.60.0",
+    "google-genai==2.28.0",
+    "googleapis-common-protos==1.75.5",
+    "h11==0.16.0",
+    "httpcore==1.0.9",
+    "httpx==0.28.1",
+    "httpx-sse==0.4.3",
+    "huggingface-hub==0.31.4",
+    "idna==3.20",
+    "importlib-metadata==8.9.0",
+    "jinja2==3.1.6",
+    "jiter==0.17.0",
+    "jmespath==1.1.0",
+    "jsonpath-python==1.1.6",
+    "jsonschema==4.26.0",
+    "jsonschema-specifications==2025.9.1",
+    "litellm==1.91.5",
+    "llama-api-client==0.6.0",
+    "markdown-it-py==4.2.0",
+    "markdownify==1.2.3",
+    "markupsafe==3.0.4",
     "mcp==1.30.0",
-    "websockets==16.1.1",
-    "tenacity==9.1.2",
+    "mdurl==0.1.2",
+    "mistralai==2.10.1",
+    "mpmath==1.3.0",
+    "multidict==6.9.1",
+    "mypy-boto3-sagemaker-runtime==1.43.68",
+    "ollama==0.6.3",
+    "openai==2.54.0",
     "opentelemetry-api==1.44.0",
-    "opentelemetry-sdk==1.44.0",
-    "opentelemetry-semantic-conventions==0.65b0",
-    "opentelemetry-proto==1.44.0",
     "opentelemetry-exporter-otlp-proto-common==1.44.0",
     "opentelemetry-exporter-otlp-proto-http==1.44.0",
     "opentelemetry-instrumentation==0.65b0",
     "opentelemetry-instrumentation-threading==0.65b0",
+    "opentelemetry-proto==1.44.0",
+    "opentelemetry-sdk==1.44.0",
+    "opentelemetry-semantic-conventions==0.65b0",
+    "packaging==26.3",
+    "pillow==12.2.0",
+    "prompt-toolkit==3.0.53",
+    "propcache==0.5.4",
+    "protobuf==7.36.2",
+    "pyasn1==0.6.4",
+    "pyasn1-modules==0.4.2",
+    "pycparser==3.0",
+    "pydantic==2.13.5",
+    "pydantic-core==2.46.5",
+    "pydantic-settings==2.15.0",
+    "pygments==2.21.0",
+    "pyjwt==2.15.1",
+    "python-dateutil==2.9.0.post0",
+    "python-dotenv==1.2.4",
+    "python-multipart==0.0.32",
+    "pyyaml==6.0.3",
+    "referencing==0.37.0",
+    "regex==2026.9.29",
+    "requests==2.34.2",
+    "rich==15.0.0",
+    "rpds-py==2026.9.1",
+    "s3transfer==0.19.2",
+    "six==1.17.0",
+    "slack-bolt==1.30.0",
+    "slack-sdk==3.45.0",
+    "sniffio==1.3.1",
+    "soupsieve==2.10",
+    "sse-starlette==3.5.0",
+    "starlette==1.7.0",
+    "strands-agents==1.56.0",
+    "strands-agents-tools==0.8.9",
+    "sympy==1.14.0",
+    "tenacity==9.1.2",
+    "tiktoken==0.11.0",
+    "tokenizers==0.23.2",
+    "tqdm==4.70.1",
+    "types-s3transfer==0.16.0",
+    "typing-extensions==4.16.0",
+    "typing-inspection==0.4.4",
+    "urllib3==2.8.0",
+    "uvicorn==0.54.0",
+    "watchdog==6.0.0",
+    "wcwidth==0.9.2",
+    "websockets==16.1.1",
+    "wrapt==2.5.0",
+    "yarl==1.25.1",
+    "zipp==4.1.1",
 )
 
 # The pip that runs the build must be 24.2 or newer. Measured with these exact flags
@@ -10487,10 +10586,13 @@ run_pip install \\
     --quiet \\
     {package_args}
 
-# Strip caches: they are the largest source of non-reproducibility and the
-# runtime regenerates them anyway.
+# Strip caches and installer-generated files that are not imported at runtime.
+# Console-script shebangs embed the absolute --target path, and RECORD hashes those
+# path-dependent bytes; both must be absent for byte-reproducible output.
+rm -rf "${{BUILD_DIR:?}}/bin"
 find "$BUILD_DIR" -type d -name '__pycache__' -exec rm -rf {{}} + 2>/dev/null || true
 find "$BUILD_DIR" -type f -name '*.pyc' -delete 2>/dev/null || true
+find "$BUILD_DIR" -type f -path '*.dist-info/RECORD' -delete 2>/dev/null || true
 {arch_check}
 OUT_ABS="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
 rm -f "$OUT_ABS"
@@ -10514,11 +10616,10 @@ rm -f "$OUT_ABS"
 #                 and `zip -r` follows it, so two identical trees can zip to two different
 #                 byte streams without a single timestamp differing.
 #
-# This removes the causes inside this script's control. The constraint file fixes the
-# version of every package the platform pins; the dependencies it deliberately leaves
-# floating (boto3 and botocore, which must move forward with new AWS APIs) can still
-# resolve a newer release between two runs. That is why deploy.sh hashes the object in
-# the bucket rather than the file it just built.
+# This removes every archive-level source of drift inside this script. The complete
+# constraint lock fixes every resolved distribution, including boto3/botocore and all
+# provider SDKs; a dependency upgrade therefore requires a reviewed lock update rather
+# than appearing between two builds of the same commit.
 find "$BUILD_DIR" -exec touch -t 198001010000 {{}} + 2>/dev/null || true
 (cd "$BUILD_DIR" && find . -print | sort | zip -q -X "$OUT_ABS" -@)
 

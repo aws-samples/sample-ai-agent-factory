@@ -1374,6 +1374,8 @@ class TestDependencyBundleIntegrity:
         assert "touch -t 198001010000" in script, "member mtimes are still whatever the build ran at"
         assert "find . -print | sort | zip" in script, "member order is left to filesystem traversal"
         assert "zip -r -q " not in script, "a non-deterministic zip -r survived"
+        assert 'rm -rf "${BUILD_DIR:?}/bin"' in script, "console-script shebangs retain the local target path"
+        assert "*.dist-info/RECORD" in script, "RECORD retains hashes of path-dependent console scripts"
 
     def test_the_digest_is_omitted_rather_than_sent_as_none(self):
         """`cloudformation deploy` keeps a parameter it is not given (UsePreviousValue),
