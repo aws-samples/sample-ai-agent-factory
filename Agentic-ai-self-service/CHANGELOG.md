@@ -39,6 +39,12 @@ All notable changes to this project are documented here. The format follows
   disabled, `LOG_ONLY`, and `on_enforce_failure=log_only` inputs cannot weaken production. The
   production tool-plane support envelope requires AgentCore Gateway because LiteLLM cannot attach
   AgentCore Policy; model-only deployments do not create a policy engine.
+- Dynamic Runtime, per-agent Runtime, managed Harness, shared CDK Runtime, and exported
+  CloudFormation Runtime execution roles now carry the same explicit deny for Gateway, target,
+  and Policy control-plane mutations. A Policy canvas node grants agent code no control-plane
+  authority. Policy builders reject exact or wildcard allows matching the denied actions before
+  IAM publication, so adding `bedrock-agentcore:*` fails closed rather than silently reopening the
+  Cedar detach path.
 - `production_evaluation_gate=false` is valid only in development-like environments. Production
   now rejects the bypass both during CDK synthesis and at deploy admission; malformed values also
   fail closed.

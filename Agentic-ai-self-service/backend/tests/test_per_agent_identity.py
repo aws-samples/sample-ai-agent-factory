@@ -4,7 +4,8 @@ Pure-function coverage — no AWS, no moto. Mirrors the property-based style of
 tests/test_iam_properties.py.
 
 Asserts:
-  1. empty connected_tools -> only the 3 baseline statements (Bedrock/S3/Logs).
+  1. empty connected_tools -> baseline model/S3/log statements plus the mandatory
+     Gateway/Policy mutation Deny.
   2. each tool added individually injects exactly its statement and nothing else.
   3. gateway/memory/kb statements carry the supplied ARN in Resource (not "*")
      and EXCLUDE other tools' ARNs/actions.
@@ -38,7 +39,12 @@ from hypothesis import strategies as st
 # Constants / strategies
 # ============================================================================
 
-BASELINE_SIDS = {"BedrockModelAccess", "S3CodeAccess", "CloudWatchLogs"}
+BASELINE_SIDS = {
+    "BedrockModelAccess",
+    "S3CodeAccess",
+    "CloudWatchLogs",
+    "NeverMutateGatewayOrPolicyControlPlane",
+}
 
 # Tools that scope to an ARN when one is supplied.
 ARN_SCOPED = {
@@ -57,7 +63,6 @@ TOOL_TO_SID = {
     "code_interpreter": "CodeInterpreterAccess",
     "evaluation": "EvaluationAccess",
     "observability": "EvaluationAccess",
-    "policy": "PolicyAccess",
 }
 
 SUPPORTED_TOOLS = list(TOOL_TO_SID.keys())
@@ -102,7 +107,12 @@ def _all_actions(policy: dict) -> set[str]:
 
 def test_empty_tools_yields_only_baseline():
     policy = build_scoped_runtime_policy([], artifacts_bucket=BUCKET)
-    assert _sids(policy) == ["BedrockModelAccess", "S3CodeAccess", "CloudWatchLogs"]
+    assert _sids(policy) == [
+        "BedrockModelAccess",
+        "S3CodeAccess",
+        "CloudWatchLogs",
+        "NeverMutateGatewayOrPolicyControlPlane",
+    ]
     assert policy["Version"] == "2012-10-17"
 
 
@@ -239,8 +249,9 @@ def test_all_arns_omitted_each_tool_wildcards():
 @settings(max_examples=100)
 def test_no_unexpected_wildcard_resources_when_all_arns_supplied(tools):
     """With bucket + all ARNs supplied, only Bedrock-model and CW-Logs may use
-    "*". Guardrails/browser/code_interpreter/evaluation/policy use "*" by
-    AWS-shape necessity (no ARN available); those are the documented exceptions.
+    "*". Guardrails/browser/code_interpreter/evaluation use "*" by
+    AWS-shape necessity; the control-plane boundary also uses "*" only as an
+    explicit Deny. Those are the documented exceptions.
     """
     policy = build_scoped_runtime_policy(
         tools,
@@ -256,7 +267,7 @@ def test_no_unexpected_wildcard_resources_when_all_arns_supplied(tools):
         "BrowserAccess",
         "CodeInterpreterAccess",
         "EvaluationAccess",
-        "PolicyAccess",
+        "NeverMutateGatewayOrPolicyControlPlane",
     }
     for stmt in policy["Statement"]:
         if stmt["Resource"] == "*":
@@ -268,10 +279,10 @@ def test_no_unexpected_wildcard_resources_when_all_arns_supplied(tools):
 
 @given(tools=tool_subset_st)
 @settings(max_examples=100)
-def test_all_statements_are_allow(tools):
+def test_only_gateway_policy_boundary_is_deny(tools):
     policy = build_scoped_runtime_policy(tools, artifacts_bucket=BUCKET)
-    for stmt in policy["Statement"]:
-        assert stmt["Effect"] == "Allow"
+    denies = [statement for statement in policy["Statement"] if statement["Effect"] == "Deny"]
+    assert [statement["Sid"] for statement in denies] == ["NeverMutateGatewayOrPolicyControlPlane"]
 
 
 # ============================================================================

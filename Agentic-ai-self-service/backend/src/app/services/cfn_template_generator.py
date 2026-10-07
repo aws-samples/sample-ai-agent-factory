@@ -76,6 +76,10 @@ from app.services.runtime_artifact import (
     classify_runtime_artifact,
 )
 from app.services.runtime_deployer import _build_network_configuration
+from app.services.runtime_policy_safety import (
+    assert_runtime_policy_is_data_plane_only,
+    runtime_control_plane_deny_statement,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -5155,6 +5159,14 @@ class CfnTemplateGenerator:
         # one pass rather than each branch remembering to tag its own resources.
         _apply_resource_tags(template, request.resource_tags)
 
+        # Final authority gate after every conditional branch has appended its
+        # data-plane grants. A later component cannot smuggle a Gateway/Policy
+        # mutation into the Runtime role after the initial role construction.
+        runtime_role = template["Resources"].get("RuntimeExecutionRole")
+        if runtime_role:
+            complete_runtime_policy = runtime_role["Properties"]["Policies"][0]["PolicyDocument"]
+            assert_runtime_policy_is_data_plane_only(complete_runtime_policy)
+
         # Serialize template
         template_yaml = _dump_template(template)
 
@@ -6426,6 +6438,9 @@ class CfnTemplateGenerator:
                 }
             )
 
+        statements.append(runtime_control_plane_deny_statement())
+        runtime_policy = {"Version": "2012-10-17", "Statement": statements}
+        assert_runtime_policy_is_data_plane_only(runtime_policy)
         template["Resources"]["RuntimeExecutionRole"] = {
             "Type": "AWS::IAM::Role",
             "Properties": {
@@ -6443,7 +6458,7 @@ class CfnTemplateGenerator:
                 "Policies": [
                     {
                         "PolicyName": "RuntimePolicy",
-                        "PolicyDocument": {"Version": "2012-10-17", "Statement": statements},
+                        "PolicyDocument": runtime_policy,
                     }
                 ],
             },

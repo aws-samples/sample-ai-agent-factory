@@ -287,6 +287,36 @@ def build_trigger_dispatch_queues(
     return dispatch_queue, dead_letter_queue, rule_prefix
 
 
+RUNTIME_CONTROL_PLANE_MUTATION_ACTIONS: tuple[str, ...] = (
+    "bedrock-agentcore:CreateGateway",
+    "bedrock-agentcore:UpdateGateway",
+    "bedrock-agentcore:DeleteGateway",
+    "bedrock-agentcore:CreateGatewayTarget",
+    "bedrock-agentcore:UpdateGatewayTarget",
+    "bedrock-agentcore:DeleteGatewayTarget",
+    "bedrock-agentcore:SynchronizeGatewayTargets",
+    "bedrock-agentcore:CreatePolicyEngine",
+    "bedrock-agentcore:UpdatePolicyEngine",
+    "bedrock-agentcore:DeletePolicyEngine",
+    "bedrock-agentcore:CreatePolicy",
+    "bedrock-agentcore:UpdatePolicy",
+    "bedrock-agentcore:DeletePolicy",
+    "bedrock-agentcore:ManageResourceScopedPolicy",
+    "bedrock-agentcore:ManageAdminPolicy",
+)
+
+
+def _deny_runtime_control_plane_mutation(role: iam.Role) -> None:
+    role.add_to_policy(
+        iam.PolicyStatement(
+            sid="NeverMutateGatewayOrPolicyControlPlane",
+            effect=iam.Effect.DENY,
+            actions=list(RUNTIME_CONTROL_PLANE_MUTATION_ACTIONS),
+            resources=["*"],
+        )
+    )
+
+
 def build_shared_runtime_role(
     stack: cdk.Stack,
     cfg: PlatformConfig,
@@ -602,6 +632,7 @@ def build_shared_runtime_role(
             },
         )
     )
+    _deny_runtime_control_plane_mutation(role)
     return role
 
 
@@ -675,6 +706,7 @@ def build_shared_mcp_runtime_role(
             resources=["*"],
         )
     )
+    _deny_runtime_control_plane_mutation(role)
     return role
 
 

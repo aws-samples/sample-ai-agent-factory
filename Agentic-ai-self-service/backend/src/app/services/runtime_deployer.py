@@ -33,6 +33,10 @@ from app.services.resource_ownership import (
     resource_is_missing,
 )
 from app.services.resource_tagging import governed_tag_list, governed_tags
+from app.services.runtime_policy_safety import (
+    assert_runtime_policy_is_data_plane_only,
+    runtime_control_plane_deny_statement,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -637,23 +641,6 @@ def create_runtime_iam_role(
                     "Resource": "*",
                 }
             )
-        elif tool == "policy":
-            core_policy["Statement"].append(
-                {
-                    "Sid": "PolicyAccess",
-                    "Effect": "Allow",
-                    "Action": [
-                        "bedrock-agentcore:CreatePolicyEngine",
-                        "bedrock-agentcore:GetPolicyEngine",
-                        "bedrock-agentcore:ListPolicyEngines",
-                        "bedrock-agentcore:CreatePolicy",
-                        "bedrock-agentcore:GetPolicy",
-                        "bedrock-agentcore:ListPolicies",
-                        "bedrock-agentcore:UpdateGateway",
-                    ],
-                    "Resource": "*",
-                }
-            )
 
     # Scoped Secrets Manager access for OTLP auth header (Langfuse,
     # Honeycomb, etc.). Bug 9 reminder: keep this in sync with the SFN path.
@@ -714,6 +701,8 @@ def create_runtime_iam_role(
             }
         )
 
+    core_policy["Statement"].append(runtime_control_plane_deny_statement())
+    assert_runtime_policy_is_data_plane_only(core_policy)
     iam_client.put_role_policy(
         RoleName=role_name,
         PolicyName="AgentCoreRuntimePolicy",

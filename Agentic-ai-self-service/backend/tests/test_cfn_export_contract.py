@@ -546,7 +546,10 @@ class TestLiteLLMExport:
         template = yaml.safe_load(_generate(gateway_config=_litellm(), connected_tools=connected).template_yaml)
         role = template["Resources"]["RuntimeExecutionRole"]
         actions = [
-            a for s in role["Properties"]["Policies"][0]["PolicyDocument"]["Statement"] for a in _as_list(s["Action"])
+            action
+            for statement in role["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
+            if statement.get("Effect") == "Allow"
+            for action in _as_list(statement["Action"])
         ]
         assert not [a for a in actions if a.startswith("bedrock-agentcore:") and "Gateway" in a]
         # The stronger statement: nothing in this role may reference a resource the
@@ -2312,6 +2315,8 @@ class TestLeastPrivilegeResources:
                 continue
             for policy in _inline_policies(resource):
                 for statement in policy["PolicyDocument"]["Statement"]:
+                    if statement.get("Effect") != "Allow":
+                        continue
                     target = statement.get("Resource")
                     if target == "*" or (isinstance(target, list) and "*" in target):
                         found.add((logical_id, statement.get("Sid", "<unnamed>")))

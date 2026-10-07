@@ -138,7 +138,11 @@ effects and again inside the Policy step. Production tool planes therefore
 require AgentCore Gateway; LiteLLM tool Gateway deployments remain available in
 development but are outside this production support envelope because they cannot
 attach AgentCore Policy. Model-only agents do not create an unnecessary policy
-engine.
+engine. Runtime and Harness execution roles never receive Gateway/Policy control-plane
+mutation authority. Every dynamic, per-agent, shared, and CloudFormation-exported
+execution role carries an explicit `Deny` for Gateway/target/Policy create, update,
+delete, and synchronization actions; policy builders also reject exact or wildcard
+`Allow` patterns that would match those actions before IAM publication.
 
 Production-like environments also default new versions to **staging** and reject
 an explicit direct production deploy before side effects. The
