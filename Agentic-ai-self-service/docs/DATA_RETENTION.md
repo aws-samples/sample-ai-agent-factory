@@ -46,6 +46,20 @@ Covers the governance data stores added in the enterprise/governance layer.
   not expire and remain until an authorized delete. A one-hour stale reservation
   is committed conservatively before receiving its 90-day TTL.
 
+## Trigger idempotency (`*-triggers`)
+
+- Trigger definitions persist until authorized deletion and contain owner,
+  deployment/version target, schedule/pattern, and secret ARN metadata—but never
+  the webhook HMAC value.
+- Authenticated webhook ingress stores the caller-supplied delivery ID, trigger
+  coordinates, request-body SHA-256, `CLAIMING` lease metadata, and terminal
+  `QUEUED` state. Worker
+  delivery rows store the same coordinates plus processing/completion state.
+  Neither marker stores request bodies, signatures, prompts, or agent responses.
+- Both queued ingress and completed worker markers expire after seven days.
+  Trigger deletion purges their shared delivery partition immediately; a live
+  claim prevents deletion until its bounded lease expires.
+
 ## Tag policies / profiles (`*-tag-policy`)
 
 - Org-wide governance config (tag keys/values). No user data. No TTL (config).

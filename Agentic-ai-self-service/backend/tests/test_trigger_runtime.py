@@ -32,6 +32,8 @@ from app.services.trigger_store import (  # noqa: E402
     TriggerDeliveryClaim,
     TriggerDeliveryInactive,
     TriggerStore,
+    WebhookIngressBusy,
+    WebhookIngressConflict,
 )
 from moto import mock_aws  # noqa: E402
 
@@ -252,6 +254,113 @@ def test_delete_fences_an_in_flight_provisioner(store: TriggerStore):
         trigger_id=row.trigger_id,
         delete_token="delete-token",
     )
+
+
+def test_webhook_ingress_claim_is_durable_and_suppresses_queued_duplicate(store: TriggerStore):
+    row = persist(store, make_trigger(trigger_type=TYPE_WEBHOOK))
+    claim = store.acquire_webhook_ingress(
+        trigger=row,
+        delivery_id=DELIVERY_ID,
+        payload_sha256="a" * 64,
+        lease_seconds=60,
+        retention_seconds=86_400,
+        now=100,
+    )
+    assert claim is not None
+
+    with pytest.raises(WebhookIngressBusy):
+        store.acquire_webhook_ingress(
+            trigger=row,
+            delivery_id=DELIVERY_ID,
+            payload_sha256="a" * 64,
+            lease_seconds=60,
+            retention_seconds=86_400,
+            now=101,
+        )
+
+    assert store.complete_webhook_ingress(claim, retention_seconds=86_400, now=102)
+    assert (
+        store.acquire_webhook_ingress(
+            trigger=row,
+            delivery_id=DELIVERY_ID,
+            payload_sha256="a" * 64,
+            lease_seconds=60,
+            retention_seconds=86_400,
+            now=103,
+        )
+        is None
+    )
+    item = store._table.get_item(  # noqa: SLF001
+        Key={
+            "runtime_name": f"!delivery#{RUNTIME_NAME}#{TRIGGER_ID}",
+            "trigger_id": f"!webhook#{DELIVERY_ID}",
+        },
+        ConsistentRead=True,
+    )["Item"]
+    assert item["ingress_status"] == "QUEUED"
+    assert item["delivery_id"] == DELIVERY_ID
+    assert "claim_token" not in item and "claim_expires_at" not in item
+    assert item["ttl"] == 86_502
+    with pytest.raises(WebhookIngressConflict, match="different payload"):
+        store.acquire_webhook_ingress(
+            trigger=row,
+            delivery_id=DELIVERY_ID,
+            payload_sha256="b" * 64,
+            lease_seconds=60,
+            retention_seconds=86_400,
+            now=104,
+        )
+    assert store.purge_deliveries(RUNTIME_NAME, TRIGGER_ID) == 1
+    assert (
+        store._table.get_item(  # noqa: SLF001
+            Key={
+                "runtime_name": f"!delivery#{RUNTIME_NAME}#{TRIGGER_ID}",
+                "trigger_id": f"!webhook#{DELIVERY_ID}",
+            },
+            ConsistentRead=True,
+        ).get("Item")
+        is None
+    )
+
+
+def test_webhook_ingress_expired_lease_is_recoverable_and_trigger_state_is_fenced(store: TriggerStore):
+    row = persist(store, make_trigger(trigger_type=TYPE_WEBHOOK))
+    abandoned = store.acquire_webhook_ingress(
+        trigger=row,
+        delivery_id=DELIVERY_ID,
+        payload_sha256="a" * 64,
+        lease_seconds=60,
+        retention_seconds=86_400,
+        now=100,
+    )
+    assert abandoned is not None
+    takeover = store.acquire_webhook_ingress(
+        trigger=row,
+        delivery_id=DELIVERY_ID,
+        payload_sha256="a" * 64,
+        lease_seconds=60,
+        retention_seconds=86_400,
+        now=160,
+    )
+    assert takeover is not None and takeover.token != abandoned.token
+    assert store.release_webhook_ingress(abandoned) is False
+    assert store.release_webhook_ingress(takeover) is True
+
+    stale = row
+    store.update_status(
+        runtime_name=row.runtime_name,
+        trigger_id=row.trigger_id,
+        status=STATUS_DELETING,
+    )
+    with pytest.raises(TriggerDeliveryInactive):
+        store.acquire_webhook_ingress(
+            trigger=stale,
+            delivery_id="evt-after-delete",
+            payload_sha256="a" * 64,
+            lease_seconds=60,
+            retention_seconds=86_400,
+            now=200,
+        )
 
 
 def test_delivery_claim_serializes_and_suppresses_duplicates(store: TriggerStore):

@@ -120,11 +120,15 @@ and the run fails unless its durable deployment record reaches
 The trigger matrix deploys one HTTP runtime and creates cron, custom
 EventBridge, S3, and signed webhook triggers through the authenticated product
 API. It fires each real source and requires a completed DynamoDB delivery row;
-that marker is written only after the AgentCore invocation returns. It then
-deletes each trigger through the product API, proves the EventBridge rule or
-webhook secret is no longer active, removes the temporary S3 bucket, and
-requires the runtime's durable deleted tombstone. Completed delivery rows remain
-only as seven-day, TTL-bounded deduplication evidence.
+that marker is written only after the AgentCore invocation returns. The signed
+webhook is then replayed byte-for-byte with the same timestamp, delivery ID, body,
+and HMAC: the first response must report `duplicate=false`, the byte-identical replay
+`duplicate=true`, and the same ID with different validly signed bytes must return exact
+`409`; only one worker delivery may complete. It then deletes each
+trigger through the product API, proves the EventBridge rule or webhook secret is
+no longer active, removes the temporary S3 bucket, and requires the runtime's
+durable deleted tombstone. Completed worker-delivery rows and queued webhook
+ingress markers remain only as seven-day, TTL-bounded deduplication evidence.
 
 ### Live verification scripts
 

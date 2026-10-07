@@ -300,6 +300,24 @@ class TriggerDeliveryInactive(RuntimeError):
     """The trigger stopped being active before delivery authority was acquired."""
 
 
+class WebhookIngressBusy(RuntimeError):
+    """Another request is authenticating or enqueueing this webhook delivery."""
+
+
+class WebhookIngressConflict(RuntimeError):
+    """A webhook delivery ID was already bound to different payload bytes."""
+
+
+@dataclass(frozen=True)
+class WebhookIngressClaim:
+    """One request's lease on a signed webhook delivery before SQS enqueue."""
+
+    runtime_name: str
+    trigger_id: str
+    delivery_id: str
+    token: str
+
+
 @dataclass(frozen=True)
 class TriggerDeliveryClaim:
     """The exact lease token protecting one durable trigger delivery."""
@@ -311,10 +329,15 @@ class TriggerDeliveryClaim:
 
 
 _DELIVERY_PARTITION_PREFIX = "!delivery#"
+_WEBHOOK_INGRESS_KEY_PREFIX = "!webhook#"
 
 
 def _delivery_partition(runtime_name: str, trigger_id: str) -> str:
     return f"{_DELIVERY_PARTITION_PREFIX}{runtime_name}#{trigger_id}"
+
+
+def _webhook_ingress_key(delivery_id: str) -> str:
+    return f"{_WEBHOOK_INGRESS_KEY_PREFIX}{delivery_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -755,6 +778,200 @@ class TriggerStore:
             raise
         return Trigger.from_item(resp["Attributes"])
 
+    def acquire_webhook_ingress(
+        self,
+        *,
+        trigger: Trigger,
+        delivery_id: str,
+        payload_sha256: str,
+        lease_seconds: int,
+        retention_seconds: int,
+        now: int | None = None,
+    ) -> WebhookIngressClaim | None:
+        """Claim one authenticated webhook delivery before queue enqueue.
+
+        A ``QUEUED`` marker makes retries idempotent across Lambda processes. A
+        transient ``CLAIMING`` lease serializes concurrent requests and can be
+        taken over after a crash. The trigger row is condition-checked in the same
+        transaction so deletion/disable cannot race a newly accepted delivery.
+        """
+
+        if not delivery_id or len(delivery_id) > 128:
+            raise ValueError("webhook ingress requires a bounded delivery id")
+        if len(payload_sha256) != 64 or any(character not in "0123456789abcdef" for character in payload_sha256):
+            raise ValueError("webhook ingress requires a canonical payload digest")
+        if lease_seconds <= 0 or retention_seconds <= lease_seconds:
+            raise ValueError("webhook ingress retention must exceed a positive lease")
+        now_epoch = int(time.time()) if now is None else int(now)
+        token = secrets.token_hex(16)
+        ingress_key = {
+            "runtime_name": _delivery_partition(trigger.runtime_name, trigger.trigger_id),
+            "trigger_id": _webhook_ingress_key(delivery_id),
+        }
+        try:
+            self._table.meta.client.transact_write_items(
+                TransactItems=[
+                    {
+                        "Update": {
+                            "TableName": self._table_name,
+                            "Key": ingress_key,
+                            "UpdateExpression": (
+                                "SET item_kind = :kind, source_runtime_name = :runtime, "
+                                "source_trigger_id = :trigger, delivery_id = :delivery, "
+                                "payload_sha256 = :payload, ingress_status = :claiming, "
+                                "claim_token = :token, "
+                                "claim_expires_at = :expires, updated_at = :now, #ttl = :ttl"
+                            ),
+                            "ConditionExpression": (
+                                "attribute_not_exists(trigger_id) OR "
+                                "(ingress_status = :claiming AND claim_expires_at <= :now "
+                                "AND payload_sha256 = :payload)"
+                            ),
+                            "ExpressionAttributeNames": {"#ttl": "ttl"},
+                            "ExpressionAttributeValues": {
+                                ":kind": "webhook_ingress",
+                                ":runtime": trigger.runtime_name,
+                                ":trigger": trigger.trigger_id,
+                                ":delivery": delivery_id,
+                                ":payload": payload_sha256,
+                                ":claiming": "CLAIMING",
+                                ":token": token,
+                                ":expires": now_epoch + lease_seconds,
+                                ":now": now_epoch,
+                                ":ttl": now_epoch + retention_seconds,
+                            },
+                        }
+                    },
+                    {
+                        "ConditionCheck": {
+                            "TableName": self._table_name,
+                            "Key": {
+                                "runtime_name": trigger.runtime_name,
+                                "trigger_id": trigger.trigger_id,
+                            },
+                            "ConditionExpression": (
+                                "attribute_exists(trigger_id) AND #status = :active "
+                                "AND owner_sub = :owner AND deployment_id = :deployment "
+                                "AND version_id = :version AND target_runtime_arn = :target"
+                            ),
+                            "ExpressionAttributeNames": {"#status": "status"},
+                            "ExpressionAttributeValues": {
+                                ":active": STATUS_ACTIVE,
+                                ":owner": trigger.owner_sub,
+                                ":deployment": trigger.deployment_id,
+                                ":version": trigger.version_id,
+                                ":target": trigger.target_runtime_arn,
+                            },
+                        }
+                    },
+                ]
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "TransactionCanceledException":
+                raise
+            current = self.get(trigger.runtime_name, trigger.trigger_id, consistent=True)
+            if (
+                current is None
+                or current.status != STATUS_ACTIVE
+                or current.owner_sub != trigger.owner_sub
+                or current.deployment_id != trigger.deployment_id
+                or current.version_id != trigger.version_id
+                or current.target_runtime_arn != trigger.target_runtime_arn
+            ):
+                raise TriggerDeliveryInactive("The trigger stopped being active before webhook enqueue") from None
+            item = self._table.get_item(Key=ingress_key, ConsistentRead=True).get("Item")
+            if item and item.get("payload_sha256") != payload_sha256:
+                raise WebhookIngressConflict(
+                    "The webhook delivery ID is already bound to a different payload"
+                ) from None
+            if item and item.get("ingress_status") == "QUEUED":
+                return None
+            raise WebhookIngressBusy("Another request is enqueueing this webhook delivery") from None
+
+        return WebhookIngressClaim(
+            runtime_name=trigger.runtime_name,
+            trigger_id=trigger.trigger_id,
+            delivery_id=delivery_id,
+            token=token,
+        )
+
+    def complete_webhook_ingress(
+        self,
+        claim: WebhookIngressClaim,
+        *,
+        retention_seconds: int,
+        now: int | None = None,
+    ) -> bool:
+        """Persist ``QUEUED`` after SQS acceptance, resolving ambiguous writes."""
+
+        if retention_seconds <= 0:
+            raise ValueError("webhook ingress retention must be positive")
+        now_epoch = int(time.time()) if now is None else int(now)
+        key = {
+            "runtime_name": _delivery_partition(claim.runtime_name, claim.trigger_id),
+            "trigger_id": _webhook_ingress_key(claim.delivery_id),
+        }
+        values = {
+            ":queued": "QUEUED",
+            ":claiming": "CLAIMING",
+            ":token": claim.token,
+            ":now": now_epoch,
+            ":ttl": now_epoch + retention_seconds,
+        }
+        last_error: Exception | None = None
+        for _attempt in range(3):
+            try:
+                self._table.update_item(
+                    Key=key,
+                    UpdateExpression=(
+                        "SET ingress_status = :queued, queued_at = :now, "
+                        "updated_at = :now, #ttl = :ttl REMOVE claim_token, claim_expires_at"
+                    ),
+                    ConditionExpression="ingress_status = :claiming AND claim_token = :token",
+                    ExpressionAttributeNames={"#ttl": "ttl"},
+                    ExpressionAttributeValues=values,
+                )
+                return True
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                    item = self._table.get_item(Key=key, ConsistentRead=True).get("Item")
+                    return bool(item and item.get("ingress_status") == "QUEUED")
+                last_error = exc
+            except Exception as exc:
+                last_error = exc
+            try:
+                item = self._table.get_item(Key=key, ConsistentRead=True).get("Item")
+            except Exception:
+                item = None
+            if item and item.get("ingress_status") == "QUEUED":
+                return True
+            if item and (item.get("ingress_status") != "CLAIMING" or item.get("claim_token") != claim.token):
+                return False
+        if last_error is None:
+            raise RuntimeError("Webhook ingress completion could not be confirmed")
+        raise last_error
+
+    def release_webhook_ingress(self, claim: WebhookIngressClaim) -> bool:
+        """Release a known failed enqueue so the sender can retry immediately."""
+
+        try:
+            self._table.delete_item(
+                Key={
+                    "runtime_name": _delivery_partition(claim.runtime_name, claim.trigger_id),
+                    "trigger_id": _webhook_ingress_key(claim.delivery_id),
+                },
+                ConditionExpression="ingress_status = :claiming AND claim_token = :token",
+                ExpressionAttributeValues={
+                    ":claiming": "CLAIMING",
+                    ":token": claim.token,
+                },
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return False
+            raise
+        return True
+
     def acquire_delivery(
         self,
         *,
@@ -1174,10 +1391,10 @@ class TriggerStore:
         self.purge_deliveries(runtime_name, trigger_id)
 
     def purge_deliveries(self, runtime_name: str, trigger_id: str, *, max_rounds: int = 25) -> int:
-        """Delete every durable delivery row of one trigger and return how many went.
+        """Delete every durable ingress/delivery row of one trigger and return how many went.
 
-        Delivery rows live in their own partition (``!delivery#<runtime>#<trigger>``) under the
-        trigger table, so deleting the trigger row alone leaves them behind for their TTL, and a
+        Worker delivery and webhook ingress rows share their own partition
+        (``!delivery#<runtime>#<trigger>``) under the trigger table, so deleting the trigger row alone leaves them behind for their TTL, and a
         residue scan reads them as leaked. Drained by consistent re-query until the partition is
         empty; a partition that will not drain raises rather than reporting the trigger deleted.
         """

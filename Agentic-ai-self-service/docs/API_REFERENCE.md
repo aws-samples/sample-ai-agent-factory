@@ -202,9 +202,16 @@ they are not reconciled AWS charges or an account-level spending guarantee.
 
 Cron, EventBridge, and S3 triggers create stack-tagged EventBridge rules that
 send version-pinned invocation envelopes through the platform's durable SQS
-queue and DLQ. Webhooks use a static HMAC-authenticated route and return `202`
-after durable enqueue. Optional result callbacks are HTTPS-only, network
-filtered, DNS-rebinding resistant, and do not follow redirects. S3 triggers
+queue and DLQ. Webhooks use a static HMAC-authenticated route. A first delivery
+returns `202` with `duplicate=false` after SQS acceptance; the same valid delivery
+ID returns `202` with `duplicate=true` without another enqueue. The marker binds
+the ID to the request-body SHA-256; reusing it for different authenticated bytes
+returns `409`. A concurrent
+in-flight request returns `409` plus `Retry-After: 1`; a crashed ingress lease can
+be taken over after 60 seconds. Queued ingress markers and completed worker
+markers expire after seven days, and worker-side transactional dedup remains the
+safety net for an ambiguous SQS send. Optional result callbacks are HTTPS-only,
+network filtered, DNS-rebinding resistant, and do not follow redirects. S3 triggers
 require EventBridge notifications to be enabled on each source bucket.
 
 ### Agent Registry

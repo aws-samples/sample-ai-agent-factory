@@ -246,6 +246,10 @@ def _wire_webhook(monkeypatch, audit: _FakeStore, calls: list[str]):
     trigger = SimpleNamespace(owner_sub="webhook-owner")
     store = MagicMock()
     store.get.return_value = trigger
+    ingress_claim = SimpleNamespace(token="claim-1")
+    store.acquire_webhook_ingress.side_effect = lambda **_kwargs: (calls.append("claim"), ingress_claim)[1]
+    store.complete_webhook_ingress.side_effect = lambda *_args, **_kwargs: (calls.append("complete"), True)[1]
+    store.release_webhook_ingress.side_effect = lambda *_args, **_kwargs: (calls.append("release"), True)[1]
     monkeypatch.setattr(triggers, "get_trigger_store", lambda: store)
     monkeypatch.setattr(triggers, "get_audit_store", lambda: audit)
     monkeypatch.setattr(audit_middleware, "get_audit_store", lambda: audit)
@@ -294,7 +298,7 @@ def test_authenticated_webhook_audit_precedes_enqueue(monkeypatch):
     response = TestClient(_webhook_app()).post("/hooks/runtime_a/trigger-1", content=b"{}")
 
     assert response.status_code == 202
-    assert calls == ["audit:attempt", "enqueue", "audit:outcome"]
+    assert calls == ["audit:attempt", "claim", "enqueue", "complete", "audit:outcome"]
     assert audit.events[0].correlation_id == audit.events[1].correlation_id
 
 

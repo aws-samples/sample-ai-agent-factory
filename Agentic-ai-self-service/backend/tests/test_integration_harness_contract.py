@@ -854,9 +854,10 @@ def test_signed_webhook_uses_the_one_time_secret_and_no_bearer_token(
             "_one_time_signing_secret": secret,
         },
     )
-    captured: dict[str, Any] = {}
+    captured: dict[str, Any] = {"post_count": 0}
 
     def post(url: str, *, data: bytes, headers: dict[str, str], timeout: int):
+        captured["post_count"] += 1
         captured.update(
             {
                 "url": url,
@@ -865,9 +866,15 @@ def test_signed_webhook_uses_the_one_time_secret_and_no_bearer_token(
                 "timeout": timeout,
             }
         )
+        if captured["post_count"] == 3:
+            return _response(
+                409,
+                detail="Webhook delivery ID was already used for a different payload",
+            )
         return _response(
             202,
             accepted=True,
+            duplicate=captured["post_count"] > 1,
             trigger_id="trigger-2",
             delivery_id=headers["X-AgentCore-Delivery-Id"],
         )
@@ -893,6 +900,7 @@ def test_signed_webhook_uses_the_one_time_secret_and_no_bearer_token(
     )
     assert headers["X-AgentCore-Signature"] == expected
     assert "Authorization" not in headers
+    assert captured["post_count"] == 3
     assert captured["url"] == ("https://product.example.test/hooks/orders_agent/trigger-2")
 
 

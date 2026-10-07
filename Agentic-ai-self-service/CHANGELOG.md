@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — signed webhook ingress is durably idempotent
+
+- After HMAC/timestamp validation and required production audit, webhook ingress conditionally
+  claims the delivery ID in the trigger table before SQS enqueue. A successful send atomically
+  becomes a seven-day `QUEUED` marker bound to the request-body SHA-256; byte-identical replay
+  returns `202 duplicate=true` without another send, while delivery-ID reuse with different
+  authenticated bytes returns `409`.
+- Concurrent requests receive retryable `409`/`Retry-After: 1`. A 60-second `CLAIMING` lease can
+  be taken over after a crash, while a known enqueue failure conditionally releases its token for
+  immediate retry. The existing worker-side transactional delivery claim remains the second
+  idempotency layer when SQS send outcome is ambiguous.
+- Ingress rows share the trigger's delivery partition, so trigger deletion purges both ingress and
+  worker evidence. Tests cover unique, duplicate, concurrent, failed-send, crash takeover,
+  delete-race, audit ordering, and a no-dedup mutation. The live trigger matrix now replays the
+  exact timestamp/delivery/body/HMAC tuple and requires first `duplicate=false`, then
+  `duplicate=true`; a newly signed different body under that ID must return exact `409`, with
+  one completed worker delivery.
+
 ### Added — production invocation operations use atomic authorization capacity
 
 - One DynamoDB transaction condition-checks every applicable owner/agent/tag limit, increments

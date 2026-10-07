@@ -458,24 +458,67 @@ def _fire_signed_webhook(
     )
     # Deliberately use an unsigned session. The public route authenticates the
     # body HMAC, not the browser's Cognito bearer token.
+    headers = {
+        "Content-Type": "application/json",
+        "X-AgentCore-Timestamp": timestamp,
+        "X-AgentCore-Delivery-Id": delivery_id,
+        "X-AgentCore-Signature": signature,
+    }
     response = requests.post(
         f"{_base_url(api_session)}{path}",
         data=body,
-        headers={
-            "Content-Type": "application/json",
-            "X-AgentCore-Timestamp": timestamp,
-            "X-AgentCore-Delivery-Id": delivery_id,
-            "X-AgentCore-Signature": signature,
-        },
+        headers=headers,
         timeout=60,
     )
     assert response.status_code == 202, f"Signed webhook returned {response.status_code}: {response.text}"
     result = response.json()
     assert result == {
         "accepted": True,
+        "duplicate": False,
         "trigger_id": trigger.trigger_id,
         "delivery_id": delivery_id,
     }
+
+    replay = requests.post(
+        f"{_base_url(api_session)}{path}",
+        data=body,
+        headers=headers,
+        timeout=60,
+    )
+    assert replay.status_code == 202, f"Signed webhook replay returned {replay.status_code}: {replay.text}"
+    assert replay.json() == {
+        "accepted": True,
+        "duplicate": True,
+        "trigger_id": trigger.trigger_id,
+        "delivery_id": delivery_id,
+    }
+
+    conflict_body = json.dumps(
+        {"nonce": nonce + "-conflict", "source": "integration-test"},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    conflict_message = timestamp.encode("ascii") + b"." + delivery_id.encode("utf-8") + b"." + conflict_body
+    conflict_headers = {
+        **headers,
+        "X-AgentCore-Signature": (
+            "v1="
+            + hmac.new(
+                secret.encode("ascii"),
+                conflict_message,
+                hashlib.sha256,
+            ).hexdigest()
+        ),
+    }
+    conflict = requests.post(
+        f"{_base_url(api_session)}{path}",
+        data=conflict_body,
+        headers=conflict_headers,
+        timeout=60,
+    )
+    assert conflict.status_code == 409, (
+        f"Signed delivery-id/body conflict returned {conflict.status_code}: {conflict.text}"
+    )
+    assert conflict.json().get("detail") == ("Webhook delivery ID was already used for a different payload")
     return delivery_id
 
 

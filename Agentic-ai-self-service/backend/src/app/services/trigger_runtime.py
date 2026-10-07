@@ -87,6 +87,7 @@ MAX_TRIGGER_EVENT_BYTES = 240 * 1024
 MAX_CALLBACK_RESPONSE_BYTES = 240 * 1024
 WEBHOOK_SIGNATURE_WINDOW_SECONDS = 300
 
+WEBHOOK_INGRESS_LEASE_SECONDS = 60
 _RUNTIME_ARN_RE = re.compile(
     r"^arn:(?P<partition>aws(?:-[a-z0-9-]+)?):bedrock-agentcore:"
     r"(?P<region>[a-z0-9-]+):(?P<account_id>\d{12}):runtime/"
