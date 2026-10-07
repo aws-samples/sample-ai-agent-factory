@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "evidence_kinds": [
+    "offline_positive",
+    "offline_adversarial",
+    "offline_mutation",
+    "clean_clone",
+    "exact_commit",
+    "live_positive",
+    "live_adversarial",
+    "live_region",
+    "ui_cloudfront",
+    "rollback",
+    "teardown_zero"
+  ],
+  "controls": [
+    {
+      "id": "release.integrity",
+      "description": "Evidence is generated from one clean reconstructable Git commit and immutable project tree.",
+      "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation", "clean_clone", "exact_commit"]
+    },
+    {
+      "id": "release.evaluation_promotion",
+      "description": "AgentCore Batch Evaluation authorizes production promotion and rejects degraded/forged/stale evidence.",
+      "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation", "live_positive", "live_adversarial"]
+    },
+    {
+      "id": "crypto.target_kms",
+      "description": "Promotion evidence uses the exact target-account and target-Region customer-managed key.",
+      "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation", "live_positive", "live_adversarial"]
+    },
+    {
+      "id": "identity.delegated_obo",
+      "description": "Caller-bound workforce identity reaches Gateway token exchange without direct Runtime bearer bypass.",
+      "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation", "live_positive", "live_adversarial"]
+    },
+    {
+      "id": "safety.guardrails",
+      "description": "Mandatory model and tool input/output Guardrails fail closed without sensitive trace disclosure.",
+      "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation", "live_positive", "live_adversarial"]
+    },
+    {
+      "id": "policy.cedar_enforce",
+      "description": "Production tool calls are default-deny Cedar ENFORCE and agent roles cannot mutate governance.",
+      "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation", "live_positive", "live_adversarial"]
+    },
+    {
+      "id": "audit.append_only",
+      "description": "Production mutation intent is append-only, digest-verified, fail-closed, and exposes incomplete outcomes.",
+      "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation", "live_positive", "live_adversarial"]
+    },
+    {
+      "id": "cost.invocation_authorization",
+      "description": "Applicable limits reserve atomically before mediated operations; exhaustion/storage failures block dispatch.",
+      "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation", "live_positive", "live_adversarial"]
+    },
+    {
+      "id": "trigger.webhook_idempotency",
+      "description": "Signed webhook IDs bind body digests, enqueue once, recover crashes, and retain worker-side deduplication.",
+      "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation", "live_positive", "live_adversarial"]
+    },
+    {
+      "id": "iam.jit_approval",
+      "description": "JIT approval leases IAM application and cannot race rejection or grant Gateway/Policy mutation.",
+      "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation", "live_positive", "live_adversarial"]
+    },
+    {
+      "id": "delivery.browser_client",
+      "description": "Versioned CloudFront SDK/Web Component invokes only production with request-local tokens and inert rendering.",
+      "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation", "live_positive", "live_adversarial", "ui_cloudfront"]
+    },
+    {
+      "id": "connector.gateway_framework",
+      "description": "A selected connector is credentialed by reference, tool-discovered, called under Cedar/Guardrails, and torn down.",
+      "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation", "live_positive", "live_adversarial"]
+    },
+    {
+      "id": "lifecycle.rollback",
+      "description": "Production can roll back only to the exact prior production version and serves it after rollback.",
+      "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation", "rollback"]
+    },
+    {
+      "id": "lifecycle.zero_residual",
+      "description": "Teardown confirms absence across direct service inventories, including alias-less keys and log groups.",
+      "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation", "teardown_zero"]
+    },
+    {
+      "id": "regional.emea_core",
+      "description": "Core Runtime/Gateway/Identity/Policy/Evaluation behavior is independently verified in every documented EMEA core Region.",
+      "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation"],
+      "required_region_kind": "live_region",
+      "region_selector": "core"
+    }
+  ],
+  "global_required_kinds": ["clean_clone", "exact_commit", "ui_cloudfront", "rollback", "teardown_zero"]
+}

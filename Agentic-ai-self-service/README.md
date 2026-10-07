@@ -266,6 +266,29 @@ days; monthly counters expire after 400 days; definitions remain until deleted. 
 [`docs/COSTS.md`](docs/COSTS.md), [`docs/DATA_RETENTION.md`](docs/DATA_RETENTION.md),
 and [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md).
 
+## Exact-commit release evidence
+
+Production readiness is a measured release gate, not a repository-wide claim. The
+machine-readable contract in [`release/production-readiness-controls.json`](release/production-readiness-controls.json)
+requires positive, adversarial, and control-removal mutation evidence for every
+material control, plus real live, CloudFront UI, rollback, and zero-residual teardown
+evidence where applicable. The dated
+[`release/emea-agentcore-regions.json`](release/emea-agentcore-regions.json) matrix
+requires an independent core scenario in every documented EMEA AgentCore Region;
+feature-specific scenarios run only where AWS documents that feature as available.
+
+[`scripts/release_evidence.py`](scripts/release_evidence.py) starts only from a clean
+Git commit, appends bounded digest-only events, keeps failures open until explicitly
+superseded, refuses incomplete finalization, and verifies the sealed event set from a
+separate detached clean clone. It stores no command line, environment, credential,
+token, or raw AWS response. A final digest proves exact source and evidence coverage;
+it does not fabricate live success or constitute third-party/WORM attestation.
+See [`release/README.md`](release/README.md) for the workflow and support matrix.
+
+No candidate is production-ready until its current-commit run finalizes and verifies.
+Passing unit tests, synthesis, a prior revision's AWS run, or one Region alone is
+insufficient.
+
 ## Accessing the Platform
 
 After deployment completes, the script prints two URLs:

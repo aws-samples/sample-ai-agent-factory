@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — exact-commit release evidence and EMEA certification matrix
+
+- `release_evidence.py` starts only on a clean Git subtree, records one immutable bounded JSON event
+  per result, stores artifact digests rather than raw logs, and rechecks commit/tree/contract identity
+  before every append. Live/UI/rollback/teardown events require both a Region and the exact 12-digit
+  AWS account ID. Sensitive detail keys, credential-like values, symlinks, hard links, oversized
+  artifacts, and non-finite numbers are refused.
+- Failed and blocked attempts remain active until an explicit same-scope supersession. Finalization
+  requires every control/kind tuple, every global lifecycle/UI gate, and an independent pass for each
+  selected EMEA Region; any active failure or missing Region prevents a seal.
+- Run, event, event-set, and final digests are independently verified from a detached clean clone.
+  Mutation tests remove a Region event, alter event content, drift contract bytes, dirty the source,
+  and exercise concurrent appends to prove each guard fails closed.
+- The dated Region matrix cites AWS Documentation and bounds core, Memory, Agent Registry, and Web
+  Search scenarios independently. It is a release-input contract, not a claim that a live campaign
+  has already passed.
+
 ### Added — Guardrails enforce every generated tool boundary
 
 - Guardrail-enabled Runtime agents apply the same deployed Guardrail to canonical tool arguments
