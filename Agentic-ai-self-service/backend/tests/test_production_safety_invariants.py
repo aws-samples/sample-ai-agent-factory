@@ -7,6 +7,7 @@ from app.services.production_safety import (
     PRODUCTION_GUARDRAIL_PROFILE,
     PRODUCTION_POLICY_PROFILE,
     ProductionSafetyConfigurationError,
+    enforce_production_execution_mode,
     enforce_production_guardrail_baseline,
     enforce_production_policy_baseline,
 )
@@ -21,6 +22,16 @@ def test_development_environment_preserves_optional_guardrails(monkeypatch):
     assert enforce_production_guardrail_baseline(None) is None
     supplied = {"mode": "existing", "guardrailId": "gr-dev"}
     assert enforce_production_guardrail_baseline(supplied) == supplied
+
+
+def test_managed_harness_is_development_only_until_guardrail_hooks_can_retract_output(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "dev")
+    enforce_production_execution_mode("harness")
+
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    enforce_production_execution_mode("runtime")
+    with pytest.raises(ProductionSafetyConfigurationError, match="Harness hooks"):
+        enforce_production_execution_mode("harness")
 
 
 def test_production_injects_complete_managed_baseline(monkeypatch):

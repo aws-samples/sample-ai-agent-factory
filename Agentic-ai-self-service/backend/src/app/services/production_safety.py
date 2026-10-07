@@ -168,3 +168,22 @@ def enforce_production_invocation_budget_envelope(
             "reserve platform capacity. Use a development environment until "
             "reservation propagation is implemented."
         )
+
+
+def enforce_production_execution_mode(deployment_mode: str | None) -> None:
+    """Keep production inside the fully Guardrail-enforced Runtime envelope.
+
+    The pinned ``CreateHarness`` model has lifecycle hooks but no native Bedrock
+    Guardrail model field. Its documented ``after_tool_call`` deny retains the
+    completed tool result before stopping, and ``after_invocation`` cannot retract
+    streamed output. A managed Harness therefore cannot satisfy mandatory input,
+    output, tool-argument, and tool-result screening yet.
+    """
+
+    if is_production_like_environment() and str(deployment_mode or "runtime").lower() == "harness":
+        raise ProductionSafetyConfigurationError(
+            "Production managed Harness deployment is outside the mandatory Guardrail "
+            "support envelope: Harness hooks cannot redact model output or retract a "
+            "completed unsafe tool result. Use the code-generated Runtime path in "
+            "production; Harness remains available in development."
+        )

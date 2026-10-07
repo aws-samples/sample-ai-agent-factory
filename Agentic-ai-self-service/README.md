@@ -24,7 +24,7 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 ## Key Features
 
 - **Visual Canvas** — Drag-and-drop AgentCore components (Runtime, Gateway, Memory, Knowledge Base, Browser, Identity, Observability, Policy, Connectors) and wire them together with real-time validation.
-- **Two authoring paths, one deploy pipeline** — Build agents on the canvas (code-generated AgentCore **Runtime**) or as a config-driven **AgentCore Harness** (`deploymentMode: "runtime" | "harness"`); both share the same Gateway, Memory, connector, test, and teardown surfaces.
+- **Two authoring paths, one deploy pipeline** — Build agents on the canvas (code-generated AgentCore **Runtime**) or as a config-driven **AgentCore Harness** (`deploymentMode: "runtime" | "harness"`); both share Gateway, Memory, connector, test, and teardown surfaces in development. Production admission requires the Runtime path because current Harness hooks cannot redact model output or retract a completed unsafe tool result.
 - **Real SaaS connectors** — Jira, Asana, Slack, GitHub, Salesforce, or any OpenAPI spec as Gateway targets with API-key or OAuth2 outbound auth; credentials live only in Secrets Manager.
 - **External browser delivery** — A versioned, dependency-free `AgentCoreClient` and `<agentcore-chat>` Web Component ship from CloudFront with TypeScript declarations. Hosts provide a request-local Cognito access-token callback; the client invokes only the owner-checked production alias, never retries POSTs, stores no token, and renders model output as inert text. See [Embeddable Chat](docs/EMBEDDABLE_CHAT.md).
 - **Template Gallery + CloudFormation Export** — Six one-click templates, plus a downloadable self-contained CloudFormation bundle (`template.yaml`, `deploy.sh`, `teardown.sh`, `build-dependency-bundle.sh`, code artifacts, README) that an external recipient deploys with no access to the platform — `deploy.sh` builds and stages the dependency bundle itself. Four custom resources, all served by one bundled Lambda, cover what no native `AWS::BedrockAgentCore::*` type does yet; data-holding resources carry configurable `DeletionPolicy`/`UpdateReplacePolicy` (retained by default); a LiteLLM-provider gateway exports as a direct proxy connection whose virtual key is passed as a Secrets Manager ARN, never as a parameter value; and the stack wraps cleanly in Terraform's `aws_cloudformation_stack` via `template_url`. See [CloudFormation Export](docs/DEPLOYMENT_INTERNALS.md#cloudformation-export).
@@ -131,7 +131,16 @@ Production rejects `existing` mode because READY status alone cannot attest that
 an externally mutable Guardrail still meets this baseline. Guardrail trace is
 disabled in generated Strands models because trace output can retain original
 matched PII, regex content, or blocked model output even when the served response
-is masked. Any production deployment with a tool Gateway also receives the
+is masked. Generated Runtime agents also call `ApplyGuardrail` around every tool
+boundary: Strands `BeforeToolCallEvent` cancels blocked arguments before execution,
+and `AfterToolCallEvent` replaces blocked results before they reach the model. The two
+direct Converse tool paths use the same wrapper. Oversized content, malformed service
+responses, hook import failure, and ApplyGuardrail outage all fail closed without
+logging content. Guardrail screening runs before HITL so blocked sensitive arguments
+are not copied into approval records. Managed Harness remains development-only: its
+current `CreateHarness` model has no native model Guardrail field, an after-tool deny
+retains the completed result, and an after-invocation hook cannot retract streamed
+output. Any production deployment with a tool Gateway also receives the
 platform-managed `production-v1` Cedar profile: `enabled=true`, `mode=ENFORCE`,
 and `on_enforce_failure=fail_closed`. Missing Policy configuration is injected;
 `disabled`, `LOG_ONLY`, and fail-open caller settings are overridden before side

@@ -1090,3 +1090,45 @@ def test_mutation_removing_a2a_envelope_reopens_production_bypass(spy, monkeypat
 
     assert response.status_code == 202, response.text
     assert spy.calls.count("StartExecution") == 1
+
+
+def test_production_rejects_managed_harness_before_any_side_effect(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(deploymentMode="harness"),
+    )
+
+    assert response.status_code == 400, response.text
+    assert "Harness hooks cannot redact model output" in response.text
+    assert spy.side_effects == []
+
+
+def test_development_keeps_managed_harness_available(spy, monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "dev")
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(deploymentMode="harness"),
+    )
+
+    assert response.status_code == 202, response.text
+    assert spy.calls.count("StartExecution") == 1
+
+
+def test_mutation_removing_harness_envelope_reopens_guardrail_bypass(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+    monkeypatch.setattr(
+        dh,
+        "enforce_production_execution_mode",
+        lambda _mode: None,
+    )
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(deploymentMode="harness"),
+    )
+
+    assert response.status_code == 202, response.text
+    assert spy.calls.count("StartExecution") == 1

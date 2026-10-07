@@ -143,6 +143,7 @@ from app.services.litellm_gateway_deployer import resolve_gateway_provider
 from app.services.policy_lifecycle import delete_policy_confirmed
 from app.services.production_safety import (
     ProductionSafetyConfigurationError,
+    enforce_production_execution_mode,
     enforce_production_guardrail_baseline,
     enforce_production_invocation_budget_envelope,
     enforce_production_policy_baseline,
@@ -1662,6 +1663,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     # hint. Resolve the managed baseline before every read/write boundary below so
     # a refusal costs zero rows, secrets, executions, or AWS resources.
     try:
+        enforce_production_execution_mode(request.deployment_mode)
         request.guardrails_config = enforce_production_guardrail_baseline(request.guardrails_config)
         tool_gateway_required = bool(request.gateway_config) or _gateway_implied(
             request.gateway_tools,

@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — Guardrails enforce every generated tool boundary
+
+- Guardrail-enabled Runtime agents apply the same deployed Guardrail to canonical tool arguments
+  (`source=INPUT`) before execution and tool results (`source=OUTPUT`) before model consumption.
+  Strands uses production `BeforeToolCallEvent`/`AfterToolCallEvent`; hand-rolled Converse and
+  forced code-interpreter paths use an equivalent wrapper.
+- `GUARDRAIL_INTERVENED`, dependency failure, malformed action, content over 64 KiB, and unavailable
+  hook APIs fail closed with generic error results; no input/result or assessment detail is logged.
+  Guardrail hooks run before HITL and pre-cancelled calls are not copied into approval records.
+- The request shape is validated against the pinned real `ApplyGuardrail` botocore model. Tests
+  cover allowed input/output, blocked input preventing execution, blocked output suppression,
+  outage, oversize, every generator/export path, hook composition, and a removed-hook mutation.
+- Production refuses managed Harness before side effects. The current Harness model exposes hooks
+  but no native model Guardrail configuration; documented after-tool deny retains the completed
+  result and after-invocation cannot retract streamed output. Harness remains available in
+  development until that support envelope can be enforced honestly.
+
 ### Added — versioned external browser delivery
 
 - `POST /api/runtimes/{name}/invoke` is a stable production-only alias over the existing exact
