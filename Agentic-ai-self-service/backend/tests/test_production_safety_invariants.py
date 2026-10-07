@@ -5,8 +5,10 @@ from __future__ import annotations
 import pytest
 from app.services.production_safety import (
     PRODUCTION_GUARDRAIL_PROFILE,
+    PRODUCTION_POLICY_PROFILE,
     ProductionSafetyConfigurationError,
     enforce_production_guardrail_baseline,
+    enforce_production_policy_baseline,
 )
 from app.services.promotion_evidence import (
     PromotionPolicyConfigurationError,
@@ -88,3 +90,72 @@ def test_development_evaluation_gate_can_be_explicitly_enabled_or_disabled(monke
     assert production_evaluation_gate_required() is True
     monkeypatch.setenv("PRODUCTION_EVALUATION_GATE", "false")
     assert production_evaluation_gate_required() is False
+
+
+def test_development_preserves_optional_policy_mode(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "dev")
+    supplied = {"enabled": False, "mode": "LOG_ONLY", "on_enforce_failure": "log_only"}
+    assert (
+        enforce_production_policy_baseline(
+            supplied,
+            tool_gateway_required=True,
+            gateway_provider="agentcore",
+        )
+        == supplied
+    )
+
+
+def test_production_without_tool_gateway_does_not_inject_cedar(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    assert (
+        enforce_production_policy_baseline(
+            None,
+            tool_gateway_required=False,
+            gateway_provider="agentcore",
+        )
+        is None
+    )
+
+
+def test_production_tool_gateway_injects_fail_closed_cedar(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    result = enforce_production_policy_baseline(
+        None,
+        tool_gateway_required=True,
+        gateway_provider="agentcore",
+    )
+    assert result == {
+        "enabled": True,
+        "mode": "ENFORCE",
+        "on_enforce_failure": "fail_closed",
+        "baselineProfile": PRODUCTION_POLICY_PROFILE,
+    }
+
+
+def test_production_caller_cannot_select_log_only_or_disable_policy(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    result = enforce_production_policy_baseline(
+        {
+            "enabled": False,
+            "mode": "LOG_ONLY",
+            "on_enforce_failure": "log_only",
+            "rules": [{"effect": "forbid", "action": "delete"}],
+        },
+        tool_gateway_required=True,
+        gateway_provider="agentcore",
+    )
+    assert result is not None
+    assert result["enabled"] is True
+    assert result["mode"] == "ENFORCE"
+    assert result["on_enforce_failure"] == "fail_closed"
+    assert result["rules"] == [{"effect": "forbid", "action": "delete"}]
+
+
+def test_production_tool_gateway_rejects_provider_without_cedar(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    with pytest.raises(ProductionSafetyConfigurationError, match="require AgentCore Gateway"):
+        enforce_production_policy_baseline(
+            None,
+            tool_gateway_required=True,
+            gateway_provider="litellm",
+        )

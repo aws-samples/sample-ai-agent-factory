@@ -14,6 +14,11 @@ All notable changes to this project are documented here. The format follows
   remain additive. Unattested `existing` Guardrails are refused before persistence or AWS work.
 - Generated Strands agents disable Guardrail trace while retaining input and output redaction,
   preventing original matched sensitive text or blocked output from being returned in traces.
+- Production tool Gateways now receive a managed Cedar profile with `ENFORCE` and fail-closed
+  behavior at API admission and again inside the Policy step. Missing Policy nodes are injected;
+  disabled, `LOG_ONLY`, and `on_enforce_failure=log_only` inputs cannot weaken production. The
+  production tool-plane support envelope requires AgentCore Gateway because LiteLLM cannot attach
+  AgentCore Policy; model-only deployments do not create a policy engine.
 - `production_evaluation_gate=false` is valid only in development-like environments. Production
   now rejects the bypass both during CDK synthesis and at deploy admission; malformed values also
   fail closed.

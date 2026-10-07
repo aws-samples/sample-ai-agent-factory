@@ -909,6 +909,7 @@ def test_production_deploy_injects_guardrail_baseline_before_execution(spy, monk
     assert guardrail["baselineProfile"] == "production-v1"
     assert set(guardrail["contentFilters"].values()) == {"HIGH"}
     assert "guardrails" in execution["connected_tools"]
+    assert "policy_config" not in execution
 
 
 def test_production_deploy_raises_weak_guardrail_settings_to_platform_floor(spy, monkeypatch):
@@ -955,4 +956,64 @@ def test_production_evaluation_gate_disable_is_refused_before_any_side_effect(sp
 
     assert response.status_code == 503, response.text
     assert "evaluation policy is invalid" in response.text
+    assert spy.side_effects == []
+
+
+def test_production_gateway_injects_fail_closed_cedar_before_execution(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(gatewayConfig={"name": "gateway-policy-probe"}),
+    )
+
+    assert response.status_code == 202, response.text
+    execution = json.loads(spy.start.input_json)
+    assert execution["policy_config"] == {
+        "enabled": True,
+        "mode": "ENFORCE",
+        "on_enforce_failure": "fail_closed",
+        "baselineProfile": "production-v1",
+    }
+
+
+def test_production_gateway_overrides_disabled_log_only_policy(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(
+            gatewayConfig={"name": "gateway-policy-probe"},
+            policyConfig={
+                "enabled": False,
+                "mode": "LOG_ONLY",
+                "on_enforce_failure": "log_only",
+                "rules": [{"effect": "forbid", "action": "delete"}],
+            },
+        ),
+    )
+
+    assert response.status_code == 202, response.text
+    policy = json.loads(spy.start.input_json)["policy_config"]
+    assert policy["enabled"] is True
+    assert policy["mode"] == "ENFORCE"
+    assert policy["on_enforce_failure"] == "fail_closed"
+    assert policy["rules"] == [{"effect": "forbid", "action": "delete"}]
+
+
+def test_production_rejects_litellm_tool_gateway_before_any_side_effect(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(
+            gatewayConfig={
+                "name": "gateway-policy-probe",
+                "gatewayProvider": "litellm",
+            }
+        ),
+    )
+
+    assert response.status_code == 400, response.text
+    assert "require AgentCore Gateway" in response.text
     assert spy.side_effects == []

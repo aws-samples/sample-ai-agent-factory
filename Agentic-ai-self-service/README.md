@@ -129,7 +129,15 @@ Production rejects `existing` mode because READY status alone cannot attest that
 an externally mutable Guardrail still meets this baseline. Guardrail trace is
 disabled in generated Strands models because trace output can retain original
 matched PII, regex content, or blocked model output even when the served response
-is masked.
+is masked. Any production deployment with a tool Gateway also receives the
+platform-managed `production-v1` Cedar profile: `enabled=true`, `mode=ENFORCE`,
+and `on_enforce_failure=fail_closed`. Missing Policy configuration is injected;
+`disabled`, `LOG_ONLY`, and fail-open caller settings are overridden before side
+effects and again inside the Policy step. Production tool planes therefore
+require AgentCore Gateway; LiteLLM tool Gateway deployments remain available in
+development but are outside this production support envelope because they cannot
+attach AgentCore Policy. Model-only agents do not create an unnecessary policy
+engine.
 
 Production-like environments also default new versions to **staging** and reject
 an explicit direct production deploy before side effects. The

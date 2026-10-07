@@ -9,6 +9,7 @@ from typing import Any
 
 DEV_ENVIRONMENTS = frozenset({"dev", "development", "test", "sandbox", "preview", "local"})
 PRODUCTION_GUARDRAIL_PROFILE = "production-v1"
+PRODUCTION_POLICY_PROFILE = "production-v1"
 
 _BASELINE_CONTENT_FILTERS = {
     "hate": "HIGH",
@@ -113,4 +114,28 @@ def enforce_production_guardrail_baseline(config: Mapping[str, Any] | None) -> d
     prepared["baselineProfile"] = PRODUCTION_GUARDRAIL_PROFILE
     prepared["contentFilters"] = _content_filters(config or {})
     prepared["piiFilters"] = _pii_filters(config or {})
+    return prepared
+
+
+def enforce_production_policy_baseline(
+    config: Mapping[str, Any] | None,
+    *,
+    tool_gateway_required: bool,
+    gateway_provider: str,
+) -> dict[str, Any] | None:
+    """Require non-bypassable Cedar enforcement for production tool Gateways."""
+
+    if not is_production_like_environment() or not tool_gateway_required:
+        return copy.deepcopy(dict(config)) if config is not None else None
+    if str(gateway_provider or "agentcore").strip().lower() != "agentcore":
+        raise ProductionSafetyConfigurationError(
+            "Production tool deployments require AgentCore Gateway so Cedar Policy can enforce every tool call"
+        )
+
+    prepared = copy.deepcopy(dict(config or {}))
+    prepared.pop("onEnforceFailure", None)
+    prepared["enabled"] = True
+    prepared["mode"] = "ENFORCE"
+    prepared["on_enforce_failure"] = "fail_closed"
+    prepared["baselineProfile"] = PRODUCTION_POLICY_PROFILE
     return prepared

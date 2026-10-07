@@ -134,10 +134,12 @@ from app.services.invocation_identity import (
     InvocationIdentityError,
     memory_invocation_identity,
 )
+from app.services.litellm_gateway_deployer import resolve_gateway_provider
 from app.services.policy_lifecycle import delete_policy_confirmed
 from app.services.production_safety import (
     ProductionSafetyConfigurationError,
     enforce_production_guardrail_baseline,
+    enforce_production_policy_baseline,
 )
 from app.services.promotion_evidence import (
     PromotionPolicyConfigurationError,
@@ -1691,7 +1693,19 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     # a refusal costs zero rows, secrets, executions, or AWS resources.
     try:
         request.guardrails_config = enforce_production_guardrail_baseline(request.guardrails_config)
-    except ProductionSafetyConfigurationError as exc:
+        tool_gateway_required = bool(request.gateway_config) or _gateway_implied(
+            request.gateway_tools,
+            request.connectors,
+            request.connected_tools,
+            request.external_mcp_servers,
+        )
+        gateway_provider = resolve_gateway_provider(request.gateway_config) if tool_gateway_required else "agentcore"
+        request.policy_config = enforce_production_policy_baseline(
+            request.policy_config,
+            tool_gateway_required=tool_gateway_required,
+            gateway_provider=gateway_provider,
+        )
+    except (ProductionSafetyConfigurationError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # THIRD, still before any side effect: if the caller named a flow, it must be a flow that

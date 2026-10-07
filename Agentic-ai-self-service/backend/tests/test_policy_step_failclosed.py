@@ -165,3 +165,18 @@ def test_enforce_happy_path_unchanged():
     assert pr["mode"] == "ENFORCE"
     assert pr["enforce_validation_pending"] is False
     assert pr["enforce_pending"] is None
+
+
+def test_production_event_mutation_cannot_disable_or_downgrade_cedar(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    event = _event(enabled=False, mode="LOG_ONLY", on_enforce_failure="log_only")
+
+    out, ctrl = _run(event)
+
+    result = out["policy_result"]
+    assert result["requested_mode"] == "ENFORCE"
+    assert result["mode"] == "ENFORCE"
+    assert result["downgraded_to_log_only"] is False
+    assert result["baseline_profile"] == "production-v1"
+    _, kwargs = ctrl.update_gateway.call_args
+    assert kwargs["policyEngineConfiguration"]["mode"] == "ENFORCE"
