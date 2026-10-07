@@ -67,6 +67,8 @@ the packager rejects an absent or mismatched pin and writes fixed-metadata, sort
 path-neutral ZIPs. Lambda dependencies are compiled from `requirements-lambda.in`
 into a target-specific `requirements-lambda.txt` with hashes, installed with
 `--require-hashes`, and stripped of path-dependent console scripts/RECORD files.
+The source distribution explicitly excludes the generated `backend/lib/` Lambda tree
+while retaining the locked Runtime ZIPs, so its contents do not depend on build order.
 Two builds of one commit must therefore produce identical Runtime ZIPs, Lambda tree,
 wheel, source distribution, CDK template, and asset manifest.
 

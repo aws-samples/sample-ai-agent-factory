@@ -96,7 +96,9 @@ deploy = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+# Package bytes are release evidence, so the backend that selects and archives them
+# must change only through a reviewed dependency update.
+requires = ["hatchling==1.32.4"]
 build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
@@ -121,6 +123,11 @@ markers = [
     "terraform_scan: needs Terraform CLI on PATH (deselect outside the export-gate job)",
     "shell_scan: needs ShellCheck on PATH (deselect outside the export-gate job)",
 ]
+
+[tool.hatch.build.targets.sdist]
+# backend/lib is regenerated from the hash lock for deployment; shipping it in an
+# sdist makes package bytes depend on whether that deployment step ran first.
+exclude = ["/lib"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/app"]

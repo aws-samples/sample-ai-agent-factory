@@ -5,6 +5,9 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import shutil
+import subprocess
+import tarfile
 import zipfile
 from pathlib import Path
 
@@ -137,3 +140,53 @@ def test_agentcore_installer_uses_only_the_validated_deterministic_packager() ->
     assert "zip -r" not in script
     assert 'rm -rf "${target_dir:?}/bin"' in script
     assert '-path "*.dist-info/RECORD" -delete' in script
+
+
+SDIST_EXCLUSION = '[tool.hatch.build.targets.sdist]\n# backend/lib is regenerated from the hash lock for deployment; shipping it in an\n# sdist makes package bytes depend on whether that deployment step ran first.\nexclude = ["/lib"]\n'
+
+
+def _build_sdist_fixture(tmp_path: Path, *, remove_exclusion: bool) -> set[str]:
+    fixture = tmp_path / ("mutated" if remove_exclusion else "protected")
+    (fixture / "src" / "app").mkdir(parents=True)
+    (fixture / "src" / "app" / "__init__.py").write_text("")
+    (fixture / "lib").mkdir()
+    (fixture / "lib" / "generated-lambda-only.txt").write_text("generated deployment dependency\n")
+    (fixture / "agentcore-deps").mkdir()
+    (fixture / "agentcore-deps" / "base.zip").write_bytes(b"locked runtime bundle")
+
+    pyproject = (ROOT / "backend" / "pyproject.toml").read_text()
+    assert 'requires = ["hatchling==1.32.4"]' in pyproject
+    assert pyproject.count(SDIST_EXCLUSION) == 1
+    if remove_exclusion:
+        pyproject = pyproject.replace(f"\n{SDIST_EXCLUSION}\n", "\n", 1)
+    (fixture / "pyproject.toml").write_text(pyproject)
+
+    uv = shutil.which("uv")
+    assert uv is not None, "uv is required to execute the real sdist build contract"
+    output = tmp_path / ("mutated-dist" if remove_exclusion else "protected-dist")
+    result = subprocess.run(
+        [uv, "build", "--sdist", "--out-dir", str(output)],
+        cwd=fixture,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    archives = list(output.glob("*.tar.gz"))
+    assert len(archives) == 1
+    with tarfile.open(archives[0], "r:gz") as archive:
+        return {"/".join(Path(name).parts[1:]) for name in archive.getnames()}
+
+
+def test_sdist_excludes_generated_lambda_tree_but_keeps_runtime_bundles(tmp_path: Path) -> None:
+    members = _build_sdist_fixture(tmp_path, remove_exclusion=False)
+
+    assert "lib/generated-lambda-only.txt" not in members
+    assert "agentcore-deps/base.zip" in members
+
+
+def test_removing_sdist_exclusion_reintroduces_build_order_dependency(tmp_path: Path) -> None:
+    members = _build_sdist_fixture(tmp_path, remove_exclusion=True)
+
+    assert "lib/generated-lambda-only.txt" in members

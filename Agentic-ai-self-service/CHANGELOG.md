@@ -45,6 +45,9 @@ All notable changes to this project are documented here. The format follows
 - Lambda dependencies now compile from `requirements-lambda.in` to a 38-package,
   target-specific hash lock and install with `--require-hashes`. Path-dependent console
   scripts, RECORD files, bytecode, caches, and symlinks are excluded before CDK hashing.
+- Source distributions explicitly exclude the generated `backend/lib/` tree while
+  retaining all 11 Runtime ZIPs, and Hatchling is exact-pinned. A real mutation build
+  proves removing the exclusion reintroduces the build-order-dependent files.
 - Repeated validation produces identical Lambda tree digests, wheels, source
   distributions, CloudFormation templates, and CDK asset manifests. Positive,
   adversarial, and lock-mutation tests prevent weakening these controls.
