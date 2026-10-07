@@ -104,6 +104,7 @@ REQUIRED_PINS = frozenset(
         "strands-agents-tools",
         "bedrock-agentcore",
         "mcp",
+        "tenacity",
         "opentelemetry-api",
         "opentelemetry-sdk",
         "opentelemetry-semantic-conventions",
@@ -120,6 +121,7 @@ REQUIRED_PINS = frozenset(
 MUST_MATCH_LOCALLY = frozenset(
     {
         "strands-agents",
+        "tenacity",
         "opentelemetry-api",
         "opentelemetry-sdk",
         "opentelemetry-semantic-conventions",
@@ -187,6 +189,12 @@ def test_the_required_pins_are_all_present(constraint_pins: dict[str, str]) -> N
         "Each one's version changes behaviour a test in this suite asserts on -- a "
         "signature, or the span attribute names the cost ledger parses."
     )
+
+
+def test_provider_shared_upper_bound_pins_are_exact(constraint_pins: dict[str, str]) -> None:
+    """Gemini must resolve against the same shared package versions as the baseline."""
+    assert constraint_pins["websockets"] == "16.1.1"
+    assert constraint_pins["tenacity"] == "9.1.2"
 
 
 def test_the_dev_extra_and_the_bundle_agree(constraint_pins: dict[str, str], dev_extra_pins: dict[str, str]) -> None:

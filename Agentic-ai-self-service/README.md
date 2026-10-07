@@ -61,6 +61,14 @@ COGNITO_USERS="user@example.com" AWS_REGION=eu-central-1 ./scripts/deploy.sh
 
 The deploy script validates prerequisites and AWS credentials, installs backend/Lambda Python dependencies, builds the AgentCore dependency bundles, runs `cdk deploy` via `npx` (API Gateway, Lambda, Step Functions, DynamoDB, S3, CloudFront), then builds and uploads the frontend and prints the URLs. Lambda code is packaged automatically by CDK — no Docker build or ECR push required. A first-time deploy takes roughly 15–20 minutes.
 
+Dependency bundle builds are a release gate, not a best-effort optimization. Shared
+packages must resolve to one version across the Strands baseline and every provider
+delta. In particular, `tenacity==9.1.2` is the newest common version accepted by
+Strands and `google-genai` (`<9.2.0`); the same exact pin is enforced in the platform
+constraints, backend test lock, and exported customer build recipe. Any future provider
+range conflict fails before CDK deployment rather than shipping a merged or partial
+Runtime bundle.
+
 To also export OTLP traces from every platform Lambda and deployed agent to a backend like Langfuse, see the platform-level OTEL deploy mode in [Observability](docs/OBSERVABILITY.md).
 
 ### Deploying to another region

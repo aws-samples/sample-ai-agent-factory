@@ -32,6 +32,15 @@ All notable changes to this project are documented here. The format follows
   Search scenarios independently. It is a release-input contract, not a claim that a live campaign
   has already passed.
 
+### Fixed — Gemini provider bundle resolves reproducibly
+
+- The live deploy bundle build exposed a new transitive conflict: the unconstrained Strands baseline
+  resolved `tenacity 9.2.1`, while every supported `google-genai` release requires
+  `tenacity>=8.2.3,<9.2.0`, so `provider-gemini.zip` failed with `ResolutionImpossible` before CDK.
+- `tenacity==9.1.2` is now synchronized across platform constraints, backend dev/lock state, and the
+  exported customer bundle recipe. No-write target-platform probes prove both baseline and latest
+  Gemini resolution; pin-parity tests make removal or drift fail closed.
+
 ### Fixed — promotion evidence keys follow environment lifecycle
 
 - The promotion-evidence CMK now uses the same stateful removal policy as every table, pool,

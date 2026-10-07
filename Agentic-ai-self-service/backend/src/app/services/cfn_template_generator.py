@@ -3698,6 +3698,7 @@ DEPENDENCY_BUNDLE_CONSTRAINTS: tuple[str, ...] = (
     "bedrock-agentcore==1.23.1",
     "mcp==1.30.0",
     "websockets==16.1.1",
+    "tenacity==9.1.2",
     "opentelemetry-api==1.44.0",
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-semantic-conventions==0.65b0",

@@ -110,6 +110,14 @@ mcp==1.30.0
 #    loudly if it has not.
 websockets==16.1.1
 
+# ── Retry library shared by Strands and google-genai. A free baseline resolve moved to
+#    9.2.1 on 2026-10-07, while every supported google-genai 1.67.0..2.28.0 requires
+#    tenacity>=8.2.3,<9.2.0. Provider-gemini therefore became ResolutionImpossible only
+#    during the real deployment bundle build. 9.1.2 is the newest release in the shared
+#    range and resolves identically in the baseline and Gemini delta.
+#    Raise only after google-genai's upper bound moves and all provider deltas resolve.
+tenacity==9.1.2
+
 # ── OpenTelemetry. These own the span attribute names the cost ledger parses. The 0.x
 #    versioned packages track the 1.x ones (1.44.0 <-> 0.65b0) and must be bumped as a set,
 #    because opentelemetry-sdk pins its semantic-conventions peer narrowly.
