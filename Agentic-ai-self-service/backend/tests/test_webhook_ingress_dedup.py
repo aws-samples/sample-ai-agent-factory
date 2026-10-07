@@ -156,7 +156,7 @@ def test_concurrent_ingress_returns_retryable_conflict(monkeypatch):
     claim = store.acquire_webhook_ingress(
         trigger=trigger,
         delivery_id=DELIVERY_ID,
-        payload_sha256="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        payload_sha256="44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",  # pragma: allowlist secret
         lease_seconds=60,
         retention_seconds=86_400,
         now=100,

@@ -942,7 +942,7 @@ def test_production_deploy_raises_weak_guardrail_settings_to_platform_floor(spy,
     assert guardrail["contentFilters"]["prompt_attack"] == "HIGH"
     pii = {item["type"]: item["action"] for item in guardrail["piiFilters"]}
     assert pii["EMAIL"] == "BLOCK"
-    assert pii["AWS_SECRET_KEY"] == "ANONYMIZE"
+    assert pii["AWS_SECRET_KEY"] == "ANONYMIZE"  # pragma: allowlist secret
 
 
 def test_production_existing_guardrail_is_refused_before_any_side_effect(spy, monkeypatch):

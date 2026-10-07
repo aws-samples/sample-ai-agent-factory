@@ -13,12 +13,40 @@
       "timeout_seconds": 900
     },
     {
+      "id": "secret-scan",
+      "working_directory": ".",
+      "selector_type": "command",
+      "check_ids": ["tracked-files-against-baseline"],
+      "commands": [
+        ["{backend_python}", "scripts/verify_secret_baseline.py"]
+      ],
+      "required_tools": {"detect-secrets-hook": "1.5.0"},
+      "timeout_seconds": 900
+    },
+    {
       "id": "backend",
       "working_directory": "backend",
       "selector_type": "pytest",
       "commands": [
         ["{backend_python}", "-m", "pytest", "-m", "not integration and not policy_scan and not terraform_scan and not shell_scan", "-q"]
       ],
+      "timeout_seconds": 7200
+    },
+    {
+      "id": "export-gate",
+      "working_directory": "backend",
+      "selector_type": "command",
+      "check_ids": ["customer-export-contract-policy"],
+      "commands": [
+        ["{backend_python}", "-m", "pytest", "tests/test_cfn_export_contract.py", "tests/test_the_exported_template_can_actually_deploy.py", "tests/test_litellm_secret_region_is_enforced_in_the_template.py", "-q"]
+      ],
+      "required_tools": {
+        "cfn-lint": "1.57.0",
+        "checkov": "3.3.1",
+        "terraform": "1.14.6",
+        "shellcheck": "0.11.0"
+      },
+      "required_environment": ["CI"],
       "timeout_seconds": 7200
     },
     {
@@ -37,6 +65,7 @@
       "selector_type": "javascript",
       "check_ids": ["lint-test-build-verify"],
       "commands": [
+        ["{npm}", "audit", "--audit-level=high"],
         ["{npm}", "run", "lint"],
         ["{npm}", "run", "test"],
         ["{npm}", "run", "build"],
@@ -81,6 +110,8 @@
           {"suite": "infra", "selector": "all-infrastructure-tests"},
           {"suite": "frontend", "selector": "lint-test-build-verify"},
           {"suite": "static", "selector": "all-python-lint-format"},
+          {"suite": "secret-scan", "selector": "tracked-files-against-baseline"},
+          {"suite": "export-gate", "selector": "customer-export-contract-policy"},
           {"suite": "backend-package", "selector": "wheel-and-sdist"},
           {"suite": "strict-synth", "selector": "production-eu-west-1-cdk-nag"}
         ],

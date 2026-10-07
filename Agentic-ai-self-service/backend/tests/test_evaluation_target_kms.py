@@ -209,7 +209,7 @@ def test_legacy_gated_version_without_frozen_key_fails_closed(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         rtc.resolve_owned_runtime_version_target(
             "release_bot",
-            "01a0d26eb4459a9516d12064ac4a8687",
+            "01a0d26eb4459a9516d12064ac4a8687",  # pragma: allowlist secret
             "owner-1",
         )
     assert exc.value.status_code == 503
@@ -217,7 +217,8 @@ def test_legacy_gated_version_without_frozen_key_fails_closed(monkeypatch):
 
 
 def test_adversarial_target_row_mutation_cannot_replace_version_key(monkeypatch):
-    mutated_key = f"arn:aws:kms:{REGION}:{ACCOUNT}:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    mutated_key_id = "-".join(("a" * 8, "b" * 4, "c" * 4, "d" * 4, "e" * 12))
+    mutated_key = f"arn:aws:kms:{REGION}:{ACCOUNT}:key/{mutated_key_id}"
     session_for_event = _wire_authority(
         monkeypatch,
         version=_version(evaluation_key=KEY_ARN),
@@ -227,7 +228,7 @@ def test_adversarial_target_row_mutation_cannot_replace_version_key(monkeypatch)
     with pytest.raises(HTTPException) as exc:
         rtc.resolve_owned_runtime_version_target(
             "release_bot",
-            "01a0d26eb4459a9516d12064ac4a8687",
+            "01a0d26eb4459a9516d12064ac4a8687",  # pragma: allowlist secret
             "owner-1",
         )
     assert exc.value.status_code == 503

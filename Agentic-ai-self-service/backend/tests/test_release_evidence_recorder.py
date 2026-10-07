@@ -176,6 +176,13 @@ def test_traceability_maps_every_required_kind_to_an_existing_check():
     traceability = json.loads(TRACEABILITY_PATH.read_text(encoding="utf-8"))
     suite_map, trace_map = release_evidence._validate_traceability(controls, traceability)
     assert set(trace_map) == {control["id"] for control in controls["controls"]}
+    for suite in suite_map.values():
+        assert all(version for version in suite.get("required_tools", {}).values())
+        working_directory = PROJECT_ROOT / suite["working_directory"]
+        for command in suite["commands"]:
+            for part in command:
+                if part.endswith(".py"):
+                    assert (working_directory / part).is_file(), f"{suite['id']}: {part}"
 
     for traced in trace_map.values():
         for kind, requirements in traced["evidence"].items():

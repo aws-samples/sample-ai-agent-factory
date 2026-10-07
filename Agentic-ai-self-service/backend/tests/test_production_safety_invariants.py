@@ -52,8 +52,8 @@ def test_production_injects_complete_managed_baseline(monkeypatch):
     }
     pii = {item["type"]: item["action"] for item in result["piiFilters"]}
     assert pii["AWS_ACCESS_KEY"] == "ANONYMIZE"
-    assert pii["AWS_SECRET_KEY"] == "ANONYMIZE"
-    assert pii["PASSWORD"] == "ANONYMIZE"
+    assert pii["AWS_SECRET_KEY"] == "ANONYMIZE"  # pragma: allowlist secret
+    assert pii["PASSWORD"] == "ANONYMIZE"  # pragma: allowlist secret
     assert pii["US_SOCIAL_SECURITY_NUMBER"] == "ANONYMIZE"
 
 
@@ -77,7 +77,7 @@ def test_production_caller_cannot_weaken_baseline(monkeypatch):
     assert result["contentFilters"]["hate"] == "HIGH"
     assert result["contentFilters"]["prompt_attack"] == "HIGH"
     pii = {item["type"]: item["action"] for item in result["piiFilters"]}
-    assert pii["PASSWORD"] == "ANONYMIZE"
+    assert pii["PASSWORD"] == "ANONYMIZE"  # pragma: allowlist secret
     assert pii["EMAIL"] == "BLOCK"
     assert result["deniedTopics"] == [{"name": "custom", "definition": "custom topic"}]
 

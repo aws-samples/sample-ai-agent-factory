@@ -398,6 +398,15 @@ def _validate_traceability(
             or len(required_environment) != len(set(required_environment))
         ):
             raise EvidenceError(f"Release suite {suite_id} has invalid required_environment")
+        required_tools = suite.get("required_tools", {})
+        if not isinstance(required_tools, dict) or any(
+            not isinstance(name, str)
+            or not _SAFE_NAME.fullmatch(name)
+            or not isinstance(version, str)
+            or not re.fullmatch(r"[0-9][A-Za-z0-9_.+-]{0,63}", version)
+            for name, version in required_tools.items()
+        ):
+            raise EvidenceError(f"Release suite {suite_id} has invalid required_tools")
         check_ids = suite.get("check_ids", [])
         if (
             not isinstance(check_ids, list)

@@ -67,7 +67,7 @@ def test_input_intervention_prevents_tool_execution():
 
     result = namespace["_guardrail_invoke_tool"](
         handler,
-        {"toolUseId": "tool-1", "input": {"secret": "blocked"}},
+        {"toolUseId": "tool-1", "input": {"secret": "blocked"}},  # pragma: allowlist secret
     )
 
     handler.assert_not_called()
@@ -120,7 +120,7 @@ def test_strands_hook_cancels_input_and_replaces_output():
     hook = namespace["_GUARDRAIL_HOOKS"][0]
     before = SimpleNamespace(
         cancel_tool=False,
-        tool_use={"toolUseId": "tool-1", "input": {"secret": "blocked"}},
+        tool_use={"toolUseId": "tool-1", "input": {"secret": "blocked"}},  # pragma: allowlist secret
     )
     hook._before_tool(before)
     assert before.cancel_tool == "Tool input blocked by the safety guardrail."

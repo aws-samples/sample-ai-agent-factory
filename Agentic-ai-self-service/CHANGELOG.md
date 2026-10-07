@@ -17,7 +17,9 @@ All notable changes to this project are documented here. The format follows
   existing committed test selectors, or named live scenarios. Offline events must name a mapped
   suite; non-offline events must name a mapped scenario. Finalization requires every mapped suite
   and scenario, so one generic pass cannot stand in for frontend, infrastructure, package, synth,
-  lifecycle, or per-Region proof.
+  lifecycle, or per-Region proof. The plan includes `npm audit --audit-level=high`, a pinned
+  tracked-file `detect-secrets` wrapper, and the isolated cfn-lint/Checkov/Terraform/ShellCheck
+  exported-artifact gate in addition to tests, builds, and strict synthesis.
 - Failed and blocked attempts remain active until an explicit same-scope supersession. Finalization
   requires every control/kind/suite/scenario tuple, every global lifecycle/UI gate, and an
   independent pass for each selected EMEA Region; any active failure or missing tuple prevents a

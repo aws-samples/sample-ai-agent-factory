@@ -28,7 +28,7 @@ The recorder does not decide whether a test was truthful, copy raw logs, retain 
 
 **Execution context:** local clean clone of this repository; no AWS account or Region is used by these recorder commands. Commit all project changes first. Keep raw logs under ignored `build/` storage or another controlled evidence store; never put credentials or raw API responses in event details.
 
-Run every command array declared for a suite in `production-readiness-traceability.json`, substituting only the named executable/output placeholders. Capture the combined exit status and log as one suite artifact. Because a suite command runs its complete gate, one passing suite event covers all exact selectors mapped to that suite; finalization still requires every distinct mapped suite.
+Run every command array declared for a suite in `production-readiness-traceability.json`, substituting only the named executable/output placeholders. Capture the combined exit status and log as one suite artifact. Because a suite command runs its complete gate, one passing suite event covers all exact selectors mapped to that suite; finalization still requires every distinct mapped suite. The required set includes project-wide Ruff, tracked-file `detect-secrets==1.5.0`, the full backend and CDK assertion suites, `npm audit --audit-level=high` plus frontend lint/test/build verification, backend wheel/sdist, strict production synthesis/cdk-nag, and the exported CloudFormation/Terraform gate under exact cfn-lint/Checkov/Terraform/ShellCheck versions.
 
 ```bash
 python3 scripts/release_evidence.py start \

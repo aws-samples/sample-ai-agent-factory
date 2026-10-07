@@ -284,7 +284,9 @@ material control, plus real live, CloudFront UI, rollback, and zero-residual tea
 evidence where applicable. The executable
 [`release/production-readiness-traceability.json`](release/production-readiness-traceability.json)
 plan pins each required kind to exact suite commands, committed test selectors, and
-named live scenarios; finalization requires every mapped suite/scenario. The dated
+named live scenarios; finalization requires every mapped suite/scenario. This includes
+tracked-file secret scanning, high-severity npm dependency audit, and the isolated
+cfn-lint/Checkov/Terraform/ShellCheck gate over customer-exported artifacts. The dated
 [`release/emea-agentcore-regions.json`](release/emea-agentcore-regions.json) matrix
 requires an independent core scenario in every documented EMEA AgentCore Region;
 feature-specific scenarios run only where AWS documents that feature as available.
