@@ -46,7 +46,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "bedrock-agentcore-starter-toolkit", marker = "extra == 'deploy'" },
-    { name = "boto3", specifier = ">=1.43.66" },
+    { name = "boto3", specifier = ">=1.43.94" },
     { name = "cfn-lint", marker = "extra == 'dev'", specifier = "==1.57.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28.0" },

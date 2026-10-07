@@ -76,9 +76,19 @@ export {
 export {
   getEvaluationConfig,
   listEvaluationResults,
+  getPromotionEvidence,
+  startPromotionEvaluation,
+  getPromotionEvaluation,
+  attestPromotionEvaluation,
   type EvaluationConfigSummary,
   type EvaluationResultRow,
   type EvaluationResultsSummary,
+  type PromotionPolicy,
+  type PromotionEvidence,
+  type PromotionEvidenceSummary,
+  type PromotionEvaluationScenario,
+  type PromotionEvaluationStart,
+  type PromotionEvaluationStatus,
 } from './api/evaluations';
 
 // ============================================================================
@@ -303,6 +313,10 @@ import type {
 import type {
   EvaluationConfigSummary,
   EvaluationResultsSummary,
+  PromotionEvidenceSummary,
+  PromotionEvaluationScenario,
+  PromotionEvaluationStart,
+  PromotionEvaluationStatus,
 } from './api/evaluations';
 import type {
   DashboardUrlSummary,
@@ -417,6 +431,22 @@ export class ApiClient {
 
   async listEvaluationResults(runtimeName: string, hours = 24): Promise<EvaluationResultsSummary> {
     return apiRequest<EvaluationResultsSummary>(`/api/runtimes/${encodeURIComponent(runtimeName)}/evaluations?hours=${hours}`, {}, this.baseUrl);
+  }
+
+  async getPromotionEvidence(runtimeName: string, versionId: string): Promise<PromotionEvidenceSummary> {
+    return apiRequest<PromotionEvidenceSummary>(`/api/runtimes/${encodeURIComponent(runtimeName)}/versions/${encodeURIComponent(versionId)}/promotion-evidence`, {}, this.baseUrl);
+  }
+
+  async startPromotionEvaluation(runtimeName: string, versionId: string, scenarios: PromotionEvaluationScenario[]): Promise<PromotionEvaluationStart> {
+    return apiRequest<PromotionEvaluationStart>(`/api/runtimes/${encodeURIComponent(runtimeName)}/versions/${encodeURIComponent(versionId)}/promotion-evaluation/start`, { method: 'POST', body: JSON.stringify({ scenarios }) }, this.baseUrl);
+  }
+
+  async getPromotionEvaluation(runtimeName: string, versionId: string, batchEvaluationId: string): Promise<PromotionEvaluationStatus> {
+    return apiRequest<PromotionEvaluationStatus>(`/api/runtimes/${encodeURIComponent(runtimeName)}/versions/${encodeURIComponent(versionId)}/promotion-evaluation/${encodeURIComponent(batchEvaluationId)}`, {}, this.baseUrl);
+  }
+
+  async attestPromotionEvaluation(runtimeName: string, versionId: string, batchEvaluationId: string): Promise<PromotionEvidenceSummary> {
+    return apiRequest<PromotionEvidenceSummary>(`/api/runtimes/${encodeURIComponent(runtimeName)}/versions/${encodeURIComponent(versionId)}/promotion-evaluation/attest`, { method: 'POST', body: JSON.stringify({ batchEvaluationId }) }, this.baseUrl);
   }
 
   // Observability

@@ -317,6 +317,15 @@
         "Resource": "*"
       },
       {
+        "Sid": "AgentCoreBatchEvaluation",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock-agentcore:StartBatchEvaluation",
+          "bedrock-agentcore:GetBatchEvaluation"
+        ],
+        "Resource": "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:batch-evaluate/*"
+      },
+      {
         "Sid": "AgentCoreRuntimeOwnershipTagging",
         "Effect": "Allow",
         "Action": [
@@ -718,6 +727,7 @@
           "logs:CreateLogGroup",
           "logs:CreateLogStream",
           "logs:PutLogEvents",
+          "logs:PutRetentionPolicy",
           "logs:DeleteLogGroup",
           "logs:DescribeLogGroups",
           "logs:DescribeLogStreams",

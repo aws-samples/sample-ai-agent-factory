@@ -33,7 +33,7 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 - **Bring your own LiteLLM** — Point an agent at a LiteLLM MCP proxy *instead of* AgentCore Gateway, or carry it *inside* one as an MCP target, and/or make a LiteLLM proxy the authoritative agent catalog. All opt-in and additive; the AgentCore Gateway and the built-in registry remain the defaults. See [Bring your own LiteLLM](#bring-your-own-litellm).
 - **13 model providers & multi-agent patterns** — Bedrock (default), OpenAI, Anthropic, Gemini, Mistral, Ollama, Groq, DeepSeek, Together, LiteLLM, SageMaker, Writer, LlamaAPI; Graph / Swarm / Workflow orchestration via Strands Agents SDK.
 - **Knowledge Base (RAG)** — 5 data source types, 3 vector stores (S3 Vectors, OpenSearch Serverless auto-provisioned, Aurora PostgreSQL), configurable parsing/chunking, plus agentic retrieval strategies. Customer-owned AWS resources require an explicit `AgentCoreFlowsAccess=allow` opt-in before the platform can grant a Knowledge Base role access.
-- **Enterprise governance** — Scope-based RBAC/ABAC, Cedar policy enforcement, agent registry with approval workflow, versioning & rollback, cost budgets, audit analytics, HITL approvals, VPC-egress runtimes, OIDC federation. See [Enterprise Capabilities](docs/ENTERPRISE_CAPABILITIES.md).
+- **Enterprise governance** — Scope-based RBAC/ABAC, Cedar policy enforcement, agent registry with approval workflow, versioning with AgentCore batch-evaluation-gated production promotion and emergency rollback, cost budgets, audit analytics, HITL approvals, VPC-egress runtimes, OIDC federation. See [Enterprise Capabilities](docs/ENTERPRISE_CAPABILITIES.md).
 - **Manifest-driven teardown with live ownership proof** — Every deploy records the sub-resources it creates; delete re-validates live ownership, confirms asynchronous removal, and reports retained or failed resources instead of claiming they were removed.
 
 ## Prerequisites
@@ -83,6 +83,43 @@ family covers only the older Claude models. In APAC, current-generation models
 are published under *country* prefixes (`jp.` in `ap-northeast-1`, `au.` in
 `ap-southeast-2`) or as `global.`, so an APAC deployment may need its model ID set
 explicitly. `us-*` and `eu-*` regions need no such adjustment.
+
+## Production promotion gate
+
+Dev-like environments (`dev`, `development`, `test`, `sandbox`, `preview`, and
+`local`) preserve the direct-production deployment loop. Every other
+environment defaults new versions to **staging** and rejects an explicit direct
+production deploy before it writes a row, stages a secret, or calls AWS.
+
+Promote a production-gated version from the **Versions** panel:
+
+1. Invoke the exact staging version for at least five representative sessions.
+2. Supply each session ID with assertions, expected tool trajectory, or expected turns.
+3. Start the AgentCore Batch Evaluation. The platform—not the browser—chooses the
+   evaluator IDs and thresholds from the policy frozen onto the version.
+4. Check and attest the completed job. Partial, failed, ignored, stale,
+   low-scoring, wrong-runtime, wrong-account, or wrong-Region results are refused.
+5. Promote. The version row's evidence digest, policy digest, and expiry are
+   condition-checked in the same DynamoDB transaction that moves the production pointer.
+
+The default policy requires five completed sessions, zero failed/ignored
+sessions, zero evaluator failures, and scores of at least `0.70` from
+`Builtin.GoalSuccessRate`, `Builtin.Correctness`, and `Builtin.Helpfulness`.
+Operators can raise or otherwise version this policy with CDK context
+`production_evaluation_policy_json`; invalid JSON or fields fail closed. Release
+evidence expires after 24 hours by default.
+
+Batch inputs/results are encrypted with the stack's dedicated rotating KMS key.
+The key policy scopes the deployment Lambda and
+`bedrock-agentcore.amazonaws.com` to this account's `batch-evaluate/*` ARN and
+encryption context. The key is retained on stack removal so deleting the UI does
+not silently destroy release evidence. A cross-account or same-account
+cross-Region target must provide a target-Region evaluation key before it can
+inherit production-promotion support; a home-Region key is never reused across
+that boundary.
+
+Emergency rollback remains available, but only as an atomic swap to the exact
+previous production version. It cannot select an arbitrary unevaluated version.
 
 ## Accessing the Platform
 

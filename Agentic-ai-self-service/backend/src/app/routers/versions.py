@@ -33,6 +33,11 @@ from app.services.auth import assert_owner, get_caller_sub
 from app.services.gateway_deployer import gateway_aws_session, get_cognito_token
 from app.services.harness_deployer import invoke_harness
 from app.services.invocation_identity import memory_invocation_identity
+from app.services.promotion_evidence import (
+    PromotionEvidenceError,
+    require_promotion_evidence,
+    validate_frozen_promotion_policy,
+)
 from app.services.rbac import require_scopes
 from app.services.runtime_invocation import (
     invoke_verified_http_runtime,
@@ -88,6 +93,9 @@ class VersionResponse(BaseModel):
     parent_version_id: str | None = None
     status: str
     description: str | None = None
+    production_gate_required: bool | None = None
+    promotion_policy: dict | None = None
+    promotion_evidence: dict | None = None
 
     @classmethod
     def from_model(cls, v: AgentVersion) -> VersionResponse:
@@ -103,6 +111,9 @@ class VersionResponse(BaseModel):
             parent_version_id=v.parent_version_id,
             status=v.status,
             description=v.description,
+            production_gate_required=v.production_gate_required,
+            promotion_policy=v.promotion_policy,
+            promotion_evidence=v.promotion_evidence,
         )
 
 
@@ -294,6 +305,24 @@ async def promote_version(
             ),
         )
 
+    promotion_authority = "deployment"
+    promotion_evidence = None
+    promotion_policy = None
+    if body.slot == "production" and target.production_gate_required:
+        try:
+            promotion_policy = validate_frozen_promotion_policy(target.promotion_policy)
+            promotion_evidence = require_promotion_evidence(
+                target.promotion_evidence,
+                runtime_name=runtime_name,
+                version_id=version_id,
+                deployment_id=target.deployment_id,
+                runtime_id=target.runtime_id,
+                policy=promotion_policy,
+            )
+        except PromotionEvidenceError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        promotion_authority = "evaluation"
+
     slots_store = get_slots_store()
     # Consistent for the same reason as the version read: F-83 turns this read into the write's
     # compare-and-set condition, so reading a stale row pins values the transaction cannot match.
@@ -331,6 +360,17 @@ async def promote_version(
                 deployment_id=target.deployment_id,
                 runtime_id=target.runtime_id,
                 runtime_arn=target.runtime_arn,
+                production_gate_required=target.production_gate_required,
+                promotion_authority=promotion_authority,
+                promotion_evidence_digest=(
+                    str(promotion_evidence["evidence_digest"]) if promotion_evidence is not None else None
+                ),
+                promotion_policy_digest=(
+                    str(promotion_policy["policy_digest"]) if promotion_policy is not None else None
+                ),
+                minimum_promotion_evidence_expiry_epoch=(
+                    int(promotion_evidence["expires_at_epoch"]) if promotion_evidence is not None else None
+                ),
             ),
         )
     except SlotWriteConflict:
@@ -425,6 +465,8 @@ async def rollback_runtime(
                 deployment_id=target.deployment_id,
                 runtime_id=target.runtime_id,
                 runtime_arn=target.runtime_arn,
+                production_gate_required=target.production_gate_required,
+                promotion_authority="rollback",
             ),
         )
     except SlotWriteConflict:

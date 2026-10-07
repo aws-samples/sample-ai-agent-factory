@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -228,6 +229,13 @@ class AgentVersion:
     deploy_request_snapshot: dict | None = None
     status: str = "pending"  # pending | succeeded | failed | superseded
     description: str | None = None
+    # Frozen at deployment admission. ``None`` identifies a legacy row; new rows
+    # always persist an explicit bool and the policy used to judge this version.
+    production_gate_required: bool | None = None
+    promotion_policy: dict | None = None
+    # Written once, conditionally, after AgentCore returns a complete passing
+    # batch evaluation. It is never accepted from a deploy or promote request.
+    promotion_evidence: dict | None = None
 
     def to_item(self) -> dict:
         item = {
@@ -248,6 +256,9 @@ class AgentVersion:
             "canvas_snapshot",
             "deploy_request_snapshot",
             "description",
+            "production_gate_required",
+            "promotion_policy",
+            "promotion_evidence",
         ):
             val = getattr(self, fld)
             if val is not None:
@@ -273,6 +284,9 @@ class AgentVersion:
             deploy_request_snapshot=item.get("deploy_request_snapshot"),
             status=item.get("status", "pending"),
             description=item.get("description"),
+            production_gate_required=item.get("production_gate_required"),
+            promotion_policy=item.get("promotion_policy"),
+            promotion_evidence=item.get("promotion_evidence"),
         )
 
 
@@ -640,6 +654,72 @@ class AgentVersionsStore:
                     "it is absent, owned by someone else, or no longer holds the runtime name"
                 ) from None
             raise
+
+    def record_promotion_evidence(
+        self,
+        runtime_name: str,
+        version_id: str,
+        *,
+        expected_owner_sub: str,
+        expected_deployment_id: str,
+        expected_runtime_id: str,
+        expected_runtime_arn: str,
+        evidence: dict,
+    ) -> AgentVersion:
+        """Attach one immutable, identity-fenced promotion evidence document.
+
+        A second write is idempotent only when it carries the same canonical
+        digest. A different batch result never replaces an earlier attestation:
+        callers deploy a new version when they need a new release decision.
+        """
+
+        digest = str(evidence.get("evidence_digest") or "")
+        if not runtime_name or version_id == NAME_CLAIM_VERSION_ID:
+            raise ValueError("a real runtime version is required")
+        if not expected_owner_sub or not expected_deployment_id or not expected_runtime_id or not expected_runtime_arn:
+            raise ValueError("promotion evidence needs the complete immutable version identity")
+        if not isinstance(evidence, dict) or len(digest) != 64:
+            raise ValueError("promotion evidence needs a canonical evidence_digest")
+        try:
+            self._table.update_item(
+                Key={"runtime_name": runtime_name, "version_id": version_id},
+                UpdateExpression="SET #evidence = :evidence",
+                ConditionExpression=(
+                    "attribute_exists(version_id) AND owner_sub = :owner AND #status = :succeeded "
+                    "AND deployment_id = :deployment AND runtime_id = :runtime_id "
+                    "AND runtime_arn = :runtime_arn AND attribute_not_exists(#evidence)"
+                ),
+                ExpressionAttributeNames={
+                    "#evidence": "promotion_evidence",
+                    "#status": "status",
+                },
+                ExpressionAttributeValues={
+                    ":evidence": _floats_to_decimals(evidence),
+                    ":owner": expected_owner_sub,
+                    ":succeeded": PROMOTABLE_VERSION_STATUS,
+                    ":deployment": expected_deployment_id,
+                    ":runtime_id": expected_runtime_id,
+                    ":runtime_arn": expected_runtime_arn,
+                },
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
+            current = self.get(runtime_name, version_id, consistent=True)
+            existing = current.promotion_evidence if current is not None else None
+            if isinstance(existing, dict) and existing.get("evidence_digest") == digest:
+                return current
+            raise PromotionEvidenceConflict(
+                f"promotion evidence for {runtime_name}/{version_id} was not recorded; "
+                "the version moved or already has a different immutable attestation"
+            ) from None
+
+        current = self.get(runtime_name, version_id, consistent=True)
+        if current is None or not isinstance(current.promotion_evidence, dict):
+            raise PromotionEvidenceConflict(
+                f"promotion evidence for {runtime_name}/{version_id} could not be read after it was recorded"
+            )
+        return current
 
     def delete(self, runtime_name: str, version_id: str) -> None:
         if version_id == NAME_CLAIM_VERSION_ID:
@@ -1158,6 +1238,10 @@ def release_name_claim_atomically(
     )
 
 
+class PromotionEvidenceConflict(RuntimeError):
+    """A version changed or already carries a different immutable attestation."""
+
+
 class SlotWriteConflict(RuntimeError):
     """The slot row moved between the caller's read and its write, so nothing was written.
 
@@ -1221,6 +1305,11 @@ class VersionFence:
     deployment_id: str
     runtime_id: str | None = None
     runtime_arn: str | None = None
+    production_gate_required: bool | None = None
+    promotion_authority: str | None = None  # deployment | evaluation | rollback
+    promotion_evidence_digest: str | None = None
+    promotion_policy_digest: str | None = None
+    minimum_promotion_evidence_expiry_epoch: int | None = None
 
 
 def _slot_mutable_pairs(slot: RuntimeSlots) -> tuple[tuple[str, str | None], ...]:
@@ -1425,6 +1514,31 @@ def set_slot_pointers_atomically(
                 f"the version fence names {fence.slot} but the row being written has a different "
                 f"{fence.slot} pointer; the fence must be the pointer it authorizes"
             )
+        if fence.slot == "production" and fence.production_gate_required:
+            if fence.promotion_authority == "rollback":
+                if (
+                    expected is None
+                    or expected.previous_production_version_id != fence.version_id
+                    or new.previous_production_version_id != expected.production_version_id
+                ):
+                    raise ValueError(
+                        "rollback authority applies only to the exact previous production version "
+                        "and must swap the prior serving pointer back into history"
+                    )
+            elif fence.promotion_authority == "evaluation":
+                if not re.fullmatch(r"[0-9a-f]{64}", fence.promotion_evidence_digest or ""):
+                    raise ValueError("evaluated production promotion needs a canonical evidence digest")
+                if not re.fullmatch(r"[0-9a-f]{64}", fence.promotion_policy_digest or ""):
+                    raise ValueError("evaluated production promotion needs the frozen policy digest")
+                expiry = fence.minimum_promotion_evidence_expiry_epoch
+                if isinstance(expiry, bool) or not isinstance(expiry, int) or expiry <= 0:
+                    raise ValueError("evaluated production promotion needs a minimum evidence expiry")
+            else:
+                raise ValueError(
+                    "this version requires server-verified evaluation evidence before production promotion"
+                )
+        elif fence.promotion_authority not in {None, "deployment", "evaluation", "rollback"}:
+            raise ValueError("unknown production-promotion authority")
         # And the fence must cover every pointer this write is ACQUIRING. Without this, a fence is
         # satisfiable by a slot the write does not touch: production already equals v1, so a fence on
         # production passes for a write whose only real effect is staging=v9. Each slot is resolved by
@@ -1440,7 +1554,42 @@ def set_slot_pointers_atomically(
                 "its own proof that the version is live"
             )
         v_conditions = ["attribute_exists(version_id)", "owner_sub = :v_owner", "#st = :v_status"]
+        v_names: dict[str, str] = {
+            "#st": "status",
+            "#gate": "production_gate_required",
+        }
         v_values: dict[str, object] = {":v_owner": fence.owner_sub, ":v_status": fence.status}
+        if fence.production_gate_required is None:
+            v_conditions.append("attribute_not_exists(#gate)")
+        else:
+            v_conditions.append("#gate = :v_gate")
+            v_values[":v_gate"] = fence.production_gate_required
+        if fence.slot == "production" and fence.production_gate_required and fence.promotion_authority == "evaluation":
+            v_names.update(
+                {
+                    "#evidence": "promotion_evidence",
+                    "#verdict": "verdict",
+                    "#digest": "evidence_digest",
+                    "#policy_digest": "policy_digest",
+                    "#expires": "expires_at_epoch",
+                }
+            )
+            v_conditions.extend(
+                [
+                    "#evidence.#verdict = :v_pass",
+                    "#evidence.#digest = :v_evidence_digest",
+                    "#evidence.#policy_digest = :v_policy_digest",
+                    "#evidence.#expires >= :v_min_expiry",
+                ]
+            )
+            v_values.update(
+                {
+                    ":v_pass": "pass",
+                    ":v_evidence_digest": str(fence.promotion_evidence_digest),
+                    ":v_policy_digest": str(fence.promotion_policy_digest),
+                    ":v_min_expiry": int(fence.minimum_promotion_evidence_expiry_epoch or 0),
+                }
+            )
         v_conditions.append("deployment_id = :v_dep")
         v_values[":v_dep"] = str(fence.deployment_id)
         if fence.runtime_id:
@@ -1469,7 +1618,7 @@ def set_slot_pointers_atomically(
                     "TableName": vstore.table_name,
                     "Key": {"runtime_name": runtime_name, "version_id": fence.version_id},
                     "ConditionExpression": " AND ".join(v_conditions),
-                    "ExpressionAttributeNames": {"#st": "status"},
+                    "ExpressionAttributeNames": v_names,
                     "ExpressionAttributeValues": v_values,
                 }
             }

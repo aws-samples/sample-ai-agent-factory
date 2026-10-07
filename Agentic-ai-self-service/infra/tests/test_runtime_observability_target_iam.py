@@ -24,11 +24,19 @@ TARGET_ROLE_ARN = "arn:aws:iam::*:role/AgentCoreFlowsDeploymentRole"
 TARGET_QUERY_ACTIONS = {
     "bedrock-agentcore:GetOnlineEvaluationConfig",
     "bedrock-agentcore:ListOnlineEvaluationConfigs",
+    "bedrock-agentcore:StartBatchEvaluation",
+    "bedrock-agentcore:GetBatchEvaluation",
     "cloudwatch:GetDashboard",
     "logs:DescribeLogGroups",
+    "logs:GetLogEvents",
+    "logs:FilterLogEvents",
     "logs:GetQueryResults",
     "logs:StartQuery",
     "logs:StopQuery",
+    "logs:CreateLogGroup",
+    "logs:CreateLogStream",
+    "logs:PutLogEvents",
+    "logs:PutRetentionPolicy",
 }
 
 
@@ -139,3 +147,114 @@ def test_cross_account_logs_query_lifecycle_is_not_scoped_to_log_group_arns():
         assert any("*" in _listify(statement.get("Resource")) for statement in grants), (
             f"{action} must be usable for a service-generated query id"
         )
+
+
+def test_batch_evaluation_actions_are_scoped_to_batch_resources(template):
+    statements = _deployment_role_statements(template)
+    matches = [
+        statement
+        for statement in statements
+        if set(_listify(statement.get("Action") or []))
+        == {"bedrock-agentcore:StartBatchEvaluation", "bedrock-agentcore:GetBatchEvaluation"}
+    ]
+    assert len(matches) == 1
+    assert _listify(matches[0]["Resource"]) == [f"arn:aws:bedrock-agentcore:*:{ACCOUNT}:batch-evaluate/*"]
+
+
+def test_documented_target_role_scopes_batch_evaluation_to_the_target_account():
+    matches = [
+        statement for statement in _documented_target_statements() if statement.get("Sid") == "AgentCoreBatchEvaluation"
+    ]
+    assert len(matches) == 1
+    assert set(matches[0]["Action"]) == {
+        "bedrock-agentcore:StartBatchEvaluation",
+        "bedrock-agentcore:GetBatchEvaluation",
+    }
+    assert matches[0]["Resource"] == ("arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:batch-evaluate/*")
+
+
+def test_deployment_api_receives_an_explicit_dev_gate_default(template):
+    environment = _deployment_function(template)["Properties"]["Environment"]["Variables"]
+    assert environment["PRODUCTION_EVALUATION_GATE"] == "false"
+
+
+def test_production_evaluation_gate_context_is_strict():
+    from stacks.platform.lambdas import _production_evaluation_gate_value
+
+    app = cdk.App(context={"production_evaluation_gate": "false"})
+    stack = cdk.Stack(app, "ExplicitGate")
+    assert _production_evaluation_gate_value(stack, "prod") == "false"
+    assert _production_evaluation_gate_value(cdk.Stack(cdk.App(), "ProdGate"), "prod") == "true"
+    assert _production_evaluation_gate_value(cdk.Stack(cdk.App(), "DevGate"), "dev") == "false"
+    with pytest.raises(ValueError, match="must be true or false"):
+        _production_evaluation_gate_value(
+            cdk.Stack(cdk.App(context={"production_evaluation_gate": "typo"}), "BadGate"),
+            "prod",
+        )
+
+
+def test_production_evidence_key_is_rotating_retained_and_bound_to_the_api(template):
+    keys = [
+        (logical_id, resource)
+        for logical_id, resource in template["Resources"].items()
+        if resource.get("Type") == "AWS::KMS::Key"
+        and resource.get("Properties", {}).get("Description")
+        == "Encrypts AgentCore batch-evaluation production promotion evidence"
+    ]
+    assert len(keys) == 1
+    key_id, key = keys[0]
+    assert key["Properties"]["EnableKeyRotation"] is True
+    assert key["Properties"]["PendingWindowInDays"] == 30
+    assert key["DeletionPolicy"] == "Retain"
+    environment = _deployment_function(template)["Properties"]["Environment"]["Variables"]
+    assert environment["EVALUATION_EVIDENCE_KMS_KEY_ARN"] == {"Fn::GetAtt": [key_id, "Arn"]}
+
+
+def test_evidence_key_policy_scopes_agentcore_to_batch_evaluations(template):
+    key = next(
+        resource
+        for resource in template["Resources"].values()
+        if resource.get("Type") == "AWS::KMS::Key"
+        and resource.get("Properties", {}).get("Description")
+        == "Encrypts AgentCore batch-evaluation production promotion evidence"
+    )
+    service = next(
+        statement
+        for statement in key["Properties"]["KeyPolicy"]["Statement"]
+        if statement.get("Principal") == {"Service": "bedrock-agentcore.amazonaws.com"}
+    )
+    assert set(_listify(service["Action"])) == {"kms:GenerateDataKey", "kms:Decrypt"}
+    assert service["Condition"]["StringEquals"] == {"aws:SourceAccount": ACCOUNT}
+    expected_batch_arn = {
+        "Fn::Join": [
+            "",
+            [
+                "arn:",
+                {"Ref": "AWS::Partition"},
+                f":bedrock-agentcore:us-east-1:{ACCOUNT}:batch-evaluate/*",
+            ],
+        ]
+    }
+    assert service["Condition"]["ArnLike"] == {"aws:SourceArn": expected_batch_arn}
+
+
+def test_deployment_role_kms_crypto_is_bound_by_batch_evaluation_context(template):
+    statements = _deployment_role_statements(template)
+    crypto = next(
+        statement
+        for statement in statements
+        if set(_listify(statement.get("Action") or [])) == {"kms:GenerateDataKey", "kms:Decrypt"}
+    )
+    expected_batch_arn = {
+        "Fn::Join": [
+            "",
+            [
+                "arn:",
+                {"Ref": "AWS::Partition"},
+                f":bedrock-agentcore:us-east-1:{ACCOUNT}:batch-evaluate/*",
+            ],
+        ]
+    }
+    assert crypto["Condition"]["StringLike"] == {
+        "kms:EncryptionContext:aws:bedrock-agentcore:batchEvaluationArn": expected_batch_arn
+    }

@@ -43,6 +43,8 @@ const GROUP_SCOPES: Record<string, string[]> = {
     'agent:read',
     'agent:write',
     'cost:read',
+    'eval:read',
+    'eval:write',
     'prompt:read',
     'registry:read',
     'tag:read',

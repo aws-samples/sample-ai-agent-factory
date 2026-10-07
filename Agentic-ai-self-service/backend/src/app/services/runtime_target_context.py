@@ -297,6 +297,50 @@ def resolve_owned_deployment_runtime_target(
     )
 
 
+def resolve_owned_runtime_version_target(
+    runtime_name: str,
+    version_id: str,
+    caller_sub: str,
+    *,
+    required_protocol: str | None = None,
+) -> OwnedRuntimeTarget:
+    """Resolve one immutable version to its exact deployment and target session."""
+
+    try:
+        version = get_versions_store().get(runtime_name, version_id, consistent=True)
+        if version is None:
+            raise HTTPException(status_code=404, detail="Not found")
+        assert_owner(version.owner_sub, caller_sub)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _unavailable("version lookup failed", exc) from exc
+
+    if str(version.runtime_name or "") != runtime_name or str(version.version_id or "") != version_id:
+        raise _unavailable("version identity binding does not match")
+    if _status_value(version.status) != "succeeded":
+        raise HTTPException(status_code=409, detail="Only a succeeded version can be evaluated")
+    if not version.deployment_id or not version.runtime_id or not version.runtime_arn:
+        raise _unavailable("version has no complete deployment/runtime authority")
+
+    try:
+        deployment = get_deployment_store().get(version.deployment_id, consistent=True)
+    except Exception as exc:
+        raise _unavailable("deployment lookup failed", exc) from exc
+    if deployment is None:
+        raise _unavailable("deployment authority is missing")
+
+    return _target_from_deployment(
+        deployment,
+        caller_sub,
+        expected_deployment_id=str(version.deployment_id),
+        expected_version_id=version_id,
+        expected_runtime_id=str(version.runtime_id),
+        expected_runtime_arn=str(version.runtime_arn),
+        required_protocol=required_protocol,
+    )
+
+
 def resolve_owned_runtime_slot_target(
     runtime_name: str,
     slot: str,

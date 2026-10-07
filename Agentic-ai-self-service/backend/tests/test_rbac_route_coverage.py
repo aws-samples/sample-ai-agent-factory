@@ -54,6 +54,26 @@ PINNED = {
     ("deployment", "POST", "/api/generate-canvas"): {"agent:write"},
     ("deployment", "POST", "/api/generate-cfn-template"): {"agent:write"},
     ("deployment", "POST", "/api/export-python"): {"agent:write"},
+    (
+        "deployment",
+        "POST",
+        "/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/start",
+    ): {"eval:write"},
+    (
+        "deployment",
+        "GET",
+        "/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/{batch_evaluation_id}",
+    ): {"eval:read"},
+    (
+        "deployment",
+        "POST",
+        "/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/attest",
+    ): {"eval:write"},
+    (
+        "deployment",
+        "GET",
+        "/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evidence",
+    ): {"eval:read"},
     ("main", "POST", "/api/flows"): {"agent:write"},
     ("main", "GET", "/api/flows"): {"agent:read"},
     ("main", "GET", "/api/flows/{flow_id}"): {"agent:read"},

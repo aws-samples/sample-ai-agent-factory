@@ -129,6 +129,11 @@ from app.services.invocation_identity import (
     memory_invocation_identity,
 )
 from app.services.policy_lifecycle import delete_policy_confirmed
+from app.services.promotion_evidence import (
+    PromotionPolicyConfigurationError,
+    load_promotion_policy,
+    production_evaluation_gate_required,
+)
 from app.services.rbac import require_scopes
 from app.services.resource_ownership import (
     OwnershipConfigurationError,
@@ -1652,6 +1657,25 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
             detail=("Authentication is required to deploy. No resource was created."),
         )
 
+    try:
+        production_gate_required = production_evaluation_gate_required()
+        promotion_policy = load_promotion_policy()
+    except PromotionPolicyConfigurationError as exc:
+        logger.error("Deploy refused: production evaluation policy is invalid (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="Production evaluation policy is invalid, so deployment was refused before anything was created.",
+        ) from exc
+    effective_deployment_slot = request.deployment_slot or ("staging" if production_gate_required else "production")
+    if production_gate_required and effective_deployment_slot == "production":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Direct production deployment is disabled in this environment. Deploy to staging, "
+                "run and attest the required AgentCore batch evaluation, then promote the version."
+            ),
+        )
+
     # THIRD, still before any side effect: if the caller named a flow, it must be a flow that
     # exists and that THEY own. ``flow_id`` is caller-supplied and becomes part of the persisted
     # deployment record, so accepting it unchecked would let one tenant file their deployments
@@ -1965,7 +1989,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         started_at=now,
         version_id=version_id,
         parent_version_id=parent_version_id,
-        deployment_slot=request.deployment_slot or "production",
+        deployment_slot=effective_deployment_slot,
         agentcore_runtime_name=agentcore_runtime_name,
         # F-81: the exact partition key of the versions/slots rows this deploy is about to
         # create. The delete path has always read this field and it has never been written, so
@@ -2013,6 +2037,8 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
                 parent_version_id=parent_version_id,
                 description=request.version_description,
                 status="pending",
+                production_gate_required=production_gate_required,
+                promotion_policy=promotion_policy,
             )
         )
     except NameClaimConflict as exc:
@@ -2322,7 +2348,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         "version_id": version_id,
         "friendly_runtime_name": friendly_runtime_name,
         "agentcore_runtime_name": agentcore_runtime_name,
-        "deployment_slot": request.deployment_slot or "production",
+        "deployment_slot": effective_deployment_slot,
         "parent_version_id": parent_version_id,
         "owner_sub": user_id or "",
         # Phase B (Bug 9) — deployment_mode MUST reach the SFN path so the state

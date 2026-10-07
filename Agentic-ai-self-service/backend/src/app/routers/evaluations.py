@@ -25,14 +25,31 @@ from __future__ import annotations
 import logging
 import re
 import time
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.services.agent_versions_store import PromotionEvidenceConflict, get_versions_store
 from app.services.auth import get_caller_sub
 from app.services.aws_errors import error_code, is_error
 from app.services.aws_pagination import list_all
+from app.services.promotion_evidence import (
+    PromotionEvidenceError,
+    PromotionEvidencePending,
+    PromotionPolicyConfigurationError,
+    assert_batch_evaluation_targets_runtime,
+    get_batch_evaluation,
+    start_batch_evaluation,
+    summarize_batch_evaluation,
+    validate_batch_evaluation_for_promotion,
+    validate_frozen_promotion_policy,
+)
 from app.services.rbac import require_scopes
-from app.services.runtime_target_context import resolve_owned_runtime_target
+from app.services.runtime_target_context import (
+    resolve_owned_runtime_target,
+    resolve_owned_runtime_version_target,
+)
 
 logger = logging.getLogger(__name__)
 _OBSERVABILITY_UNAVAILABLE = "Runtime observability is temporarily unavailable. Try again shortly."
@@ -48,6 +65,74 @@ def _validate_runtime_name(name: str) -> str:
 
 
 router = APIRouter(prefix="/api/runtimes", tags=["evaluations"])
+
+
+class PromotionEvaluationTurn(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    prompt: str = Field(min_length=1, max_length=10_000)
+    expected_response: str = Field(alias="expectedResponse", min_length=1, max_length=10_000)
+
+
+class PromotionEvaluationScenario(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    session_id: str = Field(alias="sessionId", min_length=1, max_length=256, pattern=r"^[A-Za-z0-9._:-]+$")
+    test_scenario_id: str = Field(
+        alias="testScenarioId",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
+    assertions: list[str] = Field(default_factory=list, max_length=20)
+    expected_tool_names: list[str] = Field(alias="expectedToolNames", default_factory=list, max_length=50)
+    turns: list[PromotionEvaluationTurn] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def _requires_ground_truth(self) -> PromotionEvaluationScenario:
+        if not self.assertions and not self.expected_tool_names and not self.turns:
+            raise ValueError("a release scenario needs assertions, expectedToolNames, or turns")
+        if any(not value.strip() or len(value) > 2_000 for value in self.assertions):
+            raise ValueError("assertions must be non-empty and no longer than 2000 characters")
+        if any(not value.strip() or len(value) > 128 for value in self.expected_tool_names):
+            raise ValueError("expectedToolNames entries must be non-empty and no longer than 128 characters")
+        return self
+
+
+class StartPromotionEvaluationRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    scenarios: list[PromotionEvaluationScenario] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def _unique_scenarios(self) -> StartPromotionEvaluationRequest:
+        session_ids = [scenario.session_id for scenario in self.scenarios]
+        scenario_ids = [scenario.test_scenario_id for scenario in self.scenarios]
+        if len(session_ids) != len(set(session_ids)):
+            raise ValueError("scenario sessionId values must be unique")
+        if len(scenario_ids) != len(set(scenario_ids)):
+            raise ValueError("testScenarioId values must be unique")
+        return self
+
+
+class AttestPromotionEvaluationRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    batch_evaluation_id: str = Field(
+        alias="batchEvaluationId",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+
+
+def _version_for_target(runtime_name: str, version_id: str, owner_sub: str):
+    version = get_versions_store().get(runtime_name, version_id, consistent=True)
+    if version is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    if version.owner_sub != owner_sub:
+        raise HTTPException(status_code=404, detail="Not found")
+    return version
 
 
 def _list_all_evaluation_configs(ctrl) -> list[dict]:
@@ -188,6 +273,150 @@ def _find_evaluation_config_for_runtime(ctrl, runtime_id: str) -> tuple[dict | N
     if matches:
         return matches[0]
     return None, None
+
+
+@router.post(
+    "/{runtime_name}/versions/{version_id}/promotion-evaluation/start",
+    dependencies=[Depends(require_scopes("eval:write"))],
+)
+async def start_promotion_evaluation(
+    runtime_name: str,
+    version_id: str,
+    body: StartPromotionEvaluationRequest,
+    caller_sub: str = Depends(get_caller_sub),
+) -> dict:
+    """Start one server-owned, version-bound AgentCore batch evaluation."""
+
+    runtime_name = _validate_runtime_name(runtime_name)
+    target = resolve_owned_runtime_version_target(runtime_name, version_id, caller_sub, required_protocol="HTTP")
+    version = _version_for_target(runtime_name, version_id, caller_sub)
+    try:
+        policy = validate_frozen_promotion_policy(version.promotion_policy)
+        client = target.client("bedrock-agentcore")
+        return start_batch_evaluation(
+            client,
+            runtime_name=runtime_name,
+            version_id=version_id,
+            deployment_id=target.deployment_id,
+            runtime_id=target.runtime_id,
+            runtime_arn=target.runtime_arn,
+            scenarios=[scenario.model_dump(mode="python", by_alias=False) for scenario in body.scenarios],
+            policy=policy,
+            kms_required=bool(version.production_gate_required),
+        )
+    except PromotionPolicyConfigurationError as exc:
+        logger.error("Production evaluation policy is invalid: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Production evaluation policy is unavailable") from exc
+    except PromotionEvidenceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise _service_unavailable("start promotion batch evaluation", exc) from exc
+
+
+@router.get(
+    "/{runtime_name}/versions/{version_id}/promotion-evaluation/{batch_evaluation_id}",
+    dependencies=[Depends(require_scopes("eval:read"))],
+)
+async def get_promotion_evaluation(
+    runtime_name: str,
+    version_id: str,
+    batch_evaluation_id: str,
+    caller_sub: str = Depends(get_caller_sub),
+) -> dict:
+    """Return the bounded status of one target-account batch evaluation."""
+
+    runtime_name = _validate_runtime_name(runtime_name)
+    target = resolve_owned_runtime_version_target(runtime_name, version_id, caller_sub, required_protocol="HTTP")
+    _version_for_target(runtime_name, version_id, caller_sub)
+    try:
+        result = get_batch_evaluation(target.client("bedrock-agentcore"), batch_evaluation_id)
+        assert_batch_evaluation_targets_runtime(
+            result,
+            runtime_id=target.runtime_id,
+            runtime_arn=target.runtime_arn,
+        )
+        return summarize_batch_evaluation(result)
+    except PromotionEvidenceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise _service_unavailable("get promotion batch evaluation", exc) from exc
+
+
+@router.post(
+    "/{runtime_name}/versions/{version_id}/promotion-evaluation/attest",
+    dependencies=[Depends(require_scopes("eval:write"))],
+)
+async def attest_promotion_evaluation(
+    runtime_name: str,
+    version_id: str,
+    body: AttestPromotionEvaluationRequest,
+    caller_sub: str = Depends(get_caller_sub),
+) -> dict:
+    """Verify and immutably attach a passing AgentCore batch result."""
+
+    runtime_name = _validate_runtime_name(runtime_name)
+    target = resolve_owned_runtime_version_target(runtime_name, version_id, caller_sub, required_protocol="HTTP")
+    version = _version_for_target(runtime_name, version_id, caller_sub)
+    try:
+        policy = validate_frozen_promotion_policy(version.promotion_policy)
+        result = get_batch_evaluation(target.client("bedrock-agentcore"), body.batch_evaluation_id)
+        evidence = validate_batch_evaluation_for_promotion(
+            result,
+            runtime_name=runtime_name,
+            version_id=version_id,
+            deployment_id=target.deployment_id,
+            runtime_id=target.runtime_id,
+            runtime_arn=target.runtime_arn,
+            version_created_at=version.created_at,
+            policy=policy,
+            now=datetime.now(UTC),
+        )
+        recorded = get_versions_store().record_promotion_evidence(
+            runtime_name,
+            version_id,
+            expected_owner_sub=caller_sub,
+            expected_deployment_id=target.deployment_id,
+            expected_runtime_id=target.runtime_id,
+            expected_runtime_arn=target.runtime_arn,
+            evidence=evidence,
+        )
+    except PromotionEvidencePending as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PromotionEvidenceConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (PromotionEvidenceError, PromotionPolicyConfigurationError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise _service_unavailable("attest promotion batch evaluation", exc) from exc
+    return {
+        "runtime_name": runtime_name,
+        "version_id": version_id,
+        "production_gate_required": bool(recorded.production_gate_required),
+        "promotion_policy": policy,
+        "promotion_evidence": recorded.promotion_evidence,
+    }
+
+
+@router.get(
+    "/{runtime_name}/versions/{version_id}/promotion-evidence",
+    dependencies=[Depends(require_scopes("eval:read"))],
+)
+async def get_promotion_evidence(
+    runtime_name: str,
+    version_id: str,
+    caller_sub: str = Depends(get_caller_sub),
+) -> dict:
+    """Return this immutable version's release policy and current evidence."""
+
+    runtime_name = _validate_runtime_name(runtime_name)
+    version = _version_for_target(runtime_name, version_id, caller_sub)
+    return {
+        "runtime_name": runtime_name,
+        "version_id": version_id,
+        "production_gate_required": bool(version.production_gate_required),
+        "promotion_policy": version.promotion_policy,
+        "promotion_evidence": version.promotion_evidence,
+    }
 
 
 @router.get("/{runtime_name}/evaluation-config", dependencies=[Depends(require_scopes("eval:read"))])

@@ -15,6 +15,7 @@ from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_events as events
 from aws_cdk import aws_events_targets as events_targets
 from aws_cdk import aws_iam as iam
+from aws_cdk import aws_kms as kms
 from aws_cdk import aws_lambda as _lambda
 from aws_cdk import aws_lambda_event_sources as lambda_event_sources
 from aws_cdk import aws_logs as logs
@@ -72,6 +73,34 @@ DEPLOYMENT_LAMBDA_OWNERSHIP_READ_TYPES: tuple[str, ...] = (
 # test that bounds the bundle reads the same list the deploy uses; a test with its own copy
 # would pass while the deploy shipped something else. See get_backend_code for the measured
 # reason each of the last two groups is here.
+
+
+def _production_evaluation_gate_value(stack: cdk.Stack, environment: str) -> str:
+    """Render an explicit Lambda flag; reject typoed context instead of bypassing."""
+
+    raw = stack.node.try_get_context("production_evaluation_gate")
+    if raw is None or str(raw).strip() == "":
+        return (
+            "false"
+            if environment.strip().lower()
+            in {
+                "dev",
+                "development",
+                "test",
+                "sandbox",
+                "preview",
+                "local",
+            }
+            else "true"
+        )
+    if isinstance(raw, bool):
+        return "true" if raw else "false"
+    normalized = str(raw).strip().lower()
+    if normalized not in {"true", "false"}:
+        raise ValueError("production_evaluation_gate context must be true or false")
+    return normalized
+
+
 BACKEND_ASSET_EXCLUDE: tuple[str, ...] = (
     ".venv",
     "__pycache__",
@@ -843,6 +872,42 @@ def build_deployment_lambda(
             iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole"),
         ],
     )
+    batch_evaluation_arn = f"arn:{stack.partition}:bedrock-agentcore:{stack.region}:{stack.account}:batch-evaluate/*"
+    evaluation_evidence_key = kms.Key(
+        stack,
+        "PromotionEvaluationEvidenceKey",
+        alias=f"alias/{cfg.project}-{cfg.env}-promotion-evidence",
+        description="Encrypts AgentCore batch-evaluation production promotion evidence",
+        enable_key_rotation=True,
+        removal_policy=RemovalPolicy.RETAIN,
+        pending_window=Duration.days(30),
+    )
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=["kms:DescribeKey"],
+            resources=[evaluation_evidence_key.key_arn],
+        )
+    )
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=["kms:GenerateDataKey", "kms:Decrypt"],
+            resources=[evaluation_evidence_key.key_arn],
+            conditions={
+                "StringLike": {"kms:EncryptionContext:aws:bedrock-agentcore:batchEvaluationArn": batch_evaluation_arn}
+            },
+        )
+    )
+    evaluation_evidence_key.add_to_resource_policy(
+        iam.PolicyStatement(
+            principals=[iam.ServicePrincipal("bedrock-agentcore.amazonaws.com")],
+            actions=["kms:GenerateDataKey", "kms:Decrypt"],
+            resources=["*"],
+            conditions={
+                "StringEquals": {"aws:SourceAccount": stack.account},
+                "ArnLike": {"aws:SourceArn": batch_evaluation_arn},
+            },
+        )
+    )
     # DynamoDB deployments table: read/write
     tables.deployments.grant_read_write_data(role)
     # The DELETE teardown's name hold (gateway_name_claim.hold_gateway_names_for_teardown,
@@ -1297,6 +1362,15 @@ def build_deployment_lambda(
             resources=["*"],
         )
     )
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=[
+                "bedrock-agentcore:StartBatchEvaluation",
+                "bedrock-agentcore:GetBatchEvaluation",
+            ],
+            resources=[f"arn:aws:bedrock-agentcore:*:{stack.account}:batch-evaluate/*"],
+        )
+    )
     # SEPARATE, ARN-SCOPED STATEMENT: the ownership tag read that every delete on
     # this role's cascade depends on. This is the SAME defect fixed for the step
     # roles in platform/step_lambdas.py (see AGENTCORE_OWNERSHIP_READ_TYPES there)
@@ -1416,6 +1490,34 @@ def build_deployment_lambda(
                 "logs:DescribeLogGroups",
             ],
             resources=["*"],
+        )
+    )
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=[
+                "logs:GetLogEvents",
+                "logs:FilterLogEvents",
+                "logs:StartQuery",
+                "logs:GetQueryResults",
+            ],
+            resources=[
+                f"arn:aws:logs:*:{stack.account}:log-group:/aws/bedrock-agentcore/runtimes/*",
+                f"arn:aws:logs:*:{stack.account}:log-group:/aws/bedrock-agentcore/evaluations/*",
+            ],
+        )
+    )
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=[
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+                "logs:PutRetentionPolicy",
+            ],
+            resources=[
+                f"arn:aws:logs:*:{stack.account}:log-group:/aws/bedrock-agentcore/evaluations/*",
+                f"arn:aws:logs:*:{stack.account}:log-group:/aws/bedrock-agentcore/evaluations/*:*",
+            ],
         )
     )
     # M-2: also delete the eval-results log groups on destroy_runtime. F-04 (signoff-g10):
@@ -2211,6 +2313,13 @@ def build_deployment_lambda(
             GOVERNANCE_TAG_KEY_PREFIXES_ENV: governance_tag_key_prefixes_env_value(),
             # Phase 4 (Loom) FinOps — cost budgets table (routers/cost.py).
             "BUDGET_TABLE_NAME": tables.budget.table_name,
+            # Production-like environments land new versions in staging and require
+            # server-verified AgentCore batch evidence before the production pointer moves.
+            "PRODUCTION_EVALUATION_GATE": _production_evaluation_gate_value(stack, cfg.env),
+            "PRODUCTION_EVALUATION_POLICY_JSON": str(
+                stack.node.try_get_context("production_evaluation_policy_json") or ""
+            ),
+            "EVALUATION_EVIDENCE_KMS_KEY_ARN": evaluation_evidence_key.key_arn,
             # Phase 5 (Loom) — audit trail table (middleware + admin router).
             "AUDIT_TABLE_NAME": tables.audit.table_name,
             # Loom-study 1.6 — JIT IAM permission-request workflow table.

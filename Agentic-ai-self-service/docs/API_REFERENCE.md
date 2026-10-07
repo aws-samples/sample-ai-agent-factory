@@ -138,9 +138,10 @@ the IAM roles and parameters in the account where the customer deploys it.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/runtimes/{name}/versions` | List a runtime's version history (newest first) |
+| `GET` | `/api/runtimes/{name}/versions` | List a runtime's version history (newest first), including its frozen release policy and attested evidence |
 | `GET` | `/api/runtimes/{name}/slots` | Get the production / staging slot pointers |
-| `POST` | `/api/runtimes/{name}/rollback` | Promote the previous production version back into production |
+| `POST` | `/api/runtimes/{name}/versions/{version_id}/promote` | Promote to staging, or to production only when required evidence is fresh and valid |
+| `POST` | `/api/runtimes/{name}/rollback` | Restore the exact previous production version (the emergency rollback path does not depend on a new evaluation) |
 
 ### Evaluation, Cost & Observability (runtime-scoped)
 
@@ -148,6 +149,10 @@ the IAM roles and parameters in the account where the customer deploys it.
 |--------|----------|-------------|
 | `GET` | `/api/runtimes/{name}/evaluation-config` | Registered Online Evaluation config (evaluator IDs + sampling rate) |
 | `GET` | `/api/runtimes/{name}/evaluations?hours=` | Per-evaluator score time-series from CloudWatch Logs Insights |
+| `POST` | `/api/runtimes/{name}/versions/{version_id}/promotion-evaluation/start` | Start an idempotent AgentCore batch evaluation from exact session IDs and ground truth; evaluator policy is server-owned |
+| `GET` | `/api/runtimes/{name}/versions/{version_id}/promotion-evaluation/{batch_id}` | Read bounded batch status after proving the batch source targets this version's runtime |
+| `POST` | `/api/runtimes/{name}/versions/{version_id}/promotion-evaluation/attest` | Verify a completed batch and conditionally record one immutable evidence document |
+| `GET` | `/api/runtimes/{name}/versions/{version_id}/promotion-evidence` | Read the frozen policy and current owner-checked release evidence |
 | `GET` | `/api/runtimes/{name}/dashboard-url` | Deep link to the auto-generated CloudWatch dashboard |
 | `GET` | `/api/runtimes/{name}/cost?from=&to=` | Token + estimated-cost rollup by model for the window |
 

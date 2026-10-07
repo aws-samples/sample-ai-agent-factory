@@ -837,3 +837,39 @@ def test_listing_by_flow_returns_only_the_callers_rows(monkeypatch):
 
     assert response.status_code == 200, response.text
     assert [r["deployment_id"] for r in response.json()] == ["mine"]
+
+
+def test_production_like_environment_defaults_new_deploys_to_staging(spy, monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    monkeypatch.delenv("PRODUCTION_EVALUATION_GATE", raising=False)
+
+    response = _client().post("/api/deploy", json=_body())
+
+    assert response.status_code == 202, response.text
+    version = spy.versions.put.call_args.args[0]
+    assert version.production_gate_required is True
+    assert version.promotion_policy["policy_digest"]
+    assert json.loads(spy.start.input_json)["deployment_slot"] == "staging"
+
+
+def test_production_like_environment_rejects_direct_production_before_side_effects(spy, monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    monkeypatch.delenv("PRODUCTION_EVALUATION_GATE", raising=False)
+
+    response = _client().post("/api/deploy", json=_body(deploymentSlot="production"))
+
+    assert response.status_code == 409, response.text
+    assert "Direct production deployment is disabled" in response.json()["detail"]
+    assert spy.side_effects == []
+
+
+def test_dev_environment_preserves_direct_production_default(spy, monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "dev")
+    monkeypatch.delenv("PRODUCTION_EVALUATION_GATE", raising=False)
+
+    response = _client().post("/api/deploy", json=_body())
+
+    assert response.status_code == 202, response.text
+    version = spy.versions.put.call_args.args[0]
+    assert version.production_gate_required is False
+    assert json.loads(spy.start.input_json)["deployment_slot"] == "production"

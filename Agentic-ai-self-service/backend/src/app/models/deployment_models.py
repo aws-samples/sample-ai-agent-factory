@@ -776,11 +776,12 @@ class DeployRequest(BaseModel):
     guardrails_config: dict | None = Field(alias="guardrailsConfig", default=None)
     observability_config: dict | None = Field(alias="observabilityConfig", default=None)
     a2a_config: dict | None = Field(alias="a2aConfig", default=None)
-    # Phase 1 Gap 1A — versioning. Caller can pin the slot this deploy lands
-    # on; default is "production". Version_id is server-minted (we never trust
-    # client-supplied ids) but ``description`` is captured for the version
-    # history UI.
-    deployment_slot: Literal["staging", "production"] | None = Field(alias="deploymentSlot", default="production")
+    # Phase 1 Gap 1A — versioning. An explicit slot is honored only when the
+    # environment policy permits it. Absence is resolved at admission: dev-like
+    # environments retain direct production for fast iteration; staging/prod-like
+    # environments land in staging and require server-verified evaluation before
+    # the production pointer can move.
+    deployment_slot: Literal["staging", "production"] | None = Field(alias="deploymentSlot", default=None)
     version_description: str | None = Field(alias="versionDescription", default=None, max_length=500)
     # Phase 2 (Loom) governance tagging. Caller supplies ad-hoc tag values
     # and/or selects a named tag profile; the deploy handler resolves them

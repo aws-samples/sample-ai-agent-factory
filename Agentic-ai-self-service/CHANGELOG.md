@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — production promotion requires immutable AgentCore batch-evaluation evidence
+
+- Production-like environments now default deployments to staging and reject direct production
+  before any persistence, credential staging, or AWS mutation. Dev-like environments preserve
+  their existing direct-production loop.
+- A version carries a frozen, digest-bound evaluator policy. The release UI starts a target-bound
+  AgentCore Batch Evaluation from representative session IDs and ground truth; the backend checks
+  the runtime/account/Region binding, terminal status, session completeness, evaluator failures,
+  thresholds, timestamps, and freshness. The browser cannot supply a verdict or score.
+- A passing result is written once to the version row. Production promotion condition-checks the
+  evidence digest, policy digest, expiry, owner, deployment, runtime, status, and creation identity
+  in the same DynamoDB transaction that moves the slot. Emergency rollback is separately limited
+  to the exact previous-production pointer.
+- Batch inputs and results use a dedicated rotating KMS key retained independently from the UI
+  stack. Caller crypto permissions are scoped by the batch-evaluation encryption context; the
+  AgentCore service-principal grant is scoped by source account and batch-evaluation ARN.
+- Standard agent owners now receive `eval:read` and `eval:write` for their own versions. Cross-
+  account target policies include only `StartBatchEvaluation` and `GetBatchEvaluation` on the
+  target account's `batch-evaluate/*` resources.
+
 ### Changed — every account id in the repository is an AWS documentation placeholder
 
 - Comments, docstrings, test fixtures and one catalog note carried the account the platform was

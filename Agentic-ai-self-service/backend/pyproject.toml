@@ -9,7 +9,8 @@ dependencies = [
     # 1.43.66 is the first release with the GA `agent-registry-control` /
     # `agent-registry` service models (Agent Registry left the
     # `bedrock-agentcore` namespace at GA).
-    "boto3>=1.43.66",
+    # 1.43.94 adds AgentCore batch evaluation, used by the production promotion gate.
+    "boto3>=1.43.94",
     "uvicorn>=0.32.0",
     "python-dotenv>=1.0.0",
     "mangum>=0.19.0",

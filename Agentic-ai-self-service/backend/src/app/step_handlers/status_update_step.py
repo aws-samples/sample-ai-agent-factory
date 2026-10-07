@@ -2365,7 +2365,7 @@ def handler(event: dict, context) -> dict:
         # because the deployment record itself is already marked succeeded.
         version_id = event.get("version_id")
         friendly_runtime_name = event.get("friendly_runtime_name")
-        deployment_slot = (event.get("deployment_slot") or "production").lower()
+        deployment_slot = (event.get("deployment_slot") or "staging").lower()
         owner_sub = event.get("owner_sub") or ""
         version_row_updated = False
         if version_id and friendly_runtime_name:
@@ -2490,6 +2490,8 @@ def handler(event: dict, context) -> dict:
                                 deployment_id=version_row.deployment_id,
                                 runtime_id=version_row.runtime_id,
                                 runtime_arn=version_row.runtime_arn,
+                                production_gate_required=version_row.production_gate_required,
+                                promotion_authority="deployment",
                             ),
                         )
                 except SlotWriteConflict:

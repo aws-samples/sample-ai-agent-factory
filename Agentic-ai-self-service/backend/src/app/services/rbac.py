@@ -112,6 +112,8 @@ GROUP_SCOPES: dict[str, set[str]] = {
         "agent:read",
         "agent:write",
         "cost:read",
+        "eval:read",
+        "eval:write",
         "prompt:read",
         "registry:read",
         "tag:read",
