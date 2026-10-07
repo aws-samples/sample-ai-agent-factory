@@ -6028,10 +6028,13 @@ def deploy_gateway(
         obo_required = obo_requested(connectors)
         if obo_required:
             logger.info("Using the platform workforce JWT authorizer for an OBO gateway")
-            cognito_response = workforce_gateway_identity(region)
+            cognito_response = workforce_gateway_identity(region, owner_sub)
         else:
             # Treat empty credentials as "auto-create Cognito" (e.g. template 3 sends empty clientId)
-            if identity_config and not (identity_config.get("clientId") or identity_config.get("client_id") or "").strip():
+            if (
+                identity_config
+                and not (identity_config.get("clientId") or identity_config.get("client_id") or "").strip()
+            ):
                 identity_config = {}
             provider = identity_config.get("provider", "cognito")
             if provider and provider != "cognito":
@@ -7302,9 +7305,7 @@ def deploy_gateway(
             # Durable authorization contract.  Invocation and generated code read
             # this exact marker; neither may infer OBO from a mutable UI request.
             "obo_required": obo_required,
-            "delegated_identity_live_gate": (
-                "first_authenticated_user_tool_call" if obo_required else None
-            ),
+            "delegated_identity_live_gate": ("first_authenticated_user_tool_call" if obo_required else None),
             "lambda_function_name": lambda_function_name,
             "custom_tool_lambdas": custom_tool_lambdas,
             "custom_tool_roles": custom_tool_roles,

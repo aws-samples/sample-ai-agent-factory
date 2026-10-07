@@ -1073,42 +1073,54 @@ def invoke(payload, context=None):
     subject_token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
     obo_client = None
     delegated_evidence = None
-    if GATEWAY_AUTH_MODE == "obo":
-        if (
-            not isinstance(subject_token, str)
-            or any(ch.isspace() for ch in subject_token)
-            or subject_token.count(".") != 2
-        ):
-            raise RuntimeError("OBO invocation requires one authenticated workforce JWT")
-        try:
-            _segment = subject_token.split(".")[1]
-            _segment += "=" * (-len(_segment) % 4)
-            _claims = json.loads(__import__("base64").urlsafe_b64decode(_segment.encode("ascii")))
-            delegated_evidence = dict(
-                subject=str(_claims.get("sub") or ""),
-                issuer=str(_claims.get("iss") or ""),
-                expires_at=_claims.get("exp"),
-                correlation_id=str(
-                    request_headers.get("X-Amzn-Trace-Id")
-                    or request_headers.get("x-amzn-trace-id")
-                    or ""
-                ),
-                gateway_exchange="ON_BEHALF_OF_TOKEN_EXCHANGE",
-                downstream_principal=None,
-            )
-        except Exception as exc:
-            raise RuntimeError("Runtime delivered an unreadable delegated JWT") from exc
-        {model_init}
-        obo_client = MCPClient(lambda: _create_transport(subject_token))
-        obo_client.start()
-        tools = get_full_tools_list(obo_client)
-        if not tools:
-            raise RuntimeError("OBO Gateway returned no tools for the authenticated user")
-        local_tools = [{local_tool_expr}]
-        agent = Agent(model=model, tools=tools + local_tools, system_prompt=SYSTEM_PROMPT)
-    else:
-        agent = _get_agent()
     try:
+        if GATEWAY_AUTH_MODE == "obo":
+            if (
+                not isinstance(subject_token, str)
+                or any(ch.isspace() for ch in subject_token)
+                or subject_token.count(".") != 2
+            ):
+                raise RuntimeError("OBO invocation requires one authenticated workforce JWT")
+            try:
+                _segment = subject_token.split(".")[1]
+                _segment += "=" * (-len(_segment) % 4)
+                _claims = json.loads(__import__("base64").urlsafe_b64decode(_segment.encode("ascii")))
+                _subject = _claims.get("sub")
+                _issuer = _claims.get("iss")
+                _expiry = _claims.get("exp")
+                if (
+                    not isinstance(_subject, str)
+                    or not _subject
+                    or not isinstance(_issuer, str)
+                    or not _issuer
+                    or isinstance(_expiry, bool)
+                    or not isinstance(_expiry, (int, float))
+                ):
+                    raise ValueError("invalid delegated identity claims")
+                delegated_evidence = dict(
+                    subject=_subject,
+                    issuer=_issuer,
+                    expires_at=_expiry,
+                    correlation_id=str(
+                        request_headers.get("X-Amzn-Trace-Id")
+                        or request_headers.get("x-amzn-trace-id")
+                        or ""
+                    ),
+                    gateway_exchange="ON_BEHALF_OF_TOKEN_EXCHANGE",
+                    downstream_principal=None,
+                )
+            except Exception as exc:
+                raise RuntimeError("Runtime delivered an unreadable delegated JWT") from exc
+            {model_init}
+            obo_client = MCPClient(lambda: _create_transport(subject_token))
+            obo_client.start()
+            tools = get_full_tools_list(obo_client)
+            if not tools:
+                raise RuntimeError("OBO Gateway returned no tools for the authenticated user")
+            local_tools = [{local_tool_expr}]
+            agent = Agent(model=model, tools=tools + local_tools, system_prompt=SYSTEM_PROMPT)
+        else:
+            agent = _get_agent()
         seen = _tool_use_ids(getattr(agent, "messages", None))
         result = agent(message)
         return {{
@@ -2504,44 +2516,58 @@ def invoke(payload, context=None):
     subject_token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
     obo_client = None
     delegated_evidence = None
-    if OBO_GATEWAY:
-        if (
-            not isinstance(subject_token, str)
-            or any(ch.isspace() for ch in subject_token)
-            or subject_token.count(".") != 2
-        ):
-            raise RuntimeError("OBO invocation requires one authenticated workforce JWT")
-        try:
-            _segment = subject_token.split(".")[1]
-            _segment += "=" * (-len(_segment) % 4)
-            _claims = json.loads(__import__("base64").urlsafe_b64decode(_segment.encode("ascii")))
-            delegated_evidence = dict(
-                subject=str(_claims.get("sub") or ""),
-                issuer=str(_claims.get("iss") or ""),
-                expires_at=_claims.get("exp"),
-                correlation_id=str(
-                    request_headers.get("X-Amzn-Trace-Id")
-                    or request_headers.get("x-amzn-trace-id")
-                    or ""
-                ),
-                gateway_exchange="ON_BEHALF_OF_TOKEN_EXCHANGE",
-                downstream_principal=None,
-            )
-        except Exception as exc:
-            raise RuntimeError("Runtime delivered an unreadable delegated JWT") from exc
-        obo_client = MCPClient(lambda: _create_transport(subject_token))
-        obo_client.start()
-        obo_tools = get_full_tools_list(obo_client)
-        if not obo_tools:
-            raise RuntimeError("OBO Gateway returned no tools for the authenticated user")
-        obo_tools += [{", ".join(local_tool_names)}]
-        agent = _get_agent(tools=obo_tools)
     try:
+        if globals().get("OBO_GATEWAY", False):
+            if (
+                not isinstance(subject_token, str)
+                or any(ch.isspace() for ch in subject_token)
+                or subject_token.count(".") != 2
+            ):
+                raise RuntimeError("OBO invocation requires one authenticated workforce JWT")
+            try:
+                _segment = subject_token.split(".")[1]
+                _segment += "=" * (-len(_segment) % 4)
+                _claims = json.loads(__import__("base64").urlsafe_b64decode(_segment.encode("ascii")))
+                _subject = _claims.get("sub")
+                _issuer = _claims.get("iss")
+                _expiry = _claims.get("exp")
+                if (
+                    not isinstance(_subject, str)
+                    or not _subject
+                    or not isinstance(_issuer, str)
+                    or not _issuer
+                    or isinstance(_expiry, bool)
+                    or not isinstance(_expiry, (int, float))
+                ):
+                    raise ValueError("invalid delegated identity claims")
+                delegated_evidence = dict(
+                    subject=_subject,
+                    issuer=_issuer,
+                    expires_at=_expiry,
+                    correlation_id=str(
+                        request_headers.get("X-Amzn-Trace-Id")
+                        or request_headers.get("x-amzn-trace-id")
+                        or ""
+                    ),
+                    gateway_exchange="ON_BEHALF_OF_TOKEN_EXCHANGE",
+                    downstream_principal=None,
+                )
+            except Exception as exc:
+                raise RuntimeError("Runtime delivered an unreadable delegated JWT") from exc
+            obo_client = MCPClient(lambda: _create_transport(subject_token))
+            obo_client.start()
+            obo_tools = get_full_tools_list(obo_client)
+            if not obo_tools:
+                raise RuntimeError("OBO Gateway returned no tools for the authenticated user")
+            obo_tools += [{", ".join(local_tool_names)}]
+            agent = _get_agent(tools=obo_tools)
+        else:
+            agent = _get_agent()
         seen = _tool_use_ids(getattr(agent, "messages", None))
         result = agent(enriched_prompt)
         response_text = str(result)
 
-        # Save to memory.  Neither the subject token nor Gateway transport enters
+        # Save to memory. Neither the subject token nor Gateway transport enters
         # Memory; only the user's message and assistant response are persisted.
         _save_to_memory(actor_id, session_id, message, response_text)
 

@@ -13,9 +13,13 @@ All notable changes to this project are documented here. The format follows
   token is forwarded. The OBO branch uses AgentCore's documented bearer HTTP interface because
   boto3 `InvokeAgentRuntime` is SigV4-only.
 - OBO Runtime and Gateway authorizers trust the same stack-provided workforce Cognito issuer and
-  client. Generated agents use a fresh MCP client per invocation and never cache, persist, log, or
-  return the JWT. SigV4, Basic, junk, missing, and expired headers fail closed; requested OBO can
-  no longer fall back to shared client credentials.
+  client and require the exact deployment-owner `sub` claim. The API rechecks subject, issuer,
+  client, access-token type, and expiry before forwarding; returned identity evidence must match
+  the same token. Generated agents use a fresh MCP client per invocation and close it even when
+  startup or tool discovery fails. They never cache, persist, log, or return the JWT. SigV4,
+  Basic, junk, missing, substituted, and expired headers fail closed; requested OBO can no longer
+  fall back to shared client credentials. Ordinary memory agents retain their non-OBO path even
+  when invoked from lifted/exported code without the optional OBO module flag.
 - Safe `identityEvidence` hooks correlate issuer/subject/expiry/trace with tool receipts. The
   downstream principal remains a live `whoami`-style attestation gate on the first authenticated
   tool call, recorded as `delegated_identity_live_gate`; no deploy-time machine probe impersonates

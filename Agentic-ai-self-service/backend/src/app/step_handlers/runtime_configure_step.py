@@ -14,8 +14,8 @@ from app.models.deployment_models import (
     RuntimeConfig,
 )
 from app.services import step_clients
-from app.services.deployment_state_store import DeploymentStateStore
 from app.services.delegated_identity import runtime_obo_authorizer
+from app.services.deployment_state_store import DeploymentStateStore
 from app.services.gateway_deployer import validate_token_endpoint_shape
 from app.services.observability import (
     build_otel_env_vars,
@@ -381,7 +381,10 @@ def handler(event: dict, context) -> dict:
         authorizer_config = None
         request_header_config = None
         if gateway_result.get("obo_required") is True:
-            authorizer_config, request_header_config = runtime_obo_authorizer(region)
+            authorizer_config, request_header_config = runtime_obo_authorizer(
+                region,
+                str(event.get("owner_sub") or ""),
+            )
 
         runtime_result = create_agent_runtime(
             agentcore_ctrl=agentcore_ctrl,

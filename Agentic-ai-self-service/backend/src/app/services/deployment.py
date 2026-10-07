@@ -2677,7 +2677,10 @@ class WorkflowExecutor:
             authorizer_config = None
             request_header_config = None
             if gateway_result and gateway_result.get("obo_required") is True:
-                authorizer_config, request_header_config = runtime_obo_authorizer(self.region)
+                authorizer_config, request_header_config = runtime_obo_authorizer(
+                    self.region,
+                    owner_sub,
+                )
 
             runtime_result = create_agent_runtime(
                 agentcore_ctrl,

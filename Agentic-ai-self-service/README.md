@@ -88,7 +88,9 @@ explicitly. `us-*` and `eu-*` regions need no such adjustment.
 
 A connector with `delegationMode: "obo"` changes the complete invocation chain;
 it is not a credential-provider-only switch. The Gateway and Runtime both trust
-the same workforce Cognito issuer/client that protects the API. End-user chat
+the same workforce Cognito issuer/client that protects the API and require the
+exact deployment-owner `sub` claim, preventing a different valid platform user
+from invoking the tenant's OBO plane directly. End-user chat
 invokes `POST /api/runtimes/{name}/slots/production/invoke`; the server resolves
 the production slot to its immutable version/deployment/Runtime ARN and recorded
 endpoint qualifier, then calls the Runtime through AgentCore's documented bearer

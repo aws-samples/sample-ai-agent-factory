@@ -158,6 +158,11 @@ class _Harness:
             _write,
         )
         monkeypatch.setattr(rbac, "has_scopes", lambda _request, _required: True)
+        monkeypatch.setattr(
+            versions_router,
+            "workforce_token_expectations",
+            lambda _region: ("https://issuer.example", "workforce-client"),
+        )
 
         app = FastAPI()
         app.include_router(versions_router.router)
@@ -470,15 +475,24 @@ def test_direct_slot_resolver_rejects_an_invalid_slot_before_any_read(monkeypatc
     slots.get.assert_not_called()
 
 
-def _obo_token(*, exp: int | None = None) -> str:
+def _obo_token(
+    *,
+    exp: int | None = None,
+    sub: str = OWNER,
+    issuer: str = "https://issuer.example",
+    client_id: str = "workforce-client",
+    token_use: str = "access",
+) -> str:
     import base64
     import time
 
     header = base64.urlsafe_b64encode(b'{"alg":"RS256","kid":"k"}').rstrip(b"=").decode()
     claims = {
-        "sub": OWNER,
-        "iss": "https://issuer.example",
+        "sub": sub,
+        "iss": issuer,
         "exp": exp if exp is not None else int(time.time()) + 300,
+        "client_id": client_id,
+        "token_use": token_use,
     }
     payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
     return f"{header}.{payload}.signature"
@@ -497,24 +511,26 @@ def test_authorized_obo_slot_forwards_user_bearer_to_exact_version(harness, monk
     from app.services import runtime_invocation
 
     _enable_obo(harness)
-    token = _obo_token()
+    token = _obo_token(exp=9999999999)
     captured = {}
 
     def _invoke(**kwargs):
         captured.update(kwargs)
         return {
             "statusCode": 200,
-            "response": json.dumps({
-                "response": "delegated answer",
-                "identity_evidence": {
-                    "subject": OWNER,
-                    "issuer": "https://issuer.example",
-                    "expires_at": 9999999999,
-                    "correlation_id": "trace-1",
-                    "gateway_exchange": "ON_BEHALF_OF_TOKEN_EXCHANGE",
-                    "downstream_principal": None,
-                },
-            }).encode(),
+            "response": json.dumps(
+                {
+                    "response": "delegated answer",
+                    "identity_evidence": {
+                        "subject": OWNER,
+                        "issuer": "https://issuer.example",
+                        "expires_at": 9999999999,
+                        "correlation_id": "trace-1",
+                        "gateway_exchange": "ON_BEHALF_OF_TOKEN_EXCHANGE",
+                        "downstream_principal": None,
+                    },
+                }
+            ).encode(),
             "runtimeSessionId": "delegated-session",
         }
 
@@ -528,6 +544,14 @@ def test_authorized_obo_slot_forwards_user_bearer_to_exact_version(harness, monk
     assert response.status_code == 200, response.text
     assert response.json()["success"] is True
     assert response.json()["versionId"] == V1
+    assert response.json()["identityEvidence"] == {
+        "subject": OWNER,
+        "issuer": "https://issuer.example",
+        "expires_at": 9999999999,
+        "correlation_id": "trace-1",
+        "gateway_exchange": "ON_BEHALF_OF_TOKEN_EXCHANGE",
+        "downstream_principal": None,
+    }
     assert captured["runtime_arn"] == _runtime_arn(V1)
     assert captured["deployment_state"]["runtime_endpoint"].endswith("/runtime-endpoint/DEFAULT")
     assert captured["bearer_token"] == token
@@ -551,6 +575,33 @@ def test_unauthorized_obo_slot_never_invokes_runtime(harness, monkeypatch, autho
         f"/api/runtimes/{NAME}/slots/production/invoke",
         json={"input": "who am I"},
         headers=headers,
+    )
+
+    assert response.status_code == 401
+    invoke.assert_not_called()
+    assert harness.agentcore.invocations == []
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        _obo_token(sub=OTHER),
+        _obo_token(issuer="https://other.example"),
+        _obo_token(client_id="other-client"),
+        _obo_token(token_use="id"),
+    ],
+)
+def test_substituted_obo_claims_never_invoke_runtime(harness, monkeypatch, token):
+    from app.services import runtime_invocation
+
+    _enable_obo(harness)
+    invoke = MagicMock()
+    monkeypatch.setattr(runtime_invocation, "invoke_agent_runtime_with_bearer", invoke)
+
+    response = harness.client.post(
+        f"/api/runtimes/{NAME}/slots/production/invoke",
+        json={"input": "who am I"},
+        headers={"Authorization": f"Bearer {token}"},
     )
 
     assert response.status_code == 401

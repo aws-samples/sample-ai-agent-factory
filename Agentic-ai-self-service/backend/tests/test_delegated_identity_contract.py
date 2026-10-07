@@ -7,16 +7,41 @@ import json
 import time
 from unittest.mock import MagicMock
 
+import botocore.session
 import pytest
 from app.services import delegated_identity as di
 from app.services import runtime_invocation as ri
+from botocore.validate import validate_parameters
 
 
-def _jwt(*, exp: float | None = None, sub: str = "user-123", issuer: str = "https://issuer.example") -> str:
+def _jwt(
+    *,
+    exp: float | None = None,
+    sub: str = "user-123",
+    issuer: str = "https://issuer.example",
+    client_id: str = "workforce-client",
+    token_use: str = "access",
+) -> str:
     header = base64.urlsafe_b64encode(b'{"alg":"RS256","kid":"k1"}').rstrip(b"=").decode()
-    claims = {"sub": sub, "iss": issuer, "exp": exp if exp is not None else time.time() + 300}
+    claims = {
+        "sub": sub,
+        "iss": issuer,
+        "exp": exp if exp is not None else time.time() + 300,
+        "client_id": client_id,
+        "token_use": token_use,
+    }
     payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
     return f"{header}.{payload}.signature"
+
+
+def _extract(token: str, *, now: float = 100) -> str:
+    return di.extract_user_bearer(
+        {"Authorization": f"Bearer {token}"},
+        expected_subject="user-123",
+        expected_issuer="https://issuer.example",
+        expected_client_id="workforce-client",
+        now=now,
+    )
 
 
 def test_obo_is_explicit_and_non_obo_is_unchanged():
@@ -33,15 +58,24 @@ def test_workforce_authorizer_has_no_machine_credential(monkeypatch):
     monkeypatch.setenv("WORKFORCE_CLIENT_ID", "workforce-client")
     monkeypatch.setenv("WORKFORCE_REGION", "eu-west-1")
 
-    identity = di.workforce_gateway_identity("eu-west-1")
+    identity = di.workforce_gateway_identity("eu-west-1", "user-123")
 
     assert identity["authorizer_config"] == {
         "customJWTAuthorizer": {
             "discoveryUrl": (
-                "https://cognito-idp.eu-west-1.amazonaws.com/"
-                "eu-west-1_pool123/.well-known/openid-configuration"
+                "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_pool123/.well-known/openid-configuration"
             ),
             "allowedClients": ["workforce-client"],
+            "customClaims": [
+                {
+                    "inboundTokenClaimName": "sub",
+                    "inboundTokenClaimValueType": "STRING",
+                    "authorizingClaimMatchValue": {
+                        "claimMatchValue": {"matchValueString": "user-123"},
+                        "claimMatchOperator": "EQUALS",
+                    },
+                }
+            ],
         }
     }
     assert identity["client_info"] == {
@@ -57,21 +91,34 @@ def test_workforce_authorizer_fails_closed_when_stack_wiring_is_missing(monkeypa
     monkeypatch.delenv("WORKFORCE_USER_POOL_ID", raising=False)
     monkeypatch.delenv("WORKFORCE_CLIENT_ID", raising=False)
     with pytest.raises(di.DelegatedIdentityError, match="workforce"):
-        di.workforce_gateway_identity("eu-west-1")
+        di.workforce_gateway_identity("eu-west-1", "user-123")
+
+
+def test_workforce_authorizer_rejects_missing_or_invalid_owner(monkeypatch):
+    monkeypatch.setenv("WORKFORCE_USER_POOL_ID", "eu-west-1_pool123")
+    monkeypatch.setenv("WORKFORCE_CLIENT_ID", "workforce-client")
+    monkeypatch.setenv("WORKFORCE_REGION", "eu-west-1")
+    for owner in ("", "user/other", "x" * 256):
+        with pytest.raises(di.DelegatedIdentityError, match="owner"):
+            di.workforce_gateway_identity("eu-west-1", owner)
 
 
 def test_runtime_authorizer_uses_exact_supported_header_shape(monkeypatch):
     monkeypatch.setenv("WORKFORCE_USER_POOL_ID", "eu-west-1_pool123")
     monkeypatch.setenv("WORKFORCE_CLIENT_ID", "workforce-client")
     monkeypatch.setenv("WORKFORCE_REGION", "eu-west-1")
-    authorizer, headers = di.runtime_obo_authorizer("eu-west-1")
+    authorizer, headers = di.runtime_obo_authorizer("eu-west-1", "user-123")
     assert authorizer["customJWTAuthorizer"]["allowedClients"] == ["workforce-client"]
+    assert authorizer["customJWTAuthorizer"]["customClaims"][0]["authorizingClaimMatchValue"] == {
+        "claimMatchValue": {"matchValueString": "user-123"},
+        "claimMatchOperator": "EQUALS",
+    }
     assert headers == {"requestHeaderAllowlist": ["Authorization"]}
 
 
 def test_fresh_user_bearer_is_accepted():
     token = _jwt(exp=200)
-    assert di.extract_user_bearer({"Authorization": f"Bearer {token}"}, now=100) == token
+    assert _extract(token) == token
 
 
 @pytest.mark.parametrize(
@@ -87,15 +134,35 @@ def test_fresh_user_bearer_is_accepted():
 )
 def test_non_user_credentials_and_mutated_bearers_are_rejected(header):
     with pytest.raises(di.DelegatedIdentityError):
-        di.extract_user_bearer({"authorization": header}, now=100)
+        di.extract_user_bearer(
+            {"authorization": header},
+            expected_subject="user-123",
+            expected_issuer="https://issuer.example",
+            expected_client_id="workforce-client",
+            now=100,
+        )
+
+
+@pytest.mark.parametrize(
+    ("token", "message"),
+    [
+        (_jwt(sub="other-user"), "authenticated caller"),
+        (_jwt(issuer="https://other.example"), "wrong issuer"),
+        (_jwt(client_id="other-client"), "wrong client"),
+        (_jwt(token_use="id"), "not an access token"),
+    ],
+)
+def test_substituted_identity_claims_are_rejected(token, message):
+    with pytest.raises(di.DelegatedIdentityError, match=message):
+        _extract(token)
 
 
 def test_expired_subject_is_rejected_and_never_cached():
     expired = _jwt(exp=99)
     fresh = _jwt(exp=101)
     with pytest.raises(di.DelegatedIdentityError, match="expired"):
-        di.extract_user_bearer({"authorization": f"Bearer {expired}"}, now=100)
-    assert di.extract_user_bearer({"authorization": f"Bearer {fresh}"}, now=100) == fresh
+        _extract(expired)
+    assert _extract(fresh) == fresh
 
 
 class _Response:
@@ -164,7 +231,7 @@ def test_mutated_runtime_endpoint_never_receives_the_user_token(monkeypatch, end
     urlopen.assert_not_called()
 
 
-def test_identity_evidence_accepts_only_non_credential_contract():
+def test_identity_evidence_accepts_only_caller_bound_non_credential_contract():
     evidence = {
         "subject": "user-123",
         "issuer": "https://issuer.example",
@@ -174,9 +241,34 @@ def test_identity_evidence_accepts_only_non_credential_contract():
         "downstream_principal": None,
     }
     body = json.dumps({"response": "ok", "identity_evidence": evidence})
-    assert ri.parse_identity_evidence(body) == evidence
-    evidence["access_token"] = "must-not-pass"
-    assert ri.parse_identity_evidence(json.dumps({"identity_evidence": evidence})) is None
+    expectations = {
+        "expected_subject": "user-123",
+        "expected_issuer": "https://issuer.example",
+        "expected_expiry": 200,
+    }
+    assert ri.parse_identity_evidence(body, **expectations) == evidence
+    for key, value in (
+        ("subject", "other-user"),
+        ("issuer", "https://other.example"),
+        ("expires_at", 201),
+        ("downstream_principal", ""),
+    ):
+        mutated = {**evidence, key: value}
+        assert (
+            ri.parse_identity_evidence(
+                json.dumps({"identity_evidence": mutated}),
+                **expectations,
+            )
+            is None
+        )
+    credential_bearing = {**evidence, "access_token": "must-not-pass"}
+    assert (
+        ri.parse_identity_evidence(
+            json.dumps({"identity_evidence": credential_bearing}),
+            **expectations,
+        )
+        is None
+    )
 
 
 def test_generated_gateway_agent_uses_runtime_headers_and_never_payload_tokens():
@@ -193,6 +285,9 @@ def test_generated_gateway_agent_uses_runtime_headers_and_never_payload_tokens()
     assert 'request_headers.get("Authorization")' in code
     assert 'GATEWAY_AUTH_MODE == "obo"' in code
     assert "MCPClient(lambda: _create_transport(subject_token))" in code
+    assert "invalid delegated identity claims" in code
+    assert code.index("try:\n        if GATEWAY_AUTH_MODE") < code.index("obo_client.start()")
+    assert code.index("finally:\n        if obo_client is not None") > code.index("get_full_tools_list(obo_client)")
     assert "obo_client.stop" in code
     assert "_user_bearer_token" not in code
     assert 'if GATEWAY_URL and GATEWAY_AUTH_MODE != "obo"' in code
@@ -210,9 +305,13 @@ def test_generated_memory_agent_does_not_cache_obo_agent_or_token():
     )
     compile(code, "generated-memory-agent.py", "exec")
     assert "def invoke(payload, context=None):" in code
-    assert "if OBO_GATEWAY:" in code
+    assert 'if globals().get("OBO_GATEWAY", False):' in code
     assert "return Agent(model=_model, system_prompt=SYSTEM_PROMPT, **extra_kwargs)" in code
     assert "MCPClient(lambda: _create_transport(subject_token))" in code
+    assert "invalid delegated identity claims" in code
+    assert "else:\n            agent = _get_agent()" in code
+    assert code.index('try:\n        if globals().get("OBO_GATEWAY", False):') < code.index("obo_client.start()")
+    assert code.index("finally:\n        if obo_client is not None") > code.index("get_full_tools_list(obo_client)")
     assert "_user_bearer_token" not in code
 
 
@@ -247,6 +346,18 @@ def test_runtime_create_and_update_preserve_request_header_configuration(monkeyp
         region="eu-west-1",
     )
     assert result["runtime_id"] == "orders_agent-1234567890"
-    assert ctrl.created["requestHeaderConfiguration"] == {
-        "requestHeaderAllowlist": ["Authorization"]
-    }
+    assert ctrl.created["requestHeaderConfiguration"] == {"requestHeaderAllowlist": ["Authorization"]}
+
+
+def test_owner_bound_authorizer_matches_pinned_botocore_models(monkeypatch):
+    monkeypatch.setenv("WORKFORCE_USER_POOL_ID", "eu-west-1_pool123")
+    monkeypatch.setenv("WORKFORCE_CLIENT_ID", "workforce-client")
+    monkeypatch.setenv("WORKFORCE_REGION", "eu-west-1")
+    identity = di.workforce_gateway_identity("eu-west-1", "user-123")
+    service = botocore.session.get_session().get_service_model("bedrock-agentcore-control")
+    for operation_name in ("CreateAgentRuntime", "CreateGateway"):
+        operation = service.operation_model(operation_name)
+        validate_parameters(
+            identity["authorizer_config"],
+            operation.input_shape.members["authorizerConfiguration"],
+        )

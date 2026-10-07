@@ -23,7 +23,10 @@ from fastapi import HTTPException
 
 from app.models.deployment_models import DeploymentStatusEnum, TestRequest, TestResponse
 from app.services import step_clients
-from app.services.delegated_identity import deployment_requires_obo
+from app.services.delegated_identity import (
+    delegated_bearer_identity,
+    deployment_requires_obo,
+)
 from app.services.invocation_identity import InvocationIdentity, InvocationIdentityError
 
 logger = logging.getLogger(__name__)
@@ -249,8 +252,14 @@ _IDENTITY_EVIDENCE_KEYS = frozenset(
 )
 
 
-def parse_identity_evidence(body: Any) -> dict[str, Any] | None:
-    """Return only non-credential identity/correlation evidence from Runtime."""
+def parse_identity_evidence(
+    body: Any,
+    *,
+    expected_subject: str | None = None,
+    expected_issuer: str | None = None,
+    expected_expiry: float | None = None,
+) -> dict[str, Any] | None:
+    """Return only caller-bound, non-credential identity evidence from Runtime."""
 
     try:
         data = json.loads(_body_text(body))
@@ -261,15 +270,33 @@ def parse_identity_evidence(body: Any) -> dict[str, Any] | None:
         return None
     if evidence.get("gateway_exchange") != "ON_BEHALF_OF_TOKEN_EXCHANGE":
         return None
-    for key in ("subject", "issuer", "correlation_id"):
+    for key in ("subject", "issuer"):
         value = evidence.get(key)
-        if not isinstance(value, str) or len(value) > 1024 or any(ord(ch) < 0x20 for ch in value):
+        if not isinstance(value, str) or not value or len(value) > 1024 or any(ord(ch) < 0x20 for ch in value):
             return None
+    correlation_id = evidence.get("correlation_id")
+    if (
+        not isinstance(correlation_id, str)
+        or len(correlation_id) > 1024
+        or any(ord(ch) < 0x20 for ch in correlation_id)
+    ):
+        return None
     expiry = evidence.get("expires_at")
     if isinstance(expiry, bool) or not isinstance(expiry, (int, float)):
         return None
+    if expected_subject is not None and evidence["subject"] != expected_subject:
+        return None
+    if expected_issuer is not None and evidence["issuer"] != expected_issuer:
+        return None
+    if expected_expiry is not None and float(expiry) != float(expected_expiry):
+        return None
     downstream = evidence.get("downstream_principal")
-    if downstream is not None and (not isinstance(downstream, str) or len(downstream) > 1024):
+    if downstream is not None and (
+        not isinstance(downstream, str)
+        or not downstream
+        or len(downstream) > 1024
+        or any(ord(ch) < 0x20 for ch in downstream)
+    ):
         return None
     return dict(evidence)
 
@@ -444,6 +471,7 @@ def invoke_verified_http_runtime(
         )
 
     obo_required = deployment_requires_obo(deployment_state)
+    expected_identity: tuple[str, str, float] | None = None
     gateway_result = deployment_state.get("gateway_result") or {}
     client_info = gateway_result.get("client_info")
     if client_info and not obo_required:
@@ -466,6 +494,7 @@ def invoke_verified_http_runtime(
                     success=False,
                     error="OBO was requested but no authenticated user bearer token was supplied",
                 )
+            expected_identity = delegated_bearer_identity(user_bearer_token)
             response = invoke_agent_runtime_with_bearer(
                 runtime_arn=runtime_arn,
                 deployment_state=deployment_state,
@@ -526,7 +555,12 @@ def invoke_verified_http_runtime(
             session_id=session_id,
             arn=runtime_arn,
             tool_receipts=parse_tool_receipts(raw_response),
-            identity_evidence=parse_identity_evidence(raw_response),
+            identity_evidence=parse_identity_evidence(
+                raw_response,
+                expected_subject=expected_identity[0] if expected_identity else None,
+                expected_issuer=expected_identity[1] if expected_identity else None,
+                expected_expiry=expected_identity[2] if expected_identity else None,
+            ),
         )
     except Exception as exc:  # noqa: BLE001
         error_msg = str(exc)

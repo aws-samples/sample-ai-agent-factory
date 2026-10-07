@@ -34,6 +34,7 @@ from app.services.delegated_identity import (
     DelegatedIdentityError,
     deployment_requires_obo,
     extract_user_bearer,
+    workforce_token_expectations,
 )
 from app.services.gateway_deployer import gateway_aws_session, get_cognito_token
 from app.services.harness_deployer import invoke_harness
@@ -257,7 +258,13 @@ async def invoke_runtime_slot(
     user_bearer_token = None
     if deployment_requires_obo(deployment_state):
         try:
-            user_bearer_token = extract_user_bearer(raw_request.headers)
+            expected_issuer, expected_client_id = workforce_token_expectations(target.region)
+            user_bearer_token = extract_user_bearer(
+                raw_request.headers,
+                expected_subject=caller_sub,
+                expected_issuer=expected_issuer,
+                expected_client_id=expected_client_id,
+            )
         except DelegatedIdentityError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
 
