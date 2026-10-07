@@ -209,8 +209,11 @@ promotion; existing version authority is intentionally never backfilled.
 Batch inputs/results are encrypted with the stack's dedicated rotating KMS key.
 The key policy scopes the deployment Lambda and
 `bedrock-agentcore.amazonaws.com` to this account's `batch-evaluate/*` ARN and
-encryption context. The key is retained on stack removal so deleting the UI does
-not silently destroy release evidence. A cross-account or same-account
+encryption context. In production-like environments the key uses
+`RetainExceptOnCreate`: failed first-stack creation cleans it up, while later stack
+deletes and replacements retain evidence independently from the UI. Dev/test/sandbox
+and other throwaway environments destroy it with the stack. This prevents both orphaned
+failed-create keys and accidental production evidence loss. A cross-account or same-account
 cross-Region target must provide a target-Region evaluation key before it can
 inherit production-promotion support; a home-Region key is never reused across
 that boundary.

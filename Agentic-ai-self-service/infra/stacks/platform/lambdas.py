@@ -941,7 +941,7 @@ def build_deployment_lambda(
         alias=f"alias/{cfg.project}-{cfg.env}-promotion-evidence",
         description="Encrypts AgentCore batch-evaluation production promotion evidence",
         enable_key_rotation=True,
-        removal_policy=RemovalPolicy.RETAIN,
+        removal_policy=cfg.removal_policy,
         pending_window=Duration.days(30),
     )
     role.add_to_policy(

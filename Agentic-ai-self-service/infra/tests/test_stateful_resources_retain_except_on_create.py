@@ -29,6 +29,7 @@ from stacks.platform_stack import PlatformStack
 # Types whose instances hold state and which carry the environment's removal policy.
 STATEFUL_TYPES = {
     "AWS::DynamoDB::Table",
+    "AWS::KMS::Key",
     "AWS::Cognito::UserPool",
     "AWS::Cognito::UserPoolDomain",
     "AWS::S3::Bucket",

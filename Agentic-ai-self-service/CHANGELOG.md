@@ -30,6 +30,15 @@ All notable changes to this project are documented here. The format follows
   Search scenarios independently. It is a release-input contract, not a claim that a live campaign
   has already passed.
 
+### Fixed — promotion evidence keys follow environment lifecycle
+
+- The promotion-evidence CMK now uses the same stateful removal policy as every table, pool,
+  bucket, queue, and flow-log group: production-like stacks synthesize
+  `RetainExceptOnCreate`/retained replacement, while dev/test/sandbox stacks delete the key.
+  Failed first creates no longer strand a CMK, and throwaway teardown leaves no project key.
+- The exhaustive stateful-resource oracle now includes `AWS::KMS::Key`; a dedicated test pins
+  rotation, 30-day pending window, API wiring, and destroy semantics in a test environment.
+
 ### Fixed — deployment summaries expose one explicit runtime key
 
 - `GET /api/deploy/{id}` and `GET /api/deployments` now share one response serializer. Both expose

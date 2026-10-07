@@ -202,7 +202,7 @@ def test_production_evaluation_gate_context_is_strict():
         )
 
 
-def test_production_evidence_key_is_rotating_retained_and_bound_to_the_api(template):
+def test_test_environment_evidence_key_is_rotating_destroyable_and_bound_to_the_api(template):
     keys = [
         (logical_id, resource)
         for logical_id, resource in template["Resources"].items()
@@ -214,7 +214,8 @@ def test_production_evidence_key_is_rotating_retained_and_bound_to_the_api(templ
     key_id, key = keys[0]
     assert key["Properties"]["EnableKeyRotation"] is True
     assert key["Properties"]["PendingWindowInDays"] == 30
-    assert key["DeletionPolicy"] == "Retain"
+    assert key.get("DeletionPolicy") in (None, "Delete")
+    assert key.get("UpdateReplacePolicy") in (None, "Delete")
     environment = _deployment_function(template)["Properties"]["Environment"]["Variables"]
     assert environment["EVALUATION_EVIDENCE_KMS_KEY_ARN"] == {"Fn::GetAtt": [key_id, "Arn"]}
 
