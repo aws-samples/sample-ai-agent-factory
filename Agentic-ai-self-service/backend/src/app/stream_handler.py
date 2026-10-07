@@ -76,11 +76,16 @@ from app.deployment_handler import (
     _scan_for_runtime,
 )
 from app.services import step_clients
+from app.services.budget_store import (
+    BudgetExceeded,
+    get_budget_store,
+)
 from app.services.config import load_config
 from app.services.delegated_identity import deployment_requires_obo
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.harness_deployer import invoke_harness
 from app.services.invocation_identity import InvocationIdentityError, memory_invocation_identity
+from app.services.production_safety import is_production_like_environment
 from app.services.runtime_invocation import parse_tool_receipts
 
 logger = logging.getLogger(__name__)
@@ -354,6 +359,27 @@ def _resolve_runtime_arn(
     return f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/{runtime_id}"
 
 
+def _stream_budget_reservation(deployment_state: dict, runtime_id: str, caller_sub: str | None):
+    budget_table = os.environ.get("BUDGET_TABLE_NAME", "").strip()
+    if not budget_table:
+        if is_production_like_environment():
+            raise RuntimeError("Production stream invocation has no budget table configured")
+        return None, None
+    budget_store = get_budget_store()
+    owner_sub = str(deployment_state.get("user_id") or caller_sub or "")
+    runtime_name = str(
+        deployment_state.get("friendly_runtime_name") or deployment_state.get("agentcore_runtime_name") or runtime_id
+    )
+    reservation = budget_store.reserve_invocation(
+        "default",
+        owner_sub=owner_sub,
+        runtime_name=runtime_name,
+        resource_tags=deployment_state.get("resource_tags") or {},
+        required=is_production_like_environment(),
+    )
+    return budget_store, reservation
+
+
 def _stream_invoke(write, body: dict, caller_sub: str | None) -> None:
     """Resolve the deployment, enforce tenant isolation, invoke, and emit SSE."""
     region = config.aws_region
@@ -436,16 +462,34 @@ def _stream_invoke(write, body: dict, caller_sub: str | None) -> None:
         if not harness_arn:
             write(_sse({"type": "error", "error": "Harness ARN not found for this deployment"}))
             return
-        result = invoke_harness(
-            region,
-            harness_arn,
-            prompt,
-            session_id or runtime_id,
-            agentcore_data_client=target_session.client(
-                "bedrock-agentcore",
-                region_name=region,
-            ),
-        )
+        try:
+            budget_store, reservation = _stream_budget_reservation(deployment_state, runtime_id, caller_sub)
+        except BudgetExceeded:
+            write(_sse({"type": "error", "error": "Monthly invocation authorization exhausted"}))
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Stream budget authorization failed (%s)", type(exc).__name__)
+            write(_sse({"type": "error", "error": "Budget authorization unavailable"}))
+            return
+        dispatched = False
+        try:
+            dispatched = True
+            result = invoke_harness(
+                region,
+                harness_arn,
+                prompt,
+                session_id or runtime_id,
+                agentcore_data_client=target_session.client(
+                    "bedrock-agentcore",
+                    region_name=region,
+                ),
+            )
+        finally:
+            if reservation is not None:
+                try:
+                    budget_store.settle_reservation(reservation, success=dispatched)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Stream budget settlement failed (%s)", type(exc).__name__)
         if not result.get("success"):
             # SECURITY (CodeQL py/stack-trace-exposure): never surface
             # invoke_harness's raw exception text to the external caller.
@@ -490,6 +534,16 @@ def _stream_invoke(write, body: dict, caller_sub: str | None) -> None:
         return
 
     try:
+        budget_store, reservation = _stream_budget_reservation(deployment_state, runtime_id, caller_sub)
+    except BudgetExceeded:
+        write(_sse({"type": "error", "error": "Monthly invocation authorization exhausted"}))
+        return
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Stream budget authorization failed (%s)", type(exc).__name__)
+        write(_sse({"type": "error", "error": "Budget authorization unavailable"}))
+        return
+    dispatched = False
+    try:
         # Long read timeout: the whole point of the Function URL path is to let
         # tool-heavy agents run well past API Gateway's 30s cap.
         from botocore.config import Config as _BotoConfig
@@ -507,6 +561,7 @@ def _stream_invoke(write, body: dict, caller_sub: str | None) -> None:
         if session_id:
             invoke_params["runtimeSessionId"] = session_id
 
+        dispatched = True
         resp = agentcore_client.invoke_agent_runtime(**invoke_params)
         out_session = (
             session_id if memory_identity else (resp.get("runtimeSessionId") or resp.get("sessionId") or session_id)
@@ -532,6 +587,12 @@ def _stream_invoke(write, body: dict, caller_sub: str | None) -> None:
         else:
             logger.exception("stream: runtime invocation failed")
             write(_sse({"type": "error", "error": "Internal error"}))
+    finally:
+        if reservation is not None:
+            try:
+                budget_store.settle_reservation(reservation, success=dispatched)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Stream budget settlement failed (%s)", type(exc).__name__)
 
 
 # ---------------------------------------------------------------------------

@@ -42,6 +42,11 @@ from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 
 from app.services import step_clients
+from app.services.budget_store import (
+    BudgetExceeded,
+    BudgetReservationError,
+    get_budget_store,
+)
 from app.services.deployment_state_store import (
     DeploymentLifecycleConflict,
     DeploymentStateStore,
@@ -57,6 +62,7 @@ from app.services.invocation_identity import (
     InvocationIdentityError,
     memory_invocation_identity,
 )
+from app.services.production_safety import is_production_like_environment
 from app.services.trigger_store import (
     STATUS_ACTIVE,
     STATUS_DELETING,
@@ -671,9 +677,10 @@ def invoke_trigger(
     delivery_id = _delivery_id(delivery_event)
     session_id = _session_id(trigger, delivery_id)
     prompt = _prompt(trigger, delivery_event)
+    deployment_state = deployment if isinstance(deployment, dict) else vars(deployment)
     try:
         memory_identity = memory_invocation_identity(
-            deployment if isinstance(deployment, dict) else vars(deployment),
+            deployment_state,
             session_id,
             trigger.owner_sub,
         )
@@ -687,6 +694,24 @@ def invoke_trigger(
     if memory_identity:
         payload["actor_id"] = memory_identity.actor_id
 
+    budget_store = get_budget_store()
+    try:
+        reservation = budget_store.reserve_invocation(
+            "default",
+            owner_sub=trigger.owner_sub,
+            runtime_name=trigger.runtime_name,
+            resource_tags=deployment_state.get("resource_tags") or {},
+            required=is_production_like_environment(),
+        )
+    except BudgetExceeded:
+        raise TriggerDispatchError("The trigger invocation authorization limit is exhausted") from None
+    except BudgetReservationError:
+        raise TriggerDispatchError("The trigger budget authorization is temporarily unavailable") from None
+    except Exception:
+        logger.exception("Trigger budget authorization failed")
+        raise TriggerDispatchError("The trigger budget authorization is temporarily unavailable") from None
+
+    dispatched = False
     try:
         client = session.client(
             "bedrock-agentcore",
@@ -697,6 +722,7 @@ def invoke_trigger(
                 retries={"max_attempts": 0},
             ),
         )
+        dispatched = True
         response = client.invoke_agent_runtime(
             agentRuntimeArn=trigger.target_runtime_arn,
             payload=json.dumps(payload, separators=(",", ":")),
@@ -710,6 +736,15 @@ def invoke_trigger(
             type(exc).__name__,
         )
         raise TriggerDispatchError("The trigger invocation failed") from None
+    finally:
+        if reservation is not None:
+            try:
+                budget_store.settle_reservation(reservation, success=dispatched)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Trigger budget settlement failed; reservation remains conservative (%s)",
+                    type(exc).__name__,
+                )
 
     return TriggerInvocation(
         trigger_id=trigger.trigger_id,

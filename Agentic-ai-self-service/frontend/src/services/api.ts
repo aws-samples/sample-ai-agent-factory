@@ -462,6 +462,23 @@ export class ApiClient {
     return apiRequest<CostSummary>(`/api/runtimes/${encodeURIComponent(runtimeName)}/cost${suffix}`, {}, this.baseUrl);
   }
 
+  async upsertOwnerBudget(limitUsd: number, warnPct = 80): Promise<{
+    scope: string;
+    key: string;
+    limit_usd: number;
+    warn_pct: number;
+  }> {
+    return apiRequest('/api/cost/budgets', {
+      method: 'POST',
+      body: JSON.stringify({
+        scope: 'owner',
+        key: 'self',
+        limit_usd: limitUsd,
+        warn_pct: warnPct,
+      }),
+    }, this.baseUrl);
+  }
+
   async getTraces(runtimeName: string, opts?: { from?: number; to?: number; traceId?: string }): Promise<TraceWaterfall> {
     const qs = new URLSearchParams();
     if (opts?.from) qs.set('from', String(opts.from));

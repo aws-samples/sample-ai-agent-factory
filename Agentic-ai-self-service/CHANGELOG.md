@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — production invocation operations use atomic authorization capacity
+
+- One DynamoDB transaction condition-checks every applicable owner/agent/tag limit, increments
+  monthly reserved/authorized counters, and creates a correlated reservation before each
+  platform-mediated slot, direct, stream, MCP, or trigger invocation operation. A bounded MCP
+  handshake and tool call are one operation. Production requires at
+  least one applicable definition. Exhaustion returns `429` plus `Retry-After: 3600`; storage
+  uncertainty returns `503` before dispatch.
+- Dispatch, not response success, decides settlement: successful and failed Runtime responses
+  commit because both may incur charges; proven pre-dispatch failures release; one-hour unknowns
+  commit conservatively. Settled reservation rows receive 90-day TTL and monthly counters 400-day
+  TTL, while definitions persist.
+- `budget_reservation_usd` configures one USD-denominated authorization unit. UI/API/docs explicitly
+  distinguish this admission capacity from actual AWS cost and exclude downstream vendor/tool
+  charges or separately credentialed calls. Production A2A is refused before side effects until
+  inbound/nested reservation propagation exists; development A2A remains available.
+- The hard-limit condition and A2A admission guard have mutation twins proving removal reopens
+  oversubscription/bypass. True concurrent transaction behavior remains a mandatory live DynamoDB
+  gate because Moto's transaction backend is not thread-safe.
+
 ### Added — production safety controls are mandatory and non-bypassable
 
 - Production-like deploy admission injects the platform-managed `production-v1` Bedrock Guardrail
@@ -39,18 +59,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed — OBO connectors now carry the authenticated workforce identity end to end
 
-- End-user chat now invokes the server-resolved production slot, which freezes the immutable
+- End-user chat invokes the server-resolved production slot, which freezes the immutable
   version, deployment, account, Region, Runtime ARN, and recorded endpoint qualifier before any
-  token is forwarded. The OBO branch uses AgentCore's documented bearer HTTP interface because
-  boto3 `InvokeAgentRuntime` is SigV4-only.
-- OBO Runtime and Gateway authorizers trust the same stack-provided workforce Cognito issuer and
-  client and require the exact deployment-owner `sub` claim. The API rechecks subject, issuer,
-  client, access-token type, and expiry before forwarding; returned identity evidence must match
-  the same token. Generated agents use a fresh MCP client per invocation and close it even when
-  startup or tool discovery fails. They never cache, persist, log, or return the JWT. SigV4,
-  Basic, junk, missing, substituted, and expired headers fail closed; requested OBO can no longer
-  fall back to shared client credentials. Ordinary memory agents retain their non-OBO path even
-  when invoked from lifted/exported code without the optional OBO module flag.
+  token crosses the Runtime boundary. After caller validation and budget reservation, the platform
+  invokes Runtime with target-account SigV4 and signs the request-local JWT into AgentCore's
+  restricted custom-header namespace.
+- Gateway alone uses the owner-bound custom JWT authorizer. Runtime is IAM-only and allowlists only
+  `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token`, so a user bearer cannot invoke it
+  directly and bypass platform admission. The API rechecks subject, issuer, client, access-token
+  type, and expiry; returned identity evidence must match that token. Generated agents use a fresh
+  MCP client per invocation and close it even when startup or discovery fails. They never cache,
+  persist, log, or return the JWT, and requested OBO cannot fall back to shared client credentials.
 - Safe `identityEvidence` hooks correlate issuer/subject/expiry/trace with tool receipts. The
   downstream principal remains a live `whoami`-style attestation gate on the first authenticated
   tool call, recorded as `delegated_identity_live_gate`; no deploy-time machine probe impersonates

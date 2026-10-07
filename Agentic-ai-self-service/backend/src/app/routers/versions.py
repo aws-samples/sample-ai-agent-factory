@@ -38,6 +38,10 @@ from app.services.delegated_identity import (
 )
 from app.services.gateway_deployer import gateway_aws_session, get_cognito_token
 from app.services.harness_deployer import invoke_harness
+from app.services.invocation_budget import (
+    reserve_invocation_budget,
+    settle_invocation_budget,
+)
 from app.services.invocation_identity import memory_invocation_identity
 from app.services.promotion_evidence import (
     PromotionEvidenceError,
@@ -268,21 +272,38 @@ async def invoke_runtime_slot(
         except DelegatedIdentityError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
 
-    result = invoke_verified_http_runtime(
-        invocation_request,
-        caller_sub=caller_sub,
-        deployment_state=deployment_state,
-        runtime_id=target.runtime_id,
-        runtime_arn=target.runtime_arn,
-        region=target.region,
-        target_session=target.session,
-        promote_policy=_promote_policy,
-        invoke_harness=invoke_harness,
-        resolve_memory_identity=memory_invocation_identity,
-        gateway_session=gateway_aws_session,
-        get_gateway_token=get_cognito_token,
-        user_bearer_token=user_bearer_token,
+    reservation = reserve_invocation_budget(
+        owner_sub=caller_sub,
+        runtime_name=runtime_name,
+        resource_tags=deployment_state.get("resource_tags") or {},
     )
+    dispatched = False
+
+    def _mark_dispatched() -> None:
+        nonlocal dispatched
+        dispatched = True
+
+    try:
+        result = invoke_verified_http_runtime(
+            invocation_request,
+            caller_sub=caller_sub,
+            deployment_state=deployment_state,
+            runtime_id=target.runtime_id,
+            runtime_arn=target.runtime_arn,
+            region=target.region,
+            target_session=target.session,
+            promote_policy=_promote_policy,
+            invoke_harness=invoke_harness,
+            resolve_memory_identity=memory_invocation_identity,
+            gateway_session=gateway_aws_session,
+            get_gateway_token=get_cognito_token,
+            user_bearer_token=user_bearer_token,
+            on_dispatch=_mark_dispatched,
+        )
+    except Exception:
+        settle_invocation_budget(reservation, dispatched=dispatched)
+        raise
+    settle_invocation_budget(reservation, dispatched=dispatched)
     return SlotInvokeResponse(
         **result.model_dump(mode="python"),
         runtime_name=runtime_name,

@@ -7,6 +7,7 @@ roles + Lambdas live in step_lambdas.py.
 
 import hashlib
 import os
+from decimal import Decimal, InvalidOperation
 
 import aws_cdk as cdk
 from aws_cdk import CfnOutput, Duration, RemovalPolicy
@@ -98,6 +99,17 @@ def _production_evaluation_gate_value(stack: cdk.Stack, environment: str) -> str
     if not development_like and normalized == "false":
         raise ValueError("production_evaluation_gate cannot be disabled in a production-like environment")
     return normalized
+
+
+def _budget_reservation_value(stack: cdk.Stack) -> str:
+    raw = str(stack.node.try_get_context("budget_reservation_usd") or "1.0").strip()
+    try:
+        value = Decimal(raw)
+    except InvalidOperation as exc:
+        raise ValueError("budget_reservation_usd must be a decimal number") from exc
+    if not value.is_finite() or value < Decimal("0.000001") or value > Decimal("1000"):
+        raise ValueError("budget_reservation_usd must be in 0.000001..1000")
+    return format(value.normalize(), "f")
 
 
 BACKEND_ASSET_EXCLUDE: tuple[str, ...] = (
@@ -1116,8 +1128,14 @@ def build_deployment_lambda(
     # Phase 2 (Loom) governance tagging. routers/tags.py + the deploy-time
     # tag resolver (services/tag_policy_store) read/write this table.
     tables.tag_policy.grant_read_write_data(role)
-    # Phase 4 (Loom) FinOps — cost budgets (routers/cost.py budgets_router).
+    # Phase 4 (Loom) FinOps — cost budgets and atomic invocation reservations.
     tables.budget.grant_read_write_data(role)
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=["dynamodb:TransactWriteItems"],
+            resources=[tables.budget.table_arn],
+        )
+    )
     # Append-only audit projection: the middleware can create immutable rows and
     # the admin dashboard can query them, but this role cannot update or delete
     # evidence even if a future code path attempts it.
@@ -2369,8 +2387,10 @@ def build_deployment_lambda(
             # with an explanation instead of becoming an AccessDenied inside a deployment that
             # has already created resources. Same constant, same value, both halves.
             GOVERNANCE_TAG_KEY_PREFIXES_ENV: governance_tag_key_prefixes_env_value(),
-            # Phase 4 (Loom) FinOps — cost budgets table (routers/cost.py).
+            # Phase 4 (Loom) FinOps — cost budgets table and conservative
+            # pre-invocation authorization unit.
             "BUDGET_TABLE_NAME": tables.budget.table_name,
+            "BUDGET_RESERVATION_USD": _budget_reservation_value(stack),
             # Production-like environments land new versions in staging and require
             # server-verified AgentCore batch evidence before the production pointer moves.
             "PRODUCTION_EVALUATION_GATE": _production_evaluation_gate_value(stack, cfg.env),
@@ -2560,6 +2580,7 @@ def build_stream_lambda(
     *,
     backend_code: _lambda.Code,
     deployments_table: dynamodb.Table,
+    budget_table: dynamodb.Table,
     user_pool: cognito.UserPool,
     user_pool_client: cognito.UserPoolClient,
 ) -> tuple:
@@ -2610,6 +2631,13 @@ def build_stream_lambda(
     # resolution + tenant-isolation checks. Read-only is sufficient — the
     # stream path never mutates state.
     deployments_table.grant_read_data(role)
+    budget_table.grant_read_write_data(role)
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=["dynamodb:TransactWriteItems"],
+            resources=[budget_table.table_arn],
+        )
+    )
     # SSM read (config loader reads /agentcore-workflow/{env}/* like the
     # other Lambdas).
     role.add_to_policy(
@@ -2671,6 +2699,8 @@ def build_stream_lambda(
         environment={
             "DEPLOYMENTS_TABLE_NAME": deployments_table.table_name,
             "DEPLOYMENT_TABLE_NAME": deployments_table.table_name,
+            "BUDGET_TABLE_NAME": budget_table.table_name,
+            "BUDGET_RESERVATION_USD": _budget_reservation_value(stack),
             "ENVIRONMENT": cfg.env,
             "PROJECT_NAME": cfg.project,
             "APP_AWS_REGION": stack.region,

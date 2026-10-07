@@ -13,6 +13,7 @@ import logging
 import math
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -340,10 +341,13 @@ def _invoke_rpc(
     session_id: str | None = None,
     tool_name: str | None = None,
     deadline: float,
+    on_dispatch: Callable[[], None] | None = None,
 ) -> McpReply:
     if time.monotonic() >= deadline:
         raise McpRuntimeUnavailable("The MCP request exceeded the product deadline")
     try:
+        if on_dispatch is not None:
+            on_dispatch()
         response = client.invoke_agent_runtime(
             **_build_invoke_params(
                 runtime_arn=runtime_arn,
@@ -422,6 +426,7 @@ def _initialize(
     runtime_arn: str,
     runtime_user_id: str,
     deadline: float,
+    on_dispatch: Callable[[], None] | None = None,
 ) -> tuple[str | None, dict[str, str]]:
     reply = _invoke_rpc(
         client,
@@ -438,6 +443,7 @@ def _initialize(
         },
         request_id=1,
         deadline=deadline,
+        on_dispatch=on_dispatch,
     )
     result = (reply.message or {}).get("result", {})
     if result.get("protocolVersion") != MCP_PROTOCOL_VERSION:
@@ -468,6 +474,7 @@ def _initialize(
         request_id=None,
         session_id=reply.session_id,
         deadline=deadline,
+        on_dispatch=on_dispatch,
     )
     return reply.session_id, {"name": server_name, "version": server_version}
 
@@ -524,6 +531,7 @@ def list_tools(
     runtime_arn: str,
     runtime_user_id: str,
     deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
+    on_dispatch: Callable[[], None] | None = None,
 ) -> McpToolsResult:
     """Initialize one MCP session and return a bounded, fully paginated tool list."""
 
@@ -533,6 +541,7 @@ def list_tools(
         runtime_arn=runtime_arn,
         runtime_user_id=runtime_user_id,
         deadline=deadline,
+        on_dispatch=on_dispatch,
     )
     cursor: str | None = None
     seen_cursors: set[str] = set()
@@ -551,6 +560,7 @@ def list_tools(
             request_id=request_id,
             session_id=session_id,
             deadline=deadline,
+            on_dispatch=on_dispatch,
         )
         protocol_version = reply.protocol_version
         session_id = reply.session_id
@@ -600,6 +610,7 @@ def call_tool(
     arguments: dict[str, Any],
     session_id: str | None = None,
     deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
+    on_dispatch: Callable[[], None] | None = None,
 ) -> McpToolCallResult:
     """Call one named MCP tool, initializing a session when none was supplied."""
 
@@ -612,6 +623,7 @@ def call_tool(
             runtime_arn=runtime_arn,
             runtime_user_id=runtime_user_id,
             deadline=deadline,
+            on_dispatch=on_dispatch,
         )
     else:
         session_id = _validate_session_id(session_id)
@@ -626,6 +638,7 @@ def call_tool(
         session_id=session_id,
         tool_name=tool_name,
         deadline=deadline,
+        on_dispatch=on_dispatch,
     )
     result = (reply.message or {}).get("result", {})
     content = result.get("content")

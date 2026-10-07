@@ -1,10 +1,11 @@
 """Fail-closed workforce identity handoff for AgentCore OBO connectors.
 
 The control plane marks a deployment as delegated only when a connector explicitly
-requests ``delegationMode=obo``.  Runtime invocations then carry the already-
-authenticated workforce JWT ephemerally to the generated agent, which presents it
-to the Gateway.  The Gateway validates the same issuer/client and performs the
-configured OAuth token exchange for the selected target.
+requests ``delegationMode=obo``. The platform invokes Runtime with SigV4 after budget
+authorization and forwards the already-authenticated workforce JWT in AgentCore's
+restricted custom-header namespace. Runtime therefore has no direct bearer entry
+point; generated agent code uses the request-scoped token only for the owner-bound
+Gateway, which validates it and performs OAuth token exchange for the selected target.
 
 No token is logged, persisted, cached, or returned as evidence.
 """
@@ -18,6 +19,8 @@ import re
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+RUNTIME_WORKFORCE_TOKEN_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token"
 
 
 class DelegatedIdentityError(ValueError):
@@ -107,16 +110,24 @@ def workforce_gateway_identity(region: str, owner_sub: str) -> dict[str, Any]:
     }
 
 
-def runtime_obo_authorizer(
+def runtime_obo_transport_configuration(
     region: str,
     owner_sub: str,
-) -> tuple[dict[str, Any], dict[str, list[str]]]:
-    """Return owner-bound Runtime JWT and Authorization-header shapes."""
+) -> tuple[None, dict[str, list[str]]]:
+    """Return IAM-only Runtime auth plus the workforce-token header allowlist.
 
-    identity = workforce_gateway_identity(region, owner_sub)
+    The workforce token remains the Gateway principal, but it is not accepted as
+    Runtime authentication. The platform validates the caller, reserves invocation
+    capacity, invokes Runtime with SigV4, and signs this custom header into that
+    request. Omitting ``authorizerConfiguration`` removes any legacy direct-bearer
+    authorizer on Runtime update.
+    """
+
+    _workforce_contract(region)
+    _owner_claim(owner_sub)
     return (
-        identity["authorizer_config"],
-        {"requestHeaderAllowlist": ["Authorization"]},
+        None,
+        {"requestHeaderAllowlist": [RUNTIME_WORKFORCE_TOKEN_HEADER]},
     )
 
 

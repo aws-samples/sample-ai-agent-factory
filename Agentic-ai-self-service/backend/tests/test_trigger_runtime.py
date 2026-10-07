@@ -48,6 +48,14 @@ QUEUE_ARN = f"arn:aws:sqs:{REGION}:{ACCOUNT}:agentcore-trigger-dispatch"
 QUEUE_URL = f"https://sqs.{REGION}.amazonaws.com/{ACCOUNT}/agentcore-trigger-dispatch"
 
 
+@pytest.fixture(autouse=True)
+def invocation_budget(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    budget = MagicMock()
+    budget.reserve_invocation.return_value = None
+    monkeypatch.setattr(runtime, "get_budget_store", lambda: budget)
+    return budget
+
+
 @pytest.fixture
 def store(monkeypatch: pytest.MonkeyPatch) -> Iterator[TriggerStore]:
     with mock_aws():
@@ -1206,6 +1214,7 @@ def test_deployment_authority_refuses_every_binding_mismatch(
 
 def test_invoke_uses_stable_delivery_session_and_parses_response(
     monkeypatch: pytest.MonkeyPatch,
+    invocation_budget: MagicMock,
 ):
     trigger = make_trigger()
     agentcore = MagicMock()
@@ -1224,6 +1233,8 @@ def test_invoke_uses_stable_delivery_session_and_parses_response(
         "_deployment_for_trigger",
         lambda _trigger: (deployment, match, session),
     )
+    reservation = object()
+    invocation_budget.reserve_invocation.return_value = reservation
 
     result = runtime.invoke_trigger(trigger, delivery_event())
 
@@ -1236,6 +1247,41 @@ def test_invoke_uses_stable_delivery_session_and_parses_response(
     payload = json.loads(kwargs["payload"])
     assert payload["session_id"] == result.session_id
     assert DELIVERY_ID in payload["prompt"]
+    invocation_budget.reserve_invocation.assert_called_once_with(
+        "default",
+        owner_sub=trigger.owner_sub,
+        runtime_name=trigger.runtime_name,
+        resource_tags={},
+        required=False,
+    )
+    invocation_budget.settle_reservation.assert_called_once_with(reservation, success=True)
+
+
+def test_trigger_hard_budget_denial_never_dispatches(
+    monkeypatch: pytest.MonkeyPatch,
+    invocation_budget: MagicMock,
+):
+    trigger = make_trigger()
+    session = MagicMock()
+    deployment = {
+        "deployment_id": DEPLOYMENT_ID,
+        "user_id": trigger.owner_sub,
+        "memory_result": None,
+    }
+    match = runtime._RUNTIME_ARN_RE.fullmatch(RUNTIME_ARN)  # noqa: SLF001
+    assert match is not None
+    monkeypatch.setattr(
+        runtime,
+        "_deployment_for_trigger",
+        lambda _trigger: (deployment, match, session),
+    )
+    invocation_budget.reserve_invocation.side_effect = runtime.BudgetExceeded("exhausted")
+
+    with pytest.raises(runtime.TriggerDispatchError, match="authorization limit"):
+        runtime.invoke_trigger(trigger, delivery_event())
+
+    session.client.assert_not_called()
+    invocation_budget.settle_reservation.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -11,9 +11,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import urllib.error
-import urllib.parse
-import urllib.request
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Any
@@ -24,6 +21,7 @@ from fastapi import HTTPException
 from app.models.deployment_models import DeploymentStatusEnum, TestRequest, TestResponse
 from app.services import step_clients
 from app.services.delegated_identity import (
+    RUNTIME_WORKFORCE_TOKEN_HEADER,
     delegated_bearer_identity,
     deployment_requires_obo,
 )
@@ -55,55 +53,51 @@ def _runtime_endpoint_qualifier(deployment_state: dict, runtime_arn: str) -> str
     return qualifier
 
 
-def invoke_agent_runtime_with_bearer(
+def invoke_agent_runtime_with_workforce_token(
     *,
+    agentcore_client: Any,
     runtime_arn: str,
     deployment_state: dict,
-    region: str,
     payload: dict[str, Any],
     bearer_token: str,
     session_id: str | None,
+    on_dispatch: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    """Invoke a custom-JWT Runtime through its documented bearer HTTP interface.
+    """Invoke an IAM-only Runtime with one request-local workforce token header.
 
-    The botocore 1.43.99 ``InvokeAgentRuntime`` model has no bearer-token input;
-    the official AgentCore guide therefore requires direct HTTP for custom JWT.
+    AgentCore's SDK model has no arbitrary-header input, so the documented
+    ``before-sign`` event adds the allowlisted custom header before SigV4 signing.
+    The handler is removed in ``finally`` and the token never enters the payload,
+    client cache, deployment record, or response.
     """
 
+    if not bearer_token or any(character.isspace() for character in bearer_token):
+        raise ValueError("The delegated workforce token is malformed")
     qualifier = _runtime_endpoint_qualifier(deployment_state, runtime_arn)
-    escaped_arn = urllib.parse.quote(runtime_arn, safe="")
-    escaped_qualifier = urllib.parse.quote(qualifier, safe="")
-    url = (
-        f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/"
-        f"{escaped_arn}/invocations?qualifier={escaped_qualifier}"
-    )
-    headers = {
-        "Authorization": "Bearer " + bearer_token,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
+    invoke_params: dict[str, Any] = {
+        "agentRuntimeArn": runtime_arn,
+        "qualifier": qualifier,
+        "payload": json.dumps(payload),
     }
     if session_id:
-        headers["X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"] = session_id
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
+        invoke_params["runtimeSessionId"] = session_id
+
+    event_name = "before-sign.bedrock-agentcore.InvokeAgentRuntime"
+
+    def _add_workforce_header(request: Any, **_kwargs: Any) -> None:
+        request.headers.add_header(
+            RUNTIME_WORKFORCE_TOKEN_HEADER,
+            bearer_token,
+        )
+
+    events = agentcore_client.meta.events
+    events.register_first(event_name, _add_workforce_header)
     try:
-        with urllib.request.urlopen(request, timeout=25) as response:
-            return {
-                "statusCode": response.status,
-                "response": response.read(),
-                "runtimeSessionId": response.headers.get(
-                    "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id",
-                    session_id,
-                ),
-            }
-    except urllib.error.HTTPError as exc:
-        # Do not return or log the body: IdP/Gateway error bodies can contain
-        # request details.  The status is enough for the controlled caller error.
-        return {"statusCode": exc.code, "response": b""}
+        if on_dispatch is not None:
+            on_dispatch()
+        return agentcore_client.invoke_agent_runtime(**invoke_params)
+    finally:
+        events.unregister(event_name, handler=_add_workforce_header)
 
 
 def runtime_payload(
@@ -392,6 +386,7 @@ def invoke_verified_http_runtime(
     get_gateway_token: Callable[[dict], str],
     user_bearer_token: str | None = None,
     start_harness_warmup: Callable[[dict, str, str], None] | None = None,
+    on_dispatch: Callable[[], None] | None = None,
 ) -> TestResponse:
     """Invoke one exact, owner-checked target without re-resolving authority."""
 
@@ -426,12 +421,16 @@ def invoke_verified_http_runtime(
             # turn in the session named after the harness. It now runs in the background on a session
             # of its own, and the route answers at once.
             try:
+                if on_dispatch is not None:
+                    on_dispatch()
                 start_harness_warmup(deployment_state, region, harness_arn)
             except Exception as exc:  # noqa: BLE001 -- a warm-up that cannot start is reported, not raised
                 logger.warning("Harness warm-up could not be started (%s)", type(exc).__name__)
                 return TestResponse(success=False, error="Harness warm-up could not be started", arn=harness_arn)
             return TestResponse(success=True, response="", arn=harness_arn)
         session_id = request.session_id or runtime_id
+        if on_dispatch is not None:
+            on_dispatch()
         result = invoke_harness(
             region,
             harness_arn,
@@ -495,13 +494,23 @@ def invoke_verified_http_runtime(
                     error="OBO was requested but no authenticated user bearer token was supplied",
                 )
             expected_identity = delegated_bearer_identity(user_bearer_token)
-            response = invoke_agent_runtime_with_bearer(
+            agentcore_client = target_session.client(
+                "bedrock-agentcore",
+                region_name=region,
+                config=BotoConfig(
+                    read_timeout=25,
+                    connect_timeout=5,
+                    retries={"max_attempts": 0},
+                ),
+            )
+            response = invoke_agent_runtime_with_workforce_token(
+                agentcore_client=agentcore_client,
                 runtime_arn=runtime_arn,
                 deployment_state=deployment_state,
-                region=region,
                 payload=payload,
                 bearer_token=user_bearer_token,
                 session_id=session_id,
+                on_dispatch=on_dispatch,
             )
         else:
             agentcore_client = target_session.client(
@@ -519,6 +528,8 @@ def invoke_verified_http_runtime(
             }
             if session_id:
                 invoke_params["runtimeSessionId"] = session_id
+            if on_dispatch is not None:
+                on_dispatch()
             response = agentcore_client.invoke_agent_runtime(**invoke_params)
         status_code = response.get("statusCode")
         status_is_valid = status_code is None or (

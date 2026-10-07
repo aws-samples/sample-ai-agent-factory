@@ -653,6 +653,7 @@ GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
 # "oauth2" (AgentCore Gateway, the default) exchanges client credentials for a
 # token. "static_bearer" (a LiteLLM MCP Gateway) sends a long-lived virtual key.
 GATEWAY_AUTH_MODE = os.environ.get("GATEWAY_AUTH_MODE", "oauth2")
+WORKFORCE_TOKEN_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token"
 GATEWAY_API_KEY = os.environ.get("GATEWAY_API_KEY", "")
 # The CloudFormation export passes the virtual key BY REFERENCE. See
 # _resolve_gateway_key below for why that is not the same as passing the value.
@@ -1067,14 +1068,19 @@ def invoke(payload, context=None):
     """Strands Agent with MCP Gateway tools."""
     message = payload.get("prompt", "Hello")
     request_headers = getattr(context, "request_headers", {{}}) if context is not None else {{}}
-    auth_header = str(
-        request_headers.get("Authorization") or request_headers.get("authorization") or ""
+    workforce_token_header = globals().get(
+        "WORKFORCE_TOKEN_HEADER",
+        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token",
+    )
+    subject_token = str(
+        request_headers.get(workforce_token_header)
+        or request_headers.get(workforce_token_header.lower())
+        or ""
     ).strip()
-    subject_token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
     obo_client = None
     delegated_evidence = None
     try:
-        if GATEWAY_AUTH_MODE == "obo":
+        if globals().get("GATEWAY_AUTH_MODE", "") == "obo":
             if (
                 not isinstance(subject_token, str)
                 or any(ch.isspace() for ch in subject_token)
@@ -1123,11 +1129,13 @@ def invoke(payload, context=None):
             agent = _get_agent()
         seen = _tool_use_ids(getattr(agent, "messages", None))
         result = agent(message)
-        return {{
+        response_body = {{
             "response": str(result),
             "tool_receipts": _tool_receipts(getattr(agent, "messages", None), exclude=seen, names=_TOOL_NAME_ALIASES),
-            "identity_evidence": delegated_evidence,
         }}
+        if delegated_evidence is not None:
+            response_body["identity_evidence"] = delegated_evidence
+        return response_body
     finally:
         if obo_client is not None:
             try:
@@ -1901,6 +1909,7 @@ GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
 # "oauth2" (AgentCore Gateway, the default) exchanges client credentials for a
 # token. "static_bearer" (a LiteLLM MCP Gateway) sends a long-lived virtual key.
 GATEWAY_AUTH_MODE = os.environ.get("GATEWAY_AUTH_MODE", "oauth2")
+WORKFORCE_TOKEN_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token"
 GATEWAY_API_KEY = os.environ.get("GATEWAY_API_KEY", "")
 # The CloudFormation export passes the virtual key BY REFERENCE. See
 # _resolve_gateway_key below for why that is not the same as passing the value.
@@ -2510,10 +2519,15 @@ def invoke(payload, context=None):
     # OBO credentials are request-scoped: never place the bearer, transport,
     # tools, or Agent in a module cache shared by warm Runtime invocations.
     request_headers = getattr(context, "request_headers", {{}}) if context is not None else {{}}
-    auth_header = str(
-        request_headers.get("Authorization") or request_headers.get("authorization") or ""
+    workforce_token_header = globals().get(
+        "WORKFORCE_TOKEN_HEADER",
+        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token",
+    )
+    subject_token = str(
+        request_headers.get(workforce_token_header)
+        or request_headers.get(workforce_token_header.lower())
+        or ""
     ).strip()
-    subject_token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
     obo_client = None
     delegated_evidence = None
     try:
@@ -2571,13 +2585,15 @@ def invoke(payload, context=None):
         # Memory; only the user's message and assistant response are persisted.
         _save_to_memory(actor_id, session_id, message, response_text)
 
-        return {{
+        response_body = {{
             "response": response_text,
             "tool_receipts": _tool_receipts(
                 getattr(agent, "messages", None), exclude=seen, names=globals().get("_TOOL_NAME_ALIASES")
             ),
-            "identity_evidence": delegated_evidence,
         }}
+        if delegated_evidence is not None:
+            response_body["identity_evidence"] = delegated_evidence
+        return response_body
     finally:
         if obo_client is not None:
             try:

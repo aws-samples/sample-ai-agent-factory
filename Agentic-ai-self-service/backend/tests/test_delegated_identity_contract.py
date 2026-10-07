@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import botocore.session
@@ -103,17 +104,13 @@ def test_workforce_authorizer_rejects_missing_or_invalid_owner(monkeypatch):
             di.workforce_gateway_identity("eu-west-1", owner)
 
 
-def test_runtime_authorizer_uses_exact_supported_header_shape(monkeypatch):
+def test_runtime_obo_transport_is_iam_only_with_exact_custom_header(monkeypatch):
     monkeypatch.setenv("WORKFORCE_USER_POOL_ID", "eu-west-1_pool123")
     monkeypatch.setenv("WORKFORCE_CLIENT_ID", "workforce-client")
     monkeypatch.setenv("WORKFORCE_REGION", "eu-west-1")
-    authorizer, headers = di.runtime_obo_authorizer("eu-west-1", "user-123")
-    assert authorizer["customJWTAuthorizer"]["allowedClients"] == ["workforce-client"]
-    assert authorizer["customJWTAuthorizer"]["customClaims"][0]["authorizingClaimMatchValue"] == {
-        "claimMatchValue": {"matchValueString": "user-123"},
-        "claimMatchOperator": "EQUALS",
-    }
-    assert headers == {"requestHeaderAllowlist": ["Authorization"]}
+    authorizer, headers = di.runtime_obo_transport_configuration("eu-west-1", "user-123")
+    assert authorizer is None
+    assert headers == {"requestHeaderAllowlist": ["X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token"]}
 
 
 def test_fresh_user_bearer_is_accepted():
@@ -165,46 +162,92 @@ def test_expired_subject_is_rejected_and_never_cached():
     assert _extract(fresh) == fresh
 
 
-class _Response:
-    status = 200
-    headers = {"X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": "session-returned"}
+class _Headers:
+    def __init__(self):
+        self.values: dict[str, str] = {}
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        return False
-
-    def read(self):
-        return b'{"response":"ok"}'
+    def add_header(self, name: str, value: str) -> None:
+        self.values[name] = value
 
 
-def test_bearer_runtime_invoke_is_bound_to_recorded_endpoint_and_token_is_header_only(monkeypatch):
-    captured = {}
+class _Events:
+    def __init__(self):
+        self.handler = None
+
+    def register_first(self, event_name, handler):
+        assert event_name == "before-sign.bedrock-agentcore.InvokeAgentRuntime"
+        self.handler = handler
+
+    def unregister(self, event_name, handler=None):
+        assert event_name == "before-sign.bedrock-agentcore.InvokeAgentRuntime"
+        assert handler is self.handler
+        self.handler = None
+
+
+class _SignedRuntimeClient:
+    def __init__(self, *, fail: bool = False):
+        self.meta = SimpleNamespace(events=_Events())
+        self.fail = fail
+        self.invoke_params = None
+        self.signed_headers = None
+
+    def invoke_agent_runtime(self, **kwargs):
+        request = SimpleNamespace(headers=_Headers())
+        assert self.meta.events.handler is not None
+        self.meta.events.handler(request)
+        self.invoke_params = kwargs
+        self.signed_headers = request.headers.values
+        if self.fail:
+            raise RuntimeError("network failed")
+        return {"statusCode": 200, "response": b'{"response":"ok"}'}
+
+
+def test_obo_runtime_invoke_is_sigv4_with_request_local_token_header():
     token = _jwt()
     runtime_arn = "arn:aws:bedrock-agentcore:eu-west-1:123456789012:runtime/orders_abc-1234567890"
+    client = _SignedRuntimeClient()
+    dispatched = MagicMock()
 
-    def _urlopen(request, timeout):
-        captured["request"] = request
-        captured["timeout"] = timeout
-        return _Response()
-
-    monkeypatch.setattr(ri.urllib.request, "urlopen", _urlopen)
-    response = ri.invoke_agent_runtime_with_bearer(
+    response = ri.invoke_agent_runtime_with_workforce_token(
+        agentcore_client=client,
         runtime_arn=runtime_arn,
         deployment_state={"runtime_endpoint": runtime_arn + "/runtime-endpoint/DEFAULT"},
-        region="eu-west-1",
         payload={"prompt": "hello"},
         bearer_token=token,
         session_id="session-123456789012345678901234567890123",
+        on_dispatch=dispatched,
     )
 
-    request = captured["request"]
-    assert request.full_url.endswith("/invocations?qualifier=DEFAULT")
-    assert request.get_header("Authorization") == "Bearer " + token
-    assert token.encode() not in request.data
-    assert json.loads(request.data) == {"prompt": "hello"}
-    assert response["runtimeSessionId"] == "session-returned"
+    assert client.invoke_params == {
+        "agentRuntimeArn": runtime_arn,
+        "qualifier": "DEFAULT",
+        "payload": json.dumps({"prompt": "hello"}),
+        "runtimeSessionId": "session-123456789012345678901234567890123",
+    }
+    assert client.signed_headers == {
+        di.RUNTIME_WORKFORCE_TOKEN_HEADER: token,
+    }
+    assert token not in client.invoke_params["payload"]
+    assert client.meta.events.handler is None
+    dispatched.assert_called_once_with()
+    assert response["statusCode"] == 200
+
+
+def test_obo_runtime_header_handler_is_removed_after_invoke_failure():
+    client = _SignedRuntimeClient(fail=True)
+    runtime_arn = "arn:aws:bedrock-agentcore:eu-west-1:123456789012:runtime/orders_abc-1234567890"
+
+    with pytest.raises(RuntimeError, match="network failed"):
+        ri.invoke_agent_runtime_with_workforce_token(
+            agentcore_client=client,
+            runtime_arn=runtime_arn,
+            deployment_state={"runtime_endpoint": runtime_arn + "/runtime-endpoint/DEFAULT"},
+            payload={"prompt": "hello"},
+            bearer_token=_jwt(),
+            session_id=None,
+        )
+
+    assert client.meta.events.handler is None
 
 
 @pytest.mark.parametrize(
@@ -215,20 +258,20 @@ def test_bearer_runtime_invoke_is_bound_to_recorded_endpoint_and_token_is_header
         "arn:aws:bedrock-agentcore:eu-west-1:123456789012:runtime/orders_abc-1234567890/runtime-endpoint/bad-name",
     ],
 )
-def test_mutated_runtime_endpoint_never_receives_the_user_token(monkeypatch, endpoint):
-    urlopen = MagicMock()
-    monkeypatch.setattr(ri.urllib.request, "urlopen", urlopen)
+def test_mutated_runtime_endpoint_never_receives_the_user_token(endpoint):
+    client = MagicMock()
     runtime_arn = "arn:aws:bedrock-agentcore:eu-west-1:123456789012:runtime/orders_abc-1234567890"
     with pytest.raises(ValueError):
-        ri.invoke_agent_runtime_with_bearer(
+        ri.invoke_agent_runtime_with_workforce_token(
+            agentcore_client=client,
             runtime_arn=runtime_arn,
             deployment_state={"runtime_endpoint": endpoint},
-            region="eu-west-1",
             payload={"prompt": "hello"},
             bearer_token=_jwt(),
             session_id=None,
         )
-    urlopen.assert_not_called()
+    client.meta.events.register_first.assert_not_called()
+    client.invoke_agent_runtime.assert_not_called()
 
 
 def test_identity_evidence_accepts_only_caller_bound_non_credential_contract():
@@ -282,11 +325,16 @@ def test_generated_gateway_agent_uses_runtime_headers_and_never_payload_tokens()
     )
     compile(code, "generated-gateway-agent.py", "exec")
     assert "def invoke(payload, context=None):" in code
-    assert 'request_headers.get("Authorization")' in code
-    assert 'GATEWAY_AUTH_MODE == "obo"' in code
+    assert "WORKFORCE_TOKEN_HEADER" in code
+    assert "request_headers.get(workforce_token_header)" in code
+    assert 'request_headers.get("Authorization")' not in code
+    assert 'globals().get("GATEWAY_AUTH_MODE", "") == "obo"' in code
     assert "MCPClient(lambda: _create_transport(subject_token))" in code
     assert "invalid delegated identity claims" in code
-    assert code.index("try:\n        if GATEWAY_AUTH_MODE") < code.index("obo_client.start()")
+    assert code.index('try:\n        if globals().get("GATEWAY_AUTH_MODE", "") == "obo":') < code.index(
+        "obo_client.start()"
+    )
+    assert "if delegated_evidence is not None:" in code
     assert code.index("finally:\n        if obo_client is not None") > code.index("get_full_tools_list(obo_client)")
     assert "obo_client.stop" in code
     assert "_user_bearer_token" not in code
@@ -310,6 +358,7 @@ def test_generated_memory_agent_does_not_cache_obo_agent_or_token():
     assert "MCPClient(lambda: _create_transport(subject_token))" in code
     assert "invalid delegated identity claims" in code
     assert "else:\n            agent = _get_agent()" in code
+    assert "if delegated_evidence is not None:" in code
     assert code.index('try:\n        if globals().get("OBO_GATEWAY", False):') < code.index("obo_client.start()")
     assert code.index("finally:\n        if obo_client is not None") > code.index("get_full_tools_list(obo_client)")
     assert "_user_bearer_token" not in code
@@ -349,15 +398,26 @@ def test_runtime_create_and_update_preserve_request_header_configuration(monkeyp
     assert ctrl.created["requestHeaderConfiguration"] == {"requestHeaderAllowlist": ["Authorization"]}
 
 
-def test_owner_bound_authorizer_matches_pinned_botocore_models(monkeypatch):
+def test_obo_gateway_and_runtime_transport_match_pinned_botocore_models(monkeypatch):
     monkeypatch.setenv("WORKFORCE_USER_POOL_ID", "eu-west-1_pool123")
     monkeypatch.setenv("WORKFORCE_CLIENT_ID", "workforce-client")
     monkeypatch.setenv("WORKFORCE_REGION", "eu-west-1")
     identity = di.workforce_gateway_identity("eu-west-1", "user-123")
     service = botocore.session.get_session().get_service_model("bedrock-agentcore-control")
-    for operation_name in ("CreateAgentRuntime", "CreateGateway"):
-        operation = service.operation_model(operation_name)
-        validate_parameters(
-            identity["authorizer_config"],
-            operation.input_shape.members["authorizerConfiguration"],
-        )
+
+    gateway_operation = service.operation_model("CreateGateway")
+    validate_parameters(
+        identity["authorizer_config"],
+        gateway_operation.input_shape.members["authorizerConfiguration"],
+    )
+
+    runtime_authorizer, runtime_headers = di.runtime_obo_transport_configuration(
+        "eu-west-1",
+        "user-123",
+    )
+    assert runtime_authorizer is None
+    runtime_operation = service.operation_model("CreateAgentRuntime")
+    validate_parameters(
+        runtime_headers,
+        runtime_operation.input_shape.members["requestHeaderConfiguration"],
+    )

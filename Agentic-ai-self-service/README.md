@@ -87,22 +87,23 @@ explicitly. `us-*` and `eu-*` regions need no such adjustment.
 ## Workforce OBO invocation contract
 
 A connector with `delegationMode: "obo"` changes the complete invocation chain;
-it is not a credential-provider-only switch. The Gateway and Runtime both trust
-the same workforce Cognito issuer/client that protects the API and require the
-exact deployment-owner `sub` claim, preventing a different valid platform user
-from invoking the tenant's OBO plane directly. End-user chat
-invokes `POST /api/runtimes/{name}/slots/production/invoke`; the server resolves
-the production slot to its immutable version/deployment/Runtime ARN and recorded
-endpoint qualifier, then calls the Runtime through AgentCore's documented bearer
-HTTP interface. The installed boto3 `InvokeAgentRuntime` operation is SigV4-only
-and is deliberately not used for OBO.
+it is not a credential-provider-only switch. The Gateway trusts the same workforce
+Cognito issuer/client that protects the API and requires the exact deployment-owner
+`sub` claim. End-user chat invokes
+`POST /api/runtimes/{name}/slots/production/invoke`; the server resolves the
+production slot to its immutable version/deployment/Runtime ARN and recorded
+endpoint qualifier, revalidates the workforce token, reserves invocation capacity,
+and invokes Runtime with target-account SigV4. The request carries the token only in
+AgentCore's signed, allowlisted
+`X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token` header. Runtime has no
+custom-JWT authorizer, so a user bearer cannot invoke it directly and bypass platform
+admission or budget authorization.
 
-Runtime validates the JWT and allowlists only `Authorization` into invocation
-context. Generated agents create a fresh MCP client per request, forward that JWT
-to the workforce-authorized Gateway, and close the client after the turn. The
-Gateway target's `grantType=TOKEN_EXCHANGE` performs the configured RFC 8693 or
+Generated agents create a fresh MCP client per request, present that request-local JWT
+to the owner-bound Gateway, and close the client after every success or failure path.
+The Gateway target's `grantType=TOKEN_EXCHANGE` performs the configured RFC 8693 or
 RFC 7523 exchange. Missing, expired, Basic, SigV4, malformed, or wrong-target
-credentials fail before invocation; no client-credentials fallback exists.
+credentials fail before Runtime dispatch; no client-credentials fallback exists.
 Non-OBO agents retain their existing cached M2M/static authentication path.
 
 Tokens are never stored in deployment state, Runtime payloads, logs, Memory,
@@ -112,8 +113,8 @@ downstream principal). The deploy cannot probe an OBO tool plane without a real
 user token, so `delegated_identity_live_gate=first_authenticated_user_tool_call`
 remains the explicit live gate: the downstream tool's `whoami`-style response
 must attest the expected principal before production promotion. A new request
-must present a fresh JWT; expiry is checked at the API and again by Runtime and
-Gateway. IdP revocation behavior follows the provider's access-token semantics,
+must present a fresh JWT; expiry and caller binding are checked at the API and the
+Gateway independently validates its JWT authorizer contract. IdP revocation behavior follows the provider's access-token semantics,
 so use short access-token lifetimes where immediate revocation is required.
 
 ## Production safety and promotion gate
@@ -211,6 +212,41 @@ This is an append-only, tamper-evident projection inside the platform IAM
 boundary, **not** an Object Lock/WORM compliance attestation against account
 administrators. See [`docs/DATA_RETENTION.md`](docs/DATA_RETENTION.md) for the
 pseudonymous-identifier and retention responsibilities.
+
+## Atomic invocation authorization
+
+The Cost panel can create monthly owner, agent, or tag limits. In production,
+every platform-mediated slot, direct test, buffered stream, Function URL stream,
+MCP, and durable-trigger invocation operation requires at least one applicable
+limit. A bounded MCP handshake and tool call are one operation. The platform strongly reads applicable definitions and uses one DynamoDB
+transaction to condition-check their current owner and value, increment every
+matching monthly counter, and create a correlated reservation row. Concurrent
+reserved plus committed units cannot exceed any matching limit.
+
+The unit is configured with CDK context `budget_reservation_usd` (default `1.0`)
+and passed as `BUDGET_RESERVATION_USD`. It is USD-denominated **invocation
+authorization capacity**, not predicted or reconciled AWS cost. Once network
+dispatch begins, both successful and failed Runtime responses commit the unit
+because either can incur charges. Calls proven not dispatched release it. A
+crashed or otherwise unknown reservation commits conservatively after one hour;
+it is never released on uncertainty. Exhaustion returns HTTP `429` with
+`Retry-After: 3600`; missing or unreadable production storage returns `503`
+before Runtime dispatch.
+
+This is deliberately not advertised as an AWS bill cap. It excludes downstream
+tool/vendor charges, direct calls made with separately granted service credentials,
+and variance between the configured unit and actual model/Runtime pricing. Production
+A2A is refused because inbound and nested peer Runtime calls do not yet propagate a
+reservation. OBO Runtime closes the direct bearer bypass: only the platform's SigV4
+principal invokes it, after reservation, while the workforce JWT travels in a signed
+custom header for request-local Gateway token exchange. Cost Explorer/Budgets and
+service quotas remain necessary account-level controls.
+
+Budget definitions and monthly counters contain pseudonymous owner IDs and aggregate
+authorization values, not prompts or tokens. Settled reservation rows expire after 90
+days; monthly counters expire after 400 days; definitions remain until deleted. See
+[`docs/COSTS.md`](docs/COSTS.md), [`docs/DATA_RETENTION.md`](docs/DATA_RETENTION.md),
+and [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md).
 
 ## Accessing the Platform
 

@@ -34,9 +34,17 @@ Covers the governance data stores added in the enterprise/governance layer.
 
 ## Cost / usage (`services/cost_tracking.py`, table `*-usage-events`)
 
-- Token counts + priced cost per invocation; `owner_sub` for attribution.
-- 90-day TTL. Read via `GET /api/runtimes/{name}/cost` (owner-scoped, 404 cross
-  tenant). Budgets (`*-budget` table) hold only limit config, no usage data.
+- Usage events store token counts, priced cost per invocation, and pseudonymous
+  `owner_sub` attribution; prompts, model responses, and credentials are excluded.
+- Usage-event rows expire after 90 days. Read via
+  `GET /api/runtimes/{name}/cost` (owner-scoped, 404 cross tenant).
+- The `*-budget` table stores persistent owner/agent/tag limit definitions,
+  current-month aggregate authorization counters, and correlated invocation
+  reservation rows. It stores no prompt, response, token, or downstream credential.
+- Settled reservation rows expire after 90 days. Monthly counters expire after
+  400 days so one full prior-year comparison remains available; definitions do
+  not expire and remain until an authorized delete. A one-hour stale reservation
+  is committed conservatively before receiving its 90-day TTL.
 
 ## Tag policies / profiles (`*-tag-policy`)
 

@@ -1027,3 +1027,66 @@ def test_production_rejects_litellm_tool_gateway_before_any_side_effect(spy, mon
     assert response.status_code == 400, response.text
     assert "require AgentCore Gateway" in response.text
     assert spy.side_effects == []
+
+
+def test_production_rejects_a2a_budget_bypass_before_any_side_effect(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(
+            config={
+                "name": "orders-a2a",
+                "model": {"modelId": MODEL_ID},
+                "protocol": "A2A",
+            },
+            a2aConfig={"peer_allowlist": []},
+        ),
+    )
+
+    assert response.status_code == 400, response.text
+    assert "outside the invocation-authorization support envelope" in response.text
+    assert spy.side_effects == []
+
+
+def test_development_keeps_a2a_interoperability_available(spy, monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "dev")
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(
+            config={
+                "name": "orders-a2a",
+                "model": {"modelId": MODEL_ID},
+                "protocol": "A2A",
+            },
+            a2aConfig={"peer_allowlist": []},
+        ),
+    )
+
+    assert response.status_code == 202, response.text
+    assert spy.calls.count("StartExecution") == 1
+
+
+def test_mutation_removing_a2a_envelope_reopens_production_bypass(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+    monkeypatch.setattr(
+        dh,
+        "enforce_production_invocation_budget_envelope",
+        lambda **_kwargs: None,
+    )
+
+    response = _client().post(
+        "/api/deploy",
+        json=_body(
+            config={
+                "name": "orders-a2a",
+                "model": {"modelId": MODEL_ID},
+                "protocol": "A2A",
+            },
+            a2aConfig={"peer_allowlist": []},
+        ),
+    )
+
+    assert response.status_code == 202, response.text
+    assert spy.calls.count("StartExecution") == 1

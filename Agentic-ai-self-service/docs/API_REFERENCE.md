@@ -173,6 +173,25 @@ the IAM roles and parameters in the account where the customer deploys it.
 | `GET` | `/api/runtimes/{name}/dashboard-url` | Deep link to the auto-generated CloudWatch dashboard |
 | `GET` | `/api/runtimes/{name}/cost?from=&to=` | Token + estimated-cost rollup by model for the window |
 
+
+### Invocation authorization (owner/agent/tag scoped)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/cost/budgets` | List caller-visible monthly limit definitions |
+| `POST` | `/api/cost/budgets` | Create/update `{scope, key, limit_usd, warn_pct}`; owner scope is always rebound to the authenticated caller |
+| `DELETE` | `/api/cost/budgets/{scope}/{key}` | Delete an owned definition; a foreign row remains indistinguishable from missing (`404`) |
+
+Production-mediated invocation operations require at least one applicable definition.
+A bounded MCP handshake and tool call consume one operation. Owner, agent, and matching tag limits are condition-checked and reserved in one
+DynamoDB transaction. Exhausted capacity returns `429` with
+`Retry-After: 3600`; unavailable storage returns `503` before dispatch. The cost
+response's `owner_budget` includes `authorized`, `reserved`, `committed`,
+`remaining_authorization`, `reservation_unit`,
+`authorization_scope="platform-mediated-invocation-operation"`, and
+`is_actual_cost_cap=false`. Those USD-denominated values authorize dispatches;
+they are not reconciled AWS charges or an account-level spending guarantee.
+
 ### Triggers (runtime-scoped)
 
 | Method | Endpoint | Description |

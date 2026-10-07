@@ -43,7 +43,7 @@ from app.models import (
 from app.models.enums import StrandsModelProvider
 from app.services import codegen_templates, runtime_deployer
 from app.services.aws_pagination import list_all
-from app.services.delegated_identity import runtime_obo_authorizer
+from app.services.delegated_identity import runtime_obo_transport_configuration
 from app.services.gateway_mutation_lock import engine_is, gateway_mutation_lock
 from app.services.gateway_update import preserving_gateway_update
 from app.services.iam_boundary import create_role_kwargs, ensure_role_boundary
@@ -2677,7 +2677,7 @@ class WorkflowExecutor:
             authorizer_config = None
             request_header_config = None
             if gateway_result and gateway_result.get("obo_required") is True:
-                authorizer_config, request_header_config = runtime_obo_authorizer(
+                authorizer_config, request_header_config = runtime_obo_transport_configuration(
                     self.region,
                     owner_sub,
                 )

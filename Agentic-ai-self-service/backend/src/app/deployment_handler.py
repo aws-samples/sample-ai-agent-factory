@@ -130,6 +130,10 @@ from app.services.gateway_name_claim import (
 )
 from app.services.gateway_update import NO_CLIENT_ALLOWED, preserving_gateway_update
 from app.services.harness_deployer import destroy_harness, invoke_harness
+from app.services.invocation_budget import (
+    reserve_invocation_budget,
+    settle_invocation_budget,
+)
 from app.services.invocation_identity import (
     InvocationIdentity,
     InvocationIdentityError,
@@ -140,6 +144,7 @@ from app.services.policy_lifecycle import delete_policy_confirmed
 from app.services.production_safety import (
     ProductionSafetyConfigurationError,
     enforce_production_guardrail_baseline,
+    enforce_production_invocation_budget_envelope,
     enforce_production_policy_baseline,
 )
 from app.services.promotion_evidence import (
@@ -1670,6 +1675,11 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
             tool_gateway_required=tool_gateway_required,
             gateway_provider=gateway_provider,
         )
+        enforce_production_invocation_budget_envelope(
+            runtime_protocol=request.config.protocol,
+            a2a_config=request.a2a_config,
+            connected_tools=request.connected_tools,
+        )
     except (ProductionSafetyConfigurationError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2750,22 +2760,45 @@ async def handle_test_runtime(request: TestRequest, raw_request: Request) -> Tes
             except DelegatedIdentityError as exc:
                 raise HTTPException(status_code=401, detail=str(exc)) from exc
 
-        return invoke_verified_http_runtime(
-            request,
-            caller_sub=caller_sub or "",
-            deployment_state=deployment_state,
-            runtime_id=runtime_id,
-            runtime_arn=runtime_arn,
-            region=region,
-            target_session=target_session,
-            promote_policy=_maybe_promote_policy,
-            invoke_harness=invoke_harness,
-            resolve_memory_identity=memory_invocation_identity,
-            gateway_session=gateway_aws_session,
-            get_gateway_token=get_cognito_token,
-            user_bearer_token=user_bearer_token,
-            start_harness_warmup=_start_harness_warmup,
+        budget_runtime_name = str(
+            deployment_state.get("friendly_runtime_name")
+            or deployment_state.get("agentcore_runtime_name")
+            or runtime_id
         )
+        reservation = reserve_invocation_budget(
+            owner_sub=caller_sub or "",
+            runtime_name=budget_runtime_name,
+            resource_tags=deployment_state.get("resource_tags") or {},
+        )
+        dispatched = False
+
+        def _mark_dispatched() -> None:
+            nonlocal dispatched
+            dispatched = True
+
+        try:
+            result = invoke_verified_http_runtime(
+                request,
+                caller_sub=caller_sub or "",
+                deployment_state=deployment_state,
+                runtime_id=runtime_id,
+                runtime_arn=runtime_arn,
+                region=region,
+                target_session=target_session,
+                promote_policy=_maybe_promote_policy,
+                invoke_harness=invoke_harness,
+                resolve_memory_identity=memory_invocation_identity,
+                gateway_session=gateway_aws_session,
+                get_gateway_token=get_cognito_token,
+                user_bearer_token=user_bearer_token,
+                start_harness_warmup=_start_harness_warmup,
+                on_dispatch=_mark_dispatched,
+            )
+        except Exception:
+            settle_invocation_budget(reservation, dispatched=dispatched)
+            raise
+        settle_invocation_budget(reservation, dispatched=dispatched)
+        return result
 
     except HTTPException:
         # HTTPException IS an Exception, so the broad handler below used to catch this
@@ -2932,16 +2965,31 @@ async def handle_test_runtime_stream(request: TestRequest, raw_request: Request)
                 f"data: {json.dumps({'type': 'error', 'error': 'Harness ARN not found for this deployment'})}\n\n",
                 media_type="text/event-stream",
             )
-        result = invoke_harness(
-            region,
-            harness_arn,
-            prompt,
-            request.session_id or runtime_id,
-            agentcore_data_client=target_session.client(
-                "bedrock-agentcore",
-                region_name=region,
-            ),
+        budget_runtime_name = str(
+            deployment_state.get("friendly_runtime_name")
+            or deployment_state.get("agentcore_runtime_name")
+            or runtime_id
         )
+        reservation = reserve_invocation_budget(
+            owner_sub=caller_sub or "",
+            runtime_name=budget_runtime_name,
+            resource_tags=deployment_state.get("resource_tags") or {},
+        )
+        dispatched = False
+        try:
+            dispatched = True
+            result = invoke_harness(
+                region,
+                harness_arn,
+                prompt,
+                request.session_id or runtime_id,
+                agentcore_data_client=target_session.client(
+                    "bedrock-agentcore",
+                    region_name=region,
+                ),
+            )
+        finally:
+            settle_invocation_budget(reservation, dispatched=dispatched)
         if not result.get("success"):
             # SECURITY (CodeQL py/stack-trace-exposure): invoke_harness surfaces
             # raw exception text in `error`; never return that to the external
@@ -2991,6 +3039,15 @@ async def handle_test_runtime_stream(request: TestRequest, raw_request: Request)
                 media_type="text/event-stream",
             )
 
+    budget_runtime_name = str(
+        deployment_state.get("friendly_runtime_name") or deployment_state.get("agentcore_runtime_name") or runtime_id
+    )
+    reservation = reserve_invocation_budget(
+        owner_sub=caller_sub or "",
+        runtime_name=budget_runtime_name,
+        resource_tags=deployment_state.get("resource_tags") or {},
+    )
+    dispatched = False
     try:
         from botocore.config import Config as _BotoConfig
 
@@ -3010,6 +3067,7 @@ async def handle_test_runtime_stream(request: TestRequest, raw_request: Request)
         if session_id:
             invoke_params["runtimeSessionId"] = session_id
 
+        dispatched = True
         resp = agentcore_client.invoke_agent_runtime(**invoke_params)
         if not memory_identity:
             session_id = resp.get("runtimeSessionId") or resp.get("sessionId")
@@ -3046,6 +3104,8 @@ async def handle_test_runtime_stream(request: TestRequest, raw_request: Request)
             f"data: {json.dumps({'type': 'error', 'error': 'Internal error'})}\n\n",
             media_type="text/event-stream",
         )
+    finally:
+        settle_invocation_budget(reservation, dispatched=dispatched)
 
 
 def _runtime_payload(

@@ -139,3 +139,32 @@ def enforce_production_policy_baseline(
     prepared["on_enforce_failure"] = "fail_closed"
     prepared["baselineProfile"] = PRODUCTION_POLICY_PROFILE
     return prepared
+
+
+def enforce_production_invocation_budget_envelope(
+    *,
+    runtime_protocol: str,
+    a2a_config: Mapping[str, Any] | None,
+    connected_tools: list[Any] | None,
+) -> None:
+    """Refuse production invocation paths that can bypass platform reservation.
+
+    The current authorization ledger covers one platform-mediated Runtime dispatch.
+    A2A allows both direct inbound Runtime calls and nested peer dispatches outside
+    that boundary, so admitting it would turn a hard authorization limit into an
+    advisory counter. Development remains available for A2A interoperability work.
+    """
+
+    if not is_production_like_environment():
+        return
+    tools = {
+        str(tool).strip().lower() for tool in (connected_tools or []) if isinstance(tool, str) and str(tool).strip()
+    }
+    a2a_enabled = str(runtime_protocol or "HTTP").strip().upper() == "A2A" or a2a_config is not None or "a2a" in tools
+    if a2a_enabled:
+        raise ProductionSafetyConfigurationError(
+            "Production A2A deployment is outside the invocation-authorization "
+            "support envelope: inbound and nested peer Runtime calls do not yet "
+            "reserve platform capacity. Use a development environment until "
+            "reservation propagation is implemented."
+        )

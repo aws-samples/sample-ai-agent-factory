@@ -274,6 +274,7 @@ class PlatformStack(cdk.Stack):
             otel,
             backend_code=self.backend_code,
             deployments_table=tables.deployments,
+            budget_table=tables.budget,
             user_pool=self.user_pool,
             user_pool_client=self.user_pool_client,
         )

@@ -62,6 +62,14 @@ export interface CostSummary {
     limit: number;
     used_pct: number;
     status: 'ok' | 'warn' | 'over';
+    month?: string;
+    authorized?: number;
+    reserved?: number;
+    committed?: number;
+    remaining_authorization?: number;
+    reservation_unit?: number;
+    authorization_scope?: 'platform-mediated-invocation-operation';
+    is_actual_cost_cap?: false;
   };
 }
 

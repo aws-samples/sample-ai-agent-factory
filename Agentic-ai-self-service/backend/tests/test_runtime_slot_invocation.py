@@ -163,6 +163,8 @@ class _Harness:
             "workforce_token_expectations",
             lambda _region: ("https://issuer.example", "workforce-client"),
         )
+        monkeypatch.setattr(versions_router, "reserve_invocation_budget", lambda **_kwargs: None)
+        monkeypatch.setattr(versions_router, "settle_invocation_budget", lambda *_args, **_kwargs: None)
 
         app = FastAPI()
         app.include_router(versions_router.router)
@@ -516,6 +518,7 @@ def test_authorized_obo_slot_forwards_user_bearer_to_exact_version(harness, monk
 
     def _invoke(**kwargs):
         captured.update(kwargs)
+        kwargs["on_dispatch"]()
         return {
             "statusCode": 200,
             "response": json.dumps(
@@ -534,7 +537,7 @@ def test_authorized_obo_slot_forwards_user_bearer_to_exact_version(harness, monk
             "runtimeSessionId": "delegated-session",
         }
 
-    monkeypatch.setattr(runtime_invocation, "invoke_agent_runtime_with_bearer", _invoke)
+    monkeypatch.setattr(runtime_invocation, "invoke_agent_runtime_with_workforce_token", _invoke)
     response = harness.client.post(
         f"/api/runtimes/{NAME}/slots/production/invoke",
         json={"input": "who am I"},
@@ -553,10 +556,12 @@ def test_authorized_obo_slot_forwards_user_bearer_to_exact_version(harness, monk
         "downstream_principal": None,
     }
     assert captured["runtime_arn"] == _runtime_arn(V1)
+    assert captured["agentcore_client"] is harness.agentcore
     assert captured["deployment_state"]["runtime_endpoint"].endswith("/runtime-endpoint/DEFAULT")
     assert captured["bearer_token"] == token
+    assert callable(captured["on_dispatch"])
     assert token not in response.text
-    assert harness.agentcore.invocations == []  # no SigV4/M2M fallback
+    assert harness.agentcore.invocations == []  # signed wrapper was intercepted before the SDK call
 
 
 @pytest.mark.parametrize(
@@ -568,7 +573,7 @@ def test_unauthorized_obo_slot_never_invokes_runtime(harness, monkeypatch, autho
 
     _enable_obo(harness)
     invoke = MagicMock()
-    monkeypatch.setattr(runtime_invocation, "invoke_agent_runtime_with_bearer", invoke)
+    monkeypatch.setattr(runtime_invocation, "invoke_agent_runtime_with_workforce_token", invoke)
     headers = {"Authorization": authorization} if authorization else {}
 
     response = harness.client.post(
@@ -596,7 +601,7 @@ def test_substituted_obo_claims_never_invoke_runtime(harness, monkeypatch, token
 
     _enable_obo(harness)
     invoke = MagicMock()
-    monkeypatch.setattr(runtime_invocation, "invoke_agent_runtime_with_bearer", invoke)
+    monkeypatch.setattr(runtime_invocation, "invoke_agent_runtime_with_workforce_token", invoke)
 
     response = harness.client.post(
         f"/api/runtimes/{NAME}/slots/production/invoke",
@@ -606,4 +611,73 @@ def test_substituted_obo_claims_never_invoke_runtime(harness, monkeypatch, token
 
     assert response.status_code == 401
     invoke.assert_not_called()
+    assert harness.agentcore.invocations == []
+
+
+def test_slot_invocation_reserves_before_runtime_and_commits_success(harness, monkeypatch):
+    reservation = object()
+    reserve = MagicMock(return_value=reservation)
+    settle = MagicMock()
+    monkeypatch.setattr(versions_router, "reserve_invocation_budget", reserve)
+    monkeypatch.setattr(versions_router, "settle_invocation_budget", settle)
+
+    response = harness.invoke("production")
+
+    assert response.status_code == 200
+    reserve.assert_called_once_with(
+        owner_sub=OWNER,
+        runtime_name=NAME,
+        resource_tags={},
+    )
+    settle.assert_called_once_with(reservation, dispatched=True)
+    assert len(harness.agentcore.invocations) == 1
+
+
+def test_slot_budget_429_never_invokes_runtime(harness, monkeypatch):
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(
+        versions_router,
+        "reserve_invocation_budget",
+        MagicMock(side_effect=HTTPException(status_code=429, detail="hard budget exhausted")),
+    )
+    settle = MagicMock()
+    monkeypatch.setattr(versions_router, "settle_invocation_budget", settle)
+
+    response = harness.invoke("production")
+
+    assert response.status_code == 429
+    assert harness.agentcore.invocations == []
+    settle.assert_not_called()
+
+
+def test_failed_slot_response_still_commits_dispatched_reservation(harness, monkeypatch):
+    reservation = object()
+    monkeypatch.setattr(versions_router, "reserve_invocation_budget", lambda **_kwargs: reservation)
+    settle = MagicMock()
+    monkeypatch.setattr(versions_router, "settle_invocation_budget", settle)
+    harness.agentcore.invoke_agent_runtime = MagicMock(return_value={"statusCode": 500, "response": b"internal"})
+
+    response = harness.invoke("production")
+
+    assert response.status_code == 200
+    assert response.json()["success"] is False
+    settle.assert_called_once_with(reservation, dispatched=True)
+
+
+def test_slot_failure_before_dispatch_releases_reservation(harness, monkeypatch):
+    reservation = object()
+    monkeypatch.setattr(versions_router, "reserve_invocation_budget", lambda **_kwargs: reservation)
+    settle = MagicMock()
+    monkeypatch.setattr(versions_router, "settle_invocation_budget", settle)
+    monkeypatch.setattr(
+        versions_router,
+        "invoke_verified_http_runtime",
+        MagicMock(side_effect=HTTPException(status_code=503, detail="local validation failed")),
+    )
+
+    response = harness.invoke("production")
+
+    assert response.status_code == 503
+    settle.assert_called_once_with(reservation, dispatched=False)
     assert harness.agentcore.invocations == []
