@@ -60,6 +60,15 @@ Covers the governance data stores added in the enterprise/governance layer.
   Trigger deletion purges their shared delivery partition immediately; a live
   claim prevents deletion until its bounded lease expires.
 
+## JIT permission requests (`*-permission-requests`)
+
+- Stores requester/approver pseudonymous subjects, target role, requested actions
+  and resource ARNs, justification/reason, lifecycle status, timestamps, and an
+  internal short-lived approval lease token/expiry while `APPLYING`.
+- Lease tokens are never returned by the API. The table has no TTL because the
+  request and decision form the persistent escalation history; define an
+  organization retention policy before long-term adoption.
+
 ## Tag policies / profiles (`*-tag-policy`)
 
 - Org-wide governance config (tag keys/values). No user data. No TTL (config).

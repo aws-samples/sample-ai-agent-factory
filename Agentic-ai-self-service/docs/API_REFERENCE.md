@@ -298,6 +298,21 @@ cannot be read, deploys referencing an integration return `503`.
 | `POST` | `/api/workflows/{id}/git-token` | Store a Git PAT (owner-scoped Secrets Manager) |
 | `POST` | `/api/workflows/{id}/git-sync` | Pull a workflow spec from Git (SSRF-guarded) |
 
+### JIT permission requests
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/permissions/requests` | Request an exact action/resource widening on a non-shared `AgentCore*` role |
+| `GET` | `/api/permissions/requests/pending` | Admin queue including recoverable `PENDING` and `APPLYING` rows |
+| `POST` | `/api/permissions/requests/{id}/approve` | Claim a five-minute `APPLYING` lease, idempotently apply `JIT-{id}`, then finalize `APPROVED` |
+| `POST` | `/api/permissions/requests/{id}/reject` | Conditionally reject only a `PENDING` request |
+
+An active approval lease makes concurrent approve/reject return `409`. Definitive
+IAM refusal returns the row to `PENDING`; an ambiguous IAM outcome returns `502`
+with `Retry-After: 300` and leaves `APPLYING`, preventing a false rejection until
+an admin reclaims and retries the same deterministic policy. Gateway/target/Cedar
+control-plane mutation actions are refused even when hidden behind an action wildcard.
+
 ### NL Agent Generation & Code Export
 
 | Method | Endpoint | Description |

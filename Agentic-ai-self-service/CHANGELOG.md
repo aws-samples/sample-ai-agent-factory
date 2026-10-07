@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — JIT approval cannot race a recorded rejection
+
+- Approval conditionally leases `PENDING → APPLYING` before IAM, applies the deterministic
+  `JIT-{request_id}` policy, and finalizes `APPROVED` only with the same token. Rejection is a
+  conditional `PENDING → REJECTED`, so it cannot win after permission application starts.
+- Definitive IAM refusals release the lease back to `PENDING`. Timeout/transport ambiguity remains
+  `APPLYING`, returns `Retry-After: 300`, stays visible in the admin queue, and can be reclaimed
+  after expiry to idempotently reapply/finalize; it is never mislabeled rejected.
+- JIT validation now rejects exact or wildcard Gateway, Gateway-target, and Cedar Policy mutation
+  actions in addition to existing IAM/STS/shared-role/resource guards. Positive, concurrent
+  reject, stale-token, lease-takeover, definitive-failure, ambiguous-retry, and old-sequence
+  mutation tests pin the state machine.
+
 ### Added — signed webhook ingress is durably idempotent
 
 - After HMAC/timestamp validation and required production audit, webhook ingress conditionally

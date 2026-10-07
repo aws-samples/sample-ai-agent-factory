@@ -142,7 +142,11 @@ engine. Runtime and Harness execution roles never receive Gateway/Policy control
 mutation authority. Every dynamic, per-agent, shared, and CloudFormation-exported
 execution role carries an explicit `Deny` for Gateway/target/Policy create, update,
 delete, and synchronization actions; policy builders also reject exact or wildcard
-`Allow` patterns that would match those actions before IAM publication.
+`Allow` patterns that would match those actions before IAM publication. JIT
+permission requests cannot grant the same control-plane mutations. Approval first
+claims the row as `APPLYING`; rejection is then impossible until the deterministic
+IAM write is finalized `APPROVED` or a definitive no-side-effect refusal releases it.
+Ambiguous IAM outcomes remain leased and retryable rather than being recorded rejected.
 
 Production-like environments also default new versions to **staging** and reject
 an explicit direct production deploy before side effects. The
