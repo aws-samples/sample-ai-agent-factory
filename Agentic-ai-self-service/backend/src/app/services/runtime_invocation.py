@@ -11,6 +11,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Any
@@ -20,6 +23,7 @@ from fastapi import HTTPException
 
 from app.models.deployment_models import DeploymentStatusEnum, TestRequest, TestResponse
 from app.services import step_clients
+from app.services.delegated_identity import deployment_requires_obo
 from app.services.invocation_identity import InvocationIdentity, InvocationIdentityError
 
 logger = logging.getLogger(__name__)
@@ -33,6 +37,70 @@ def _close_response_body(body: Any) -> None:
         close()
     except Exception:  # noqa: BLE001
         logger.debug("Could not close the runtime response body", exc_info=True)
+
+
+def _runtime_endpoint_qualifier(deployment_state: dict, runtime_arn: str) -> str:
+    """Return the exact endpoint qualifier durably bound to this deployment."""
+
+    endpoint_arn = str(deployment_state.get("runtime_endpoint") or "")
+    prefix = runtime_arn + "/runtime-endpoint/"
+    if not endpoint_arn.startswith(prefix):
+        raise ValueError("The delegated Runtime endpoint is not bound to this deployment")
+    qualifier = endpoint_arn[len(prefix) :]
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,47}|DEFAULT", qualifier):
+        raise ValueError("The delegated Runtime endpoint qualifier is invalid")
+    return qualifier
+
+
+def invoke_agent_runtime_with_bearer(
+    *,
+    runtime_arn: str,
+    deployment_state: dict,
+    region: str,
+    payload: dict[str, Any],
+    bearer_token: str,
+    session_id: str | None,
+) -> dict[str, Any]:
+    """Invoke a custom-JWT Runtime through its documented bearer HTTP interface.
+
+    The botocore 1.43.99 ``InvokeAgentRuntime`` model has no bearer-token input;
+    the official AgentCore guide therefore requires direct HTTP for custom JWT.
+    """
+
+    qualifier = _runtime_endpoint_qualifier(deployment_state, runtime_arn)
+    escaped_arn = urllib.parse.quote(runtime_arn, safe="")
+    escaped_qualifier = urllib.parse.quote(qualifier, safe="")
+    url = (
+        f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/"
+        f"{escaped_arn}/invocations?qualifier={escaped_qualifier}"
+    )
+    headers = {
+        "Authorization": "Bearer " + bearer_token,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if session_id:
+        headers["X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"] = session_id
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=25) as response:
+            return {
+                "statusCode": response.status,
+                "response": response.read(),
+                "runtimeSessionId": response.headers.get(
+                    "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id",
+                    session_id,
+                ),
+            }
+    except urllib.error.HTTPError as exc:
+        # Do not return or log the body: IdP/Gateway error bodies can contain
+        # request details.  The status is enough for the controlled caller error.
+        return {"statusCode": exc.code, "response": b""}
 
 
 def runtime_payload(
@@ -169,6 +237,43 @@ def parse_response_body(body: Any) -> str:
     return body
 
 
+_IDENTITY_EVIDENCE_KEYS = frozenset(
+    {
+        "subject",
+        "issuer",
+        "expires_at",
+        "correlation_id",
+        "gateway_exchange",
+        "downstream_principal",
+    }
+)
+
+
+def parse_identity_evidence(body: Any) -> dict[str, Any] | None:
+    """Return only non-credential identity/correlation evidence from Runtime."""
+
+    try:
+        data = json.loads(_body_text(body))
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    evidence = data.get("identity_evidence") if isinstance(data, dict) else None
+    if not isinstance(evidence, dict) or set(evidence) != _IDENTITY_EVIDENCE_KEYS:
+        return None
+    if evidence.get("gateway_exchange") != "ON_BEHALF_OF_TOKEN_EXCHANGE":
+        return None
+    for key in ("subject", "issuer", "correlation_id"):
+        value = evidence.get(key)
+        if not isinstance(value, str) or len(value) > 1024 or any(ord(ch) < 0x20 for ch in value):
+            return None
+    expiry = evidence.get("expires_at")
+    if isinstance(expiry, bool) or not isinstance(expiry, (int, float)):
+        return None
+    downstream = evidence.get("downstream_principal")
+    if downstream is not None and (not isinstance(downstream, str) or len(downstream) > 1024):
+        return None
+    return dict(evidence)
+
+
 def promote_pending_policy(
     deployment_state: dict,
     fallback_region: str,
@@ -258,6 +363,7 @@ def invoke_verified_http_runtime(
     resolve_memory_identity: Callable[[dict, str | None, str], InvocationIdentity | None],
     gateway_session: Callable[[Any], AbstractContextManager],
     get_gateway_token: Callable[[dict], str],
+    user_bearer_token: str | None = None,
     start_harness_warmup: Callable[[dict, str, str], None] | None = None,
 ) -> TestResponse:
     """Invoke one exact, owner-checked target without re-resolving authority."""
@@ -337,9 +443,10 @@ def invoke_verified_http_runtime(
             detail="Could not verify this runtime right now. Try again shortly.",
         )
 
+    obo_required = deployment_requires_obo(deployment_state)
     gateway_result = deployment_state.get("gateway_result") or {}
     client_info = gateway_result.get("client_info")
-    if client_info:
+    if client_info and not obo_required:
         try:
             with gateway_session(target_session):
                 get_gateway_token(client_info)
@@ -347,30 +454,43 @@ def invoke_verified_http_runtime(
             logger.warning("Could not get Cognito token for gateway auth validation")
 
     try:
-        agentcore_client = target_session.client(
-            "bedrock-agentcore",
-            region_name=region,
-            config=BotoConfig(
-                read_timeout=25,
-                connect_timeout=5,
-                retries={"max_attempts": 0},
-            ),
+        payload = runtime_payload(
+            prompt,
+            session_id,
+            memory_identity,
+            warmup=request.warmup,
         )
-        invoke_params: dict[str, Any] = {
-            "agentRuntimeArn": runtime_arn,
-            "payload": json.dumps(
-                runtime_payload(
-                    prompt,
-                    session_id,
-                    memory_identity,
-                    warmup=request.warmup,
+        if obo_required:
+            if not user_bearer_token:
+                return TestResponse(
+                    success=False,
+                    error="OBO was requested but no authenticated user bearer token was supplied",
                 )
-            ),
-        }
-        if session_id:
-            invoke_params["runtimeSessionId"] = session_id
-
-        response = agentcore_client.invoke_agent_runtime(**invoke_params)
+            response = invoke_agent_runtime_with_bearer(
+                runtime_arn=runtime_arn,
+                deployment_state=deployment_state,
+                region=region,
+                payload=payload,
+                bearer_token=user_bearer_token,
+                session_id=session_id,
+            )
+        else:
+            agentcore_client = target_session.client(
+                "bedrock-agentcore",
+                region_name=region,
+                config=BotoConfig(
+                    read_timeout=25,
+                    connect_timeout=5,
+                    retries={"max_attempts": 0},
+                ),
+            )
+            invoke_params: dict[str, Any] = {
+                "agentRuntimeArn": runtime_arn,
+                "payload": json.dumps(payload),
+            }
+            if session_id:
+                invoke_params["runtimeSessionId"] = session_id
+            response = agentcore_client.invoke_agent_runtime(**invoke_params)
         status_code = response.get("statusCode")
         status_is_valid = status_code is None or (
             isinstance(status_code, int) and not isinstance(status_code, bool) and 200 <= status_code < 300
@@ -406,6 +526,7 @@ def invoke_verified_http_runtime(
             session_id=session_id,
             arn=runtime_arn,
             tool_receipts=parse_tool_receipts(raw_response),
+            identity_evidence=parse_identity_evidence(raw_response),
         )
     except Exception as exc:  # noqa: BLE001
         error_msg = str(exc)

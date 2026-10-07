@@ -28,6 +28,7 @@ import boto3
 from app.services import codegen_templates
 from app.services.aws_errors import error_code, is_error
 from app.services.aws_pagination import list_all
+from app.services.delegated_identity import obo_requested, workforce_gateway_identity
 from app.services.deletion_confirmation import DeletionFailedAfterAccept, wait_until_absent
 from app.services.error_sanitizer import redact_secrets
 from app.services.gateway_mutation_lock import (
@@ -6019,44 +6020,52 @@ def deploy_gateway(
         if claim_gateway_name is not None:
             claim_gateway_name(gateway_name)
 
-        # Step 1: Create authorizer (Cognito or external IDP)
+        # Step 1: Create authorizer (workforce JWT for OBO; otherwise Cognito or
+        # an explicitly configured external IdP).  OBO must never silently fall
+        # back to the machine client: that would make a successful call run as
+        # the deployment rather than the authenticated user.
         identity_config = identity_config or {}
-        # Treat empty credentials as "auto-create Cognito" (e.g. template 3 sends empty clientId)
-        if identity_config and not (identity_config.get("clientId") or identity_config.get("client_id") or "").strip():
-            identity_config = {}
-        provider = identity_config.get("provider", "cognito")
-        if provider and provider != "cognito":
-            logger.info(
-                "Creating external %s authorizer for gateway '%s'",
-                provider,
-                gateway_name,
-            )
-            cognito_response = _create_external_oauth_config(identity_config, region)
+        obo_required = obo_requested(connectors)
+        if obo_required:
+            logger.info("Using the platform workforce JWT authorizer for an OBO gateway")
+            cognito_response = workforce_gateway_identity(region)
         else:
-            logger.info("Creating Cognito authorizer for gateway '%s'", gateway_name)
-            # owner_sub + deployment_id are passed so the minted client-secret
-            # reference is BOUND to this tenant and this deploy, not merely placed in
-            # the product's shared secret namespace where a prefix match would claim it.
-            cognito_response = _create_cognito_oauth(
-                cognito_client,
-                gateway_name,
-                region,
-                owner_sub,
-                deployment_id or "",
-                resource_tags=resource_tags,
-            )
-            # A gateway in any account or region reuses the platform's warm
-            # HOME-region pool. Conflict adoption and stale-client retirement happen
-            # later in this function, so route those operations to that pool's
-            # account (platform credentials) and region too. Dedicated pools stay on
-            # the original target client, moved only to the pool's own region.
-            _auth_pool_id = (cognito_response.get("client_info") or {}).get("user_pool_id", "")
-            if _auth_pool_id:
-                _auth_pool_region = _pool_region(_auth_pool_id)
-                if is_platform_owned_user_pool(_auth_pool_id):
-                    cognito_client = _create_platform_cognito_client(_auth_pool_region)
-                elif _auth_pool_region != region:
-                    cognito_client = _create_cognito_client(_auth_pool_region)
+            # Treat empty credentials as "auto-create Cognito" (e.g. template 3 sends empty clientId)
+            if identity_config and not (identity_config.get("clientId") or identity_config.get("client_id") or "").strip():
+                identity_config = {}
+            provider = identity_config.get("provider", "cognito")
+            if provider and provider != "cognito":
+                logger.info(
+                    "Creating external %s authorizer for gateway '%s'",
+                    provider,
+                    gateway_name,
+                )
+                cognito_response = _create_external_oauth_config(identity_config, region)
+            else:
+                logger.info("Creating Cognito authorizer for gateway '%s'", gateway_name)
+                # owner_sub + deployment_id are passed so the minted client-secret
+                # reference is BOUND to this tenant and this deploy, not merely placed in
+                # the product's shared secret namespace where a prefix match would claim it.
+                cognito_response = _create_cognito_oauth(
+                    cognito_client,
+                    gateway_name,
+                    region,
+                    owner_sub,
+                    deployment_id or "",
+                    resource_tags=resource_tags,
+                )
+                # A gateway in any account or region reuses the platform's warm
+                # HOME-region pool. Conflict adoption and stale-client retirement happen
+                # later in this function, so route those operations to that pool's
+                # account (platform credentials) and region too. Dedicated pools stay on
+                # the original target client, moved only to the pool's own region.
+                _auth_pool_id = (cognito_response.get("client_info") or {}).get("user_pool_id", "")
+                if _auth_pool_id:
+                    _auth_pool_region = _pool_region(_auth_pool_id)
+                    if is_platform_owned_user_pool(_auth_pool_id):
+                        cognito_client = _create_platform_cognito_client(_auth_pool_region)
+                    elif _auth_pool_region != region:
+                        cognito_client = _create_cognito_client(_auth_pool_region)
 
         # Step 1b: Create gateway IAM role
         iam_client = _create_iam_client()
@@ -7015,7 +7024,7 @@ def deploy_gateway(
         # control-plane is silent here, so the authoritative readiness signal is the
         # live MCP tools/list probe. Require the connector gateway to serve >=1 tool;
         # fail closed otherwise (never ship a connector gateway that serves nothing).
-        if connectors and expected_tool_count == 0:
+        if connectors and expected_tool_count == 0 and not obo_required:
             served = _wait_for_gateway_to_serve_tools(gateway_url, client_info, expected=1, timeout=120)
             if served < 1:
                 # Surface the REAL reason: a FAILED OpenAPI target carries an
@@ -7072,7 +7081,7 @@ def deploy_gateway(
         # Whether the MCP tools/list probe actually CONFIRMED the tool plane, as
         # opposed to being unable to reach it. Travels in the result so a caller
         # never has to infer verification from success alone.
-        tool_plane_verified = True
+        tool_plane_verified = not obo_required
         if expected_tool_count > 0:
             # `probe` records HOW the probe ended, because the count alone cannot
             # tell an empty tool plane apart from a probe that never got a usable
@@ -7290,6 +7299,12 @@ def deploy_gateway(
             "gateway_role_name": gw_role_confirmed,
             "gateway_role_created_by_deployment": gw_role_created,
             "client_info": client_info,
+            # Durable authorization contract.  Invocation and generated code read
+            # this exact marker; neither may infer OBO from a mutable UI request.
+            "obo_required": obo_required,
+            "delegated_identity_live_gate": (
+                "first_authenticated_user_tool_call" if obo_required else None
+            ),
             "lambda_function_name": lambda_function_name,
             "custom_tool_lambdas": custom_tool_lambdas,
             "custom_tool_roles": custom_tool_roles,

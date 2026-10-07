@@ -77,6 +77,7 @@ from app.deployment_handler import (
 )
 from app.services import step_clients
 from app.services.config import load_config
+from app.services.delegated_identity import deployment_requires_obo
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.harness_deployer import invoke_harness
 from app.services.invocation_identity import InvocationIdentityError, memory_invocation_identity
@@ -191,10 +192,9 @@ def _extract_bearer(event: dict) -> str:
     """The caller's bearer token, or ``""`` when the Authorization header is not one.
 
     F-28: this used to return ANY non-bearer header value whole, so on the SigV4 path the
-    ``AWS4-HMAC-SHA256 Credential=..., SignedHeaders=..., Signature=...`` string was carried
-    into the invoke payload as ``user_access_token``. A signature is not a user token and no
-    consumer wants it there. Only ``Bearer <token>`` -- or a bare JWT (three dot-separated
-    segments, no whitespace) for callers that omit the scheme -- is a token.
+    ``AWS4-HMAC-SHA256 Credential=..., SignedHeaders=..., Signature=...`` string could be
+    mistaken for a user credential. Only ``Bearer <token>`` -- or a bare JWT (three
+    dot-separated segments, no whitespace) -- is a token.
     """
     headers = event.get("headers") or {}
     # Function URL lowercases header names, but be defensive.
@@ -415,6 +415,17 @@ def _stream_invoke(write, body: dict, caller_sub: str | None) -> None:
             write(_sse({"type": "error", "error": "Runtime not found"}))
             return
 
+    if deployment_requires_obo(deployment_state):
+        write(
+            _sse(
+                {
+                    "type": "error",
+                    "error": "OBO invocation requires the authenticated production-slot endpoint",
+                }
+            )
+        )
+        return
+
     target_event = _deployment_target_event(deployment_state, region)
     region = target_event["target_region"]
     target_session = step_clients.session_for_event(target_event)
@@ -489,12 +500,6 @@ def _stream_invoke(write, body: dict, caller_sub: str | None) -> None:
             config=_BotoConfig(read_timeout=870, connect_timeout=10, retries={"max_attempts": 0}),
         )
         payload_body = _runtime_payload(prompt, session_id, memory_identity)
-        # Phase 3 (Loom) OBO — pass the user's access token to the runtime so its
-        # OAuth2 handler can perform the on-behalf-of exchange. Carried in the
-        # invoke payload (not an AgentCore header, which the proxy strips).
-        _uat = body.get("_user_access_token")
-        if _uat:
-            payload_body["user_access_token"] = _uat
         invoke_params: dict = {
             "agentRuntimeArn": runtime_arn,
             "payload": json.dumps(payload_body),
@@ -562,15 +567,6 @@ def _handle(event: dict, write) -> None:
     except Exception:  # noqa: BLE001
         write(_sse({"type": "error", "error": "Invalid JSON body"}))
         return
-
-    # Phase 3 (Loom) OBO — forward the caller's bearer token so the runtime's
-    # OAuth2 handler can use it as the SUBJECT token in an on-behalf-of exchange
-    # (agent acts AS the user downstream). Only the user's own token is carried;
-    # the SigV4 path has no bearer and simply omits it (M2M connectors ignore it).
-    if isinstance(body, dict):
-        _bearer = _extract_bearer(event)
-        if _bearer:
-            body["_user_access_token"] = _bearer
 
     _stream_invoke(write, body, caller_sub)
 

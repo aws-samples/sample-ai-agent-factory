@@ -954,7 +954,12 @@ def _fit_tool_names_for_bedrock(client, tools, _limit=64):
 
 # ── Lazy init: boto3/MCP clients may not have valid creds at module load ──
 
-def _create_transport():
+def _create_transport(subject_token=""):
+    if GATEWAY_AUTH_MODE == "obo":
+        if not subject_token:
+            raise RuntimeError("OBO invocation is missing its authenticated workforce token")
+        headers = dict(Authorization="Bearer " + subject_token)
+        return streamablehttp_client(GATEWAY_URL, headers=headers)
     token = _get_gateway_token()
     if GATEWAY_AUTH_MODE == "static_bearer":
         # LiteLLM reads its virtual key from its own header, and scopes the
@@ -1058,16 +1063,65 @@ __TOOL_RECEIPTS__
 
 
 @app.entrypoint
-def invoke(payload):
+def invoke(payload, context=None):
     """Strands Agent with MCP Gateway tools."""
     message = payload.get("prompt", "Hello")
-    agent = _get_agent()
-    seen = _tool_use_ids(getattr(agent, "messages", None))
-    result = agent(message)
-    return {{
-        "response": str(result),
-        "tool_receipts": _tool_receipts(getattr(agent, "messages", None), exclude=seen, names=_TOOL_NAME_ALIASES),
-    }}
+    request_headers = getattr(context, "request_headers", {{}}) if context is not None else {{}}
+    auth_header = str(
+        request_headers.get("Authorization") or request_headers.get("authorization") or ""
+    ).strip()
+    subject_token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+    obo_client = None
+    delegated_evidence = None
+    if GATEWAY_AUTH_MODE == "obo":
+        if (
+            not isinstance(subject_token, str)
+            or any(ch.isspace() for ch in subject_token)
+            or subject_token.count(".") != 2
+        ):
+            raise RuntimeError("OBO invocation requires one authenticated workforce JWT")
+        try:
+            _segment = subject_token.split(".")[1]
+            _segment += "=" * (-len(_segment) % 4)
+            _claims = json.loads(__import__("base64").urlsafe_b64decode(_segment.encode("ascii")))
+            delegated_evidence = dict(
+                subject=str(_claims.get("sub") or ""),
+                issuer=str(_claims.get("iss") or ""),
+                expires_at=_claims.get("exp"),
+                correlation_id=str(
+                    request_headers.get("X-Amzn-Trace-Id")
+                    or request_headers.get("x-amzn-trace-id")
+                    or ""
+                ),
+                gateway_exchange="ON_BEHALF_OF_TOKEN_EXCHANGE",
+                downstream_principal=None,
+            )
+        except Exception as exc:
+            raise RuntimeError("Runtime delivered an unreadable delegated JWT") from exc
+        {model_init}
+        obo_client = MCPClient(lambda: _create_transport(subject_token))
+        obo_client.start()
+        tools = get_full_tools_list(obo_client)
+        if not tools:
+            raise RuntimeError("OBO Gateway returned no tools for the authenticated user")
+        local_tools = [{local_tool_expr}]
+        agent = Agent(model=model, tools=tools + local_tools, system_prompt=SYSTEM_PROMPT)
+    else:
+        agent = _get_agent()
+    try:
+        seen = _tool_use_ids(getattr(agent, "messages", None))
+        result = agent(message)
+        return {{
+            "response": str(result),
+            "tool_receipts": _tool_receipts(getattr(agent, "messages", None), exclude=seen, names=_TOOL_NAME_ALIASES),
+            "identity_evidence": delegated_evidence,
+        }}
+    finally:
+        if obo_client is not None:
+            try:
+                obo_client.stop(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
 
 # Eager warm at CONTAINER INIT — in a BACKGROUND thread so the HTTP server starts
 # immediately and passes AgentCore's /ping health check, while gateway tool discovery
@@ -1076,7 +1130,7 @@ def invoke(payload):
 # returns 503 on the first call if discovery runs lazily inside invoke. Warming in the
 # background means _get_agent() (called from invoke) blocks on the already-in-progress
 # warm instead of starting a fresh cold discovery under the 30s ceiling.
-if GATEWAY_URL:
+if GATEWAY_URL and GATEWAY_AUTH_MODE != "obo":
     import threading as _thr
     def _bg_warm():
         try:
@@ -2132,7 +2186,12 @@ def _fit_tool_names_for_bedrock(client, tools, _limit=64):
     return tools
 
 
-def _create_transport():
+def _create_transport(subject_token=""):
+    if GATEWAY_AUTH_MODE == "obo":
+        if not subject_token:
+            raise RuntimeError("OBO invocation is missing its authenticated workforce token")
+        headers = dict(Authorization="Bearer " + subject_token)
+        return streamablehttp_client(GATEWAY_URL, headers=headers)
     token = _get_gateway_token()
     if GATEWAY_AUTH_MODE == "static_bearer":
         # LiteLLM reads its virtual key from its own header, and scopes the
@@ -2264,6 +2323,7 @@ SYSTEM_PROMPT = """{system_prompt}"""
 MODEL_ID = os.environ.get("MODEL_ID", "{model_id}")
 REGION = os.environ.get("AWS_REGION", "{region}")
 MEMORY_ID = os.environ.get("MEMORY_ID", "")
+OBO_GATEWAY = os.environ.get("GATEWAY_AUTH_MODE", "") == "obo"
 {gateway_env}
 {gateway_functions}
 {gateway_init}
@@ -2275,11 +2335,15 @@ _agent = None
 
 def _get_agent(**extra_kwargs):
     global _model, _agent
-    if _agent is None or extra_kwargs:
-        if _model is None:
-            {model_init}
-            _model = model
-        _agent = Agent(model=_model, {agent_tools}system_prompt=SYSTEM_PROMPT, **extra_kwargs)
+    if _model is None:
+        {model_init}
+        _model = model
+    if extra_kwargs:
+        # Request-scoped tools (OBO) must never replace the cached machine-auth
+        # agent or survive into another user's invocation.
+        return Agent(model=_model, system_prompt=SYSTEM_PROMPT, **extra_kwargs)
+    if _agent is None:
+        _agent = Agent(model=_model, {agent_tools}system_prompt=SYSTEM_PROMPT)
     return _agent
 
 # Memory client (lazy init)
@@ -2388,7 +2452,7 @@ __TOOL_RECEIPTS__
 
 
 @app.entrypoint
-def invoke(payload):
+def invoke(payload, context=None):
     """Process user prompt with memory context and optional Gateway tools."""
     message = payload.get("prompt", "Hello")
     session_id = payload.get("session_id") or ""
@@ -2430,21 +2494,70 @@ def invoke(payload):
         joined = "\\n\\n".join(context_parts)
         enriched_prompt = f"{{joined}}\\n\\nCurrent message: {{message}}"
 
-    # Strands Agent handles tool discovery + calling via MCPClient automatically
-    agent = _get_agent()
-    seen = _tool_use_ids(getattr(agent, "messages", None))
-    result = agent(enriched_prompt)
-    response_text = str(result)
+    # Strands Agent handles tool discovery + calling via MCPClient automatically.
+    # OBO credentials are request-scoped: never place the bearer, transport,
+    # tools, or Agent in a module cache shared by warm Runtime invocations.
+    request_headers = getattr(context, "request_headers", {{}}) if context is not None else {{}}
+    auth_header = str(
+        request_headers.get("Authorization") or request_headers.get("authorization") or ""
+    ).strip()
+    subject_token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+    obo_client = None
+    delegated_evidence = None
+    if OBO_GATEWAY:
+        if (
+            not isinstance(subject_token, str)
+            or any(ch.isspace() for ch in subject_token)
+            or subject_token.count(".") != 2
+        ):
+            raise RuntimeError("OBO invocation requires one authenticated workforce JWT")
+        try:
+            _segment = subject_token.split(".")[1]
+            _segment += "=" * (-len(_segment) % 4)
+            _claims = json.loads(__import__("base64").urlsafe_b64decode(_segment.encode("ascii")))
+            delegated_evidence = dict(
+                subject=str(_claims.get("sub") or ""),
+                issuer=str(_claims.get("iss") or ""),
+                expires_at=_claims.get("exp"),
+                correlation_id=str(
+                    request_headers.get("X-Amzn-Trace-Id")
+                    or request_headers.get("x-amzn-trace-id")
+                    or ""
+                ),
+                gateway_exchange="ON_BEHALF_OF_TOKEN_EXCHANGE",
+                downstream_principal=None,
+            )
+        except Exception as exc:
+            raise RuntimeError("Runtime delivered an unreadable delegated JWT") from exc
+        obo_client = MCPClient(lambda: _create_transport(subject_token))
+        obo_client.start()
+        obo_tools = get_full_tools_list(obo_client)
+        if not obo_tools:
+            raise RuntimeError("OBO Gateway returned no tools for the authenticated user")
+        obo_tools += [{", ".join(local_tool_names)}]
+        agent = _get_agent(tools=obo_tools)
+    try:
+        seen = _tool_use_ids(getattr(agent, "messages", None))
+        result = agent(enriched_prompt)
+        response_text = str(result)
 
-    # Save to memory
-    _save_to_memory(actor_id, session_id, message, response_text)
+        # Save to memory.  Neither the subject token nor Gateway transport enters
+        # Memory; only the user's message and assistant response are persisted.
+        _save_to_memory(actor_id, session_id, message, response_text)
 
-    return {{
-        "response": response_text,
-        "tool_receipts": _tool_receipts(
-            getattr(agent, "messages", None), exclude=seen, names=globals().get("_TOOL_NAME_ALIASES")
-        ),
-    }}
+        return {{
+            "response": response_text,
+            "tool_receipts": _tool_receipts(
+                getattr(agent, "messages", None), exclude=seen, names=globals().get("_TOOL_NAME_ALIASES")
+            ),
+            "identity_evidence": delegated_evidence,
+        }}
+    finally:
+        if obo_client is not None:
+            try:
+                obo_client.stop(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
 
 if __name__ == "__main__":
     app.run()
@@ -3409,9 +3522,9 @@ def _inject_otel(code: str) -> str:
         wrap_block = """
 # Wrap invoke() so spans flush before AgentCore idle-stop kills the runtime.
 _otel_inner_invoke = invoke
-def _otel_invoke_wrap(payload):
+def _otel_invoke_wrap(*args, **kwargs):
     try:
-        return _otel_inner_invoke(payload)
+        return _otel_inner_invoke(*args, **kwargs)
     finally:
         _otel_force_flush()
 invoke = _otel_invoke_wrap

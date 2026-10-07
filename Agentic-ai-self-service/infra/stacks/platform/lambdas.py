@@ -854,6 +854,8 @@ def build_deployment_lambda(
     trigger_rule_prefix: str,
     gateway_auth_pool: cognito.IUserPool | None = None,
     gateway_auth_domain: str = "",
+    workforce_user_pool: cognito.IUserPool | None = None,
+    workforce_user_pool_client: cognito.IUserPoolClient | None = None,
 ) -> _lambda.Function:
     """Create Deployment Lambda for deploy/status/test/delete operations.
 
@@ -2356,6 +2358,15 @@ def build_deployment_lambda(
             "ENVIRONMENT": cfg.env,
             "PROJECT_NAME": cfg.project,
             "APP_AWS_REGION": stack.region,
+            "WORKFORCE_USER_POOL_ID": (
+                workforce_user_pool.user_pool_id if workforce_user_pool is not None else ""
+            ),
+            "WORKFORCE_CLIENT_ID": (
+                workforce_user_pool_client.user_pool_client_id
+                if workforce_user_pool_client is not None
+                else ""
+            ),
+            "WORKFORCE_REGION": stack.region,
             "POWERTOOLS_SERVICE_NAME": "deployment",
             "TOOL_GENERATOR_MODEL_ID": f"{'eu' if stack.region.startswith('eu-') else 'apac' if stack.region.startswith('ap-') else 'us'}.anthropic.claude-sonnet-5",
             # Tool-test sandbox network (F-11). Testing a generated tool executes

@@ -57,6 +57,11 @@ from app.services.aws_errors import is_error
 from app.services.aws_pagination import list_all
 from app.services.config import load_config
 from app.services.credential_scrub import strip_credential_leaves
+from app.services.delegated_identity import (
+    DelegatedIdentityError,
+    deployment_requires_obo,
+    extract_user_bearer,
+)
 from app.services.deletion_confirmation import (
     ConfirmationBudgetExhausted,
     DeletionFailedAfterAccept,
@@ -2612,7 +2617,15 @@ async def handle_list_deployments(
     else:
         states = store.query_by_user(user_id, status_filter=status)
     # F-02: same read-side redaction as the status route; see the comment there.
-    return [strip_credential_leaves(s.model_dump(mode="json", exclude=INTERNAL_ONLY_STATE_FIELDS)) for s in states]
+    result = []
+    for state in states:
+        public = state.model_dump(mode="json", exclude=INTERNAL_ONLY_STATE_FIELDS)
+        # The friendly name is user-supplied and is the public key of the
+        # immutable RuntimeSlots table.  Publish it under a public semantic name
+        # rather than exposing the internal persistence field wholesale.
+        public["runtime_name"] = state.friendly_runtime_name or state.agentcore_runtime_name or state.runtime_id
+        result.append(strip_credential_leaves(public))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -2732,6 +2745,13 @@ async def handle_test_runtime(request: TestRequest, raw_request: Request) -> Tes
                     detail=f"Cannot resolve runtime ARN for runtime_id={runtime_id}. Check logs for details.",
                 ) from e
 
+        user_bearer_token = None
+        if deployment_requires_obo(deployment_state):
+            try:
+                user_bearer_token = extract_user_bearer(raw_request.headers)
+            except DelegatedIdentityError as exc:
+                raise HTTPException(status_code=401, detail=str(exc)) from exc
+
         return invoke_verified_http_runtime(
             request,
             caller_sub=caller_sub or "",
@@ -2745,6 +2765,7 @@ async def handle_test_runtime(request: TestRequest, raw_request: Request) -> Tes
             resolve_memory_identity=memory_invocation_identity,
             gateway_session=gateway_aws_session,
             get_gateway_token=get_cognito_token,
+            user_bearer_token=user_bearer_token,
             start_harness_warmup=_start_harness_warmup,
         )
 
@@ -2875,6 +2896,14 @@ async def handle_test_runtime_stream(request: TestRequest, raw_request: Request)
 
         return PlainTextResponse(
             f"data: {json.dumps({'type': 'error', 'error': 'This is an MCP-protocol runtime. Use POST /api/test-mcp-runtime to discover and call its tools.'})}\n\n",
+            media_type="text/event-stream",
+        )
+
+    if deployment_requires_obo(deployment_state):
+        from fastapi.responses import PlainTextResponse
+
+        return PlainTextResponse(
+            f"data: {json.dumps({'type': 'error', 'error': 'OBO invocation requires the authenticated production-slot endpoint'})}\n\n",
             media_type="text/event-stream",
         )
 

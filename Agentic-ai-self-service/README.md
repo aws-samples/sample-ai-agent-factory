@@ -84,6 +84,36 @@ are published under *country* prefixes (`jp.` in `ap-northeast-1`, `au.` in
 `ap-southeast-2`) or as `global.`, so an APAC deployment may need its model ID set
 explicitly. `us-*` and `eu-*` regions need no such adjustment.
 
+## Workforce OBO invocation contract
+
+A connector with `delegationMode: "obo"` changes the complete invocation chain;
+it is not a credential-provider-only switch. The Gateway and Runtime both trust
+the same workforce Cognito issuer/client that protects the API. End-user chat
+invokes `POST /api/runtimes/{name}/slots/production/invoke`; the server resolves
+the production slot to its immutable version/deployment/Runtime ARN and recorded
+endpoint qualifier, then calls the Runtime through AgentCore's documented bearer
+HTTP interface. The installed boto3 `InvokeAgentRuntime` operation is SigV4-only
+and is deliberately not used for OBO.
+
+Runtime validates the JWT and allowlists only `Authorization` into invocation
+context. Generated agents create a fresh MCP client per request, forward that JWT
+to the workforce-authorized Gateway, and close the client after the turn. The
+Gateway target's `grantType=TOKEN_EXCHANGE` performs the configured RFC 8693 or
+RFC 7523 exchange. Missing, expired, Basic, SigV4, malformed, or wrong-target
+credentials fail before invocation; no client-credentials fallback exists.
+Non-OBO agents retain their existing cached M2M/static authentication path.
+
+Tokens are never stored in deployment state, Runtime payloads, logs, Memory,
+tool receipts, or returned evidence. Responses may include non-credential
+`identityEvidence` (issuer, subject, expiry, trace correlation, and an optional
+downstream principal). The deploy cannot probe an OBO tool plane without a real
+user token, so `delegated_identity_live_gate=first_authenticated_user_tool_call`
+remains the explicit live gate: the downstream tool's `whoami`-style response
+must attest the expected principal before production promotion. A new request
+must present a fresh JWT; expiry is checked at the API and again by Runtime and
+Gateway. IdP revocation behavior follows the provider's access-token semantics,
+so use short access-token lifetimes where immediate revocation is required.
+
 ## Production promotion gate
 
 Dev-like environments (`dev`, `development`, `test`, `sandbox`, `preview`, and

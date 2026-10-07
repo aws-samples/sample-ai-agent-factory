@@ -2477,6 +2477,8 @@ def build_step_lambdas(
     role_boundary: iam.ManagedPolicy,
     gateway_auth_pool: cognito.IUserPool | None = None,
     gateway_auth_domain: str = "",
+    workforce_user_pool: cognito.IUserPool | None = None,
+    workforce_user_pool_client: cognito.IUserPoolClient | None = None,
 ) -> dict[str, _lambda.Function]:
     """Create individual Lambda functions for each Step Functions step.
 
@@ -2673,6 +2675,15 @@ def build_step_lambdas(
                 # infra/tests/test_governance_tag_namespace_grant.py.
                 GOVERNANCE_TAG_KEY_PREFIXES_ENV: governance_tag_key_prefixes_env_value(),
                 "APP_AWS_REGION": stack.region,
+                "WORKFORCE_USER_POOL_ID": (
+                    workforce_user_pool.user_pool_id if workforce_user_pool is not None else ""
+                ),
+                "WORKFORCE_CLIENT_ID": (
+                    workforce_user_pool_client.user_pool_client_id
+                    if workforce_user_pool_client is not None
+                    else ""
+                ),
+                "WORKFORCE_REGION": stack.region,
                 "PYTHONPATH": "/var/task/src:/var/task:/var/task/lib",
                 # Shared runtime execution role — pre-created at stack
                 # init to avoid the per-deploy IAM-propagation race.

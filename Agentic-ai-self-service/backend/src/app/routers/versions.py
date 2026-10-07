@@ -16,7 +16,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.deployment_models import TestRequest, TestResponse
@@ -30,6 +30,11 @@ from app.services.agent_versions_store import (
     set_slot_pointers_atomically,
 )
 from app.services.auth import assert_owner, get_caller_sub
+from app.services.delegated_identity import (
+    DelegatedIdentityError,
+    deployment_requires_obo,
+    extract_user_bearer,
+)
 from app.services.gateway_deployer import gateway_aws_session, get_cognito_token
 from app.services.harness_deployer import invoke_harness
 from app.services.invocation_identity import memory_invocation_identity
@@ -222,6 +227,7 @@ async def invoke_runtime_slot(
     runtime_name: str,
     slot: Literal["staging", "production"],
     body: SlotInvokeRequest,
+    raw_request: Request,
     caller_sub: str = Depends(get_caller_sub),
 ) -> SlotInvokeResponse:
     """Invoke the exact HTTP runtime version currently assigned to ``slot``."""
@@ -248,6 +254,13 @@ async def invoke_runtime_slot(
             state_store=get_deployment_store(),
         )
 
+    user_bearer_token = None
+    if deployment_requires_obo(deployment_state):
+        try:
+            user_bearer_token = extract_user_bearer(raw_request.headers)
+        except DelegatedIdentityError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+
     result = invoke_verified_http_runtime(
         invocation_request,
         caller_sub=caller_sub,
@@ -261,6 +274,7 @@ async def invoke_runtime_slot(
         resolve_memory_identity=memory_invocation_identity,
         gateway_session=gateway_aws_session,
         get_gateway_token=get_cognito_token,
+        user_bearer_token=user_bearer_token,
     )
     return SlotInvokeResponse(
         **result.model_dump(mode="python"),

@@ -43,6 +43,7 @@ from app.models import (
 from app.models.enums import StrandsModelProvider
 from app.services import codegen_templates, runtime_deployer
 from app.services.aws_pagination import list_all
+from app.services.delegated_identity import runtime_obo_authorizer
 from app.services.gateway_mutation_lock import engine_is, gateway_mutation_lock
 from app.services.gateway_update import preserving_gateway_update
 from app.services.iam_boundary import create_role_kwargs, ensure_role_boundary
@@ -2602,7 +2603,11 @@ class WorkflowExecutor:
             # token endpoint that does not exist. This path had no provider branch at all
             # and treated every gateway as Cognito; the twin in runtime_configure_step is
             # the contract being mirrored.
-            if gateway_result and str(client_info.get("provider") or "") == "litellm":
+            if gateway_result and gateway_result.get("obo_required") is True:
+                if str(client_info.get("provider") or "") != "workforce_jwt":
+                    raise RuntimeError("OBO gateway is not bound to the platform workforce authorizer")
+                env_vars["GATEWAY_AUTH_MODE"] = "obo"
+            elif gateway_result and str(client_info.get("provider") or "") == "litellm":
                 env_vars["GATEWAY_AUTH_MODE"] = "static_bearer"
                 _litellm_servers = [str(s) for s in (gateway_result.get("litellm_servers") or []) if str(s).strip()]
                 if _litellm_servers:
@@ -2669,6 +2674,11 @@ class WorkflowExecutor:
             )
             env_vars.update(otel_env)
 
+            authorizer_config = None
+            request_header_config = None
+            if gateway_result and gateway_result.get("obo_required") is True:
+                authorizer_config, request_header_config = runtime_obo_authorizer(self.region)
+
             runtime_result = create_agent_runtime(
                 agentcore_ctrl,
                 runtime_deployer.sanitize_runtime_name(runtime_config.name),
@@ -2681,6 +2691,8 @@ class WorkflowExecutor:
                 else "PYTHON_3_13",
                 runtime_config.protocol.value if hasattr(runtime_config.protocol, "value") else "HTTP",
                 env_vars,
+                authorizer_config=authorizer_config,
+                request_header_config=request_header_config,
                 region=self.region,
             )
             state.runtime_id = runtime_result["runtime_id"]

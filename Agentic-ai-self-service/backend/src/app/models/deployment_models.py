@@ -1185,6 +1185,7 @@ class TestResponse(BaseModel):
     # Tool calls the agent's own loop executed this turn (name, status, argument
     # digests); None when the runtime reported none. runtime_invocation.parse_tool_receipts.
     tool_receipts: list[dict[str, Any]] | None = Field(alias="toolReceipts", default=None)
+    identity_evidence: dict[str, Any] | None = Field(alias="identityEvidence", default=None)
 
 
 class DeleteResponse(BaseModel):

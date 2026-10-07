@@ -12,6 +12,7 @@ import { API_BASE_URL, apiErrorFromResponse, apiRequest } from './client';
 export interface DeployedAgentSummary {
   deployment_id: string;
   runtime_id: string | null;
+  runtime_name?: string | null;
   runtime_arn?: string | null;
   agentcore_runtime_name?: string | null;
   status: string;
@@ -46,10 +47,38 @@ export async function listMyAgents(baseUrl: string = API_BASE_URL): Promise<Depl
  * /api/test-runtime when SSE isn't available.
  */
 export async function streamInvoke(
-  params: { runtimeId: string; input: string; sessionId?: string | null },
+  params: { runtimeId?: string; runtimeName?: string; input: string; sessionId?: string | null },
   onToken: (t: string) => void,
   baseUrl: string = API_BASE_URL,
 ): Promise<{ sessionId: string | null; fullText: string }> {
+  if (params.runtimeName) {
+    // The production slot resolves slot -> immutable version -> deployment ->
+    // exact Runtime ARN server-side.  No account, role, ARN, version, or
+    // qualifier is accepted from the browser.
+    const slotResponse = await authFetch(
+      `${baseUrl}/api/runtimes/${encodeURIComponent(params.runtimeName)}/slots/production/invoke`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          input: params.input,
+          ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+        }),
+      },
+    );
+    if (!slotResponse.ok) throw await apiErrorFromResponse(slotResponse);
+    const slotResult = (await slotResponse.json()) as {
+      success?: boolean;
+      response?: string;
+      error?: string;
+      sessionId?: string | null;
+    };
+    if (!slotResult.success) throw new Error(slotResult.error || 'Invocation failed');
+    const text = slotResult.response || '';
+    if (text) onToken(text);
+    return { sessionId: slotResult.sessionId || params.sessionId || null, fullText: text };
+  }
+  if (!params.runtimeId) throw new Error('A runtime name or runtime id is required');
   const body = JSON.stringify({
     runtimeId: params.runtimeId,
     input: params.input,

@@ -193,6 +193,7 @@ def test_production_and_staging_invoke_distinct_exact_targets(harness):
         "logs": None,
         "traceId": None,
         "toolReceipts": None,
+        "identityEvidence": None,
         "runtimeName": NAME,
         "slot": "production",
         "versionId": V1,
@@ -467,3 +468,91 @@ def test_direct_slot_resolver_rejects_an_invalid_slot_before_any_read(monkeypatc
 
     assert exc.value.status_code == 400
     slots.get.assert_not_called()
+
+
+def _obo_token(*, exp: int | None = None) -> str:
+    import base64
+    import time
+
+    header = base64.urlsafe_b64encode(b'{"alg":"RS256","kid":"k"}').rstrip(b"=").decode()
+    claims = {
+        "sub": OWNER,
+        "iss": "https://issuer.example",
+        "exp": exp if exp is not None else int(time.time()) + 300,
+    }
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+    return f"{header}.{payload}.signature"
+
+
+def _enable_obo(harness: _Harness) -> None:
+    deployment = harness.deployments[f"dep-{V1[-8:]}"]
+    deployment.gateway_result = {
+        "obo_required": True,
+        "client_info": {"provider": "workforce_jwt"},
+    }
+    deployment.runtime_endpoint = _runtime_arn(V1) + "/runtime-endpoint/DEFAULT"
+
+
+def test_authorized_obo_slot_forwards_user_bearer_to_exact_version(harness, monkeypatch):
+    from app.services import runtime_invocation
+
+    _enable_obo(harness)
+    token = _obo_token()
+    captured = {}
+
+    def _invoke(**kwargs):
+        captured.update(kwargs)
+        return {
+            "statusCode": 200,
+            "response": json.dumps({
+                "response": "delegated answer",
+                "identity_evidence": {
+                    "subject": OWNER,
+                    "issuer": "https://issuer.example",
+                    "expires_at": 9999999999,
+                    "correlation_id": "trace-1",
+                    "gateway_exchange": "ON_BEHALF_OF_TOKEN_EXCHANGE",
+                    "downstream_principal": None,
+                },
+            }).encode(),
+            "runtimeSessionId": "delegated-session",
+        }
+
+    monkeypatch.setattr(runtime_invocation, "invoke_agent_runtime_with_bearer", _invoke)
+    response = harness.client.post(
+        f"/api/runtimes/{NAME}/slots/production/invoke",
+        json={"input": "who am I"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["success"] is True
+    assert response.json()["versionId"] == V1
+    assert captured["runtime_arn"] == _runtime_arn(V1)
+    assert captured["deployment_state"]["runtime_endpoint"].endswith("/runtime-endpoint/DEFAULT")
+    assert captured["bearer_token"] == token
+    assert token not in response.text
+    assert harness.agentcore.invocations == []  # no SigV4/M2M fallback
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    [None, "Basic dXNlcjpwYXNz", "AWS4-HMAC-SHA256 Credential=AKIA/x", "Bearer junk"],
+)
+def test_unauthorized_obo_slot_never_invokes_runtime(harness, monkeypatch, authorization):
+    from app.services import runtime_invocation
+
+    _enable_obo(harness)
+    invoke = MagicMock()
+    monkeypatch.setattr(runtime_invocation, "invoke_agent_runtime_with_bearer", invoke)
+    headers = {"Authorization": authorization} if authorization else {}
+
+    response = harness.client.post(
+        f"/api/runtimes/{NAME}/slots/production/invoke",
+        json={"input": "who am I"},
+        headers=headers,
+    )
+
+    assert response.status_code == 401
+    invoke.assert_not_called()
+    assert harness.agentcore.invocations == []

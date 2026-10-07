@@ -764,6 +764,7 @@ def create_agent_runtime(
     protocol: str = "HTTP",
     env_vars: dict | None = None,
     authorizer_config: dict | None = None,
+    request_header_config: dict | None = None,
     vpc_config: dict | None = None,
     region: str | None = None,
     resource_tags: dict | None = None,
@@ -815,6 +816,8 @@ def create_agent_runtime(
 
     if authorizer_config:
         create_params["authorizerConfiguration"] = authorizer_config
+    if request_header_config:
+        create_params["requestHeaderConfiguration"] = request_header_config
 
     def _create_with_transient_retry():
         """Retry create_agent_runtime on two known transient ValidationExceptions.
@@ -968,6 +971,8 @@ def create_agent_runtime(
                     # carry exactly what the create would.
                     if authorizer_config:
                         update_params["authorizerConfiguration"] = authorizer_config
+                    if request_header_config:
+                        update_params["requestHeaderConfiguration"] = request_header_config
                     agentcore_ctrl.update_agent_runtime(**update_params)
                 except Exception as update_err:
                     raise RuntimeError(

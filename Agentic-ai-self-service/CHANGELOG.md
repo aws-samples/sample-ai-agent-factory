@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — OBO connectors now carry the authenticated workforce identity end to end
+
+- End-user chat now invokes the server-resolved production slot, which freezes the immutable
+  version, deployment, account, Region, Runtime ARN, and recorded endpoint qualifier before any
+  token is forwarded. The OBO branch uses AgentCore's documented bearer HTTP interface because
+  boto3 `InvokeAgentRuntime` is SigV4-only.
+- OBO Runtime and Gateway authorizers trust the same stack-provided workforce Cognito issuer and
+  client. Generated agents use a fresh MCP client per invocation and never cache, persist, log, or
+  return the JWT. SigV4, Basic, junk, missing, and expired headers fail closed; requested OBO can
+  no longer fall back to shared client credentials.
+- Safe `identityEvidence` hooks correlate issuer/subject/expiry/trace with tool receipts. The
+  downstream principal remains a live `whoami`-style attestation gate on the first authenticated
+  tool call, recorded as `delegated_identity_live_gate`; no deploy-time machine probe impersonates
+  that evidence. Non-OBO agents retain their existing M2M/static path.
+
 ### Added — production promotion requires immutable AgentCore batch-evaluation evidence
 
 - Production-like environments now default deployments to staging and reject direct production

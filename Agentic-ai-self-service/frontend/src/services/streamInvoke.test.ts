@@ -70,3 +70,37 @@ describe('streamInvokeApi', () => {
     ).rejects.toThrow('boom');
   });
 });
+
+
+describe('streamInvokeApi production slot', () => {
+  afterEach(() => { delete globals.__authFetch; });
+
+  it('invokes the immutable production slot without runtime target fields', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globals.__authFetch = vi.fn(async (url, init) => {
+      calls.push({ url: String(url), init: init as RequestInit });
+      return new Response(JSON.stringify({
+        success: true,
+        response: 'delegated answer',
+        sessionId: 'slot-session',
+        versionId: 'version-1',
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+
+    const tokens: string[] = [];
+    const out = await streamInvokeApi(
+      { runtimeName: 'orders_agent', input: 'who am I' },
+      (token) => tokens.push(token),
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toContain('/api/runtimes/orders_agent/slots/production/invoke');
+    const body = JSON.parse(String(calls[0].init?.body));
+    expect(body).toEqual({ input: 'who am I' });
+    expect(body.runtimeId).toBeUndefined();
+    expect(body.versionId).toBeUndefined();
+    expect(body.arn).toBeUndefined();
+    expect(out).toEqual({ sessionId: 'slot-session', fullText: 'delegated answer' });
+    expect(tokens).toEqual(['delegated answer']);
+  });
+});
