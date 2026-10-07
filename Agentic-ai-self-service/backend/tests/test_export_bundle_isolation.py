@@ -995,7 +995,7 @@ def audit_middleware_response_uses(text: str) -> list[str]:
     assignment from ``await call_next(request)``, ``getattr(response, "status_code", 0)``,
     and ``return response``. Any other use (a ``.json()``, a ``.body``, a helper call)
     could read the response body into the audit record."""
-    fn = _function(text, "_audit_middleware")
+    fn = _function(text, "audit_http_request")
     parents = {id(c): n for n in ast.walk(fn) for c in ast.iter_child_nodes(n)}
     uses = []
     for n in ast.walk(fn):
@@ -1017,12 +1017,13 @@ _ALLOWED_RESPONSE_USES = ["assigned from call_next", "returned", "status_code re
 
 
 def test_the_audit_middleware_records_no_response_content(sources):
-    text = sources["deployment_handler.py"]
-    fn = _function(text, "_audit_middleware")
+    text = sources["services/audit_middleware.py"]
+    fn = _function(text, "_event")
     events = [c for c in ast.walk(fn) if isinstance(c, ast.Call) and getattr(c.func, "id", None) == "AuditEvent"]
     assert len(events) == 1
     assert {k.arg for k in events[0].keywords} == {
         "org_id", "actor_sub", "action", "method", "path", "status_code", "session_uuid",
+        "phase", "correlation_id",
     }  # fmt: skip
     assert audit_middleware_response_uses(text) == _ALLOWED_RESPONSE_USES
 
@@ -1032,10 +1033,10 @@ def test_the_audit_middleware_records_no_response_content(sources):
     ["_b = await response.json()", "_b = response.body", "_b = response.render({})", "_record_body(response)"],
 )
 def test_positive_control_a_response_body_read_is_caught(sources, extra):
-    text = sources["deployment_handler.py"]
-    anchor = "    response = await call_next(request)\n"
+    text = sources["services/audit_middleware.py"]
+    anchor = "        response = await call_next(request)\n"
     assert text.count(anchor) == 1
-    mutated = text.replace(anchor, anchor + "    " + extra + "\n")
+    mutated = text.replace(anchor, anchor + "        " + extra + "\n")
     uses = audit_middleware_response_uses(mutated)
     assert uses != _ALLOWED_RESPONSE_USES and any(u.startswith("OTHER") for u in uses), uses
 

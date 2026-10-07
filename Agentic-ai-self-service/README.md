@@ -100,6 +100,12 @@ AgentCore's signed, allowlisted
 custom-JWT authorizer, so a user bearer cannot invoke it directly and bypass platform
 admission or budget authorization.
 
+Both `GET /api/deploy/{deployment_id}` and `GET /api/deployments` expose the same
+`runtime_name`: the sanitized tenant-facing slot key used by chat and the external
+client. It is derived from the internal friendly-name authority (with AgentCore
+name/id fallback), classified explicitly as public, and never persisted as a second
+source of truth. Internal teardown authority and credential leaves remain excluded.
+
 Generated agents create a fresh MCP client per request, present that request-local JWT
 to the owner-bound Gateway, and close the client after every success or failure path.
 The Gateway target's `grantType=TOKEN_EXCHANGE` performs the configured RFC 8693 or

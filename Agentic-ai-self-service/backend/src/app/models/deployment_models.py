@@ -408,6 +408,11 @@ INTERNAL_ONLY_STATE_FIELDS: frozenset[str] = frozenset(
     }
 )
 
+# Fields intentionally derived at the response boundary rather than persisted as a
+# second source of truth. ``runtime_name`` is the tenant's safe public key for slot
+# invocation; ``friendly_runtime_name`` remains internal authority for teardown.
+DERIVED_PUBLIC_STATE_FIELDS: frozenset[str] = frozenset({"runtime_name"})
+
 
 # ============================================================================
 # Runtime Configuration Model (moved from routers/deployment.py)

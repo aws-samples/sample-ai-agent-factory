@@ -30,6 +30,16 @@ All notable changes to this project are documented here. The format follows
   Search scenarios independently. It is a release-input contract, not a claim that a live campaign
   has already passed.
 
+### Fixed — deployment summaries expose one explicit runtime key
+
+- `GET /api/deploy/{id}` and `GET /api/deployments` now share one response serializer. Both expose
+  the derived, tenant-facing `runtime_name` required by production-slot chat while excluding the
+  persisted `friendly_runtime_name`, teardown authority, and credential leaves. A central derived-
+  field classification prevents the value from becoming an unreviewed persistence field.
+- Response-shape tests pin identical status/list values and preserve byte-for-byte modern Gateway
+  references. Export-isolation mutation tests now inspect the shared audit middleware introduced by
+  append-only auditing, including phase/correlation fields, and still fail if response content is read.
+
 ### Added — Guardrails enforce every generated tool boundary
 
 - Guardrail-enabled Runtime agents apply the same deployed Guardrail to canonical tool arguments

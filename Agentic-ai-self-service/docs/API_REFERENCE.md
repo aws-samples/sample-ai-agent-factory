@@ -24,7 +24,8 @@ Every API endpoint the platform exposes, plus deploy-time configuration variable
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/deploy` | Start deployment (returns 202 with `deployment_id`, status, and message; the Step Functions execution ARN is operator-only state) |
-| `GET` | `/api/deploy/{deployment_id}` | Get deployment status from DynamoDB |
+| `GET` | `/api/deploy/{deployment_id}` | Get the caller-owned deployment status; includes derived public `runtime_name` and excludes internal authority/credential leaves |
+| `GET` | `/api/deployments` | List caller-owned deployments with the same public shape and derived `runtime_name` used by production-slot chat |
 | `POST` | `/api/test-runtime` | Test a deployed agent with a prompt (supports session_id for conversation context) |
 | `DELETE` | `/api/runtime/{id}` | Delete runtime + gateway + Cognito + Lambda (full cleanup) |
 | `POST` | `/api/generate-tool` | AI Tool Generator -- generate Lambda code from natural language via Claude Sonnet |

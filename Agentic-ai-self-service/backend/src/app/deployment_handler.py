@@ -2541,6 +2541,13 @@ def _update_execution_arn(store: DeploymentStateStore, deployment_id: str, execu
     )
 
 
+def _public_deployment_state(state: DeploymentState) -> dict:
+    """Serialize one tenant-owned deployment with explicit derived public fields."""
+    public = state.model_dump(mode="json", exclude=INTERNAL_ONLY_STATE_FIELDS)
+    public["runtime_name"] = state.friendly_runtime_name or state.agentcore_runtime_name or state.runtime_id
+    return strip_credential_leaves(public)
+
+
 # ---------------------------------------------------------------------------
 # GET /api/deploy/{deployment_id}
 # ---------------------------------------------------------------------------
@@ -2570,7 +2577,7 @@ async def handle_deploy_status(deployment_id: str, raw_request: Request) -> dict
     if owner and owner != _get_user_id(raw_request):
         raise HTTPException(status_code=404, detail=f"Deployment '{deployment_id}' not found")
 
-    result = state.model_dump(mode="json", exclude=INTERNAL_ONLY_STATE_FIELDS)
+    result = _public_deployment_state(state)
     # Bug 181: the status poll is a natural post-deploy touchpoint to lazy-promote
     # a pending Cedar engine to ENFORCE (the gateway's policy plane converges a few
     # minutes after deploy). _maybe_promote_policy mutates the dict's policy_result
@@ -2620,16 +2627,8 @@ async def handle_list_deployments(
         states = [s for s in store.query_by_workflow(flow_id, status_filter=status) if s.user_id == user_id]
     else:
         states = store.query_by_user(user_id, status_filter=status)
-    # F-02: same read-side redaction as the status route; see the comment there.
-    result = []
-    for state in states:
-        public = state.model_dump(mode="json", exclude=INTERNAL_ONLY_STATE_FIELDS)
-        # The friendly name is user-supplied and is the public key of the
-        # immutable RuntimeSlots table.  Publish it under a public semantic name
-        # rather than exposing the internal persistence field wholesale.
-        public["runtime_name"] = state.friendly_runtime_name or state.agentcore_runtime_name or state.runtime_id
-        result.append(strip_credential_leaves(public))
-    return result
+    # F-02: same read-side redaction and derived public fields as the status route.
+    return [_public_deployment_state(state) for state in states]
 
 
 # ---------------------------------------------------------------------------
