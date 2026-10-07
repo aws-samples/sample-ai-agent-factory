@@ -1925,6 +1925,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     target_mcp_runtime_role_arn: str | None = None
     target_harness_role_arn: str | None = None
     target_artifact_bucket: str | None = None
+    evaluation_kms_key_arn = os.environ.get("EVALUATION_EVIDENCE_KMS_KEY_ARN", "").strip() or None
     if request.target_account_id or request.target_region:
         from app.services.deploy_target import (
             TargetError,
@@ -1951,13 +1952,21 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
                 target_mcp_runtime_role_arn = target["mcp_runtime_role_arn"]
                 target_harness_role_arn = target["harness_role_arn"]
                 target_artifact_bucket = target["artifact_bucket"]
+                evaluation_kms_key_arn = target["evaluation_kms_key_arn"]
                 _reject_unsupported_cross_account_features(request)
             else:
                 target = resolve_registered_region_target(request.target_region)
                 target_region = target["region"]
                 target_artifact_bucket = target["artifact_bucket"]
+                evaluation_kms_key_arn = target["evaluation_kms_key_arn"]
         except TargetError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if production_gate_required and not evaluation_kms_key_arn:
+        raise HTTPException(
+            status_code=503,
+            detail="Production evaluation encryption is unavailable for this deployment target",
+        )
 
     # Phase 2 (Loom) governance tagging — resolve the org's tag policies against
     # the caller's supplied tags / selected profile BEFORE starting the deploy.
@@ -2011,6 +2020,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         target_region=target_region,
         target_role_arn=target_role_arn,
         target_artifact_bucket=target_artifact_bucket,
+        evaluation_kms_key_arn=evaluation_kms_key_arn,
         # Persist the validated invocation protocol so restored/listed deployments and the
         # product MCP explorer know how to talk to this runtime rather than trusting a
         # browser claim. Legacy rows default to HTTP (see DeploymentState.runtime_protocol).
@@ -2039,6 +2049,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
                 status="pending",
                 production_gate_required=production_gate_required,
                 promotion_policy=promotion_policy,
+                evaluation_kms_key_arn=evaluation_kms_key_arn,
             )
         )
     except NameClaimConflict as exc:
@@ -2342,6 +2353,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         "target_mcp_runtime_role_arn": target_mcp_runtime_role_arn,
         "target_harness_role_arn": target_harness_role_arn,
         "target_artifact_bucket": target_artifact_bucket,
+        "evaluation_kms_key_arn": evaluation_kms_key_arn,
         # Phase 1 Gap 1A — every step handler keys S3 paths and AgentCore
         # runtime names off the version. friendly_runtime_name is the user's
         # input; agentcore_runtime_name is what we actually pass to AgentCore.

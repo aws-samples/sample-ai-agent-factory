@@ -897,6 +897,27 @@ def build_deployment_lambda(
             },
         )
     )
+    # Admin registration and later target revalidation inspect only key metadata
+    # and policy. Crypto use remains bound to AgentCore batch-evaluation context.
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=["kms:DescribeKey", "kms:GetKeyPolicy"],
+            resources=[f"arn:{stack.partition}:kms:*:{stack.account}:key/*"],
+        )
+    )
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=["kms:GenerateDataKey", "kms:Decrypt"],
+            resources=[f"arn:{stack.partition}:kms:*:{stack.account}:key/*"],
+            conditions={
+                "StringLike": {
+                    "kms:EncryptionContext:aws:bedrock-agentcore:batchEvaluationArn": (
+                        f"arn:{stack.partition}:bedrock-agentcore:*:{stack.account}:batch-evaluate/*"
+                    )
+                }
+            },
+        )
+    )
     evaluation_evidence_key.add_to_resource_policy(
         iam.PolicyStatement(
             principals=[iam.ServicePrincipal("bedrock-agentcore.amazonaws.com")],
@@ -2320,6 +2341,7 @@ def build_deployment_lambda(
                 stack.node.try_get_context("production_evaluation_policy_json") or ""
             ),
             "EVALUATION_EVIDENCE_KMS_KEY_ARN": evaluation_evidence_key.key_arn,
+            "DEPLOYMENT_LAMBDA_ROLE_ARN": role.role_arn,
             # Phase 5 (Loom) — audit trail table (middleware + admin router).
             "AUDIT_TABLE_NAME": tables.audit.table_name,
             # Loom-study 1.6 — JIT IAM permission-request workflow table.

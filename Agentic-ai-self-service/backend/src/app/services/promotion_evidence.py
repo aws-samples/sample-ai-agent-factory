@@ -36,7 +36,6 @@ DEFAULT_PROMOTION_POLICY: dict[str, Any] = {
 
 _POLICY_ENV = "PRODUCTION_EVALUATION_POLICY_JSON"
 _GATE_ENV = "PRODUCTION_EVALUATION_GATE"
-_KMS_ENV = "EVALUATION_EVIDENCE_KMS_KEY_ARN"
 _DEV_ENVIRONMENTS = frozenset({"dev", "development", "test", "sandbox", "preview", "local"})
 _ALLOWED_POLICY_KEYS = frozenset(DEFAULT_PROMOTION_POLICY)
 _EVALUATOR_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
@@ -164,22 +163,28 @@ def load_promotion_policy() -> dict[str, Any]:
     return {**policy, "policy_digest": _sha256(policy)}
 
 
-def evaluation_kms_key_arn(*, target_region: str, target_account_id: str, required: bool = False) -> str | None:
-    """Return a target-bound CMK ARN; production evidence requires one."""
+def evaluation_kms_key_arn(
+    value: str | None,
+    *,
+    target_region: str,
+    target_account_id: str,
+    required: bool = False,
+) -> str | None:
+    """Validate a frozen target-bound CMK ARN; production evidence requires one."""
 
-    value = os.environ.get(_KMS_ENV, "").strip()
-    if not value:
+    resolved = (value or "").strip()
+    if not resolved:
         if required:
-            raise PromotionPolicyConfigurationError(
-                f"{_KMS_ENV} is required when production evaluation gating is enabled"
-            )
+            raise PromotionPolicyConfigurationError("A frozen target evaluation KMS key is required")
         return None
-    match = _KMS_ARN.fullmatch(value)
+    match = _KMS_ARN.fullmatch(resolved)
     if match is None:
-        raise PromotionPolicyConfigurationError(f"{_KMS_ENV} must be a KMS key ARN")
+        raise PromotionPolicyConfigurationError("The frozen evaluation KMS key must be a KMS key ARN")
     if match.group("region") != target_region or match.group("account") != target_account_id:
-        raise PromotionPolicyConfigurationError(f"{_KMS_ENV} must belong to the runtime account and region")
-    return value
+        raise PromotionPolicyConfigurationError(
+            "The frozen evaluation KMS key must belong to the runtime account and region"
+        )
+    return resolved
 
 
 def _as_utc(value: Any, field: str) -> datetime:
@@ -229,6 +234,7 @@ def start_batch_evaluation(
     runtime_arn: str,
     scenarios: list[dict[str, Any]],
     policy: dict[str, Any],
+    kms_key_arn: str | None = None,
     kms_required: bool = False,
 ) -> dict[str, Any]:
     """Start one idempotent, version-bound AgentCore batch evaluation."""
@@ -287,6 +293,7 @@ def start_batch_evaluation(
         "outputConfig": {"cloudWatchConfig": {"resultDestination": "DEDICATED_LOG_GROUP"}},
     }
     kms_key = evaluation_kms_key_arn(
+        kms_key_arn,
         target_region=identity.group("region"),
         target_account_id=identity.group("account"),
         required=kms_required,

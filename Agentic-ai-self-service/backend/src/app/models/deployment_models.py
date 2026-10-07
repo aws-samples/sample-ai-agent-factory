@@ -348,6 +348,9 @@ class DeploymentState(BaseModel):
     # for operator/audit continuity; codegen receives the same frozen value on
     # the SFN event rather than reconstructing a convention later.
     target_artifact_bucket: str | None = None
+    # Exact CMK validated at target registration and frozen at deployment admission.
+    # Internal authority only; callers never choose it on evaluation requests.
+    evaluation_kms_key_arn: str | None = None
     # Async (slow-class) teardown tracking. KB-backed deletes exceed API
     # Gateway's 29s integration cap, so DELETE /api/runtime/{id} dispatches
     # them to a background self-invoke and the caller polls
@@ -400,6 +403,7 @@ INTERNAL_ONLY_STATE_FIELDS: frozenset[str] = frozenset(
         "resource_manifest_version",
         "target_role_arn",
         "target_artifact_bucket",
+        "evaluation_kms_key_arn",
         "delete_claim_expires_at",
     }
 )

@@ -25,13 +25,27 @@ async def list_deploy_target_options(
     enabled = dt.targets_enabled()
     accounts = []
     regions = []
+    region_targets = []
     if enabled:
-        regions = sorted(set(dt.list_regions()))
+        registered_regions = dt.list_region_targets()
+        regions = sorted({str(target.get("region")) for target in registered_regions if target.get("region")})
+        region_targets = sorted(
+            [
+                {
+                    "region": str(target.get("region")),
+                    "production_promotion_supported": bool(target.get("evaluation_kms_key_arn")),
+                }
+                for target in registered_regions
+                if target.get("region")
+            ],
+            key=lambda target: target["region"],
+        )
         accounts = sorted(
             [
                 {
                     "account_id": str(target.get("account_id", "")),
                     "region": str(target.get("region") or dt.home_region()),
+                    "production_promotion_supported": bool(target.get("evaluation_kms_key_arn")),
                 }
                 for target in dt.list_accounts()
                 if target.get("account_id")
@@ -42,5 +56,6 @@ async def list_deploy_target_options(
         "enabled": enabled,
         "home_region": dt.home_region(),
         "regions": regions,
+        "region_targets": region_targets,
         "accounts": accounts,
     }

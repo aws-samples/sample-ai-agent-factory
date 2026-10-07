@@ -25,6 +25,16 @@ All notable changes to this project are documented here. The format follows
 - Standard agent owners now receive `eval:read` and `eval:write` for their own versions. Cross-
   account target policies include only `StartBatchEvaluation` and `GetBatchEvaluation` on the
   target account's `batch-evaluate/*` resources.
+- Cross-account and same-account cross-Region target registration now requires an enabled,
+  symmetric customer-managed evaluation key in the exact target account and Region. Registration
+  validates `DescribeKey` metadata and the default key policy's scoped AgentCore service grant,
+  without reading key material, before persisting the ARN.
+- The selected key is frozen on target, deployment, and version authority. Promotion batch startup
+  uses the home stack key only for home-Region versions and the exact registered key everywhere
+  else; missing legacy authority or deployment/version disagreement fails closed. Admin APIs and
+  forms expose the registered ARN, while the read-only deployer catalog exposes only a capability
+  boolean. The cross-account role template now includes least-privilege key metadata/crypto grants,
+  required key policy, support guidance, and customer-owned cleanup semantics.
 
 ### Changed — every account id in the repository is an AWS documentation placeholder
 

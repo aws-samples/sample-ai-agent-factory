@@ -258,3 +258,75 @@ def test_deployment_role_kms_crypto_is_bound_by_batch_evaluation_context(templat
     assert crypto["Condition"]["StringLike"] == {
         "kms:EncryptionContext:aws:bedrock-agentcore:batchEvaluationArn": expected_batch_arn
     }
+
+
+def test_deployment_api_receives_its_role_arn_for_key_policy_validation(template):
+    role_id = role_logical_id(template, "DeploymentLambdaRole")
+    environment = _deployment_function(template)["Properties"]["Environment"]["Variables"]
+    assert environment["DEPLOYMENT_LAMBDA_ROLE_ARN"] == {"Fn::GetAtt": [role_id, "Arn"]}
+
+
+def test_deployment_role_can_validate_and_use_registered_regional_keys(template):
+    statements = _deployment_role_statements(template)
+    regional_key_arn = {
+        "Fn::Join": [
+            "",
+            ["arn:", {"Ref": "AWS::Partition"}, f":kms:*:{ACCOUNT}:key/*"],
+        ]
+    }
+    metadata = next(
+        statement
+        for statement in statements
+        if set(_listify(statement.get("Action") or [])) == {"kms:DescribeKey", "kms:GetKeyPolicy"}
+        and regional_key_arn in _listify(statement.get("Resource"))
+    )
+    assert metadata["Effect"] == "Allow"
+
+    crypto = next(
+        statement
+        for statement in statements
+        if set(_listify(statement.get("Action") or [])) == {"kms:GenerateDataKey", "kms:Decrypt"}
+        and regional_key_arn in _listify(statement.get("Resource"))
+    )
+    expected_context = {
+        "Fn::Join": [
+            "",
+            [
+                "arn:",
+                {"Ref": "AWS::Partition"},
+                f":bedrock-agentcore:*:{ACCOUNT}:batch-evaluate/*",
+            ],
+        ]
+    }
+    assert crypto["Condition"]["StringLike"] == {
+        "kms:EncryptionContext:aws:bedrock-agentcore:batchEvaluationArn": expected_context
+    }
+
+
+def test_documented_target_role_and_key_policy_authorize_scoped_evaluation_key_use():
+    document_path = Path(__file__).resolve().parents[2] / "docs" / "cross-account-deploy-role.json"
+    document = json.loads(document_path.read_text())
+    statements = document["permissions-policy.json"]["Statement"]
+    metadata = next(statement for statement in statements if statement.get("Sid") == "ProductionEvaluationKeyMetadata")
+    crypto = next(statement for statement in statements if statement.get("Sid") == "ProductionEvaluationKeyUse")
+    assert set(metadata["Action"]) == {"kms:DescribeKey", "kms:GetKeyPolicy"}
+    assert metadata["Resource"] == "<TARGET_EVALUATION_KMS_KEY_ARN>"
+    assert set(crypto["Action"]) == {"kms:GenerateDataKey", "kms:Decrypt"}
+    assert crypto["Resource"] == "<TARGET_EVALUATION_KMS_KEY_ARN>"
+    assert crypto["Condition"]["StringLike"] == {
+        "kms:EncryptionContext:aws:bedrock-agentcore:batchEvaluationArn": (
+            "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:batch-evaluate/*"
+        )
+    }
+
+    key_policy = document["_STEP_5_evaluation-key-policy.json"]
+    service = next(
+        statement
+        for statement in key_policy["Statement"]
+        if statement.get("Principal") == {"Service": "bedrock-agentcore.amazonaws.com"}
+    )
+    assert set(service["Action"]) == {"kms:GenerateDataKey", "kms:Decrypt"}
+    assert service["Condition"]["StringEquals"] == {"aws:SourceAccount": "<TARGET_ACCOUNT_ID>"}
+    assert service["Condition"]["ArnLike"] == {
+        "aws:SourceArn": "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:batch-evaluate/*"
+    }

@@ -840,7 +840,9 @@ def test_listing_by_flow_returns_only_the_callers_rows(monkeypatch):
 
 
 def test_production_like_environment_defaults_new_deploys_to_staging(spy, monkeypatch):
+    evaluation_key_arn = f"arn:aws:kms:{REGION}:{ACCOUNT}:key/12345678-1234-1234-1234-1234567890ab"
     monkeypatch.setenv("ENVIRONMENT", "prod")
+    monkeypatch.setenv("EVALUATION_EVIDENCE_KMS_KEY_ARN", evaluation_key_arn)
     monkeypatch.delenv("PRODUCTION_EVALUATION_GATE", raising=False)
 
     response = _client().post("/api/deploy", json=_body())
@@ -849,7 +851,12 @@ def test_production_like_environment_defaults_new_deploys_to_staging(spy, monkey
     version = spy.versions.put.call_args.args[0]
     assert version.production_gate_required is True
     assert version.promotion_policy["policy_digest"]
-    assert json.loads(spy.start.input_json)["deployment_slot"] == "staging"
+    assert version.evaluation_kms_key_arn == evaluation_key_arn
+    state = spy.store.create.call_args.args[0]
+    assert state.evaluation_kms_key_arn == evaluation_key_arn
+    sfn_input = json.loads(spy.start.input_json)
+    assert sfn_input["deployment_slot"] == "staging"
+    assert sfn_input["evaluation_kms_key_arn"] == evaluation_key_arn
 
 
 def test_production_like_environment_rejects_direct_production_before_side_effects(spy, monkeypatch):

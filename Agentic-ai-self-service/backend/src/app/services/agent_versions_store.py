@@ -233,6 +233,9 @@ class AgentVersion:
     # always persist an explicit bool and the policy used to judge this version.
     production_gate_required: bool | None = None
     promotion_policy: dict | None = None
+    # Exact target-bound key selected at deployment admission. Legacy gated rows
+    # without this authority fail closed instead of borrowing ambient configuration.
+    evaluation_kms_key_arn: str | None = None
     # Written once, conditionally, after AgentCore returns a complete passing
     # batch evaluation. It is never accepted from a deploy or promote request.
     promotion_evidence: dict | None = None
@@ -258,6 +261,7 @@ class AgentVersion:
             "description",
             "production_gate_required",
             "promotion_policy",
+            "evaluation_kms_key_arn",
             "promotion_evidence",
         ):
             val = getattr(self, fld)
@@ -286,6 +290,7 @@ class AgentVersion:
             description=item.get("description"),
             production_gate_required=item.get("production_gate_required"),
             promotion_policy=item.get("promotion_policy"),
+            evaluation_kms_key_arn=item.get("evaluation_kms_key_arn"),
             promotion_evidence=item.get("promotion_evidence"),
         )
 

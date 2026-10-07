@@ -26,6 +26,7 @@ def test_disabled_target_catalog_exposes_only_the_platform_default(monkeypatch):
         "enabled": False,
         "home_region": "us-east-1",
         "regions": [],
+        "region_targets": [],
         "accounts": [],
     }
 
@@ -35,8 +36,14 @@ def test_target_catalog_is_sanitized_sorted_and_contains_no_role_arns(monkeypatc
     monkeypatch.setattr(dt, "home_region", lambda: "us-east-1")
     monkeypatch.setattr(
         dt,
-        "list_regions",
-        lambda: ["eu-west-1", "us-west-2", "eu-west-1"],
+        "list_region_targets",
+        lambda: [
+            {
+                "region": "eu-west-1",
+                "evaluation_kms_key_arn": "arn:aws:kms:eu-west-1:111111111111:key/private",
+            },
+            {"region": "us-west-2"},
+        ],
     )
     monkeypatch.setattr(
         dt,
@@ -47,6 +54,7 @@ def test_target_catalog_is_sanitized_sorted_and_contains_no_role_arns(monkeypatc
                 "region": "us-west-2",
                 "role_arn": "arn:aws:iam::222222222222:role/secret-deployment-role",
                 "runtime_role_arn": "arn:aws:iam::222222222222:role/secret-runtime-role",
+                "evaluation_kms_key_arn": "arn:aws:kms:us-west-2:222222222222:key/private",
             },
             {
                 "account_id": "111111111111",
@@ -62,9 +70,23 @@ def test_target_catalog_is_sanitized_sorted_and_contains_no_role_arns(monkeypatc
         "enabled": True,
         "home_region": "us-east-1",
         "regions": ["eu-west-1", "us-west-2"],
+        "region_targets": [
+            {"region": "eu-west-1", "production_promotion_supported": True},
+            {"region": "us-west-2", "production_promotion_supported": False},
+        ],
         "accounts": [
-            {"account_id": "111111111111", "region": "eu-west-1"},
-            {"account_id": "222222222222", "region": "us-west-2"},
+            {
+                "account_id": "111111111111",
+                "region": "eu-west-1",
+                "production_promotion_supported": False,
+            },
+            {
+                "account_id": "222222222222",
+                "region": "us-west-2",
+                "production_promotion_supported": True,
+            },
         ],
     }
     assert "role_arn" not in str(result)
+    assert "evaluation_kms_key_arn" not in str(result)
+    assert "arn:aws:kms" not in str(result)

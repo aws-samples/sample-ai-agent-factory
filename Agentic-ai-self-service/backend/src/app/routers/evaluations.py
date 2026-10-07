@@ -302,6 +302,7 @@ async def start_promotion_evaluation(
             runtime_arn=target.runtime_arn,
             scenarios=[scenario.model_dump(mode="python", by_alias=False) for scenario in body.scenarios],
             policy=policy,
+            kms_key_arn=target.evaluation_kms_key_arn,
             kms_required=bool(version.production_gate_required),
         )
     except PromotionPolicyConfigurationError as exc:

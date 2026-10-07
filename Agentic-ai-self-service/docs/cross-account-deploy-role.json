@@ -1,5 +1,5 @@
 {
-  "_README": "Phase 7 (opt-in) cross-account deployment. In EACH target AWS account, pre-provision FIVE things before registration: (1) role 'AgentCoreFlowsDeploymentRole' \u2014 assumed by the platform for every target-account control-plane call; (2) role 'AgentCoreFlowsRuntimeRole' \u2014 stable, model-capable AgentCore Runtime execution role for Strands agents; (3) role 'AgentCoreFlowsMCPRuntimeRole' \u2014 stable, deliberately MODEL-FREE AgentCore Runtime execution role for protocol-only FastMCP servers (it grants artifact read and logging only, never bedrock:* / bedrock-agentcore:*, so a tool-only runtime cannot invoke models); (4) role 'AgentCoreFlowsHarnessRole' \u2014 stable AgentCore Harness execution role; (5) S3 bucket 'agentcore-flows-artifacts-<TARGET_ACCOUNT_ID>-<REGION>' \u2014 final runtime code.zip, hosted-MCP code, oversized Gateway specs, and BDA supplemental storage. Stable execution roles avoid the fresh-role IAM-propagation race that can CREATE_FAIL AgentCore resources for ~17-20 minutes. Registration is atomic: the API assumes (1), proves (2), (3) and (4) exist in the target account and trust bedrock-agentcore.amazonaws.com, then proves (5) is owned by <TARGET_ACCOUNT_ID>, accessible to the deployment role, and physically in <REGION>; only then does it persist the target. Optional custom execution-role ARNs and a custom bucket name may be supplied. Replace <TARGET_RUNTIME_ROLE_ARN>, <TARGET_MCP_RUNTIME_ROLE_ARN>, <TARGET_HARNESS_ROLE_ARN>, and <TARGET_ARTIFACT_BUCKET> with the exact registered values; when defaults are used they are arn:aws:iam::<TARGET_ACCOUNT_ID>:role/AgentCoreFlowsRuntimeRole, arn:aws:iam::<TARGET_ACCOUNT_ID>:role/AgentCoreFlowsMCPRuntimeRole, arn:aws:iam::<TARGET_ACCOUNT_ID>:role/AgentCoreFlowsHarnessRole, and agentcore-flows-artifacts-<TARGET_ACCOUNT_ID>-<REGION>. Platform dependency bundles remain in the platform bucket and are read with the platform session; they are never copied from the target role. A basic cross-account runtime was verified live; the full component matrix still requires a fresh live gate before production sign-off.",
+  "_README": "Phase 7 (opt-in) cross-account deployment. In EACH target AWS account, pre-provision SIX things before registration: (1) role 'AgentCoreFlowsDeploymentRole' \u2014 assumed by the platform for every target-account control-plane call; (2) role 'AgentCoreFlowsRuntimeRole' \u2014 stable, model-capable AgentCore Runtime execution role for Strands agents; (3) role 'AgentCoreFlowsMCPRuntimeRole' \u2014 stable, deliberately MODEL-FREE AgentCore Runtime execution role for protocol-only FastMCP servers (it grants artifact read and logging only, never bedrock:* / bedrock-agentcore:*, so a tool-only runtime cannot invoke models); (4) role 'AgentCoreFlowsHarnessRole' \u2014 stable AgentCore Harness execution role; (5) S3 bucket 'agentcore-flows-artifacts-<TARGET_ACCOUNT_ID>-<REGION>' \u2014 final runtime code.zip, hosted-MCP code, oversized Gateway specs, and BDA supplemental storage; (6) an enabled symmetric customer-managed KMS key in <REGION> whose policy permits scoped AgentCore batch-evaluation encryption. Stable execution roles avoid the fresh-role IAM-propagation race that can CREATE_FAIL AgentCore resources for ~17-20 minutes. Registration is atomic: the API assumes (1), proves (2), (3) and (4) exist in the target account and trust bedrock-agentcore.amazonaws.com, proves (5) is owned by <TARGET_ACCOUNT_ID>, accessible to the deployment role, and physically in <REGION>, then validates (6) by metadata and key policy without reading key material; only then does it persist the target. Optional custom execution-role ARNs and a custom bucket name may be supplied. Replace <TARGET_RUNTIME_ROLE_ARN>, <TARGET_MCP_RUNTIME_ROLE_ARN>, <TARGET_HARNESS_ROLE_ARN>, and <TARGET_ARTIFACT_BUCKET> with the exact registered values; when defaults are used they are arn:aws:iam::<TARGET_ACCOUNT_ID>:role/AgentCoreFlowsRuntimeRole, arn:aws:iam::<TARGET_ACCOUNT_ID>:role/AgentCoreFlowsMCPRuntimeRole, arn:aws:iam::<TARGET_ACCOUNT_ID>:role/AgentCoreFlowsHarnessRole, and agentcore-flows-artifacts-<TARGET_ACCOUNT_ID>-<REGION>. Platform dependency bundles remain in the platform bucket and are read with the platform session; they are never copied from the target role. A basic cross-account runtime was verified live; the full component matrix still requires a fresh live gate before production sign-off.",
   "_STEP_2_runtime-role-trust.json": {
     "Version": "2012-10-17",
     "Statement": [
@@ -206,6 +206,41 @@
   },
   "_STEP_3_harness-role-notes": "Create AgentCoreFlowsHarnessRole with _STEP_3_harness-role-trust.json, attach _STEP_3_harness-role-permissions.json, and wait for IAM propagation before registration. This stable role serves many Harness deployments, so connected Gateway and Memory ARNs are not known at onboarding time; the data-plane action set is explicit but Resource is '*'. The role is intentionally never written into a per-deployment teardown manifest.",
   "_STEP_4_artifact-bucket-notes": "Create <TARGET_ARTIFACT_BUCKET> in <REGION> and <TARGET_ACCOUNT_ID>, enable S3 Block Public Access, and retain default or stronger server-side encryption. The deployment role needs the TargetArtifactBucket and TargetArtifactBucketList grants below. The registration API calls HeadBucket and GetBucketLocation with ExpectedBucketOwner=<TARGET_ACCOUNT_ID>; a missing, foreign, wrong-region, or unreadable bucket is rejected before any target configuration is persisted.",
+  "_STEP_5_evaluation-key-policy.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "EnableTargetAccountIam",
+        "Effect": "Allow",
+        "Principal": {
+          "AWS": "arn:aws:iam::<TARGET_ACCOUNT_ID>:root"
+        },
+        "Action": "kms:*",
+        "Resource": "*"
+      },
+      {
+        "Sid": "AllowAgentCoreBatchEvaluation",
+        "Effect": "Allow",
+        "Principal": {
+          "Service": "bedrock-agentcore.amazonaws.com"
+        },
+        "Action": [
+          "kms:GenerateDataKey",
+          "kms:Decrypt"
+        ],
+        "Resource": "*",
+        "Condition": {
+          "StringEquals": {
+            "aws:SourceAccount": "<TARGET_ACCOUNT_ID>"
+          },
+          "ArnLike": {
+            "aws:SourceArn": "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:batch-evaluate/*"
+          }
+        }
+      }
+    ]
+  },
+  "_STEP_5_evaluation-key-notes": "Create an enabled symmetric customer-managed ENCRYPT_DECRYPT KMS key in <REGION>, apply _STEP_5_evaluation-key-policy.json, replace <TARGET_EVALUATION_KMS_KEY_ARN> in permissions-policy.json with its full key ARN (aliases are refused), then register that ARN. Registration reads DescribeKey and the default key policy only; it never reads key material. Disabled, asymmetric, wrong-account, wrong-Region, or under-authorized keys are rejected and the target row is not persisted.",
   "trust-policy.json": {
     "Version": "2012-10-17",
     "Statement": [
@@ -324,6 +359,29 @@
           "bedrock-agentcore:GetBatchEvaluation"
         ],
         "Resource": "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:batch-evaluate/*"
+      },
+      {
+        "Sid": "ProductionEvaluationKeyMetadata",
+        "Effect": "Allow",
+        "Action": [
+          "kms:DescribeKey",
+          "kms:GetKeyPolicy"
+        ],
+        "Resource": "<TARGET_EVALUATION_KMS_KEY_ARN>"
+      },
+      {
+        "Sid": "ProductionEvaluationKeyUse",
+        "Effect": "Allow",
+        "Action": [
+          "kms:GenerateDataKey",
+          "kms:Decrypt"
+        ],
+        "Resource": "<TARGET_EVALUATION_KMS_KEY_ARN>",
+        "Condition": {
+          "StringLike": {
+            "kms:EncryptionContext:aws:bedrock-agentcore:batchEvaluationArn": "arn:aws:bedrock-agentcore:<REGION>:<TARGET_ACCOUNT_ID>:batch-evaluate/*"
+          }
+        }
       },
       {
         "Sid": "AgentCoreRuntimeOwnershipTagging",

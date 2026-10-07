@@ -109,6 +109,24 @@ Operators can raise or otherwise version this policy with CDK context
 `production_evaluation_policy_json`; invalid JSON or fields fail closed. Release
 evidence expires after 24 hours by default.
 
+### Target-Region production evaluation keys
+
+Every cross-account or same-account cross-Region target registration requires a
+full customer-managed KMS **key ARN** (aliases are refused). The admin API uses
+the target session to call only `DescribeKey` and `GetKeyPolicy`: the key must
+belong to the registered account and Region, be enabled, use
+`SYMMETRIC_DEFAULT` with `ENCRYPT_DECRYPT`, and have the scoped AgentCore service
+statement shown in `docs/cross-account-deploy-role.json`. No key material is
+read or returned. The exact ARN is stored on the target row and then frozen on
+both the deployment and version authority rows.
+
+Promotion batch startup reads that immutable authority. It uses the stack key
+only for a home-Region version; target versions use their registered target key.
+A missing legacy value, a changed target row, or disagreement between the
+version and deployment records fails closed before `StartBatchEvaluation`.
+Re-register legacy targets and redeploy a new version to enable production
+promotion; existing version authority is intentionally never backfilled.
+
 Batch inputs/results are encrypted with the stack's dedicated rotating KMS key.
 The key policy scopes the deployment Lambda and
 `bedrock-agentcore.amazonaws.com` to this account's `batch-evaluate/*` ARN and
@@ -362,6 +380,15 @@ The cleanup script validates credentials, deletes every AgentCore resource the
 platform created (runtimes, gateways, memories, KBs, vector stores, Cognito
 pools, secrets, IAM roles), empties the S3 buckets, runs `cdk destroy` on the
 stack, and verifies all resources are removed.
+
+Registered target evaluation keys are customer-owned prerequisites, not
+platform-created resources. `cleanup.sh` does not schedule or delete them.
+Before deleting a target key, retire every version that names its ARN and retain
+the key for as long as its encrypted batch-evaluation evidence must remain
+readable. If registration fails, check the key account/Region/state/spec first,
+then compare its default policy and the target deployment-role policy with
+`docs/cross-account-deploy-role.json`; do not work around the check with an alias
+or the home-Region key.
 
 ### Safe to run with more than one deployment in the account
 

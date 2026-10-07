@@ -28,12 +28,16 @@ const account = {
   harness_role_arn:
     'arn:aws:iam::123456789012:role/AgentCoreFlowsHarnessRole',
   artifact_bucket: 'ecb-agent-runtime-artifacts',
+  evaluation_kms_key_arn:
+    'arn:aws:kms:eu-west-1:123456789012:key/12345678-1234-1234-1234-1234567890ab',
   region: 'eu-west-1',
 };
 
 const regionTarget = {
   account_id: '123456789012',
   artifact_bucket: 'agentcore-flows-artifacts-123456789012-eu-west-1',
+  evaluation_kms_key_arn:
+    'arn:aws:kms:eu-west-1:123456789012:key/12345678-1234-1234-1234-1234567890ab',
   region: 'eu-west-1',
 };
 
@@ -121,6 +125,11 @@ describe('DeployTargetsPanel', () => {
       { target: { value: account.artifact_bucket } },
     );
 
+    fireEvent.change(
+      screen.getByLabelText('Target production evaluation KMS key ARN'),
+      { target: { value: account.evaluation_kms_key_arn } },
+    );
+
     fireEvent.click(
       screen.getByRole('button', { name: 'Register & validate account' }),
     );
@@ -130,6 +139,7 @@ describe('DeployTargetsPanel', () => {
         account.account_id,
         account.role_arn,
         account.region,
+        account.evaluation_kms_key_arn,
         account.runtime_role_arn,
         account.mcp_runtime_role_arn,
         account.harness_role_arn,
@@ -171,6 +181,10 @@ describe('DeployTargetsPanel', () => {
         },
       },
     );
+    fireEvent.change(
+      screen.getByLabelText('Regional production evaluation KMS key ARN'),
+      { target: { value: regionTarget.evaluation_kms_key_arn } },
+    );
     fireEvent.click(
       screen.getByRole('button', { name: 'Register & validate region' }),
     );
@@ -178,6 +192,7 @@ describe('DeployTargetsPanel', () => {
     await waitFor(() => {
       expect(api.addDeployRegion).toHaveBeenCalledWith(
         'us-west-2',
+        regionTarget.evaluation_kms_key_arn,
         'agentcore-flows-artifacts-123456789012-us-west-2',
       );
     });
@@ -229,12 +244,20 @@ describe('DeployTargetsPanel', () => {
     fireEvent.change(screen.getByLabelText('Region to allow'), {
       target: { value: 'us-west-2' },
     });
+    fireEvent.change(
+      screen.getByLabelText('Regional production evaluation KMS key ARN'),
+      { target: { value: regionTarget.evaluation_kms_key_arn } },
+    );
     fireEvent.click(
       screen.getByRole('button', { name: 'Register & validate region' }),
     );
 
     await waitFor(() => {
-      expect(api.addDeployRegion).toHaveBeenCalledWith('us-west-2', undefined);
+      expect(api.addDeployRegion).toHaveBeenCalledWith(
+        'us-west-2',
+        regionTarget.evaluation_kms_key_arn,
+        undefined,
+      );
     });
   });
 });

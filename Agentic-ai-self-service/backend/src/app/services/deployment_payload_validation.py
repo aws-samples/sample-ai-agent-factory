@@ -172,6 +172,7 @@ _PREPARED_TOP_LEVEL_FIELDS = frozenset(
         "target_mcp_runtime_role_arn",
         "target_harness_role_arn",
         "target_artifact_bucket",
+        "evaluation_kms_key_arn",
         "version_id",
         "friendly_runtime_name",
         "agentcore_runtime_name",
@@ -1477,6 +1478,20 @@ def validate_deployment_payload(
                 account_policy="required",
                 expect_account=expected_account,
             )
+
+    evaluation_key = payload.get("evaluation_kms_key_arn")
+    if evaluation_key is not None:
+        _check_arn(
+            errors,
+            "$.evaluation_kms_key_arn",
+            evaluation_key,
+            expect_service="kms",
+            expect_resource_prefix="key/",
+            region_policy="required",
+            expect_region=expected_region,
+            account_policy="required",
+            expect_account=expected_account,
+        )
 
     # Staged secrets are created BY this deployment, in the target account and region
     # (deployment_handler.py:391-422 binds them through a session for the target event), so

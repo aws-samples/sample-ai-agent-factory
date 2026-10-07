@@ -30,6 +30,23 @@ Every API endpoint the platform exposes, plus deploy-time configuration variable
 | `POST` | `/api/generate-tool` | AI Tool Generator -- generate Lambda code from natural language via Claude Sonnet |
 | `POST` | `/api/generate-cfn-template` | Generate downloadable CloudFormation stack (template YAML + deploy scripts + code artifacts) |
 
+### Deployment targets
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/deploy-targets` | Read-only deployer catalog. Returns account/Region choices and `production_promotion_supported`; never returns IAM role or KMS key ARNs. |
+| `GET` | `/api/admin/deploy-targets` | Admin configuration including validated artifact bucket, execution-role, and `evaluation_kms_key_arn` authority. |
+| `POST` | `/api/admin/deploy-targets/regions` | Register a same-account Region. Requires `region`, `evaluation_kms_key_arn`, and an optional `artifact_bucket`. |
+| `POST` | `/api/admin/deploy-targets/accounts` | Register a cross-account target. Requires `account_id`, fixed deployment `role_arn`, `region`, and `evaluation_kms_key_arn`; execution roles and artifact bucket may be overridden. |
+
+Registration accepts only a full target-Region customer-managed KMS key ARN.
+The backend verifies account, Region, enabled state, symmetric
+`ENCRYPT_DECRYPT` usage, and the default key policy's target-account and scoped
+`bedrock-agentcore.amazonaws.com` grants. It reads metadata and policy only—no
+key material. Target rows created before this field existed remain visible to
+admins but are not deployable until re-registered. New deployment and version
+rows freeze the exact ARN; promotion refuses missing or disagreeing authority.
+
 #### CloudFormation export naming and tags
 
 `POST /api/generate-cfn-template` accepts these optional governance fields in the

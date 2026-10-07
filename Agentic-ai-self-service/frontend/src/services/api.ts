@@ -550,6 +550,7 @@ export class ApiClient {
       region: string;
       account_id?: string | null;
       artifact_bucket?: string | null;
+      evaluation_kms_key_arn?: string | null;
     }>;
     accounts: Array<{
       account_id: string;
@@ -558,6 +559,7 @@ export class ApiClient {
       mcp_runtime_role_arn: string;
       harness_role_arn: string;
       artifact_bucket: string;
+      evaluation_kms_key_arn: string;
       region: string;
     }>;
   }> {
@@ -570,11 +572,13 @@ export class ApiClient {
 
   async addDeployRegion(
     region: string,
+    evaluationKmsKeyArn: string,
     artifactBucket?: string,
   ): Promise<{
     region: string;
     account_id: string;
     artifact_bucket: string;
+    evaluation_kms_key_arn: string;
     validated: boolean;
     regions: string[];
   }> {
@@ -582,6 +586,7 @@ export class ApiClient {
       method: 'POST',
       body: JSON.stringify({
         region,
+        evaluation_kms_key_arn: evaluationKmsKeyArn,
         ...(artifactBucket ? { artifact_bucket: artifactBucket } : {}),
       }),
     }, this.baseUrl);
@@ -591,6 +596,7 @@ export class ApiClient {
     accountId: string,
     roleArn: string,
     region: string,
+    evaluationKmsKeyArn: string,
     runtimeRoleArn?: string,
     mcpRuntimeRoleArn?: string,
     harnessRoleArn?: string,
@@ -601,6 +607,7 @@ export class ApiClient {
     mcp_runtime_role_arn: string;
     harness_role_arn: string;
     artifact_bucket: string;
+    evaluation_kms_key_arn: string;
     validated: boolean;
   }> {
     return apiRequest(`/api/admin/deploy-targets/accounts`, {
@@ -609,6 +616,7 @@ export class ApiClient {
         account_id: accountId,
         role_arn: roleArn,
         region,
+        evaluation_kms_key_arn: evaluationKmsKeyArn,
         ...(runtimeRoleArn ? { runtime_role_arn: runtimeRoleArn } : {}),
         ...(mcpRuntimeRoleArn
           ? { mcp_runtime_role_arn: mcpRuntimeRoleArn }

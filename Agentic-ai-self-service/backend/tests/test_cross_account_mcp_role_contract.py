@@ -28,6 +28,7 @@ RUNTIME_ROLE_ARN = f"arn:aws:iam::{ACCOUNT}:role/AgentCoreFlowsRuntimeRole"
 MCP_RUNTIME_ROLE_ARN = f"arn:aws:iam::{ACCOUNT}:role/AgentCoreFlowsMCPRuntimeRole"
 HARNESS_ROLE_ARN = f"arn:aws:iam::{ACCOUNT}:role/AgentCoreFlowsHarnessRole"
 ARTIFACT_BUCKET = "customer-agent-runtime-artifacts"
+EVALUATION_KEY_ARN = f"arn:aws:kms:{REGION}:{ACCOUNT}:key/12345678-1234-1234-1234-1234567890ab"
 
 MODEL_ACTIONS = {
     "bedrock:InvokeModel",
@@ -152,12 +153,14 @@ def test_target_registry_persists_the_validated_mcp_execution_role(monkeypatch):
         mcp_runtime_role_arn=MCP_RUNTIME_ROLE_ARN,
         harness_role_arn=HARNESS_ROLE_ARN,
         artifact_bucket=ARTIFACT_BUCKET,
+        evaluation_kms_key_arn=EVALUATION_KEY_ARN,
     )
 
     item = table.put_item.call_args.kwargs["Item"]
     assert item["runtime_role_arn"] == RUNTIME_ROLE_ARN
     assert item["mcp_runtime_role_arn"] == MCP_RUNTIME_ROLE_ARN
     assert item["harness_role_arn"] == HARNESS_ROLE_ARN
+    assert item["evaluation_kms_key_arn"] == EVALUATION_KEY_ARN
 
 
 def test_live_target_resolution_revalidates_and_returns_the_mcp_role(monkeypatch):
@@ -170,6 +173,7 @@ def test_live_target_resolution_revalidates_and_returns_the_mcp_role(monkeypatch
         "mcp_runtime_role_arn": MCP_RUNTIME_ROLE_ARN,
         "harness_role_arn": HARNESS_ROLE_ARN,
         "artifact_bucket": ARTIFACT_BUCKET,
+        "evaluation_kms_key_arn": EVALUATION_KEY_ARN,
         "region": REGION,
     }
     session = MagicMock()
@@ -190,6 +194,11 @@ def test_live_target_resolution_revalidates_and_returns_the_mcp_role(monkeypatch
         dt,
         "validate_artifact_bucket",
         lambda *_args, **_kwargs: ARTIFACT_BUCKET,
+    )
+    monkeypatch.setattr(
+        dt,
+        "validate_evaluation_kms_key",
+        lambda *_args, **_kwargs: EVALUATION_KEY_ARN,
     )
 
     resolved = dt.resolve_registered_account_target(ACCOUNT)
@@ -227,10 +236,16 @@ def test_admin_registration_forwards_the_mcp_role_without_reconstructing_it(
         "validate_artifact_bucket",
         lambda *_args, **_kwargs: ARTIFACT_BUCKET,
     )
+    monkeypatch.setattr(
+        dt,
+        "validate_evaluation_kms_key",
+        lambda *_args, **_kwargs: EVALUATION_KEY_ARN,
+    )
     monkeypatch.setattr(dt, "add_account", add_account)
 
     body = admin.AccountTargetRequest(
         account_id=ACCOUNT,
+        evaluation_kms_key_arn=EVALUATION_KEY_ARN,
         role_arn=DEPLOYMENT_ROLE_ARN,
         runtime_role_arn=RUNTIME_ROLE_ARN,
         mcp_runtime_role_arn=MCP_RUNTIME_ROLE_ARN,
@@ -255,6 +270,7 @@ def test_admin_registration_forwards_the_mcp_role_without_reconstructing_it(
         mcp_runtime_role_arn=MCP_RUNTIME_ROLE_ARN,
         harness_role_arn=HARNESS_ROLE_ARN,
         artifact_bucket=ARTIFACT_BUCKET,
+        evaluation_kms_key_arn=EVALUATION_KEY_ARN,
     )
     assert result["mcp_runtime_role_arn"] == MCP_RUNTIME_ROLE_ARN
 
@@ -359,8 +375,8 @@ def test_onboarding_document_defines_a_model_free_mcp_execution_role():
 
     assert "AgentCoreFlowsMCPRuntimeRole" in serialized
     assert "<TARGET_MCP_RUNTIME_ROLE_ARN>" in serialized
-    assert "pre-provision FIVE things" in readme
-    assert "pre-provision FOUR things" not in readme
+    assert "pre-provision SIX things" in readme
+    assert "pre-provision FIVE things" not in readme
 
     mcp_permission_documents = [
         value

@@ -78,10 +78,7 @@ def _batch_result(policy: dict, *, status: str = "COMPLETED") -> dict:
 
 @pytest.fixture
 def harness(monkeypatch):
-    monkeypatch.setenv(
-        "EVALUATION_EVIDENCE_KMS_KEY_ARN",
-        f"arn:aws:kms:{REGION}:{ACCOUNT}:key/12345678-1234-1234-1234-1234567890ab",
-    )
+    evaluation_key_arn = f"arn:aws:kms:{REGION}:{ACCOUNT}:key/12345678-1234-1234-1234-1234567890ab"
     policy = load_promotion_policy()
     version = AgentVersion(
         runtime_name=RUNTIME_NAME,
@@ -95,6 +92,7 @@ def harness(monkeypatch):
         status="succeeded",
         production_gate_required=True,
         promotion_policy=policy,
+        evaluation_kms_key_arn=evaluation_key_arn,
     )
     agentcore = MagicMock()
     agentcore.start_batch_evaluation.return_value = {
@@ -107,6 +105,7 @@ def harness(monkeypatch):
         deployment_id=DEPLOYMENT_ID,
         runtime_id=RUNTIME_ID,
         runtime_arn=RUNTIME_ARN,
+        evaluation_kms_key_arn=evaluation_key_arn,
         client=lambda service: agentcore if service == "bedrock-agentcore" else None,
     )
     store = MagicMock()
