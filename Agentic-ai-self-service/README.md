@@ -151,9 +151,13 @@ so use short access-token lifetimes where immediate revocation is required.
 Dev-like environments (`dev`, `development`, `test`, `sandbox`, `preview`, and
 `local`) preserve optional Guardrails and the direct-production iteration loop.
 Every other environment enforces the platform-managed `production-v1` Guardrail
-baseline before any row, secret, execution, or AWS resource is created. Missing
-Guardrail configuration is injected automatically; caller-supplied content
-filters are raised to `HIGH`, credential/common-PII filters are retained at
+baseline before any row, secret, execution, or AWS resource is created. Guardrail
+creation always applies the platform's governed ownership tags, so both the
+in-account `StepGuardrailsRole` and the documented cross-account deployment role
+include a separate, request-tag-conditioned `bedrock:TagResource` grant on
+`guardrail/*`; granting `CreateGuardrail` alone is insufficient when `tags` are
+present. Missing Guardrail configuration is injected automatically;
+caller-supplied content filters are raised to `HIGH`, credential/common-PII filters are retained at
 `ANONYMIZE` or stronger, and custom denied topics/word/regex filters remain.
 Production rejects `existing` mode because READY status alone cannot attest that
 an externally mutable Guardrail still meets this baseline. Guardrail trace is

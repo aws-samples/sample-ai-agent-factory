@@ -1622,6 +1622,7 @@ def _create_step_role(
     # generated (ARN carries the id, not the name), so guardrail/* in this
     # account+region is the tightest pre-creation pattern.
     if step_name == "guardrails":
+        guardrail_arns = [f"arn:aws:bedrock:*:{stack.account}:guardrail/*"]
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
@@ -1631,7 +1632,32 @@ def _create_step_role(
                     "bedrock:DeleteGuardrail",
                     "bedrock:CreateGuardrailVersion",
                 ],
-                resources=[f"arn:aws:bedrock:*:{stack.account}:guardrail/*"],
+                resources=guardrail_arns,
+            )
+        )
+        # CreateGuardrail authorizes its tags as a separate TagResource action.
+        # This was proven live in eu-west-1: the create failed atomically with
+        # AccessDenied naming bedrock:TagResource while the create action itself
+        # was already granted. IDs do not exist before the call, so the ARN must
+        # stay globbed; pin both ownership values and the exact tag-key namespaces
+        # instead of granting an unconditioned relabel primitive.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:TagResource"],
+                resources=guardrail_arns,
+                conditions={
+                    "StringEquals": {
+                        "aws:RequestTag/ManagedBy": "agentcore-flows",
+                        "aws:RequestTag/AgentCoreStack": (f"{cfg.project}-{cfg.env}-${{aws:RequestedRegion}}"),
+                    },
+                    "ForAllValues:StringLike": {
+                        "aws:TagKeys": [
+                            "ManagedBy",
+                            "AgentCoreStack",
+                            *governance_tag_key_globs(),
+                        ]
+                    },
+                },
             )
         )
         # ListGuardrails (account-level listing) — no resource-level scoping.

@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — Guardrail creation can apply governed ownership tags
+
+- `StepGuardrailsRole` now grants the separately authorized
+  `bedrock:TagResource` action that `CreateGuardrail(tags=...)` requires. A real
+  `eu-west-1` deployment proved the create action alone is insufficient: AWS
+  denied `TagResource` atomically before returning a guardrail ID.
+- The grant is limited to `guardrail/*` in this account and pins
+  `ManagedBy=agentcore-flows`, the exact stack/Region owner value, and only the
+  ownership keys plus `platform:*` and `org:*` governance namespaces. The
+  documented cross-account role carries the same conditioned grant; positive,
+  adversarial-broadening, and removal-mutation tests protect both paths.
+
 ### Fixed — control-plane APIs reject Cognito ID tokens
 
 - Every JWT-protected API Gateway route now requires Cognito's
@@ -18,7 +30,9 @@ All notable changes to this project are documented here. The format follows
 - A real `eu-west-1` CloudFront probe discovered the gap: the same standard-user
   session received HTTP 200 with an access token and, incorrectly, with its ID
   token. The workflow fixture was deleted after the probe; the corrected revision
-  requires a fresh live 200/401 twin before certification.
+  requires a fresh live 200/403 twin before certification. API Gateway returns
+  `403 Forbidden` for a valid JWT that lacks the route scope; `401` is reserved
+  for JWT validation failures such as a bad audience.
 
 ### Fixed — fresh deploy recognizes current AWS CLI missing-stack errors
 

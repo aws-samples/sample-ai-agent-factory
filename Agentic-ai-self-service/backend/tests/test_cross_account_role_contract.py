@@ -168,6 +168,7 @@ def _deployment_role_statements() -> list[dict]:
                 "bedrock:DeleteGuardrail",
                 "bedrock:ListGuardrails",
                 "bedrock:CreateGuardrailVersion",
+                "bedrock:TagResource",
             },
         ),
         (
