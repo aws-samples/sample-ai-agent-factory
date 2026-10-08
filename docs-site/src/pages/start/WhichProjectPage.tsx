@@ -149,7 +149,7 @@ export function WhichProjectPage() {
     <>
       <PageMeta
         title="Which project fits?"
-        description="Compare the four AI Agent Factory projects by stage, audience, validated regions, account topology, tooling, first deploy, hands-on time, cost, teardown and status, every value linked to its source."
+        description="Compare the four Agentic AI Factory projects by stage, audience, validated regions, account topology, tooling, first deploy, hands-on time, cost, teardown and status, every value linked to its source."
       />
       <PageHeader
         eyebrow="Start"

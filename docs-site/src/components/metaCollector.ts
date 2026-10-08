@@ -1,8 +1,8 @@
 import { createContext } from 'react';
 
-export const SITE_NAME = 'AI Agent Factory';
+export const SITE_NAME = 'Agentic AI Factory';
 export const DEFAULT_DESCRIPTION =
-  'AI Agent Factory: enterprise agentic AI samples for AWS with Amazon Bedrock and Amazon Bedrock AgentCore';
+  'Agentic AI Factory: enterprise agentic AI samples for AWS with Amazon Bedrock and Amazon Bedrock AgentCore';
 
 /**
  * Per-render collector. On the server, PageMeta writes into it during render
@@ -10,7 +10,7 @@ export const DEFAULT_DESCRIPTION =
  * the page title from it to announce navigation.
  */
 export interface MetaCollector {
-  /** Full document title, e.g. "Security | AI Agent Factory". */
+  /** Full document title, e.g. "Security | Agentic AI Factory". */
   title: string;
   /** Page part of the title, e.g. "Security". */
   pageTitle: string;

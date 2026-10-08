@@ -171,7 +171,7 @@ export function Layout() {
         <div className={styles.headerContent}>
           <HomeLink className={styles.logo}>
             <Hexagon size={24} className={styles.logoIcon} aria-hidden="true" />
-            <span className={styles.logoText}>AI Agent Factory</span>
+            <span className={styles.logoText}>Agentic AI Factory</span>
             <span className="visually-hidden"> home</span>
           </HomeLink>
 
