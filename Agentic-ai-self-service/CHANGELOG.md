@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — fresh deploy recognizes current AWS CLI missing-stack errors
+
+- The Cognito carry-forward guard now accepts both exact AWS CLI v2 `GetTemplate`
+  missing-stack forms: the legacy `An error occurred ...` line and the current
+  `aws: [ERROR]: An error occurred ...` line. AWS CLI 2.33 otherwise made every
+  fresh deployment stop before synthesis even though the stack was provably absent.
+- Classification remains fail-closed: only one nonblank line with the exact
+  `ValidationError`, operation, and target stack is accepted. Wrong stacks, access
+  denials, transport failures, prefixes, suffixes, and extra diagnostics still abort.
+  Positive, adversarial, and fail-open mutation tests execute the real shell function.
+
 ### Added — exact-commit release evidence and EMEA certification matrix
 
 - `release_evidence.py` starts only on a clean Git subtree, records one immutable bounded JSON event

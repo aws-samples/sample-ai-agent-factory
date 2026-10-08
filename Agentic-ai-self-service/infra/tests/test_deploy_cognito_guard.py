@@ -17,6 +17,7 @@ extracts zero emails is indistinguishable from having no guard at all.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -24,7 +25,9 @@ import sys
 
 import pytest
 
-_DEPLOY_SH = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "deploy.sh"
+_DEPLOY_SH = pathlib.Path(
+    os.environ.get("DEPLOY_SH_UNDER_TEST", pathlib.Path(__file__).resolve().parents[2] / "scripts" / "deploy.sh")
+)
 
 
 def _deploy_sh() -> str:
@@ -52,6 +55,103 @@ def _run(template) -> str:
         check=True,
     )
     return proc.stdout.strip()
+
+
+def _missing_stack_error(stack: str = "teststack", *, prefixed: bool = True) -> str:
+    message = (
+        "An error occurred (ValidationError) when calling the GetTemplate operation: "
+        f"Stack with id {stack} does not exist"
+    )
+    return f"aws: [ERROR]: {message}" if prefixed else message
+
+
+def _run_absent_guard(tmp_path: pathlib.Path, aws_stderr: str) -> subprocess.CompletedProcess[str]:
+    """Run the real carry-forward function against one failed GetTemplate response."""
+    error_file = tmp_path / "aws-stderr.txt"
+    error_file.write_text(aws_stderr)
+    env = os.environ.copy()
+    env.update(
+        {
+            "AWS_ERROR_FILE": str(error_file),
+            "DEPLOY_SH_UNDER_TEST": str(_DEPLOY_SH),
+            "TMPDIR": str(tmp_path),
+        }
+    )
+    driver = r"""
+set -euo pipefail
+source "${DEPLOY_SH_UNDER_TEST}"
+STACK_NAME=teststack
+AWS_REGION=eu-west-1
+COGNITO_USERS=""
+aws() {
+  cat "${AWS_ERROR_FILE}" >&2
+  return 254
+}
+preserve_existing_cognito_users
+printf 'guard=absent\n'
+"""
+    return subprocess.run(["bash", "-c", driver], capture_output=True, text=True, env=env)
+
+
+class TestAbsentStackClassification:
+    @pytest.mark.parametrize(
+        "aws_stderr",
+        [
+            _missing_stack_error(prefixed=False),
+            f"\n{_missing_stack_error()}\n",
+        ],
+    )
+    def test_both_exact_aws_cli_v2_formats_allow_a_fresh_stack(self, tmp_path, aws_stderr):
+        proc = _run_absent_guard(tmp_path, aws_stderr)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "guard=absent" in proc.stdout
+
+    def test_wrong_stack_error_fails_closed(self, tmp_path):
+        proc = _run_absent_guard(tmp_path, _missing_stack_error("some-other-stack"))
+        assert proc.returncode != 0
+        assert "NOT provably absent" in proc.stderr
+        assert "guard=absent" not in proc.stdout
+
+    @pytest.mark.parametrize(
+        "aws_stderr",
+        [
+            "aws: [ERROR]: An error occurred (AccessDeniedException) when calling the GetTemplate operation: denied",
+            "aws: [ERROR]: connection reset; Stack with id teststack does not exist",
+            f"{_missing_stack_error()}\nsecond nonblank diagnostic",
+            f"prefix {_missing_stack_error()}",
+        ],
+    )
+    def test_every_nonexact_failure_fails_closed(self, tmp_path, aws_stderr):
+        proc = _run_absent_guard(tmp_path, aws_stderr)
+        assert proc.returncode != 0
+        assert "NOT provably absent" in proc.stderr
+
+    def test_a_fail_open_mutation_is_caught_by_the_wrong_stack_adversarial(self, tmp_path):
+        source = _deploy_sh()
+        strict_condition = """if [[ "${missing_stack_error}" == "${expected_missing_stack_error}" ||
+          "${missing_stack_error}" == "aws: [ERROR]: ${expected_missing_stack_error}" ]]; then"""
+        assert strict_condition in source
+        mutant = source.replace(strict_condition, "if true; then", 1)
+        mutated_deploy = tmp_path / "deploy-mutated.sh"
+        mutated_deploy.write_text(mutant)
+
+        env = os.environ.copy()
+        env["DEPLOY_SH_UNDER_TEST"] = str(mutated_deploy)
+        mutation_run = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                f"{pathlib.Path(__file__)}::TestAbsentStackClassification::test_wrong_stack_error_fails_closed",
+                "-q",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        assert mutation_run.returncode != 0, mutation_run.stdout + mutation_run.stderr
+        assert "1 failed" in mutation_run.stdout
 
 
 # The shape CDK actually emits, verified against the live stack's get-template.

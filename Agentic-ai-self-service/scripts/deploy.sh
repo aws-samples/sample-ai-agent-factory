@@ -435,11 +435,16 @@ preserve_existing_cognito_users() {
     rc=$?
   fi
   if (( rc != 0 )); then
-    # Exact absent-stack classification: the AWS error code AND the exact GetTemplate message for THIS stack, as one
-    # whole line. Any other ValidationError (or any other text) is unknown and fails closed.
-    local stack_re
-    stack_re="$(printf '%s' "${STACK_NAME}" | sed 's/[][\.*^$\\/+?(){}|]/\\&/g')"
-    if grep -Eq "^An error occurred \(ValidationError\) when calling the GetTemplate operation: Stack with id ${stack_re} does not exist\$" "${err}"; then
+    # Exact absent-stack classification: require one nonblank stderr line containing the
+    # ValidationError and THIS stack's exact GetTemplate message. AWS CLI 2.33 prefixes
+    # service errors with `aws: [ERROR]:`; older CLI 2 releases do not. Those are the only
+    # accepted forms. Any second diagnostic, different code/operation/stack, or extra text
+    # remains unknown and fails closed.
+    local missing_stack_error expected_missing_stack_error
+    missing_stack_error="$(sed '/^[[:space:]]*$/d' "${err}")"
+    expected_missing_stack_error="An error occurred (ValidationError) when calling the GetTemplate operation: Stack with id ${STACK_NAME} does not exist"
+    if [[ "${missing_stack_error}" == "${expected_missing_stack_error}" ||
+          "${missing_stack_error}" == "aws: [ERROR]: ${expected_missing_stack_error}" ]]; then
       log_info "Stack '${STACK_NAME}' is absent (exact ValidationError + message): no users to carry forward."
       rm -f "${err}"
       return

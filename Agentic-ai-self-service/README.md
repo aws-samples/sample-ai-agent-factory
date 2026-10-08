@@ -61,6 +61,11 @@ COGNITO_USERS="user@example.com" AWS_REGION=eu-central-1 ./scripts/deploy.sh
 
 The deploy script validates prerequisites and AWS credentials, installs backend/Lambda Python dependencies, builds the AgentCore dependency bundles, runs `cdk deploy` via `npx` (API Gateway, Lambda, Step Functions, DynamoDB, S3, CloudFront), then builds and uploads the frontend and prints the URLs. Lambda code is packaged automatically by CDK — no Docker build or ECR push required. A first-time deploy takes roughly 15–20 minutes.
 
+Fresh deployments also verify that a missing stack is genuinely absent before deciding
+there are no Cognito users to carry forward. Both AWS CLI v2 missing-stack formats are
+supported, including the current `aws: [ERROR]:` prefix; every nonexact error still
+fails closed before synthesis so an unreadable existing stack cannot lose users.
+
 Dependency builds are a release gate, not a best-effort optimization. The AgentCore
 bundle lock covers every distribution across the baseline and all provider deltas;
 the packager rejects an absent or mismatched pin and writes fixed-metadata, sorted,
