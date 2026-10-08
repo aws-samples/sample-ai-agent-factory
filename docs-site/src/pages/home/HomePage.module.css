@@ -291,3 +291,43 @@
   justify-content: center;
   gap: var(--space-3);
 }
+
+/* Hero accent word in the serif display face: one word, never body text. The size nudge keeps its
+   x-height level with the sans around it; letter-spacing is tightened the way the face is drawn. */
+.titleAccent {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 1.08em;
+  letter-spacing: -0.01em;
+}
+
+/* Grid rails: three hairlines at 25, 50 and 75 percent behind the hero and the Atlas band. They sit
+   under the constellation canvas and the figure, carry no content, and are invisible to tooling. */
+.hero::before,
+.atlas::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, var(--rail-color), var(--rail-color)),
+    linear-gradient(to right, var(--rail-color), var(--rail-color)),
+    linear-gradient(to right, var(--rail-color), var(--rail-color));
+  background-size: 1px 100%;
+  background-repeat: no-repeat;
+  background-position:
+    25% 0,
+    50% 0,
+    75% 0;
+}
+
+.atlas {
+  position: relative;
+}
+
+.atlas > :global(.container) {
+  position: relative;
+  z-index: 1;
+}

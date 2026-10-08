@@ -111,3 +111,64 @@
   outline: var(--focus-ring);
   outline-offset: 2px;
 }
+
+/* Glow: a one-pixel gradient border that starts in the stage hue and fades into the ordinary
+   border, plus a soft shadow of the same hue below the card. Both effects paint outside the text
+   area, so the card's contrast never changes; the lift on hover brightens the glow. */
+.card[data-variant='glow'] {
+  border-color: transparent;
+  background:
+    linear-gradient(var(--color-surface), var(--color-surface)) padding-box,
+    linear-gradient(145deg, var(--card-accent, var(--color-border)) 0%, var(--color-border) 55%, var(--color-border) 100%) border-box;
+  box-shadow:
+    var(--shadow-card),
+    0 10px 28px -16px color-mix(in srgb, var(--card-accent, var(--color-border)) 55%, transparent);
+}
+
+.card[data-variant='glow'][data-lift]:hover,
+.card[data-variant='glow'][data-lift]:focus-within {
+  border-color: transparent;
+  background:
+    linear-gradient(var(--color-surface), var(--color-surface)) padding-box,
+    linear-gradient(145deg, var(--card-accent, var(--color-border)) 0%, color-mix(in srgb, var(--card-accent, var(--color-border)) 40%, var(--color-border)) 100%) border-box;
+  box-shadow:
+    var(--shadow-card),
+    0 16px 36px -14px color-mix(in srgb, var(--card-accent, var(--color-border)) 70%, transparent);
+}
+
+/* Corner marks: two small squares in opposite corners, the site's shared signature with the
+   Self-Service hero. Decorative; they take the link colour when the card is hovered or focused. */
+.card[data-corners]::before,
+.card[data-corners]::after {
+  content: '';
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  background: var(--color-border);
+  pointer-events: none;
+  transition: background-color var(--transition-normal);
+}
+
+.card[data-corners]::before {
+  top: var(--space-3);
+  right: var(--space-3);
+}
+
+.card[data-corners]::after {
+  bottom: var(--space-3);
+  left: var(--space-3);
+}
+
+.card[data-corners][data-lift]:hover::before,
+.card[data-corners][data-lift]:hover::after,
+.card[data-corners][data-lift]:focus-within::before,
+.card[data-corners][data-lift]:focus-within::after {
+  background: var(--color-link);
+}
+
+@media (forced-colors: active) {
+  .card[data-variant='glow'] {
+    border-color: CanvasText;
+    background: Canvas;
+  }
+}

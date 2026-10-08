@@ -29,7 +29,7 @@ import styles from './ProjectSections.module.css';
 /** Hero figure: the canvas screenshot from the README. */
 export function SelfServiceHero() {
   return (
-    <div className={styles.heroFigure}>
+    <div className={styles.heroFigure} data-panel="plain">
       <DocImage src={canvasImg} alt={selfServiceFigures.canvas.alt} width={1600} height={1000} loading="eager" fetchPriority="high" />
     </div>
   );
@@ -58,6 +58,7 @@ export function SelfServiceSections() {
           width={1600}
           height={1000}
           caption="Template gallery screenshot from the README."
+          panel={false}
         />
       </Section>
 

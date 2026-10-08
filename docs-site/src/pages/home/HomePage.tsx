@@ -72,6 +72,7 @@ export function HomePage() {
 
       <PageHeader
         align="center"
+        className={styles.hero}
         title={
           <>
             AI Agent <span className={styles.titleAccent}>Factory</span>
@@ -129,7 +130,7 @@ export function HomePage() {
                 <Card
                   as="li"
                   key={project.id}
-                  variant="accent"
+                  variant="glow"
                   stage={project.stage}
                   interactive
                   reveal
@@ -187,7 +188,7 @@ export function HomePage() {
             {personas.map((persona) => {
               const Icon = PERSONA_ICONS[persona.icon];
               return (
-                <Card as="li" key={persona.role} interactive reveal className={styles.persona}>
+                <Card as="li" key={persona.role} interactive reveal corners className={styles.persona}>
                   <span className={styles.personaIcon} aria-hidden="true">
                     <Icon size={20} />
                   </span>

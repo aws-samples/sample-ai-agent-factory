@@ -74,6 +74,7 @@ export function PageHeader({
       data-page-header
       data-align={align}
       data-variant={variant}
+      data-stage={stage}
     >
       <div className={styles.backdrop}>{backdrop !== undefined ? backdrop : <HeaderGlow hue={glowHue} />}</div>
       <div className={`container ${innerClass}`}>

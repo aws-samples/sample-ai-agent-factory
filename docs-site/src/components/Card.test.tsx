@@ -35,3 +35,22 @@ describe('Card', () => {
     expect(screen.getByText('Note')).toHaveAttribute('data-tint', 'blue');
   });
 });
+
+describe('Card decorations', () => {
+  it('exposes the glow variant and corner marks as data attributes', () => {
+    render(
+      <Card variant="glow" stage="build" corners>
+        Tile
+      </Card>,
+    );
+    const card = screen.getByText('Tile');
+    expect(card).toHaveAttribute('data-variant', 'glow');
+    expect(card).toHaveAttribute('data-stage', 'build');
+    expect(card).toHaveAttribute('data-corners', '');
+  });
+
+  it('leaves corner marks off by default', () => {
+    render(<Card>Plain</Card>);
+    expect(screen.getByText('Plain')).not.toHaveAttribute('data-corners');
+  });
+});
