@@ -50,7 +50,7 @@ function HeroBackdrop() {
 
 /** Same wording as the atlas figure on the Architecture page; project names match the SVG labels. */
 const ATLAS_ALT =
-  'AI Agent Factory Atlas: four complementary projects for enterprise agentic AI on AWS. In the centre sits a hub labelled Agent Factory Capabilities: LLM Gateway, Tool Gateway, Identity and Registry, Policy and Observability. Around it, four stages in order. Learn: Workshop, hands-on platform patterns. Build: Visual Workflow Platform, drag-and-drop agent builder. Govern: MCP Governance Gateway, per-tool-call authorization. Scale: Enterprise Blueprint, multi-account reference blueprint. A legend distinguishes the sequential journey path, a skip-ahead path, and the shared-capability links from each project to the hub. A footer reads: Each project is self-contained. Start anywhere based on your role and goals.';
+  'Agentic AI Factory Atlas: four complementary projects for enterprise agentic AI on AWS. In the centre sits a hub labelled Agent Factory Capabilities: LLM Gateway, Tool Gateway, Identity and Registry, Policy and Observability. Around it, four stages in order. Learn: Workshop, hands-on platform patterns. Build: Visual Workflow Platform, drag-and-drop agent builder. Govern: MCP Governance Gateway, per-tool-call authorization. Scale: Enterprise Blueprint, multi-account reference blueprint. A legend distinguishes the sequential journey path, a skip-ahead path, and the shared-capability links from each project to the hub. A footer reads: Each project is self-contained. Start anywhere based on your role and goals.';
 
 /** Role icons for the persona cards (always rendered aria-hidden beside the role name). */
 const PERSONA_ICONS: Record<PersonaIcon, LucideIcon> = {
@@ -65,7 +65,7 @@ export function HomePage() {
   return (
     <div className={styles.page}>
       <PageMeta
-        title="AI Agent Factory: enterprise agentic AI samples on AWS"
+        title="Agentic AI Factory: enterprise agentic AI samples on AWS"
         description="Four complementary AWS samples for learning, building, governing and scaling agentic AI with Amazon Bedrock and Amazon Bedrock AgentCore, compared by stage, regions, deploy time and cost."
         titleIsFull
       />
@@ -75,7 +75,7 @@ export function HomePage() {
         className={styles.hero}
         title={
           <>
-            AI Agent <span className={styles.titleAccent}>Factory</span>
+            Agentic AI <span className={styles.titleAccent}>Factory</span>
           </>
         }
         lead="Enterprise samples for building, governing, and operating agentic AI on AWS with Amazon Bedrock and Amazon Bedrock AgentCore."

@@ -165,7 +165,7 @@ export function StartPage() {
     <>
       <PageMeta
         title="Getting started"
-        description="The first ten minutes with each of the four AI Agent Factory projects on Amazon Bedrock AgentCore: clone, first steps and expected time, copied from the READMEs, with links to the full quickstarts."
+        description="The first ten minutes with each of the four Agentic AI Factory projects on Amazon Bedrock AgentCore: clone, first steps and expected time, copied from the READMEs, with links to the full quickstarts."
       />
       <PageHeader
         eyebrow="Start"

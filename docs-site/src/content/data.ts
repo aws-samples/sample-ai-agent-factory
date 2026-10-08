@@ -1,5 +1,5 @@
 /**
- * Core typed content model for the AI Agent Factory docs site.
+ * Core typed content model for the Agentic AI Factory docs site.
  *
  * Pure data: no React, no imports from components or pages. Copy in this file
  * is kept at parity with the root README and each project's README. Numbers,

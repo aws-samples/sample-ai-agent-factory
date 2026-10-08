@@ -47,7 +47,7 @@ export function GlossaryPage() {
     <div className={styles.page}>
       <PageMeta
         title="Glossary"
-        description="Definitions of the terms used across the four AI Agent Factory projects, with the meaning each project gives a term where the meanings differ: MCP Gateway, Registry, LiteLLM, Cedar, PrivateLink, Fast Path, self-service and more."
+        description="Definitions of the terms used across the four Agentic AI Factory projects, with the meaning each project gives a term where the meanings differ: MCP Gateway, Registry, LiteLLM, Cedar, PrivateLink, Fast Path, self-service and more."
       />
       <PageHeader
         eyebrow="Concepts"
