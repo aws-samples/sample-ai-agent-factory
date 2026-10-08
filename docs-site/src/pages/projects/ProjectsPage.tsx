@@ -23,7 +23,7 @@ export function ProjectsPage() {
     <div className={styles.page}>
       <PageMeta
         title="Projects"
-        description="Directory of the four AI Agent Factory projects: Workshop, Self-Service, MCP Gateway and Blueprint, with validated regions, first-deploy time and cost for each."
+        description="Directory of the four Agentic AI Factory projects: Workshop, Self-Service, MCP Gateway and Blueprint, with validated regions, first-deploy time and cost for each."
       />
       <PageHeader
         eyebrow="Directory"

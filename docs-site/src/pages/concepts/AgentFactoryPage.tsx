@@ -30,7 +30,7 @@ const INDEPENDENCE_SOURCE: Source = {
 /** The one-line description under the root README's title. */
 const README_INTRO_SOURCE: Source = {
   file: ROOT_README,
-  heading: 'AI Agent Factory',
+  heading: 'Agentic AI Factory',
 };
 
 const BLUEPRINT_NAME = projects.find((project) => project.id === 'blueprint')?.name ?? 'Blueprint';
@@ -154,7 +154,7 @@ export function AgentFactoryPage() {
 
         <Section id="concept" title="The Agent Factory concept" flush>
           <p className={styles.prose}>
-            An <strong>AI Agent Factory</strong> is the people, patterns, and platform that let an organization turn
+            An <strong>Agentic AI Factory</strong> is the people, patterns, and platform that let an organization turn
             ideas into production agents reliably and at scale. The hard part is everything around the model:
             governed access, reusable tools, security and authorization, observability, and a repeatable way to ship
             agents to production.

@@ -51,7 +51,7 @@ export function SupportEnvelopePage() {
     <div className={styles.page}>
       <PageMeta
         title="Support envelope"
-        description="Validated regions, status and the known limitations each of the four AI Agent Factory projects documents, quoted from the project READMEs with source links."
+        description="Validated regions, status and the known limitations each of the four Agentic AI Factory projects documents, quoted from the project READMEs with source links."
       />
       <PageHeader
         eyebrow="Reference"

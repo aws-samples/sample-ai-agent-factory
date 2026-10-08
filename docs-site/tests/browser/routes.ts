@@ -14,7 +14,7 @@ export const BASE_PATH = '/sample-ai-agent-factory/';
 export const PREVIEW_PORT = Number(process.env.PREVIEW_PORT) || 4173;
 export const SITE_ORIGIN = `http://127.0.0.1:${PREVIEW_PORT}`;
 export const SITE_URL = `${SITE_ORIGIN}${BASE_PATH}`;
-export const SITE_NAME = 'AI Agent Factory';
+export const SITE_NAME = 'Agentic AI Factory';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const DIST_DIR = resolve(HERE, '..', '..', 'dist');

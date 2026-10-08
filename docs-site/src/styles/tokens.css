@@ -46,6 +46,14 @@
   --stage-govern-on-dark: #C4B5FD;
   --stage-scale-on-dark: #93C5FD;
 
+  /* Constellation (Home hero backdrop): neon takes on the four stage hues. Brighter and more
+     saturated than the on-dark text set because they are drawn on the canvas, never used as text;
+     COPY_DIM in the engine keeps whatever sits under the hero copy at a quarter of this. */
+  --constellation-learn: #FFB341;
+  --constellation-build: #3DF58F;
+  --constellation-govern: #C084FC;
+  --constellation-scale: #38D6FF;
+
   /* Stage tints: decorative borders and strokes (keep the original hues) */
   --stage-learn-tint: var(--color-amber);
   --stage-build-tint: var(--color-green);
