@@ -344,6 +344,12 @@ aws cloudformation describe-stacks --stack-name agentcore-workflow-dev \
 Substitute the region you deployed to. The stack, the user pool and the
 distribution all live in that one region.
 
+Every JWT-protected API route requires Cognito's
+`aws.cognito.signin.user.admin` authorization scope. Use the Cognito **access
+token** as the API bearer token; an ID token is rejected by API Gateway before
+Lambda. `GET /health` and the HMAC-authenticated webhook ingress are the only
+intentional exceptions.
+
 ### First sign-in — assign a persona
 
 `COGNITO_USERS` pre-creates Cognito **users** and puts each one in `g-users-default` + `t-user`: a standard user who can build, deploy and invoke their own agents and browse & clone the registry. The API enforces scopes by default (`RBAC_ENFORCE=true`), so a user in **no** group (for example one created in the Cognito console) gets `403` on every call until you assign one. Admin personas are always a manual grant:

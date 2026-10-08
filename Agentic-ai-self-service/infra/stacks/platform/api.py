@@ -91,6 +91,7 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
         integration=workflow_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     api.add_routes(
         path="/api/workflows/{proxy+}",
@@ -102,6 +103,7 @@ def build_api_gateway(
         ],
         integration=workflow_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
 
     # --- Flow routes ---
@@ -110,6 +112,7 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
         integration=workflow_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     api.add_routes(
         path="/api/flows/{proxy+}",
@@ -120,6 +123,7 @@ def build_api_gateway(
         ],
         integration=workflow_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
 
     # --- Deployment routes ---
@@ -128,18 +132,21 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     api.add_routes(
         path="/api/deploy/{proxy+}",
         methods=[apigwv2.HttpMethod.GET],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     api.add_routes(
         path="/api/deployments",
         methods=[apigwv2.HttpMethod.GET],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Read-only, sanitized deployment-target choices for users with agent:write.
     # Role ARNs and target registration stay admin-only on /api/admin/*.
@@ -148,18 +155,21 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.GET],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     api.add_routes(
         path="/api/test-runtime",
         methods=[apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     api.add_routes(
         path="/api/test-runtime-stream",
         methods=[apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Standalone MCP-server product explorer — routers/runtime_mcp.py mounts
     # POST /api/test-mcp-runtime/tools (discover) and POST /api/test-mcp-runtime/call
@@ -174,6 +184,7 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     api.add_routes(
         path="/api/runtime/{proxy+}",
@@ -182,6 +193,7 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.DELETE, apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Phase 1 Gap 1A — versions + slot management endpoints. Routed to
     # the deployment Lambda which mounts routers/versions.py. The proxy
@@ -199,6 +211,7 @@ def build_api_gateway(
         ],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Webhook trigger ingress authenticates the exact body with a per-trigger
     # HMAC, timestamp, and delivery id. It deliberately has no Cognito
@@ -213,30 +226,35 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     api.add_routes(
         path="/api/generate-tool/{jobId}",
         methods=[apigwv2.HttpMethod.GET],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     api.add_routes(
         path="/api/test-tool",
         methods=[apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     api.add_routes(
         path="/api/test-tool/{testId}",
         methods=[apigwv2.HttpMethod.GET],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     api.add_routes(
         path="/api/generate-cfn-template",
         methods=[apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Phase 3 Gap 3G — eject standalone Python project. Same deployment
     # Lambda + artifacts bucket grant as the CFN export; only a new route.
@@ -245,6 +263,7 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Phase 1 Gap 1E — NL agent (canvas) generator. Same Bedrock
     # InvokeModel grant as the existing tool generator (already on
@@ -254,6 +273,7 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Phase 2 Gap 2A — agent registry. POST publish + GET search on the
     # collection, plus GET/PUT/DELETE/clone on /{slug} via proxy.
@@ -262,6 +282,7 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     api.add_routes(
         path="/api/registry/{proxy+}",
@@ -273,6 +294,7 @@ def build_api_gateway(
         ],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Phase 2 Gap 2D — HITL approval queue. GET /api/hitl/pending +
     # POST /api/hitl/{request_id}/decision via the proxy.
@@ -281,12 +303,14 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     api.add_routes(
         path="/api/hitl/{proxy+}",
         methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Phase 3 Gap 3E — pre-built connector catalog (read-only). GET list +
     # GET /{id} detail on the deployment Lambda (mounts routers/connectors).
@@ -295,12 +319,14 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.GET],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     api.add_routes(
         path="/api/connectors/{proxy+}",
         methods=[apigwv2.HttpMethod.GET],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Verified external MCP-server catalog (read-only). GET list + GET /{id}
     # detail on the deployment Lambda (routers/mcp_servers.py). Browsable in
@@ -310,12 +336,14 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.GET],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     api.add_routes(
         path="/api/mcp-servers/{proxy+}",
         methods=[apigwv2.HttpMethod.GET],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Phase 1 (Loom-study 1.2/1.3) — identity inspection + OBO dry-run.
     # GET /token-info + POST /test-obo on the deployment Lambda (routers/identity).
@@ -324,6 +352,7 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Loom-study 1.6 — JIT IAM permission requests (create/list/approve/reject).
     api.add_routes(
@@ -331,6 +360,7 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Loom-study 5.1 — live model catalog.
     api.add_routes(
@@ -338,6 +368,7 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.GET],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Phase 3 Gap 3H — prompt management library. POST save + GET list on
     # the collection, plus GET/PUT/DELETE on /{prompt_name} via proxy.
@@ -347,6 +378,7 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     api.add_routes(
         path="/api/prompts/{proxy+}",
@@ -358,6 +390,7 @@ def build_api_gateway(
         ],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Phase 2 (Loom) governance tagging — routers/tags.py mounts
     # /api/settings/tags + /api/settings/tag-profiles on the deployment
@@ -371,6 +404,7 @@ def build_api_gateway(
         ],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Phase 4 (Loom) FinOps — routers/cost.py budgets_router mounts
     # /api/cost/budgets on the deployment Lambda.
@@ -383,6 +417,7 @@ def build_api_gateway(
         ],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Phase 5 (Loom) — admin audit dashboard (/api/admin/audit) + Phase 7
     # deployment-targets management (/api/admin/deploy-targets*, POST).
@@ -391,6 +426,7 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
         integration=deployment_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Phase 2 Gap 2E — workspace sharing. GET /api/workspaces routes to the
     # WORKFLOW Lambda (main.py mounts workspaces_router; it reads workflow
@@ -403,6 +439,7 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.GET],
         integration=workflow_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
 
     # --- Observability credential storage route ---
@@ -414,6 +451,7 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.POST],
         integration=workflow_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # --- Platform-defaults read route (UI uses this to show platform-managed
     # OTEL settings as read-only).
@@ -422,6 +460,7 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.GET],
         integration=workflow_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
     # Model-provider API keys are accepted once by the workflow control plane,
     # stored under a tenant-bound agentcore-provider/ source secret, and returned
@@ -431,6 +470,7 @@ def build_api_gateway(
         methods=[apigwv2.HttpMethod.POST],
         integration=workflow_integration,
         authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
     )
 
     # --- Health check route ---

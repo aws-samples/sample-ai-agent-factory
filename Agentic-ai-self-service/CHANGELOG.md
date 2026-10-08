@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — control-plane APIs reject Cognito ID tokens
+
+- Every JWT-protected API Gateway route now requires Cognito's
+  `aws.cognito.signin.user.admin` scope, which is present on workforce access
+  tokens and absent from ID tokens. ID tokens are rejected before Lambda rather
+  than being accepted from issuer/audience alone.
+- `GET /health` and HMAC-authenticated webhook ingress remain the only intentional
+  unauthenticated routes. Synthesized-template tests cover every route and include
+  removal, wrong-scope, and unauthenticated-route mutation twins.
+- A real `eu-west-1` CloudFront probe discovered the gap: the same standard-user
+  session received HTTP 200 with an access token and, incorrectly, with its ID
+  token. The workflow fixture was deleted after the probe; the corrected revision
+  requires a fresh live 200/401 twin before certification.
+
 ### Fixed — fresh deploy recognizes current AWS CLI missing-stack errors
 
 - The Cognito carry-forward guard now accepts both exact AWS CLI v2 `GetTemplate`
