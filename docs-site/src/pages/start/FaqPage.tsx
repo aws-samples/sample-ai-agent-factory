@@ -15,7 +15,7 @@ export function FaqPage() {
     <>
       <PageMeta
         title="Frequently asked questions"
-        description="Answers to common questions about the AI Agent Factory samples: publication, regions, costs, first sign-in, production readiness and the open GitHub issues, each with its repository source."
+        description="Answers to common questions about the Agentic AI Factory samples: publication, regions, costs, first sign-in, production readiness and the open GitHub issues, each with its repository source."
       />
       <PageHeader
         eyebrow="Start"

@@ -99,14 +99,14 @@ describe('route change behaviour', () => {
     const scrollTo = vi.mocked(window.scrollTo);
     scrollTo.mockClear();
     const { router } = await renderRoute('/');
-    expect(document.title).toBe('AI Agent Factory: enterprise agentic AI samples on AWS');
+    expect(document.title).toBe('Agentic AI Factory: enterprise agentic AI samples on AWS');
 
     const startLink = screen.getByRole('navigation', { name: /main navigation/i }).querySelector('a[href*="/start/"]');
     expect(startLink).not.toBeNull();
     fireEvent.click(startLink as HTMLAnchorElement);
 
     await waitFor(() => expect(router.state.location.pathname).toBe(PATHS.start));
-    await waitFor(() => expect(document.title).toBe('Getting started | AI Agent Factory'));
+    await waitFor(() => expect(document.title).toBe('Getting started | Agentic AI Factory'));
     await waitFor(() => expect(screen.getByRole('main')).toHaveFocus());
     expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 0 }));
     // Pages may carry their own status regions (CodeBlock copy feedback), so target the route announcer.

@@ -41,7 +41,7 @@ const BLUEPRINT_NAME = projects.find((project) => project.id === 'blueprint')?.n
 
 /** Mirrors the text labels inside the SVG, including its own project names. */
 const ATLAS_ALT =
-  'AI Agent Factory Atlas: four complementary projects for enterprise agentic AI on AWS. In the centre sits a hub labelled Agent Factory Capabilities: LLM Gateway, Tool Gateway, Identity and Registry, Policy and Observability. Around it, four stages in order. Learn: Workshop, hands-on platform patterns. Build: Visual Workflow Platform, drag-and-drop agent builder. Govern: MCP Governance Gateway, per-tool-call authorization. Scale: Enterprise Blueprint, multi-account reference blueprint. A legend distinguishes the sequential journey path, a skip-ahead path, and the shared-capability links from each project to the hub. A footer reads: Each project is self-contained. Start anywhere based on your role and goals.';
+  'Agentic AI Factory Atlas: four complementary projects for enterprise agentic AI on AWS. In the centre sits a hub labelled Agent Factory Capabilities: LLM Gateway, Tool Gateway, Identity and Registry, Policy and Observability. Around it, four stages in order. Learn: Workshop, hands-on platform patterns. Build: Visual Workflow Platform, drag-and-drop agent builder. Govern: MCP Governance Gateway, per-tool-call authorization. Scale: Enterprise Blueprint, multi-account reference blueprint. A legend distinguishes the sequential journey path, a skip-ahead path, and the shared-capability links from each project to the hub. A footer reads: Each project is self-contained. Start anywhere based on your role and goals.';
 
 const CONCEPT_ALT =
   'Enterprise Agent Factory operating model and governed flow: enterprise governance, people and ownership, an Agent Factory control plane, and repeatable isolated Workstream cells connected by software delivery, inference, tool, telemetry and governance flows.';
@@ -120,7 +120,7 @@ export function ArchitecturePage() {
     <div className={styles.page}>
       <PageMeta
         title="Architecture"
-        description="Architecture diagrams for the AI Agent Factory: the repository atlas, the Blueprint's operating-model and AWS service-level figures, the workshop landing zone and LLM Gateway, the Self-Service platform architecture, and the Blueprint concepts of planes, cells and governed flows."
+        description="Architecture diagrams for the Agentic AI Factory: the repository atlas, the Blueprint's operating-model and AWS service-level figures, the workshop landing zone and LLM Gateway, the Self-Service platform architecture, and the Blueprint concepts of planes, cells and governed flows."
       />
       <PageHeader
         eyebrow="Concepts"
