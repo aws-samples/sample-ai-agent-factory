@@ -97,7 +97,7 @@ function ComparisonTable() {
               </th>
               {columns.map(({ project, facts }) => (
                 <td key={project.id}>
-                  <FactValue fact={facts[key]} label={FACT_LABELS[key]} project={project.shortName} />
+                  <FactValue fact={facts[key]} label={FACT_LABELS[key]} project={project.shortName} noteMode="collapsed" />
                 </td>
               ))}
             </tr>

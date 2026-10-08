@@ -52,23 +52,32 @@ export function EvidenceSection({ projectId, children }: { projectId: ProjectId;
         <Sources sources={data.live.sources} />
       </Callout>
       {children}
-      {data.items.map((item) => (
-        <Card key={item.id} reveal className={styles.evidenceItem}>
-          <h3>{item.what}</h3>
-          {item.command && <CodeBlock code={item.command} language="bash" />}
-          <p className={styles.prose}>
-            <strong>What a pass proves:</strong> {item.proves}
-          </p>
-          {item.list && (
-            <ol className={styles.list}>
-              {item.list.map((entry) => (
-                <li key={entry}>{entry}</li>
-              ))}
-            </ol>
-          )}
-          <Sources sources={item.sources} />
-        </Card>
-      ))}
+      {/* The checks are long (a command and a proof each), so they sit behind one disclosure;
+          the intro and the live-AWS note above stay visible and say what is inside. */}
+      <details className={styles.evidenceDetails} data-evidence-details>
+        <summary className={styles.evidenceSummary}>
+          Show the {data.items.length} checks with their commands and what a pass proves
+        </summary>
+        <div className={styles.evidenceBody}>
+          {data.items.map((item) => (
+            <Card key={item.id} className={styles.evidenceItem}>
+              <h3>{item.what}</h3>
+              {item.command && <CodeBlock code={item.command} language="bash" />}
+              <p className={styles.prose}>
+                <strong>What a pass proves:</strong> {item.proves}
+              </p>
+              {item.list && (
+                <ol className={styles.list}>
+                  {item.list.map((entry) => (
+                    <li key={entry}>{entry}</li>
+                  ))}
+                </ol>
+              )}
+              <Sources sources={item.sources} />
+            </Card>
+          ))}
+        </div>
+      </details>
     </Section>
   );
 }

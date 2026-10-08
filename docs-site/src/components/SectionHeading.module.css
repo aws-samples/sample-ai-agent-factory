@@ -21,13 +21,40 @@
   margin-inline: auto;
 }
 
+/* Eyebrow: a short accent rule, then the label. The rule takes the stage colour inside a stage
+   context (`--stage-color` from Card, StageJourney or a page header) and the accent otherwise. */
 .eyebrow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   margin-bottom: var(--space-2);
   font-size: var(--text-xs);
   font-weight: 700;
-  letter-spacing: var(--label-tracking);
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--color-text-secondary);
+}
+
+.eyebrow::before {
+  content: '';
+  flex-shrink: 0;
+  width: 1.25rem;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--stage-color, var(--color-link));
+}
+
+.heading[data-align='center'] .eyebrow {
+  justify-content: center;
+}
+
+.heading[data-align='center'] .eyebrow::after {
+  content: '';
+  flex-shrink: 0;
+  width: 1.25rem;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--stage-color, var(--color-link));
 }
 
 .title {

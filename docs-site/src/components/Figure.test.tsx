@@ -105,3 +105,13 @@ describe('Figure lightbox', () => {
     expect(opener).toHaveFocus();
   });
 });
+
+describe('Figure panel', () => {
+  it('frames the image on a light panel by default and drops the frame for dark screenshots', () => {
+    const { unmount } = render(<Figure src="/diagram.png" alt="A diagram" caption="Figure" />);
+    expect(document.querySelector('figure')).toHaveAttribute('data-panel', 'light');
+    unmount();
+    render(<Figure src="/shot.png" alt="A dark screenshot" caption="Figure" panel={false} />);
+    expect(document.querySelector('figure')).toHaveAttribute('data-panel', 'plain');
+  });
+});
