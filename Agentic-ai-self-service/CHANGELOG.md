@@ -20,6 +20,14 @@ All notable changes to this project are documented here. The format follows
   controls that can only return 404. The real integration matrix creates
   deterministic staging sessions, waits for their AgentCore logs, runs and attests
   Batch Evaluation, promotes the exact version, and only then provisions triggers.
+- The same live run then proved production invocation admission fails closed with
+  exact HTTP 429 when no applicable monthly budget exists. The matrix now creates
+  one bounded agent-scoped budget through the product API. Its synthetic
+  `g-users-default` identity also receives the orthogonal `g-admins-cost` group
+  for the run because agent budgets are writer-owner-bound; that group grants no
+  trigger scope and cannot mask trigger RBAC. Cleanup is registered before the
+  write and deletion is absence-checked in `finally`, including failed promotion
+  paths.
 
 ### Fixed — runtime teardown can verify Guardrail ownership
 

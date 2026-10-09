@@ -681,6 +681,66 @@ def _delete_trigger_and_verify(
         _wait_for_secret_inactive(secrets_client, secret_ref)
 
 
+def _create_integration_budget(
+    api_session: requests.Session,
+    runtime_name: str,
+) -> str:
+    """Create bounded authorization capacity for this one synthetic runtime."""
+
+    response = api_session.post(
+        f"{_base_url(api_session)}/api/cost/budgets",
+        json={
+            "scope": "agent",
+            "key": runtime_name,
+            "limit_usd": 100.0,
+            "warn_pct": 100,
+        },
+        timeout=60,
+    )
+    assert response.status_code == 200, (
+        f"Creating temporary trigger budget returned {response.status_code}: {response.text}"
+    )
+    body = response.json()
+    assert body.get("scope") == "agent"
+    assert body.get("key") == runtime_name
+    assert float(body.get("limit_usd") or 0) == 100.0
+    return runtime_name
+
+
+def _delete_integration_budget(
+    api_session: requests.Session,
+    budget_key: str,
+) -> None:
+    """Delete the matrix's runtime-specific budget definition idempotently."""
+
+    response = api_session.delete(
+        f"{_base_url(api_session)}/api/cost/budgets/agent/{budget_key}",
+        timeout=60,
+    )
+    assert response.status_code == 200, (
+        f"Deleting temporary trigger budget returned {response.status_code}: {response.text}"
+    )
+    assert response.json().get("deleted") == {
+        "scope": "agent",
+        "key": budget_key,
+    }
+
+    listed = api_session.get(
+        f"{_base_url(api_session)}/api/cost/budgets",
+        timeout=60,
+    )
+    assert listed.status_code == 200, (
+        f"Listing budgets after temporary-budget deletion returned {listed.status_code}: {listed.text}"
+    )
+    listed_body = listed.json()
+    assert isinstance(listed_body, list), f"Budget inventory returned a non-list body: {listed_body!r}"
+    assert not any(
+        item.get("scope") == "agent" and item.get("key") == budget_key
+        for item in listed_body
+        if isinstance(item, dict)
+    ), f"Temporary trigger budget agent/{budget_key} is still visible after deletion"
+
+
 def _integration_timeout(name: str, default: int) -> int:
     raw = os.environ.get(name, str(default))
     try:
@@ -886,6 +946,7 @@ def test_all_four_trigger_sources_invoke_and_cleanup(
     s3_client, bucket_name, object_prefix = _create_source_bucket(aws_region)
 
     active_triggers: list[CreatedTrigger] = []
+    budget_key: str | None = None
     primary_error: BaseException | None = None
     try:
         record, runtime_name, status = _start_http_runtime(
@@ -894,6 +955,8 @@ def test_all_four_trigger_sources_invoke_and_cleanup(
             wait_for_deployment,
         )
         runtime_arn = status["runtime_arn"]
+        budget_key = runtime_name
+        _create_integration_budget(api_session, budget_key)
         _promote_staging_version_for_triggers(
             api_session,
             logs_client,
@@ -1070,6 +1133,12 @@ def test_all_four_trigger_sources_invoke_and_cleanup(
             _remove_source_bucket(s3_client, bucket_name)
         except Exception as exc:  # noqa: BLE001 - teardown is production evidence
             cleanup_errors.append(f"S3/{bucket_name}: {type(exc).__name__}: {exc}")
+        if budget_key is not None:
+            try:
+                _delete_integration_budget(api_session, budget_key)
+                budget_key = None
+            except Exception as exc:  # noqa: BLE001 - teardown is production evidence
+                cleanup_errors.append(f"budget/agent/{budget_key}: {type(exc).__name__}: {exc}")
 
         if cleanup_errors:
             detail = "Trigger integration cleanup was not proven:\n  - " + ("\n  - ".join(cleanup_errors))

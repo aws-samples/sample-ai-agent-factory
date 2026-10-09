@@ -167,6 +167,25 @@ def test_no_matching_budget_requires_no_reservation(store: BudgetStore):
         )
 
 
+def test_foreign_owned_agent_budget_cannot_authorize_required_invocation(store: BudgetStore):
+    store.put_owned(
+        Budget(org_id=ORG, scope="agent", key="bot", limit_usd=100),
+        caller_sub="finops-user",
+    )
+
+    with pytest.raises(BudgetExceeded, match="requires at least one"):
+        store.reserve_invocation(
+            ORG,
+            owner_sub="alice",
+            runtime_name="bot",
+            amount_usd=1,
+            now_epoch=1_783_000_000,
+            required=True,
+        )
+
+    assert store.counter_snapshot(ORG, "agent", "bot", "2026-07") == {}
+
+
 def test_reservation_applies_atomically_to_owner_agent_and_tag_budgets(store: BudgetStore):
     _owned_budget(store, "owner", "alice", 10)
     _owned_budget(store, "agent", "bot", 5)

@@ -80,8 +80,14 @@ Integration tests perform real AWS API calls with zero mocking. They require:
 - Valid AWS credentials with permissions for API Gateway, Lambda, Step Functions, DynamoDB, AgentCore, IAM, Cognito
 - A deployed stack (run `./scripts/deploy.sh` first)
 - Environment variables: `API_GATEWAY_URL`, `AWS_REGION`, and a real Cognito
-  access token with `agent:read`, `agent:write`, `invoke`, `trigger:read`, and
-  `trigger:write` scopes
+  access token with `agent:read`, `agent:write`, `invoke`, `trigger:read`,
+  `trigger:write`, `cost:read`, and `cost:write` scopes. For the trigger-delivery
+  matrix, issue this token to one synthetic user in `g-users-default`, `t-user`,
+  and `g-admins-cost`. Agent budgets are bound to their writer's `owner_sub`, so
+  a separate FinOps identity would not authorize this user's invocation.
+  `g-admins-cost` grants no trigger capability, so trigger authorization still
+  comes only from `g-users-default`. The matrix registers cleanup before creating
+  its unique agent-scoped budget and verifies deletion in `finally`.
 - The trigger-delivery matrix also requires direct test-runner permission to
   read the platform triggers table, publish a custom EventBridge event, inspect
   EventBridge rules and webhook secrets, read the generated Runtime CloudWatch
@@ -98,7 +104,7 @@ cd backend
 # Set required environment variables
 export API_GATEWAY_URL="https://XXXXXXXXXX.execute-api.us-east-1.amazonaws.com"
 export AWS_REGION="us-east-1"
-export API_BEARER_TOKEN="<Cognito access token>"
+export API_BEARER_TOKEN="<Cognito access token for g-users-default + t-user + g-admins-cost>"
 export INTEGRATION_TRIGGERS_TABLE_NAME="<project>-<environment>-triggers"
 # Optional: raise the default 12-minute per-delivery wait for a slow account.
 export INTEGRATION_TRIGGER_TIMEOUT_SECONDS="900"

@@ -771,6 +771,10 @@ def test_live_trigger_matrix_uses_real_sources_and_a_durable_completion_oracle()
     assert "EventBridge rule" in source
     assert "Webhook secret" in source
     assert "delete_status" in source
+    assert "budget_key = runtime_name" in source
+    assert "_create_integration_budget(api_session, budget_key)" in source
+    assert "_delete_integration_budget(api_session, budget_key)" in source
+    assert "Temporary trigger budget" in source
     assert "unittest.mock" not in source
     assert "monkeypatch" not in source
 
@@ -1034,6 +1038,8 @@ def test_trigger_matrix_operator_contract_is_documented() -> None:
     assert "test_trigger_delivery_matrix.py" in development
     assert "`trigger:read`" in development
     assert "`trigger:write`" in development
+    assert "`g-admins-cost`" in development
+    assert "writer's `owner_sub`" in development
     assert "completed DynamoDB delivery row" in development
     assert "signed webhook" in development
 

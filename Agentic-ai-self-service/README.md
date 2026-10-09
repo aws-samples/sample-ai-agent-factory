@@ -283,7 +283,12 @@ version and never target staging implicitly. The Triggers panel checks the slot
 first: a staging-only deployment is directed to the Versions tab to run the
 required evaluation and promotion, rather than exposing controls that cannot be
 used yet. Trigger delivery remains owner-scoped and version-pinned after later
-promotions.
+promotions. The real delivery matrix gives its synthetic `g-users-default`
+identity the orthogonal `g-admins-cost` group only for the run: agent budgets are
+bound to the writer's `owner_sub`, while the cost group grants no trigger scope
+and therefore cannot mask trigger RBAC. The matrix creates one unique agent-scoped
+invocation budget before staging evaluation, then deletes and absence-checks it
+in `finally`, so no reusable budget definition is left behind.
 
 ## Atomic invocation authorization
 
