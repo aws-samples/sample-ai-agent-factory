@@ -15,9 +15,43 @@ import sys
 sys.path.insert(0, "src")
 
 from app.services.guardrail_builders import (  # noqa: E402
+    BEDROCK_PII_TYPES,
     build_contextual_grounding_config,
     build_regex_filters,
+    normalize_pii_type,
 )
+
+# ---------------------------------------------------------------------------
+# Bedrock PII entity contract
+# ---------------------------------------------------------------------------
+
+
+def test_supported_pii_types_match_pinned_botocore_create_guardrail_model():
+    from botocore.session import Session
+
+    model = Session().get_service_model("bedrock").operation_model("CreateGuardrail")
+    pii_type = (
+        model.input_shape.members["sensitiveInformationPolicyConfig"]
+        .members["piiEntitiesConfig"]
+        .member.members["type"]
+    )
+    assert BEDROCK_PII_TYPES == frozenset(pii_type.enum)
+    assert "SSN" not in BEDROCK_PII_TYPES
+    assert "US_SOCIAL_SECURITY_NUMBER" in BEDROCK_PII_TYPES
+
+
+def test_legacy_ssn_alias_normalizes_to_service_enum():
+    assert normalize_pii_type("ssn") == "US_SOCIAL_SECURITY_NUMBER"
+    assert normalize_pii_type(" US_SOCIAL_SECURITY_NUMBER ") == "US_SOCIAL_SECURITY_NUMBER"
+
+
+def test_mutation_removing_ssn_alias_is_caught(monkeypatch):
+    from app.services import guardrail_builders
+
+    monkeypatch.setattr(guardrail_builders, "_PII_TYPE_ALIASES", {})
+    mutated = guardrail_builders.normalize_pii_type("SSN")
+    assert mutated not in BEDROCK_PII_TYPES
+
 
 # ---------------------------------------------------------------------------
 # build_contextual_grounding_config

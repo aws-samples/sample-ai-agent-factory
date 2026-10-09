@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from app.services.guardrail_builders import BEDROCK_PII_TYPES
 from app.services.production_safety import (
     PRODUCTION_GUARDRAIL_PROFILE,
     PRODUCTION_POLICY_PROFILE,
@@ -51,6 +52,8 @@ def test_production_injects_complete_managed_baseline(monkeypatch):
         "prompt_attack": "HIGH",
     }
     pii = {item["type"]: item["action"] for item in result["piiFilters"]}
+    assert set(pii) <= BEDROCK_PII_TYPES
+    assert "SSN" not in pii
     assert pii["AWS_ACCESS_KEY"] == "ANONYMIZE"
     assert pii["AWS_SECRET_KEY"] == "ANONYMIZE"  # pragma: allowlist secret
     assert pii["PASSWORD"] == "ANONYMIZE"  # pragma: allowlist secret
@@ -67,6 +70,7 @@ def test_production_caller_cannot_weaken_baseline(monkeypatch):
             "piiFilters": [
                 {"type": "PASSWORD", "action": "ANONYMIZE"},
                 {"type": "EMAIL", "action": "BLOCK"},
+                {"type": "SSN", "action": "BLOCK"},
             ],
             "deniedTopics": [{"name": "custom", "definition": "custom topic"}],
         }
@@ -79,7 +83,25 @@ def test_production_caller_cannot_weaken_baseline(monkeypatch):
     pii = {item["type"]: item["action"] for item in result["piiFilters"]}
     assert pii["PASSWORD"] == "ANONYMIZE"  # pragma: allowlist secret
     assert pii["EMAIL"] == "BLOCK"
+    assert pii["US_SOCIAL_SECURITY_NUMBER"] == "BLOCK"
+    assert "SSN" not in pii
     assert result["deniedTopics"] == [{"name": "custom", "definition": "custom topic"}]
+
+
+def test_mutation_reintroducing_legacy_ssn_fails_service_enum_oracle(monkeypatch):
+    from app.services import production_safety
+
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    monkeypatch.setattr(
+        production_safety,
+        "normalize_pii_type",
+        lambda value: str(value or "").strip().upper(),
+    )
+    mutated = production_safety.enforce_production_guardrail_baseline(
+        {"piiFilters": [{"type": "SSN", "action": "BLOCK"}]}
+    )
+    invalid = [item["type"] for item in mutated["piiFilters"] if item["type"] not in BEDROCK_PII_TYPES]
+    assert invalid == ["SSN"]
 
 
 def test_production_rejects_unattested_existing_guardrail(monkeypatch):

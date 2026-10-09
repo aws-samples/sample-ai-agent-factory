@@ -7,6 +7,8 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
+from app.services.guardrail_builders import normalize_pii_type
+
 DEV_ENVIRONMENTS = frozenset({"dev", "development", "test", "sandbox", "preview", "local"})
 PRODUCTION_GUARDRAIL_PROFILE = "production-v1"
 PRODUCTION_POLICY_PROFILE = "production-v1"
@@ -26,7 +28,6 @@ _BASELINE_PII_ACTIONS = {
     "EMAIL": "ANONYMIZE",
     "PASSWORD": "ANONYMIZE",  # pragma: allowlist secret
     "PHONE": "ANONYMIZE",
-    "SSN": "ANONYMIZE",
     "US_BANK_ACCOUNT_NUMBER": "ANONYMIZE",
     "US_SOCIAL_SECURITY_NUMBER": "ANONYMIZE",
 }
@@ -72,11 +73,11 @@ def _pii_filters(config: Mapping[str, Any]) -> list[dict[str, str]]:
     if not isinstance(supplied, list):
         raise ProductionSafetyConfigurationError("Production Guardrail piiFilters must be an array")
 
-    merged: dict[str, str] = dict(_BASELINE_PII_ACTIONS)
+    merged = {normalize_pii_type(pii_type): action for pii_type, action in _BASELINE_PII_ACTIONS.items()}
     for item in supplied:
         if not isinstance(item, Mapping):
             raise ProductionSafetyConfigurationError("Every production Guardrail PII filter must be an object")
-        pii_type = str(item.get("type") or "").strip().upper()
+        pii_type = normalize_pii_type(item.get("type"))
         action = str(item.get("action") or "ANONYMIZE").strip().upper()
         if not pii_type:
             raise ProductionSafetyConfigurationError("Every production Guardrail PII filter requires a type")

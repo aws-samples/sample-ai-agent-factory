@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — Guardrail PII filters use service-model enum values
+
+- The production baseline no longer sends legacy `SSN` to Bedrock. A real
+  `eu-west-1` deployment reached `CreateGuardrail` and returned
+  `ValidationException` because the service accepts
+  `US_SOCIAL_SECURITY_NUMBER`, not the shorthand alias.
+- Legacy caller input remains compatible: `SSN` is canonicalized before the
+  request, alias/canonical duplicates collapse to one entry, and `BLOCK` wins
+  over `ANONYMIZE`. Tests compare the complete supported set to the pinned
+  botocore `CreateGuardrail` model and include an alias-removal mutation.
+
 ### Fixed — Guardrail creation can apply governed ownership tags
 
 - `StepGuardrailsRole` now grants the separately authorized

@@ -157,8 +157,12 @@ in-account `StepGuardrailsRole` and the documented cross-account deployment role
 include a separate, request-tag-conditioned `bedrock:TagResource` grant on
 `guardrail/*`; granting `CreateGuardrail` alone is insufficient when `tags` are
 present. Missing Guardrail configuration is injected automatically;
-caller-supplied content filters are raised to `HIGH`, credential/common-PII filters are retained at
-`ANONYMIZE` or stronger, and custom denied topics/word/regex filters remain.
+caller-supplied content filters are raised to `HIGH`, and credential/common-PII
+filters are retained at `ANONYMIZE` or stronger. The compatibility input `SSN`
+is canonicalized to Bedrock's `US_SOCIAL_SECURITY_NUMBER`, alias/canonical
+entries are deduplicated with `BLOCK` winning, and every emitted PII type is
+checked against the pinned botocore `CreateGuardrail` enum. Custom denied
+topics and word/regex filters remain.
 Production rejects `existing` mode because READY status alone cannot attest that
 an externally mutable Guardrail still meets this baseline. Guardrail trace is
 disabled in generated Strands models because trace output can retain original
