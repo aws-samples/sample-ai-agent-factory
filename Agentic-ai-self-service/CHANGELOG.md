@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — failed CDK updates cannot report deployment success
+
+- `cdk_deploy_pinned` now captures and returns the exact nonzero CDK status before
+  logging success. A real rollback exposed Bash's conditional-function behavior:
+  invoking the helper from `if ...` disables inherited `errexit`, so the old helper
+  continued after CDK failed and returned the later logging command's zero status.
+- The executable safety-gate harness now invokes the real function chain from a
+  shell conditional and forces `cdk deploy` to exit 73. The test requires that
+  exact status to reach the caller and prevents frontend publication after a
+  failed or rolled-back stack update.
+
 ### Fixed — Guardrail PII filters use service-model enum values
 
 - The production baseline no longer sends legacy `SSN` to Bedrock. A real

@@ -1097,15 +1097,22 @@ cdk_diff_pinned() {
 cdk_deploy_pinned() {
   local gate_asm="${PROJECT_ROOT}/infra/cdk.out.preflight"
   local gate_log_dir="${PROJECT_ROOT}/.cdk-gate"
+  local deploy_rc
   cd "${PROJECT_ROOT}/infra"
   verify_pinned_assembly pre-deploy
   log_info "CDK safety gate 3/3: deploying the reviewed assembly (no re-synth)..."
-  "${CDK_BIN}" deploy "${STACK_NAME}" \
+  if "${CDK_BIN}" deploy "${STACK_NAME}" \
     --app "${gate_asm}" \
     --exclusively \
-    --require-approval never
-  cd "${PROJECT_ROOT}"
-  log_success "CDK stack deployed."
+    --require-approval never; then
+    cd "${PROJECT_ROOT}"
+    log_success "CDK stack deployed."
+  else
+    deploy_rc=$?
+    cd "${PROJECT_ROOT}"
+    log_error "CDK deployment failed with exit ${deploy_rc}; the stack did not reach the requested state."
+    return "${deploy_rc}"
+  fi
 }
 
 run_cdk_deploy() {
