@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — frozen promotion evidence survives DynamoDB persistence
+
+- Agent-version reads now restore integral DynamoDB numbers as Python `int` and
+  fractional numbers as `float`. The previous reader converted every `Decimal`
+  to `float`, silently changing canonical policy JSON (`5` to `5.0`) and making
+  an otherwise unchanged frozen policy fail its SHA-256 digest at Batch
+  Evaluation start with exact HTTP 409.
+- The same contract protects persisted evidence counts and expiry timestamps.
+  A real Moto DynamoDB write/read validates both policy and evidence digests,
+  checks their integer fields retain exact types, and an all-floats mutation
+  proves the old behavior fails closed.
+
 ### Fixed — standard users can manage owned runtime triggers
 
 - `g-users-default` now includes `trigger:read` and `trigger:write`, matching the

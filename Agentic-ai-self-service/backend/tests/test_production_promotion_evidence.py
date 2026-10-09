@@ -43,6 +43,20 @@ def _policy(monkeypatch) -> dict:
     return load_promotion_policy()
 
 
+def _integer_numbers_to_floats(value):
+    """Model the old DynamoDB reader that converted every number to float."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return float(value)
+    if isinstance(value, dict):
+        return {key: _integer_numbers_to_floats(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_integer_numbers_to_floats(item) for item in value]
+    return value
+
+
 def _scenarios(count: int = 5) -> list[dict]:
     return [
         {
@@ -119,6 +133,26 @@ def test_default_policy_is_digest_bound_and_requires_five_scenarios(monkeypatch)
         "Builtin.Helpfulness",
     }
     assert validate_frozen_promotion_policy(policy) == policy
+
+
+def test_all_floats_deserialization_mutation_breaks_policy_and_evidence_digests(monkeypatch):
+    policy = _policy(monkeypatch)
+    mutated_policy = _integer_numbers_to_floats(policy)
+    with pytest.raises(PromotionEvidenceError, match="policy is invalid"):
+        validate_frozen_promotion_policy(mutated_policy)
+
+    evidence = _evidence(policy)
+    mutated_evidence = _integer_numbers_to_floats(evidence)
+    with pytest.raises(PromotionEvidenceError, match="digest is invalid"):
+        require_promotion_evidence(
+            mutated_evidence,
+            runtime_name=RUNTIME_NAME,
+            version_id=VERSION_ID,
+            deployment_id=DEPLOYMENT_ID,
+            runtime_id=RUNTIME_ID,
+            policy=policy,
+            now_epoch=int(NOW.timestamp()),
+        )
 
 
 def test_invalid_operator_policy_fails_closed(monkeypatch):
@@ -293,6 +327,20 @@ def test_evidence_write_is_identity_fenced_immutable_and_idempotent(monkeypatch)
             )
         )
 
+        persisted = store.get(RUNTIME_NAME, VERSION_ID, consistent=True)
+        assert persisted is not None
+        assert persisted.promotion_policy is not None
+        for key in (
+            "schema_version",
+            "minimum_sessions",
+            "maximum_failed_sessions",
+            "maximum_ignored_sessions",
+            "maximum_evaluator_failures",
+            "max_evidence_age_seconds",
+        ):
+            assert type(persisted.promotion_policy[key]) is int
+        assert validate_frozen_promotion_policy(persisted.promotion_policy) == policy
+
         recorded = store.record_promotion_evidence(
             RUNTIME_NAME,
             VERSION_ID,
@@ -313,6 +361,25 @@ def test_evidence_write_is_identity_fenced_immutable_and_idempotent(monkeypatch)
                 expected_runtime_arn=RUNTIME_ARN,
                 evidence=evidence,
             ).promotion_evidence
+            == evidence
+        )
+
+        persisted_evidence = store.get(RUNTIME_NAME, VERSION_ID, consistent=True)
+        assert persisted_evidence is not None
+        assert persisted_evidence.promotion_policy is not None
+        assert persisted_evidence.promotion_evidence is not None
+        assert type(persisted_evidence.promotion_evidence["expires_at_epoch"]) is int
+        assert type(persisted_evidence.promotion_evidence["session_summary"]["total"]) is int
+        assert (
+            require_promotion_evidence(
+                persisted_evidence.promotion_evidence,
+                runtime_name=RUNTIME_NAME,
+                version_id=VERSION_ID,
+                deployment_id=DEPLOYMENT_ID,
+                runtime_id=RUNTIME_ID,
+                policy=persisted_evidence.promotion_policy,
+                now_epoch=int(NOW.timestamp()),
+            )
             == evidence
         )
 

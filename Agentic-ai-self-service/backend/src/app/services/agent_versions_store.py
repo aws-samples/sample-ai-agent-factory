@@ -181,7 +181,7 @@ def short_version_suffix(version_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Decimal/float helpers shared with deployment_state_store
+# Decimal/Python-number helpers shared with deployment_state_store
 # ---------------------------------------------------------------------------
 
 
@@ -197,13 +197,22 @@ def _floats_to_decimals(obj):
     return obj
 
 
-def _decimals_to_floats(obj):
+def _decimals_to_numbers(obj):
+    """Restore the Python number type encoded by DynamoDB's decimal exponent.
+
+    Boto3 deserializes every DynamoDB ``N`` as ``Decimal``. Integer inputs are
+    encoded without a fractional exponent (``5``), while floats produced by
+    ``_floats_to_decimals`` retain one (``5.0``). Converting both to float changes
+    canonical JSON from ``5`` to ``5.0`` and invalidates persisted policy/evidence
+    digests, even though Python equality hides the type drift.
+    """
+
     if isinstance(obj, Decimal):
-        return float(obj)
+        return int(obj) if obj.as_tuple().exponent >= 0 else float(obj)
     if isinstance(obj, dict):
-        return {k: _decimals_to_floats(v) for k, v in obj.items()}
+        return {k: _decimals_to_numbers(v) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_decimals_to_floats(v) for v in obj]
+        return [_decimals_to_numbers(v) for v in obj]
     return obj
 
 
@@ -271,7 +280,7 @@ class AgentVersion:
 
     @classmethod
     def from_item(cls, item: dict) -> AgentVersion:
-        item = _decimals_to_floats(dict(item))
+        item = _decimals_to_numbers(dict(item))
         return cls(
             runtime_name=item["runtime_name"],
             version_id=item["version_id"],

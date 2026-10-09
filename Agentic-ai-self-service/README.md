@@ -217,6 +217,12 @@ Promote a production-gated version from the **Versions** panel:
 5. Promote. The version row's evidence digest, policy digest, and expiry are
    condition-checked in the same DynamoDB transaction that moves the production pointer.
 
+Frozen policy and evidence documents preserve canonical numeric types across
+DynamoDB: integral counts, limits, schema versions, and epochs return as integers,
+while evaluator thresholds remain floating point. This distinction is part of the
+digest contract (`5` and `5.0` are different canonical JSON); promotion fails
+closed if persistence changes either representation.
+
 The default policy requires five completed sessions, zero failed/ignored
 sessions, zero evaluator failures, and scores of at least `0.70` from
 `Builtin.GoalSuccessRate`, `Builtin.Correctness`, and `Builtin.Helpfulness`.
