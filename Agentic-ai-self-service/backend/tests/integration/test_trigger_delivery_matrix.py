@@ -681,6 +681,191 @@ def _delete_trigger_and_verify(
         _wait_for_secret_inactive(secrets_client, secret_ref)
 
 
+def _integration_timeout(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError:
+        pytest.fail(f"{name} must be an integer", pytrace=False)
+    if value < 60:
+        pytest.fail(f"{name} must be at least 60 seconds", pytrace=False)
+    return value
+
+
+def _release_scenarios(
+    api_session: requests.Session,
+    *,
+    runtime_name: str,
+    version_id: str,
+    count: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Create deterministic real staging sessions for production evaluation."""
+
+    scenarios: list[dict[str, Any]] = []
+    session_ids: list[str] = []
+    token = uuid.uuid4().hex[:12]
+    for index in range(count):
+        session_id = f"trigger-eval-{uuid.uuid4()}"
+        marker = f"TRIGGER-RELEASE-{token}-{index + 1}"
+        prompt = f"Reply with exactly {marker} and nothing else."
+        response = api_session.post(
+            f"{_base_url(api_session)}/api/runtimes/{runtime_name}/slots/staging/invoke",
+            json={"input": prompt, "sessionId": session_id},
+            timeout=180,
+        )
+        assert response.status_code == 200, (
+            f"Staging evaluation session {index + 1} returned {response.status_code}: {response.text}"
+        )
+        body = response.json()
+        assert body.get("success") is True, body
+        assert body.get("slot") == "staging"
+        assert body.get("versionId") == version_id
+        assert body.get("sessionId") == session_id
+        assert str(body.get("response") or "").strip() == marker
+        session_ids.append(session_id)
+        scenarios.append(
+            {
+                "sessionId": session_id,
+                "testScenarioId": f"trigger-release-{token}-{index + 1}",
+                "assertions": [f"The response is exactly {marker} and uses no tools."],
+                "expectedToolNames": [],
+                "turns": [{"prompt": prompt, "expectedResponse": marker}],
+            }
+        )
+    return scenarios, session_ids
+
+
+def _wait_for_evaluation_sessions(
+    logs_client: Any,
+    *,
+    runtime_id: str,
+    session_ids: list[str],
+) -> None:
+    """Wait until every exact staging session is queryable by AgentCore evaluation."""
+
+    log_group = f"/aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT"
+    pending = set(session_ids)
+    deadline = time.monotonic() + _integration_timeout(
+        "INTEGRATION_EVALUATION_LOG_TIMEOUT_SECONDS",
+        10 * 60,
+    )
+    while pending and time.monotonic() < deadline:
+        for session_id in list(pending):
+            try:
+                events = logs_client.filter_log_events(
+                    logGroupName=log_group,
+                    filterPattern=f'"{session_id}"',
+                    limit=1,
+                ).get("events", [])
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+                    continue
+                raise
+            if events:
+                pending.remove(session_id)
+        if pending:
+            time.sleep(POLL_INTERVAL_SECONDS)
+    assert not pending, f"Staging sessions did not reach {log_group}: {sorted(pending)}"
+
+
+def _promote_staging_version_for_triggers(
+    api_session: requests.Session,
+    logs_client: Any,
+    *,
+    runtime_name: str,
+    status: dict[str, Any],
+) -> None:
+    """Make the exact succeeded version production-ready through the real gate."""
+
+    version_id = status.get("version_id")
+    runtime_id = status.get("runtime_id")
+    assert isinstance(version_id, str) and version_id
+    assert isinstance(runtime_id, str) and runtime_id
+
+    slots_response = api_session.get(
+        f"{_base_url(api_session)}/api/runtimes/{runtime_name}/slots",
+        timeout=60,
+    )
+    slots_response.raise_for_status()
+    slots = slots_response.json()
+    if slots.get("production_version_id") == version_id:
+        return
+    assert slots.get("staging_version_id") == version_id, slots
+
+    evidence_response = api_session.get(
+        f"{_base_url(api_session)}/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evidence",
+        timeout=60,
+    )
+    evidence_response.raise_for_status()
+    evidence = evidence_response.json()
+    if evidence.get("production_gate_required"):
+        policy = evidence.get("promotion_policy") or {}
+        minimum_sessions = int(policy.get("minimum_sessions") or 0)
+        assert minimum_sessions >= 1, policy
+        scenarios, session_ids = _release_scenarios(
+            api_session,
+            runtime_name=runtime_name,
+            version_id=version_id,
+            count=minimum_sessions,
+        )
+        _wait_for_evaluation_sessions(
+            logs_client,
+            runtime_id=runtime_id,
+            session_ids=session_ids,
+        )
+        start = api_session.post(
+            f"{_base_url(api_session)}/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/start",
+            json={"scenarios": scenarios},
+            timeout=90,
+        )
+        assert start.status_code == 200, f"Starting production evaluation returned {start.status_code}: {start.text}"
+        batch_id = start.json().get("batch_evaluation_id")
+        assert isinstance(batch_id, str) and batch_id
+
+        deadline = time.monotonic() + _integration_timeout(
+            "INTEGRATION_PROMOTION_TIMEOUT_SECONDS",
+            30 * 60,
+        )
+        last_status = ""
+        while time.monotonic() < deadline:
+            batch = api_session.get(
+                f"{_base_url(api_session)}/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/{batch_id}",
+                timeout=60,
+            )
+            batch.raise_for_status()
+            last_status = str(batch.json().get("status") or "")
+            if last_status == "COMPLETED":
+                break
+            assert last_status in {"PENDING", "IN_PROGRESS", "STOPPING"}, batch.json()
+            time.sleep(POLL_INTERVAL_SECONDS)
+        assert last_status == "COMPLETED", f"Batch evaluation ended/timed out in {last_status or 'UNKNOWN'}"
+
+        attest = api_session.post(
+            f"{_base_url(api_session)}/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/attest",
+            json={"batchEvaluationId": batch_id},
+            timeout=90,
+        )
+        assert attest.status_code == 200, (
+            f"Attesting production evaluation returned {attest.status_code}: {attest.text}"
+        )
+        assert (attest.json().get("promotion_evidence") or {}).get("verdict") == "pass"
+
+    promote = api_session.post(
+        f"{_base_url(api_session)}/api/runtimes/{runtime_name}/versions/{version_id}/promote",
+        json={"slot": "production"},
+        timeout=90,
+    )
+    assert promote.status_code == 200, f"Promoting trigger runtime returned {promote.status_code}: {promote.text}"
+    assert promote.json().get("promoted_version_id") == version_id
+
+    final_slots = api_session.get(
+        f"{_base_url(api_session)}/api/runtimes/{runtime_name}/slots",
+        timeout=60,
+    )
+    final_slots.raise_for_status()
+    assert final_slots.json().get("production_version_id") == version_id
+
+
 @pytest.mark.integration
 def test_all_four_trigger_sources_invoke_and_cleanup(
     api_session: requests.Session,
@@ -696,6 +881,7 @@ def test_all_four_trigger_sources_invoke_and_cleanup(
         region_name=aws_region,
     ).Table(integration_triggers_table_name)
     events_client = boto3.client("events", region_name=aws_region)
+    logs_client = boto3.client("logs", region_name=aws_region)
     secrets_client = boto3.client("secretsmanager", region_name=aws_region)
     s3_client, bucket_name, object_prefix = _create_source_bucket(aws_region)
 
@@ -708,6 +894,12 @@ def test_all_four_trigger_sources_invoke_and_cleanup(
             wait_for_deployment,
         )
         runtime_arn = status["runtime_arn"]
+        _promote_staging_version_for_triggers(
+            api_session,
+            logs_client,
+            runtime_name=runtime_name,
+            status=status,
+        )
         nonce = uuid.uuid4().hex
         event_source = f"integration.agentcore.{nonce}"
         event_detail_type = f"AgentCore integration {nonce}"

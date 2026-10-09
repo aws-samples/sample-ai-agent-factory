@@ -84,9 +84,13 @@ Integration tests perform real AWS API calls with zero mocking. They require:
   `trigger:write` scopes
 - The trigger-delivery matrix also requires direct test-runner permission to
   read the platform triggers table, publish a custom EventBridge event, inspect
-  EventBridge rules and webhook secrets, and create/delete one temporary
-  private S3 bucket. Set `INTEGRATION_TRIGGERS_TABLE_NAME` to the exact deployed
-  table name (normally `<project>-<environment>-triggers`).
+  EventBridge rules and webhook secrets, read the generated Runtime CloudWatch
+  log group, and create/delete one temporary private S3 bucket. Set
+  `INTEGRATION_TRIGGERS_TABLE_NAME` to the exact deployed table name (normally
+  `<project>-<environment>-triggers`). In production-like environments the
+  matrix invokes deterministic staging sessions, waits for those session IDs in
+  AgentCore logs, runs and attests the configured Batch Evaluation, and promotes
+  the exact version before exercising production-only triggers.
 
 ```bash
 cd backend

@@ -276,6 +276,15 @@ boundary, **not** an Object Lock/WORM compliance attestation against account
 administrators. See [`docs/DATA_RETENTION.md`](docs/DATA_RETENTION.md) for the
 pseudonymous-identifier and retention responsibilities.
 
+## Production-slot runtime triggers
+
+Cron, EventBridge, S3, and signed-webhook triggers bind to the exact production
+version and never target staging implicitly. The Triggers panel checks the slot
+first: a staging-only deployment is directed to the Versions tab to run the
+required evaluation and promotion, rather than exposing controls that cannot be
+used yet. Trigger delivery remains owner-scoped and version-pinned after later
+promotions.
+
 ## Atomic invocation authorization
 
 The Cost panel can create monthly owner, agent, or tag limits. In production,

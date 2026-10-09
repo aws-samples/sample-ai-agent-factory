@@ -15,6 +15,11 @@ All notable changes to this project are documented here. The format follows
   received exact HTTP 403 `Missing required scope(s): trigger:write` on its first
   cron trigger. Backend/frontend parity, unauthorized type-only access, and a
   scope-removal mutation now pin the persona contract.
+- Triggers intentionally resolve only the production slot. The UI now reads the
+  slot first and directs staging-only users to evaluate/promote instead of showing
+  controls that can only return 404. The real integration matrix creates
+  deterministic staging sessions, waits for their AgentCore logs, runs and attests
+  Batch Evaluation, promotes the exact version, and only then provisions triggers.
 
 ### Fixed — runtime teardown can verify Guardrail ownership
 
