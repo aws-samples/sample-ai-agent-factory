@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 from typing import Any
 
 import pytest
@@ -78,14 +79,18 @@ class _Session:
             self.budget_active = True
             return _Response(json)
         if url.endswith("/slots/staging/invoke"):
-            marker = str(json["input"]).removeprefix("Reply with exactly ").removesuffix(" and nothing else.")
+            case = next(
+                case
+                for case in matrix._RELEASE_EVALUATION_CASES
+                if case["prompt"] == json["input"]
+            )
             return _Response(
                 {
                     "success": True,
                     "slot": "staging",
                     "versionId": VERSION,
                     "sessionId": json["sessionId"],
-                    "response": marker,
+                    "response": case["expected_response"],
                 }
             )
         if url.endswith("/promotion-evaluation/start"):
@@ -146,6 +151,58 @@ def test_failed_batch_evaluation_never_promotes(monkeypatch) -> None:
 
     assert not any(url.endswith("/attest") or url.endswith("/promote") for _method, url in session.calls)
     assert session.production_ready is False
+
+
+def test_release_scenarios_are_guardrail_safe_and_semantically_oracled() -> None:
+    cases = matrix._RELEASE_EVALUATION_CASES
+    assert len(cases) >= 5
+    assert len({case["prompt"] for case in cases}) == len(cases)
+    for case in cases:
+        prompt = str(case["prompt"])
+        expected = str(case["expected_response"])
+        accepted = tuple(str(answer).casefold() for answer in case["accepted_answers"])
+        assert "reply with exactly" not in prompt.casefold()
+        assert not re.search(r"\b[0-9a-f]{8,}\b", f"{prompt} {expected}", re.IGNORECASE)
+        assert accepted
+        assert any(answer in expected.casefold() for answer in accepted)
+        assert case["assertion"]
+
+
+def test_guardrail_redaction_placeholder_fails_the_semantic_oracle() -> None:
+    class RedactedSession(_Session):
+        def post(self, url: str, *, json: dict[str, Any], **kwargs) -> _Response:
+            if url.endswith("/slots/staging/invoke"):
+                self.calls.append(("POST", url))
+                return _Response(
+                    {
+                        "success": True,
+                        "slot": "staging",
+                        "versionId": VERSION,
+                        "sessionId": json["sessionId"],
+                        "response": "[Assistant output redacted.]",
+                    }
+                )
+            return super().post(url, json=json, **kwargs)
+
+    with pytest.raises(AssertionError, match="semantic oracle"):
+        matrix._release_scenarios(
+            RedactedSession(),
+            runtime_name=RUNTIME,
+            version_id=VERSION,
+            count=1,
+        )
+
+
+def test_promotion_policy_cannot_exceed_guardrail_safe_case_inventory() -> None:
+    session = _Session()
+    with pytest.raises(AssertionError, match="Guardrail-safe evaluation cases"):
+        matrix._release_scenarios(
+            session,
+            runtime_name=RUNTIME,
+            version_id=VERSION,
+            count=len(matrix._RELEASE_EVALUATION_CASES) + 1,
+        )
+    assert session.calls == []
 
 
 def test_existing_production_slot_needs_no_evaluation() -> None:

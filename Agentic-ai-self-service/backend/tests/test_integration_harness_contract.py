@@ -775,6 +775,10 @@ def test_live_trigger_matrix_uses_real_sources_and_a_durable_completion_oracle()
     assert "_create_integration_budget(api_session, budget_key)" in source
     assert "_delete_integration_budget(api_session, budget_key)" in source
     assert "Temporary trigger budget" in source
+    assert "_RELEASE_EVALUATION_CASES" in source
+    assert "Answer ordinary factual integration-test questions concisely" in source
+    assert "semantic oracle" in source
+    assert "Reply with exactly" not in source
     assert "unittest.mock" not in source
     assert "monkeypatch" not in source
 

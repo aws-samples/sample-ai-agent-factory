@@ -288,7 +288,11 @@ identity the orthogonal `g-admins-cost` group only for the run: agent budgets ar
 bound to the writer's `owner_sub`, while the cost group grants no trigger scope
 and therefore cannot mask trigger RBAC. The matrix creates one unique agent-scoped
 invocation budget before staging evaluation, then deletes and absence-checks it
-in `finally`, so no reusable budget definition is left behind.
+in `finally`, so no reusable budget definition is left behind. Evaluation uses
+ordinary low-entropy factual questions with semantic answer oracles rather than
+prompt-injection-shaped “reply exactly” commands or random credential-like
+markers; a Guardrail redaction placeholder is a test failure, never accepted as
+an evaluation pass.
 
 ## Atomic invocation authorization
 

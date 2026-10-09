@@ -47,6 +47,61 @@ TRIGGER_TYPES_UNDER_TEST = (
     "webhook",
 )
 DELIVERY_PARTITION_PREFIX = "!delivery#"
+
+# Production Guardrails deliberately flag prompt-injection-shaped commands and
+# credential-like random tokens. Release evaluation therefore uses ordinary,
+# low-entropy factual questions with semantic answer oracles; session IDs, not
+# model output, provide per-run correlation.
+_RELEASE_EVALUATION_CASES: tuple[dict[str, Any], ...] = (
+    {
+        "prompt": "What is two plus two?",
+        "expected_response": "Four.",
+        "accepted_answers": ("4", "four"),
+        "assertion": "The response correctly states that two plus two equals four.",
+    },
+    {
+        "prompt": "What color is a clear daytime sky?",
+        "expected_response": "Blue.",
+        "accepted_answers": ("blue",),
+        "assertion": "The response correctly identifies blue as the usual color of a clear daytime sky.",
+    },
+    {
+        "prompt": "How many days are in one week?",
+        "expected_response": "Seven.",
+        "accepted_answers": ("7", "seven"),
+        "assertion": "The response correctly states that one week has seven days.",
+    },
+    {
+        "prompt": "What is the opposite of hot?",
+        "expected_response": "Cold.",
+        "accepted_answers": ("cold",),
+        "assertion": "The response correctly identifies cold as the opposite of hot.",
+    },
+    {
+        "prompt": "Which planet do humans live on?",
+        "expected_response": "Earth.",
+        "accepted_answers": ("earth",),
+        "assertion": "The response correctly identifies Earth as the planet humans live on.",
+    },
+    {
+        "prompt": "How many months are in one year?",
+        "expected_response": "Twelve.",
+        "accepted_answers": ("12", "twelve"),
+        "assertion": "The response correctly states that one year has twelve months.",
+    },
+    {
+        "prompt": "What shape has three sides?",
+        "expected_response": "A triangle.",
+        "accepted_answers": ("triangle",),
+        "assertion": "The response correctly identifies a triangle as a three-sided shape.",
+    },
+    {
+        "prompt": "Which animal is known for barking?",
+        "expected_response": "A dog.",
+        "accepted_answers": ("dog",),
+        "assertion": "The response correctly identifies a dog as an animal known for barking.",
+    },
+)
 EVENT_BUS_NAME = "default"
 TRIGGERS_TABLE_ENV = "INTEGRATION_TRIGGERS_TABLE_NAME"
 DELIVERY_TIMEOUT_ENV = "INTEGRATION_TRIGGER_TIMEOUT_SECONDS"
@@ -122,7 +177,9 @@ def _start_http_runtime(
                     "us.anthropic.claude-sonnet-5",
                 )
             },
-            "systemPrompt": ("Acknowledge automated integration-test events concisely. Do not call external tools."),
+            "systemPrompt": (
+                "Answer ordinary factual integration-test questions concisely. Do not call external tools."
+            ),
             "deploymentType": "direct_code_deploy",
             "pythonRuntime": "PYTHON_3_13",
             "protocol": "HTTP",
@@ -763,11 +820,14 @@ def _release_scenarios(
 
     scenarios: list[dict[str, Any]] = []
     session_ids: list[str] = []
-    token = uuid.uuid4().hex[:12]
-    for index in range(count):
+    assert count <= len(_RELEASE_EVALUATION_CASES), (
+        f"Promotion policy requires {count} sessions but the trigger matrix has only "
+        f"{len(_RELEASE_EVALUATION_CASES)} Guardrail-safe evaluation cases"
+    )
+    scenario_token = uuid.uuid4().hex[:12]
+    for index, case in enumerate(_RELEASE_EVALUATION_CASES[:count]):
         session_id = f"trigger-eval-{uuid.uuid4()}"
-        marker = f"TRIGGER-RELEASE-{token}-{index + 1}"
-        prompt = f"Reply with exactly {marker} and nothing else."
+        prompt = str(case["prompt"])
         response = api_session.post(
             f"{_base_url(api_session)}/api/runtimes/{runtime_name}/slots/staging/invoke",
             json={"input": prompt, "sessionId": session_id},
@@ -781,15 +841,25 @@ def _release_scenarios(
         assert body.get("slot") == "staging"
         assert body.get("versionId") == version_id
         assert body.get("sessionId") == session_id
-        assert str(body.get("response") or "").strip() == marker
+        model_response = str(body.get("response") or "").strip()
+        accepted_answers = tuple(str(answer).casefold() for answer in case["accepted_answers"])
+        assert any(answer in model_response.casefold() for answer in accepted_answers), (
+            f"Staging evaluation session {index + 1} did not satisfy its semantic oracle: "
+            f"expected one of {accepted_answers!r}, got {model_response!r}"
+        )
         session_ids.append(session_id)
         scenarios.append(
             {
                 "sessionId": session_id,
-                "testScenarioId": f"trigger-release-{token}-{index + 1}",
-                "assertions": [f"The response is exactly {marker} and uses no tools."],
+                "testScenarioId": f"trigger-release-{scenario_token}-{index + 1}",
+                "assertions": [str(case["assertion"]), "The response uses no external tools."],
                 "expectedToolNames": [],
-                "turns": [{"prompt": prompt, "expectedResponse": marker}],
+                "turns": [
+                    {
+                        "prompt": prompt,
+                        "expectedResponse": str(case["expected_response"]),
+                    }
+                ],
             }
         )
     return scenarios, session_ids

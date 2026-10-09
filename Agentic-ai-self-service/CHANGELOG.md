@@ -28,6 +28,13 @@ All notable changes to this project are documented here. The format follows
   trigger scope and cannot mask trigger RBAC. Cleanup is registered before the
   write and deletion is absence-checked in `finally`, including failed promotion
   paths.
+- A live staging call proved the old random `TRIGGER-RELEASE-<token>` exact-output
+  prompt was itself Guardrail-hostile and correctly returned `[Assistant output
+  redacted.]`. Release evaluation now uses a bounded inventory of ordinary factual
+  questions, low-entropy expected answers, and explicit semantic oracles. The
+  redaction placeholder fails the oracle, and a policy requiring more sessions
+  than the reviewed inventory fails before invocation; no Guardrail setting is
+  weakened for test convenience.
 
 ### Fixed — runtime teardown can verify Guardrail ownership
 

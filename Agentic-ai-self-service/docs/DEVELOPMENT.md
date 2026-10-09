@@ -94,9 +94,12 @@ Integration tests perform real AWS API calls with zero mocking. They require:
   log group, and create/delete one temporary private S3 bucket. Set
   `INTEGRATION_TRIGGERS_TABLE_NAME` to the exact deployed table name (normally
   `<project>-<environment>-triggers`). In production-like environments the
-  matrix invokes deterministic staging sessions, waits for those session IDs in
-  AgentCore logs, runs and attests the configured Batch Evaluation, and promotes
-  the exact version before exercising production-only triggers.
+  matrix invokes ordinary low-entropy factual prompts, rejects Guardrail
+  redaction placeholders, waits for those session IDs in AgentCore logs, runs
+  and attests the configured Batch Evaluation, and promotes the exact version
+  before exercising production-only triggers. It deliberately does not use
+  random exact-output markers, which production Guardrails can classify as
+  prompt-injection or sensitive-token content.
 
 ```bash
 cd backend
