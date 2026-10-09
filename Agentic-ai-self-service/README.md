@@ -366,7 +366,7 @@ intentional exceptions.
 
 ### First sign-in — assign a persona
 
-`COGNITO_USERS` pre-creates Cognito **users** and puts each one in `g-users-default` + `t-user`: a standard user who can build, deploy and invoke their own agents and browse & clone the registry. The API enforces scopes by default (`RBAC_ENFORCE=true`), so a user in **no** group (for example one created in the Cognito console) gets `403` on every call until you assign one. Admin personas are always a manual grant:
+`COGNITO_USERS` pre-creates Cognito **users** and puts each one in `g-users-default` + `t-user`: a standard user who can build, deploy, invoke, and schedule their own agents and browse & clone the registry. The API enforces scopes by default (`RBAC_ENFORCE=true`), so a user in **no** group (for example one created in the Cognito console) gets `403` on every call until you assign one. Admin personas are always a manual grant:
 
 > **Always pass `--region <the region you deployed to>`** — `us-east-1` below, but
 > use `eu-central-1` if that is where you deployed. Without it the AWS CLI falls

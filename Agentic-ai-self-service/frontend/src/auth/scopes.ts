@@ -48,6 +48,8 @@ const GROUP_SCOPES: Record<string, string[]> = {
     'prompt:read',
     'registry:read',
     'tag:read',
+    'trigger:read',
+    'trigger:write',
   ],
   // Legacy groups (backward compatible)
   'org-admin': ['admin', 'invoke', ...allReadWrite()],

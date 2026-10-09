@@ -1284,14 +1284,17 @@ def build_deployment_lambda(
             resources=[f"arn:aws:bedrock:*:{stack.account}:knowledge-base/*"],
         )
     )
-    # Guardrail cleanup on runtime delete. The manifest delete path (and the
-    # legacy guardrails_result fallback) run in THIS Lambda and call
-    # DeleteGuardrail — without it the guardrail orphans with AccessDenied
-    # (Bug 165). Guardrail ids are service-generated → guardrail/* pattern.
+    # Guardrail cleanup on runtime delete. The manifest delete path first reads
+    # the guardrail and its ownership tags, then deletes only an owned resource.
+    # A real eu-west-1 teardown retained its guardrail when ListTagsForResource
+    # was missing even though GetGuardrail and DeleteGuardrail were allowed.
+    # Guardrail ids are service-generated, so guardrail/* is the tightest
+    # pre-existing resource pattern.
     role.add_to_policy(
         iam.PolicyStatement(
             actions=[
                 "bedrock:GetGuardrail",
+                "bedrock:ListTagsForResource",
                 "bedrock:DeleteGuardrail",
             ],
             resources=[f"arn:aws:bedrock:*:{stack.account}:guardrail/*"],

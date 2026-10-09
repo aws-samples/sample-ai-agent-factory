@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — standard users can manage owned runtime triggers
+
+- `g-users-default` now includes `trigger:read` and `trigger:write`, matching the
+  Triggers panel shown to standard users who can deploy agents. Runtime and row
+  ownership checks remain authoritative; no admin or cross-tenant access is added.
+- A real `eu-west-1` customer-path run previously deployed the runtime, then
+  received exact HTTP 403 `Missing required scope(s): trigger:write` on its first
+  cron trigger. Backend/frontend parity, unauthorized type-only access, and a
+  scope-removal mutation now pin the persona contract.
+
+### Fixed — runtime teardown can verify Guardrail ownership
+
+- `DeploymentLambdaRole` now grants `bedrock:ListTagsForResource` on this
+  account's Guardrails alongside its existing get/delete actions. Teardown still
+  fails closed unless the live `ManagedBy` and `AgentCoreStack` tags prove ownership.
+- A real `eu-west-1` teardown deleted its Runtime but retained the generated
+  Guardrail because the ownership read returned `AccessDeniedException`. The
+  synthesized-role contract covers the exact resource pattern, foreign-account
+  denial, and missing-read mutation.
+
 ### Fixed — failed CDK updates cannot report deployment success
 
 - `cdk_deploy_pinned` now captures and returns the exact nonzero CDK status before
