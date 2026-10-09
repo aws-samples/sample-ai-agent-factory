@@ -10,6 +10,7 @@ import os
 from decimal import Decimal, InvalidOperation
 
 import aws_cdk as cdk
+import cdk_nag
 from aws_cdk import CfnOutput, Duration, RemovalPolicy
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as dynamodb
@@ -1290,15 +1291,44 @@ def build_deployment_lambda(
     # was missing even though GetGuardrail and DeleteGuardrail were allowed.
     # Guardrail ids are service-generated, so guardrail/* is the tightest
     # pre-existing resource pattern.
+    # Keep the established get/delete statement on the role's existing policy;
+    # moving it would repack unrelated overflow policies. Isolate only the new
+    # ownership-tag read so the deployment delta remains reviewable.
     role.add_to_policy(
         iam.PolicyStatement(
             actions=[
                 "bedrock:GetGuardrail",
-                "bedrock:ListTagsForResource",
                 "bedrock:DeleteGuardrail",
             ],
             resources=[f"arn:aws:bedrock:*:{stack.account}:guardrail/*"],
         )
+    )
+    guardrail_ownership_read_policy = iam.Policy(
+        stack,
+        "DeploymentGuardrailOwnershipReadPolicy",
+        statements=[
+            iam.PolicyStatement(
+                actions=["bedrock:ListTagsForResource"],
+                resources=[f"arn:aws:bedrock:*:{stack.account}:guardrail/*"],
+            )
+        ],
+    )
+    guardrail_ownership_read_policy.attach_to_role(role)
+    cdk_nag.NagSuppressions.add_resource_suppressions(
+        guardrail_ownership_read_policy,
+        [
+            cdk_nag.NagPackSuppression(
+                id="AwsSolutions-IAM5",
+                reason=(
+                    "Bedrock assigns the Guardrail id after creation, so teardown cannot name "
+                    "a concrete ARN at synthesis time. This dedicated policy grants only the "
+                    "ownership-tag read on Guardrails in this account; application code requires "
+                    "live ManagedBy and AgentCoreStack tags before the separate delete action."
+                ),
+                applies_to=[{"regex": r"/^Resource::arn:.*:bedrock:\*:<AWS::AccountId>:guardrail\/\*$/g"}],
+            )
+        ],
+        apply_to_children=True,
     )
     # S3 Vectors teardown (Bug 167): the KB step self-provisions a vector
     # bucket+index; the manifest delete path in THIS Lambda tears it down.

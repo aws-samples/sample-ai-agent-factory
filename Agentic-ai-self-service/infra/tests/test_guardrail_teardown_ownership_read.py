@@ -50,20 +50,30 @@ def _actions(statement: dict) -> set[str]:
 
 def guardrail_teardown_contract_violations(statements: list[dict]) -> list[str]:
     matching = [statement for statement in statements if _actions(statement) & ACTIONS]
-    if len(matching) != 1:
-        return [f"expected one guardrail teardown statement, found {len(matching)}"]
-    statement = matching[0]
+    if not matching:
+        return ["no guardrail teardown statements found"]
     violations = []
-    if statement.get("Effect") != "Allow":
-        violations.append("guardrail teardown statement is not Allow")
-    if _actions(statement) != ACTIONS:
-        missing = sorted(ACTIONS - _actions(statement))
+    granted: set[str] = set()
+    seen: set[str] = set()
+    for statement in matching:
+        relevant = _actions(statement) & ACTIONS
+        duplicated = sorted(relevant & seen)
+        if duplicated:
+            violations.append(f"duplicate guardrail teardown actions: {duplicated}")
+        seen |= relevant
+        granted |= relevant
+        if statement.get("Effect") != "Allow":
+            violations.append("guardrail teardown statement is not Allow")
         extra = sorted(_actions(statement) - ACTIONS)
-        violations.append(f"guardrail teardown actions differ: missing={missing}, extra={extra}")
-    if statement.get("Resource") != RESOURCE:
-        violations.append(f"guardrail teardown resource is {statement.get('Resource')!r}")
-    if statement.get("Condition"):
-        violations.append("guardrail teardown reads carry an inapplicable condition")
+        if extra:
+            violations.append(f"guardrail teardown statement has extra actions: {extra}")
+        if statement.get("Resource") != RESOURCE:
+            violations.append(f"guardrail teardown resource is {statement.get('Resource')!r}")
+        if statement.get("Condition"):
+            violations.append("guardrail teardown reads carry an inapplicable condition")
+    missing = sorted(ACTIONS - granted)
+    if missing:
+        violations.append(f"guardrail teardown actions are missing: {missing}")
     return violations
 
 
@@ -72,11 +82,11 @@ def test_deployment_lambda_can_prove_and_delete_owned_guardrails(statements) -> 
 
 
 def test_removing_the_ownership_read_is_caught(statements) -> None:
-    mutated = copy.deepcopy(statements)
-    statement = next(item for item in mutated if _actions(item) & ACTIONS)
-    statement["Action"].remove("bedrock:ListTagsForResource")
+    mutated = [
+        statement for statement in copy.deepcopy(statements) if "bedrock:ListTagsForResource" not in _actions(statement)
+    ]
     assert guardrail_teardown_contract_violations(mutated) == [
-        "guardrail teardown actions differ: missing=['bedrock:ListTagsForResource'], extra=[]"
+        "guardrail teardown actions are missing: ['bedrock:ListTagsForResource']"
     ]
 
 
@@ -87,6 +97,6 @@ def test_removing_the_ownership_read_is_caught(statements) -> None:
 )
 def test_broader_or_foreign_guardrail_authority_is_caught(statements, resource) -> None:
     mutated = copy.deepcopy(statements)
-    statement = next(item for item in mutated if _actions(item) & ACTIONS)
+    statement = next(item for item in mutated if "bedrock:ListTagsForResource" in _actions(item))
     statement["Resource"] = resource
     assert guardrail_teardown_contract_violations(mutated) == [f"guardrail teardown resource is {resource!r}"]
