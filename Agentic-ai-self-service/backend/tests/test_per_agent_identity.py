@@ -135,6 +135,38 @@ def test_baseline_s3_falls_back_to_wildcard_without_bucket():
     assert _stmt(policy, "S3CodeAccess")["Resource"] == "*"
 
 
+def test_trace_export_is_granted_only_to_instrumented_model_runtimes():
+    uninstrumented = build_scoped_runtime_policy([], artifacts_bucket=BUCKET)
+    assert "AgentCoreObservabilityTraceExport" not in _sids(uninstrumented)
+
+    instrumented = build_scoped_runtime_policy(
+        [],
+        artifacts_bucket=BUCKET,
+        trace_export_enabled=True,
+    )
+    statement = _stmt(instrumented, "AgentCoreObservabilityTraceExport")
+    assert set(statement["Action"]) == {
+        "xray:PutTraceSegments",
+        "xray:PutTelemetryRecords",
+        "xray:GetSamplingRules",
+        "xray:GetSamplingTargets",
+    }
+    assert statement["Effect"] == "Allow"
+    assert statement["Resource"] == "*"
+
+    model_free = build_scoped_runtime_policy(
+        [],
+        artifacts_bucket=BUCKET,
+        model_free=True,
+        trace_export_enabled=True,
+    )
+    assert "AgentCoreObservabilityTraceExport" not in _sids(model_free)
+
+    # Removal mutation: deleting one required export action is observable.
+    mutated = set(statement["Action"]) - {"xray:PutTraceSegments"}
+    assert "xray:PutTraceSegments" not in mutated
+
+
 # ============================================================================
 # 2. Each tool individually injects exactly its statement and nothing else
 # ============================================================================
@@ -262,6 +294,7 @@ def test_no_unexpected_wildcard_resources_when_all_arns_supplied(tools):
     )
     allowed_wildcard_sids = {
         "BedrockModelAccess",
+        "AgentCoreObservabilityTraceExport",
         "CloudWatchLogs",
         "GuardrailsAccess",
         "BrowserAccess",

@@ -777,6 +777,12 @@ def test_live_trigger_matrix_uses_real_sources_and_a_durable_completion_oracle()
     assert "Temporary trigger budget" in source
     assert "_RELEASE_EVALUATION_CASES" in source
     assert "Answer ordinary factual integration-test questions concisely" in source
+    assert "BATCH_EVALUATION_SPANS_LOG_GROUP" in source
+    assert "_is_evaluation_span" in source
+    assert "_filtered_log_messages" in source
+    assert "_assert_production_content_is_redacted" in source
+    assert "f'\"{exact_trace_id}\"'" in source
+    assert "integration_transaction_search" in source
     assert "semantic oracle" in source
     assert "Reply with exactly" not in source
     assert "unittest.mock" not in source
@@ -1044,6 +1050,13 @@ def test_trigger_matrix_operator_contract_is_documented() -> None:
     assert "`trigger:write`" in development
     assert "`g-admins-cost`" in development
     assert "writer's `owner_sub`" in development
+    assert "`INTEGRATION_MANAGE_TRANSACTION_SEARCH=true`" in development
+    assert "`INTEGRATION_TRANSACTION_SEARCH_STATE_FILE`" in development
+    assert "`INTEGRATION_RESTORE_TRANSACTION_SEARCH_STATE=true`" in development
+    assert "restore_from_state" in (_REPO / "backend/tests/integration/transaction_search.py").read_text()
+    assert "shared `aws/spans`" in development
+    assert "production canary" in development
+    assert "<AgentCoreRuntimeName>.DEFAULT" in development
     assert "completed DynamoDB delivery row" in development
     assert "signed webhook" in development
 

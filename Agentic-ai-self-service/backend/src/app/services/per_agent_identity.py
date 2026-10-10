@@ -284,6 +284,7 @@ def build_scoped_runtime_policy(
     provider_key_secret_arn: str | None = None,
     gateway_key_secret_arn: str | None = None,
     model_free: bool = False,
+    trace_export_enabled: bool = False,
 ) -> dict:
     """Build a least-privilege IAM policy document for a per-agent runtime role.
 
@@ -332,6 +333,10 @@ def build_scoped_runtime_policy(
             This is where ``per_agent`` mode beats the shared role, which can only
             grant the whole ``agentcore-connector/`` namespace because it has no
             per-deploy ARN at synth time.
+        trace_export_enabled: Whether this exact Runtime is launched under AWS
+            ADOT and therefore needs the four X-Ray trace/sampling actions. False
+            leaves ordinary model runtimes without account-level X-Ray authority;
+            model-free runtimes never receive it even when true.
 
     Returns:
         A deterministic IAM policy document (dict) with the model/S3/log
@@ -367,6 +372,20 @@ def build_scoped_runtime_policy(
                 "Resource": "*",
             }
         )
+        if trace_export_enabled:
+            statements.append(
+                {
+                    "Sid": "AgentCoreObservabilityTraceExport",
+                    "Effect": "Allow",
+                    "Action": [
+                        "xray:PutTraceSegments",
+                        "xray:PutTelemetryRecords",
+                        "xray:GetSamplingRules",
+                        "xray:GetSamplingTargets",
+                    ],
+                    "Resource": "*",
+                }
+            )
     statements += [
         {
             "Sid": "S3CodeAccess",

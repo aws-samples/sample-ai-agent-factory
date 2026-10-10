@@ -106,6 +106,59 @@ _AGENTCORE_NATIVE_OBSERVABILITY_ENV: dict[str, str] = {
 }
 
 
+def _production_evaluation_observability_env(
+    *,
+    runtime_name: str,
+    region: str,
+) -> dict[str, str]:
+    """Return the non-bypassable ADOT contract for production evaluation.
+
+    Batch Evaluation reads real OpenTelemetry spans from CloudWatch. Direct
+    code deployment therefore has to run under ``opentelemetry-instrument``
+    with the AWS distro, send traces to X-Ray's OTLP endpoint, and use the
+    documented ``{RuntimeName}.DEFAULT`` service name. We deliberately opt out
+    of the newer per-runtime unified destination: the platform's evaluation
+    IAM and reversible Transaction Search setup are scoped to shared
+    ``aws/spans`` and do not grant tenant runtimes account-wide
+    ``logs:PutResourcePolicy``.
+
+    AgentCore Evaluations requires prompt and response content. Framework-wide
+    capture remains disabled and its unredacted allowlist remains empty, so
+    ordinary production/model/tool spans carry no content. Generated code adds
+    one standards-compliant invoke-agent span only when the owner-authorized
+    staging-slot route resolves an immutable production-gated version and
+    supplies its private marker. Extraction opt-out keeps those two bounded
+    attributes on that span in ``aws/spans``; no OTEL log
+    exporter or second content-bearing log group is needed.
+    """
+
+    normalized_region = str(region or "").strip()
+    if not re.fullmatch(r"[a-z]{2}(?:-[a-z]+)+-\d+", normalized_region):
+        raise ValueError("Production evaluation observability requires a valid AWS Region")
+    endpoint_suffix = "amazonaws.com.cn" if normalized_region.startswith("cn-") else "amazonaws.com"
+    return {
+        "AGENT_OBSERVABILITY_ENABLED": "true",
+        "UNIFIED_TRACES_DESTINATION_ENABLED": "false",
+        "OTEL_PYTHON_DISTRO": "aws_distro",
+        "OTEL_PYTHON_CONFIGURATOR": "aws_configurator",
+        "OTEL_TRACES_EXPORTER": "otlp",
+        "OTEL_LOGS_EXPORTER": "none",
+        "OTEL_METRICS_EXPORTER": "none",
+        "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": f"https://xray.{normalized_region}.{endpoint_suffix}/v1/traces",
+        "OTEL_SERVICE_NAME": f"{runtime_name}.DEFAULT",
+        "OTEL_TRACES_SAMPLER": "always_on",
+        "OTEL_AWS_APPLICATION_SIGNALS_ENABLED": "false",
+        "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "false",
+        "AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT": "true",
+        # Strands 1.56 treats an empty unredacted allowlist as redact-all for
+        # prompt, response, system instruction, and tool argument/result fields.
+        "OTEL_SEMCONV_STABILITY_OPT_IN": ("gen_ai_latest_experimental,gen_ai_unredacted_attributes="),
+        "OTEL_BSP_SCHEDULE_DELAY": "1000",
+        "OTEL_BSP_EXPORT_TIMEOUT": "5000",
+    }
+
+
 class PlatformObservabilityUnavailable(RuntimeError):
     """The platform OTEL policy could not be READ (as opposed to being absent).
 
@@ -236,6 +289,8 @@ def build_otel_env_vars(
     enable_otel_legacy: bool = False,
     platform_defaults: dict | None = None,
     trusted_auth_secret_arns: Collection[str] = (),
+    production_evaluation_required: bool = False,
+    target_region: str | None = None,
 ) -> dict[str, str]:
     """Translate an ObservabilityConfig dict into runtime env vars.
 
@@ -257,12 +312,29 @@ def build_otel_env_vars(
             validated, copied, and durably recorded by the deploy boundary.
             These live under ``agentcore-connector/`` rather than the long-lived
             user ``agentcore-otel/`` source namespace.
+        production_evaluation_required: Force the AWS ADOT/X-Ray span path used
+            by AgentCore Batch Evaluation even when canvas observability is off.
+        target_region: Runtime Region used to build the SigV4 X-Ray OTLP
+            endpoint when production evaluation is required.
 
     Returns:
         Dict of OTEL_* env vars. Empty when observability is disabled AND no
         platform defaults are configured.
     """
     obs = observability or {}
+
+    def _finalize(env: dict[str, str]) -> dict[str, str]:
+        if not production_evaluation_required:
+            return env
+        required = _production_evaluation_observability_env(
+            runtime_name=runtime_name,
+            region=target_region or os.environ.get("APP_AWS_REGION") or os.environ.get("AWS_REGION") or "",
+        )
+        # Production promotion depends on CloudWatch/X-Ray traces. Required
+        # keys intentionally win over user/platform trace settings; unrelated
+        # endpoint credentials and resource attributes remain available.
+        return {**env, **required}
+
     plat = platform_defaults or {}
     trusted_secret_arns = {str(arn) for arn in trusted_auth_secret_arns if arn}
 
@@ -324,7 +396,7 @@ def build_otel_env_vars(
     # used to fall back to a localhost AgentCore sidecar that does not exist
     # in production (verified via live deploy 2026-05-15). Treat as disabled.
     if not obs:
-        return {}
+        return _finalize({})
 
     # Enable gate accepts the frontend Observability node's camelCase
     # ``enableOtel`` as an alias for the model's ``enabled`` -- the same
@@ -337,9 +409,9 @@ def build_otel_env_vars(
     # defaults branch above has already rewritten obs with enabled=True, so a
     # platform-locked deploy is unaffected and telemetry stays enforced there.
     if obs.get("enabled") is False or obs.get("enableOtel") is False:
-        return {}
+        return _finalize({})
     if not obs.get("enabled", obs.get("enableOtel", True)):
-        return {}
+        return _finalize({})
 
     provider = obs.get("provider", "langfuse")
     caller_endpoint = obs.get("otlp_endpoint") or obs.get("otlpEndpoint") or ""
@@ -372,7 +444,7 @@ def build_otel_env_vars(
         # No usable 3rd-party export target, but observability IS enabled
         # (explicitly or by default). The generated bootstrap turns this into
         # usage-only runtime log records for cost rollup.
-        return dict(_AGENTCORE_NATIVE_OBSERVABILITY_ENV)
+        return _finalize(dict(_AGENTCORE_NATIVE_OBSERVABILITY_ENV))
 
     protocol = obs.get("otlp_protocol") or obs.get("otlpProtocol", "http/protobuf")
     service_name = obs.get("service_name") or obs.get("serviceName") or runtime_name
@@ -414,4 +486,4 @@ def build_otel_env_vars(
         # resolved auth header.
         env["OTEL_EXPORTER_OTLP_EXTRA_HEADERS"] = ",".join(f"{k}={v}" for k, v in extra_headers.items() if v)
 
-    return env
+    return _finalize(env)

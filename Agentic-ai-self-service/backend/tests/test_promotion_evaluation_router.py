@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 OWNER = "release-owner"
 RUNTIME_NAME = "release_bot"
+AGENTCORE_RUNTIME_NAME = "release_bot_deadbeef"
 VERSION_ID = "01a0d26eb4459a9516d12064ac4a8687"
 DEPLOYMENT_ID = "dep-release-1"
 RUNTIME_ID = "release_runtime_1"
@@ -51,8 +52,8 @@ def _batch_result(policy: dict, *, status: str = "COMPLETED") -> dict:
         "evaluators": [{"evaluatorId": evaluator_id} for evaluator_id in policy["evaluators"]],
         "dataSourceConfig": {
             "cloudWatchLogs": {
-                "serviceNames": [RUNTIME_ID],
-                "logGroupNames": [f"/aws/bedrock-agentcore/runtimes/{RUNTIME_ID}-DEFAULT"],
+                "serviceNames": [f"{AGENTCORE_RUNTIME_NAME}.DEFAULT"],
+                "logGroupNames": ["aws/spans"],
                 "filterConfig": {"sessionIds": [f"session-{index}" for index in range(5)]},
             }
         },
@@ -86,7 +87,7 @@ def harness(monkeypatch):
         owner_sub=OWNER,
         created_at=(datetime.now(UTC) - timedelta(minutes=10)).isoformat(),
         deployment_id=DEPLOYMENT_ID,
-        agentcore_runtime_name=RUNTIME_NAME,
+        agentcore_runtime_name=AGENTCORE_RUNTIME_NAME,
         runtime_id=RUNTIME_ID,
         runtime_arn=RUNTIME_ARN,
         status="succeeded",
@@ -101,12 +102,28 @@ def harness(monkeypatch):
         "status": "PENDING",
     }
     agentcore.get_batch_evaluation.return_value = _batch_result(policy)
+    xray = MagicMock()
+    xray.get_trace_segment_destination.return_value = {
+        "Destination": "CloudWatchLogs",
+        "Status": "ACTIVE",
+    }
+    xray.get_indexing_rules.return_value = {
+        "IndexingRules": [
+            {
+                "Name": "Default",
+                "Rule": {"Probabilistic": {"DesiredSamplingPercentage": 100.0}},
+            }
+        ]
+    }
     target = SimpleNamespace(
         deployment_id=DEPLOYMENT_ID,
         runtime_id=RUNTIME_ID,
         runtime_arn=RUNTIME_ARN,
         evaluation_kms_key_arn=evaluation_key_arn,
-        client=lambda service: agentcore if service == "bedrock-agentcore" else None,
+        client=lambda service: {
+            "bedrock-agentcore": agentcore,
+            "xray": xray,
+        }.get(service),
     )
     store = MagicMock()
     store.get.return_value = version
@@ -126,6 +143,7 @@ def harness(monkeypatch):
     return SimpleNamespace(
         client=TestClient(app),
         agentcore=agentcore,
+        xray=xray,
         store=store,
         version=version,
         policy=policy,
@@ -141,7 +159,11 @@ def test_start_endpoint_uses_the_version_target_and_frozen_policy(harness):
     assert response.status_code == 200, response.text
     assert response.json()["batch_evaluation_id"] == BATCH_ID
     request = harness.agentcore.start_batch_evaluation.call_args.kwargs
-    assert request["dataSourceConfig"]["cloudWatchLogs"]["serviceNames"] == [RUNTIME_ID]
+    assert request["dataSourceConfig"]["cloudWatchLogs"] == {
+        "serviceNames": [f"{AGENTCORE_RUNTIME_NAME}.DEFAULT"],
+        "logGroupNames": ["aws/spans"],
+        "filterConfig": {"sessionIds": [f"session-{index}" for index in range(5)]},
+    }
     assert {item["evaluatorId"] for item in request["evaluators"]} == set(harness.policy["evaluators"])
     assert request["kmsKeyArn"].endswith("12345678-1234-1234-1234-1234567890ab")
 
@@ -157,6 +179,84 @@ def test_attest_endpoint_records_only_server_verified_evidence(harness):
     assert evidence["verdict"] == "pass"
     assert evidence["runtime_id"] == RUNTIME_ID
     harness.store.record_promotion_evidence.assert_called_once()
+
+
+def test_start_fails_before_agentcore_when_transaction_search_is_disabled(harness):
+    harness.xray.get_trace_segment_destination.return_value = {
+        "Destination": "XRay",
+        "Status": "ACTIVE",
+    }
+    harness.xray.get_indexing_rules.return_value = {
+        "IndexingRules": [
+            {
+                "Name": "Default",
+                "Rule": {"Probabilistic": {"DesiredSamplingPercentage": 0.0}},
+            }
+        ]
+    }
+
+    response = harness.client.post(
+        f"/api/runtimes/{RUNTIME_NAME}/versions/{VERSION_ID}/promotion-evaluation/start",
+        json={"scenarios": _scenarios()},
+    )
+
+    assert response.status_code == 409
+    assert "ACTIVE/CloudWatchLogs" in response.json()["detail"]
+    harness.agentcore.start_batch_evaluation.assert_not_called()
+
+
+def test_start_fails_503_when_transaction_search_cannot_be_read(harness):
+    harness.xray.get_trace_segment_destination.side_effect = RuntimeError("xray unavailable")
+
+    response = harness.client.post(
+        f"/api/runtimes/{RUNTIME_NAME}/versions/{VERSION_ID}/promotion-evaluation/start",
+        json={"scenarios": _scenarios()},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Production evaluation policy is unavailable"
+    harness.agentcore.start_batch_evaluation.assert_not_called()
+
+
+@pytest.mark.parametrize("indexing_percentage", ["nan", "inf", True, "not-a-number"])
+def test_start_fails_503_for_malformed_transaction_search_indexing(harness, indexing_percentage):
+    harness.xray.get_indexing_rules.return_value = {
+        "IndexingRules": [
+            {
+                "Name": "Default",
+                "Rule": {"Probabilistic": {"DesiredSamplingPercentage": indexing_percentage}},
+            }
+        ]
+    }
+
+    response = harness.client.post(
+        f"/api/runtimes/{RUNTIME_NAME}/versions/{VERSION_ID}/promotion-evaluation/start",
+        json={"scenarios": _scenarios()},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Production evaluation policy is unavailable"
+    harness.agentcore.start_batch_evaluation.assert_not_called()
+
+
+def test_removing_transaction_search_preflight_exposes_malformed_state(harness, monkeypatch):
+    harness.xray.get_indexing_rules.return_value = {
+        "IndexingRules": [
+            {
+                "Name": "Default",
+                "Rule": {"Probabilistic": {"DesiredSamplingPercentage": "nan"}},
+            }
+        ]
+    }
+    monkeypatch.setattr(evaluations, "require_transaction_search", lambda _client: None)
+
+    response = harness.client.post(
+        f"/api/runtimes/{RUNTIME_NAME}/versions/{VERSION_ID}/promotion-evaluation/start",
+        json={"scenarios": _scenarios()},
+    )
+
+    assert response.status_code == 200
+    harness.agentcore.start_batch_evaluation.assert_called_once()
 
 
 def test_pending_batch_cannot_create_evidence(harness):

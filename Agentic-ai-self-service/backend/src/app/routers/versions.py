@@ -299,6 +299,7 @@ async def invoke_runtime_slot(
             get_gateway_token=get_cognito_token,
             user_bearer_token=user_bearer_token,
             on_dispatch=_mark_dispatched,
+            evaluation_capture=(slot == "staging" and target.production_gate_required is True),
         )
     except Exception:
         settle_invocation_budget(reservation, dispatched=dispatched)

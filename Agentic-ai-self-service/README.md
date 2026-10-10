@@ -204,7 +204,20 @@ Production-like environments also default new versions to **staging** and reject
 an explicit direct production deploy before side effects. The
 `production_evaluation_gate` context may enable the gate in development but may
 not disable it in production; a false or malformed production value fails
-synthesis and deploy admission.
+synthesis and deploy admission. Gated Runtime code is always launched through
+AWS ADOT `opentelemetry-instrument`, even if canvas observability is off. Its
+framework spans remain content-redacted. Only the owner-checked staging slot of
+an immutable production-gated version can add an internal marker, which generated code strips before execution
+and converts into one evaluator `invoke_agent` span carrying the documented
+`gen_ai.task.input/output` fields under service name
+`<AgentCoreRuntimeName>.DEFAULT` in shared `aws/spans`. The production slot
+cannot accept that marker, and the live matrix invokes a post-promotion canary
+and proves its prompt and expected response phrase never appear in correlated
+spans. CloudWatch Transaction
+Search must be active in each target account and Region; the live integration
+harness can lease this setting temporarily, restores its exact prior destination
+and indexing percentage after the run, and retains a validated recovery file if
+cleanup cannot be proven.
 
 Promote a production-gated version from the **Versions** panel:
 

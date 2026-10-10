@@ -40,6 +40,7 @@ from app.services.promotion_evidence import (
     PromotionPolicyConfigurationError,
     assert_batch_evaluation_targets_runtime,
     get_batch_evaluation,
+    require_transaction_search,
     start_batch_evaluation,
     summarize_batch_evaluation,
     validate_batch_evaluation_for_promotion,
@@ -292,10 +293,12 @@ async def start_promotion_evaluation(
     version = _version_for_target(runtime_name, version_id, caller_sub)
     try:
         policy = validate_frozen_promotion_policy(version.promotion_policy)
+        require_transaction_search(target.client("xray"))
         client = target.client("bedrock-agentcore")
         return start_batch_evaluation(
             client,
             runtime_name=runtime_name,
+            agentcore_runtime_name=version.agentcore_runtime_name,
             version_id=version_id,
             deployment_id=target.deployment_id,
             runtime_id=target.runtime_id,
@@ -328,11 +331,12 @@ async def get_promotion_evaluation(
 
     runtime_name = _validate_runtime_name(runtime_name)
     target = resolve_owned_runtime_version_target(runtime_name, version_id, caller_sub, required_protocol="HTTP")
-    _version_for_target(runtime_name, version_id, caller_sub)
+    version = _version_for_target(runtime_name, version_id, caller_sub)
     try:
         result = get_batch_evaluation(target.client("bedrock-agentcore"), batch_evaluation_id)
         assert_batch_evaluation_targets_runtime(
             result,
+            agentcore_runtime_name=version.agentcore_runtime_name,
             runtime_id=target.runtime_id,
             runtime_arn=target.runtime_arn,
         )
@@ -364,6 +368,7 @@ async def attest_promotion_evaluation(
         evidence = validate_batch_evaluation_for_promotion(
             result,
             runtime_name=runtime_name,
+            agentcore_runtime_name=version.agentcore_runtime_name,
             version_id=version_id,
             deployment_id=target.deployment_id,
             runtime_id=target.runtime_id,

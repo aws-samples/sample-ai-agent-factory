@@ -408,6 +408,39 @@ def build_shared_runtime_role(
             resources=["*"],
         )
     )
+    runtime_observability_policy = iam.Policy(
+        stack,
+        "SharedRuntimeObservabilityTracePolicy",
+        statements=[
+            iam.PolicyStatement(
+                sid="AgentCoreObservabilityTraceExport",
+                actions=[
+                    "xray:PutTraceSegments",
+                    "xray:PutTelemetryRecords",
+                    "xray:GetSamplingRules",
+                    "xray:GetSamplingTargets",
+                ],
+                resources=["*"],
+            )
+        ],
+    )
+    runtime_observability_policy.attach_to_role(role)
+    cdk_nag.NagSuppressions.add_resource_suppressions(
+        runtime_observability_policy,
+        [
+            cdk_nag.NagPackSuppression(
+                id="AwsSolutions-IAM5",
+                reason=(
+                    "X-Ray trace export and sampling APIs do not support resource-level "
+                    "permissions. This dedicated policy contains only the four exact "
+                    "AWS-documented ADOT Runtime actions and is attached only to the "
+                    "model-capable shared Runtime role."
+                ),
+                applies_to=["Resource::*"],
+            )
+        ],
+        apply_to_children=True,
+    )
     # All AgentCore runtime tool integrations (browser, code interpreter,
     # gateway, memory, guardrails, evaluation, policy). Exact action lists
     # (verified against the bedrock-agentcore / bedrock-agentcore-control
@@ -1513,6 +1546,38 @@ def build_deployment_lambda(
             ],
             resources=[f"arn:aws:bedrock-agentcore:*:{stack.account}:batch-evaluate/*"],
         )
+    )
+    # Production Batch Evaluation preflights Transaction Search in the runtime
+    # Region before creating a job. Keep these two account-level reads isolated
+    # from the role's overflow managed policies: adding one statement there
+    # repacks several unrelated documents and inflates every code-only deploy.
+    batch_evaluation_trace_policy = iam.Policy(
+        stack,
+        "DeploymentBatchEvaluationTraceReadPolicy",
+        statements=[
+            iam.PolicyStatement(
+                actions=[
+                    "xray:GetIndexingRules",
+                    "xray:GetTraceSegmentDestination",
+                ],
+                resources=["*"],
+            ),
+        ],
+    )
+    batch_evaluation_trace_policy.attach_to_role(role)
+    cdk_nag.NagSuppressions.add_resource_suppressions(
+        batch_evaluation_trace_policy,
+        [
+            cdk_nag.NagPackSuppression(
+                id="AwsSolutions-IAM5",
+                reason=(
+                    "X-Ray Transaction Search state is account/Region-level and "
+                    "these two read-only APIs expose no resource ARN."
+                ),
+                applies_to=["Resource::*"],
+            )
+        ],
+        apply_to_children=True,
     )
     # SEPARATE, ARN-SCOPED STATEMENT: the ownership tag read that every delete on
     # this role's cascade depends on. This is the SAME defect fixed for the step

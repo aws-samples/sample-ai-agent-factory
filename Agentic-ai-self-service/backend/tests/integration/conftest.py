@@ -20,10 +20,14 @@ import os
 import time
 from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+import boto3
 import pytest
 import requests
+
+from tests.integration.transaction_search import TransactionSearchLease
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +76,45 @@ def api_gateway_url() -> str:
     if not url:
         pytest.skip("API_GATEWAY_URL or CLOUDFRONT_URL is required")
     return url.rstrip("/")
+
+
+@pytest.fixture
+def integration_transaction_search(aws_region: str):
+    """Require or reversibly manage Batch Evaluation's account prerequisite."""
+
+    account_id = boto3.client("sts", region_name=aws_region).get_caller_identity()["Account"]
+    manage = os.environ.get("INTEGRATION_MANAGE_TRANSACTION_SEARCH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    raw_state_path = os.environ.get("INTEGRATION_TRANSACTION_SEARCH_STATE_FILE", "").strip()
+    state_path = Path(raw_state_path).expanduser().resolve() if raw_state_path else None
+    lease = TransactionSearchLease(
+        account_id=account_id,
+        region=aws_region,
+        manage=manage,
+        state_path=state_path,
+        xray_client=boto3.client("xray", region_name=aws_region),
+        logs_client=boto3.client("logs", region_name=aws_region),
+        sts_client=boto3.client("sts", region_name=aws_region),
+    )
+    restore_stale = os.environ.get("INTEGRATION_RESTORE_TRANSACTION_SEARCH_STATE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if restore_stale:
+        if not manage:
+            pytest.fail(
+                "INTEGRATION_RESTORE_TRANSACTION_SEARCH_STATE requires INTEGRATION_MANAGE_TRANSACTION_SEARCH=true",
+                pytrace=False,
+            )
+        lease.restore_from_state()
+    with lease:
+        yield lease
 
 
 @pytest.fixture(scope="session")

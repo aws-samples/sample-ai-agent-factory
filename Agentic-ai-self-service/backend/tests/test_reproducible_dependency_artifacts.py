@@ -139,6 +139,9 @@ def test_agentcore_installer_uses_only_the_validated_deterministic_packager() ->
     assert script.count('package_bundle "${target_dir}" "${zip_path}"') == 2
     assert "zip -r" not in script
     assert 'rm -rf "${target_dir:?}/bin"' in script
+    assert 'bin/opentelemetry-instrument"' in script
+    assert "#!/usr/bin/env python3" in script
+    assert '>"${target_dir:?}/opentelemetry-instrument"' in script
     assert '-path "*.dist-info/RECORD" -delete' in script
 
 

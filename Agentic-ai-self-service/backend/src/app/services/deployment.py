@@ -2697,6 +2697,7 @@ class WorkflowExecutor:
                 authorizer_config=authorizer_config,
                 request_header_config=request_header_config,
                 region=self.region,
+                instrument_observability=bool(otel_env),
             )
             state.runtime_id = runtime_result["runtime_id"]
             _record_resource_best_effort(

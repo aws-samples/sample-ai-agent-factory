@@ -25,6 +25,7 @@ from app.services.promotion_evidence import (
 from moto import mock_aws
 
 RUNTIME_NAME = "release_bot"
+AGENTCORE_RUNTIME_NAME = "release_bot_deadbeef"
 VERSION_ID = "01a0d26eb4459a9516d12064ac4a8687"
 DEPLOYMENT_ID = "dep-release-1"
 RUNTIME_ID = "release_runtime_1"
@@ -82,8 +83,8 @@ def _result(policy: dict, **overrides) -> dict:
         "evaluators": [{"evaluatorId": evaluator_id} for evaluator_id in policy["evaluators"]],
         "dataSourceConfig": {
             "cloudWatchLogs": {
-                "serviceNames": [RUNTIME_ID],
-                "logGroupNames": [f"/aws/bedrock-agentcore/runtimes/{RUNTIME_ID}-DEFAULT"],
+                "serviceNames": [f"{AGENTCORE_RUNTIME_NAME}.DEFAULT"],
+                "logGroupNames": ["aws/spans"],
                 "filterConfig": {"sessionIds": session_ids},
             }
         },
@@ -114,6 +115,7 @@ def _evidence(policy: dict, **overrides) -> dict:
     return validate_batch_evaluation_for_promotion(
         result,
         runtime_name=RUNTIME_NAME,
+        agentcore_runtime_name=AGENTCORE_RUNTIME_NAME,
         version_id=VERSION_ID,
         deployment_id=DEPLOYMENT_ID,
         runtime_id=RUNTIME_ID,
@@ -173,6 +175,7 @@ def test_start_wrapper_builds_exact_version_bound_batch_request(monkeypatch):
     started = start_batch_evaluation(
         client,
         runtime_name=RUNTIME_NAME,
+        agentcore_runtime_name=AGENTCORE_RUNTIME_NAME,
         version_id=VERSION_ID,
         deployment_id=DEPLOYMENT_ID,
         runtime_id=RUNTIME_ID,
@@ -184,8 +187,8 @@ def test_start_wrapper_builds_exact_version_bound_batch_request(monkeypatch):
     assert started["batch_evaluation_id"] == BATCH_ID
     request = client.start_batch_evaluation.call_args.kwargs
     assert request["dataSourceConfig"]["cloudWatchLogs"] == {
-        "serviceNames": [RUNTIME_ID],
-        "logGroupNames": [f"/aws/bedrock-agentcore/runtimes/{RUNTIME_ID}-DEFAULT"],
+        "serviceNames": [f"{AGENTCORE_RUNTIME_NAME}.DEFAULT"],
+        "logGroupNames": ["aws/spans"],
         "filterConfig": {"sessionIds": [item["session_id"] for item in _scenarios()]},
     }
     assert {item["evaluatorId"] for item in request["evaluators"]} == set(policy["evaluators"])
@@ -200,6 +203,7 @@ def test_start_wrapper_rejects_too_few_scenarios_before_calling_aws(monkeypatch)
         start_batch_evaluation(
             client,
             runtime_name=RUNTIME_NAME,
+            agentcore_runtime_name=AGENTCORE_RUNTIME_NAME,
             version_id=VERSION_ID,
             deployment_id=DEPLOYMENT_ID,
             runtime_id=RUNTIME_ID,
@@ -249,6 +253,7 @@ def test_low_score_is_an_exact_release_denial(monkeypatch):
         validate_batch_evaluation_for_promotion(
             result,
             runtime_name=RUNTIME_NAME,
+            agentcore_runtime_name=AGENTCORE_RUNTIME_NAME,
             version_id=VERSION_ID,
             deployment_id=DEPLOYMENT_ID,
             runtime_id=RUNTIME_ID,
@@ -267,6 +272,7 @@ def test_wrong_runtime_source_cannot_authorize_this_version(monkeypatch):
         validate_batch_evaluation_for_promotion(
             result,
             runtime_name=RUNTIME_NAME,
+            agentcore_runtime_name=AGENTCORE_RUNTIME_NAME,
             version_id=VERSION_ID,
             deployment_id=DEPLOYMENT_ID,
             runtime_id=RUNTIME_ID,
@@ -318,7 +324,7 @@ def test_evidence_write_is_identity_fenced_immutable_and_idempotent(monkeypatch)
                 owner_sub="owner-1",
                 created_at=(CREATED - timedelta(minutes=1)).isoformat(),
                 deployment_id=DEPLOYMENT_ID,
-                agentcore_runtime_name=RUNTIME_NAME,
+                agentcore_runtime_name=AGENTCORE_RUNTIME_NAME,
                 runtime_id=RUNTIME_ID,
                 runtime_arn=RUNTIME_ARN,
                 status="succeeded",
@@ -406,6 +412,7 @@ def test_production_batch_refuses_a_missing_customer_managed_key(monkeypatch):
         start_batch_evaluation(
             client,
             runtime_name=RUNTIME_NAME,
+            agentcore_runtime_name=AGENTCORE_RUNTIME_NAME,
             version_id=VERSION_ID,
             deployment_id=DEPLOYMENT_ID,
             runtime_id=RUNTIME_ID,

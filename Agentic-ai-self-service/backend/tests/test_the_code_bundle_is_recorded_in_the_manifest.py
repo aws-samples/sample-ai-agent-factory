@@ -47,7 +47,11 @@ def _s3_object_rows(store: MagicMock) -> list[dict]:
     ]
 
 
-def _run_codegen(event: dict) -> tuple[MagicMock, list[tuple[str, str]]]:
+def _run_codegen(
+    event: dict,
+    *,
+    captured_code: list[str] | None = None,
+) -> tuple[MagicMock, list[tuple[str, str]]]:
     """Invoke the real handler; return the store and exact ``(bucket, key)`` uploads."""
     from app.step_handlers import codegen_step
 
@@ -56,6 +60,8 @@ def _run_codegen(event: dict) -> tuple[MagicMock, list[tuple[str, str]]]:
 
     def _capture_upload(s3, bucket, key, code, reqs, entrypoint, **kwargs):
         uploads.append((bucket, key))
+        if captured_code is not None:
+            captured_code.append(code)
 
     with (
         patch.object(codegen_step, "_get_deployment_store", return_value=store),
@@ -91,6 +97,35 @@ def test_the_uploaded_bundle_is_recorded_with_the_key_that_was_actually_used():
     assert uploads[0][0] == BUCKET
     assert rows[0]["id"] == f"s3://{uploads[0][0]}/{uploads[0][1]}"
     assert rows[0]["region"] == REGION
+
+
+def test_production_gate_forces_otel_codegen_without_a_canvas_observability_node():
+    generated: list[str] = []
+    _run_codegen(
+        {
+            "deployment_id": "d-production-evaluation",
+            "production_gate_required": True,
+            "config": _config("release bot"),
+            "version_id": "v-evaluated",
+        },
+        captured_code=generated,
+    )
+    assert len(generated) == 1
+    assert "# OTEL observability bootstrap" in generated[0]
+    assert "_otel_force_flush()" in generated[0]
+
+    unprotected: list[str] = []
+    _run_codegen(
+        {
+            "deployment_id": "d-development",
+            "production_gate_required": False,
+            "config": _config("development bot"),
+            "version_id": "v-development",
+        },
+        captured_code=unprotected,
+    )
+    assert len(unprotected) == 1
+    assert "# OTEL observability bootstrap" not in unprotected[0]
 
 
 def test_the_versioned_and_unversioned_key_branches_are_both_recorded():

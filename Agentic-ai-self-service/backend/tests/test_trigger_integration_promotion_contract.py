@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import re
 from typing import Any
 
@@ -13,6 +14,7 @@ from tests.integration import test_trigger_delivery_matrix as matrix
 RUNTIME = "trigger_release_runtime"
 VERSION = "0" * 32
 RUNTIME_ID = "trigger_release_runtime_1234567890"
+AGENTCORE_RUNTIME_NAME = "trigger_release_runtime_deadbeef"
 
 
 class _Response:
@@ -37,16 +39,25 @@ class _Session:
         self.production_ready = production_ready
         self.budget_active = False
         self.calls: list[tuple[str, str]] = []
+        self.evaluation_sessions: dict[str, tuple[str, str]] = {}
 
     def get(self, url: str, **_kwargs) -> _Response:
         self.calls.append(("GET", url))
         if url.endswith("/api/cost/budgets"):
             budgets = (
-                [{"scope": "agent", "key": RUNTIME, "limit_usd": 100.0, "warn_pct": 100}]
-                if self.budget_active
-                else []
+                [{"scope": "agent", "key": RUNTIME, "limit_usd": 100.0, "warn_pct": 100}] if self.budget_active else []
             )
             return _Response(budgets)
+        if url.endswith("/versions"):
+            return _Response(
+                [
+                    {
+                        "runtime_name": RUNTIME,
+                        "version_id": VERSION,
+                        "agentcore_runtime_name": AGENTCORE_RUNTIME_NAME,
+                    }
+                ]
+            )
         if url.endswith("/slots"):
             return _Response(
                 {
@@ -79,10 +90,10 @@ class _Session:
             self.budget_active = True
             return _Response(json)
         if url.endswith("/slots/staging/invoke"):
-            case = next(
-                case
-                for case in matrix._RELEASE_EVALUATION_CASES
-                if case["prompt"] == json["input"]
+            case = next(case for case in matrix._RELEASE_EVALUATION_CASES if case["prompt"] == json["input"])
+            self.evaluation_sessions[json["sessionId"]] = (
+                str(case["prompt"]),
+                str(case["expected_response"]),
             )
             return _Response(
                 {
@@ -113,14 +124,38 @@ class _Session:
 
 
 class _Logs:
-    def filter_log_events(self, **_kwargs) -> dict[str, list[dict[str, str]]]:
-        return {"events": [{"message": "session visible"}]}
+    def __init__(self, session: _Session) -> None:
+        self.session = session
+
+    def filter_log_events(self, **kwargs) -> dict[str, list[dict[str, str]]]:
+        session_id = str(kwargs["filterPattern"]).strip('"')
+        assert kwargs["logGroupName"] == matrix.BATCH_EVALUATION_SPANS_LOG_GROUP
+        prompt, response = self.session.evaluation_sessions[session_id]
+        return {
+            "events": [
+                {
+                    "message": json.dumps(
+                        {
+                            "traceId": "a" * 32,
+                            "spanId": "b" * 16,
+                            "resource": {"attributes": {"service.name": f"{AGENTCORE_RUNTIME_NAME}.DEFAULT"}},
+                            "attributes": {
+                                "session.id": session_id,
+                                "gen_ai.operation.name": "invoke_agent",
+                                "gen_ai.task.input": prompt,
+                                "gen_ai.task.output": response,
+                            },
+                        }
+                    )
+                }
+            ]
+        }
 
 
 def _run(session: _Session) -> None:
     matrix._promote_staging_version_for_triggers(
         session,
-        _Logs(),
+        _Logs(session),
         runtime_name=RUNTIME,
         status={"version_id": VERSION, "runtime_id": RUNTIME_ID},
     )
@@ -140,6 +175,202 @@ def test_staging_sessions_are_evaluated_attested_and_promoted(monkeypatch) -> No
     assert len(invoke_positions) == 2
     assert max(invoke_positions) < start < attest < promote
     assert session.production_ready is True
+
+
+def _span_message(
+    *,
+    session_id: str = "session-1",
+    service_name: str = f"{AGENTCORE_RUNTIME_NAME}.DEFAULT",
+    trace_id: str = "a" * 32,
+    span_id: str = "b" * 16,
+    prompt: str = "What is two plus two?",
+    response: str = "The answer is 4.",
+) -> str:
+    return json.dumps(
+        {
+            "traceId": trace_id,
+            "spanId": span_id,
+            "resource": {"attributes": {"service.name": service_name}},
+            "attributes": {
+                "session.id": session_id,
+                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.task.input": prompt,
+                "gen_ai.task.output": response,
+            },
+        }
+    )
+
+
+def test_evaluation_span_requires_exact_session_service_ids_and_content() -> None:
+    expected = {
+        "prompt": "What is two plus two?",
+        "accepted_answers": ("4",),
+    }
+    message = _span_message()
+    assert matrix._is_evaluation_span(
+        message,
+        session_id="session-1",
+        service_name=f"{AGENTCORE_RUNTIME_NAME}.DEFAULT",
+        **expected,
+    )
+    assert not matrix._is_evaluation_span(
+        message,
+        session_id="another-session",
+        service_name=f"{AGENTCORE_RUNTIME_NAME}.DEFAULT",
+        **expected,
+    )
+    assert not matrix._is_evaluation_span(
+        message,
+        session_id="session-1",
+        service_name="another-runtime.DEFAULT",
+        **expected,
+    )
+    assert not matrix._is_evaluation_span(
+        _span_message(trace_id="not-a-trace"),
+        session_id="session-1",
+        service_name=f"{AGENTCORE_RUNTIME_NAME}.DEFAULT",
+        **expected,
+    )
+    assert not matrix._is_evaluation_span(
+        _span_message(prompt="another prompt"),
+        session_id="session-1",
+        service_name=f"{AGENTCORE_RUNTIME_NAME}.DEFAULT",
+        **expected,
+    )
+    assert not matrix._is_evaluation_span(
+        _span_message(response="[Assistant output redacted.]"),
+        session_id="session-1",
+        service_name=f"{AGENTCORE_RUNTIME_NAME}.DEFAULT",
+        **expected,
+    )
+    assert not matrix._is_evaluation_span(
+        "session-1 appeared in an ordinary application log",
+        session_id="session-1",
+        service_name=f"{AGENTCORE_RUNTIME_NAME}.DEFAULT",
+        **expected,
+    )
+
+
+class _ProductionPrivacySession:
+    base_url = "https://agents.example.com"
+
+    def __init__(self) -> None:
+        self.invocation_payload: dict[str, Any] | None = None
+
+    def get(self, url: str, **_kwargs) -> _Response:
+        assert url.endswith("/versions")
+        return _Response(
+            [
+                {
+                    "runtime_name": RUNTIME,
+                    "version_id": VERSION,
+                    "agentcore_runtime_name": AGENTCORE_RUNTIME_NAME,
+                }
+            ]
+        )
+
+    def post(self, url: str, *, json: dict[str, Any], **_kwargs) -> _Response:
+        assert url.endswith("/slots/production/invoke")
+        assert "_agentcore_evaluation_capture" not in json
+        self.invocation_payload = dict(json)
+        return _Response(
+            {
+                "success": True,
+                "slot": "production",
+                "versionId": VERSION,
+                "sessionId": json["sessionId"],
+                "response": "The capital is Paris. lavender compass",
+            }
+        )
+
+
+class _ProductionPrivacyLogs:
+    trace_id = "c" * 32
+
+    def __init__(self, session: _ProductionPrivacySession, *, leak_on_trace: bool = False) -> None:
+        self.session = session
+        self.leak_on_trace = leak_on_trace
+        self.filters: list[str] = []
+
+    def filter_log_events(self, **kwargs) -> dict[str, list[dict[str, str]]]:
+        assert kwargs["logGroupName"] == matrix.BATCH_EVALUATION_SPANS_LOG_GROUP
+        value = str(kwargs["filterPattern"]).strip('"')
+        self.filters.append(value)
+        payload = self.session.invocation_payload or {}
+        if value == payload.get("sessionId"):
+            return {
+                "events": [
+                    {
+                        "message": json.dumps(
+                            {
+                                "traceId": self.trace_id,
+                                "spanId": "d" * 16,
+                                "resource": {"attributes": {"service.name": f"{AGENTCORE_RUNTIME_NAME}.DEFAULT"}},
+                                "attributes": {"session.id": value},
+                            }
+                        )
+                    }
+                ]
+            }
+        if value == self.trace_id:
+            message = (
+                "split event leaked lavender compass"
+                if self.leak_on_trace
+                else json.dumps({"traceId": self.trace_id, "body": {"redacted": True}})
+            )
+            return {"events": [{"message": message}]}
+        raise AssertionError(f"Unexpected filter {value}")
+
+
+def test_production_privacy_canary_checks_session_and_trace_records(monkeypatch) -> None:
+    monkeypatch.setenv(matrix.EVALUATION_INDEX_SETTLE_ENV, "0")
+    monkeypatch.setattr(matrix.time, "sleep", lambda _seconds: None)
+    session = _ProductionPrivacySession()
+    logs = _ProductionPrivacyLogs(session)
+
+    matrix._assert_production_content_is_redacted(
+        session,
+        logs,
+        runtime_name=RUNTIME,
+        version_id=VERSION,
+    )
+
+    assert session.invocation_payload is not None
+    assert any(value.startswith("trigger-production-privacy-") for value in logs.filters)
+    assert logs.trace_id in logs.filters
+
+
+def test_production_privacy_canary_catches_split_trace_content(monkeypatch) -> None:
+    monkeypatch.setenv(matrix.EVALUATION_INDEX_SETTLE_ENV, "0")
+    monkeypatch.setattr(matrix.time, "sleep", lambda _seconds: None)
+    session = _ProductionPrivacySession()
+    logs = _ProductionPrivacyLogs(session, leak_on_trace=True)
+
+    with pytest.raises(AssertionError, match="split-telemetry"):
+        matrix._assert_production_content_is_redacted(
+            session,
+            logs,
+            runtime_name=RUNTIME,
+            version_id=VERSION,
+        )
+
+
+def test_filtered_span_reader_collects_every_page() -> None:
+    class PagedLogs:
+        def filter_log_events(self, **kwargs):
+            token = kwargs.get("nextToken")
+            if token is None:
+                return {
+                    "events": [{"message": "first"}],
+                    "nextToken": "page-2",
+                }
+            assert token == "page-2"
+            return {"events": [{"message": "second"}]}
+
+    assert matrix._filtered_log_messages(PagedLogs(), '"session"') == [
+        "first",
+        "second",
+    ]
 
 
 def test_failed_batch_evaluation_never_promotes(monkeypatch) -> None:

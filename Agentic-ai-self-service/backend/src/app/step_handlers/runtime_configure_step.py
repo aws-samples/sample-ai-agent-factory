@@ -310,6 +310,8 @@ def handler(event: dict, context) -> dict:
             enable_otel_legacy=bool(getattr(config, "enable_otel", False)),
             platform_defaults=platform_observability_defaults,
             trusted_auth_secret_arns=event.get("recorded_secret_arns") or (),
+            production_evaluation_required=bool(event.get("production_gate_required")),
+            target_region=region,
         )
         env_vars.update(otel_env)
 
@@ -393,6 +395,7 @@ def handler(event: dict, context) -> dict:
             s3_bucket=s3_bucket,
             s3_key=s3_key,
             entrypoint=entrypoint,
+            instrument_observability=bool(event.get("production_gate_required")),
             python_runtime=config.python_runtime or "PYTHON_3_13",
             protocol=server_protocol,
             env_vars=env_vars if env_vars else None,

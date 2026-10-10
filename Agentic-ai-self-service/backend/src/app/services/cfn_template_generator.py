@@ -3143,6 +3143,7 @@ _LEGACY_TOOL_SCHEMAS: dict[str, dict] = {
 # tests/test_cfn_export_contract.py parses that script and compares, because a
 # silent divergence here means a stack that deploys and then dies at import.
 _OTEL_PACKAGES = [
+    "aws-opentelemetry-distro",
     "opentelemetry-api",
     "opentelemetry-sdk",
     "opentelemetry-semantic-conventions",
@@ -3762,7 +3763,7 @@ DEPENDENCY_BUNDLE_CONSTRAINTS: tuple[str, ...] = (
     "pillow==12.2.0",
     "prompt-toolkit==3.0.53",
     "propcache==0.5.4",
-    "protobuf==7.36.2",
+    "protobuf==6.33.5",
     "pyasn1==0.6.4",
     "pyasn1-modules==0.4.2",
     "pycparser==3.0",
@@ -3805,6 +3806,63 @@ DEPENDENCY_BUNDLE_CONSTRAINTS: tuple[str, ...] = (
     "websockets==16.1.1",
     "wrapt==2.5.0",
     "yarl==1.25.1",
+    # AWS ADOT 0.21.0 direct-code instrumentation graph.
+    "asgiref==3.12.1",
+    "aws-opentelemetry-distro==0.21.0",
+    "cachetools==6.2.4",
+    "grpcio==1.84.0",
+    "opentelemetry-distro==0.65b0",
+    "opentelemetry-exporter-otlp-proto-grpc==1.44.0",
+    "opentelemetry-instrumentation-aio-pika==0.65b0",
+    "opentelemetry-instrumentation-aiohttp-client==0.65b0",
+    "opentelemetry-instrumentation-aiokafka==0.65b0",
+    "opentelemetry-instrumentation-aiopg==0.65b0",
+    "opentelemetry-instrumentation-asgi==0.65b0",
+    "opentelemetry-instrumentation-asyncpg==0.65b0",
+    "opentelemetry-instrumentation-aws-lambda==0.65b0",
+    "opentelemetry-instrumentation-boto3sqs==0.65b0",
+    "opentelemetry-instrumentation-botocore==0.65b0",
+    "opentelemetry-instrumentation-cassandra==0.65b0",
+    "opentelemetry-instrumentation-celery==0.65b0",
+    "opentelemetry-instrumentation-confluent-kafka==0.65b0",
+    "opentelemetry-instrumentation-dbapi==0.65b0",
+    "opentelemetry-instrumentation-django==0.65b0",
+    "opentelemetry-instrumentation-falcon==0.65b0",
+    "opentelemetry-instrumentation-fastapi==0.65b0",
+    "opentelemetry-instrumentation-flask==0.65b0",
+    "opentelemetry-instrumentation-grpc==0.65b0",
+    "opentelemetry-instrumentation-httpx==0.65b0",
+    "opentelemetry-instrumentation-jinja2==0.65b0",
+    "opentelemetry-instrumentation-kafka-python==0.65b0",
+    "opentelemetry-instrumentation-logging==0.65b0",
+    "opentelemetry-instrumentation-mysql==0.65b0",
+    "opentelemetry-instrumentation-mysqlclient==0.65b0",
+    "opentelemetry-instrumentation-pika==0.65b0",
+    "opentelemetry-instrumentation-psycopg2==0.65b0",
+    "opentelemetry-instrumentation-pymemcache==0.65b0",
+    "opentelemetry-instrumentation-pymongo==0.65b0",
+    "opentelemetry-instrumentation-pymysql==0.65b0",
+    "opentelemetry-instrumentation-pyramid==0.65b0",
+    "opentelemetry-instrumentation-redis==0.65b0",
+    "opentelemetry-instrumentation-remoulade==0.65b0",
+    "opentelemetry-instrumentation-requests==0.65b0",
+    "opentelemetry-instrumentation-sqlalchemy==0.65b0",
+    "opentelemetry-instrumentation-sqlite3==0.65b0",
+    "opentelemetry-instrumentation-starlette==0.65b0",
+    "opentelemetry-instrumentation-system-metrics==0.65b0",
+    "opentelemetry-instrumentation-tornado==0.65b0",
+    "opentelemetry-instrumentation-tortoiseorm==0.65b0",
+    "opentelemetry-instrumentation-urllib==0.65b0",
+    "opentelemetry-instrumentation-urllib3==0.65b0",
+    "opentelemetry-instrumentation-wsgi==0.65b0",
+    "opentelemetry-processor-baggage==0.65b0",
+    "opentelemetry-propagator-aws-xray==1.0.2",
+    "opentelemetry-propagator-b3==1.44.0",
+    "opentelemetry-propagator-jaeger==1.44.0",
+    "opentelemetry-propagator-ot-trace==0.65b0",
+    "opentelemetry-sdk-extension-aws==2.1.0",
+    "opentelemetry-util-http==0.65b0",
+    "psutil==7.2.2",
     "zipp==4.1.1",
 )
 
@@ -6209,7 +6267,6 @@ class CfnTemplateGenerator:
                 "Resource": _log_group_resources(),
             },
         ]
-
         # `has_gateway` already includes "gateway" in connected_tools (see generate()),
         # so an `or "gateway" in connected_tools` here would add nothing — except that
         # it also undid the caller's deliberate `has_gateway and not is_litellm`, and
@@ -9491,7 +9548,11 @@ def handler(event, context):
                                 "Prefix": {"Fn::GetAtt": ["AgentCodePackage", "CodeZipPrefix"]},
                             }
                         },
-                        "EntryPoint": [config.entrypoint or "agent.py"],
+                        "EntryPoint": (
+                            ["opentelemetry-instrument", config.entrypoint or "agent.py"]
+                            if otel_env
+                            else [config.entrypoint or "agent.py"]
+                        ),
                         "Runtime": config.python_runtime or "PYTHON_3_13",
                     }
                 },
@@ -10587,8 +10648,16 @@ run_pip install \\
     {package_args}
 
 # Strip caches and installer-generated files that are not imported at runtime.
-# Console-script shebangs embed the absolute --target path, and RECORD hashes those
-# path-dependent bytes; both must be absent for byte-reproducible output.
+# Preserve only the AWS-documented opentelemetry-instrument command, moving it
+# to the bundle root with a path-neutral shebang; every other console script and
+# every RECORD hash remains path-dependent and is removed.
+if [[ -f "${{BUILD_DIR:?}}/bin/opentelemetry-instrument" ]]; then
+    {{
+        printf '#!/usr/bin/env python3\\n'
+        tail -n +2 "${{BUILD_DIR:?}}/bin/opentelemetry-instrument"
+    }} >"${{BUILD_DIR:?}}/opentelemetry-instrument"
+    chmod 0755 "${{BUILD_DIR:?}}/opentelemetry-instrument"
+fi
 rm -rf "${{BUILD_DIR:?}}/bin"
 find "$BUILD_DIR" -type d -name '__pycache__' -exec rm -rf {{}} + 2>/dev/null || true
 find "$BUILD_DIR" -type f -name '*.pyc' -delete 2>/dev/null || true

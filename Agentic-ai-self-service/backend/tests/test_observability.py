@@ -215,6 +215,59 @@ def test_langfuse_default_with_extra_headers_uses_default_endpoint():
     assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == ("https://cloud.langfuse.com/api/public/otel")
 
 
+def test_production_evaluation_forces_native_adot_even_when_canvas_disables_otel():
+    env = build_otel_env_vars(
+        {"enableOtel": False},
+        runtime_name="release_bot_deadbeef",
+        deployment_id="dep-release",
+        production_evaluation_required=True,
+        target_region="eu-west-1",
+    )
+
+    assert env["AGENT_OBSERVABILITY_ENABLED"] == "true"
+    assert env["UNIFIED_TRACES_DESTINATION_ENABLED"] == "false"
+    assert env["OTEL_PYTHON_DISTRO"] == "aws_distro"
+    assert env["OTEL_PYTHON_CONFIGURATOR"] == "aws_configurator"
+    assert env["OTEL_TRACES_EXPORTER"] == "otlp"
+    assert env["OTEL_LOGS_EXPORTER"] == "none"
+    assert env["OTEL_METRICS_EXPORTER"] == "none"
+    assert env["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] == "http/protobuf"
+    assert env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] == ("https://xray.eu-west-1.amazonaws.com/v1/traces")
+    assert env["OTEL_SERVICE_NAME"] == "release_bot_deadbeef.DEFAULT"
+    assert env["OTEL_TRACES_SAMPLER"] == "always_on"
+    assert env["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"] == "false"
+    assert env["AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT"] == "true"
+    assert env["OTEL_SEMCONV_STABILITY_OPT_IN"].endswith("gen_ai_unredacted_attributes=")
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in env
+
+
+def test_production_evaluation_trace_endpoint_overrides_external_trace_routing():
+    env = build_otel_env_vars(
+        {
+            "enabled": True,
+            "provider": "custom",
+            "otlp_endpoint": "https://otel.example/v1",
+        },
+        runtime_name="release_bot_deadbeef",
+        production_evaluation_required=True,
+        target_region="eu-west-1",
+    )
+
+    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "https://otel.example/v1"
+    assert env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] == ("https://xray.eu-west-1.amazonaws.com/v1/traces")
+    assert env["OTEL_SERVICE_NAME"] == "release_bot_deadbeef.DEFAULT"
+
+
+def test_production_evaluation_rejects_an_invalid_target_region():
+    with pytest.raises(ValueError, match="valid AWS Region"):
+        build_otel_env_vars(
+            None,
+            runtime_name="release_bot_deadbeef",
+            production_evaluation_required=True,
+            target_region="not-a-region",
+        )
+
+
 def test_inject_otel_adds_bootstrap_after_app_init():
     src = '''"""Test"""
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
@@ -361,11 +414,86 @@ _otel_force_flush()
     assert "TOKEN-MUST-NOT-LEAK" not in combined
 
 
+def test_evaluation_span_captures_only_marked_staging_content():
+    script = (
+        "from opentelemetry import trace\n"
+        "from opentelemetry.sdk.trace import TracerProvider\n"
+        "from opentelemetry.sdk.trace.export import SimpleSpanProcessor\n"
+        "from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter\n"
+        "exporter = InMemorySpanExporter()\n"
+        "provider = TracerProvider()\n"
+        "provider.add_span_processor(SimpleSpanProcessor(exporter))\n"
+        "trace.set_tracer_provider(provider)\n"
+        + OTEL_BOOTSTRAP
+        + """
+seen = []
+def invoke(payload):
+    seen.append(dict(payload))
+    return {"response": "The answer is 4."}
+
+_otel_invoke_with_evaluation_span(
+    invoke,
+    {"prompt": "PRODUCTION-MUST-STAY-REDACTED", "session_id": "prod-session"},
+)
+_otel_invoke_with_evaluation_span(
+    invoke,
+    {
+        "prompt": "What is two plus two?",
+        "session_id": "staging-session",
+        "_agentcore_evaluation_capture": True,
+    },
+)
+_otel_force_flush()
+spans = [span for span in exporter.get_finished_spans() if span.name == "invoke_agent"]
+assert len(spans) == 1, spans
+attrs = dict(spans[0].attributes)
+assert attrs["gen_ai.operation.name"] == "invoke_agent"
+assert attrs["session.id"] == "staging-session"
+assert attrs["gen_ai.task.input"] == "What is two plus two?"
+assert attrs["gen_ai.task.output"] == "The answer is 4."
+assert "agentcore.invocation.user_prompt" not in attrs
+assert "agentcore.invocation.agent_response" not in attrs
+assert "PRODUCTION-MUST-STAY-REDACTED" not in repr(attrs)
+assert all("_agentcore_evaluation_capture" not in payload for payload in seen)
+assert len(_otel_evaluation_text("x" * 40000)) == 12000
+"""
+    )
+    env = os.environ.copy()
+    env.pop("OTEL_EXPORTER_OTLP_ENDPOINT", None)
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 def test_inject_otel_resilient_when_no_app_marker():
     """Should still produce valid Python even if the marker isn't present."""
     out = _inject_otel("print('no app here')\n")
     # Doesn't crash and doesn't leave the file empty.
     assert "print" in out
+
+
+def test_bootstrap_reuses_a_preconfigured_sdk_tracer_provider():
+    script = (
+        "from opentelemetry import trace\n"
+        "from opentelemetry.sdk.trace import TracerProvider\n"
+        "provider = TracerProvider()\n"
+        "trace.set_tracer_provider(provider)\n" + OTEL_BOOTSTRAP + "\nassert _otel_provider is provider\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Overriding of current TracerProvider is not allowed" not in result.stderr
 
 
 # ---------------------------------------------------------------------------

@@ -122,6 +122,7 @@ class OwnedRuntimeTarget:
     account_id: str | None
     role_arn: str | None
     session: Any
+    production_gate_required: bool | None = None
     evaluation_kms_key_arn: str | None = None
     runtime_arn: str = ""
     protocol: str = "HTTP"
@@ -167,6 +168,7 @@ def _target_from_deployment(
     expected_runtime_id: str | None = None,
     expected_runtime_arn: str | None = None,
     expected_evaluation_kms_key_arn: str | None = None,
+    production_gate_required: bool | None = None,
     required_protocol: str | None = None,
 ) -> OwnedRuntimeTarget:
     """Validate one deployment authority row and build its frozen target session."""
@@ -276,6 +278,7 @@ def _target_from_deployment(
         account_id=target_event["target_account_id"],
         role_arn=target_event["target_role_arn"],
         session=session,
+        production_gate_required=production_gate_required,
         evaluation_kms_key_arn=evaluation_kms_key_arn,
         runtime_arn=runtime_arn,
         protocol=protocol,
@@ -358,6 +361,7 @@ def resolve_owned_runtime_version_target(
         expected_runtime_id=str(version.runtime_id),
         expected_runtime_arn=str(version.runtime_arn),
         expected_evaluation_kms_key_arn=version_evaluation_key,
+        production_gate_required=version.production_gate_required,
         required_protocol=required_protocol,
     )
 
@@ -439,6 +443,7 @@ def resolve_owned_runtime_slot_target(
         expected_runtime_id=str(version.runtime_id),
         expected_runtime_arn=str(version.runtime_arn or ""),
         expected_evaluation_kms_key_arn=version_evaluation_key,
+        production_gate_required=version.production_gate_required,
         required_protocol=required_protocol,
     )
 

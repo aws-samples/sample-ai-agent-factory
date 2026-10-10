@@ -216,6 +216,50 @@ def test_production_and_staging_invoke_distinct_exact_targets(harness):
     ]
 
 
+def test_only_a_production_gated_staging_route_marks_evaluation_content(harness):
+    evaluation_key = f"arn:aws:kms:{REGION}:{ACCOUNT}:key/evaluation-key"
+    harness.versions[V2] = replace(
+        harness.versions[V2],
+        production_gate_required=True,
+        evaluation_kms_key_arn=evaluation_key,
+    )
+    harness.deployments[f"dep-{V2[-8:]}"] = _deployment(
+        V2,
+        evaluation_kms_key_arn=evaluation_key,
+    )
+
+    production = harness.invoke("production", sessionId="production-session")
+    staging = harness.invoke("staging", sessionId="staging-session")
+
+    assert production.status_code == 200, production.text
+    assert staging.status_code == 200, staging.text
+    production_payload, staging_payload = [json.loads(call["payload"]) for call in harness.agentcore.invocations]
+    assert "_agentcore_evaluation_capture" not in production_payload
+    assert staging_payload["_agentcore_evaluation_capture"] is True
+    assert staging_payload["prompt"] == "probe-staging"
+    assert staging_payload["session_id"] == "staging-session"
+
+    # The public schema is the authority boundary: a caller cannot turn a
+    # production invocation into a content-bearing evaluation span.
+    injected = harness.client.post(
+        f"/api/runtimes/{NAME}/slots/production/invoke",
+        json={
+            "input": "must remain redacted",
+            "_agentcore_evaluation_capture": True,
+        },
+    )
+    assert injected.status_code == 422
+    assert len(harness.agentcore.invocations) == 2
+
+
+def test_ungated_staging_route_cannot_mark_evaluation_content(harness):
+    response = harness.invoke("staging", sessionId="ungated-staging-session")
+
+    assert response.status_code == 200, response.text
+    payload = json.loads(harness.agentcore.invocations[-1]["payload"])
+    assert "_agentcore_evaluation_capture" not in payload
+
+
 @pytest.mark.parametrize("status_code", [500, 302, "200", True])
 def test_explicit_unsuccessful_or_malformed_runtime_status_fails_closed(
     harness,

@@ -109,6 +109,8 @@ REQUIRED_PINS = frozenset(
         "opentelemetry-sdk",
         "opentelemetry-semantic-conventions",
         "opentelemetry-exporter-otlp-proto-http",
+        "opentelemetry-exporter-otlp-proto-grpc",
+        "aws-opentelemetry-distro",
         "boto3",
         "botocore",
         "openai",

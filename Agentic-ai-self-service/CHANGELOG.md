@@ -5,6 +5,36 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed — production evaluation emits real AgentCore spans
+
+- Production-gated code deployments now run through the AWS-documented
+  `opentelemetry-instrument` entrypoint with exact `aws-opentelemetry-distro`
+  `0.21.0`. The gate forces framework-wide content redaction while the
+  owner-checked staging slot of an immutable production-gated version adds a
+  private marker that generated code strips
+  before execution and converts into one documented `invoke_agent` span with
+  `gen_ai.task.input/output`. Production-slot callers cannot set that marker;
+  the live matrix invokes a unique post-promotion canary and requires its prompt
+  and expected response phrase to remain absent from every correlated
+  `aws/spans` record. Trace export uses
+  the target Region's SigV4-protected X-Ray OTLP endpoint and shared `aws/spans`
+  without granting tenant runtimes account-wide `logs:PutResourcePolicy`.
+- Batch Evaluation now selects the documented
+  `<AgentCoreRuntimeName>.DEFAULT` service identity rather than the opaque
+  runtime ID, and reads the shared span group the platform IAM already governs.
+  A live Ireland job exposed both defects by failing all five sessions with
+  `JobProcessorCustomerException: No spans were found for the session`.
+- The real trigger matrix now waits for structured records with exact session,
+  service, trace, and span IDs—not any application-log mention—then observes the
+  documented indexing settle window. Its Transaction Search lease captures the
+  account's destination/indexing state, registers every cleanup before mutation,
+  enables 100% indexing for the run, and restores and verifies the original
+  state and temporary resource-policy absence on every exit path. A failed
+  restoration retains both its in-memory retry handle and 0600 durable state;
+  an explicit replacement-process recovery validates account, Region, schema,
+  ranges, flags, policy namespace, and exact policy ownership before mutating
+  any account-global setting.
+
 
 ### Fixed — frozen promotion evidence survives DynamoDB persistence
 

@@ -37,6 +37,15 @@ TARGET_QUERY_ACTIONS = {
     "logs:CreateLogStream",
     "logs:PutLogEvents",
     "logs:PutRetentionPolicy",
+    "xray:GetIndexingRules",
+    "xray:GetTraceSegmentDestination",
+}
+
+RUNTIME_TRACE_EXPORT_ACTIONS = {
+    "xray:PutTraceSegments",
+    "xray:PutTelemetryRecords",
+    "xray:GetSamplingRules",
+    "xray:GetSamplingTargets",
 }
 
 
@@ -86,15 +95,50 @@ def _deployment_function(template: dict) -> dict:
     return matches[0]
 
 
-def _documented_target_statements() -> list[dict]:
+def _documented_target_document() -> dict:
     repository = Path(__file__).resolve().parents[2]
-    document = json.loads((repository / "docs" / "cross-account-deploy-role.json").read_text())
+    return json.loads((repository / "docs" / "cross-account-deploy-role.json").read_text())
+
+
+def _documented_target_statements() -> list[dict]:
+    document = _documented_target_document()
     return [
         statement
         for name, policy in document.items()
         if name.startswith("permissions-policy") and name.endswith(".json")
         for statement in policy["Statement"]
     ]
+
+
+def _documented_runtime_statements() -> list[dict]:
+    return _documented_target_document()["_STEP_2_runtime-role-permissions.json"]["Statement"]
+
+
+def test_model_runtime_role_has_only_the_exact_trace_export_actions(template):
+    role_id = role_logical_id(template, "SharedRuntimeExecRole")
+    statements = [statement for _, statement in statements_for_role(template, role_id)]
+    matches = [
+        statement
+        for statement in statements
+        if RUNTIME_TRACE_EXPORT_ACTIONS & set(_listify(statement.get("Action") or []))
+    ]
+    assert len(matches) == 1
+    assert matches[0]["Effect"] == "Allow"
+    assert set(_listify(matches[0]["Action"])) == RUNTIME_TRACE_EXPORT_ACTIONS
+    assert _listify(matches[0]["Resource"]) == ["*"]
+
+
+def test_model_free_mcp_runtime_role_has_no_trace_export_authority(template):
+    role_id = role_logical_id(template, "SharedMcpRuntimeExecRole")
+    actions = _allowed_actions([statement for _, statement in statements_for_role(template, role_id)])
+    assert not (RUNTIME_TRACE_EXPORT_ACTIONS & actions)
+
+
+def test_removing_runtime_trace_export_is_caught(template):
+    role_id = role_logical_id(template, "SharedRuntimeExecRole")
+    actions = _allowed_actions([statement for _, statement in statements_for_role(template, role_id)])
+    mutated = actions - {"xray:PutTraceSegments"}
+    assert RUNTIME_TRACE_EXPORT_ACTIONS - mutated == {"xray:PutTraceSegments"}
 
 
 def test_deployment_api_role_can_query_a_same_account_regional_runtime(template):
@@ -105,6 +149,26 @@ def test_deployment_api_role_can_query_a_same_account_regional_runtime(template)
     )
 
 
+def test_documented_cross_account_runtime_has_exact_trace_export_authority():
+    runtime_statements = _documented_runtime_statements()
+    matches = [
+        statement
+        for statement in runtime_statements
+        if RUNTIME_TRACE_EXPORT_ACTIONS & set(_listify(statement.get("Action") or []))
+    ]
+    assert len(matches) == 1
+    assert matches[0]["Sid"] == "RuntimeAgentCoreEvaluationTraceExport"
+    assert set(_listify(matches[0]["Action"])) == RUNTIME_TRACE_EXPORT_ACTIONS
+    assert _listify(matches[0]["Resource"]) == ["*"]
+
+    deployment_actions = _allowed_actions(_documented_target_statements())
+    assert {
+        "xray:PutTraceSegments",
+        "xray:PutTelemetryRecords",
+        "xray:GetSamplingTargets",
+    }.isdisjoint(deployment_actions)
+
+
 def test_deployment_api_receives_a_trusted_home_account_identifier(template):
     environment = _deployment_function(template).get("Properties", {}).get("Environment", {}).get("Variables", {})
     state_machine_arn = environment.get("STATE_MACHINE_ARN")
@@ -112,6 +176,28 @@ def test_deployment_api_receives_a_trusted_home_account_identifier(template):
     state_machine_id = state_machine_arn.get("Ref")
     assert state_machine_id
     assert template["Resources"][state_machine_id]["Type"] == "AWS::StepFunctions::StateMachine"
+
+
+def test_batch_evaluation_trace_preflight_is_isolated_and_read_only(template):
+    role_statements = _deployment_role_statements(template)
+    preflight_actions = {
+        "xray:GetIndexingRules",
+        "xray:GetTraceSegmentDestination",
+    }
+    matches = [
+        statement for statement in role_statements if preflight_actions & set(_listify(statement.get("Action") or []))
+    ]
+    assert len(matches) == 1
+    assert matches[0]["Effect"] == "Allow"
+    assert set(_listify(matches[0]["Action"])) == preflight_actions
+    assert _listify(matches[0]["Resource"]) == ["*"]
+    assert not any(action.startswith("logs:") for action in _listify(matches[0].get("Action") or []))
+
+
+def test_removing_transaction_search_preflight_permission_is_caught(template):
+    actions = _allowed_actions(_deployment_role_statements(template))
+    mutated = actions - {"xray:GetTraceSegmentDestination"}
+    assert TARGET_QUERY_ACTIONS - mutated == {"xray:GetTraceSegmentDestination"}
 
 
 def test_deployment_api_role_can_assume_only_the_fixed_target_role(template):

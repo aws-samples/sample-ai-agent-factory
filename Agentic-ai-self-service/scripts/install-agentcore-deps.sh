@@ -116,6 +116,16 @@ install_packages() {
 remove_cache_files() {
   local target_dir="$1"
 
+  # Production-gated runtimes use the AWS-documented direct-code entrypoint
+  # ["opentelemetry-instrument", "agent.py"]. Preserve that one script at the
+  # bundle root with a path-neutral shebang; remove every other console script.
+  if [[ -f "${target_dir:?}/bin/opentelemetry-instrument" ]]; then
+    {
+      printf '#!/usr/bin/env python3\n'
+      tail -n +2 "${target_dir:?}/bin/opentelemetry-instrument"
+    } >"${target_dir:?}/opentelemetry-instrument"
+    chmod 0755 "${target_dir:?}/opentelemetry-instrument"
+  fi
   rm -rf "${target_dir:?}/bin"
   find "${target_dir}" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
   find "${target_dir}" -type f -name "*.pyc" -delete 2>/dev/null || true
@@ -206,6 +216,7 @@ main() {
   # native CloudWatch sidecar, etc.). Strands' setup_otlp_exporter() lazily
   # imports the HTTP exporter, so it MUST be in the bundle.
   local otel_packages=(
+    "aws-opentelemetry-distro"
     "opentelemetry-api"
     "opentelemetry-sdk"
     "opentelemetry-semantic-conventions"

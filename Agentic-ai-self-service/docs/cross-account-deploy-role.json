@@ -86,6 +86,17 @@
         "Resource": "*"
       },
       {
+        "Sid": "RuntimeAgentCoreEvaluationTraceExport",
+        "Effect": "Allow",
+        "Action": [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords",
+          "xray:GetSamplingRules",
+          "xray:GetSamplingTargets"
+        ],
+        "Resource": "*"
+      },
+      {
         "Sid": "RuntimeSecretReferences",
         "Effect": "Allow",
         "Action": [
@@ -97,7 +108,7 @@
       }
     ]
   },
-  "_STEP_2_runtime-role-notes": "Create AgentCoreFlowsRuntimeRole with _STEP_2_runtime-role-trust.json, attach _STEP_2_runtime-role-permissions.json, replace <TARGET_ARTIFACT_BUCKET>, then wait for IAM propagation before registering the target. Both the primary Runtime and any hosted MCP Runtime use this stable role and read their final code zips from the target bucket. The platform validates long-lived provider/OTEL source secrets, then stages deployment-bound copies under agentcore-connector/ in the target account. The runtime receives only those copied ARNs and dereferences them itself because GetAgentRuntime exposes environment variables; without RuntimeSecretReferences a deploy can reach SUCCESS while every model or gateway call fails with AccessDenied. The stable runtime role deliberately cannot read agentcore-provider/ or agentcore-otel/ source namespaces. Cross-account HITL is not yet supported because the approval queue and API are platform-account data; admission rejects that combination rather than silently pointing a target Runtime at the wrong DynamoDB table.",
+  "_STEP_2_runtime-role-notes": "Create AgentCoreFlowsRuntimeRole with _STEP_2_runtime-role-trust.json, attach _STEP_2_runtime-role-permissions.json, replace <TARGET_ARTIFACT_BUCKET>, then wait for IAM propagation before registering the target. The stable model Runtime role includes the four AWS-documented X-Ray trace export/sampling actions because production-gated target runtimes launch through AWS ADOT and Batch Evaluation consumes their spans; the separate model-free MCP role receives none. Both the primary Runtime and any hosted MCP Runtime use their corresponding stable role and read their final code zips from the target bucket. The platform validates long-lived provider/OTEL source secrets, then stages deployment-bound copies under agentcore-connector/ in the target account. The runtime receives only those copied ARNs and dereferences them itself because GetAgentRuntime exposes environment variables; without RuntimeSecretReferences a deploy can reach SUCCESS while every model or gateway call fails with AccessDenied. The stable runtime role deliberately cannot read agentcore-provider/ or agentcore-otel/ source namespaces. Cross-account HITL is not yet supported because the approval queue and API are platform-account data; admission rejects that combination rather than silently pointing a target Runtime at the wrong DynamoDB table.",
   "_STEP_3_mcp-runtime-role-trust.json": {
     "Version": "2012-10-17",
     "Statement": [
@@ -845,6 +856,7 @@
         "Effect": "Allow",
         "Action": [
           "xray:GetIndexingRules",
+          "xray:GetTraceSegmentDestination",
           "xray:UpdateIndexingRule",
           "xray:GetGroup",
           "xray:GetGroups",

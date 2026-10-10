@@ -134,13 +134,20 @@ def test_shared_role_selection_keeps_the_model_role_for_agents(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("artifact_kind", "expects_model_access"),
-    [("mcp", False), ("strands", True)],
+    ("artifact_kind", "production_gate", "expects_model_access", "expects_trace_export"),
+    [
+        ("mcp", False, False, False),
+        ("mcp", True, False, False),
+        ("strands", False, True, False),
+        ("strands", True, True, True),
+    ],
 )
 def test_per_agent_policy_matches_the_runtime_artifact(
     monkeypatch,
     artifact_kind,
+    production_gate,
     expects_model_access,
+    expects_trace_export,
 ):
     from app.step_handlers import iam_step
 
@@ -174,6 +181,7 @@ def test_per_agent_policy_matches_the_runtime_artifact(
         {
             "deployment_id": f"dep-per-agent-{artifact_kind}",
             "runtime_artifact_kind": artifact_kind,
+            "production_gate_required": production_gate,
             "identity_config": {"mode": "per_agent"},
             "agentcore_runtime_name": f"{artifact_kind}_runtime",
             "config": {
@@ -193,6 +201,13 @@ def test_per_agent_policy_matches_the_runtime_artifact(
         "bedrock:InvokeModelWithResponseStream",
     }.issubset(actions)
     assert has_model_access is expects_model_access
+    trace_actions = {
+        "xray:PutTraceSegments",
+        "xray:PutTelemetryRecords",
+        "xray:GetSamplingRules",
+        "xray:GetSamplingTargets",
+    }
+    assert trace_actions.issubset(actions) is expects_trace_export
 
 
 def test_hosted_mcp_server_role_is_model_free(monkeypatch):

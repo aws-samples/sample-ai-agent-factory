@@ -90,16 +90,34 @@ Integration tests perform real AWS API calls with zero mocking. They require:
   its unique agent-scoped budget and verifies deletion in `finally`.
 - The trigger-delivery matrix also requires direct test-runner permission to
   read the platform triggers table, publish a custom EventBridge event, inspect
-  EventBridge rules and webhook secrets, read the generated Runtime CloudWatch
-  log group, and create/delete one temporary private S3 bucket. Set
+  EventBridge rules and webhook secrets, query shared `aws/spans`, and
+  create/delete one temporary private S3 bucket. Set
   `INTEGRATION_TRIGGERS_TABLE_NAME` to the exact deployed table name (normally
-  `<project>-<environment>-triggers`). In production-like environments the
-  matrix invokes ordinary low-entropy factual prompts, rejects Guardrail
-  redaction placeholders, waits for those session IDs in AgentCore logs, runs
-  and attests the configured Batch Evaluation, and promotes the exact version
-  before exercising production-only triggers. It deliberately does not use
-  random exact-output markers, which production Guardrails can classify as
-  prompt-injection or sensitive-token content.
+  `<project>-<environment>-triggers`). CloudWatch Transaction Search is an AWS
+  prerequisite for Batch Evaluation. By default the matrix fails closed unless
+  the Region is already `ACTIVE/CloudWatchLogs` with indexing above 0%. A
+  controlled throwaway account may set `INTEGRATION_MANAGE_TRANSACTION_SEARCH=true`
+  plus an absolute `INTEGRATION_TRANSACTION_SEARCH_STATE_FILE`; the fixture then
+  creates one exact X-Ray-to-Logs resource policy, raises indexing to 100%, and
+  restores and verifies the captured destination/indexing and policy absence in
+  teardown. The durable state file is retained if restoration cannot be proven;
+  set `INTEGRATION_RESTORE_TRANSACTION_SEARCH_STATE=true` on the next run to
+  validate that file's account, Region, schema, ranges, mutation flags, and
+  policy ownership, restore it, and only then acquire a fresh lease. Recovery
+  refuses an unrelated or modified resource policy before changing any
+  account-global X-Ray setting. In production-like environments the matrix
+  invokes ordinary low-entropy factual prompts through the owner-checked
+  staging slot of an immutable production-gated version. Only that trusted
+  route adds a private marker; generated code
+  strips it before agent execution and emits one content-bearing `invoke_agent`
+  span with the documented `gen_ai.task.input/output` attributes. Framework
+  capture remains redacted. After promotion, the matrix invokes a unique
+  production canary and proves its prompt and expected response phrase are absent
+  from every correlated shared-span record before testing trigger delivery. It also rejects Guardrail
+  redaction placeholders, waits for exact session ID, documented
+  `<AgentCoreRuntimeName>.DEFAULT` service name, trace ID, and span ID, then
+  waits the documented ingestion-settle window before starting and attesting
+  Batch Evaluation and promoting the exact version.
 
 ```bash
 cd backend
@@ -109,6 +127,11 @@ export API_GATEWAY_URL="https://XXXXXXXXXX.execute-api.us-east-1.amazonaws.com"
 export AWS_REGION="us-east-1"
 export API_BEARER_TOKEN="<Cognito access token for g-users-default + t-user + g-admins-cost>"
 export INTEGRATION_TRIGGERS_TABLE_NAME="<project>-<environment>-triggers"
+# Throwaway-account automation only: capture, enable, then restore Transaction Search.
+export INTEGRATION_MANAGE_TRANSACTION_SEARCH="true"
+export INTEGRATION_TRANSACTION_SEARCH_STATE_FILE="$PWD/../build/transaction-search-state.json"
+# Recovery only after an interrupted/failed cleanup retained that exact state file:
+# export INTEGRATION_RESTORE_TRANSACTION_SEARCH_STATE="true"
 # Optional: raise the default 12-minute per-delivery wait for a slow account.
 export INTEGRATION_TRIGGER_TIMEOUT_SECONDS="900"
 

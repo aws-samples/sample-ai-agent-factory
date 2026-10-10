@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 from datetime import UTC, datetime
@@ -49,6 +50,7 @@ _BATCH_ARN = re.compile(
     r"^arn:(?P<partition>aws(?:-[a-z0-9-]+)?):bedrock-agentcore:"
     r"(?P<region>[a-z0-9-]+):(?P<account>[0-9]{12}):batch-evaluate/(?P<batch>[A-Za-z0-9_-]+)$"
 )
+_BATCH_EVALUATION_SPANS_LOG_GROUP = "aws/spans"
 _KMS_ARN = re.compile(
     r"^arn:(?P<partition>aws(?:-[a-z0-9-]+)?):kms:"
     r"(?P<region>[a-z0-9-]+):(?P<account>[0-9]{12}):key/[0-9a-fA-F-]{36}$"
@@ -65,6 +67,15 @@ class PromotionEvidenceError(ValueError):
 
 class PromotionEvidencePending(PromotionEvidenceError):
     """The named batch evaluation has not reached a terminal success state."""
+
+
+def agentcore_runtime_service_name(agentcore_runtime_name: str) -> str:
+    """Return the CloudWatch service name documented for Runtime endpoints."""
+
+    normalized = str(agentcore_runtime_name or "").strip()
+    if not normalized or re.fullmatch(r"[A-Za-z0-9_]{1,48}", normalized) is None:
+        raise PromotionEvidenceError("The version has no valid AgentCore runtime name for evaluation")
+    return f"{normalized}.DEFAULT"
 
 
 def _canonical_json(value: Any) -> str:
@@ -227,10 +238,44 @@ def _scenario_ground_truth(scenario: dict[str, Any]) -> dict[str, Any]:
     return {"inline": inline}
 
 
+def require_transaction_search(xray_client: Any) -> None:
+    """Require the account-level CloudWatch span path Batch Evaluation consumes."""
+
+    try:
+        destination = xray_client.get_trace_segment_destination()
+        indexing_response = xray_client.get_indexing_rules()
+        if not isinstance(destination, dict) or not isinstance(indexing_response, dict):
+            raise ValueError("X-Ray Transaction Search response is not an object")
+        rules = indexing_response.get("IndexingRules", [])
+        if not isinstance(rules, list):
+            raise ValueError("X-Ray indexing rules are not a list")
+        raw_indexing = next(
+            (
+                (item.get("Rule") or {}).get("Probabilistic", {}).get("DesiredSamplingPercentage", 0.0)
+                for item in rules
+                if isinstance(item, dict) and item.get("Name") == "Default"
+            ),
+            0.0,
+        )
+        if isinstance(raw_indexing, bool):
+            raise ValueError("X-Ray indexing percentage is boolean")
+        indexing = float(raw_indexing)
+        if not math.isfinite(indexing):
+            raise ValueError("X-Ray indexing percentage is not finite")
+    except Exception as exc:
+        raise PromotionPolicyConfigurationError("CloudWatch Transaction Search state could not be read") from exc
+    if destination.get("Destination") != "CloudWatchLogs" or destination.get("Status") != "ACTIVE" or indexing <= 0:
+        raise PromotionEvidenceError(
+            "Production evaluation requires CloudWatch Transaction Search in the "
+            "runtime account and Region (ACTIVE/CloudWatchLogs with indexing above 0%)"
+        )
+
+
 def start_batch_evaluation(
     client: Any,
     *,
     runtime_name: str,
+    agentcore_runtime_name: str,
     version_id: str,
     deployment_id: str,
     runtime_id: str,
@@ -251,8 +296,11 @@ def start_batch_evaluation(
             f"At least {policy['minimum_sessions']} release scenarios are required by platform policy"
         )
 
+    service_name = agentcore_runtime_service_name(agentcore_runtime_name)
     request_identity = {
         "runtime_name": runtime_name,
+        "agentcore_runtime_name": agentcore_runtime_name,
+        "service_name": service_name,
         "version_id": version_id,
         "deployment_id": deployment_id,
         "runtime_id": runtime_id,
@@ -266,8 +314,8 @@ def start_batch_evaluation(
         "evaluators": [{"evaluatorId": evaluator_id} for evaluator_id in policy["evaluators"]],
         "dataSourceConfig": {
             "cloudWatchLogs": {
-                "serviceNames": [runtime_id],
-                "logGroupNames": [f"/aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT"],
+                "serviceNames": [service_name],
+                "logGroupNames": [_BATCH_EVALUATION_SPANS_LOG_GROUP],
                 "filterConfig": {"sessionIds": session_ids},
             }
         },
@@ -369,6 +417,7 @@ def validate_batch_evaluation_for_promotion(
     result: dict[str, Any],
     *,
     runtime_name: str,
+    agentcore_runtime_name: str,
     version_id: str,
     deployment_id: str,
     runtime_id: str,
@@ -416,10 +465,10 @@ def validate_batch_evaluation_for_promotion(
         raise PromotionEvidenceError("The batch evaluation evidence is stale")
 
     logs_source = ((result.get("dataSourceConfig") or {}).get("cloudWatchLogs")) or {}
-    service_names = {str(value) for value in (logs_source.get("serviceNames") or [])}
-    log_groups = {str(value) for value in (logs_source.get("logGroupNames") or [])}
-    expected_group = f"/aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT"
-    if service_names != {runtime_id} or log_groups != {expected_group}:
+    expected_service = agentcore_runtime_service_name(agentcore_runtime_name)
+    if {str(value) for value in (logs_source.get("serviceNames") or [])} != {expected_service} or {
+        str(value) for value in (logs_source.get("logGroupNames") or [])
+    } != {_BATCH_EVALUATION_SPANS_LOG_GROUP}:
         raise PromotionEvidenceError("The batch evaluation source is not exactly this version's runtime")
     filter_config = logs_source.get("filterConfig") or {}
     session_ids = [str(value) for value in (filter_config.get("sessionIds") or [])]
@@ -571,6 +620,7 @@ def validate_frozen_promotion_policy(policy: Any) -> dict[str, Any]:
 def assert_batch_evaluation_targets_runtime(
     result: dict[str, Any],
     *,
+    agentcore_runtime_name: str,
     runtime_id: str,
     runtime_arn: str,
 ) -> None:
@@ -588,8 +638,8 @@ def assert_batch_evaluation_targets_runtime(
     ):
         raise PromotionEvidenceError("The batch evaluation is not bound to the runtime account and region")
     logs_source = ((result.get("dataSourceConfig") or {}).get("cloudWatchLogs")) or {}
-    expected_group = f"/aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT"
-    if {str(value) for value in (logs_source.get("serviceNames") or [])} != {runtime_id} or {
+    expected_service = agentcore_runtime_service_name(agentcore_runtime_name)
+    if {str(value) for value in (logs_source.get("serviceNames") or [])} != {expected_service} or {
         str(value) for value in (logs_source.get("logGroupNames") or [])
-    } != {expected_group}:
+    } != {_BATCH_EVALUATION_SPANS_LOG_GROUP}:
         raise PromotionEvidenceError("The batch evaluation source is not exactly this version's runtime")

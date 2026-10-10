@@ -105,8 +105,15 @@ def runtime_payload(
     session_id: str | None,
     memory_identity: InvocationIdentity | None,
     warmup: bool = False,
+    evaluation_capture: bool = False,
 ) -> dict[str, str | bool]:
-    """Build the exact payload consumed by generated HTTP agents."""
+    """Build the exact payload consumed by generated HTTP agents.
+
+    ``evaluation_capture`` is an internal control-plane bit. Public request
+    models forbid extra fields, and only the owner-checked staging-slot route
+    for an immutable production-gated version enables it; production-slot,
+    ungated staging, and direct client invocations remain redacted.
+    """
 
     payload: dict[str, str | bool] = {"prompt": prompt}
     if session_id:
@@ -115,6 +122,8 @@ def runtime_payload(
         payload["actor_id"] = memory_identity.actor_id
     if warmup:
         payload["warmup"] = True
+    if evaluation_capture:
+        payload["_agentcore_evaluation_capture"] = True
     return payload
 
 
@@ -387,6 +396,7 @@ def invoke_verified_http_runtime(
     user_bearer_token: str | None = None,
     start_harness_warmup: Callable[[dict, str, str], None] | None = None,
     on_dispatch: Callable[[], None] | None = None,
+    evaluation_capture: bool = False,
 ) -> TestResponse:
     """Invoke one exact, owner-checked target without re-resolving authority."""
 
@@ -486,6 +496,7 @@ def invoke_verified_http_runtime(
             session_id,
             memory_identity,
             warmup=request.warmup,
+            evaluation_capture=evaluation_capture,
         )
         if obo_required:
             if not user_bearer_token:

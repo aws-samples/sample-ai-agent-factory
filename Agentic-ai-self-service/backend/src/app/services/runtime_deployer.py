@@ -158,7 +158,9 @@ def _merge_deps_into_zip(
     *seen* makes the merge idempotent across MORE THAN ONE bundle, which is what a
     provider-extras bundle needs: it is a delta on top of the base bundle and the two
     still share ``strands-agents``' own dist-info and any package pip pulled into
-    both. ``zipfile`` does not reject a duplicate name — it appends a second member
+    both. ``ZipInfo`` metadata is retained so executable entrypoints survive into
+    the final code ZIP; copying only member names silently removed their execute
+    bits. ``zipfile`` does not reject a duplicate name — it appends a second member
     with the same path, warns, and leaves the reader to take whichever it finds — so
     without this the zip would carry two copies of every shared file and which one
     gets extracted would be an implementation detail of the unzip. Pass the same set
@@ -169,14 +171,19 @@ def _merge_deps_into_zip(
     if seen is None:
         seen = set()
     with zipfile.ZipFile(io.BytesIO(bundle_bytes), "r") as bundle_zf:
-        for item in bundle_zf.namelist():
+        for info in bundle_zf.infolist():
+            item = info.filename
             if "__pycache__" in item or item.endswith(".pyc"):
                 continue
             if item in seen:
                 continue
             seen.add(item)
-            data = bundle_zf.read(item)
-            target_zf.writestr(item, data)
+            data = bundle_zf.read(info)
+            # Preserve the deterministic packager's Unix mode and archive
+            # metadata. Rewriting only the filename resets executable members
+            # (notably opentelemetry-instrument) to a non-executable default in
+            # the final code.zip even though the dependency bundle is correct.
+            target_zf.writestr(info, data)
 
 
 def _create_code_zip(
@@ -422,6 +429,7 @@ def create_runtime_iam_role(
     gateway_key_secret_arn: str | None = None,
     return_provenance: bool = False,
     model_free: bool = False,
+    trace_export_enabled: bool = False,
 ) -> str | tuple[str, bool]:
     """Create or reuse an IAM execution role for an AgentCore runtime.
 
@@ -438,9 +446,12 @@ def create_runtime_iam_role(
     the model provider's API key and a LiteLLM gateway's virtual key, which stopped
     being injected as plaintext ``PROVIDER_API_KEY`` / ``GATEWAY_API_KEY`` env vars for
     exactly that reason. Each is scoped to its one ARN; omit them and nothing is
-    granted. Kept in sync with ``per_agent_identity.build_scoped_runtime_policy`` and
-    the CDK shared role (``infra/stacks/platform/lambdas.build_shared_runtime_role``,
-    which can only grant the two namespaces because it has no per-deploy ARN).
+    granted. ``trace_export_enabled`` adds the four account-level X-Ray actions only
+    for a Runtime that the same deployment launches under AWS ADOT; ordinary model
+    runtimes and model-free MCP runtimes receive no X-Ray authority. Kept in sync
+    with ``per_agent_identity.build_scoped_runtime_policy`` and the CDK shared role
+    (``infra/stacks/platform/lambdas.build_shared_runtime_role``, which is reused by
+    production-evaluation runtimes and therefore carries the bounded trace policy).
     """
     trust_policy = {
         "Version": "2012-10-17",
@@ -520,10 +531,9 @@ def create_runtime_iam_role(
     # must NOT carry bedrock model access. Reusing the model-capable statement for
     # a tool-only runtime is the model-free contract violation the dedicated MCP
     # role guards against.
-    _model_access_statements = (
-        []
-        if model_free
-        else [
+    _model_access_statements: list[dict] = []
+    if not model_free:
+        _model_access_statements.append(
             {
                 "Sid": "BedrockModelAccess",
                 "Effect": "Allow",
@@ -533,8 +543,21 @@ def create_runtime_iam_role(
                 ],
                 "Resource": "*",
             }
-        ]
-    )
+        )
+        if trace_export_enabled:
+            _model_access_statements.append(
+                {
+                    "Sid": "AgentCoreObservabilityTraceExport",
+                    "Effect": "Allow",
+                    "Action": [
+                        "xray:PutTraceSegments",
+                        "xray:PutTelemetryRecords",
+                        "xray:GetSamplingRules",
+                        "xray:GetSamplingTargets",
+                    ],
+                    "Resource": "*",
+                }
+            )
     core_policy = {
         "Version": "2012-10-17",
         "Statement": [
@@ -757,6 +780,7 @@ def create_agent_runtime(
     vpc_config: dict | None = None,
     region: str | None = None,
     resource_tags: dict | None = None,
+    instrument_observability: bool = False,
 ) -> dict:
     """Create an AgentCore runtime using the boto3 control API.
 
@@ -774,6 +798,11 @@ def create_agent_runtime(
     vpc_config field was read by no deployer (dead config). Falls back to PUBLIC
     when absent.
 
+    ``instrument_observability`` selects the AWS-documented direct-code
+    entrypoint ``["opentelemetry-instrument", entrypoint]``. The executable is
+    normalized into the dependency bundle root; callers must not enable this
+    unless that bundle is present.
+
     Returns dict with runtime_id, arn, status.
     """
     network_configuration = _build_network_configuration(vpc_config)
@@ -788,7 +817,7 @@ def create_agent_runtime(
                     }
                 },
                 "runtime": python_runtime,
-                "entryPoint": [entrypoint],
+                "entryPoint": (["opentelemetry-instrument", entrypoint] if instrument_observability else [entrypoint]),
             }
         },
         "roleArn": role_arn,
