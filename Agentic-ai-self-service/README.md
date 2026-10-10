@@ -215,9 +215,14 @@ cannot accept that marker, and the live matrix invokes a post-promotion canary
 and proves its prompt and expected response phrase never appear in correlated
 spans. CloudWatch Transaction
 Search must be active in each target account and Region; the live integration
-harness can lease this setting temporarily, restores its exact prior destination
-and indexing percentage after the run, and retains a validated recovery file if
-cleanup cannot be proven.
+harness can lease this setting temporarily. After first enabling the destination
+or indexing rule, it waits AWS's documented ten-minute search-readiness window
+before creating evaluation sessions. It restores the exact prior destination and
+indexing percentage after the run, treats an already-restored or still-settling
+target as an idempotent recovery state, and retains a validated 0600 recovery
+file until cleanup is proven. The standalone `mcp-server-runtime` is model-free:
+it receives neither this model-evaluation gate nor an injected Bedrock Guardrail;
+its production gate is authenticated MCP protocol and complete tool execution.
 
 Promote a production-gated version from the **Versions** panel:
 
@@ -307,8 +312,10 @@ identity the orthogonal `g-admins-cost` group only for the run: agent budgets ar
 bound to the writer's `owner_sub`, while the cost group grants no trigger scope
 and therefore cannot mask trigger RBAC. The matrix creates one unique agent-scoped
 invocation budget before staging evaluation, then deletes and absence-checks it
-in `finally`, so no reusable budget definition is left behind. Evaluation uses
-ordinary low-entropy factual questions with semantic answer oracles rather than
+in `finally`, so no reusable budget definition is left behind. The lifecycle and
+gallery integration cases use the same register-before-write tracker around every
+conversational Runtime invocation; a lost budget response is still cleaned by the
+case's unique Runtime name. Evaluation uses ordinary low-entropy factual questions with semantic answer oracles rather than
 prompt-injection-shaped “reply exactly” commands or random credential-like
 markers; a Guardrail redaction placeholder is a test failure, never accepted as
 an evaluation pass.

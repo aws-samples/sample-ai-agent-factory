@@ -988,6 +988,7 @@ def test_gallery_template_deploy_invoke_and_verified_cleanup(
     case: TemplateCase,
     api_session,
     deployment_cleanup: DeploymentCleanupTracker,
+    runtime_budget,
     wait_for_deployment,
 ) -> None:
     record, request_payload = _deploy_template(
@@ -1021,11 +1022,16 @@ def test_gallery_template_deploy_invoke_and_verified_cleanup(
             status=status,
         )
     else:
-        _invoke_http_template(
-            api_session,
-            case=case,
-            status=status,
-        )
+        runtime_name = request_payload["config"]["name"]
+        runtime_budget.authorize(runtime_name)
+        try:
+            _invoke_http_template(
+                api_session,
+                case=case,
+                status=status,
+            )
+        finally:
+            runtime_budget.release(runtime_name)
 
     tombstone = deployment_cleanup.delete_and_verify(record)
     assert tombstone.get("delete_status") == "deleted"

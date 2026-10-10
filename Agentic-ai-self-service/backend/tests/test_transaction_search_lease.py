@@ -84,6 +84,7 @@ def _lease(
     xray: _XRay | None = None,
     logs: _Logs | None = None,
     account: str = ACCOUNT,
+    sleep=None,
 ) -> TransactionSearchLease:
     return TransactionSearchLease(
         account_id=ACCOUNT,
@@ -93,7 +94,7 @@ def _lease(
         xray_client=xray or _XRay(),
         logs_client=logs or _Logs(),
         sts_client=_Sts(account),
-        sleep=lambda _seconds: None,
+        sleep=sleep or (lambda _seconds: None),
         policy_token="contract",
     )
 
@@ -101,10 +102,20 @@ def _lease(
 def test_managed_lease_enables_and_restores_every_account_setting(tmp_path: Path) -> None:
     xray = _XRay()
     logs = _Logs()
-    lease = _lease(tmp_path, manage=True, xray=xray, logs=logs)
+    sleeps: list[float] = []
+    lease = _lease(
+        tmp_path,
+        manage=True,
+        xray=xray,
+        logs=logs,
+        sleep=sleeps.append,
+    )
 
     lease.acquire()
 
+    assert sleeps == [10 * 60], (
+        "A newly enabled Transaction Search must wait AWS's documented ten-minute search-readiness window"
+    )
     assert xray.destination == "CloudWatchLogs"
     assert xray.indexing == 100.0
     assert list(logs.policies) == ["agentcore-trigger-it-contract"]
@@ -183,6 +194,49 @@ def test_new_process_restores_an_interrupted_lease_from_state(tmp_path: Path) ->
 
     assert xray.destination == "XRay"
     assert xray.indexing == 0.0
+    assert logs.policies == {}
+    assert replacement.snapshot is None
+    assert not (tmp_path / "transaction-search.json").exists()
+
+
+def test_recovery_waits_for_an_already_restored_destination_without_updating_it(
+    tmp_path: Path,
+) -> None:
+    class PartiallyRestoredXRay(_XRay):
+        def __init__(self) -> None:
+            super().__init__()
+            self.status = "ACTIVE"
+            self.pending_target_reads = 0
+
+        def get_trace_segment_destination(self):
+            status = self.status
+            if status == "PENDING":
+                self.pending_target_reads += 1
+                self.status = "ACTIVE"
+            return {"Destination": self.destination, "Status": status}
+
+        def update_trace_segment_destination(self, *, Destination):
+            if Destination == self.destination:
+                raise RuntimeError("duplicate destination update")
+            return super().update_trace_segment_destination(Destination=Destination)
+
+    xray = PartiallyRestoredXRay()
+    logs = _Logs()
+    _lease(tmp_path, manage=True, xray=xray, logs=logs).acquire()
+
+    # Simulate a process that restored both settings and then lost credentials
+    # while AWS was still settling the destination transition.
+    xray.indexing = 0.0
+    xray.destination = "XRay"
+    xray.status = "PENDING"
+    updates_before_retry = list(xray.updates)
+
+    replacement = _lease(tmp_path, manage=True, xray=xray, logs=logs)
+    replacement.restore_from_state()
+
+    assert xray.status == "ACTIVE"
+    assert xray.pending_target_reads == 1
+    assert xray.updates == updates_before_retry
     assert logs.policies == {}
     assert replacement.snapshot is None
     assert not (tmp_path / "transaction-search.json").exists()

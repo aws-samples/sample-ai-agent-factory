@@ -98,10 +98,11 @@ Integration tests perform real AWS API calls with zero mocking. They require:
   the Region is already `ACTIVE/CloudWatchLogs` with indexing above 0%. A
   controlled throwaway account may set `INTEGRATION_MANAGE_TRANSACTION_SEARCH=true`
   plus an absolute `INTEGRATION_TRANSACTION_SEARCH_STATE_FILE`; the fixture then
-  creates one exact X-Ray-to-Logs resource policy, raises indexing to 100%, and
-  restores and verifies the captured destination/indexing and policy absence in
-  teardown. The durable state file is retained if restoration cannot be proven;
-  set `INTEGRATION_RESTORE_TRANSACTION_SEARCH_STATE=true` on the next run to
+  creates one exact X-Ray-to-Logs resource policy, raises indexing to 100%,
+  waits AWS's documented ten-minute first-enable search-readiness window, and
+  only then lets the test generate evaluation sessions. Teardown restores and
+  verifies the captured destination/indexing and policy absence. The durable
+  state file is retained if restoration cannot be proven; set `INTEGRATION_RESTORE_TRANSACTION_SEARCH_STATE=true` on the next run to
   validate that file's account, Region, schema, ranges, mutation flags, and
   policy ownership, restore it, and only then acquire a fresh lease. Recovery
   refuses an unrelated or modified resource policy before changing any
@@ -160,10 +161,13 @@ that marker is written only after the AgentCore invocation returns. The signed
 webhook is then replayed byte-for-byte with the same timestamp, delivery ID, body,
 and HMAC: the first response must report `duplicate=false`, the byte-identical replay
 `duplicate=true`, and the same ID with different validly signed bytes must return exact
-`409`; only one worker delivery may complete. It then deletes each
-trigger through the product API, proves the EventBridge rule or webhook secret is
-no longer active, removes the temporary S3 bucket, and requires the runtime's
-durable deleted tombstone. Completed worker-delivery rows and queued webhook
+`409`; only one worker delivery may complete. Every conversational lifecycle/gallery
+case and the trigger matrix creates a unique owner-bound agent budget before its first
+Runtime invocation, registers the key before the write, and deletes and
+absence-checks it during teardown. The trigger matrix then deletes each trigger
+through the product API, proves the EventBridge rule or webhook secret is no longer
+active, removes the temporary S3 bucket, and requires the runtime's durable deleted
+tombstone. Completed worker-delivery rows and queued webhook
 ingress markers remain only as seven-day, TTL-bounded deduplication evidence.
 
 ### Live verification scripts

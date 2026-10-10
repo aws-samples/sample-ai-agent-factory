@@ -922,6 +922,38 @@ def test_production_deploy_injects_guardrail_baseline_before_execution(spy, monk
     assert "policy_config" not in execution
 
 
+def test_production_model_free_mcp_uses_protocol_gates_not_model_controls(spy, monkeypatch):
+    _enable_production_admission(monkeypatch)
+    import app.services.observability as observability
+
+    monkeypatch.setattr(observability, "get_platform_observability_defaults", lambda: None)
+    response = _client().post(
+        "/api/deploy",
+        json=_body(
+            templateId="mcp-server-runtime",
+            deploymentSlot="production",
+            config={
+                "name": "orders_mcp_server",
+                "protocol": "MCP",
+                "deploymentType": "direct_code_deploy",
+                "pythonRuntime": "PYTHON_3_13",
+                "enableOtel": False,
+            },
+        ),
+    )
+
+    assert response.status_code == 202, response.text
+    version = spy.versions.put.call_args.args[0]
+    assert version.production_gate_required is False
+    assert version.promotion_policy == {}
+    assert version.evaluation_kms_key_arn is None
+    execution = json.loads(spy.start.input_json)
+    assert execution["deployment_slot"] == "production"
+    assert "production_gate_required" not in execution
+    assert "guardrails_config" not in execution
+    assert "guardrails" not in execution["connected_tools"]
+
+
 def test_production_deploy_raises_weak_guardrail_settings_to_platform_floor(spy, monkeypatch):
     _enable_production_admission(monkeypatch)
     body = _body(

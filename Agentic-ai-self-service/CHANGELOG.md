@@ -5,6 +5,34 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+### Fixed — live integration honors production admission and cleanup
+
+- Real CloudFront integration invocations now create a unique, owner-bound
+  agent budget before dispatch and delete and absence-check it afterward. The
+  tracker registers the key before the write, so a lost create response still
+  has deterministic cleanup; missing production capacity continues to return
+  exact HTTP 429.
+- The standalone `mcp-server-runtime` gallery entry is explicitly model-free.
+  Production admission no longer injects a Bedrock Guardrail, model evaluation
+  key, staging promotion gate, or generic-agent observability into that tool
+  server; caller-supplied model/Guardrail/agent settings remain rejected. Its
+  release gate is the real authenticated MCP protocol and complete tool matrix.
+- Hosted MCP Runtime targets now derive Cedar actions from the authenticated
+  `tools/list` plane after target synchronization. A partial or unreadable list
+  fails closed rather than creating a deny-all policy; a complete list carries
+  every qualified action into the Policy step.
+- Newly enabled CloudWatch Transaction Search waits AWS's documented ten-minute
+  search-readiness window before release sessions are generated. Recovery is
+  idempotent across credential expiry after either indexing or destination was
+  already restored, and keeps its 0600 state until destination, percentage, and
+  temporary policy absence are all reverified.
+- Failed-deployment cleanup now gives `StepStatusUpdateRole` the two ownership
+  reads it actually calls—`bedrock:GetGuardrail` and
+  `bedrock:ListTagsForResource`—on this account's Guardrails. They live in one
+  dedicated policy, while deletion stays separate and still requires live
+  `ManagedBy` and `AgentCoreStack` tags.
+
 ### Fixed — production evaluation emits real AgentCore spans
 
 - Production-gated code deployments now run through the AWS-documented

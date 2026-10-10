@@ -537,10 +537,12 @@ def _resolve_gateway_tool_actions(agentcore_ctrl, gateway_id: str, timeout: int 
                 nm = tool.get("name")
                 if nm:
                     actions.append(f"{tname}___{nm}")
-        # Done when every configured target is synced AND every configured tool
-        # is present in the action list.
-        if ids and all_synced and len(actions) == expected and expected > 0:
-            logger.warning("Gateway %s tool plane synced: %d/%d tools", gateway_id, len(actions), expected)
+        # Inline targets contribute a configured count here. Crawled OpenAPI/
+        # MCP targets contribute zero until the served tools/list probe below,
+        # but a READY target with an advanced sync timestamp has still completed
+        # this control-plane phase and must not burn the whole timeout.
+        if ids and all_synced and len(actions) == expected:
+            logger.warning("Gateway %s tool targets synced: %d inline tools", gateway_id, expected)
             return actions, expected
         _t.sleep(5)
 
@@ -7020,21 +7022,25 @@ def deploy_gateway(
         gateway_url = gateway.get("gatewayUrl", "")
         client_info = cognito_response["client_info"]
 
-        # Connectors (OpenAPI targets) declare NO inline tools and CANNOT be synced
-        # (verified live: SynchronizeGatewayTargets rejects OPEN_API_SCHEMA), so
-        # _resolve_gateway_tool_actions reports expected_tool_count==0 for them even
-        # though the gateway crawls the spec and DOES serve operations. The
-        # control-plane is silent here, so the authoritative readiness signal is the
-        # live MCP tools/list probe. Require the connector gateway to serve >=1 tool;
-        # fail closed otherwise (never ship a connector gateway that serves nothing).
-        if connectors and expected_tool_count == 0 and not obo_required:
-            served = _wait_for_gateway_to_serve_tools(gateway_url, client_info, expected=1, timeout=120)
-            if served < 1:
-                # Surface the REAL reason: a FAILED OpenAPI target carries an
-                # actionable statusReason (e.g. "Invalid OpenAPI schema: ...items
-                # is missing"). Without this the user only sees the generic
-                # "0 tools" message and can't fix their spec. (Verified live: an
-                # array schema missing `items` FAILs the target silently.)
+        # Crawled targets (OpenAPI connectors and MCP servers) declare no inline
+        # tool schema, so the control plane correctly reports zero configured
+        # tools. Their authoritative action list is the served MCP tools/list
+        # response. Without this branch a hosted MCP Runtime target deployed
+        # READY, but the policy step received []/0 and failed after creating the
+        # entire Gateway graph rather than building Cedar over its four tools.
+        crawled_targets = bool(connectors or external_mcp_servers or mcp_server_runtime_arn)
+        crawled_plane_verified = False
+        if crawled_targets and expected_tool_count == 0 and not obo_required:
+            minimum_served = 1
+            probe: dict = {}
+            served = _wait_for_gateway_to_serve_tools(
+                gateway_url,
+                client_info,
+                minimum_served,
+                timeout=120,
+                probe=probe,
+            )
+            if served < minimum_served:
                 target_reasons = []
                 try:
                     for _t in _list_all_gateway_targets(
@@ -7044,32 +7050,39 @@ def deploy_gateway(
                         _tid = _t.get("targetId") or _t.get("gatewayTargetId")
                         if not _tid:
                             continue
-                        _d = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway["gatewayId"], targetId=_tid)
+                        _d = agentcore_ctrl.get_gateway_target(
+                            gatewayIdentifier=gateway["gatewayId"],
+                            targetId=_tid,
+                        )
                         if (_d.get("status") or "").upper() == "FAILED":
                             _r = _d.get("statusReasons") or _d.get("statusReason") or "unknown"
                             target_reasons.append(f"{_tid}: {_r}")
-                except Exception:  # noqa: BLE001 — diagnostics enrichment only; the deploy still fails below
+                except Exception:  # noqa: BLE001 — diagnostics only; failure remains closed
                     logger.debug("Could not collect FAILED-target reasons", exc_info=True)
                 detail = (
                     f" Target failure(s): {target_reasons}"
                     if target_reasons
-                    else " No target reported FAILED — likely the AgentCore empty-tool-plane "
-                    "provisioning flake (retry the deploy)."
+                    else (" No target reported FAILED; tools/list did not expose a servable crawled tool plane.")
                 )
-                # Raise into the common failure handler instead of returning a
-                # connector-only fragment. The common handler carries the gateway,
-                # role, Cognito client, providers, secrets, and staged specs to both
-                # abort cleanup and the durable manifest. The old early return lost
-                # the gateway/role/client handles, so an abort-cleanup failure made
-                # those resources permanently undiscoverable.
                 raise RuntimeError(
-                    f"Gateway {gateway['gatewayId']} serves 0 tools over MCP after "
-                    f"deploying connector OpenAPI target(s)." + detail
+                    f"Gateway {gateway['gatewayId']} serves {served}/{minimum_served} required tools over MCP after "
+                    f"deploying crawled target(s)." + detail
                 )
-            # Backfill qualified_tools from the live plane so the policy step (if any)
-            # has the connector's tool actions.
-            qualified_tools = _qualified_tools_from_served(gateway_url, client_info)
-            logger.warning("Connector gateway %s serves %d tool(s) over MCP", gateway["gatewayId"], served)
+            served_tools = _qualified_tools_from_served(gateway_url, client_info)
+            if len(served_tools) != served:
+                raise RuntimeError(
+                    f"Gateway {gateway['gatewayId']} reported {served} served tools but "
+                    f"only {len(served_tools)} qualified actions could be read. Refusing "
+                    "to build a partial Cedar permit."
+                )
+            qualified_tools = served_tools
+            expected_tool_count = served
+            crawled_plane_verified = True
+            logger.warning(
+                "Crawled-target gateway %s confirmed serving %d tool(s) over MCP",
+                gateway["gatewayId"],
+                served,
+            )
 
         # Bug 134 (THE stability fix): a Lambda gateway target can be status=READY
         # with a full inline schema yet the gateway's MCP plane serves an EMPTY
@@ -7085,7 +7098,7 @@ def deploy_gateway(
         # opposed to being unable to reach it. Travels in the result so a caller
         # never has to infer verification from success alone.
         tool_plane_verified = not obo_required
-        if expected_tool_count > 0:
+        if expected_tool_count > 0 and not crawled_plane_verified:
             # `probe` records HOW the probe ended, because the count alone cannot
             # tell an empty tool plane apart from a probe that never got a usable
             # answer: _count_served_tools returns -1 for a non-200 or a transport
@@ -7289,6 +7302,24 @@ def deploy_gateway(
                     )
             # Servable plane confirmed — qualified_tools should reflect it.
             logger.warning("Gateway %s confirmed serving %d tools over MCP", gateway["gatewayId"], served)
+
+        if crawled_targets and expected_tool_count > 0 and not crawled_plane_verified and not obo_required:
+            if not tool_plane_verified:
+                raise RuntimeError(
+                    f"Gateway {gateway['gatewayId']} has crawled targets but its complete "
+                    "served action list could not be verified. Refusing to build Cedar "
+                    "from only the inline subset."
+                )
+            served_tools = _qualified_tools_from_served(gateway_url, client_info)
+            if len(served_tools) != served:
+                raise RuntimeError(
+                    f"Gateway {gateway['gatewayId']} reported {served} served tools but "
+                    f"only {len(served_tools)} qualified actions could be read. Refusing "
+                    "to build a partial Cedar permit."
+                )
+            qualified_tools = served_tools
+            expected_tool_count = served
+            crawled_plane_verified = True
 
         result = {
             "success": True,

@@ -1,6 +1,7 @@
 """Per-step IAM roles (1:1) + step Lambda functions for the deploy pipeline."""
 
 import aws_cdk as cdk
+import cdk_nag
 from aws_cdk import Duration, RemovalPolicy
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_iam as iam
@@ -2353,13 +2354,49 @@ def _create_step_role(
         )
         role.add_to_policy(
             iam.PolicyStatement(
-                # The guardrail arm. Guardrail ids are service-generated (the ARN
-                # carries the id, not the name), so guardrail/* in this account+region
-                # is the tightest pattern — same scoping as the guardrails step that
-                # creates them.
+                # The destructive call remains in the existing role policy so
+                # adding ownership reads does not repack unrelated overflow
+                # policies. The two new reads are isolated below.
                 actions=["bedrock:DeleteGuardrail"],
                 resources=[f"arn:aws:bedrock:*:{stack.account}:guardrail/*"],
             )
+        )
+        guardrail_ownership_read_policy = iam.Policy(
+            stack,
+            "StepStatusUpdateGuardrailOwnershipReadPolicy",
+            statements=[
+                iam.PolicyStatement(
+                    actions=[
+                        "bedrock:GetGuardrail",
+                        "bedrock:ListTagsForResource",
+                    ],
+                    resources=[f"arn:aws:bedrock:*:{stack.account}:guardrail/*"],
+                )
+            ],
+        )
+        guardrail_ownership_read_policy.attach_to_role(role)
+        cdk_nag.NagSuppressions.add_resource_suppressions(
+            guardrail_ownership_read_policy,
+            [
+                cdk_nag.NagPackSuppression(
+                    id="AwsSolutions-IAM5",
+                    reason=(
+                        "Bedrock assigns the Guardrail id after creation, so failed-deployment "
+                        "cleanup cannot name a concrete ARN. This dedicated policy grants only "
+                        "the two ownership reads on Guardrails in this account; deletion stays "
+                        "separate and requires live ManagedBy and AgentCoreStack tags."
+                    ),
+                    applies_to=[
+                        {
+                            "regex": (
+                                r"/^Resource::arn:.*:bedrock:\*:<AWS::AccountId>:"
+                                r"guardrail\/\*$/g"
+                            )
+                        }
+                    ],
+                )
+            ],
+            apply_to_children=True,
         )
         role.add_to_policy(
             iam.PolicyStatement(

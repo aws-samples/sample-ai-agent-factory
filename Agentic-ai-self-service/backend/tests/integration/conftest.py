@@ -528,6 +528,101 @@ def deployment_cleanup(
         )
 
 
+class RuntimeBudgetTracker:
+    """Authorize unique integration Runtimes and delete every budget afterward."""
+
+    def __init__(self, api_session: requests.Session) -> None:
+        self._api_session = api_session
+        self._keys: list[str] = []
+
+    @property
+    def keys(self) -> tuple[str, ...]:
+        return tuple(self._keys)
+
+    def authorize(self, runtime_name: str) -> None:
+        """Create one owner-bound agent budget before the first invocation."""
+
+        if not runtime_name:
+            raise AssertionError("Cannot authorize an empty Runtime name")
+        if runtime_name in self._keys:
+            return
+        # Register before the request: a lost 200 can still have created the
+        # row, and DELETE is idempotent for this caller-owned unique key.
+        self._keys.append(runtime_name)
+        response = self._api_session.post(
+            f"{_base_url(self._api_session)}/api/cost/budgets",
+            json={
+                "scope": "agent",
+                "key": runtime_name,
+                "limit_usd": 100.0,
+                "warn_pct": 100,
+            },
+            timeout=60,
+        )
+        assert response.status_code == 200, (
+            f"Creating integration budget for {runtime_name} returned {response.status_code}: {response.text}"
+        )
+        body = response.json()
+        assert body.get("scope") == "agent"
+        assert body.get("key") == runtime_name
+        assert float(body.get("limit_usd") or 0) == 100.0
+
+    def release(self, runtime_name: str) -> None:
+        """Delete one tracked budget and prove it is absent from inventory."""
+
+        if runtime_name not in self._keys:
+            return
+        response = self._api_session.delete(
+            f"{_base_url(self._api_session)}/api/cost/budgets/agent/{runtime_name}",
+            timeout=60,
+        )
+        assert response.status_code == 200, (
+            f"Deleting integration budget for {runtime_name} returned {response.status_code}: {response.text}"
+        )
+        assert response.json().get("deleted") == {
+            "scope": "agent",
+            "key": runtime_name,
+        }
+        listed = self._api_session.get(
+            f"{_base_url(self._api_session)}/api/cost/budgets",
+            timeout=60,
+        )
+        listed.raise_for_status()
+        body = listed.json()
+        assert isinstance(body, list)
+        assert not any(
+            isinstance(item, dict) and item.get("scope") == "agent" and item.get("key") == runtime_name for item in body
+        ), f"Temporary integration budget agent/{runtime_name} is still visible"
+        self._keys.remove(runtime_name)
+
+    def cleanup(self) -> None:
+        failures: list[str] = []
+        for runtime_name in reversed(self._keys.copy()):
+            try:
+                self.release(runtime_name)
+            except Exception as exc:  # noqa: BLE001 - report every retained budget
+                failures.append(f"{runtime_name}: {type(exc).__name__}: {exc}")
+        if failures:
+            raise AssertionError(
+                "Integration budget cleanup was not proven complete:\n"
+                + "\n".join(f"  - {failure}" for failure in failures)
+            )
+
+
+@pytest.fixture()
+def runtime_budget(
+    api_session: requests.Session,
+) -> Generator[RuntimeBudgetTracker, None, None]:
+    """Owner-bound invocation capacity with a verified teardown safety net."""
+
+    tracker = RuntimeBudgetTracker(api_session)
+    yield tracker
+    try:
+        tracker.cleanup()
+    except Exception as exc:  # noqa: BLE001 - convert cleanup failure to test failure
+        pytest.fail(str(exc), pytrace=False)
+
+
 @pytest.fixture()
 def wait_for_deployment(
     api_session: requests.Session,

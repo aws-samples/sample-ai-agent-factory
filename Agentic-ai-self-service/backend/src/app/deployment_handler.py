@@ -1640,9 +1640,24 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
             detail=("Authentication is required to deploy. No resource was created."),
         )
 
+    model_free_mcp_runtime = (
+        request.template_id == "mcp-server-runtime"
+        and (request.deployment_mode or "runtime") == "runtime"
+        and request.config.protocol == "MCP"
+    )
     try:
-        production_gate_required = production_evaluation_gate_required()
-        promotion_policy = load_promotion_policy()
+        if model_free_mcp_runtime:
+            # A standalone FastMCP server exposes deterministic tools and has no
+            # model loop. The request model already rejects caller-supplied
+            # Guardrails, model fields, agent observability, and agent features;
+            # injecting those controls here would create resources the artifact
+            # cannot use and then fail after side effects. Its executable live
+            # gate is MCP protocol/tool verification, not model evaluation.
+            production_gate_required = False
+            promotion_policy = {}
+        else:
+            production_gate_required = production_evaluation_gate_required()
+            promotion_policy = load_promotion_policy()
     except PromotionPolicyConfigurationError as exc:
         logger.error("Deploy refused: production evaluation policy is invalid (%s)", type(exc).__name__)
         raise HTTPException(
@@ -1664,7 +1679,9 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     # a refusal costs zero rows, secrets, executions, or AWS resources.
     try:
         enforce_production_execution_mode(request.deployment_mode)
-        request.guardrails_config = enforce_production_guardrail_baseline(request.guardrails_config)
+        request.guardrails_config = (
+            None if model_free_mcp_runtime else enforce_production_guardrail_baseline(request.guardrails_config)
+        )
         tool_gateway_required = bool(request.gateway_config) or _gateway_implied(
             request.gateway_tools,
             request.connectors,
@@ -1971,6 +1988,8 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         except TargetError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    if model_free_mcp_runtime:
+        evaluation_kms_key_arn = None
     if production_gate_required and not evaluation_kms_key_arn:
         raise HTTPException(
             status_code=503,

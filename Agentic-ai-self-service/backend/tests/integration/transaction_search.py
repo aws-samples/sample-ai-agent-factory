@@ -13,6 +13,8 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
+TRANSACTION_SEARCH_ACTIVATION_SETTLE_SECONDS = 10 * 60
+
 
 class TransactionSearchLeaseError(RuntimeError):
     """Transaction Search could not be enabled or restored exactly."""
@@ -281,6 +283,14 @@ class TransactionSearchLease:
                     Rule={"Probabilistic": {"DesiredSamplingPercentage": 100.0}},
                 )
             self._wait_indexing(100.0)
+            if self.snapshot.destination_changed or self.snapshot.indexing_changed:
+                # AWS documents that a newly enabled Transaction Search can take
+                # ten minutes before spans are searchable. ACTIVE/CloudWatchLogs
+                # and a 100% desired indexing rule describe control-plane state,
+                # not data-plane readiness: live evaluation lost the first five
+                # sessions and indexed the final three during this window.
+                self.sleep(TRANSACTION_SEARCH_ACTIVATION_SETTLE_SECONDS)
+                self.require_ready()
             return self
         except BaseException as primary_error:
             try:
@@ -327,17 +337,29 @@ class TransactionSearchLease:
                 ) from exc
         if snapshot.indexing_changed:
             try:
-                self.xray.update_indexing_rule(
-                    Name="Default",
-                    Rule={"Probabilistic": {"DesiredSamplingPercentage": snapshot.indexing_percentage}},
-                )
+                current_indexing = self._indexing_percentage()
+                if current_indexing != snapshot.indexing_percentage:
+                    self.xray.update_indexing_rule(
+                        Name="Default",
+                        Rule={"Probabilistic": {"DesiredSamplingPercentage": snapshot.indexing_percentage}},
+                    )
                 self._wait_indexing(snapshot.indexing_percentage)
             except Exception as exc:  # noqa: BLE001 - aggregate every restore failure
                 errors.append(f"indexing: {type(exc).__name__}: {exc}")
         if snapshot.destination_changed:
             try:
-                self.xray.update_trace_segment_destination(Destination=snapshot.destination)
-                self._wait_destination(snapshot.destination)
+                current_destination, current_status = self._destination()
+                if current_destination == snapshot.destination:
+                    # A prior process can lose credentials after AWS accepts the
+                    # restore but before it observes ACTIVE. Waiting is both
+                    # idempotent and required: UpdateTraceSegmentDestination
+                    # rejects duplicate target updates in PENDING and ACTIVE.
+                    self._wait_destination(snapshot.destination)
+                else:
+                    if current_status != "ACTIVE":
+                        self._wait_destination(current_destination)
+                    self.xray.update_trace_segment_destination(Destination=snapshot.destination)
+                    self._wait_destination(snapshot.destination)
             except Exception as exc:  # noqa: BLE001 - aggregate every restore failure
                 errors.append(f"destination: {type(exc).__name__}: {exc}")
         if snapshot.policy_created and owned_policy_exists:

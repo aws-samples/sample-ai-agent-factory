@@ -648,6 +648,40 @@ def test_tracker_recovers_an_eventually_consistent_deploy_by_exact_node_id() -> 
     ]
 
 
+def test_runtime_budget_authorizes_and_proves_deletion() -> None:
+    session = FakeSession(
+        post_responses=[_response(200, scope="agent", key="runtime-a", limit_usd=100.0, warn_pct=100)],
+        delete_responses=[_response(200, deleted={"scope": "agent", "key": "runtime-a"})],
+        get_responses=[_response(200, body=[])],
+    )
+    tracker = harness.RuntimeBudgetTracker(session)  # type: ignore[arg-type]
+
+    tracker.authorize("runtime-a")
+    assert tracker.keys == ("runtime-a",)
+    tracker.release("runtime-a")
+
+    assert tracker.keys == ()
+    assert session.post_calls == ["https://product.example.test/api/cost/budgets"]
+    assert session.delete_calls == ["https://product.example.test/api/cost/budgets/agent/runtime-a"]
+    assert session.get_calls == ["https://product.example.test/api/cost/budgets"]
+
+
+def test_lost_budget_create_response_is_still_cleaned_by_unique_key() -> None:
+    session = FakeSession(
+        post_responses=[requests.Timeout("budget response lost")],
+        delete_responses=[_response(200, deleted={"scope": "agent", "key": "runtime-lost"})],
+        get_responses=[_response(200, body=[])],
+    )
+    tracker = harness.RuntimeBudgetTracker(session)  # type: ignore[arg-type]
+
+    with pytest.raises(requests.Timeout, match="budget response lost"):
+        tracker.authorize("runtime-lost")
+    assert tracker.keys == ("runtime-lost",)
+
+    tracker.cleanup()
+    assert tracker.keys == ()
+
+
 def test_lost_deploy_response_still_registers_the_row_for_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

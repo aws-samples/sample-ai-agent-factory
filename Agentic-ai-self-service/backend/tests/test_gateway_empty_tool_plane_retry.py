@@ -836,6 +836,65 @@ def _shared_pool_cognito(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("inline_tool_count", [0, 2], ids=["crawled-only", "mixed-inline-and-crawled"])
+def test_hosted_mcp_target_uses_served_tools_for_cedar_actions(monkeypatch, inline_tool_count):
+    class ReadyMcpCtrl(_FakeCtrl):
+        def list_gateway_targets(self, **kw):
+            return {
+                "items": [
+                    {
+                        "name": "MCPServerRuntime",
+                        "targetId": "mcp-target",
+                        "status": "READY",
+                    }
+                ]
+            }
+
+    ctrl = ReadyMcpCtrl()
+    _install(monkeypatch, ctrl=ctrl, served=4, expected=inline_tool_count)
+    monkeypatch.setattr(
+        gateway_deployer,
+        "_ensure_oauth2_credential_provider",
+        lambda *args, **kwargs: "arn:aws:bedrock-agentcore:us-east-1:1:provider/mcp",
+    )
+    monkeypatch.setattr(
+        gateway_deployer,
+        "_create_gateway_target_with_retry",
+        lambda *args, **kwargs: {"targetId": "mcp-target"},
+    )
+    served_actions = [
+        "MCPServerRuntime___get_order",
+        "MCPServerRuntime___get_customer",
+        "MCPServerRuntime___list_orders",
+        "MCPServerRuntime___process_refund",
+    ]
+    monkeypatch.setattr(
+        gateway_deployer,
+        "_qualified_tools_from_served",
+        lambda *_args: served_actions,
+    )
+
+    out = gateway_deployer.deploy_gateway(
+        {"name": "agent-gateway"},
+        "us-east-1",
+        owner_sub="owner-a",
+        deployment_id="d-mcp-served",
+        secrets_prebound=True,
+        mcp_server_runtime_arn="arn:aws:bedrock-agentcore:us-east-1:1:runtime/mcp",
+        mcp_oauth={
+            "discovery_url": "https://issuer.example/.well-known/openid-configuration",
+            "client_id": "client",
+            "scope": "mcp/invoke",
+            "client_secret_ref": ("arn:aws:secretsmanager:us-east-1:1:secret:agentcore-connector/owner/ref"),
+        },
+    )
+
+    assert out["success"] is True, out.get("error")
+    assert out["qualified_tools"] == served_actions
+    assert out["expected_tool_count"] == 4
+    assert out["tool_plane_verified"] is True
+
+
 def test_a_failed_shared_pool_deploy_hands_back_the_credentials_it_must_revoke(monkeypatch):
     """The abort inventory reduced ``client_info`` to {provider, user_pool_id}, which
     kept the secret out and took three teardown handles with it.
