@@ -428,7 +428,6 @@ def test_a_structured_tool_error_cannot_be_hidden_beside_a_valid_candidate() -> 
             {
                 "customer_id": "CUST-001",
                 "name": "John Doe",
-                "email": "john@example.com",
                 "total_orders": 3,
                 "total_spent": 354.97,
             },
@@ -469,7 +468,6 @@ def test_a_structured_tool_error_cannot_be_hidden_beside_a_valid_candidate() -> 
             {
                 "customer_id": "CUST-001",
                 "name": "John Smith",
-                "email": "john@example.com",
                 "membership_tier": "Gold",
             },
         ),

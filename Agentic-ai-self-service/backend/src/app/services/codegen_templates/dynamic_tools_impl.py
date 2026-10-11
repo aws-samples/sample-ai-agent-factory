@@ -84,23 +84,74 @@ def _http_get(url, timeout=10, retries=2):
 
 
 def _do_duckduckgo_search(query):
-    url = "https://api.duckduckgo.com/?" + urllib.parse.urlencode({"q": query, "format": "json", "no_html": "1"})
-    data = json.loads(_http_get(url, timeout=12).decode())
-    results = []
-    if data.get("Abstract"):
-        results.append(
-            {"title": data.get("Heading", query), "snippet": data["Abstract"], "url": data.get("AbstractURL", "")}
-        )
-    for topic in data.get("RelatedTopics", [])[:5]:
-        if isinstance(topic, dict) and topic.get("Text"):
-            results.append(
-                {
-                    "title": topic.get("Text", "")[:80],
-                    "snippet": topic.get("Text", ""),
-                    "url": topic.get("FirstURL", ""),
-                }
-            )
-    return json.dumps(results) if results else json.dumps({"message": f"No results found for: {query}"})
+    from html.parser import HTMLParser
+
+    def result_url(href):
+        if href.startswith("//"):
+            href = "https:" + href
+        elif href.startswith("/"):
+            href = urllib.parse.urljoin("https://duckduckgo.com", href)
+        parsed = urllib.parse.urlparse(href)
+        if parsed.hostname in {"duckduckgo.com", "www.duckduckgo.com"} and parsed.path.startswith("/l/"):
+            href = urllib.parse.parse_qs(parsed.query).get("uddg", [""])[0]
+            parsed = urllib.parse.urlparse(href)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return ""
+        return href
+
+    class SearchResultsParser(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.results = []
+            self._mode = ""
+            self._mode_tag = ""
+            self._parts = []
+            self._pending_url = ""
+            self._pending_result_index = None
+
+        def handle_starttag(self, tag, attrs):
+            attributes = dict(attrs)
+            classes = set(attributes.get("class", "").split())
+            if tag == "a" and "result__a" in classes:
+                self._pending_url = result_url(attributes.get("href", ""))
+                self._pending_result_index = None
+                self._mode = "title"
+                self._mode_tag = tag
+                self._parts = []
+            elif self._pending_result_index is not None and "result__snippet" in classes:
+                self._mode = "snippet"
+                self._mode_tag = tag
+                self._parts = []
+
+        def handle_data(self, data):
+            if self._mode:
+                self._parts.append(data)
+
+        def handle_endtag(self, tag):
+            if not self._mode or tag != self._mode_tag:
+                return
+            text = " ".join("".join(self._parts).split())
+            if self._mode == "title" and text and self._pending_url and len(self.results) < 5:
+                self.results.append({"title": text, "snippet": "", "url": self._pending_url})
+                self._pending_result_index = len(self.results) - 1
+            elif self._mode == "snippet" and self._pending_result_index is not None:
+                self.results[self._pending_result_index]["snippet"] = text
+            self._mode = ""
+            self._mode_tag = ""
+            self._parts = []
+
+    normalized_query = str(query or "").strip()
+    if not normalized_query:
+        return json.dumps({"error": "A non-empty search query is required"})
+    url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": normalized_query})
+    parser = SearchResultsParser()
+    parser.feed(_http_get(url, timeout=12).decode(errors="replace"))
+    parser.close()
+    return (
+        json.dumps(parser.results)
+        if parser.results
+        else json.dumps({"message": f"No results found for: {normalized_query}"})
+    )
 
 
 def _do_wikipedia_search(query):

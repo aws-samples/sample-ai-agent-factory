@@ -123,7 +123,7 @@ def _is_customer_payload(value: Any) -> bool:
         isinstance(value, dict)
         and value.get("customer_id") == "CUST-001"
         and value.get("name") == "John Doe"
-        and value.get("email") == "john@example.com"
+        and "email" not in value
         and value.get("total_orders") == 3
         and value.get("total_spent") == 354.97
     )
@@ -166,7 +166,7 @@ def _is_legacy_customer_payload(value: Any) -> bool:
         isinstance(value, dict)
         and value.get("customer_id") == "CUST-001"
         and value.get("name") == "John Smith"
-        and value.get("email") == "john@example.com"
+        and "email" not in value
         and value.get("membership_tier") == "Gold"
     )
 
@@ -200,10 +200,7 @@ def _tool_call(
 ) -> ToolInvocation:
     return ToolInvocation(
         tool_name=tool_name,
-        prompt=(
-            f"Call {tool_name} with {arguments}. Return only the exact JSON value "
-            "returned by the tool, with no commentary or markdown."
-        ),
+        prompt=(f"Please use {tool_name} with {arguments}, then present the tool result as JSON."),
         response_label=response_label,
         response_oracle=response_oracle,
     )
@@ -272,7 +269,7 @@ _LEGACY_SUPPORT_INVOCATIONS = (
     ),
     _tool_call(
         "lookup_customer",
-        "email john@example.com",
+        "customer_id CUST-001",
         "legacy lookup_customer tool",
         _is_legacy_customer_payload,
     ),
@@ -714,6 +711,69 @@ def _structured_error(value: Any) -> str | None:
     return None
 
 
+_EXPECTED_TOOL_ARGUMENTS: dict[str, tuple[dict[str, Any], ...]] = {
+    "duckduckgo_search": ({"query": "Amazon Bedrock AgentCore"},),
+    "wikipedia_search": ({"query": "Python programming language"},),
+    "get_weather": ({"location": "Dublin"},),
+    "fetch_webpage": ({"url": "https://example.com"},),
+    "get_order": ({"order_id": "ORD-12345"},),
+    "get_customer": ({"customer_id": "CUST-001"},),
+    "list_orders": ({"customer_id": "CUST-001", "limit": 10},),
+    "process_refund": (
+        {"order_id": "ORD-12345", "amount": 10, "reason": "integration verification"},
+        {"order_id": "ORD-12345", "amount": 10.0, "reason": "integration verification"},
+    ),
+    "check_order_status": ({"order_id": "ORD-12345"},),
+    "lookup_customer": ({"customer_id": "CUST-001"},),
+    "search_knowledge_base": ({"query": "refund"},),
+    "get_return_policy": ({"product_category": "electronics"},),
+}
+
+
+def _receipt_digest(value: Any) -> str:
+    import hashlib
+
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _require_exact_tool_receipt(body: dict[str, Any], invocation: ToolInvocation) -> None:
+    receipts = body.get("toolReceipts")
+    if receipts is None:
+        receipts = body.get("tool_receipts")
+    assert isinstance(receipts, list), f"{invocation.response_label} returned no verifiable tool receipts: {body}"
+    accepted_arguments = _EXPECTED_TOOL_ARGUMENTS[invocation.tool_name]
+    expected = {
+        (
+            _receipt_digest(arguments),
+            tuple(sorted((key, _receipt_digest(value)) for key, value in arguments.items())),
+        )
+        for arguments in accepted_arguments
+    }
+    observed = {
+        (
+            str(receipt.get("input_sha256") or ""),
+            tuple(sorted((receipt.get("argument_sha256") or {}).items())),
+        )
+        for receipt in receipts
+        if isinstance(receipt, dict)
+        and receipt.get("name") == invocation.tool_name
+        and receipt.get("status") == "success"
+        and isinstance(receipt.get("argument_sha256"), dict)
+    }
+    assert expected & observed, (
+        f"{invocation.response_label} lacks a successful exact-argument receipt; "
+        f"expected one of {sorted(expected)}, observed {sorted(observed)}"
+    )
+
+
 def _invoke_http(
     api_session,
     *,
@@ -722,6 +782,7 @@ def _invoke_http(
     prompt: str,
     session_id: str,
     label: str,
+    invocation: ToolInvocation | None = None,
 ) -> str:
     response = api_session.post(
         f"{api_session.base_url}/api/test-runtime",
@@ -741,6 +802,8 @@ def _invoke_http(
         assert returned_session == session_id, (
             f"{case.template_id}: {label} changed session {session_id!r} to {returned_session!r}"
         )
+    if invocation is not None:
+        _require_exact_tool_receipt(body, invocation)
     text = body.get("response")
     assert isinstance(text, str) and text.strip(), f"{case.template_id}: {label} returned no response text"
     return text
@@ -763,6 +826,7 @@ def _invoke_http_template(
             prompt=invocation.prompt,
             session_id=session_id,
             label=invocation.response_label,
+            invocation=invocation,
         )
         _require_json_oracle(
             text,
@@ -773,12 +837,12 @@ def _invoke_http_template(
     if not case.verify_memory_recall:
         return
 
-    nonce = f"MEM-{uuid.uuid4().hex}"
+    memory_fact = "blue orchard seven"
     _invoke_http(
         api_session,
         case=case,
         status=status,
-        prompt=(f"Remember this verification nonce exactly for this conversation: {nonce}. Reply only STORED."),
+        prompt=(f"For this conversation, remember that the integration verification phrase is {memory_fact}."),
         session_id=session_id,
         label="memory write",
     )
@@ -786,9 +850,7 @@ def _invoke_http_template(
         api_session,
         case=case,
         status=status,
-        prompt=(
-            "What exact verification nonce did I ask you to remember in this conversation? Return only that nonce."
-        ),
+        prompt="What is the integration verification phrase for this conversation?",
         session_id=session_id,
         label="memory recall",
     )
@@ -796,8 +858,8 @@ def _invoke_http_template(
     assert not recall_errors, (
         f"{case.template_id}: memory recall returned structured errors {recall_errors}: {recall[:1200]!r}"
     )
-    assert nonce in recall, (
-        f"{case.template_id}: same-session memory did not recall {nonce!r}. Actual response: {recall[:1200]!r}"
+    assert memory_fact in recall.casefold(), (
+        f"{case.template_id}: same-session memory did not recall {memory_fact!r}. Actual response: {recall[:1200]!r}"
     )
 
 
@@ -1015,12 +1077,17 @@ def test_gallery_template_deploy_invoke_and_verified_cleanup(
 
     if case.protocol == "MCP":
         assert request_payload["config"]["protocol"] == "MCP"
-        _invoke_standalone_mcp(
-            api_session,
-            deployment_id=record.deployment_id,
-            runtime_name=request_payload["config"]["name"],
-            status=status,
-        )
+        runtime_name = request_payload["config"]["name"]
+        runtime_budget.authorize(runtime_name)
+        try:
+            _invoke_standalone_mcp(
+                api_session,
+                deployment_id=record.deployment_id,
+                runtime_name=runtime_name,
+                status=status,
+            )
+        finally:
+            runtime_budget.release(runtime_name)
     else:
         runtime_name = request_payload["config"]["name"]
         runtime_budget.authorize(runtime_name)

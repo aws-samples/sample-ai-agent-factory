@@ -189,7 +189,7 @@ TOOL_CASES: dict[str, tuple[dict[str, Any], Callable[[Any], bool]]] = {
         matrix._is_legacy_order_status_payload,
     ),
     "lookup_customer": (
-        {"email": "john@example.com"},
+        {"customer_id": "CUST-001"},
         matrix._is_legacy_customer_payload,
     ),
     "search_knowledge_base": (

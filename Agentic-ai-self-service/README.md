@@ -206,8 +206,13 @@ an explicit direct production deploy before side effects. The
 not disable it in production; a false or malformed production value fails
 synthesis and deploy admission. Gated Runtime code is always launched through
 AWS ADOT `opentelemetry-instrument`, even if canvas observability is off. Its
-framework spans remain content-redacted. Only the owner-checked staging slot of
-an immutable production-gated version can add an internal marker, which generated code strips before execution
+framework spans remain content-redacted. The injected evaluation/force-flush
+wrapper is re-registered through `BedrockAgentCoreApp.entrypoint`; rebinding only
+the module variable is insufficient because the SDK stores the original handler
+when the decorator runs. Executable removal-mutation coverage proves that dropping
+this second registration bypasses marker stripping, span capture, and flush. Only
+the owner-checked staging slot of an immutable production-gated version can add an
+internal marker, which generated code strips before execution
 and converts into one evaluator `invoke_agent` span carrying the documented
 `gen_ai.task.input/output` fields under service name
 `<AgentCoreRuntimeName>.DEFAULT` in shared `aws/spans`. The production slot
@@ -314,11 +319,19 @@ and therefore cannot mask trigger RBAC. The matrix creates one unique agent-scop
 invocation budget before staging evaluation, then deletes and absence-checks it
 in `finally`, so no reusable budget definition is left behind. The lifecycle and
 gallery integration cases use the same register-before-write tracker around every
-conversational Runtime invocation; a lost budget response is still cleaned by the
-case's unique Runtime name. Evaluation uses ordinary low-entropy factual questions with semantic answer oracles rather than
-prompt-injection-shaped “reply exactly” commands or random credential-like
-markers; a Guardrail redaction placeholder is a test failure, never accepted as
-an evaluation pass.
+Runtime invocation, including MCP discovery and tool calls; each unique Runtime
+receives an owner-bound temporary budget that is deleted and absence-checked on
+success or failure. Conversational gallery cases use customer-style requests that
+pass the unchanged `HIGH` prompt-attack filter, then require a successful runtime-
+generated tool receipt with exact SHA-256 argument digests before accepting the
+semantic response oracle. Demo customer tools advertise only non-PII customer IDs and do
+not return or echo email addresses, so the production PII Guardrail remains strict
+without erasing useful customer data. DuckDuckGo tools parse bounded results from
+the real HTML search endpoint; the Instant Answer endpoint is not accepted as a
+search substitute. Evaluation uses ordinary low-entropy factual questions with
+semantic answer oracles rather than prompt-injection-shaped “reply exactly”
+commands or random credential-like markers; a Guardrail redaction placeholder is
+a test failure, never accepted as an evaluation pass.
 
 ## Atomic invocation authorization
 

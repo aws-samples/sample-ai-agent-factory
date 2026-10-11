@@ -1645,11 +1645,13 @@ CUSTOMER_SUPPORT_TOOLS_SCHEMA = {
         },
         {
             "name": "lookup_customer",
-            "description": "Look up customer information by email address.",
+            "description": "Look up customer information by customer ID.",
             "inputSchema": {
                 "type": "object",
-                "properties": {"email": {"type": "string", "description": "Customer email address"}},
-                "required": ["email"],
+                "properties": {
+                    "customer_id": {"type": "string", "description": "Customer ID"},
+                },
+                "required": ["customer_id"],
             },
         },
         {

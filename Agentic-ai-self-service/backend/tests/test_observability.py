@@ -291,6 +291,68 @@ if __name__ == "__main__":
     # invoke wrapped so spans flush before idle stop
     assert "_otel_invoke_wrap" in out
     assert "_otel_force_flush()" in out
+    assert "invoke = app.entrypoint(_otel_invoke_wrap)" in out
+
+
+def test_registered_agentcore_entrypoint_uses_evaluation_wrapper_and_removal_mutant_fails():
+    source = """class BedrockAgentCoreApp:
+    def __init__(self):
+        self.handlers = {}
+
+    def entrypoint(self, function):
+        self.handlers["main"] = function
+        return function
+
+app = BedrockAgentCoreApp()
+
+@app.entrypoint
+def invoke(payload):
+    return dict(payload)
+"""
+    generated = _inject_otel(source)
+    registration = "invoke = app.entrypoint(_otel_invoke_wrap)"
+    assert generated.count(registration) == 1
+    assertion = """
+payload = {
+    "prompt": "What is two plus two?",
+    "session_id": "staging-session",
+    "_agentcore_evaluation_capture": True,
+}
+result = app.handlers["main"](payload)
+assert app.handlers["main"] is invoke
+assert "_agentcore_evaluation_capture" not in result
+assert result["prompt"] == "What is two plus two?"
+"""
+    env = os.environ.copy()
+    for key in (
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "OTEL_AUTH_SECRET_ARN",
+    ):
+        env.pop(key, None)
+    env["AGENT_OBSERVABILITY_ENABLED"] = "true"
+
+    positive = subprocess.run(
+        [sys.executable, "-c", generated + assertion],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert positive.returncode == 0, positive.stdout + positive.stderr
+
+    mutant = generated.replace(registration, "invoke = _otel_invoke_wrap", 1)
+    removed = subprocess.run(
+        [sys.executable, "-c", mutant + assertion],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert removed.returncode != 0, "Removing public entrypoint registration escaped detection"
 
 
 def test_no_endpoint_bootstrap_emits_allowlisted_usage_without_sensitive_span_data():

@@ -3652,9 +3652,10 @@ def _inject_otel(code: str) -> str:
             code = code[: eol + 1] + OTEL_BOOTSTRAP + code[eol + 1 :]
 
     # Wrap the @app.entrypoint invoke() body with force_flush in finally.
-    # Strategy: find each `def invoke(payload):` block and append a flush call
-    # via a try/finally around the existing return. We do this conservatively
-    # by appending a top-level decorator that wraps the invoke function.
+    # Strategy: find each `def invoke(payload):` block and install a wrapper by
+    # re-registering it through the app's public entrypoint decorator. Rebinding a
+    # module variable alone is insufficient because BedrockAgentCoreApp stores the
+    # original handler when the first decorator runs.
     if "@app.entrypoint" in code and "_otel_invoke_wrap" not in code:
         wrap_block = """
 # Wrap invoke() so spans flush before AgentCore idle-stop kills the runtime.
@@ -3666,7 +3667,7 @@ def _otel_invoke_wrap(*args, **kwargs):
         )
     finally:
         _otel_force_flush()
-invoke = _otel_invoke_wrap
+invoke = app.entrypoint(_otel_invoke_wrap)
 """
         # Append after the file's existing __main__ block check, or at end.
         if 'if __name__ == "__main__":' in code:

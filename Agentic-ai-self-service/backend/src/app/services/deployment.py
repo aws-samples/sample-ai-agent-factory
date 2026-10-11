@@ -953,18 +953,8 @@ def process_refund(order_id: str, amount: float = 0, reason: str = "") -> str:
 @mcp.tool()
 def duckduckgo_search(query: str, max_results: int = 5) -> str:
     """Search the web using DuckDuckGo. Returns top results."""
-    import urllib.request, urllib.parse
-    url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json&no_redirect=1"
-    try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.loads(resp.read())
-        results = []
-        for topic in data.get("RelatedTopics", [])[:max_results]:
-            if "Text" in topic:
-                results.append({"text": topic["Text"], "url": topic.get("FirstURL", "")})
-        return json.dumps(results if results else [{"text": data.get("AbstractText", "No results"), "url": data.get("AbstractURL", "")}])
-    except Exception as e:
-        return json.dumps({"error": str(e)})
+    del max_results  # Canonical implementation is deliberately bounded to five.
+    return _do_duckduckgo_search(query)
 ''')
 
     if "wikipedia_search" in tool_names:
@@ -972,15 +962,7 @@ def duckduckgo_search(query: str, max_results: int = 5) -> str:
 @mcp.tool()
 def wikipedia_search(query: str) -> str:
     """Search and retrieve Wikipedia article summaries."""
-    import urllib.request, urllib.parse
-    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(query)}"
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "AgentCore/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-        return json.dumps({"title": data.get("title", ""), "summary": data.get("extract", "No summary available")})
-    except Exception as e:
-        return json.dumps({"error": str(e)})
+    return _do_wikipedia_search(query)
 ''')
 
     # Generate custom tools from dict definitions (name/toolName + code/implementation)
@@ -1057,6 +1039,10 @@ def {ct_name}({params_str}) -> str:
     mock_data = ""
     if has_customer_tools:
         mock_data = "\n" + codegen_templates.load_impl("customer_support_impl") + "\n"
+    has_web_tools = any(t in tool_names for t in ["duckduckgo_search", "wikipedia_search"])
+    web_tool_support = ""
+    if has_web_tools:
+        web_tool_support = "\n" + codegen_templates.load_impl("dynamic_tools_impl") + "\n"
 
     # Name + instructions reach the generated source as ``repr()`` literals so a
     # server name or system prompt carrying quotes, backslashes or newlines is a
@@ -1082,6 +1068,7 @@ from mcp.server.fastmcp import FastMCP
 # to 8000; honour PORT only if AgentCore ever overrides it.
 PORT = int(os.environ.get("PORT", "8000"))
 mcp = FastMCP(name={server_name_lit}, instructions={instructions_lit}, host="0.0.0.0", port=PORT, stateless_http=True)
+{web_tool_support}
 {mock_data}
 {tools_str}
 

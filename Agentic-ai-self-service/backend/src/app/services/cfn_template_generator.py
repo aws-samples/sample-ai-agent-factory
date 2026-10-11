@@ -3095,11 +3095,13 @@ _LEGACY_TOOL_SCHEMAS: dict[str, dict] = {
     },
     "lookup_customer": {
         "name": "lookup_customer",
-        "description": "Look up customer information by email address.",
+        "description": "Look up customer information by customer ID.",
         "inputSchema": {
             "type": "object",
-            "properties": {"email": {"type": "string", "description": "Customer email address"}},
-            "required": ["email"],
+            "properties": {
+                "customer_id": {"type": "string", "description": "Customer ID"},
+            },
+            "required": ["customer_id"],
         },
     },
     "search_knowledge_base": {
