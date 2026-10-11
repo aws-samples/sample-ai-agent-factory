@@ -209,7 +209,7 @@ async def get_slots(
 ) -> SlotsResponse:
     """Return the production + staging slot pointers for a runtime."""
     runtime_name = _validate_runtime_name(runtime_name)
-    slots = get_slots_store().get(runtime_name)
+    slots = get_slots_store().get(runtime_name, consistent=True)
     if slots is None:
         raise HTTPException(status_code=404, detail="Not found")
     assert_owner(slots.owner_sub, caller_sub)

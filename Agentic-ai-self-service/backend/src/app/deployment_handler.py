@@ -340,6 +340,37 @@ def _gateway_implied(
     return bool(gateway_tools or connectors or external_mcp_servers or "gateway" in (connected_tools or []))
 
 
+_TEMPLATE_DEFAULT_GATEWAY_NAMES = {
+    "strands-gateway-agent": "agent_gateway",
+    "customer-support-assistant": "support_gateway",
+    "customer-support-blueprint": "support_gateway",
+    "mcp-server-gateway-target": "mcp_server_gateway",
+}
+
+
+def _pair_template_default_gateway_name(
+    gateway_config: dict | None,
+    *,
+    template_id: str | None,
+    friendly_runtime_name: str,
+) -> dict | None:
+    """Make an untouched gallery Gateway follow its ownership-fenced Runtime name.
+
+    Gallery documents are static, so their built-in Gateway names are static too.
+    Preserving one of those defaults in a shared account lets the first tenant's
+    live deployment block every later tenant even when each Runtime name is unique.
+    Pair only the exact known defaults; a user-supplied custom name remains an
+    explicit request and is never rewritten.
+    """
+    if gateway_config is None:
+        return None
+    prepared = copy.deepcopy(gateway_config)
+    default_name = _TEMPLATE_DEFAULT_GATEWAY_NAMES.get(template_id or "")
+    if default_name and prepared.get("name") == default_name:
+        prepared["name"] = friendly_runtime_name
+    return prepared
+
+
 def _reject_unsupported_cross_account_features(request: DeployRequest) -> None:
     """Fail before persistence for features that still depend on home-account data.
 
@@ -2168,7 +2199,11 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     if "memory" in template_implied and not prepared_memory_config:
         prepared_memory_config = {"enabled": True}
 
-    prepared_gateway_config = copy.deepcopy(request.gateway_config) if request.gateway_config else None
+    prepared_gateway_config = _pair_template_default_gateway_name(
+        request.gateway_config,
+        template_id=request.template_id,
+        friendly_runtime_name=friendly_runtime_name,
+    )
     if prepared_gateway_config is None and _gateway_implied(
         request.gateway_tools,
         request.connectors,

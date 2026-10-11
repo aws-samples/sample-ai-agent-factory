@@ -168,15 +168,36 @@ def _deployment_status(
     api_session: requests.Session,
     deployment_id: str,
 ) -> dict[str, Any]:
-    response = api_session.get(
-        f"{_base_url(api_session)}/api/deploy/{deployment_id}",
-        timeout=30,
-    )
-    response.raise_for_status()
-    body = response.json()
-    if not isinstance(body, dict):
-        raise AssertionError(f"Deployment {deployment_id} returned a non-object status body")
-    return body
+    """Read one status with a bounded retry for transport-only failures.
+
+    CloudFront can close an otherwise healthy keep-alive connection while a
+    multi-minute deployment is being polled. A GET is safe to replay, but an
+    HTTP response (including 4xx/5xx) is authoritative and must never be hidden
+    by this retry boundary.
+    """
+    attempts = 4
+    for attempt in range(1, attempts + 1):
+        try:
+            response = api_session.get(
+                f"{_base_url(api_session)}/api/deploy/{deployment_id}",
+                timeout=30,
+            )
+            response.raise_for_status()
+            body = response.json()
+            if not isinstance(body, dict):
+                raise AssertionError(f"Deployment {deployment_id} returned a non-object status body")
+            return body
+        except (requests.ConnectionError, requests.Timeout):
+            if attempt == attempts:
+                raise
+            logger.warning(
+                "Deployment %s status transport failed on attempt %d/%d; retrying idempotent GET",
+                deployment_id,
+                attempt,
+                attempts,
+            )
+            time.sleep(float(attempt))
+    raise AssertionError("unreachable")
 
 
 def _wait_for_status(

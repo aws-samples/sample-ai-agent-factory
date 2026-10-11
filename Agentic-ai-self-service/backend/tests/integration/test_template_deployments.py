@@ -744,6 +744,20 @@ def _receipt_digest(value: Any) -> str:
     ).hexdigest()
 
 
+def _receipt_tool_name_matches(published_name: Any, requested_name: str) -> bool:
+    """Match a direct tool name or the exact leaf of a Gateway-published name."""
+    if not isinstance(published_name, str) or not published_name or len(published_name) > 256:
+        return False
+    if published_name == requested_name:
+        return True
+    segments = published_name.split("___")
+    return (
+        len(segments) >= 2
+        and segments[-1] == requested_name
+        and all(re.fullmatch(r"[A-Za-z0-9_-]+", segment) for segment in segments)
+    )
+
+
 def _require_exact_tool_receipt(body: dict[str, Any], invocation: ToolInvocation) -> None:
     receipts = body.get("toolReceipts")
     if receipts is None:
@@ -764,7 +778,7 @@ def _require_exact_tool_receipt(body: dict[str, Any], invocation: ToolInvocation
         )
         for receipt in receipts
         if isinstance(receipt, dict)
-        and receipt.get("name") == invocation.tool_name
+        and _receipt_tool_name_matches(receipt.get("name"), invocation.tool_name)
         and receipt.get("status") == "success"
         and isinstance(receipt.get("argument_sha256"), dict)
     }
@@ -816,15 +830,18 @@ def _invoke_http_template(
     status: dict[str, Any],
 ) -> None:
     assert case.invocations
-    session_id = f"integration-{uuid.uuid4().hex}"
 
+    # Each tool oracle is an independent wiring check. Reusing one model
+    # conversation lets an earlier response change whether the model calls a
+    # later requested tool, which tests conversation drift rather than wiring.
     for invocation in case.invocations:
+        tool_session_id = f"integration-tool-{case.name_token}-{uuid.uuid4().hex}"
         text = _invoke_http(
             api_session,
             case=case,
             status=status,
             prompt=invocation.prompt,
-            session_id=session_id,
+            session_id=tool_session_id,
             label=invocation.response_label,
             invocation=invocation,
         )
@@ -837,21 +854,25 @@ def _invoke_http_template(
     if not case.verify_memory_recall:
         return
 
-    memory_fact = "blue orchard seven"
+    # Memory itself remains a same-session, two-turn customer journey. Use a
+    # normal support preference rather than a secret-like nonce that the
+    # production PII Guardrail correctly anonymizes as a password.
+    memory_session_id = f"integration-memory-{case.name_token}-{uuid.uuid4().hex}"
+    memory_fact = "text message"
     _invoke_http(
         api_session,
         case=case,
         status=status,
-        prompt=(f"For this conversation, remember that the integration verification phrase is {memory_fact}."),
-        session_id=session_id,
+        prompt="The customer prefers to receive delivery updates by text message in this support conversation.",
+        session_id=memory_session_id,
         label="memory write",
     )
     recall = _invoke_http(
         api_session,
         case=case,
         status=status,
-        prompt="What is the integration verification phrase for this conversation?",
-        session_id=session_id,
+        prompt="How does the customer prefer to receive delivery updates in this support conversation?",
+        session_id=memory_session_id,
         label="memory recall",
     )
     recall_errors = [error for value in _json_values(recall) if (error := _structured_error(value))]
