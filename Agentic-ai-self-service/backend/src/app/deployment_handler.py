@@ -2417,6 +2417,11 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         "target_harness_role_arn": target_harness_role_arn,
         "target_artifact_bucket": target_artifact_bucket,
         "evaluation_kms_key_arn": evaluation_kms_key_arn,
+        # Required server-authored control bit. Codegen, IAM, and RuntimeConfigure
+        # all consume this exact value; omitting it silently launched a plain
+        # agent.py process with no evaluation spans while the version row still
+        # claimed that production evaluation was mandatory.
+        "production_gate_required": production_gate_required,
         # Phase 1 Gap 1A — every step handler keys S3 paths and AgentCore
         # runtime names off the version. friendly_runtime_name is the user's
         # input; agentcore_runtime_name is what we actually pass to AgentCore.

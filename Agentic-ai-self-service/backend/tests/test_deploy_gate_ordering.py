@@ -867,6 +867,30 @@ def test_production_like_environment_defaults_new_deploys_to_staging(spy, monkey
     sfn_input = json.loads(spy.start.input_json)
     assert sfn_input["deployment_slot"] == "staging"
     assert sfn_input["evaluation_kms_key_arn"] == evaluation_key_arn
+    assert sfn_input["production_gate_required"] is True
+
+
+def test_production_gate_propagation_removal_mutant_is_rejected(spy, monkeypatch):
+    """The version claim and every runtime step must consume the same gate bit."""
+
+    _enable_production_admission(monkeypatch)
+
+    response = _client().post("/api/deploy", json=_body())
+
+    assert response.status_code == 202, response.text
+    execution = json.loads(spy.start.input_json)
+    assert execution["production_gate_required"] is True
+
+    # Removal is the live defect: downstream ``event.get`` calls all became
+    # false while the immutable version row still said evaluation was required.
+    from app.services.deployment_payload_validation import (
+        PayloadPhase,
+        validate_deployment_payload,
+    )
+
+    removed = {key: value for key, value in execution.items() if key != "production_gate_required"}
+    verdict = validate_deployment_payload(removed, phase=PayloadPhase.PREPARED)
+    assert "missing_server_field" in verdict.codes()
 
 
 def test_production_like_environment_rejects_direct_production_before_side_effects(spy, monkeypatch):
@@ -889,7 +913,9 @@ def test_dev_environment_preserves_direct_production_default(spy, monkeypatch):
     assert response.status_code == 202, response.text
     version = spy.versions.put.call_args.args[0]
     assert version.production_gate_required is False
-    assert json.loads(spy.start.input_json)["deployment_slot"] == "production"
+    execution = json.loads(spy.start.input_json)
+    assert execution["deployment_slot"] == "production"
+    assert execution["production_gate_required"] is False
 
 
 # --------------------------------------------------------------------------------------
@@ -949,7 +975,7 @@ def test_production_model_free_mcp_uses_protocol_gates_not_model_controls(spy, m
     assert version.evaluation_kms_key_arn is None
     execution = json.loads(spy.start.input_json)
     assert execution["deployment_slot"] == "production"
-    assert "production_gate_required" not in execution
+    assert execution["production_gate_required"] is False
     assert "guardrails_config" not in execution
     assert "guardrails" not in execution["connected_tools"]
 

@@ -173,6 +173,7 @@ _PREPARED_TOP_LEVEL_FIELDS = frozenset(
         "target_harness_role_arn",
         "target_artifact_bucket",
         "evaluation_kms_key_arn",
+        "production_gate_required",
         "version_id",
         "friendly_runtime_name",
         "agentcore_runtime_name",
@@ -1306,6 +1307,15 @@ def validate_deployment_payload(
                         "this payload was not produced by the deployment API",
                     )
                 )
+        production_gate_required = payload.get("production_gate_required")
+        if not isinstance(production_gate_required, bool):
+            errors.append(
+                PayloadError(
+                    "$.production_gate_required",
+                    "missing_server_field",
+                    "is a required server-authored boolean consumed by code generation, IAM, and Runtime configuration",
+                )
+            )
         for key in sorted(k for k in payload if k in _VALIDATOR_OUTPUT_FIELDS):
             errors.append(
                 PayloadError(

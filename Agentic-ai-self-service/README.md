@@ -206,7 +206,10 @@ Production-like environments also default new versions to **staging** and reject
 an explicit direct production deploy before side effects. The
 `production_evaluation_gate` context may enable the gate in development but may
 not disable it in production; a false or malformed production value fails
-synthesis and deploy admission. Gated Runtime code is always launched through
+synthesis and deploy admission. The server-authored gate bit is required on the
+prepared Step Functions input and is consumed unchanged by code generation, IAM,
+and Runtime configuration; the prepared-payload validator refuses a missing or
+non-boolean value before execution. Gated Runtime code is always launched through
 AWS ADOT `opentelemetry-instrument`, even if canvas observability is off. Its
 framework spans remain content-redacted. The injected evaluation/force-flush
 wrapper is re-registered through `BedrockAgentCoreApp.entrypoint`; rebinding only
