@@ -82,6 +82,7 @@ def _prepared_payload(*, mcp_role_arn: str = MCP_RUNTIME_ROLE_ARN) -> dict:
         "friendly_runtime_name": "standalone-mcp",
         "agentcore_runtime_name": "standalone_mcp-AbCdEf1234",
         "deployment_slot": "production",
+        "production_gate_required": False,
         "parent_version_id": None,
         "owner_sub": "owner",
         "deployment_mode": "runtime",
