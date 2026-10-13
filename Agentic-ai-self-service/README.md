@@ -209,9 +209,16 @@ not disable it in production; a false or malformed production value fails
 synthesis and deploy admission. The server-authored gate bit is required on the
 prepared Step Functions input and is consumed unchanged by code generation, IAM,
 and Runtime configuration; the prepared-payload validator refuses a missing or
-non-boolean value before execution. Gated Runtime code is always launched through
-AWS ADOT `opentelemetry-instrument`, even if canvas observability is off. Its
-framework spans remain content-redacted. The injected evaluation/force-flush
+non-boolean value before execution. Gated Python Runtime code keeps
+`agent.py` as the sole direct-code entrypoint and initializes the packaged AWS
+ADOT distro in-process before Strands binds its tracer provider, even if canvas
+observability is off. The `opentelemetry-instrument` entrypoint prefix is not
+used: AgentCore validates that prefix as the Node.js package contract and rejects
+a Python ZIP with `CREATE_FAILED`, even when the Python console script is present.
+The production environment disables ADOT's prefork-worker deferral because
+`BedrockAgentCoreApp` runs in the direct-code process; failure to install a real
+SDK provider for the required X-Ray traces endpoint fails Runtime startup closed.
+Its framework spans remain content-redacted. The injected evaluation/force-flush
 wrapper is re-registered through `BedrockAgentCoreApp.entrypoint`; rebinding only
 the module variable is insufficient because the SDK stores the original handler
 when the decorator runs. Executable removal-mutation coverage proves that dropping
@@ -230,7 +237,12 @@ or indexing rule, it waits AWS's documented ten-minute search-readiness window
 before creating evaluation sessions. It restores the exact prior destination and
 indexing percentage after the run, treats an already-restored or still-settling
 target as an idempotent recovery state, and retains a validated 0600 recovery
-file until cleanup is proven. The standalone `mcp-server-runtime` is model-free:
+file until cleanup is proven. Failure auto-cleanup may delete every external AWS
+resource before the full teardown runs; when the deployment already owns an
+immutable version, it records `delete_retained` until the version/slot/name-claim
+transaction succeeds. An idempotent DELETE also reconciles historical `deleted`
+tombstones that still carry a version ID, and never reports success while that
+claim remains. The standalone `mcp-server-runtime` is model-free:
 it receives neither this model-evaluation gate nor an injected Bedrock Guardrail;
 its production gate is authenticated MCP protocol and complete tool execution.
 

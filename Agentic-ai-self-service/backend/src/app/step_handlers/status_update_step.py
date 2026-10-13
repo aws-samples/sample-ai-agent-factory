@@ -777,6 +777,18 @@ def _keep_claims_for(name_hold, durable: list, standing: set | None) -> None:
     name_hold.only_durable(ids, standing=still)
 
 
+def _version_claim_release_pending(record: dict, event: dict) -> bool:
+    """Whether full teardown must still atomically release version/name metadata.
+
+    Admission creates the immutable AgentVersion row before any AWS side effect.
+    Automatic failure cleanup owns external resources only; marking its result
+    ``deleted`` while this id remains makes the public DELETE idempotently return
+    before the version/slot transaction runs, permanently locking the name.
+    """
+
+    return bool(event.get("version_id") or record.get("version_id"))
+
+
 def _auto_cleanup_on_failure(
     store: DeploymentStateStore,
     deployment_id: str,
@@ -935,11 +947,8 @@ def _auto_cleanup_on_failure(
                         finalizer_token=finalizer_token,
                     )
                     return
-                store.update_delete_status(
-                    deployment_id,
-                    "deleted",
-                    # Server-authored text. The marker's own reason string is logged above but
-                    # never persisted here, because this message is rendered to an operator.
+                metadata_pending = _version_claim_release_pending(record or {}, event)
+                empty_message = (
                     (
                         "No resources were created: the gateway step refused the deployment "
                         "before creating anything, and no earlier step recorded a resource. "
@@ -949,7 +958,14 @@ def _auto_cleanup_on_failure(
                     else (
                         "No resources were created: the deployment was refused at the first "
                         "step, before any resource-creating step ran. Nothing to clean up."
-                    ),
+                    )
+                )
+                if metadata_pending:
+                    empty_message += " Version and runtime-name metadata still require full teardown."
+                store.update_delete_status(
+                    deployment_id,
+                    "delete_retained" if metadata_pending else "deleted",
+                    empty_message,
                     finalizer_token=finalizer_token,
                 )
                 return
@@ -1283,9 +1299,10 @@ def _auto_cleanup_on_failure(
             # Our runtime may still call it: a retention, and the claim stays with it.
             protected += handed_off
             handed_off_gateways = []
+        metadata_pending = _version_claim_release_pending(record or {}, event)
         if failed:
             delete_status = "delete_failed"
-        elif protected:
+        elif protected or metadata_pending:
             delete_status = "delete_retained"
         else:
             delete_status = "deleted"
@@ -1341,6 +1358,7 @@ def _auto_cleanup_on_failure(
                 (f"{unfinished} " if unfinished else "")
                 + f"Automatic cleanup handled {cleaned}/{len(seen)} resources; protected={protected}, "
                 f"failed={failed}, left for another deployment={handed_off}."
+                + (" Version and runtime-name metadata still require full teardown." if metadata_pending else "")
                 + (
                     f" Gateway {frozen_gateway} was not deleted, so {frozen} resource(s) of its graph were left intact."
                     if frozen

@@ -113,13 +113,17 @@ def _production_evaluation_observability_env(
 ) -> dict[str, str]:
     """Return the non-bypassable ADOT contract for production evaluation.
 
-    Batch Evaluation reads real OpenTelemetry spans from CloudWatch. Direct
-    code deployment therefore has to run under ``opentelemetry-instrument``
-    with the AWS distro, send traces to X-Ray's OTLP endpoint, and use the
-    documented ``{RuntimeName}.DEFAULT`` service name. We deliberately opt out
-    of the newer per-runtime unified destination: the platform's evaluation
-    IAM and reversible Transaction Search setup are scoped to shared
-    ``aws/spans`` and do not grant tenant runtimes account-wide
+    Batch Evaluation reads real OpenTelemetry spans from CloudWatch. Python
+    direct-code deployment keeps ``agent.py`` as the Runtime entrypoint and the
+    generated module initializes the packaged AWS distro in-process before
+    Strands binds its tracer provider. The control-plane API accepts at most two
+    entrypoint tokens, while AgentCore's ``opentelemetry-instrument`` prefix
+    validation is the Node.js package contract and rejects Python ZIPs even when
+    they contain the Python console script. We send traces to X-Ray's OTLP
+    endpoint and use the documented ``{RuntimeName}.DEFAULT`` service name. We
+    deliberately opt out of the newer per-runtime unified destination: the
+    platform's evaluation IAM and reversible Transaction Search setup are scoped
+    to shared ``aws/spans`` and do not grant tenant runtimes account-wide
     ``logs:PutResourcePolicy``.
 
     AgentCore Evaluations requires prompt and response content. Framework-wide
@@ -141,6 +145,9 @@ def _production_evaluation_observability_env(
         "UNIFIED_TRACES_DESTINATION_ENABLED": "false",
         "OTEL_PYTHON_DISTRO": "aws_distro",
         "OTEL_PYTHON_CONFIGURATOR": "aws_configurator",
+        # BedrockAgentCoreApp runs the generated module in this direct-code
+        # process; there is no prefork WSGI worker that will initialize later.
+        "OTEL_AWS_PYTHON_DEFER_TO_WORKERS_ENABLED": "false",
         "OTEL_TRACES_EXPORTER": "otlp",
         "OTEL_LOGS_EXPORTER": "none",
         "OTEL_METRICS_EXPORTER": "none",

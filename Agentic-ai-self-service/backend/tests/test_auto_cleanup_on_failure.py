@@ -118,6 +118,29 @@ def test_successful_failure_cleanup_marks_the_row_deleted(mock_store):
     )
 
 
+def test_failure_cleanup_with_a_version_claim_stays_retryable(mock_store):
+    from app.step_handlers.status_update_step import _auto_cleanup_on_failure
+
+    state = mock_store.get.return_value.model_dump.return_value
+    state["version_id"] = "01a135161780b6d678d8ce7afe0aab25"
+    state["friendly_runtime_name"] = "it_lifecycle_states_13a363a5"
+    with patch("app.step_handlers.status_update_step._cleanup_resource"):
+        _auto_cleanup_on_failure(mock_store, "test-deploy-123", {})
+
+    final = mock_store.update_delete_status.call_args_list[-1]
+    assert final.args[:2] == ("test-deploy-123", "delete_retained")
+    assert "Version and runtime-name metadata still require full teardown" in final.args[2]
+
+    # Removal mutation: without the persisted version id, external cleanup may
+    # finalize immediately because there is no immutable claim left to release.
+    state.pop("version_id")
+    state.pop("friendly_runtime_name")
+    mock_store.reset_mock()
+    with patch("app.step_handlers.status_update_step._cleanup_resource"):
+        _auto_cleanup_on_failure(mock_store, "test-deploy-123", {})
+    assert mock_store.update_delete_status.call_args_list[-1].args[1] == "deleted"
+
+
 def test_failed_failure_cleanup_keeps_a_durable_retry_row(mock_store):
     from app.step_handlers.status_update_step import _auto_cleanup_on_failure
 

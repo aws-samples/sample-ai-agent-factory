@@ -1,4 +1,4 @@
-"""Production evaluation runs AgentCore direct code under the supported ADOT entrypoint."""
+"""Production evaluation keeps Python direct code on agent.py and boots ADOT in-process."""
 
 from __future__ import annotations
 
@@ -7,6 +7,9 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
+from app.models.deployment_models import DeployRequest, RuntimeConfig
+from app.services.cfn_template_generator import CfnTemplateGenerator
 from app.services.runtime_deployer import _create_code_zip, create_agent_runtime
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -43,10 +46,9 @@ def _create(*, instrument: bool) -> dict:
     return control.calls[0]
 
 
-def test_instrumented_runtime_uses_the_aws_documented_entrypoint() -> None:
+def test_instrumented_python_runtime_keeps_the_python_direct_code_entrypoint() -> None:
     request = _create(instrument=True)
     assert request["agentRuntimeArtifact"]["codeConfiguration"]["entryPoint"] == [
-        "opentelemetry-instrument",
         "agent.py",
     ]
 
@@ -54,6 +56,25 @@ def test_instrumented_runtime_uses_the_aws_documented_entrypoint() -> None:
 def test_uninstrumented_runtime_keeps_the_plain_entrypoint() -> None:
     request = _create(instrument=False)
     assert request["agentRuntimeArtifact"]["codeConfiguration"]["entryPoint"] == ["agent.py"]
+
+
+def test_exported_observable_python_runtime_keeps_the_python_entrypoint() -> None:
+    config = RuntimeConfig(
+        name="observable-export",
+        model={"modelId": "us.anthropic.claude-sonnet-5"},
+        observability={
+            "enableOtel": True,
+            "provider": "custom",
+            "otlpEndpoint": "https://otel.example/v1/traces",
+        },
+    )
+    bundle = CfnTemplateGenerator().generate(DeployRequest(nodeId="node-1", config=config))
+    template = yaml.safe_load(bundle.template_yaml)
+
+    assert template["Resources"]["AgentCoreRuntime"]["Properties"]["AgentRuntimeArtifact"]["CodeConfiguration"][
+        "EntryPoint"
+    ] == ["agent.py"]
+    assert "_otel_auto_initialize(swallow_exceptions=False)" in bundle.agent_code
 
 
 def test_installer_preserves_only_a_path_neutral_adot_console_script() -> None:

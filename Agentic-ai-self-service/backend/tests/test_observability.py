@@ -10,6 +10,8 @@ import json
 import os
 import subprocess
 import sys
+import zipfile
+from pathlib import Path
 
 import pytest
 from app.models.deployment_models import RuntimeConfig
@@ -228,6 +230,7 @@ def test_production_evaluation_forces_native_adot_even_when_canvas_disables_otel
     assert env["UNIFIED_TRACES_DESTINATION_ENABLED"] == "false"
     assert env["OTEL_PYTHON_DISTRO"] == "aws_distro"
     assert env["OTEL_PYTHON_CONFIGURATOR"] == "aws_configurator"
+    assert env["OTEL_AWS_PYTHON_DEFER_TO_WORKERS_ENABLED"] == "false"
     assert env["OTEL_TRACES_EXPORTER"] == "otlp"
     assert env["OTEL_LOGS_EXPORTER"] == "none"
     assert env["OTEL_METRICS_EXPORTER"] == "none"
@@ -239,6 +242,73 @@ def test_production_evaluation_forces_native_adot_even_when_canvas_disables_otel
     assert env["AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT"] == "true"
     assert env["OTEL_SEMCONV_STABILITY_OPT_IN"].endswith("gen_ai_unredacted_attributes=")
     assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in env
+
+
+def test_required_traces_endpoint_initializes_a_real_provider_and_removal_mutant_fails(tmp_path: Path):
+    runtime_bundle = Path(__file__).resolve().parents[1] / "agentcore-deps" / "strands-mcp.zip"
+    if not runtime_bundle.exists():
+        pytest.skip("generated AgentCore Runtime bundle is absent")
+    extracted = tmp_path / "runtime-bundle"
+    with zipfile.ZipFile(runtime_bundle) as archive:
+        archive.extractall(extracted)
+
+    runtime_prefix = f"""
+from strands.telemetry import StrandsTelemetry as _HostStrandsTelemetry
+from opentelemetry import trace as _host_trace
+from opentelemetry.sdk.trace import TracerProvider as _HostTracerProvider
+import pydantic as _host_pydantic
+import pydantic_core as _host_pydantic_core
+import sys
+sys.path.insert(0, {str(extracted)!r})
+"""
+    assertion = """
+from opentelemetry import trace as _assert_trace
+from opentelemetry.sdk.trace import TracerProvider as _AssertTracerProvider
+assert isinstance(_assert_trace.get_tracer_provider(), _AssertTracerProvider)
+assert _otel_provider is _assert_trace.get_tracer_provider()
+"""
+    env = os.environ.copy()
+    for key in (
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_AUTH_SECRET_ARN",
+    ):
+        env.pop(key, None)
+    env.update(
+        {
+            "AGENT_OBSERVABILITY_ENABLED": "true",
+            "OTEL_PYTHON_DISTRO": "aws_distro",
+            "OTEL_PYTHON_CONFIGURATOR": "aws_configurator",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://127.0.0.1:9/v1/traces",
+            "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
+            "OTEL_TRACES_EXPORTER": "otlp",
+            "OTEL_LOGS_EXPORTER": "none",
+            "OTEL_METRICS_EXPORTER": "none",
+            "OTEL_PYTHON_DISABLED_INSTRUMENTATIONS": "*",
+            "OTEL_AWS_PYTHON_DEFER_TO_WORKERS_ENABLED": "false",
+        }
+    )
+    positive = subprocess.run(
+        [sys.executable, "-c", runtime_prefix + OTEL_BOOTSTRAP + assertion],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert positive.returncode == 0, positive.stdout + positive.stderr
+
+    initializer = "_otel_auto_initialize(swallow_exceptions=False)"
+    assert OTEL_BOOTSTRAP.count(initializer) == 1
+    mutant = OTEL_BOOTSTRAP.replace(initializer, "None", 1)
+    removed = subprocess.run(
+        [sys.executable, "-c", runtime_prefix + mutant + assertion],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert removed.returncode != 0, "Removing in-process ADOT initialization escaped detection"
 
 
 def test_production_evaluation_trace_endpoint_overrides_external_trace_routing():

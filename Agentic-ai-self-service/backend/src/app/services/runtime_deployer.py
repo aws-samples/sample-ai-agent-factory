@@ -798,10 +798,12 @@ def create_agent_runtime(
     vpc_config field was read by no deployer (dead config). Falls back to PUBLIC
     when absent.
 
-    ``instrument_observability`` selects the AWS-documented direct-code
-    entrypoint ``["opentelemetry-instrument", entrypoint]``. The executable is
-    normalized into the dependency bundle root; callers must not enable this
-    unless that bundle is present.
+    ``instrument_observability`` means the generated Python module contains the
+    in-process ADOT bootstrap. Python direct-code runtimes must keep the Python
+    file as their sole ``entryPoint``. Live AgentCore validation rejects the
+    Node.js-style ``["opentelemetry-instrument", entrypoint]`` prefix even when
+    the ZIP contains the Python console script; the bootstrap initializes the
+    packaged AWS distro before Strands binds its provider instead.
 
     Returns dict with runtime_id, arn, status.
     """
@@ -817,7 +819,7 @@ def create_agent_runtime(
                     }
                 },
                 "runtime": python_runtime,
-                "entryPoint": (["opentelemetry-instrument", entrypoint] if instrument_observability else [entrypoint]),
+                "entryPoint": [entrypoint],
             }
         },
         "roleArn": role_arn,

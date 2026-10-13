@@ -4474,6 +4474,47 @@ def _claim_delete_status(deployment_id: str) -> bool:
     return False
 
 
+def _reconcile_deleted_version_claim(deployment_record: dict, caller_sub: str | None) -> bool:
+    """Release version/name metadata before reporting an old tombstone final.
+
+    Failure auto-cleanup historically marked external-resource deletion final
+    without running the version/slot transaction. A later DELETE then returned
+    early forever. Rows without a version id predate or never entered that
+    lifecycle and need no reconciliation.
+    """
+
+    if not deployment_record.get("version_id"):
+        return True
+    friendly, proven = _resolve_friendly_runtime_name(deployment_record)
+    if not friendly or not proven:
+        logger.warning(
+            "Deleted deployment %s still has a version id but no proven runtime name",
+            deployment_record.get("deployment_id"),
+        )
+        return False
+    outcome: dict[str, bool] = {}
+    messages = _release_runtime_name_claim(
+        deployment_record,
+        caller_sub,
+        runtime_may_still_live=False,
+        trigger_cleanup_unconfirmed=False,
+        outcome=outcome,
+    )
+    if outcome.get("released") is True:
+        logger.info(
+            "Reconciled deleted deployment %s version/name metadata: %s",
+            deployment_record.get("deployment_id"),
+            "; ".join(messages) or "already absent",
+        )
+        return True
+    logger.warning(
+        "Deleted deployment %s version/name metadata remains: %s",
+        deployment_record.get("deployment_id"),
+        "; ".join(messages) or "release was not proven",
+    )
+    return False
+
+
 @deployment_app.delete(
     "/api/runtime/{runtime_id}",
     response_model=DeleteResponse,
@@ -4529,10 +4570,17 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
         if existing_delete_status == "deleted":
             verdict = _deleted_is_final(dep_id)
             if verdict == DELETED_FINAL:
-                return DeleteResponse(
-                    success=True,
-                    message="This deployment has already been deleted.",
+                if _reconcile_deleted_version_claim(deployment_record, caller_sub):
+                    return DeleteResponse(
+                        success=True,
+                        message="This deployment has already been deleted.",
+                    )
+                message = (
+                    "AWS resources are deleted, but version and runtime-name metadata "
+                    "could not be released yet. Try again shortly."
                 )
+                _set_delete_status(dep_id, "delete_failed", message)
+                return DeleteResponse(success=False, message=message)
             if verdict == DELETED_UNVERIFIED:
                 return DeleteResponse(success=False, message=_DELETED_UNVERIFIED_MESSAGE)
             # Reopened: the claim below takes it, and the teardown runs again.
@@ -4871,10 +4919,14 @@ def _handle_stack_cleanup_delete(event: dict) -> dict:
     if observed_status == "deleted":
         verdict = _deleted_is_final(deployment_id)
         if verdict == DELETED_FINAL:
-            return {
-                "success": True,
-                "message": "Deployment was already deleted.",
-            }
+            if _reconcile_deleted_version_claim(record, record.get("user_id")):
+                return {
+                    "success": True,
+                    "message": "Deployment was already deleted.",
+                }
+            message = "AWS resources are deleted, but version and runtime-name metadata could not be released yet."
+            _set_delete_status(deployment_id, "delete_failed", message)
+            return {"success": False, "retryable": True, "message": message}
         if verdict == DELETED_UNVERIFIED:
             return {"success": False, "retryable": True, "message": _DELETED_UNVERIFIED_MESSAGE}
         # Reopened: the claim below takes it, and the teardown runs again.

@@ -9550,11 +9550,12 @@ def handler(event, context):
                                 "Prefix": {"Fn::GetAtt": ["AgentCodePackage", "CodeZipPrefix"]},
                             }
                         },
-                        "EntryPoint": (
-                            ["opentelemetry-instrument", config.entrypoint or "agent.py"]
-                            if otel_env
-                            else [config.entrypoint or "agent.py"]
-                        ),
+                        # Python direct-code accepts the Python module as its entrypoint.
+                        # AgentCore's executable-prefix validation is the Node.js
+                        # auto-instrumentation contract and rejects Python ZIPs even
+                        # when they contain the console script. Generated agent.py
+                        # initializes the packaged ADOT distro in-process instead.
+                        "EntryPoint": [config.entrypoint or "agent.py"],
                         "Runtime": config.python_runtime or "PYTHON_3_13",
                     }
                 },
