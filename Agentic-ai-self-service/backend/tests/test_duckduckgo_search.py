@@ -25,17 +25,39 @@ _SEARCH_HTML = b"""
 </body></html>
 """
 
+_LITE_SEARCH_HTML = b"""
+<html><body>
+  <a class="result-link" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Faws.amazon.com%2Fbedrock%2Fagentcore%2F">
+    Amazon Bedrock AgentCore - AWS
+  </a>
+  <td class="result-snippet">Build and operate production-ready agents.</td>
+  <a class="result-link" href="https://docs.aws.amazon.com/bedrock-agentcore/">Documentation</a>
+  <td class="result-snippet">Developer guide.</td>
+</body></html>
+"""
 
-def _install_response(monkeypatch: pytest.MonkeyPatch, body: bytes) -> list[tuple[str, int]]:
+
+def _install_responses(
+    monkeypatch: pytest.MonkeyPatch,
+    bodies: list[bytes],
+) -> list[tuple[str, int]]:
     calls: list[tuple[str, int]] = []
+    remaining = iter(bodies)
 
     def fake_get(url: str, timeout: int = 10, retries: int = 2) -> bytes:
         del retries
         calls.append((url, timeout))
-        return body
+        try:
+            return next(remaining)
+        except StopIteration as error:
+            raise AssertionError(f"Unexpected extra search request: {url}") from error
 
     monkeypatch.setattr(tools, "_http_get", fake_get)
     return calls
+
+
+def _install_response(monkeypatch: pytest.MonkeyPatch, body: bytes) -> list[tuple[str, int]]:
+    return _install_responses(monkeypatch, [body])
 
 
 def test_duckduckgo_search_uses_real_html_results(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -61,6 +83,65 @@ def test_duckduckgo_search_uses_real_html_results(monkeypatch: pytest.MonkeyPatc
             "url": "https://docs.aws.amazon.com/bedrock-agentcore/",
         },
     ]
+
+
+def test_duckduckgo_search_falls_back_to_lite_for_unexpected_html(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install_responses(
+        monkeypatch,
+        [b'<html><form id="challenge-form">unavailable</form></html>', _LITE_SEARCH_HTML],
+    )
+
+    result = json.loads(tools._do_duckduckgo_search("Amazon Bedrock AgentCore"))
+
+    assert calls == [
+        ("https://html.duckduckgo.com/html/?q=Amazon+Bedrock+AgentCore", 12),
+        ("https://lite.duckduckgo.com/lite/?q=Amazon+Bedrock+AgentCore", 12),
+    ]
+    assert result == [
+        {
+            "title": "Amazon Bedrock AgentCore - AWS",
+            "snippet": "Build and operate production-ready agents.",
+            "url": "https://aws.amazon.com/bedrock/agentcore/",
+        },
+        {
+            "title": "Documentation",
+            "snippet": "Developer guide.",
+            "url": "https://docs.aws.amazon.com/bedrock-agentcore/",
+        },
+    ]
+
+
+def test_duckduckgo_search_returns_no_results_only_for_explicit_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_responses(
+        monkeypatch,
+        [
+            b"<html><body>unexpected primary response</body></html>",
+            b"<html><body>No results found for the quoted query</body></html>",
+        ],
+    )
+
+    result = json.loads(tools._do_duckduckgo_search("quoted impossible query"))
+
+    assert result == {"message": "No results found for: quoted impossible query"}
+
+
+def test_duckduckgo_search_fails_closed_for_two_unexpected_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_responses(
+        monkeypatch,
+        [
+            b"<html><body>This page may have no results.</body></html>",
+            b"<html><body>unexpected fallback response</body></html>",
+        ],
+    )
+
+    with pytest.raises(tools.ToolUnavailable, match="unavailable or unexpected"):
+        tools._do_duckduckgo_search("Amazon Bedrock AgentCore")
 
 
 def test_duckduckgo_search_rejects_unsafe_result_urls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -99,8 +180,29 @@ def test_mcp_codegen_reuses_canonical_search_implementation() -> None:
     )
 
     assert "https://html.duckduckgo.com/html/?" in generated
+    assert "https://lite.duckduckgo.com/lite/?" in generated
     assert "return _do_duckduckgo_search(query)" in generated
     assert "https://api.duckduckgo.com/" not in generated
+
+
+def test_removal_mutation_disables_lite_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    source_path = Path(tools.__file__)
+    source = source_path.read_text(encoding="utf-8")
+    fallback = '    ("https://lite.duckduckgo.com/lite/?", "result-link", "result-snippet"),\n'
+    assert source.count(fallback) == 1
+    mutant = source.replace(fallback, "", 1)
+    namespace: dict[str, Any] = {"__name__": "duckduckgo_fallback_mutant"}
+    exec(compile(mutant, str(source_path), "exec"), namespace)
+    responses = iter(
+        [
+            b"<html><body>unexpected primary response</body></html>",
+            _LITE_SEARCH_HTML,
+        ]
+    )
+    monkeypatch.setitem(namespace, "_http_get", lambda *_args, **_kwargs: next(responses))
+
+    with pytest.raises(namespace["ToolUnavailable"], match="unavailable or unexpected"):
+        namespace["_do_duckduckgo_search"]("Amazon Bedrock AgentCore")
 
 
 def test_removal_mutation_reintroduces_unsafe_search_url(
@@ -108,7 +210,7 @@ def test_removal_mutation_reintroduces_unsafe_search_url(
 ) -> None:
     source_path = Path(tools.__file__)
     source = source_path.read_text(encoding="utf-8")
-    guard = '        if parsed.scheme not in {"http", "https"} or not parsed.hostname:\n            return ""\n'
+    guard = '    if parsed.scheme not in {"http", "https"} or not parsed.hostname:\n        return ""\n'
     assert source.count(guard) == 1
     mutant = source.replace(guard, "", 1)
     namespace: dict[str, Any] = {"__name__": "duckduckgo_url_guard_mutant"}

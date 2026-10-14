@@ -343,9 +343,13 @@ pass the unchanged `HIGH` prompt-attack filter, then require a successful runtim
 generated tool receipt with exact SHA-256 argument digests before accepting the
 semantic response oracle. Demo customer tools advertise only non-PII customer IDs and do
 not return or echo email addresses, so the production PII Guardrail remains strict
-without erasing useful customer data. DuckDuckGo tools parse bounded results from
-the real HTML search endpoint; the Instant Answer endpoint is not accepted as a
-search substitute. Evaluation uses ordinary low-entropy factual questions with
+without erasing useful customer data. DuckDuckGo tools parse at most five results
+from the real HTML search endpoint and fall back to DuckDuckGo Lite when the
+primary endpoint returns unavailable or changed markup. They report an empty
+search only when DuckDuckGo explicitly says no results; two unrecognized pages
+fail closed as structured `tool_unavailable` instead of inventing an empty result.
+The Instant Answer endpoint is not accepted as a search substitute. Evaluation
+uses ordinary low-entropy factual questions with
 semantic answer oracles rather than prompt-injection-shaped “reply exactly”
 commands or random credential-like markers; a Guardrail redaction placeholder is
 a test failure, never accepted as an evaluation pass.

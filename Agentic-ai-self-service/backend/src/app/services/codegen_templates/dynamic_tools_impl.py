@@ -83,21 +83,29 @@ def _http_get(url, timeout=10, retries=2):
     raise ToolUnavailable(str(last_err))
 
 
-def _do_duckduckgo_search(query):
-    from html.parser import HTMLParser
+_DUCKDUCKGO_SEARCH_ENDPOINTS = (
+    ("https://html.duckduckgo.com/html/?", "result__a", "result__snippet"),
+    ("https://lite.duckduckgo.com/lite/?", "result-link", "result-snippet"),
+)
+_DUCKDUCKGO_NO_RESULT_MARKERS = ("no results found for",)
 
-    def result_url(href):
-        if href.startswith("//"):
-            href = "https:" + href
-        elif href.startswith("/"):
-            href = urllib.parse.urljoin("https://duckduckgo.com", href)
+
+def _duckduckgo_result_url(href):
+    if href.startswith("//"):
+        href = "https:" + href
+    elif href.startswith("/"):
+        href = urllib.parse.urljoin("https://duckduckgo.com", href)
+    parsed = urllib.parse.urlparse(href)
+    if parsed.hostname in {"duckduckgo.com", "www.duckduckgo.com"} and parsed.path.startswith("/l/"):
+        href = urllib.parse.parse_qs(parsed.query).get("uddg", [""])[0]
         parsed = urllib.parse.urlparse(href)
-        if parsed.hostname in {"duckduckgo.com", "www.duckduckgo.com"} and parsed.path.startswith("/l/"):
-            href = urllib.parse.parse_qs(parsed.query).get("uddg", [""])[0]
-            parsed = urllib.parse.urlparse(href)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            return ""
-        return href
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ""
+    return href
+
+
+def _parse_duckduckgo_results(body, title_class, snippet_class):
+    from html.parser import HTMLParser
 
     class SearchResultsParser(HTMLParser):
         def __init__(self):
@@ -112,13 +120,13 @@ def _do_duckduckgo_search(query):
         def handle_starttag(self, tag, attrs):
             attributes = dict(attrs)
             classes = set(attributes.get("class", "").split())
-            if tag == "a" and "result__a" in classes:
-                self._pending_url = result_url(attributes.get("href", ""))
+            if tag == "a" and title_class in classes:
+                self._pending_url = _duckduckgo_result_url(attributes.get("href", ""))
                 self._pending_result_index = None
                 self._mode = "title"
                 self._mode_tag = tag
                 self._parts = []
-            elif self._pending_result_index is not None and "result__snippet" in classes:
+            elif self._pending_result_index is not None and snippet_class in classes:
                 self._mode = "snippet"
                 self._mode_tag = tag
                 self._parts = []
@@ -140,18 +148,42 @@ def _do_duckduckgo_search(query):
             self._mode_tag = ""
             self._parts = []
 
+    text = body.decode(errors="replace")
+    parser = SearchResultsParser()
+    parser.feed(text)
+    parser.close()
+    return parser.results, text
+
+
+def _search_duckduckgo_endpoint(base_url, title_class, snippet_class, query):
+    url = base_url + urllib.parse.urlencode({"q": query})
+    body = _http_get(url, timeout=12)
+    return _parse_duckduckgo_results(body, title_class, snippet_class)
+
+
+def _do_duckduckgo_search(query):
     normalized_query = str(query or "").strip()
     if not normalized_query:
         return json.dumps({"error": "A non-empty search query is required"})
-    url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": normalized_query})
-    parser = SearchResultsParser()
-    parser.feed(_http_get(url, timeout=12).decode(errors="replace"))
-    parser.close()
-    return (
-        json.dumps(parser.results)
-        if parser.results
-        else json.dumps({"message": f"No results found for: {normalized_query}"})
-    )
+
+    response_pages = []
+    for base_url, title_class, snippet_class in _DUCKDUCKGO_SEARCH_ENDPOINTS:
+        try:
+            results, response_text = _search_duckduckgo_endpoint(
+                base_url,
+                title_class,
+                snippet_class,
+                normalized_query,
+            )
+        except ToolUnavailable:
+            continue
+        response_pages.append(response_text.casefold())
+        if results:
+            return json.dumps(results)
+
+    if any(marker in page for page in response_pages for marker in _DUCKDUCKGO_NO_RESULT_MARKERS):
+        return json.dumps({"message": f"No results found for: {normalized_query}"})
+    raise ToolUnavailable("DuckDuckGo returned an unavailable or unexpected search response")
 
 
 def _do_wikipedia_search(query):
