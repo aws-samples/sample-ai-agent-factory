@@ -1,6 +1,6 @@
 """Custom Resource Lambda for AgentCore CloudFormation stacks.
 
-Handles four Custom Resource types — the complete set, enforced by
+Handles five Custom Resource types — the complete set, enforced by
 SUPPORTED_RESOURCE_TYPES below:
 
 1. Custom::AgentCodePackage
@@ -72,6 +72,22 @@ SUPPORTED_RESOURCE_TYPES below:
                           to the AWS-owned key
    Returns:
        LogGroupNames    — the governed names, comma-separated
+
+5. Custom::ManagedWebSearchTarget
+   Creates, updates, synchronizes and deletes the AWS-managed AgentCore Web
+   Search connector target. CloudFormation's native GatewayTarget connector
+   surface does not expose the connector ``version`` field, so a native target
+   cannot pin the search schema this export was certified against.
+
+   Properties:
+       GatewayIdentifier — id of this stack's AgentCore Gateway
+       Region            — stack Region, checked against the supported matrix
+       TargetName        — must be AmazonWebSearch
+       ConnectorId       — must be web-search
+       ConnectorVersion  — must be 1.2.0
+       ToolName          — must be WebSearch
+   Returns:
+       TargetId, TargetName, ConnectorId, ConnectorVersion, ToolName
 """
 
 import hashlib
@@ -2279,6 +2295,413 @@ def _list_runtime_log_groups(logs, runtime_id: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Custom::ManagedWebSearchTarget
+# ---------------------------------------------------------------------------
+
+
+_MANAGED_WEB_SEARCH_CONNECTOR_ID = "web-search"
+_MANAGED_WEB_SEARCH_CONNECTOR_VERSION = "1.2.0"
+_MANAGED_WEB_SEARCH_TARGET_NAME = "AmazonWebSearch"
+_MANAGED_WEB_SEARCH_TOOL_NAME = "WebSearch"
+_MANAGED_WEB_SEARCH_SUPPORTED_REGIONS = frozenset({"us-east-1", "eu-west-1", "ap-northeast-1"})
+_MANAGED_WEB_SEARCH_DESCRIPTION = "AWS-managed Web Search Tool with source citations"
+_MANAGED_WEB_SEARCH_PHYSICAL_ID_PREFIX = "managed-web-search-target"
+_MAX_GATEWAY_TARGET_PAGES = 100
+_GATEWAY_TARGET_TERMINAL_FAILURES = frozenset({"FAILED", "UPDATE_UNSUCCESSFUL", "SYNCHRONIZE_UNSUCCESSFUL", "DELETING"})
+
+
+def _managed_web_search_stack_region(event: dict) -> str:
+    """Return and validate the stack Region before constructing an AWS client."""
+
+    stack_id = str(event.get("StackId") or "")
+    parts = stack_id.split(":", 5)
+    region = parts[3] if len(parts) == 6 and parts[0] == "arn" else os.environ.get("AWS_REGION", "")
+    declared_region = str(event.get("ResourceProperties", {}).get("Region") or "")
+    if not region:
+        raise ProviderError("could not determine the CloudFormation stack Region for managed Web Search")
+    if declared_region and declared_region != region:
+        raise ProviderError("the managed Web Search Region property does not match the CloudFormation stack Region")
+    if region not in _MANAGED_WEB_SEARCH_SUPPORTED_REGIONS:
+        supported = ", ".join(sorted(_MANAGED_WEB_SEARCH_SUPPORTED_REGIONS))
+        raise ProviderError(f"AgentCore Web Search is not available in {region}; supported Regions: {supported}")
+    return region
+
+
+def _managed_web_search_gateway_id(event: dict) -> str:
+    props = event.get("ResourceProperties", {})
+    expected = {
+        "TargetName": _MANAGED_WEB_SEARCH_TARGET_NAME,
+        "ConnectorId": _MANAGED_WEB_SEARCH_CONNECTOR_ID,
+        "ConnectorVersion": _MANAGED_WEB_SEARCH_CONNECTOR_VERSION,
+        "ToolName": _MANAGED_WEB_SEARCH_TOOL_NAME,
+    }
+    for key, value in expected.items():
+        if props.get(key) != value:
+            raise ProviderError(f"the managed Web Search {key} property does not match the pinned contract")
+    gateway_id = str(props.get("GatewayIdentifier") or "")
+    if not gateway_id:
+        raise ProviderError("GatewayIdentifier is required for the managed Web Search target")
+    return gateway_id
+
+
+def _managed_web_search_owner(event: dict) -> str:
+    """Stable ownership marker for conflict adoption and failed-create cleanup."""
+
+    authority = f"{event.get('StackId', '')}\n{event.get('LogicalResourceId', '')}"
+    digest = hashlib.sha256(authority.encode("utf-8")).hexdigest()[:16]
+    return f"{_MANAGED_WEB_SEARCH_DESCRIPTION} [cfn:{digest}]"
+
+
+def _managed_web_search_target_configuration() -> dict:
+    return {
+        "mcp": {
+            "connector": {
+                "source": {
+                    "connectorId": _MANAGED_WEB_SEARCH_CONNECTOR_ID,
+                    "version": _MANAGED_WEB_SEARCH_CONNECTOR_VERSION,
+                },
+                "configurations": [
+                    {
+                        "name": _MANAGED_WEB_SEARCH_TOOL_NAME,
+                        "parameterValues": {},
+                    }
+                ],
+            }
+        }
+    }
+
+
+def _managed_web_search_target_request(event: dict, gateway_id: str) -> dict:
+    return {
+        "gatewayIdentifier": gateway_id,
+        "name": _MANAGED_WEB_SEARCH_TARGET_NAME,
+        "description": _managed_web_search_owner(event),
+        "targetConfiguration": _managed_web_search_target_configuration(),
+        "credentialProviderConfigurations": [{"credentialProviderType": "GATEWAY_IAM_ROLE"}],
+    }
+
+
+def _managed_web_search_client_token(event: dict, gateway_id: str) -> str:
+    authority = (
+        f"{event.get('StackId', '')}\n{event.get('LogicalResourceId', '')}\n"
+        f"{gateway_id}\n{_MANAGED_WEB_SEARCH_CONNECTOR_VERSION}"
+    )
+    return hashlib.sha256(authority.encode("utf-8")).hexdigest()
+
+
+def _managed_web_search_physical_id(gateway_id: str, target_id: str) -> str:
+    return f"{_MANAGED_WEB_SEARCH_PHYSICAL_ID_PREFIX}/{gateway_id}/{target_id}"
+
+
+def _parse_managed_web_search_physical_id(value: str) -> tuple[str, str] | None:
+    parts = str(value or "").split("/")
+    if len(parts) != 3 or parts[0] != _MANAGED_WEB_SEARCH_PHYSICAL_ID_PREFIX:
+        return None
+    if not parts[1] or not parts[2]:
+        return None
+    return parts[1], parts[2]
+
+
+def _managed_target_contract_problems(detail: dict, event: dict) -> list[str]:
+    """Return field names that do not match the pinned, secret-free contract."""
+
+    problems: list[str] = []
+    if detail.get("name") != _MANAGED_WEB_SEARCH_TARGET_NAME:
+        problems.append("name")
+    if detail.get("description") != _managed_web_search_owner(event):
+        problems.append("ownership description")
+
+    target_configuration = detail.get("targetConfiguration")
+    if not isinstance(target_configuration, dict) or set(target_configuration) != {"mcp"}:
+        problems.append("targetConfiguration")
+        return problems
+    mcp = target_configuration.get("mcp")
+    if not isinstance(mcp, dict) or set(mcp) != {"connector"}:
+        problems.append("targetConfiguration.mcp")
+        return problems
+    connector = mcp.get("connector")
+    if not isinstance(connector, dict):
+        problems.append("targetConfiguration.mcp.connector")
+        return problems
+    if connector.get("source") != {
+        "connectorId": _MANAGED_WEB_SEARCH_CONNECTOR_ID,
+        "version": _MANAGED_WEB_SEARCH_CONNECTOR_VERSION,
+    }:
+        problems.append("connector source/version")
+
+    configurations = connector.get("configurations")
+    if not isinstance(configurations, list) or len(configurations) != 1:
+        problems.append("connector configurations")
+    else:
+        configuration = configurations[0]
+        if not isinstance(configuration, dict) or configuration.get("name") != _MANAGED_WEB_SEARCH_TOOL_NAME:
+            problems.append("connector configuration name")
+        elif configuration.get("parameterValues", {}) != {}:
+            problems.append("connector parameter values")
+        if isinstance(configuration, dict) and configuration.get("parameterOverrides", []) not in (None, []):
+            problems.append("connector parameter overrides")
+
+    enabled = connector.get("enabled")
+    if enabled not in (None, [], [_MANAGED_WEB_SEARCH_TOOL_NAME]):
+        problems.append("enabled connector configurations")
+    if detail.get("credentialProviderConfigurations") != [{"credentialProviderType": "GATEWAY_IAM_ROLE"}]:
+        problems.append("credential provider configuration")
+    return problems
+
+
+def _managed_target_is_owned(detail: dict, event: dict) -> bool:
+    return detail.get("name") == _MANAGED_WEB_SEARCH_TARGET_NAME and detail.get(
+        "description"
+    ) == _managed_web_search_owner(event)
+
+
+def _gateway_target_not_found(ctrl, exc: Exception) -> bool:
+    return _error_code(exc) == "ResourceNotFoundException" or isinstance(exc, ctrl.exceptions.ResourceNotFoundException)
+
+
+def _get_gateway_target(ctrl, gateway_id: str, target_id: str) -> dict | None:
+    try:
+        return ctrl.get_gateway_target(gatewayIdentifier=gateway_id, targetId=target_id)
+    except Exception as exc:
+        if _gateway_target_not_found(ctrl, exc):
+            return None
+        raise
+
+
+def _find_owned_managed_target(ctrl, gateway_id: str, event: dict) -> dict | None:
+    """Find this resource's target without trusting a same-name foreign target."""
+
+    token: str | None = None
+    seen_tokens: set[str] = set()
+    owned: list[dict] = []
+    for _ in range(_MAX_GATEWAY_TARGET_PAGES):
+        kwargs = {"gatewayIdentifier": gateway_id, "maxResults": 100}
+        if token:
+            kwargs["nextToken"] = token
+        page = ctrl.list_gateway_targets(**kwargs)
+        items = page.get("items", [])
+        if not isinstance(items, list):
+            raise ProviderError("ListGatewayTargets returned a non-list target collection")
+        for item in items:
+            if not isinstance(item, dict) or item.get("name") != _MANAGED_WEB_SEARCH_TARGET_NAME:
+                continue
+            target_id = str(item.get("targetId") or "")
+            if not target_id:
+                raise ProviderError("ListGatewayTargets returned the managed target name without a target id")
+            detail = _get_gateway_target(ctrl, gateway_id, target_id)
+            if detail is not None and _managed_target_is_owned(detail, event):
+                owned.append(detail)
+
+        candidate = page.get("nextToken")
+        if candidate in (None, ""):
+            break
+        if not isinstance(candidate, str):
+            raise ProviderError("ListGatewayTargets returned a non-string nextToken")
+        if candidate in seen_tokens:
+            raise ProviderError("ListGatewayTargets repeated a pagination token")
+        seen_tokens.add(candidate)
+        token = candidate
+    else:
+        raise ProviderError(f"ListGatewayTargets exceeded {_MAX_GATEWAY_TARGET_PAGES} pages")
+
+    if len(owned) > 1:
+        raise ProviderError("more than one managed Web Search target carries this stack resource's ownership marker")
+    return owned[0] if owned else None
+
+
+def _await_managed_target_ready(
+    ctrl,
+    gateway_id: str,
+    target_id: str,
+    event: dict,
+    deadline: float,
+    *,
+    require_synchronization: bool = False,
+    prior_synchronized_at=None,
+) -> dict:
+    last_status = ""
+    last_synchronized_at = None
+    while True:
+        detail = _get_gateway_target(ctrl, gateway_id, target_id)
+        if detail is not None:
+            problems = _managed_target_contract_problems(detail, event)
+            if problems:
+                raise ProviderError(
+                    "managed Web Search target read-back does not match the pinned contract: " + ", ".join(problems)
+                )
+            last_status = str(detail.get("status") or "")
+            last_synchronized_at = detail.get("lastSynchronizedAt")
+            synchronization_ready = not require_synchronization or (
+                last_synchronized_at is not None and last_synchronized_at != prior_synchronized_at
+            )
+            if last_status == "READY" and synchronization_ready:
+                return detail
+            if last_status in _GATEWAY_TARGET_TERMINAL_FAILURES:
+                raise ProviderError(f"managed Web Search target {target_id} reached terminal status {last_status}")
+        if deadline - time.monotonic() <= 5.0:
+            synchronization_detail = (
+                "; synchronization receipt did not advance"
+                if require_synchronization and last_synchronized_at == prior_synchronized_at
+                else ""
+            )
+            raise ProviderError(
+                f"managed Web Search target {target_id} did not reach READY within the time available "
+                f"(last status: {last_status or 'could not be read'}{synchronization_detail})"
+            )
+        time.sleep(5)
+
+
+def _synchronize_managed_target(ctrl, gateway_id: str, target_id: str, event: dict, deadline: float) -> dict:
+    """Synchronize only this target and prove the operation completed."""
+
+    before = _get_gateway_target(ctrl, gateway_id, target_id)
+    prior_synchronized_at = before.get("lastSynchronizedAt") if before else None
+    response = ctrl.synchronize_gateway_targets(gatewayIdentifier=gateway_id, targetIdList=[target_id])
+    targets = response.get("targets", [])
+    if not isinstance(targets, list):
+        raise ProviderError("SynchronizeGatewayTargets returned a non-list target collection")
+    response_ids = {str(target.get("targetId") or "") for target in targets if isinstance(target, dict)}
+    if response_ids and response_ids != {target_id}:
+        raise ProviderError("SynchronizeGatewayTargets returned a target outside the requested target id")
+
+    return _await_managed_target_ready(
+        ctrl,
+        gateway_id,
+        target_id,
+        event,
+        deadline,
+        require_synchronization=True,
+        prior_synchronized_at=prior_synchronized_at,
+    )
+
+
+def _handle_managed_web_search_create(event: dict, context) -> tuple[dict, str]:
+    _managed_web_search_stack_region(event)
+    gateway_id = _managed_web_search_gateway_id(event)
+    ctrl = boto3.client("bedrock-agentcore-control")
+    deadline = _deadline(context)
+    request = _managed_web_search_target_request(event, gateway_id)
+    try:
+        response = ctrl.create_gateway_target(
+            **request,
+            clientToken=_managed_web_search_client_token(event, gateway_id),
+        )
+        target_id = str(response.get("targetId") or "")
+    except Exception as exc:
+        if _error_code(exc) != "ConflictException":
+            raise
+        existing = _find_owned_managed_target(ctrl, gateway_id, event)
+        if existing is None:
+            raise ProviderError(
+                "a target named AmazonWebSearch already exists on this gateway but its exact configuration "
+                "and ownership marker do not match this stack resource; refusing to adopt it"
+            ) from exc
+        problems = _managed_target_contract_problems(existing, event)
+        if problems:
+            raise ProviderError(
+                "the owned AmazonWebSearch target conflicts with the pinned contract: " + ", ".join(problems)
+            ) from exc
+        target_id = str(existing.get("targetId") or "")
+
+    if not target_id:
+        raise ProviderError("AgentCore accepted the managed Web Search target but returned no target id")
+    _await_managed_target_ready(ctrl, gateway_id, target_id, event, deadline)
+    _synchronize_managed_target(ctrl, gateway_id, target_id, event, deadline)
+    return {
+        "TargetId": target_id,
+        "TargetName": _MANAGED_WEB_SEARCH_TARGET_NAME,
+        "ConnectorId": _MANAGED_WEB_SEARCH_CONNECTOR_ID,
+        "ConnectorVersion": _MANAGED_WEB_SEARCH_CONNECTOR_VERSION,
+        "ToolName": _MANAGED_WEB_SEARCH_TOOL_NAME,
+    }, _managed_web_search_physical_id(gateway_id, target_id)
+
+
+def _handle_managed_web_search_update(event: dict, context) -> tuple[dict, str]:
+    _managed_web_search_stack_region(event)
+    gateway_id = _managed_web_search_gateway_id(event)
+    parsed = _parse_managed_web_search_physical_id(event.get("PhysicalResourceId", ""))
+    if parsed is None or parsed[0] != gateway_id:
+        # A replacement Gateway needs a new target and physical id. CloudFormation
+        # subsequently sends Delete with OldResourceProperties for the old one.
+        return _handle_managed_web_search_create(event, context)
+
+    target_id = parsed[1]
+    ctrl = boto3.client("bedrock-agentcore-control")
+    current = _get_gateway_target(ctrl, gateway_id, target_id)
+    if current is None:
+        return _handle_managed_web_search_create(event, context)
+    if not _managed_target_is_owned(current, event):
+        raise ProviderError(
+            f"managed Web Search target {target_id} no longer carries this stack resource's ownership marker; "
+            "refusing to overwrite it"
+        )
+
+    request = _managed_web_search_target_request(event, gateway_id)
+    response = ctrl.update_gateway_target(targetId=target_id, **request)
+    response_id = str(response.get("targetId") or target_id)
+    if response_id != target_id:
+        raise ProviderError("UpdateGatewayTarget returned a different target id")
+    deadline = _deadline(context)
+    _await_managed_target_ready(ctrl, gateway_id, target_id, event, deadline)
+    _synchronize_managed_target(ctrl, gateway_id, target_id, event, deadline)
+    return {
+        "TargetId": target_id,
+        "TargetName": _MANAGED_WEB_SEARCH_TARGET_NAME,
+        "ConnectorId": _MANAGED_WEB_SEARCH_CONNECTOR_ID,
+        "ConnectorVersion": _MANAGED_WEB_SEARCH_CONNECTOR_VERSION,
+        "ToolName": _MANAGED_WEB_SEARCH_TOOL_NAME,
+    }, _managed_web_search_physical_id(gateway_id, target_id)
+
+
+def _await_managed_target_absent(ctrl, gateway_id: str, target_id: str, deadline: float) -> None:
+    while True:
+        if _get_gateway_target(ctrl, gateway_id, target_id) is None:
+            return
+        if deadline - time.monotonic() <= 5.0:
+            raise ProviderError(f"managed Web Search target {target_id} still exists after DeleteGatewayTarget")
+        time.sleep(5)
+
+
+def _handle_managed_web_search_delete(event: dict, context) -> tuple[dict, str]:
+    physical_id = str(event.get("PhysicalResourceId") or event.get("LogicalResourceId") or "")
+    parsed = _parse_managed_web_search_physical_id(physical_id)
+    props = event.get("ResourceProperties", {})
+    gateway_id = parsed[0] if parsed else str(props.get("GatewayIdentifier") or "")
+    if not gateway_id:
+        logger.info("managed Web Search Delete has no gateway id; nothing could have been created")
+        return {}, physical_id
+
+    ctrl = boto3.client("bedrock-agentcore-control")
+    target: dict | None
+    if parsed:
+        target = _get_gateway_target(ctrl, gateway_id, parsed[1])
+        if target is not None and not _managed_target_is_owned(target, event):
+            raise ProviderError(
+                f"managed Web Search target {parsed[1]} no longer carries this stack resource's ownership marker; "
+                "refusing to delete a target this resource cannot prove it owns"
+            )
+    else:
+        # A failed Create leaves CloudFormation with only the logical id. Recover
+        # by the stack-specific ownership marker rather than leaking the target.
+        target = _find_owned_managed_target(ctrl, gateway_id, event)
+    if target is None:
+        return {}, physical_id
+
+    target_id = str(target.get("targetId") or "")
+    if not target_id:
+        raise ProviderError("the owned managed Web Search target has no target id")
+    if target.get("status") != "DELETING":
+        try:
+            ctrl.delete_gateway_target(gatewayIdentifier=gateway_id, targetId=target_id)
+        except Exception as exc:
+            if not _gateway_target_not_found(ctrl, exc):
+                code = _error_code(exc) or type(exc).__name__
+                raise ProviderError(f"managed Web Search target {target_id} could not be deleted ({code})") from exc
+    _await_managed_target_absent(ctrl, gateway_id, target_id, _deadline(context, reserve_seconds=30.0))
+    return {"DeletedTargetId": target_id}, physical_id
+
+
+# ---------------------------------------------------------------------------
 # Router — dispatches by resource type
 # ---------------------------------------------------------------------------
 
@@ -2290,13 +2713,15 @@ def _get_resource_type(event: dict) -> str:
 
 # The complete set of resource types this Lambda serves. Must match the
 # "Type": "Custom::..." values emitted by cfn_template_generator.py; there is no
-# fifth one. Kept as an explicit set so dispatch can fail closed — see handler().
+# fifth type is the managed Web Search connector. Kept as an explicit set so
+# dispatch can fail closed — see handler().
 SUPPORTED_RESOURCE_TYPES = frozenset(
     {
         "Custom::AgentCodePackage",
         "Custom::OAuth2CredentialProvider",
         "Custom::AgentCorePolicy",
         "Custom::RuntimeLogGroup",
+        "Custom::ManagedWebSearchTarget",
     }
 )
 
@@ -2436,6 +2861,15 @@ def handler(event: dict, context) -> None:
                 data, physical_id = _handle_runtime_log_group_create_update(event)
             elif request_type == "Delete":
                 data, physical_id = _handle_runtime_log_group_delete(event)
+            else:
+                raise ValueError(f"Unknown RequestType: {request_type}")
+        elif resource_type == "Custom::ManagedWebSearchTarget":
+            if request_type == "Create":
+                data, physical_id = _handle_managed_web_search_create(event, context)
+            elif request_type == "Update":
+                data, physical_id = _handle_managed_web_search_update(event, context)
+            elif request_type == "Delete":
+                data, physical_id = _handle_managed_web_search_delete(event, context)
             else:
                 raise ValueError(f"Unknown RequestType: {request_type}")
         else:

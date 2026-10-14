@@ -177,7 +177,7 @@ def test_guardrail_and_hitl_hooks_compose_guardrail_first():
     assert 'if getattr(event, "cancel_tool", False):' in code
 
 
-def test_hand_rolled_converse_tools_use_guarded_wrapper():
+def test_managed_web_search_uses_strands_tool_guardrail_hooks():
     code = generate_agent_code(
         _config(),
         tools=["guardrails"],
@@ -185,8 +185,8 @@ def test_hand_rolled_converse_tools_use_guarded_wrapper():
     )
 
     compile(code, "guarded-web-search.py", "exec")
-    assert "result = _guardrail_invoke_tool(handler, tu)" in code
-    assert 'result = handler(tu["input"])' not in code
+    assert "MCPClient" in code
+    _assert_tool_boundary(code)
 
 
 def test_forced_code_interpreter_path_uses_guarded_wrapper():

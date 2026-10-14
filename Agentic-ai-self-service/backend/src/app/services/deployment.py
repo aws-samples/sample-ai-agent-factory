@@ -713,7 +713,6 @@ MCP_BUILTIN_TOOLS = frozenset(
         "get_customer",
         "list_orders",
         "process_refund",
-        "duckduckgo_search",
         "wikipedia_search",
     }
 )
@@ -758,6 +757,12 @@ def validate_mcp_server_tools(tools) -> list[str]:
         if not name.isidentifier():
             # It becomes a Python function name in the generated server.
             problems.append(f"tools[{i}] name {name!r} is not a valid Python identifier")
+            continue
+        if name == "duckduckgo_search" and not has_body:
+            problems.append(
+                f"tools[{i}] 'duckduckgo_search' is a retired scraper alias. Use the managed "
+                "web_search tool on an AgentCore Gateway, or provide an explicit custom implementation"
+            )
             continue
         if name not in MCP_BUILTIN_TOOLS and not has_body:
             problems.append(
@@ -948,15 +953,6 @@ def process_refund(order_id: str, amount: float = 0, reason: str = "") -> str:
     return _do_process_refund({"order_id": order_id, "amount": amount, "reason": reason})
 ''')
 
-    if "duckduckgo_search" in tool_names:
-        tool_impls.append('''
-@mcp.tool()
-def duckduckgo_search(query: str, max_results: int = 5) -> str:
-    """Search the web using DuckDuckGo. Returns top results."""
-    del max_results  # Canonical implementation is deliberately bounded to five.
-    return _do_duckduckgo_search(query)
-''')
-
     if "wikipedia_search" in tool_names:
         tool_impls.append('''
 @mcp.tool()
@@ -1039,7 +1035,7 @@ def {ct_name}({params_str}) -> str:
     mock_data = ""
     if has_customer_tools:
         mock_data = "\n" + codegen_templates.load_impl("customer_support_impl") + "\n"
-    has_web_tools = any(t in tool_names for t in ["duckduckgo_search", "wikipedia_search"])
+    has_web_tools = "wikipedia_search" in tool_names
     web_tool_support = ""
     if has_web_tools:
         web_tool_support = "\n" + codegen_templates.load_impl("dynamic_tools_impl") + "\n"

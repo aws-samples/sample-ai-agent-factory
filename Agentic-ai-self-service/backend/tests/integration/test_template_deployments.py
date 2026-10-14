@@ -55,16 +55,19 @@ class TemplateCase:
 
 
 def _is_web_search_payload(value: Any) -> bool:
+    results = value.get("results") if isinstance(value, dict) else value
     return bool(
-        isinstance(value, list)
-        and value
+        isinstance(results, list)
+        and results
         and any(
             isinstance(item, dict)
             and isinstance(item.get("title"), str)
             and item.get("title")
             and isinstance(item.get("url"), str)
             and item.get("url", "").startswith("http")
-            for item in value
+            and isinstance(item.get("text"), str)
+            and item.get("text")
+            for item in results
         )
     )
 
@@ -235,9 +238,9 @@ _CANONICAL_SUPPORT_INVOCATIONS = (
 
 _DYNAMIC_WEB_INVOCATIONS = (
     _tool_call(
-        "duckduckgo_search",
-        "query Amazon Bedrock AgentCore",
-        "DuckDuckGo search tool",
+        "WebSearch",
+        "query Amazon Bedrock AgentCore and maxResults 5",
+        "Amazon managed Web Search tool",
         _is_web_search_payload,
     ),
     _tool_call(
@@ -342,10 +345,10 @@ TEMPLATE_CASES: tuple[TemplateCase, ...] = (
 
 
 _WEB_SEARCH_PROMPT = (
-    "You are a helpful web search assistant. Use the DuckDuckGo search tool to find "
-    "relevant URLs, then use the fetch_webpage tool to retrieve the actual page "
-    "content for up-to-date information. Always fetch page content rather than "
-    "relying on search snippets alone. Cite your sources."
+    "You are a helpful web search assistant. Use the managed WebSearch tool to find "
+    "current information and preserve result titles and source URLs as citations. "
+    "When more detail is needed, use fetch_webpage on a result URL to retrieve bounded "
+    "page content rather than relying on a search excerpt alone. Cite every source you use."
 )
 _STRANDS_GATEWAY_PROMPT = (
     "You are a helpful assistant with access to tools through the MCP Gateway. "
@@ -481,7 +484,15 @@ def _template_request_payload(
         "templateId": case.template_id,
     }
 
-    if case.template_id == "strands-gateway-agent":
+    if case.template_id == "web-search-agent":
+        payload.update(
+            {
+                "connectedTools": ["gateway", "identity"],
+                "gatewayConfig": _gateway_config("web_search_gateway"),
+                "identityConfig": _shared_cognito_identity(),
+            }
+        )
+    elif case.template_id == "strands-gateway-agent":
         payload.update(
             {
                 "connectedTools": ["gateway", "identity"],
@@ -712,7 +723,7 @@ def _structured_error(value: Any) -> str | None:
 
 
 _EXPECTED_TOOL_ARGUMENTS: dict[str, tuple[dict[str, Any], ...]] = {
-    "duckduckgo_search": ({"query": "Amazon Bedrock AgentCore"},),
+    "WebSearch": ({"query": "Amazon Bedrock AgentCore", "maxResults": 5},),
     "wikipedia_search": ({"query": "Python programming language"},),
     "get_weather": ({"location": "Dublin"},),
     "fetch_webpage": ({"url": "https://example.com"},),
@@ -941,7 +952,6 @@ def _invoke_standalone_mcp(
     assert discovery.get("protocolVersion") == MCP_PROTOCOL_VERSION
     assert {tool.get("name") for tool in discovery.get("tools", []) if isinstance(tool, dict)} == {
         "get_weather",
-        "search_web",
         "fetch_url",
     }
     assert all(
@@ -964,23 +974,6 @@ def _invoke_standalone_mcp(
         _mcp_text(weather),
         oracle=_is_weather_payload,
         label="standalone MCP get_weather",
-    )
-
-    search = _call_mcp_tool(
-        api_session,
-        deployment_id=deployment_id,
-        tool_name="search_web",
-        arguments={"query": "Python programming language"},
-        session_id=session_id,
-    )
-    _require_json_oracle(
-        _mcp_text(search),
-        oracle=lambda value: bool(
-            isinstance(value, list)
-            and value
-            and any(isinstance(item, dict) and isinstance(item.get("url"), str) and item.get("url") for item in value)
-        ),
-        label="standalone MCP search_web",
     )
 
     fetched = _call_mcp_tool(

@@ -158,19 +158,25 @@ def test_gateway_deployer_constants_compile():
 def test_generated_tool_agent_code_compiles(template_id: str, protocol: str):
     code = generate_agent_code(_make_config(protocol=protocol), template_id=template_id)
     compile(code, f"<{template_id}>", "exec")
-    # Canonical impl actually landed (marker replaced, hardened fetch present).
     assert "__TOOL_IMPL__" not in code
-    assert "_FETCH_BLOCKED_NETS" in code
-    assert "duckduckgo_search" in code
+    assert "_do_duckduckgo_search" not in code
+    assert "duckduckgo.com" not in code
+    if template_id == "mcp-server-runtime":
+        assert "_FETCH_BLOCKED_NETS" in code
+        assert "def get_weather" in code
+        assert "def fetch_url" in code
+        assert "def search_web" not in code
+    else:
+        assert "MCPClient" in code
+        assert "GATEWAY_URL" in code
 
 
-def test_web_search_agent_wires_canonical_handlers():
+def test_web_search_agent_uses_provider_aware_gateway_tools():
     code = generate_agent_code(_make_config(), template_id="web-search-agent")
-    assert "_do_duckduckgo_search" in code
-    assert "_do_weather" in code
-    assert "_do_fetch_webpage" in code
-    # exactly one _http_get definition (no duplicated helper)
-    assert code.count("def _http_get") == 1
+    assert "MCPClient" in code
+    assert "get_full_tools_list" in code
+    assert "_do_duckduckgo_search" not in code
+    assert "duckduckgo.com" not in code
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +203,8 @@ def test_cfn_tool_lambda_zip_contains_canonical_code():
     # DynamicTools family on both the export and live-deploy paths.
     assert "_FETCH_BLOCKED_NETS" in dynamic
     assert "tool_unavailable" in dynamic
+    assert "_do_duckduckgo_search" not in dynamic
+    assert "duckduckgo.com" not in dynamic
     assert "_do_get_order" in dynamic
     assert "_do_process_refund" in dynamic
     compile(dynamic, "<cfn dynamic_tools.py>", "exec")
@@ -204,6 +212,8 @@ def test_cfn_tool_lambda_zip_contains_canonical_code():
     # Template handler wiring matches the shipped module's entrypoint name.
     assert "dynamic_tools.lambda_handler" in bundle.template_yaml
     assert "customer_support_tools.lambda_handler" not in bundle.template_yaml
+    assert "Custom::ManagedWebSearchTarget" in bundle.template_yaml
+    assert "ConnectorVersion: 1.2.0" in bundle.template_yaml
 
 
 def test_cfn_kb_template_embeds_canonical_kb_lambda():

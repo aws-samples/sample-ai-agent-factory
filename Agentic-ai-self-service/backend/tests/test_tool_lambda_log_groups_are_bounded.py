@@ -131,7 +131,14 @@ def _capture_targets(monkeypatch, tool_log_groups) -> list[tuple[str, dict]]:
 def test_a_shared_tool_function_is_governed_before_its_target_exists(
     monkeypatch, tool_log_groups, template_id, helper, function, target, count
 ):
-    _install(monkeypatch, ctrl=_FakeCtrl(), served=count, expected=count)
+    served_count = count + (1 if template_id == "strands-gateway-agent" else 0)
+    _install(monkeypatch, ctrl=_FakeCtrl(), served=served_count, expected=count)
+    if template_id == "strands-gateway-agent":
+        monkeypatch.setattr(
+            gateway_deployer,
+            "_qualified_tools_from_served",
+            lambda *_args, **_kwargs: [f"Qualified___tool_{index}" for index in range(served_count)],
+        )
     monkeypatch.setattr(gateway_deployer, helper, lambda *_a, **_k: ACCOUNT_FN + function)
     seen = _capture_targets(monkeypatch, tool_log_groups)
 
@@ -142,10 +149,12 @@ def test_a_shared_tool_function_is_governed_before_its_target_exists(
     assert out["success"] is True, out.get("error")
     group = f"/aws/lambda/{function}"
     assert tool_log_groups.groups[group] == {"retentionInDays": RUNTIME_LOG_RETENTION_DAYS}
-    assert [name for name, _groups in seen] == [target]
-    assert seen[0][1].get(group) == {"retentionInDays": RUNTIME_LOG_RETENTION_DAYS}, (
+    target_groups = next(groups for name, groups in seen if name == target)
+    assert target_groups.get(group) == {"retentionInDays": RUNTIME_LOG_RETENTION_DAYS}, (
         "the gateway could invoke the function before its log group was bounded"
     )
+    expected_targets = {target, "AmazonWebSearch"} if template_id == "strands-gateway-agent" else {target}
+    assert {name for name, _groups in seen} == expected_targets
     assert tool_log_groups.regions == ["us-east-1"]
 
 

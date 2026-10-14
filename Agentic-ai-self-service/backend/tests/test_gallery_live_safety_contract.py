@@ -81,7 +81,7 @@ def _receipt(invocation: matrix.ToolInvocation, arguments: dict[str, Any]) -> di
 
 def test_gallery_accepts_only_exact_successful_tool_receipts() -> None:
     invocation = matrix._DYNAMIC_WEB_INVOCATIONS[0]
-    arguments = {"query": "Amazon Bedrock AgentCore"}
+    arguments = {"query": "Amazon Bedrock AgentCore", "maxResults": 5}
 
     matrix._require_exact_tool_receipt(
         {"toolReceipts": [_receipt(invocation, arguments)]},

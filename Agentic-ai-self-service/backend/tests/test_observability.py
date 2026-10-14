@@ -10,8 +10,6 @@ import json
 import os
 import subprocess
 import sys
-import zipfile
-from pathlib import Path
 
 import pytest
 from app.models.deployment_models import RuntimeConfig
@@ -244,51 +242,72 @@ def test_production_evaluation_forces_native_adot_even_when_canvas_disables_otel
     assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in env
 
 
-def test_required_traces_endpoint_initializes_a_real_provider_and_removal_mutant_fails(tmp_path: Path):
-    runtime_bundle = Path(__file__).resolve().parents[1] / "agentcore-deps" / "strands-mcp.zip"
-    if not runtime_bundle.exists():
-        pytest.skip("generated AgentCore Runtime bundle is absent")
-    extracted = tmp_path / "runtime-bundle"
-    with zipfile.ZipFile(runtime_bundle) as archive:
-        archive.extractall(extracted)
+def test_required_traces_endpoint_sigv4_signs_a_real_otlp_http_request():
+    setup = """
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    runtime_prefix = f"""
-from strands.telemetry import StrandsTelemetry as _HostStrandsTelemetry
-from opentelemetry import trace as _host_trace
-from opentelemetry.sdk.trace import TracerProvider as _HostTracerProvider
-import pydantic as _host_pydantic
-import pydantic_core as _host_pydantic_core
-import sys
-sys.path.insert(0, {str(extracted)!r})
+seen = {}
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        seen["path"] = self.path
+        seen["authorization"] = self.headers.get("Authorization", "")
+        seen["token"] = self.headers.get("X-Amz-Security-Token", "")
+        seen["content_type"] = self.headers.get("Content-Type", "")
+        seen["body"] = self.rfile.read(length)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-protobuf")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *_args):
+        pass
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+os.environ["AWS_REGION"] = "eu-west-1"
+os.environ["AWS_ACCESS_KEY_ID"] = "AKIDEXAMPLE"  # pragma: allowlist secret
+os.environ["AWS_SECRET_ACCESS_KEY"] = "secret-example"  # pragma: allowlist secret
+os.environ["AWS_SESSION_TOKEN"] = "session-example"  # pragma: allowlist secret
+os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = (
+    f"http://127.0.0.1:{server.server_port}/v1/traces"
+)
+os.environ["OTEL_SERVICE_NAME"] = "signed-probe.DEFAULT"
+os.environ["OTEL_TRACES_SAMPLER"] = "always_on"
 """
     assertion = """
-from opentelemetry import trace as _assert_trace
-from opentelemetry.sdk.trace import TracerProvider as _AssertTracerProvider
-assert isinstance(_assert_trace.get_tracer_provider(), _AssertTracerProvider)
-assert _otel_provider is _assert_trace.get_tracer_provider()
+from opentelemetry import trace
+import time
+with trace.get_tracer("sigv4-test").start_as_current_span("signed-probe") as probe_span:
+    trace_hex = format(probe_span.get_span_context().trace_id, "032x")
+_otel_force_flush()
+server.shutdown()
+server.server_close()
+thread.join(timeout=2)
+assert seen["path"] == "/v1/traces", seen
+assert seen["content_type"] == "application/x-protobuf", seen
+assert seen["body"], seen
+assert len(trace_hex) == 32
+assert abs(int(trace_hex[:8], 16) - int(time.time())) < 60, trace_hex
+assert seen["token"] == "session-example", seen
+assert seen["authorization"].startswith("AWS4-HMAC-SHA256 "), seen
+assert "Credential=AKIDEXAMPLE/" in seen["authorization"], seen
+assert "/eu-west-1/xray/aws4_request" in seen["authorization"], seen
 """
     env = os.environ.copy()
     for key in (
         "OTEL_EXPORTER_OTLP_ENDPOINT",
         "OTEL_AUTH_SECRET_ARN",
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
     ):
         env.pop(key, None)
-    env.update(
-        {
-            "AGENT_OBSERVABILITY_ENABLED": "true",
-            "OTEL_PYTHON_DISTRO": "aws_distro",
-            "OTEL_PYTHON_CONFIGURATOR": "aws_configurator",
-            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://127.0.0.1:9/v1/traces",
-            "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
-            "OTEL_TRACES_EXPORTER": "otlp",
-            "OTEL_LOGS_EXPORTER": "none",
-            "OTEL_METRICS_EXPORTER": "none",
-            "OTEL_PYTHON_DISABLED_INSTRUMENTATIONS": "*",
-            "OTEL_AWS_PYTHON_DEFER_TO_WORKERS_ENABLED": "false",
-        }
-    )
+
     positive = subprocess.run(
-        [sys.executable, "-c", runtime_prefix + OTEL_BOOTSTRAP + assertion],
+        [sys.executable, "-c", setup + OTEL_BOOTSTRAP + assertion],
         check=False,
         capture_output=True,
         text=True,
@@ -297,18 +316,18 @@ assert _otel_provider is _assert_trace.get_tracer_provider()
     )
     assert positive.returncode == 0, positive.stdout + positive.stderr
 
-    initializer = "_otel_auto_initialize(swallow_exceptions=False)"
-    assert OTEL_BOOTSTRAP.count(initializer) == 1
-    mutant = OTEL_BOOTSTRAP.replace(initializer, "None", 1)
+    signer = "signed_session.auth = _XRaySigV4Auth(signing_region)"
+    assert OTEL_BOOTSTRAP.count(signer) == 1
+    mutant = OTEL_BOOTSTRAP.replace(signer, "signed_session.auth = None", 1)
     removed = subprocess.run(
-        [sys.executable, "-c", runtime_prefix + mutant + assertion],
+        [sys.executable, "-c", setup + mutant + assertion],
         check=False,
         capture_output=True,
         text=True,
         env=env,
         timeout=30,
     )
-    assert removed.returncode != 0, "Removing in-process ADOT initialization escaped detection"
+    assert removed.returncode != 0, "Removing X-Ray SigV4 authentication escaped detection"
 
 
 def test_production_evaluation_trace_endpoint_overrides_external_trace_routing():

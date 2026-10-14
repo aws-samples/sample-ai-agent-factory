@@ -35,7 +35,7 @@ describe('new-node configuration modal routing', () => {
       shouldOpenConfigurationForNewNode('tool', 'connector:jira'),
     ).toBe(true);
     expect(
-      shouldOpenConfigurationForNewNode('tool', 'duckduckgo_search'),
+      shouldOpenConfigurationForNewNode('tool', 'web_search'),
     ).toBe(false);
     expect(
       shouldOpenConfigurationForNewNode('tool', 'knowledge_base'),
@@ -49,11 +49,11 @@ describe('new-node configuration modal routing', () => {
       type: 'tool',
       position: repeatedPosition,
       data: {
-        label: 'DuckDuckGo Search',
+        label: 'Amazon Web Search',
         componentType: 'tool',
         configuration: {
-          name: 'duckduckgo_search',
-          toolId: 'duckduckgo_search',
+          name: 'web_search',
+          toolId: 'web_search',
           description: 'Search the web',
           enabled: true,
         },
@@ -109,11 +109,11 @@ describe('new-node configuration modal routing', () => {
       type: 'tool',
       position: { x: 0, y: 0 },
       data: {
-        label: 'DuckDuckGo Search',
+        label: 'Amazon Web Search',
         componentType: 'tool',
         configuration: {
-          name: 'duckduckgo_search',
-          toolId: 'duckduckgo_search',
+          name: 'web_search',
+          toolId: 'web_search',
           description: 'Search the web',
           enabled: true,
         },

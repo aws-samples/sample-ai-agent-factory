@@ -269,51 +269,36 @@ def test_the_default_strands_agent_returns_receipts():
     assert namespace["invoke"]({"prompt": "go"}) == {"response": "done", "tool_receipts": EXPECTED}
 
 
-class _Converse:
-    """Bedrock Converse: one tool_use turn, then a final answer."""
-
-    def __init__(self, tool_calls: list[tuple[str, dict]]) -> None:
-        self._tool_calls = tool_calls
-        self.requests: list[list] = []
-
-    def converse(self, **kwargs):
-        self.requests.append(json.loads(json.dumps(kwargs["messages"])))
-        if len(self.requests) == 1:
-            content = [
-                {"toolUse": {"toolUseId": f"u{index}", "name": name, "input": arguments}}
-                for index, (name, arguments) in enumerate(self._tool_calls)
-            ]
-            return {"output": {"message": {"role": "assistant", "content": content}}, "stopReason": "tool_use"}
-        return {"output": {"message": {"role": "assistant", "content": [{"text": "final"}]}}, "stopReason": "end_turn"}
-
-
-def test_the_web_search_loop_returns_receipts_and_keeps_its_converse_request_unchanged():
-    bedrock = _Converse([("get_weather", {"location": "Dublin"}), ("nope", {"x": 1})])
-    source = generate_agent_code(_config(), template_id="web-search-agent")
+def test_managed_web_search_gateway_returns_qualified_receipts():
+    calls = [
+        (
+            "AmazonWebSearch___WebSearch",
+            {"query": "Amazon Bedrock AgentCore", "maxResults": 5},
+            "success",
+        )
+    ]
+    agent = _FakeAgent(calls)
+    source = generate_agent_code(_config(), template_id="web-search-agent", portable=True)
     namespace = _lift(
         source,
-        {"invoke", "_converse_loop"},
+        {"invoke"},
         {
             **_helpers(),
             "app": _App,
-            "_get_bedrock": lambda: bedrock,
-            "MODEL_ID": "m",
-            "SYSTEM_PROMPT": "p",
-            "TOOL_CONFIG": {"tools": []},
-            "TOOL_HANDLERS": {"get_weather": lambda args: json.dumps({"location": args["location"]})},
+            "_get_agent": lambda: agent,
+            "_TOOL_NAME_ALIASES": {},
         },
     )
 
-    result = namespace["invoke"]({"prompt": "weather please"})
-
-    assert result == {
-        "response": "final",
-        "tool_receipts": [_receipt("get_weather", {"location": "Dublin"}), _receipt("nope", {"x": 1}, "error")],
+    assert namespace["invoke"]({"prompt": "search"}) == {
+        "response": "done",
+        "tool_receipts": [
+            _receipt(
+                "AmazonWebSearch___WebSearch",
+                {"query": "Amazon Bedrock AgentCore", "maxResults": 5},
+            )
+        ],
     }
-    # The loop decides status beside the conversation; the toolResult blocks it sends
-    # back to Bedrock keep their previous shape, since not every model accepts `status`.
-    tool_results = bedrock.requests[1][2]["content"]
-    assert [set(block["toolResult"]) for block in tool_results] == [{"toolUseId", "content"}] * 2
 
 
 # ---------------------------------------------------------------------------

@@ -39,6 +39,14 @@ from app.services.gateway_mutation_lock import (
 )
 from app.services.gateway_update import NO_CLIENT_ALLOWED, preserving_gateway_update
 from app.services.iam_boundary import create_role_kwargs, ensure_role_boundary
+from app.services.managed_web_search import (
+    MANAGED_WEB_SEARCH_TARGET_NAME,
+    MANAGED_WEB_SEARCH_TOOL_IDS,
+    managed_web_search_requested,
+    managed_web_search_target_params,
+    require_managed_web_search_region,
+    without_managed_web_search_tools,
+)
 from app.services.mcp_gateway_protocol import pinned_protocol_configuration
 from app.services.naming import (
     deployment_scope_suffix,
@@ -478,20 +486,28 @@ def _resolve_gateway_tool_actions(agentcore_ctrl, gateway_id: str, timeout: int 
         schema = (mcp.get("lambda", {}) or {}).get("toolSchema", {}) or {}
         return schema.get("inlinePayload", []) or []
 
-    # Snapshot pre-sync timestamps so we can require lastSynchronizedAt to ADVANCE
-    # (a target may carry a stale sync time from a prior deploy of a reused gw).
+    # Snapshot every crawled target before synchronization, then pass the
+    # exact IDs. The API requires targetIdList and rejects Lambda targets.
+    # A missing/failed sync is fatal through the readiness loop below; it
+    # must not be relabelled as an empty but healthy tool plane.
     pre_sync = {}
+    crawled_target_ids = []
     for _tname, tid in _list_target_ids():
         try:
-            d = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway_id, targetId=tid)
-            pre_sync[tid] = d.get("lastSynchronizedAt")
+            detail = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway_id, targetId=tid)
+            pre_sync[tid] = detail.get("lastSynchronizedAt")
+            mcp = (detail.get("targetConfiguration", {}) or {}).get("mcp", {}) or {}
+            if "lambda" not in mcp:
+                crawled_target_ids.append(tid)
         except Exception:  # noqa: BLE001
             pre_sync[tid] = None
+            crawled_target_ids.append(tid)
 
-    try:
-        agentcore_ctrl.synchronize_gateway_targets(gatewayIdentifier=gateway_id)
-    except Exception as e:  # noqa: BLE001
-        logger.info("synchronize_gateway_targets (non-fatal) for %s: %s", gateway_id, e)
+    if crawled_target_ids:
+        agentcore_ctrl.synchronize_gateway_targets(
+            gatewayIdentifier=gateway_id,
+            targetIdList=sorted(set(crawled_target_ids)),
+        )
 
     deadline = _t.time() + timeout
     actions = []
@@ -1680,21 +1696,11 @@ CUSTOMER_SUPPORT_TOOLS_SCHEMA = {
     ]
 }
 
-# Dynamic tools Lambda (search/wikipedia/weather/fetch + customer-support demo
-# handlers + dispatcher). Canonical source lives in app/services/codegen_templates/
-# (dynamic_tools_impl.py + customer_support_impl.py + dynamic_tools_handler.py).
+# Dynamic tools Lambda (Wikipedia/weather/fetch + customer-support demo
+# handlers + dispatcher). Managed full-web search is a connector target.
 DYNAMIC_TOOLS_LAMBDA_CODE = codegen_templates.dynamic_tools_lambda_source()
 
 GATEWAY_TOOL_SCHEMAS: dict[str, dict] = {
-    "duckduckgo_search": {
-        "name": "duckduckgo_search",
-        "description": "Search the web using DuckDuckGo.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"query": {"type": "string"}},
-            "required": ["query"],
-        },
-    },
     "wikipedia_search": {
         "name": "wikipedia_search",
         "description": "Search Wikipedia and return an article summary.",
@@ -4550,7 +4556,7 @@ class GatewayTargetFamilyConflict(RuntimeError):
 #: creates. The family is the one field in the shape that our own code NEVER changes for a
 #: given target: a redeploy can move a Lambda ARN, a schema or an endpoint, but a canvas node
 #: that produced an ``openApiSchema`` target keeps producing one.
-_TARGET_FAMILY_KEYS = ("lambda", "openApiSchema", "smithyModel", "mcpServer")
+_TARGET_FAMILY_KEYS = ("lambda", "openApiSchema", "smithyModel", "mcpServer", "connector")
 
 #: Exactly the configuration fields ``UpdateGatewayTarget`` replaces, and therefore exactly
 #: what has to match before an update can be reported as applied. ``name`` and ``description``
@@ -5059,57 +5065,115 @@ def _update_existing_gateway_target(agentcore_ctrl, gateway_id: str, target_name
     )
 
 
-def _build_gateway_role_policy() -> dict:
-    """Build the IAM policy document for gateway roles with scoped permissions."""
-    return {
-        "Version": "2012-10-17",
-        "Statement": [
+def _build_gateway_role_policy(
+    *,
+    region: str,
+    account_id: str,
+    gateway_name: str,
+    managed_web_search: bool = False,
+    owner_sub: str = "",
+    partition: str = "aws",
+) -> dict:
+    """Build the least-privilege runtime policy for one Gateway service role.
+
+    This is an execution role, not the deployer's resource-management role. It
+    may invoke targets, mint outbound-authorization tokens, and evaluate an
+    attached policy engine; it may not create/delete AgentCore resources, pass
+    roles, invoke models, or write credential secrets.
+    """
+
+    gateway_arn = f"arn:{partition}:bedrock-agentcore:{region}:{account_id}:gateway/{gateway_name}-*"
+    policy_engine_arn = f"arn:{partition}:bedrock-agentcore:{region}:{account_id}:policy-engine/*"
+    identity_directory_arn = (
+        f"arn:{partition}:bedrock-agentcore:{region}:{account_id}:workload-identity-directory/default"
+    )
+    workload_identity_arn = f"{identity_directory_arn}/workload-identity/{gateway_name}-*"
+    token_vault_arn = f"arn:{partition}:bedrock-agentcore:{region}:{account_id}:token-vault/default"
+    token_resources = [
+        token_vault_arn,
+        f"{token_vault_arn}/oauth2credentialprovider/*",
+        f"{token_vault_arn}/apikeycredentialprovider/*",
+        identity_directory_arn,
+        workload_identity_arn,
+    ]
+    secret_prefix = connector_secret_owner_prefix(owner_sub)
+
+    statements = [
+        {
+            "Sid": "GatewayInvocation",
+            "Effect": "Allow",
+            "Action": ["bedrock-agentcore:InvokeGateway"],
+            "Resource": gateway_arn,
+        },
+        {
+            "Sid": "PolicyAuthorization",
+            "Effect": "Allow",
+            "Action": [
+                "bedrock-agentcore:GetPolicyEngine",
+                "bedrock-agentcore:AuthorizeAction",
+                "bedrock-agentcore:PartiallyAuthorizeActions",
+            ],
+            "Resource": [policy_engine_arn, gateway_arn],
+        },
+        {
+            "Sid": "WorkloadIdentityToken",
+            "Effect": "Allow",
+            "Action": ["bedrock-agentcore:GetWorkloadAccessToken"],
+            "Resource": [identity_directory_arn, workload_identity_arn],
+        },
+        {
+            "Sid": "OutboundCredentialTokens",
+            "Effect": "Allow",
+            "Action": [
+                "bedrock-agentcore:GetResourceOauth2Token",
+                "bedrock-agentcore:GetResourceApiKey",
+            ],
+            "Resource": token_resources,
+        },
+        {
+            "Sid": "CredentialSecretRead",
+            "Effect": "Allow",
+            "Action": ["secretsmanager:GetSecretValue"],
+            "Resource": f"arn:{partition}:secretsmanager:{region}:{account_id}:secret:{secret_prefix}*",
+        },
+        {
+            "Sid": "InvokeGatewayToolLambdas",
+            "Effect": "Allow",
+            "Action": ["lambda:InvokeFunction"],
+            "Resource": f"arn:{partition}:lambda:{region}:{account_id}:function:AgentCore*",
+        },
+    ]
+    if managed_web_search:
+        statements.append(
             {
+                "Sid": "ManagedWebSearch",
                 "Effect": "Allow",
-                "Action": [
-                    # `agent-credential-provider` is not an AWS service, so the
-                    # entry that used to sit here authorized nothing -- and it was
-                    # the only grant that made this role look like it could reach
-                    # the credential providers. It can: the real actions are
-                    # bedrock-agentcore:GetResourceOauth2Token and
-                    # GetResourceApiKey, covered by the wildcard below. See the
-                    # prefix note in services/per_agent_identity.py.
-                    "bedrock-agentcore:*",
-                ],
-                "Resource": "*",
-            },
-            {
-                "Effect": "Allow",
-                "Action": [
-                    "bedrock:InvokeModel",
-                    "bedrock:InvokeModelWithResponseStream",
-                    "bedrock:ListFoundationModels",
-                    "bedrock:GetFoundationModel",
-                ],
-                "Resource": "*",
-            },
-            {
-                "Effect": "Allow",
-                "Action": "iam:PassRole",
-                "Resource": "arn:aws:iam::*:role/AgentCore*",
-            },
-            {
-                "Effect": "Allow",
-                "Action": [
-                    "secretsmanager:CreateSecret",
-                    "secretsmanager:GetSecretValue",
-                    "secretsmanager:PutSecretValue",
-                    "secretsmanager:DeleteSecret",
-                ],
-                "Resource": "*",
-            },
-            {
-                "Effect": "Allow",
-                "Action": "lambda:InvokeFunction",
-                "Resource": "arn:aws:lambda:*:*:function:AgentCore*",
-            },
-        ],
-    }
+                "Action": ["bedrock-agentcore:InvokeWebSearch"],
+                "Resource": f"arn:{partition}:bedrock-agentcore:{region}:aws:tool/web-search.v1",
+            }
+        )
+    return {"Version": "2012-10-17", "Statement": statements}
+
+
+def _gateway_role_policy_for(
+    role_arn: str,
+    *,
+    region: str,
+    gateway_name: str,
+    managed_web_search: bool,
+    owner_sub: str,
+) -> dict:
+    parts = str(role_arn or "").split(":", 5)
+    if len(parts) != 6 or parts[0] != "arn" or parts[2] != "iam" or not parts[4]:
+        raise ValueError("IAM returned an invalid Gateway role ARN; refusing to emit an unscoped execution policy")
+    return _build_gateway_role_policy(
+        region=region,
+        account_id=parts[4],
+        gateway_name=gateway_name,
+        managed_web_search=managed_web_search,
+        owner_sub=owner_sub,
+        partition=parts[1],
+    )
 
 
 def _fetch_openapi_spec(spec_url: str, allowlist_hosts: list | None = None) -> str:
@@ -5946,6 +6010,13 @@ def deploy_gateway(
         custom_tools = custom_tools or []
         connectors = connectors or []
         external_mcp_servers = external_mcp_servers or []
+        managed_web_search = managed_web_search_requested(template_id, gateway_tools)
+        if managed_web_search:
+            require_managed_web_search_region(region)
+            # Saved canvases may still carry duckduckgo_search. It is a
+            # migration alias for the managed connector, never a Lambda
+            # tool backed by unsupported HTML scraping.
+            gateway_tools = without_managed_web_search_tools(gateway_tools)
 
         # Fail closed on a tool set this deployer cannot faithfully serve, BEFORE any
         # AWS side effect (no client is created yet, so refused_before_side_effects is
@@ -6131,9 +6202,13 @@ def deploy_gateway(
             gw_role_confirmed = gw_role_name
             # SECURITY: Scope Lambda invoke to AgentCore-prefixed functions only,
             # and limit bedrock-agentcore actions to gateway-specific operations.
-            sts_client = _aws_client("sts")
-            sts_client.get_caller_identity()  # validate credentials
-            _gw_policy_doc = _build_gateway_role_policy()
+            _gw_policy_doc = _gateway_role_policy_for(
+                gw_role_arn,
+                region=region,
+                gateway_name=gateway_name,
+                managed_web_search=managed_web_search,
+                owner_sub=owner_sub,
+            )
             iam_client.put_role_policy(
                 RoleName=gw_role_name,
                 PolicyName="GatewayLambdaInvoke",
@@ -6162,7 +6237,13 @@ def deploy_gateway(
             # that first created it had no manifest row either, so no run ever named it.
             gw_role_confirmed = gw_role_name
             # Update the policy to ensure it has latest permissions (critical for MCP patterns)
-            _gw_policy_doc = _build_gateway_role_policy()
+            _gw_policy_doc = _gateway_role_policy_for(
+                gw_role_arn,
+                region=region,
+                gateway_name=gateway_name,
+                managed_web_search=managed_web_search,
+                owner_sub=owner_sub,
+            )
             iam_client.put_role_policy(
                 RoleName=gw_role_name,
                 PolicyName="GatewayLambdaInvoke",
@@ -6417,7 +6498,9 @@ def deploy_gateway(
                 update_existing=True,  # F-74: repoint an existing target to this deploy's function
             )
 
-        elif template_id in ("strands-gateway-agent", "customer-support-blueprint") or gateway_tools:
+        elif (
+            template_id in ("web-search-agent", "strands-gateway-agent", "customer-support-blueprint") or gateway_tools
+        ):
             # Deploy the DynamicTools Lambda with tool schemas. It executes the web
             # tools AND the canonical order tools, so the blueprint (canonical) and
             # strands (web + canonical) templates both land here.
@@ -6444,14 +6527,16 @@ def deploy_gateway(
                 schemas = [
                     GATEWAY_TOOL_SCHEMAS[tid] for tid in ("get_order", "get_customer", "list_orders", "process_refund")
                 ]
+            elif template_id == "web-search-agent":
+                # Search itself is the managed connector. Keep only the
+                # adjacent weather and bounded page-fetch Lambda tools.
+                schemas = [GATEWAY_TOOL_SCHEMAS[tid] for tid in ("weather_api", "web_page_fetcher")]
             else:
-                # strands-gateway-agent with no explicit tools: the 8 executable
-                # web + canonical tools (everything the dispatcher can answer),
-                # never the 9th knowledge_base entry.
+                # strands-gateway-agent: managed WebSearch plus the seven
+                # executable Lambda-backed encyclopedia/weather/fetch/order tools.
                 schemas = [
                     GATEWAY_TOOL_SCHEMAS[tid]
                     for tid in (
-                        "duckduckgo_search",
                         "wikipedia_search",
                         "weather_api",
                         "web_page_fetcher",
@@ -6488,6 +6573,17 @@ def deploy_gateway(
                     "No predefined tool schemas matched gateway_tools=%s, skipping DynamicTools target",
                     gateway_tools,
                 )
+
+        if managed_web_search:
+            web_search_params = managed_web_search_target_params(gateway["gatewayId"])
+            _create_gateway_target_with_retry(
+                agentcore_ctrl,
+                gateway["gatewayId"],
+                MANAGED_WEB_SEARCH_TARGET_NAME,
+                web_search_params,
+                update_existing=True,
+            )
+            logger.info("AWS-managed Web Search target deployed")
 
         # Step 3b: Create MCP Server Runtime target (if provided)
         if mcp_server_runtime_arn:
@@ -6926,8 +7022,9 @@ def deploy_gateway(
         # name. mcp_server entries present in `targets` are skipped by the helper
         # (already handled) to avoid double-deploy.
         config_targets = gateway_config.get("targets") or []
-        _config_target_families = {(t or {}).get("type") for t in config_targets}
-        _has_crawled_config_target = bool(_config_target_families & {"openapi", "smithy"})
+        _crawled_config_target_count = sum(
+            1 for target in config_targets if (target or {}).get("type") in {"openapi", "smithy"}
+        )
         if config_targets:
             _deploy_config_targets(
                 agentcore_ctrl,
@@ -6939,41 +7036,10 @@ def deploy_gateway(
                 resource_tags=resource_tags,
             )
 
-        # Step 5: Synchronize NON-LAMBDA targets (OpenAPI / external MCP) so their
-        # tools are crawled into the servable MCP plane. Bug 134:
-        # synchronize_gateway_targets REQUIRES a targetIdList (the old call omitted
-        # it → silent failure) AND rejects LAMBDA targets ("Target type LAMBDA is
-        # not supported for synchronization") — Lambda targets serve their inline
-        # tools directly. Connector (OpenAPI) targets MUST be crawled regardless of
-        # the semantic-search toggle, so we always sync the non-lambda set whenever
-        # any crawled target exists (or semantic search was explicitly requested).
-        if (
-            connectors
-            or external_mcp_servers
-            or mcp_server_runtime_arn
-            or _has_crawled_config_target
-            or gateway_config.get("semanticSearchEnabled")
-        ):
-            try:
-                _sync_ids = []
-                for _t in _list_all_gateway_targets(
-                    agentcore_ctrl,
-                    gateway["gatewayId"],
-                ):
-                    _tid = _t.get("targetId") or _t.get("gatewayTargetId")
-                    _tc = (_t.get("targetConfiguration", {}) or {}).get("mcp", {}) or {}
-                    # crawled targets = NOT lambda (openApiSchema / mcpServer)
-                    if _tid and "lambda" not in _tc:
-                        _sync_ids.append(_tid)
-                if _sync_ids:
-                    logger.warning(
-                        "Synchronizing %d non-lambda target(s) on gateway %s", len(_sync_ids), gateway["gatewayId"]
-                    )
-                    agentcore_ctrl.synchronize_gateway_targets(
-                        gatewayIdentifier=gateway["gatewayId"], targetIdList=_sync_ids
-                    )
-            except Exception as sync_err:
-                logger.warning("Gateway target sync (non-fatal): %s", sync_err)
+        # Step 5 synchronization is performed once, authoritatively, by
+        # _resolve_gateway_tool_actions below. It snapshots crawled targets,
+        # calls SynchronizeGatewayTargets with their exact IDs, and waits for
+        # lastSynchronizedAt to advance before any Cedar action is built.
 
         # Bug 138: if the caller asked for tools (built-in and/or custom) but the
         # gateway ended up with ZERO targets, the agent would deploy against an
@@ -6982,7 +7048,7 @@ def deploy_gateway(
         # passes an unknown built-in toolId (no schema match → DynamicTools target
         # skipped) or every custom tool failed validation. FAIL LOUDLY here with a
         # message the user can act on, instead of silently shipping a dead gateway.
-        tools_requested = bool(gateway_tools) or bool(custom_tools)
+        tools_requested = bool(gateway_tools) or bool(custom_tools) or managed_web_search
         if tools_requested:
             try:
                 _existing_targets = _list_all_gateway_targets(
@@ -6992,8 +7058,12 @@ def deploy_gateway(
             except Exception:  # noqa: BLE001
                 _existing_targets = []
             if not _existing_targets:
-                _known = sorted(GATEWAY_TOOL_SCHEMAS.keys())
-                _unknown = [t for t in (gateway_tools or []) if t not in GATEWAY_TOOL_SCHEMAS]
+                _known = sorted(set(GATEWAY_TOOL_SCHEMAS) | MANAGED_WEB_SEARCH_TOOL_IDS)
+                _unknown = [
+                    t
+                    for t in (gateway_tools or [])
+                    if t not in GATEWAY_TOOL_SCHEMAS and t not in MANAGED_WEB_SEARCH_TOOL_IDS
+                ]
                 detail = ""
                 if _unknown:
                     detail = (
@@ -7030,10 +7100,19 @@ def deploy_gateway(
         # response. Without this branch a hosted MCP Runtime target deployed
         # READY, but the policy step received []/0 and failed after creating the
         # entire Gateway graph rather than building Cedar over its four tools.
-        crawled_targets = bool(connectors or external_mcp_servers or mcp_server_runtime_arn)
+        declared_crawled_target_count = (
+            len(connectors)
+            + len(external_mcp_servers)
+            + int(bool(mcp_server_runtime_arn))
+            + int(managed_web_search)
+            + _crawled_config_target_count
+        )
+        crawled_targets = declared_crawled_target_count > 0
         crawled_plane_verified = False
-        if crawled_targets and expected_tool_count == 0 and not obo_required:
-            minimum_served = 1
+        if crawled_targets and not obo_required:
+            # Each declared crawled target must contribute at least one
+            # served tool in addition to every configured inline tool.
+            minimum_served = expected_tool_count + declared_crawled_target_count
             probe: dict = {}
             served = _wait_for_gateway_to_serve_tools(
                 gateway_url,
@@ -7061,30 +7140,42 @@ def deploy_gateway(
                             target_reasons.append(f"{_tid}: {_r}")
                 except Exception:  # noqa: BLE001 — diagnostics only; failure remains closed
                     logger.debug("Could not collect FAILED-target reasons", exc_info=True)
-                detail = (
-                    f" Target failure(s): {target_reasons}"
-                    if target_reasons
-                    else (" No target reported FAILED; tools/list did not expose a servable crawled tool plane.")
+                if target_reasons:
+                    raise RuntimeError(
+                        f"Gateway {gateway['gatewayId']} serves {served}/{minimum_served} required tools over MCP "
+                        f"after deploying crawled target(s). Target failure(s): {target_reasons}"
+                    )
+                # No target reports a terminal failure: this is the same
+                # service-side short-plane condition as an inline target whose
+                # schema is READY but absent from tools/list. Preserve the full
+                # mixed-plane minimum and let the bounded reprobe/recreation block
+                # below decide whether a fresh Gateway repairs it. Keeping this as
+                # a fall-through also preserves connector/external-MCP/owner args
+                # on recursion; raising here bypassed that proven recovery path.
+                expected_tool_count = minimum_served
+                logger.warning(
+                    "Gateway %s serves %d/%d required mixed-plane tools; no target "
+                    "reported FAILED, so applying the bounded Gateway plane recovery",
+                    gateway["gatewayId"],
+                    served,
+                    minimum_served,
                 )
-                raise RuntimeError(
-                    f"Gateway {gateway['gatewayId']} serves {served}/{minimum_served} required tools over MCP after "
-                    f"deploying crawled target(s)." + detail
+            else:
+                served_tools = _qualified_tools_from_served(gateway_url, client_info)
+                if len(served_tools) != served:
+                    raise RuntimeError(
+                        f"Gateway {gateway['gatewayId']} reported {served} served tools but "
+                        f"only {len(served_tools)} qualified actions could be read. Refusing "
+                        "to build a partial Cedar permit."
+                    )
+                qualified_tools = served_tools
+                expected_tool_count = served
+                crawled_plane_verified = True
+                logger.warning(
+                    "Crawled-target gateway %s confirmed serving %d tool(s) over MCP",
+                    gateway["gatewayId"],
+                    served,
                 )
-            served_tools = _qualified_tools_from_served(gateway_url, client_info)
-            if len(served_tools) != served:
-                raise RuntimeError(
-                    f"Gateway {gateway['gatewayId']} reported {served} served tools but "
-                    f"only {len(served_tools)} qualified actions could be read. Refusing "
-                    "to build a partial Cedar permit."
-                )
-            qualified_tools = served_tools
-            expected_tool_count = served
-            crawled_plane_verified = True
-            logger.warning(
-                "Crawled-target gateway %s confirmed serving %d tool(s) over MCP",
-                gateway["gatewayId"],
-                served,
-            )
 
         # Bug 134 (THE stability fix): a Lambda gateway target can be status=READY
         # with a full inline schema yet the gateway's MCP plane serves an EMPTY

@@ -466,7 +466,8 @@ export type A2ACommunicationPattern =
 // ============================================================================
 
 export type ToolId =
-  | 'duckduckgo_search'
+  | 'web_search'
+  | 'duckduckgo_search' // legacy saved-canvas alias; backend migrates to managed Web Search
   | 'web_page_fetcher'
   | 'wikipedia_search'
   | 'weather_api'

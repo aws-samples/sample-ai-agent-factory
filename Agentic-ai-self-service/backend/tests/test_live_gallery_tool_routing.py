@@ -26,8 +26,8 @@ LEGACY_TOOLS = (
     "search_knowledge_base",
     "get_return_policy",
 )
-WEB_TOOLS = (
-    "duckduckgo_search",
+MANAGED_WEB_SEARCH_TOOL = "WebSearch"
+LAMBDA_WEB_TOOLS = (
     "wikipedia_search",
     "get_weather",
     "fetch_webpage",
@@ -40,13 +40,19 @@ def _exercise_live_route(
     template_id: str | None,
     gateway_tools: list[str],
     expected_count: int,
+    inline_expected_count: int | None = None,
 ) -> tuple[dict, list[str], list[tuple[str, dict]]]:
     ctrl = _FakeCtrl()
     _install(
         monkeypatch,
         ctrl=ctrl,
         served=expected_count,
-        expected=expected_count,
+        expected=expected_count if inline_expected_count is None else inline_expected_count,
+    )
+    monkeypatch.setattr(
+        gateway_deployer,
+        "_qualified_tools_from_served",
+        lambda *_args, **_kwargs: [f"served___tool-{index}" for index in range(expected_count)],
     )
 
     lambda_calls: list[str] = []
@@ -109,13 +115,6 @@ def _exercise_live_route(
     ),
     (
         (
-            "strands-gateway-agent",
-            [],
-            "DynamicTools",
-            WEB_TOOLS + CANONICAL_TOOLS,
-            "dynamic",
-        ),
-        (
             "customer-support-assistant",
             [],
             "CustomerSupportTools",
@@ -164,6 +163,48 @@ def test_live_gateway_advertises_exact_gallery_contract_and_uses_matching_lambda
     schemas = create_params["targetConfiguration"]["mcp"]["lambda"]["toolSchema"]["inlinePayload"]
     assert tuple(schema["name"] for schema in schemas) == expected_schema_names
     assert "knowledge_base_query" not in expected_schema_names
+
+
+@pytest.mark.parametrize(
+    ("template_id", "gateway_tools", "inline_tools"),
+    (
+        ("web-search-agent", [], ("get_weather", "fetch_webpage")),
+        ("strands-gateway-agent", [], LAMBDA_WEB_TOOLS + CANONICAL_TOOLS),
+        (None, ["web_search"], ()),
+        (None, ["duckduckgo_search"], ()),
+    ),
+)
+def test_live_gateway_routes_search_to_the_managed_connector(
+    monkeypatch: pytest.MonkeyPatch,
+    template_id: str | None,
+    gateway_tools: list[str],
+    inline_tools: tuple[str, ...],
+) -> None:
+    total_tools = len(inline_tools) + 1
+    result, lambda_calls, targets = _exercise_live_route(
+        monkeypatch,
+        template_id=template_id,
+        gateway_tools=gateway_tools,
+        expected_count=total_tools,
+        inline_expected_count=len(inline_tools),
+    )
+
+    assert result["success"] is True, result
+    assert lambda_calls == (["dynamic"] if inline_tools else [])
+    by_name = {name: params for name, params in targets}
+    connector = by_name["AmazonWebSearch"]["targetConfiguration"]["mcp"]["connector"]
+    assert connector == {
+        "source": {"connectorId": "web-search", "version": "1.2.0"},
+        "configurations": [{"name": "WebSearch", "parameterValues": {}}],
+    }
+    assert by_name["AmazonWebSearch"]["credentialProviderConfigurations"] == [
+        {"credentialProviderType": "GATEWAY_IAM_ROLE"}
+    ]
+    if inline_tools:
+        schemas = by_name["DynamicTools"]["targetConfiguration"]["mcp"]["lambda"]["toolSchema"]["inlinePayload"]
+        assert tuple(item["name"] for item in schemas) == inline_tools
+    else:
+        assert set(by_name) == {"AmazonWebSearch"}
 
 
 def test_live_gateway_refuses_an_unknown_tool_instead_of_silently_dropping_it(

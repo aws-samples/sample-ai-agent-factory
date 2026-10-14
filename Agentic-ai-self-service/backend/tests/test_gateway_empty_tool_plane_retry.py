@@ -895,6 +895,70 @@ def test_hosted_mcp_target_uses_served_tools_for_cedar_actions(monkeypatch, inli
     assert out["tool_plane_verified"] is True
 
 
+def test_two_openapi_config_targets_each_require_a_served_tool(monkeypatch):
+    """Two targets of one family are two obligations, not one set member."""
+    ctrl = _FakeCtrl()
+    _install(monkeypatch, ctrl=ctrl, served=3, expected=2)
+    monkeypatch.setattr(gateway_deployer, "_deploy_config_targets", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        gateway_deployer,
+        "_qualified_tools_from_served",
+        lambda *_args: ["Inline___one", "Inline___two", "OpenApiA___one"],
+    )
+
+    out = gateway_deployer.deploy_gateway(
+        {
+            "name": "agent-gateway",
+            "targets": [
+                {"type": "openapi", "name": "OpenApiA"},
+                {"type": "openapi", "name": "OpenApiB"},
+            ],
+        },
+        "us-east-1",
+        deployment_id="d-config-count",
+    )
+
+    assert out["success"] is False
+    assert "served 3/4 tools" in out["error"]
+
+
+def test_mixed_inline_and_crawled_plane_requires_both_contributions(monkeypatch):
+    class ReadyMcpCtrl(_FakeCtrl):
+        def list_gateway_targets(self, **kw):
+            return {"items": [{"name": "MCPServerRuntime", "targetId": "mcp-target", "status": "READY"}]}
+
+    ctrl = ReadyMcpCtrl()
+    _install(monkeypatch, ctrl=ctrl, served=2, expected=2)
+    monkeypatch.setattr(
+        gateway_deployer,
+        "_ensure_oauth2_credential_provider",
+        lambda *_args, **_kwargs: "arn:aws:bedrock-agentcore:us-east-1:1:provider/mcp",
+    )
+    monkeypatch.setattr(
+        gateway_deployer,
+        "_create_gateway_target_with_retry",
+        lambda *_args, **_kwargs: {"targetId": "mcp-target"},
+    )
+
+    out = gateway_deployer.deploy_gateway(
+        {"name": "agent-gateway"},
+        "us-east-1",
+        owner_sub="owner-a",
+        deployment_id="d-mixed-served",
+        secrets_prebound=True,
+        mcp_server_runtime_arn="arn:aws:bedrock-agentcore:us-east-1:1:runtime/mcp",
+        mcp_oauth={
+            "discovery_url": "https://issuer.example/.well-known/openid-configuration",
+            "client_id": "client",
+            "scope": "mcp/invoke",
+            "client_secret_ref": "arn:aws:secretsmanager:us-east-1:1:secret:agentcore-connector/owner/ref",
+        },
+    )
+
+    assert out["success"] is False
+    assert "served 2/3 tools" in out["error"]
+
+
 def test_a_failed_shared_pool_deploy_hands_back_the_credentials_it_must_revoke(monkeypatch):
     """The abort inventory reduced ``client_info`` to {provider, user_pool_id}, which
     kept the secret out and took three teardown handles with it.
@@ -903,6 +967,7 @@ def test_a_failed_shared_pool_deploy_hands_back_the_credentials_it_must_revoke(m
     ``gwfixaafac57e-client`` (secret still mintable) and resource server
     ``agentcore-gwfixaafac57e`` were left in the platform pool, because neither the
     abort cleanup nor the manifest could name them.
+
     """
     ctrl = _FakeCtrl()
     _install(monkeypatch, ctrl=ctrl, served=9, expected=9)

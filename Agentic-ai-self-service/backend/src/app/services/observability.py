@@ -98,8 +98,11 @@ _PROVIDER_DEFAULT_ENDPOINTS: dict[str, str] = {
 # token-count attributes to appear on those spans (Bug 17). We deliberately do
 # NOT set OTEL_EXPORTER_OTLP_ENDPOINT here: there is no localhost:4318 sidecar
 # (Bug 18), and the usage-log exporter does not need an external collector.
-# Account-level prerequisite (CloudWatch Transaction Search trace-segment
-# destination = CloudWatchLogs) is operator-managed and confirmed enabled.
+# Account-level prerequisite: CloudWatch Transaction Search must set the
+# trace-segment destination to CloudWatchLogs. Production promotion checks this
+# fail-closed (promotion_evidence.require_transaction_search); integration runs
+# acquire a reversible lease that enables it, waits for search readiness, and
+# restores the exact prior destination/indexing state.
 _AGENTCORE_NATIVE_OBSERVABILITY_ENV: dict[str, str] = {
     "AGENT_OBSERVABILITY_ENABLED": "true",
     "OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental",

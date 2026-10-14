@@ -6,8 +6,11 @@ id is available, before the runtime id exists. If ``POST /api/deploy`` is
 accepted but its response is lost, the harness recovers the caller-owned row by
 the request's unique ``node_id`` before propagating the original failure.
 Teardown then waits for the deployment to settle, deletes the exact runtime,
-and requires the durable deployment record to reach
-``delete_status == "deleted"``.
+requires the durable deployment record to reach
+``delete_status == "deleted"``, and uses its operator-side Logs client to delete
+only that service-returned Runtime ID's synthetic audit groups. Two consecutive
+empty inventories prove they did not reappear. Production customer deletion
+continues to retain real audit logs for the configured retention period.
 
 These tests make real AWS calls through the deployed API. There is no mocking
 in this module.
@@ -337,14 +340,16 @@ class TrackedDeployment:
     deployment_id: str
     runtime_id: str | None = None
     deleted: bool = False
+    runtime_logs_deleted: bool = False
     last_status: dict[str, Any] = field(default_factory=dict)
 
 
 class DeploymentCleanupTracker:
     """Registers deployments early and verifies every teardown outcome."""
 
-    def __init__(self, api_session: requests.Session) -> None:
+    def __init__(self, api_session: requests.Session, *, logs_client: Any | None = None) -> None:
         self._api_session = api_session
+        self._logs_client = logs_client
         self._records: dict[str, TrackedDeployment] = {}
 
     @property
@@ -432,6 +437,87 @@ class DeploymentCleanupTracker:
             raise AssertionError(f"Deployment {record.deployment_id} produced an empty runtime id")
         record.runtime_id = runtime_id
 
+    def _runtime_log_groups(self, runtime_id: str) -> list[str]:
+        if self._logs_client is None:
+            return []
+        prefix = f"/aws/bedrock-agentcore/runtimes/{runtime_id}-"
+        names: list[str] = []
+        token: str | None = None
+        seen_tokens: set[str] = set()
+        while True:
+            request: dict[str, Any] = {"logGroupNamePrefix": prefix}
+            if token:
+                request["nextToken"] = token
+            page = self._logs_client.describe_log_groups(**request)
+            groups = page.get("logGroups", [])
+            if not isinstance(groups, list):
+                raise AssertionError("CloudWatch returned a non-list Runtime log group inventory")
+            names.extend(
+                name
+                for item in groups
+                if isinstance(item, dict)
+                and isinstance((name := item.get("logGroupName")), str)
+                and name.startswith(prefix)
+            )
+            candidate = page.get("nextToken")
+            if candidate in (None, ""):
+                return sorted(set(names))
+            if not isinstance(candidate, str) or candidate in seen_tokens:
+                raise AssertionError("CloudWatch Runtime log group pagination did not advance")
+            seen_tokens.add(candidate)
+            token = candidate
+
+    def _purge_runtime_logs(self, record: TrackedDeployment) -> None:
+        """Dispose of this harness's synthetic audit logs and prove they stay absent.
+
+        The product deliberately retains real customer Runtime logs for its bounded
+        retention period. Integration deployments are synthetic and promise direct-
+        service zero residue, so the operator-side harness deletes only the exact
+        service-returned Runtime prefix after the customer DELETE path has reached a
+        durable ``deleted`` tombstone.
+        """
+
+        if self._logs_client is None or record.runtime_logs_deleted:
+            return
+        runtime_id = str(record.runtime_id or "")
+        if not runtime_id:
+            return
+        if not record.deleted or record.last_status.get("delete_status") != "deleted":
+            raise AssertionError(
+                f"Refusing to purge Runtime logs before deployment {record.deployment_id} is durably deleted"
+            )
+
+        deadline = time.monotonic() + 90
+        stable_empty_reads = 0
+        removed: set[str] = set()
+        while time.monotonic() < deadline:
+            names = self._runtime_log_groups(runtime_id)
+            if not names:
+                stable_empty_reads += 1
+                if stable_empty_reads >= 2:
+                    record.runtime_logs_deleted = True
+                    logger.info(
+                        "Synthetic deployment %s Runtime log groups are absent (removed: %s)",
+                        record.deployment_id,
+                        ", ".join(sorted(removed)) or "none",
+                    )
+                    return
+                time.sleep(5)
+                continue
+            stable_empty_reads = 0
+            for name in names:
+                try:
+                    self._logs_client.delete_log_group(logGroupName=name)
+                    removed.add(name)
+                except Exception as exc:  # noqa: BLE001 - inspect one AWS code
+                    code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+                    if code != "ResourceNotFoundException":
+                        raise AssertionError(f"Could not delete synthetic Runtime log group {name} ({code})") from exc
+            time.sleep(5)
+
+        remaining = self._runtime_log_groups(runtime_id)
+        raise AssertionError(f"Synthetic Runtime log groups did not stay absent for {runtime_id}: {remaining}")
+
     def delete_and_verify(
         self,
         record: TrackedDeployment,
@@ -458,6 +544,7 @@ class DeploymentCleanupTracker:
             poll_interval=poll_interval,
         )
         record.deleted = True
+        self._purge_runtime_logs(record)
         return record.last_status
 
     def cleanup(self, record: TrackedDeployment) -> None:
@@ -472,6 +559,7 @@ class DeploymentCleanupTracker:
                     f"{stable.get('delete_status')!r}"
                 )
             record.last_status = stable
+            self._purge_runtime_logs(record)
             return
 
         status = wait_for_deployment_terminal(
@@ -493,6 +581,7 @@ class DeploymentCleanupTracker:
             record.last_status = status
         if delete_status == "deleted":
             record.deleted = True
+            self._purge_runtime_logs(record)
             return
 
         # A failed deploy may have finished its automatic cleanup before a
@@ -526,10 +615,14 @@ class DeploymentCleanupTracker:
 @pytest.fixture()
 def deployment_cleanup(
     api_session: requests.Session,
+    aws_region: str,
 ) -> Generator[DeploymentCleanupTracker, None, None]:
     """Cleanup safety net that fails the run on any unverified teardown."""
 
-    tracker = DeploymentCleanupTracker(api_session)
+    tracker = DeploymentCleanupTracker(
+        api_session,
+        logs_client=boto3.client("logs", region_name=aws_region),
+    )
     yield tracker
 
     failures: list[str] = []

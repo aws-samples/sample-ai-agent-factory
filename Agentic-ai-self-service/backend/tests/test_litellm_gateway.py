@@ -625,7 +625,7 @@ class TestDeployContract:
         result = lgd.deploy_litellm_gateway(
             gateway_config={"name": "gw", "litellm_base_url": BASE, "litellm_api_key": "sk-x"},
             region="eu-central-1",
-            gateway_tools=["duckduckgo_search"],
+            gateway_tools=["web_search"],
             custom_tools=[{"name": "x"}],
             connectors=[{"connector_id": "github"}],
             knowledge_base_result={"knowledge_base_id": "KB1"},

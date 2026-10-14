@@ -32,7 +32,7 @@ def test_gateway_qualified_receipt_keeps_exact_argument_proof() -> None:
             "toolReceipts": [
                 _qualified_receipt(
                     invocation,
-                    name="DynamicTools___duckduckgo_search",
+                    name="AmazonWebSearch___WebSearch",
                 )
             ]
         },
@@ -44,10 +44,10 @@ def test_gateway_qualified_receipt_keeps_exact_argument_proof() -> None:
     "name",
     (
         "DynamicTools___fetch_webpage",
-        "DynamicTools...duckduckgo_search",
-        "___duckduckgo_search",
-        "DynamicTools___duckduckgo_search___",
-        "Dynamic.Tools___duckduckgo_search",
+        "AmazonWebSearch...WebSearch",
+        "___WebSearch",
+        "AmazonWebSearch___WebSearch___",
+        "Amazon.WebSearch___WebSearch",
     ),
 )
 def test_gateway_receipt_rejects_wrong_or_malformed_published_names(name: str) -> None:
@@ -72,7 +72,7 @@ def test_qualified_name_branch_removal_mutation_fails(monkeypatch: pytest.Monkey
                 "toolReceipts": [
                     _qualified_receipt(
                         invocation,
-                        name="DynamicTools___duckduckgo_search",
+                        name="AmazonWebSearch___WebSearch",
                     )
                 ]
             },

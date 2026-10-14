@@ -128,7 +128,7 @@ def test_rejects_edge_referencing_unknown_suffix():
     assert "ghost" in err
 
 
-def _tool_node(suffix, tool_id="duckduckgo_search", is_custom=False, input_schema=None):
+def _tool_node(suffix, tool_id="web_search", is_custom=False, input_schema=None):
     cfg = {
         "name": tool_id,
         "toolId": tool_id,
@@ -216,7 +216,7 @@ def test_canonical_tool_gateway_runtime_spec_passes():
         "nodes": [
             _runtime_node("rt"),
             _gateway_node("gw"),
-            _tool_node("t1", tool_id="duckduckgo_search"),
+            _tool_node("t1", tool_id="web_search"),
             _tool_node(
                 "t2",
                 tool_id="create_jira_ticket",
@@ -235,6 +235,21 @@ def test_canonical_tool_gateway_runtime_spec_passes():
         ],
     }
     assert _validate_spec(spec) is None
+
+
+def test_generated_canvas_rejects_legacy_scraper_alias() -> None:
+    spec = {
+        "nodes": [_runtime_node("rt"), _gateway_node("gw"), _tool_node("t1", tool_id="duckduckgo_search")],
+        "edges": [
+            {"sourceIdSuffix": "gw", "targetIdSuffix": "rt", "connectionType": "data"},
+            {"sourceIdSuffix": "t1", "targetIdSuffix": "gw", "connectionType": "data"},
+        ],
+    }
+
+    error = _validate_spec(spec)
+    assert error is not None
+    assert "duckduckgo_search" in error
+    assert "web_search" in error
 
 
 def test_full_spec_with_memory_and_guardrails_passes():

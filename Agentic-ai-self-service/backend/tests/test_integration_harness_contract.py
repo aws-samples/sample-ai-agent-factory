@@ -184,12 +184,12 @@ def test_every_conversational_template_has_a_semantic_oracle() -> None:
 def test_the_live_matrix_exercises_every_advertised_executable_tool() -> None:
     expected = {
         "web-search-agent": (
-            "duckduckgo_search",
+            "WebSearch",
             "get_weather",
             "fetch_webpage",
         ),
         "strands-gateway-agent": (
-            "duckduckgo_search",
+            "WebSearch",
             "wikipedia_search",
             "get_weather",
             "fetch_webpage",
@@ -220,7 +220,6 @@ def test_the_live_matrix_exercises_every_advertised_executable_tool() -> None:
         # _invoke_standalone_mcp rather than through model prompts.
         "mcp-server-runtime": (
             "get_weather",
-            "search_web",
             "fetch_url",
         ),
     }
@@ -231,12 +230,11 @@ def test_the_live_matrix_exercises_every_advertised_executable_tool() -> None:
     }
     actual["mcp-server-runtime"] = (
         "get_weather",
-        "search_web",
         "fetch_url",
     )
 
     assert actual == expected
-    assert sum(len(tools) for tools in actual.values()) == 26
+    assert sum(len(tools) for tools in actual.values()) == 25
 
 
 def test_exactly_the_two_memory_gallery_templates_require_live_recall() -> None:
@@ -250,7 +248,7 @@ def test_live_requests_match_the_frontend_composition_boundary() -> None:
     payloads = {case.template_id: matrix._template_request_payload(case, "deadbeef") for case in matrix.TEMPLATE_CASES}
 
     expected_connected = {
-        "web-search-agent": [],
+        "web-search-agent": ["gateway", "identity"],
         "strands-gateway-agent": ["gateway", "identity"],
         "customer-support-assistant": [
             "gateway",
@@ -263,7 +261,7 @@ def test_live_requests_match_the_frontend_composition_boundary() -> None:
         "mcp-server-runtime": [],
     }
     expected_gateway_names = {
-        "web-search-agent": None,
+        "web-search-agent": "web_search_gateway",
         "strands-gateway-agent": "agent_gateway",
         "customer-support-assistant": "support_gateway",
         "customer-support-blueprint": "support_gateway",
@@ -295,7 +293,7 @@ def test_live_requests_match_the_frontend_composition_boundary() -> None:
     assert payloads["mcp-server-gateway-target"]["gatewayTools"] == []
     assert payloads["mcp-server-runtime"]["gatewayTools"] == []
 
-    for template_id in ("strands-gateway-agent", "customer-support-assistant"):
+    for template_id in ("web-search-agent", "strands-gateway-agent", "customer-support-assistant"):
         assert payloads[template_id]["identityConfig"] == {
             "mode": "shared",
             "provider": "cognito",
@@ -377,8 +375,9 @@ def test_a_structured_tool_error_cannot_be_hidden_beside_a_valid_candidate() -> 
             [
                 {
                     "title": "Amazon Bedrock AgentCore",
-                    "snippet": "Build and deploy agents.",
+                    "text": "Build and deploy agents.",
                     "url": "https://example.com/agentcore",
+                    "publishedDate": "2026-10-14",
                 }
             ],
         ),
@@ -744,6 +743,62 @@ def test_failed_deployment_cleanup_accepts_only_a_proven_deleted_verdict() -> No
     assert record.last_status["delete_status"] == "deleted"
 
 
+def test_integration_cleanup_purges_only_bound_runtime_logs_and_proves_absence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_id = "it_web_exact-1234567890"  # pragma: allowlist secret
+    first = f"/aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT"
+    second = f"/aws/bedrock-agentcore/runtimes/{runtime_id}-production"
+    foreign = f"/aws/bedrock-agentcore/runtimes/{runtime_id}x-DEFAULT"
+
+    class PagedLogs:
+        def __init__(self):
+            self.groups = {first, second, foreign}
+            self.deleted: list[str] = []
+            self.describe_calls: list[dict[str, Any]] = []
+
+        def describe_log_groups(self, **kwargs):
+            self.describe_calls.append(kwargs)
+            prefix = kwargs["logGroupNamePrefix"]
+            matches = sorted(name for name in self.groups if name.startswith(prefix))
+            if kwargs.get("nextToken") == "page-2":
+                return {"logGroups": [{"logGroupName": name} for name in matches[1:]]}
+            page = {"logGroups": [{"logGroupName": name} for name in matches[:1]]}
+            if len(matches) > 1:
+                page["nextToken"] = "page-2"
+            return page
+
+        def delete_log_group(self, *, logGroupName):
+            self.deleted.append(logGroupName)
+            self.groups.discard(logGroupName)
+
+    session = FakeSession(
+        get_responses=[
+            _response(
+                200,
+                status="failed",
+                delete_status="deleted",
+                runtime_id=runtime_id,
+            )
+        ]
+    )
+    logs = PagedLogs()
+    tracker = harness.DeploymentCleanupTracker(session, logs_client=logs)  # type: ignore[arg-type]
+    record = tracker.track("deployment-with-logs")
+    record.runtime_id = runtime_id
+    record.deleted = True
+    record.last_status = {"delete_status": "deleted", "runtime_id": runtime_id}
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    tracker.cleanup(record)
+
+    assert set(logs.deleted) == {first, second}
+    assert logs.groups == {foreign}
+    assert record.runtime_logs_deleted is True
+    assert any(call.get("nextToken") == "page-2" for call in logs.describe_calls)
+    assert len(logs.describe_calls) >= 4, "one empty read is not a quiescence proof"
+
+
 def test_customer_facing_docs_describe_six_templates_and_real_mcp() -> None:
     development = (_REPO / "docs/DEVELOPMENT.md").read_text()
     internals = (_REPO / "docs/DEPLOYMENT_INTERNALS.md").read_text()
@@ -756,11 +811,12 @@ def test_customer_facing_docs_describe_six_templates_and_real_mcp() -> None:
     assert "all six built-in gallery templates" in internals
     assert "`FastMCP`" in internals
     assert "mcp-lean.zip" in internals
-    assert "eight `DynamicTools` operations" in internals
+    assert "seven `DynamicTools` operations" in internals
     assert all(
         tool_name in internals
         for tool_name in (
-            "duckduckgo_search",
+            "web_search",
+            "WebSearch",
             "wikipedia_search",
             "get_weather",
             "fetch_webpage",

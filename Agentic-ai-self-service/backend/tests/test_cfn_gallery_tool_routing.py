@@ -37,10 +37,11 @@ LEGACY_TOOLS = (
     "search_knowledge_base",
     "get_return_policy",
 )
-WEB_TOOLS = ("duckduckgo_search", "wikipedia_search", "get_weather", "fetch_webpage")
+LAMBDA_WEB_TOOLS = ("wikipedia_search", "get_weather", "fetch_webpage")
 
 EXPECTED_ROUTES = {
-    "strands-gateway-agent": ("DynamicTools", WEB_TOOLS + CANONICAL_TOOLS),
+    "web-search-agent": ("DynamicTools", ("get_weather", "fetch_webpage")),
+    "strands-gateway-agent": ("DynamicTools", LAMBDA_WEB_TOOLS + CANONICAL_TOOLS),
     "customer-support-assistant": ("CustomerSupportTools", LEGACY_TOOLS),
     "customer-support-blueprint": ("DynamicTools", CANONICAL_TOOLS),
 }
@@ -106,6 +107,126 @@ def test_exported_gallery_target_advertises_exactly_its_intended_tools(
     assert target_name == expected_target
     assert set(tool_names) == set(expected_tools)
     assert len(tool_names) == len(expected_tools)
+
+
+def _managed_web_search_target(template: dict[str, Any]) -> dict[str, Any]:
+    target = template["Resources"]["ManagedWebSearchTarget"]
+    assert target["Type"] == "Custom::ManagedWebSearchTarget"
+    return target
+
+
+def _assert_managed_search_contract(template: dict[str, Any]) -> None:
+    target = _managed_web_search_target(template)
+    assert target["Properties"] == {
+        "ServiceToken": {"Fn::GetAtt": ["ManagedWebSearchProviderLambda", "Arn"]},
+        "GatewayIdentifier": {"Fn::GetAtt": ["AgentCoreGateway", "GatewayIdentifier"]},
+        "Region": {"Ref": "AWS::Region"},
+        "TargetName": "AmazonWebSearch",
+        "ConnectorId": "web-search",
+        "ConnectorVersion": "1.2.0",
+        "ToolName": "WebSearch",
+    }
+    dedicated = template["Resources"]["ManagedWebSearchProviderLambda"]
+    shared = template["Resources"]["CfnProviderLambda"]
+    assert dedicated["Type"] == "AWS::Lambda::Function"
+    assert dedicated["Properties"]["Code"] == shared["Properties"]["Code"]
+    assert dedicated["Properties"]["Role"] == shared["Properties"]["Role"]
+    assert "ManagedWebSearchProviderLambdaLogGroup" in template["Resources"]
+    assert template["Resources"]["ManagedWebSearchProviderLambdaAsyncConfig"]["Properties"] == {
+        "FunctionName": {"Ref": "ManagedWebSearchProviderLambda"},
+        "Qualifier": "$LATEST",
+        "MaximumRetryAttempts": 2,
+    }
+
+    provider_policies = template["Resources"]["CfnProviderRole"]["Properties"]["Policies"]
+    lifecycle = next(
+        policy for policy in provider_policies if policy.get("PolicyName") == "ManagedWebSearchTargetManagement"
+    )
+    assert lifecycle["PolicyDocument"]["Statement"] == [
+        {
+            "Sid": "ManagedWebSearchTargetLifecycle",
+            "Effect": "Allow",
+            "Action": [
+                "bedrock-agentcore:CreateGatewayTarget",
+                "bedrock-agentcore:GetGatewayTarget",
+                "bedrock-agentcore:ListGatewayTargets",
+                "bedrock-agentcore:UpdateGatewayTarget",
+                "bedrock-agentcore:DeleteGatewayTarget",
+                "bedrock-agentcore:SynchronizeGatewayTargets",
+            ],
+            "Resource": {"Fn::GetAtt": ["AgentCoreGateway", "GatewayArn"]},
+        }
+    ]
+
+    gateway_statements = template["Resources"]["GatewayRole"]["Properties"]["Policies"][0]["PolicyDocument"][
+        "Statement"
+    ]
+    search_statement = next(
+        (item for item in gateway_statements if item.get("Sid") == "ManagedWebSearch"),
+        None,
+    )
+    assert search_statement == {
+        "Sid": "ManagedWebSearch",
+        "Effect": "Allow",
+        "Action": ["bedrock-agentcore:InvokeWebSearch"],
+        "Resource": {"Fn::Sub": "arn:aws:bedrock-agentcore:${AWS::Region}:aws:tool/web-search.v1"},
+    }
+    actions, unknowable = CfnTemplateGenerator._gateway_tool_actions(template)
+    assert "AmazonWebSearch___WebSearch" in actions
+    assert "AmazonWebSearch" not in unknowable
+    region_rule = template["Rules"]["ManagedWebSearchRegion"]["Assertions"][0]
+    assert set(region_rule["Assert"]["Fn::Contains"][0]) == {
+        "us-east-1",
+        "eu-west-1",
+        "ap-northeast-1",
+    }
+
+
+@pytest.mark.parametrize("template_id", ["web-search-agent", "strands-gateway-agent"])
+def test_exported_search_templates_use_the_managed_connector_with_exact_iam_and_cedar(
+    template_id: str,
+) -> None:
+    _bundle, template = _export(template_id)
+    _assert_managed_search_contract(template)
+
+
+@pytest.mark.parametrize("mutation", ["target", "connector", "version", "sync", "invoke"])
+def test_managed_search_removal_mutations_break_the_export_contract(mutation: str) -> None:
+    _bundle, template = _export("web-search-agent")
+    target = template["Resources"]["ManagedWebSearchTarget"]
+    if mutation == "target":
+        del template["Resources"]["ManagedWebSearchTarget"]
+    elif mutation == "connector":
+        target["Properties"].pop("ConnectorId")
+    elif mutation == "version":
+        target["Properties"].pop("ConnectorVersion")
+    elif mutation == "sync":
+        lifecycle = next(
+            policy
+            for policy in template["Resources"]["CfnProviderRole"]["Properties"]["Policies"]
+            if policy.get("PolicyName") == "ManagedWebSearchTargetManagement"
+        )
+        lifecycle["PolicyDocument"]["Statement"][0]["Action"].remove("bedrock-agentcore:SynchronizeGatewayTargets")
+    else:
+        statements = template["Resources"]["GatewayRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
+        statements[:] = [statement for statement in statements if statement.get("Sid") != "ManagedWebSearch"]
+
+    with pytest.raises((AssertionError, KeyError)):
+        _assert_managed_search_contract(template)
+
+
+def test_non_search_template_gets_no_managed_connector_or_permission() -> None:
+    _bundle, template = _export("customer-support-blueprint")
+
+    assert "ManagedWebSearchTarget" not in template["Resources"]
+    assert "ManagedWebSearchProviderLambda" not in template["Resources"]
+    assert "ManagedWebSearchProviderLambdaAsyncConfig" not in template["Resources"]
+    gateway_statements = template["Resources"]["GatewayRole"]["Properties"]["Policies"][0]["PolicyDocument"][
+        "Statement"
+    ]
+    assert not any(item.get("Sid") == "ManagedWebSearch" for item in gateway_statements)
+    provider_policies = template["Resources"]["CfnProviderRole"]["Properties"]["Policies"]
+    assert not any(item.get("PolicyName") == "ManagedWebSearchTargetManagement" for item in provider_policies)
 
 
 def test_export_refuses_an_unknown_tool_instead_of_silently_dropping_it() -> None:
@@ -213,7 +334,6 @@ def test_exported_gallery_lambda_executes_every_intended_tool(
     namespace, handler = _load_packaged_handler(bundle, handler_reference)
 
     web_probes = {
-        "duckduckgo_search": ("_do_duckduckgo_search", {"query": "AgentCore"}),
         "wikipedia_search": ("_do_wikipedia_search", {"query": "Python"}),
         "get_weather": ("_do_weather", {"location": "Dublin"}),
         "fetch_webpage": ("_do_fetch_webpage", {"url": "https://example.com"}),

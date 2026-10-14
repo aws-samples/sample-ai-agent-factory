@@ -67,6 +67,7 @@ def _request(resource_tags=None) -> DeployRequest:
             entrypoint="agent.py",
         ),
         gateway_config={"gateway_provider": "agentcore", "targetType": "lambda"},
+        gateway_tools=["web_search"],
         mcp_server_config={"tools": []},
         policy_config={"policies": [{"name": "p", "statement": VALID_CEDAR}]},
         resource_tags=resource_tags,

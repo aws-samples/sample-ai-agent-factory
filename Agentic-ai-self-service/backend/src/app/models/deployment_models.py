@@ -959,11 +959,6 @@ class DeployRequest(BaseModel):
             return self
         if provider == "bedrock":
             return self
-        if self.template_id == "web-search-agent":
-            raise ValueError(
-                f"templateId '{self.template_id}' currently requires modelProvider='bedrock'; "
-                f"it cannot honour modelProvider='{provider}' and will not silently substitute Bedrock"
-            )
         tools = set(self.connected_tools or [])
         if self.guardrails_config or "guardrails" in tools:
             raise ValueError(
@@ -1054,6 +1049,23 @@ class DeployRequest(BaseModel):
                 f"server and cannot honour: {names}. Remove those settings or "
                 "use a conversational/Gateway template; none will be silently omitted."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_managed_web_search_region(self) -> "DeployRequest":
+        """Reject an explicit unsupported target Region before any AWS side effect."""
+
+        if (self.deployment_mode or "runtime") == "harness":
+            return self
+        from ..services.managed_web_search import (
+            managed_web_search_requested,
+            require_managed_web_search_region,
+        )
+
+        if managed_web_search_requested(self.template_id, self.gateway_tools):
+            requested_region = self.target_region
+            if requested_region:
+                require_managed_web_search_region(requested_region)
         return self
 
     @model_validator(mode="after")

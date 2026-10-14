@@ -57,13 +57,9 @@ class CodeGenerationUnsupportedError(ValueError):
     """The requested canvas cannot be represented without changing its meaning."""
 
 
-_BEDROCK_ONLY_TEMPLATES = {
-    # These generators call the Bedrock Converse API directly rather than
-    # constructing a Strands model. Until they are rewritten around Strands,
-    # accepting another provider would silently deploy Bedrock with that
-    # provider's model id.
-    "web-search-agent",
-}
+# Templates in this set call Bedrock Converse directly. Web Search now uses
+# the provider-aware Strands MCP Gateway path, so no gallery template remains.
+_BEDROCK_ONLY_TEMPLATES: set[str] = set()
 
 _MODEL_FREE_TEMPLATES = {"mcp-server-runtime"}
 
@@ -428,156 +424,6 @@ def _extract_gateway_credentials(gateway_config: dict | None) -> dict:
 # ---------------------------------------------------------------------------
 # Template-specific code generators
 # ---------------------------------------------------------------------------
-
-
-def _generate_langchain_web_search(system_prompt: str, model_id: str, region: str) -> str:
-    """Generate Web Search agent using BedrockAgentCoreApp + boto3 Converse API.
-
-    Uses DuckDuckGo + Open-Meteo weather via stdlib urllib (zero extra deps beyond boto3).
-    Tool implementations come from the canonical ``codegen_templates`` package and
-    are spliced in AFTER f-string evaluation (see ``_TOOL_IMPL_BLOCK``).
-    """
-    code = f'''"""AgentCore Runtime - Web Search Agent
-
-Uses BedrockAgentCoreApp SDK for AgentCore Runtime protocol.
-Lightweight tool-calling loop via boto3 Converse API.
-"""
-from bedrock_agentcore.runtime import BedrockAgentCoreApp
-import boto3
-import json
-import os
-import re
-import time
-import urllib.request
-import urllib.parse
-
-app = BedrockAgentCoreApp()
-
-SYSTEM_PROMPT = """{system_prompt}"""
-MODEL_ID = os.environ.get("MODEL_ID", "{model_id}")
-REGION = os.environ.get("AWS_REGION", "{region}")
-
-TOOL_CONFIG = {{
-    "tools": [
-        {{
-            "toolSpec": {{
-                "name": "duckduckgo_search",
-                "description": "Search the web using DuckDuckGo. Returns top 5 results with title, URL, and snippet.",
-                "inputSchema": {{
-                    "json": {{
-                        "type": "object",
-                        "properties": {{
-                            "query": {{"type": "string", "description": "The search query"}}
-                        }},
-                        "required": ["query"]
-                    }}
-                }}
-            }}
-        }},
-        {{
-            "toolSpec": {{
-                "name": "get_weather",
-                "description": "Get current weather for a city or location. Returns temperature, humidity, wind speed, and conditions. Use this tool whenever the user asks about weather.",
-                "inputSchema": {{
-                    "json": {{
-                        "type": "object",
-                        "properties": {{
-                            "location": {{"type": "string", "description": "City or location name (e.g. 'Chicago', 'London', 'Tokyo')"}}
-                        }},
-                        "required": ["location"]
-                    }}
-                }}
-            }}
-        }},
-        {{
-            "toolSpec": {{
-                "name": "fetch_webpage",
-                "description": "Fetch and extract text content from a webpage URL. Use after searching to get actual page content.",
-                "inputSchema": {{
-                    "json": {{
-                        "type": "object",
-                        "properties": {{
-                            "url": {{"type": "string", "description": "The URL to fetch"}}
-                        }},
-                        "required": ["url"]
-                    }}
-                }}
-            }}
-        }}
-    ]
-}}
-
-
-__TOOL_IMPL__
-
-__TOOL_RECEIPTS__
-
-TOOL_HANDLERS = {{
-    "duckduckgo_search": lambda args: _tool_safe(_do_duckduckgo_search, args.get("query", "")),
-    "get_weather": lambda args: _tool_safe(_do_weather, args.get("location", "")),
-    "fetch_webpage": lambda args: _tool_safe(_do_fetch_webpage, args.get("url", "")),
-}}
-
-_bedrock = None
-
-def _get_bedrock():
-    global _bedrock
-    if _bedrock is None:
-        _bedrock = boto3.client("bedrock-runtime", region_name=REGION)
-    return _bedrock
-
-
-def _converse_loop(prompt: str, max_turns: int = 10):
-    """Run a multi-turn Converse API loop with tool use; return (text, tool receipts)."""
-    messages = [{{"role": "user", "content": [{{"text": prompt}}]}}]
-    statuses = dict()
-
-    for _ in range(max_turns):
-        resp = _get_bedrock().converse(
-            modelId=MODEL_ID,
-            system=[{{"text": SYSTEM_PROMPT}}],
-            messages=messages,
-            toolConfig=TOOL_CONFIG,
-        )
-        output = resp["output"]["message"]
-        messages.append(output)
-
-        if resp["stopReason"] == "tool_use":
-            tool_results = []
-            for block in output["content"]:
-                if "toolUse" in block:
-                    tu = block["toolUse"]
-                    handler = TOOL_HANDLERS.get(tu["name"])
-                    result = handler(tu["input"]) if handler else "Unknown tool"
-                    statuses[tu["toolUseId"]] = _tool_result_status(handler is not None, result)
-                    tool_results.append({{
-                        "toolResult": {{
-                            "toolUseId": tu["toolUseId"],
-                            "content": [{{"text": result}}],
-                        }}
-                    }})
-            messages.append({{"role": "user", "content": tool_results}})
-        else:
-            receipts = _tool_receipts(messages, statuses=statuses)
-            for block in output["content"]:
-                if "text" in block:
-                    return block["text"], receipts
-            return str(output["content"]), receipts
-
-    return "Max tool-use turns reached.", _tool_receipts(messages, statuses=statuses)
-
-
-@app.entrypoint
-def invoke(payload):
-    """Process user prompt through the web search agent."""
-    message = payload.get("prompt", "Hello")
-    response_text, tool_receipts = _converse_loop(message)
-    return {{"response": response_text, "tool_receipts": tool_receipts}}
-
-if __name__ == "__main__":
-    app.run()
-'''
-    return code.replace(_TOOL_IMPL_MARKER, _TOOL_IMPL_BLOCK).replace(_TOOL_RECEIPTS_MARKER, _TOOL_RECEIPTS_BLOCK)
 
 
 def _generate_strands_gateway(
@@ -1839,8 +1685,9 @@ def _generate_mcp_server_runtime(system_prompt: str, model_id: str, region: str)
 
     code = '''"""Standalone AgentCore MCP Runtime.
 
-Exposes weather, web-search, and SSRF-guarded URL-fetch tools directly over
-MCP. It is a tool server, not a conversational model loop.
+Exposes weather and SSRF-guarded URL-fetch tools directly over MCP. It is a
+tool server, not a conversational model loop. Full-web search requires the
+managed AgentCore Gateway connector and is not implemented by scraping.
 """
 import os
 from mcp.server.fastmcp import FastMCP
@@ -1848,7 +1695,7 @@ from mcp.server.fastmcp import FastMCP
 PORT = int(os.environ.get("PORT", "8000"))
 mcp = FastMCP(
     name="Agentic AI Self Service Tools",
-    instructions="Use the advertised schemas to call weather, search, and URL-fetch tools.",
+    instructions="Use the advertised schemas to call weather and URL-fetch tools.",
     host="0.0.0.0",
     port=PORT,
     stateless_http=True,
@@ -1861,12 +1708,6 @@ __TOOL_IMPL__
 def get_weather(city: str) -> str:
     """Get current weather for a city."""
     return _tool_safe(_do_weather, city)
-
-
-@mcp.tool()
-def search_web(query: str) -> str:
-    """Search the web using DuckDuckGo."""
-    return _tool_safe(_do_duckduckgo_search, query)
 
 
 @mcp.tool()
@@ -3417,11 +3258,94 @@ def _otel_bootstrap():
 
         existing_provider = _otel_trace_api.get_tracer_provider()
         adot_configured = isinstance(existing_provider, _OtelSdkTracerProvider)
-        if (endpoint or traces_endpoint) and not adot_configured:
-            # Python direct-code starts agent.py itself. AgentCore's
-            # opentelemetry-instrument entrypoint prefix is validated as the
-            # Node.js package contract, so initialize the packaged Python distro
-            # through OpenTelemetry's public auto-instrumentation entrypoint.
+        if traces_endpoint and not adot_configured:
+            # CloudWatch's traces OTLP endpoint requires SigV4. The stock Python
+            # OTLP exporter does not sign direct requests (AWS documents a local
+            # Collector + sigv4auth as the usual bridge), and AgentCore Runtime
+            # provides no collector sidecar. A stock exporter therefore reaches
+            # xray.<region>.amazonaws.com and receives HTTP 400 for every batch.
+            # Attach a refreshable botocore signer to the exporter's requests
+            # Session instead; credentials are resolved per request so a warm
+            # runtime survives role credential rotation.
+            import requests as _otel_requests
+            import time as _otel_time
+            from requests.auth import AuthBase as _OtelRequestsAuthBase
+            from botocore.auth import SigV4Auth as _OtelBotocoreSigV4Auth
+            from botocore.awsrequest import AWSRequest as _OtelAwsRequest
+            from botocore.session import Session as _OtelBotocoreSession
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                OTLPSpanExporter as _OtelHttpSpanExporter,
+            )
+            from opentelemetry.sdk.resources import (
+                SERVICE_NAME as _OtelServiceName,
+                Resource as _OtelResource,
+            )
+            from opentelemetry.sdk.trace.export import (
+                BatchSpanProcessor as _OtelBatchSpanProcessor,
+            )
+            from opentelemetry.sdk.trace.id_generator import (
+                RandomIdGenerator as _OtelRandomIdGenerator,
+            )
+
+            signing_region = _otel_os.environ.get("AWS_REGION", "")
+            if not signing_region:
+                raise RuntimeError("AWS_REGION is required for X-Ray OTLP SigV4 signing")
+
+            class _XRaySigV4Auth(_OtelRequestsAuthBase):
+                def __init__(self, region):
+                    self._region = region
+                    self._session = _OtelBotocoreSession()
+
+                def __call__(self, prepared_request):
+                    credentials = self._session.get_credentials()
+                    if credentials is None:
+                        raise RuntimeError("AWS credentials are required for X-Ray OTLP export")
+                    aws_request = _OtelAwsRequest(
+                        method=prepared_request.method,
+                        url=prepared_request.url,
+                        data=prepared_request.body,
+                        headers=dict(prepared_request.headers),
+                    )
+                    _OtelBotocoreSigV4Auth(
+                        credentials.get_frozen_credentials(),
+                        "xray",
+                        self._region,
+                    ).add_auth(aws_request)
+                    prepared_request.headers.update(dict(aws_request.headers.items()))
+                    return prepared_request
+
+            class _XRayIdGenerator(_OtelRandomIdGenerator):
+                """X-Ray trace IDs: 32-bit epoch seconds plus 96 random bits."""
+
+                def generate_trace_id(self):
+                    random_bits = super().generate_trace_id() & ((1 << 96) - 1)
+                    return (int(_otel_time.time()) << 96) | random_bits
+
+            signed_session = _otel_requests.Session()
+            signed_session.auth = _XRaySigV4Auth(signing_region)
+            signed_exporter = _OtelHttpSpanExporter(
+                endpoint=traces_endpoint,
+                session=signed_session,
+            )
+            existing_provider = _OtelSdkTracerProvider(
+                resource=_OtelResource.create(
+                    {
+                        _OtelServiceName: _otel_os.environ.get(
+                            "OTEL_SERVICE_NAME", "agentcore-runtime"
+                        )
+                    }
+                ),
+                id_generator=_XRayIdGenerator(),
+            )
+            existing_provider.add_span_processor(
+                _OtelBatchSpanProcessor(signed_exporter)
+            )
+            _otel_trace_api.set_tracer_provider(existing_provider)
+            adot_configured = True
+        elif endpoint and not adot_configured:
+            # External collectors (Langfuse, Honeycomb, and custom OTLP) use
+            # their configured bearer/basic headers and the normal distro path.
+            # Do not SigV4-sign those third-party requests.
             _otel_os.environ.setdefault(
                 "OTEL_AWS_PYTHON_DEFER_TO_WORKERS_ENABLED", "false"
             )
@@ -4419,6 +4343,7 @@ def generate_agent_code(
     _TOOL_USE_TEMPLATES = {
         "mcp-server-gateway-target",
         "strands-gateway-agent",
+        "web-search-agent",
         "customer-support-assistant",
         "customer-support-blueprint",
     }
@@ -4478,9 +4403,6 @@ def generate_agent_code(
     # other connected capability above. The gateway templates are the unified gateway
     # agent, so they fall through with their Gateway implied and compose with whatever
     # else is connected; an early return here silently dropped it (26 combinations).
-    if template_id == "web-search-agent":
-        return _maybe_inject_guardrails(_generate_langchain_web_search(system_prompt, model_id, region))
-
     if template_id == "mcp-server-runtime":
         if protocol != "MCP":
             raise CodeGenerationUnsupportedError(

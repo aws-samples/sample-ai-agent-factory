@@ -156,9 +156,11 @@ def test_generated_artifact_is_a_real_fastmcp_server():
     assert 'os.environ.get("PORT", "8000")' in source
     assert "stateless_http=True" in source
     assert 'mcp.run(transport="streamable-http")' in source
-    assert source.count("@mcp.tool()") == 3
-    for name in ("get_weather", "search_web", "fetch_url"):
+    assert source.count("@mcp.tool()") == 2
+    for name in ("get_weather", "fetch_url"):
         assert f"def {name}(" in source
+    assert "def search_web(" not in source
+    assert "duckduckgo.com" not in source
 
     for forbidden in (
         "BedrockAgentCoreApp",
@@ -174,17 +176,15 @@ def test_generated_artifact_is_a_real_fastmcp_server():
 def test_generated_tools_register_and_call_the_canonical_implementations():
     namespace = _execute_with_fake_fastmcp(_source())
     server = namespace["mcp"]
-    assert set(server.tools) == {"get_weather", "search_web", "fetch_url"}
+    assert set(server.tools) == {"get_weather", "fetch_url"}
     assert server.kwargs["port"] == 8000
     assert server.kwargs["stateless_http"] is True
 
     namespace["_do_weather"] = lambda city: f"weather:{city}"
-    namespace["_do_duckduckgo_search"] = lambda query: f"search:{query}"
     namespace["_do_fetch_webpage"] = lambda url: f"fetch:{url}"
     namespace["_tool_safe"] = lambda function, value: function(value)
 
     assert server.tools["get_weather"]("Dublin") == "weather:Dublin"
-    assert server.tools["search_web"]("MCP") == "search:MCP"
     assert server.tools["fetch_url"]("https://example.com") == "fetch:https://example.com"
 
 

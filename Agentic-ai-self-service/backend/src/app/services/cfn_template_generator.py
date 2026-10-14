@@ -4,7 +4,7 @@ Converts a DeployRequest (workflow definition from the frontend) into a
 complete CloudFormation template bundle using native AWS::BedrockAgentCore::*
 resource types wherever they exist.
 
-Four Custom Resources are emitted, all served by the single cfn-provider
+Five Custom Resources are emitted, all served by the single cfn-provider
 Lambda in ``cfn_provider/handler.py``, because no native CFN type covers them:
 
 - ``Custom::AgentCodePackage`` — merges the agent code with a prebuilt
@@ -20,6 +20,10 @@ Lambda in ``cfn_provider/handler.py``, because no native CFN type covers them:
   Runtime. Emitted only on the MCP-server path.
 - ``Custom::AgentCorePolicy`` — creates the Cedar policy attached to a
   PolicyEngine. Emitted only when a policy is configured.
+- ``Custom::ManagedWebSearchTarget`` — creates and synchronizes the managed
+  Web Search connector at the exact certified version. CloudFormation's native
+  GatewayTarget connector surface does not expose ``version``. Emitted only
+  when managed Web Search is requested.
 
 Keep this list in sync with the handler dispatch in
 ``cfn_provider/handler.py`` and with the architecture note in the generated
@@ -65,6 +69,15 @@ from app.services import codegen_templates
 from app.services.code_generator import generate_agent_code, resolve_model_id
 from app.services.gateway_deployer import _default_lambda_tool_schema
 from app.services.litellm_gateway_deployer import resolve_gateway_provider, resolve_mcp_url
+from app.services.managed_web_search import (
+    MANAGED_WEB_SEARCH_CONNECTOR_ID,
+    MANAGED_WEB_SEARCH_CONNECTOR_VERSION,
+    MANAGED_WEB_SEARCH_SUPPORTED_REGIONS,
+    MANAGED_WEB_SEARCH_TARGET_NAME,
+    MANAGED_WEB_SEARCH_TOOL_IDS,
+    MANAGED_WEB_SEARCH_TOOL_NAME,
+    managed_web_search_requested,
+)
 from app.services.mcp_gateway_protocol import MCP_SUPPORTED_VERSIONS
 from app.services.observability import build_otel_env_vars
 from app.services.region_models import current_region, is_inference_profile_id, repoint_regional_prefix
@@ -186,11 +199,12 @@ _CUSTOM_RESOURCE_TAG_LIMITS: dict[str, int] = {
     "Custom::RuntimeLogGroup": 50,
 }
 
-# AgentCore Policy children do not support tags. Their owning PolicyEngine does, and
-# is tagged by the native-resource pass above. Keep this explicit so the exception
-# cannot be mistaken for the old blanket "skip every Custom::*" behavior.
+# AgentCore Policy and GatewayTarget children do not support tags. Their owning
+# native resources carry the effective tags. Keep these explicit so neither
+# exception can be mistaken for the old blanket "skip every Custom::*" behavior.
 _CUSTOM_RESOURCE_TAG_COVERED_BY: dict[str, str] = {
     "Custom::AgentCorePolicy": "AWS::BedrockAgentCore::PolicyEngine",
+    "Custom::ManagedWebSearchTarget": "AWS::BedrockAgentCore::Gateway",
 }
 
 #: The tag character class, the 128/256 length bounds, the reserved-prefix rule and the
@@ -2981,15 +2995,6 @@ def _litellm_export_settings(gateway_config: dict | None) -> dict:
 # ---------------------------------------------------------------------------
 
 GATEWAY_TOOL_SCHEMAS: dict[str, dict] = {
-    "duckduckgo_search": {
-        "name": "duckduckgo_search",
-        "description": "Search the web using DuckDuckGo.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"query": {"type": "string"}},
-            "required": ["query"],
-        },
-    },
     "wikipedia_search": {
         "name": "wikipedia_search",
         "description": "Search Wikipedia and return an article summary.",
@@ -3070,7 +3075,7 @@ GATEWAY_TOOL_SCHEMAS: dict[str, dict] = {
 # to the "CustomerSupportTools" target. This mirrors the live gateway_deployer
 # routing so an export and a UI deploy advertise and execute the same tools.
 _CUSTOMER_SUPPORT_TOOL_IDS = {"get_order", "get_customer", "list_orders", "process_refund"}
-_DYNAMIC_TOOL_IDS = {"duckduckgo_search", "wikipedia_search", "weather_api", "web_page_fetcher"}
+_DYNAMIC_TOOL_IDS = {"wikipedia_search", "weather_api", "web_page_fetcher"}
 _LEGACY_CUSTOMER_TOOL_IDS = {
     "check_order_status",
     "lookup_customer",
@@ -4691,7 +4696,7 @@ def _reject_what_the_export_cannot_express(request: DeployRequest) -> None:
 # HTTP-agent doc and the MCP-native doc are chosen by template_id in _generate_readme.
 _AGENT_INVOKE_MD = '## Invoking the Agent\n\nThe runtime answers on the **data** plane, `bedrock-agentcore`. That is a different\nservice name from the `bedrock-agentcore-control` plane the stack\'s own resources live\non, and the invoke call exists only on the former. Both values it needs are outputs:\n\n```bash\nSTACK=my-agent\nREGION=YOUR-REGION\n\nRUNTIME_ARN="$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$REGION" \\\n    --query "Stacks[0].Outputs[?OutputKey==\'RuntimeArn\'].OutputValue" --output text)"\nENDPOINT_NAME="$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$REGION" \\\n    --query "Stacks[0].Outputs[?OutputKey==\'EndpointName\'].OutputValue" --output text)"\n{invoke_ids_sh}\nrm -f response.json\naws bedrock-agentcore invoke-agent-runtime \\\n    --region "$REGION" \\\n    --agent-runtime-arn "$RUNTIME_ARN" \\\n    --qualifier "$ENDPOINT_NAME" \\\n    --runtime-session-id {invoke_session_arg} \\\n    --content-type application/json \\\n    --cli-binary-format raw-in-base64-out \\\n    --payload {invoke_payload_arg} \\\n    response.json\n\ncat response.json\n```\n{invoke_memory_md}\nTwo separate `describe-stacks` calls rather than one query for both keys, deliberately.\nA `[?A || B]` query is a filter over the outputs: it hands them back in whatever order\nthe *stack* reports them, which is not the order you named them in and is not something\nyou control. Measured on a stack built from this template, the pair came back reversed,\nso `read -r RUNTIME_ARN ENDPOINT_NAME` put the endpoint name into the ARN variable and\nthe failure that followed was about a malformed ARN rather than about the order. Two\ncalls cost one extra round trip and cannot do that.\n\nA few things about that command are worth knowing before you adapt it.\n\n**`--cli-binary-format raw-in-base64-out` is not optional.** AWS CLI v2 treats blob\narguments as base64 by default, so without it the CLI tries to *decode* your payload.\nThis fails in two different shapes, and the second one is the expensive one. A payload\ncontaining `{{` or `"` is rejected on your own machine with `Invalid base64` — annoying,\nbut it tells you what is wrong. A payload that happens to be valid base64 is decoded to\nbinary and sent, and then the error names nothing you can act on:\n\n```\nAn error occurred (RuntimeClientError) when calling the InvokeAgentRuntime operation:\nReceived error (400) from runtime. Please check your CloudWatch logs for more information.\n```\n\nThat reads exactly like a broken deployment, and it is not: it is this flag. The logs it\nsends you to do say so, as a `WARNING` reading `Invalid encoding in request ... \'utf-8\'\ncodec can\'t decode byte` — but that sentence never reaches your terminal, so do not wait\nto see it. The byte it names is whatever your decoded payload happened to begin with, so\nthere is no fixed string to search for. If a runtime you just deployed answers 400 with\nnothing else to go on, check this flag before you go looking at your agent.\n\n**The output file is a required positional argument, and it takes the answer.** The\nresponse body is written to `response.json`; only the metadata — `runtimeSessionId`,\n`contentType`, `statusCode` — is printed to your terminal. So a call that looks like it\nreturned nothing useful has almost certainly succeeded and put the reply in the file.\nOmit the argument entirely and the CLI refuses the command.\n\nThe `rm -f` in front of the invoke is not tidiness. A *failed* call does not create or\ntruncate the output file, it leaves whatever was there untouched — verified as the same\nsha256 before and after a rejected invoke. So on the second attempt of a block you are\nstill getting right, `cat response.json` hands you a plausible-looking agent reply from\nthe attempt that worked, and you conclude the one that just failed succeeded. Delete it\nfirst and an absent file means what it says.\n\n**Pass `--qualifier` even though it is optional.** It takes an endpoint *name*, not an\nARN — which is what the `EndpointName` output is for. Left off, it defaults to the\nliteral endpoint `DEFAULT`, which AgentCore maintains for you. That is a different\nendpoint from the one this stack creates and updates, so invoking it tells you about\nAgentCore\'s endpoint rather than about your stack\'s. Name your own and the thing you\ntest is the thing you deployed.\n\n**`--runtime-session-id` has a minimum length of 33 characters.** A shorter one is\nrejected as a validation error before the request leaves your machine, which is\nconfusing if you reached for something short and readable. `uuidgen` gives 36. Reuse one\nacross calls to continue a conversation; use a fresh one to start a new one.\n\n**Do not lower `--cli-read-timeout`, and do not wrap this call in your own retry loop.**\nThe CLI retries a read timeout for you, and each retry runs your agent again. Measured:\none command with `--cli-read-timeout 2` against a request needing about seven seconds\nprinted a single clean `statusCode 200` and exit 0, while the runtime\'s log showed\n*three* completed invocations under that one session id. Nothing in the CLI\'s output says\nso. For an agent that only answers a question that is a billing surprise; for an agent\nthat writes something, files a ticket or sends a mail, it happens three times.\n\nYou should not need the flag at all. A genuine first-ever cold start on a\nfreshly deployed stack measured 7.1s against the CLI\'s 60s default — about eight times\nthe headroom — and raising it to 180 measured 7.8s, which is noise, because the flag is a\nsocket timeout and cannot make the service faster. Useful latency to expect: roughly 7s\nfor a new `--runtime-session-id`, roughly 3s for another call reusing the same one. That\npremium is per session, not per runtime, so every new conversation pays it.\n\nTwo honest limits on those numbers. They were measured in one region on an agent that\nmakes a single model call, so an agent doing many tool calls or a long generation can\nexceed 60s on its own merits — what is established is that AgentCore\'s *startup* does not\nthreaten the default, not that 60s suits every agent. And if the retries do run out, we\nhave not seen what the CLI prints.'
 
-_MCP_RUNTIME_INVOKE_MD = '## Invoking the MCP Runtime\n\nThis runtime is a Model Context Protocol server, not an agent. It has no `prompt`\ninput and does not answer the agent request/response envelope. It speaks JSON-RPC 2.0\nover the streamable-HTTP MCP transport on the **data** plane, `bedrock-agentcore` -- a\ndifferent service name from the `bedrock-agentcore-control` plane the stack\'s own\nresources live on. `ProtocolConfiguration` on the emitted runtime is `MCP`, and that is\nwhat makes the data plane speak MCP instead of the agent envelope.\n\nA client opens a session and exchanges four kinds of JSON-RPC message, in order:\n\n1. **`initialize`** -- the client\'s first request. It advertises the protocol version\n   and its capabilities and the server replies with its own. Nothing else may be called\n   until this round trip completes.\n2. **`notifications/initialized`** -- a notification (no `id`, no reply) the client\n   sends once it has processed the `initialize` result. It tells the server the session\n   is live; only after it may `tools/*` be called.\n3. **`tools/list`** -- enumerates the tools this server exposes. The generated server\n   registers `get_weather`, `search_web`, and `fetch_url`; the result carries each\n   tool\'s name, description, and JSON input schema.\n4. **`tools/call`** -- invokes one tool by name with an `arguments` object matching that\n   tool\'s input schema, and returns the tool\'s content blocks.\n\nThe `initialize` + `notifications/initialized` pair is how the client and server agree on a\nprotocol version and capabilities, so a well-behaved client always sends it first. This server\nruns FastMCP in **stateless HTTP mode** (`stateless_http=True`): every request is handled on its\nown, no session id is issued, and a `tools/*` request is answered even without a prior\n`initialize`. Do not rely on the server to reject an un-initialized call; rely on the handshake\nto negotiate. The request\nbodies look like this (ids and arguments are yours to choose):\n\n```json\n{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "probe", "version": "0"}}}\n{"jsonrpc": "2.0", "method": "notifications/initialized"}\n{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}\n{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_weather", "arguments": {"city": "Dublin"}}}\n```\n\nReach the data-plane URL with a SigV4-signed POST (the runtime\'s default SigV4 auth) or\na bearer token if you configured a JWT authorizer instead -- the two auth methods are\nmutually exclusive on a runtime. A generic MCP client that speaks streamable-HTTP\nhandles the session-id header, framing, and the handshake ordering for you; the sequence\nabove is what it puts on the wire.'
+_MCP_RUNTIME_INVOKE_MD = '## Invoking the MCP Runtime\n\nThis runtime is a Model Context Protocol server, not an agent. It has no `prompt`\ninput and does not answer the agent request/response envelope. It speaks JSON-RPC 2.0\nover the streamable-HTTP MCP transport on the **data** plane, `bedrock-agentcore` -- a\ndifferent service name from the `bedrock-agentcore-control` plane the stack\'s own\nresources live on. `ProtocolConfiguration` on the emitted runtime is `MCP`, and that is\nwhat makes the data plane speak MCP instead of the agent envelope.\n\nA client opens a session and exchanges four kinds of JSON-RPC message, in order:\n\n1. **`initialize`** -- the client\'s first request. It advertises the protocol version\n   and its capabilities and the server replies with its own. Nothing else may be called\n   until this round trip completes.\n2. **`notifications/initialized`** -- a notification (no `id`, no reply) the client\n   sends once it has processed the `initialize` result. It tells the server the session\n   is live; only after it may `tools/*` be called.\n3. **`tools/list`** -- enumerates the tools this server exposes. The generated server\n   registers `get_weather` and `fetch_url`; the result carries each\n   tool\'s name, description, and JSON input schema.\n4. **`tools/call`** -- invokes one tool by name with an `arguments` object matching that\n   tool\'s input schema, and returns the tool\'s content blocks.\n\nThe `initialize` + `notifications/initialized` pair is how the client and server agree on a\nprotocol version and capabilities, so a well-behaved client always sends it first. This server\nruns FastMCP in **stateless HTTP mode** (`stateless_http=True`): every request is handled on its\nown, no session id is issued, and a `tools/*` request is answered even without a prior\n`initialize`. Do not rely on the server to reject an un-initialized call; rely on the handshake\nto negotiate. The request\nbodies look like this (ids and arguments are yours to choose):\n\n```json\n{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "probe", "version": "0"}}}\n{"jsonrpc": "2.0", "method": "notifications/initialized"}\n{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}\n{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_weather", "arguments": {"city": "Dublin"}}}\n```\n\nReach the data-plane URL with a SigV4-signed POST (the runtime\'s default SigV4 auth) or\na bearer token if you configured a JWT authorizer instead -- the two auth methods are\nmutually exclusive on a runtime. A generic MCP client that speaks streamable-HTTP\nhandles the session-id header, framing, and the handshake ordering for you; the sequence\nabove is what it puts on the wire.'
 
 
 class CfnTemplateGenerator:
@@ -4709,6 +4714,7 @@ class CfnTemplateGenerator:
         gateway_config = request.gateway_config
         gateway_tools = request.gateway_tools or []
         custom_tools = request.custom_tools or []
+        has_managed_web_search = managed_web_search_requested(template_id, gateway_tools)
         memory_config = request.memory_config
         policy_config = request.policy_config
         mcp_server_config = request.mcp_server_config
@@ -4724,6 +4730,7 @@ class CfnTemplateGenerator:
             or template_id
             in (
                 "strands-gateway-agent",
+                "web-search-agent",
                 "customer-support-assistant",
                 "customer-support-blueprint",
                 "mcp-server-gateway-target",
@@ -4889,6 +4896,7 @@ class CfnTemplateGenerator:
             # E3005, and a deploy that never starts).
             has_agentcore_gateway=has_gateway and not is_litellm,
             has_resource_tags=bool(request.resource_tags),
+            has_managed_web_search=has_managed_web_search,
         )
         self._add_code_package(template, config, litellm_secret=is_litellm)
 
@@ -4941,8 +4949,10 @@ class CfnTemplateGenerator:
                 )
         elif has_gateway:
             self._add_cognito(template, deployment_name)
-            self._add_gateway_role(template)
+            self._add_gateway_role(template, has_managed_web_search=has_managed_web_search)
             self._add_gateway(template, deployment_name)
+            if has_managed_web_search:
+                self._add_managed_web_search_target(template)
 
             # Add predefined tool targets
             tool_ids = self._resolve_gateway_tools(template_id, gateway_tools, custom_tools)
@@ -5062,7 +5072,7 @@ class CfnTemplateGenerator:
         # come from the knowledge base or the MCP server, not just from gateway tools.
         resource_types = [r.get("Type") for r in template.get("Resources", {}).values()]
         if "AWS::BedrockAgentCore::Gateway" in resource_types and not any(
-            t == "AWS::BedrockAgentCore::GatewayTarget" for t in resource_types
+            t in {"AWS::BedrockAgentCore::GatewayTarget", "Custom::ManagedWebSearchTarget"} for t in resource_types
         ):
             logger.warning(
                 "Gateway export: the template creates a gateway with no targets, so tool "
@@ -5613,8 +5623,9 @@ class CfnTemplateGenerator:
         has_mcp_server: bool = False,
         has_agentcore_gateway: bool = False,
         has_resource_tags: bool = False,
+        has_managed_web_search: bool = False,
     ) -> None:
-        """Add the CFN provider Lambda + role for Custom::AgentCodePackage."""
+        """Add the CFN provider Lambda and least-privilege role."""
         policies = [
             {
                 "PolicyName": "CodePackagingPolicy",
@@ -5784,6 +5795,36 @@ class CfnTemplateGenerator:
                 },
             },
         ]
+
+        if has_managed_web_search:
+            policies.append(
+                {
+                    "PolicyName": "ManagedWebSearchTargetManagement",
+                    "PolicyDocument": {
+                        "Version": "2012-10-17",
+                        "Statement": [
+                            {
+                                "Sid": "ManagedWebSearchTargetLifecycle",
+                                "Effect": "Allow",
+                                "Action": [
+                                    "bedrock-agentcore:CreateGatewayTarget",
+                                    "bedrock-agentcore:GetGatewayTarget",
+                                    "bedrock-agentcore:ListGatewayTargets",
+                                    "bedrock-agentcore:UpdateGatewayTarget",
+                                    "bedrock-agentcore:DeleteGatewayTarget",
+                                    "bedrock-agentcore:SynchronizeGatewayTargets",
+                                ],
+                                # The service-authorization reference assigns all
+                                # six actions to the parent gateway resource type.
+                                # The target id is not an IAM resource, so this is
+                                # both the exact supported scope and the narrowest
+                                # one the provider can receive.
+                                "Resource": {"Fn::GetAtt": ["AgentCoreGateway", "GatewayArn"]},
+                            }
+                        ],
+                    },
+                }
+            )
 
         # Custom::RuntimeLogGroup applies the stack's retention and key to the log
         # groups AgentCore creates for the runtime. Always granted, because every
@@ -6054,6 +6095,30 @@ class CfnTemplateGenerator:
                 "MemorySize": 1024,
             },
         }
+        if has_managed_web_search:
+            # A NEW function, not another reference to CfnProviderLambda. During
+            # rollback of an update that first introduces a custom type,
+            # CloudFormation can restore the existing shared provider's old code
+            # before deleting the new custom resource. That old code legitimately
+            # does not know the new type and its compatibility path reports Delete
+            # success without touching anything, orphaning the target. This function
+            # is introduced in the same update as the target, so the ServiceToken
+            # dependency forces CloudFormation to delete the target before deleting
+            # its provider; no old function version can be restored in between.
+            template["Resources"]["ManagedWebSearchProviderLambda"] = {
+                "Type": "AWS::Lambda::Function",
+                "Properties": {
+                    "Runtime": "python3.13",
+                    "Handler": "handler.handler",
+                    "Role": {"Fn::GetAtt": ["CfnProviderRole", "Arn"]},
+                    "Code": {
+                        "S3Bucket": {"Ref": "ArtifactsBucket"},
+                        "S3Key": {"Ref": "CfnProviderCodeKey"},
+                    },
+                    "Timeout": 300,
+                    "MemorySize": 1024,
+                },
+            }
 
         # Stated rather than inherited. CloudFormation invokes a custom resource
         # asynchronously, and handler.py deliberately fails the invocation when it
@@ -6071,6 +6136,15 @@ class CfnTemplateGenerator:
                 "MaximumRetryAttempts": 2,
             },
         }
+        if has_managed_web_search:
+            template["Resources"]["ManagedWebSearchProviderLambdaAsyncConfig"] = {
+                "Type": "AWS::Lambda::EventInvokeConfig",
+                "Properties": {
+                    "FunctionName": {"Ref": "ManagedWebSearchProviderLambda"},
+                    "Qualifier": "$LATEST",
+                    "MaximumRetryAttempts": 2,
+                },
+            }
 
     def _add_code_package(self, template: dict, config: RuntimeConfig, *, litellm_secret: bool = False) -> None:
         """Add the Custom::AgentCodePackage resource.
@@ -6783,7 +6857,7 @@ class CfnTemplateGenerator:
     # Gateway IAM Role
     # ------------------------------------------------------------------
 
-    def _add_gateway_role(self, template: dict) -> None:
+    def _add_gateway_role(self, template: dict, *, has_managed_web_search: bool = False) -> None:
         template["Resources"]["GatewayRole"] = {
             "Type": "AWS::IAM::Role",
             "Properties": {
@@ -6986,6 +7060,18 @@ class CfnTemplateGenerator:
                 ],
             },
         }
+        if has_managed_web_search:
+            statements = template["Resources"]["GatewayRole"]["Properties"]["Policies"][0]["PolicyDocument"][
+                "Statement"
+            ]
+            statements.append(
+                {
+                    "Sid": "ManagedWebSearch",
+                    "Effect": "Allow",
+                    "Action": ["bedrock-agentcore:InvokeWebSearch"],
+                    "Resource": {"Fn::Sub": "arn:aws:bedrock-agentcore:${AWS::Region}:aws:tool/web-search.v1"},
+                }
+            )
 
     # ------------------------------------------------------------------
     # Gateway (native CFN)
@@ -7068,13 +7154,14 @@ class CfnTemplateGenerator:
         - strands-gateway-agent -> the 4 web tools PLUS the 4 canonical order
           tools (8 total), all executed by the DynamicTools Lambda
         """
+        if template_id == "web-search-agent":
+            return ["weather_api", "web_page_fetcher"]
         if template_id == "customer-support-blueprint":
             return ["get_order", "get_customer", "list_orders", "process_refund"]
         if template_id == "customer-support-assistant":
             return ["check_order_status", "lookup_customer", "search_knowledge_base", "get_return_policy"]
         if template_id == "strands-gateway-agent":
             return [
-                "duckduckgo_search",
                 "wikipedia_search",
                 "weather_api",
                 "web_page_fetcher",
@@ -7095,7 +7182,9 @@ class CfnTemplateGenerator:
         # single _package_tool_lambdas zip must carry both families; rather than
         # rely on that coupling staying correct, refuse the mix here so the export
         # matches the live deployer, which also fails closed on it.
-        _known = _DYNAMIC_TOOL_IDS | _CUSTOMER_SUPPORT_TOOL_IDS | _LEGACY_CUSTOMER_TOOL_IDS
+        _known = (
+            _DYNAMIC_TOOL_IDS | _CUSTOMER_SUPPORT_TOOL_IDS | _LEGACY_CUSTOMER_TOOL_IDS | MANAGED_WEB_SEARCH_TOOL_IDS
+        )
         _unknown = [t for t in tool_ids if t not in _known]
         if _unknown:
             raise CfnExportUnsupportedError(
@@ -7113,8 +7202,9 @@ class CfnTemplateGenerator:
                 f"({', '.join(_dynamic_requested)}). Export each family separately."
             )
 
-        # Custom tools don't add to gateway_tools — they become separate targets
-        return tool_ids
+        # Managed search IDs become the connector target above, never a
+        # Lambda schema. The legacy DuckDuckGo ID migrates here too.
+        return [tool_id for tool_id in tool_ids if tool_id not in MANAGED_WEB_SEARCH_TOOL_IDS]
 
     def _add_tool_lambdas_and_targets(self, template: dict, deployment_name: str, tool_ids: list[str]) -> None:
         """Add Lambda functions and Gateway targets for the specified tools."""
@@ -7160,6 +7250,43 @@ class CfnTemplateGenerator:
 
         # Permission for Gateway to invoke Lambda
         template["Resources"][f"{logical_id}Permission"] = _gateway_invoke_permission(logical_id)
+
+    def _add_managed_web_search_target(self, template: dict) -> None:
+        """Add the pinned AWS-managed Web Search connector target."""
+
+        template.setdefault("Rules", {})["ManagedWebSearchRegion"] = {
+            "Assertions": [
+                {
+                    "Assert": {
+                        "Fn::Contains": [
+                            sorted(MANAGED_WEB_SEARCH_SUPPORTED_REGIONS),
+                            {"Ref": "AWS::Region"},
+                        ]
+                    },
+                    "AssertDescription": (
+                        "AgentCore Web Search is available only in ap-northeast-1, eu-west-1, and us-east-1."
+                    ),
+                }
+            ]
+        }
+        template["Resources"]["ManagedWebSearchTarget"] = {
+            "Type": "Custom::ManagedWebSearchTarget",
+            "Metadata": {
+                "WhyCustom": (
+                    "AWS::BedrockAgentCore::GatewayTarget supports ConnectorId but does not expose "
+                    "the connector Version property. This provider pins and verifies version 1.2.0."
+                )
+            },
+            "Properties": {
+                "ServiceToken": {"Fn::GetAtt": ["ManagedWebSearchProviderLambda", "Arn"]},
+                "GatewayIdentifier": {"Fn::GetAtt": ["AgentCoreGateway", "GatewayIdentifier"]},
+                "Region": {"Ref": "AWS::Region"},
+                "TargetName": MANAGED_WEB_SEARCH_TARGET_NAME,
+                "ConnectorId": MANAGED_WEB_SEARCH_CONNECTOR_ID,
+                "ConnectorVersion": MANAGED_WEB_SEARCH_CONNECTOR_VERSION,
+                "ToolName": MANAGED_WEB_SEARCH_TOOL_NAME,
+            },
+        }
 
     def _add_gateway_target(
         self,
@@ -8349,6 +8476,15 @@ def handler(event, context):
         actions: list[str] = []
         unknowable: list[str] = []
         for resource in template["Resources"].values():
+            if resource["Type"] == "Custom::ManagedWebSearchTarget":
+                props = resource["Properties"]
+                target = props.get("TargetName")
+                tool = props.get("ToolName")
+                if isinstance(target, str) and isinstance(tool, str):
+                    actions.append(f"{target}___{tool}")
+                else:
+                    unknowable.append(str(target))
+                continue
             if resource["Type"] != "AWS::BedrockAgentCore::GatewayTarget":
                 continue
             props = resource["Properties"]
@@ -8356,8 +8492,15 @@ def handler(event, context):
             if not isinstance(target, str):  # an Fn::Sub target name cannot be named here
                 unknowable.append(str(target))
                 continue
-            payload = props.get("TargetConfiguration", {}).get("Mcp", {}).get("Lambda", {})
-            schemas = payload.get("ToolSchema", {}).get("InlinePayload", [])
+            mcp = props.get("TargetConfiguration", {}).get("Mcp", {})
+            connector = mcp.get("Connector", {})
+            source = connector.get("Source", {})
+            if source.get("ConnectorId") == MANAGED_WEB_SEARCH_CONNECTOR_ID:
+                enabled = connector.get("Enabled") or [MANAGED_WEB_SEARCH_TOOL_NAME]
+                if MANAGED_WEB_SEARCH_TOOL_NAME in enabled:
+                    actions.append(f"{target}___{MANAGED_WEB_SEARCH_TOOL_NAME}")
+                continue
+            schemas = mcp.get("Lambda", {}).get("ToolSchema", {}).get("InlinePayload", [])
             if not schemas:
                 unknowable.append(target)
                 continue
@@ -8813,7 +8956,12 @@ def handler(event, context):
             target_ids = sorted(
                 lid
                 for lid, res in template["Resources"].items()
-                if isinstance(res, dict) and res.get("Type") == "AWS::BedrockAgentCore::GatewayTarget"
+                if isinstance(res, dict)
+                and res.get("Type")
+                in {
+                    "AWS::BedrockAgentCore::GatewayTarget",
+                    "Custom::ManagedWebSearchTarget",
+                }
             )
             template["Resources"][logical_id] = {
                 "Type": "Custom::AgentCorePolicy",
@@ -9830,7 +9978,7 @@ def handler(event, context):
         needs_legacy = any(t in _LEGACY_CUSTOMER_TOOL_IDS for t in _tool_ids)
         # Template overrides mirror _resolve_gateway_tools: strands and blueprint
         # both need the DynamicTools Lambda; the assistant needs the legacy one.
-        if template_id in ("strands-gateway-agent", "customer-support-blueprint"):
+        if template_id in ("web-search-agent", "strands-gateway-agent", "customer-support-blueprint"):
             needs_dynamic = True
         if template_id == "customer-support-assistant":
             needs_legacy = True
@@ -11053,7 +11201,8 @@ The two digests are distinct parameters so the two bundles version independently
             target_count = sum(
                 1
                 for res in (template or {}).get("Resources", {}).values()
-                if isinstance(res, dict) and res.get("Type") == "AWS::BedrockAgentCore::GatewayTarget"
+                if isinstance(res, dict)
+                and res.get("Type") in {"AWS::BedrockAgentCore::GatewayTarget", "Custom::ManagedWebSearchTarget"}
             )
             if target_count:
                 components.append("GatewayTargets")
@@ -11091,6 +11240,15 @@ The two digests are distinct parameters so the two bundles version independently
             "Retain, deleting the stack leaves the agent's logs in place, "
             "expiring on the retention you set.",
         ]
+        if "Custom::ManagedWebSearchTarget" in resource_types:
+            custom_resources.append(
+                "- `Custom::ManagedWebSearchTarget` — creates the AWS-managed Web Search "
+                "connector as target `AmazonWebSearch`, pins connector version `1.2.0`, "
+                "synchronizes only that target id, and verifies the exact configuration "
+                "before reporting success. The native GatewayTarget connector surface "
+                "does not expose a version property. The target cannot carry tags, so its "
+                "owning `AWS::BedrockAgentCore::Gateway` carries the effective governance tags."
+            )
         if has_mcp_server:
             custom_resources.append(
                 "- `Custom::OAuth2CredentialProvider` — creates the AgentCore OAuth2 "

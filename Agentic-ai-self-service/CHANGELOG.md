@@ -6,6 +6,46 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — managed Web Search replaces unsupported HTML scraping
+
+- `web-search-agent` and `strands-gateway-agent` now use the Amazon Bedrock
+  AgentCore Gateway Web Search Tool (`connectorId=web-search`) pinned to version
+  `1.2.0`. The managed target advertises `AmazonWebSearch___WebSearch`; live
+  response oracles require structured `title`, `text`, and HTTP(S) `url` fields,
+  and gallery prompts require source titles and links to remain as citations.
+- Live deployment and CloudFormation export both fail before side effects outside
+  `us-east-1`, `eu-west-1`, and `ap-northeast-1`. The dated EMEA matrix therefore
+  enables this scenario only in Europe (Ireland), independently of core Runtime,
+  Memory, and Agent Registry support.
+- CloudFormation uses `Custom::ManagedWebSearchTarget` because the current native
+  GatewayTarget connector schema exposes `ConnectorId` but not connector
+  `Version`. Its complete create/update/delete lifecycle adopts conflicts only
+  after exact ownership/configuration readback, synchronizes only its target ID,
+  polls `READY`/absence, and uses a stable Gateway/target physical ID. A dedicated
+  provider function guarantees rollback can run the new Delete handler before
+  removing its code.
+- The provider role receives only `Create/Get/List/Update/DeleteGatewayTarget` and
+  `SynchronizeGatewayTargets` on the stack's exact Gateway ARN. The live Gateway
+  execution role no longer grants `bedrock-agentcore:*`, Bedrock model access,
+  role passing, or secret writes; it has explicit invocation, policy, workload
+  token, credential-read, Lambda, and region-specific service-owned Web Search
+  permissions.
+- The legacy `duckduckgo_search` ID remains only as a saved-canvas migration alias
+  to managed search. DuckDuckGo HTML/Lite parsing and endpoints were removed from
+  generated agents, Gateway Lambda code, standalone MCP built-ins, exports, UI
+  labels, and AI canvas generation. A standalone MCP request for the legacy ID
+  now requires caller-supplied implementation code or fails with a migration
+  message.
+- Production-evaluation OTLP/HTTP requests to X-Ray are now SigV4-signed with
+  refreshable Runtime-role credentials and X-Ray-compatible epoch-prefixed trace
+  IDs. Promotion still fails closed unless Transaction Search is
+  `ACTIVE/CloudWatchLogs`; the reversible integration lease enables it, waits for
+  search readiness, and restores the exact prior regional state.
+- The live integration cleanup tracker now paginates and deletes only each
+  synthetic deployment's exact Runtime log-group prefix after the customer delete
+  tombstone is durably `deleted`, then requires two empty inventories. Real
+  customer deletion continues to retain bounded audit logs by design.
+
 ### Fixed — live integration honors production admission and cleanup
 
 - Real CloudFront integration invocations now create a unique, owner-bound
