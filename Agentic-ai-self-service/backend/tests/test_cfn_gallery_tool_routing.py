@@ -152,7 +152,6 @@ def _assert_managed_search_contract(template: dict[str, Any]) -> None:
                 "bedrock-agentcore:ListGatewayTargets",
                 "bedrock-agentcore:UpdateGatewayTarget",
                 "bedrock-agentcore:DeleteGatewayTarget",
-                "bedrock-agentcore:SynchronizeGatewayTargets",
             ],
             "Resource": {"Fn::GetAtt": ["AgentCoreGateway", "GatewayArn"]},
         }
@@ -190,7 +189,7 @@ def test_exported_search_templates_use_the_managed_connector_with_exact_iam_and_
     _assert_managed_search_contract(template)
 
 
-@pytest.mark.parametrize("mutation", ["target", "connector", "version", "sync", "invoke"])
+@pytest.mark.parametrize("mutation", ["target", "connector", "version", "read", "invoke"])
 def test_managed_search_removal_mutations_break_the_export_contract(mutation: str) -> None:
     _bundle, template = _export("web-search-agent")
     target = template["Resources"]["ManagedWebSearchTarget"]
@@ -200,13 +199,13 @@ def test_managed_search_removal_mutations_break_the_export_contract(mutation: st
         target["Properties"].pop("ConnectorId")
     elif mutation == "version":
         target["Properties"].pop("ConnectorVersion")
-    elif mutation == "sync":
+    elif mutation == "read":
         lifecycle = next(
             policy
             for policy in template["Resources"]["CfnProviderRole"]["Properties"]["Policies"]
             if policy.get("PolicyName") == "ManagedWebSearchTargetManagement"
         )
-        lifecycle["PolicyDocument"]["Statement"][0]["Action"].remove("bedrock-agentcore:SynchronizeGatewayTargets")
+        lifecycle["PolicyDocument"]["Statement"][0]["Action"].remove("bedrock-agentcore:GetGatewayTarget")
     else:
         statements = template["Resources"]["GatewayRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
         statements[:] = [statement for statement in statements if statement.get("Sid") != "ManagedWebSearch"]

@@ -452,19 +452,22 @@ def _list_all_gateway_targets(agentcore_ctrl, gateway_id: str) -> list[dict]:
 
 
 def _resolve_gateway_tool_actions(agentcore_ctrl, gateway_id: str, timeout: int = 180) -> tuple[list, int]:
-    """Return (qualified Cedar action names, expected_tool_count) for a gateway,
-    waiting up to *timeout*s for EACH target to be truly SYNCED into the gateway's
-    servable MCP tool plane.
+    """Return ``(qualified Cedar actions, configured inline-tool count)``.
 
-    Bug 134/race-A: `inlinePayload` is the CONFIGURED schema (echoed back the
-    instant the target exists) — it does NOT prove the gateway has synced those
-    tools into the plane the agent discovers via tools/list. The authoritative
-    per-target signal is `lastSynchronizedAt` (only on get_gateway_target, not on
-    list_gateway_targets items). We synchronize, then poll each target until
-    status==READY AND lastSynchronizedAt has advanced past its pre-sync value, so
-    the manifest the Cedar policy is built from == the plane the agent will
-    discover. We also return how many tools the gateway CONFIGURED so the policy
-    step can fail-closed on a partial (synced < configured) plane.
+    Target readiness is family-specific:
+
+    * inline Lambda targets are ready when their exact read-back status is
+      ``READY``; they never receive ``lastSynchronizedAt``;
+    * crawled OpenAPI, Smithy, and MCP-server targets require an exact-ID
+      ``SynchronizeGatewayTargets`` call and a fresh synchronization receipt;
+    * AWS-managed ``connector`` targets explicitly do **not** support
+      ``SynchronizeGatewayTargets`` (live AgentCore returns ``ValidationException:
+      Target type CONNECTOR is not supported for synchronization``). They are
+      ready after exact configuration read-back and ``READY``/``ACTIVE`` status,
+      then the served MCP ``tools/list`` probe below proves their published tool.
+
+    Unknown or unreadable target families fail closed instead of being sent to a
+    mutating API whose support cannot be established.
     """
     import time as _t
 
@@ -481,27 +484,46 @@ def _resolve_gateway_tool_actions(agentcore_ctrl, gateway_id: str, timeout: int 
             return []
 
     def _configured_tools(detail: dict) -> list:
-        tc = detail.get("targetConfiguration", {}) or {}
-        mcp = tc.get("mcp", {}) or {}
+        mcp = (detail.get("targetConfiguration", {}) or {}).get("mcp", {}) or {}
         schema = (mcp.get("lambda", {}) or {}).get("toolSchema", {}) or {}
         return schema.get("inlinePayload", []) or []
 
-    # Snapshot every crawled target before synchronization, then pass the
-    # exact IDs. The API requires targetIdList and rejects Lambda targets.
-    # A missing/failed sync is fatal through the readiness loop below; it
-    # must not be relabelled as an empty but healthy tool plane.
-    pre_sync = {}
-    crawled_target_ids = []
-    for _tname, tid in _list_target_ids():
+    def _target_family(detail: dict) -> str:
+        mcp = (detail.get("targetConfiguration", {}) or {}).get("mcp", {}) or {}
+        if not isinstance(mcp, dict):
+            return "unknown"
+        if "lambda" in mcp:
+            return "inline"
+        if "connector" in mcp:
+            return "managed_connector"
+        if set(mcp) & {"openApiSchema", "smithyModel", "mcpServer"}:
+            return "crawled"
+        return "unknown"
+
+    # Classify every target before mutating anything. A transient Get failure or
+    # an unfamiliar future family is not permission to guess that synchronization
+    # is supported.
+    pre_sync: dict[str, object] = {}
+    target_families: dict[str, str] = {}
+    crawled_target_ids: list[str] = []
+    initial_ids = _list_target_ids()
+    if not initial_ids:
+        return [], 0
+    for _target_name, target_id in initial_ids:
         try:
-            detail = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway_id, targetId=tid)
-            pre_sync[tid] = detail.get("lastSynchronizedAt")
-            mcp = (detail.get("targetConfiguration", {}) or {}).get("mcp", {}) or {}
-            if "lambda" not in mcp:
-                crawled_target_ids.append(tid)
-        except Exception:  # noqa: BLE001
-            pre_sync[tid] = None
-            crawled_target_ids.append(tid)
+            detail = agentcore_ctrl.get_gateway_target(
+                gatewayIdentifier=gateway_id,
+                targetId=target_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Gateway target {target_id} could not be read before readiness admission") from exc
+        family = _target_family(detail)
+        if family == "unknown":
+            raise RuntimeError(f"Gateway target {target_id} has an unsupported target family")
+        target_families[target_id] = family
+        if family == "crawled":
+            pre_sync[target_id] = detail.get("lastSynchronizedAt")
+            crawled_target_ids.append(target_id)
 
     if crawled_target_ids:
         agentcore_ctrl.synchronize_gateway_targets(
@@ -510,60 +532,57 @@ def _resolve_gateway_tool_actions(agentcore_ctrl, gateway_id: str, timeout: int 
         )
 
     deadline = _t.time() + timeout
-    actions = []
+    actions: list[str] = []
     expected = 0
     while _t.time() < deadline:
         actions = []
         expected = 0
-        all_synced = True
+        all_ready = True
         ids = _list_target_ids()
-        if not ids:
-            all_synced = False
-        for tname, tid in ids:
+        if not ids or {target_id for _name, target_id in ids} != set(target_families):
+            all_ready = False
+        for target_name, target_id in ids:
             try:
-                detail = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway_id, targetId=tid)
+                detail = agentcore_ctrl.get_gateway_target(
+                    gatewayIdentifier=gateway_id,
+                    targetId=target_id,
+                )
             except Exception:  # noqa: BLE001
-                all_synced = False
+                all_ready = False
                 continue
+            family = _target_family(detail)
+            if family != target_families.get(target_id):
+                raise RuntimeError(f"Gateway target {target_id} changed target family during readiness admission")
             tools = _configured_tools(detail)
             expected += len(tools)
-            tstatus = (detail.get("status") or "").upper()
-            synced_at = detail.get("lastSynchronizedAt")
-            # Readiness depends on the target TYPE:
-            #  - INLINE-payload Lambda targets declare their tools inline, so they
-            #    are servable as soon as status==READY. They NEVER get a
-            #    lastSynchronizedAt (that timestamp is only set for targets whose
-            #    tool list is CRAWLED — OpenAPI specs / external MCP servers).
-            #    Requiring lastSynchronizedAt here was the bug: an inline-Lambda
-            #    target stays READY with lastSynchronizedAt=None forever, so the
-            #    poll always timed out at 0/N (verified live).
-            #  - CRAWLED targets (no inlinePayload) ARE only servable once
-            #    lastSynchronizedAt is present and (for reused gateways) advanced.
-            is_inline = bool(tools)
-            if is_inline:
-                target_synced = tstatus == "READY"
+            status = (detail.get("status") or "").upper()
+            if family in {"inline", "managed_connector"}:
+                target_ready = status in {"READY", "ACTIVE"}
             else:
-                target_synced = (
-                    tstatus in ("READY", "ACTIVE") and synced_at is not None and synced_at != pre_sync.get(tid)
+                synchronized_at = detail.get("lastSynchronizedAt")
+                target_ready = (
+                    status in {"READY", "ACTIVE"}
+                    and synchronized_at is not None
+                    and synchronized_at != pre_sync.get(target_id)
                 )
-            if not target_synced:
-                all_synced = False
+            if not target_ready:
+                all_ready = False
                 continue
             for tool in tools:
-                nm = tool.get("name")
-                if nm:
-                    actions.append(f"{tname}___{nm}")
-        # Inline targets contribute a configured count here. Crawled OpenAPI/
-        # MCP targets contribute zero until the served tools/list probe below,
-        # but a READY target with an advanced sync timestamp has still completed
-        # this control-plane phase and must not burn the whole timeout.
-        if ids and all_synced and len(actions) == expected:
-            logger.warning("Gateway %s tool targets synced: %d inline tools", gateway_id, expected)
+                name = tool.get("name")
+                if name:
+                    actions.append(f"{target_name}___{name}")
+        if ids and all_ready and len(actions) == expected:
+            logger.warning(
+                "Gateway %s target control plane ready: %d inline tools; managed connectors verified without synchronization",
+                gateway_id,
+                expected,
+            )
             return actions, expected
         _t.sleep(5)
 
     logger.warning(
-        "Gateway %s tool plane not fully synced within %ds; %d/%d tools synced",
+        "Gateway %s target control plane not ready within %ds; %d/%d inline tools ready",
         gateway_id,
         timeout,
         len(actions),
@@ -7036,10 +7055,12 @@ def deploy_gateway(
                 resource_tags=resource_tags,
             )
 
-        # Step 5 synchronization is performed once, authoritatively, by
-        # _resolve_gateway_tool_actions below. It snapshots crawled targets,
-        # calls SynchronizeGatewayTargets with their exact IDs, and waits for
-        # lastSynchronizedAt to advance before any Cedar action is built.
+        # Step 5 readiness is performed once, authoritatively, by
+        # _resolve_gateway_tool_actions below. It synchronizes only crawled
+        # OpenAPI/Smithy/MCP-server target IDs and requires fresh receipts.
+        # AWS-managed connector targets reject SynchronizeGatewayTargets, so
+        # their exact READY read-back is followed by the same served MCP
+        # tools/list proof used for every crawled-plane declaration.
 
         # Bug 138: if the caller asked for tools (built-in and/or custom) but the
         # gateway ended up with ZERO targets, the agent would deploy against an

@@ -74,10 +74,13 @@ SUPPORTED_RESOURCE_TYPES below:
        LogGroupNames    — the governed names, comma-separated
 
 5. Custom::ManagedWebSearchTarget
-   Creates, updates, synchronizes and deletes the AWS-managed AgentCore Web
-   Search connector target. CloudFormation's native GatewayTarget connector
-   surface does not expose the connector ``version`` field, so a native target
-   cannot pin the search schema this export was certified against.
+   Creates, updates, verifies and deletes the AWS-managed AgentCore Web Search
+   connector target. Managed connector targets publish automatically and reject
+   SynchronizeGatewayTargets, so readiness is exact pinned configuration/version
+   read-back plus READY status; the Gateway MCP tools/list probe proves the served
+   plane. CloudFormation's native GatewayTarget connector surface does not expose
+   the connector ``version`` field, so a native target cannot pin the search schema
+   this export was certified against.
 
    Properties:
        GatewayIdentifier — id of this stack's AgentCore Gateway
@@ -2307,7 +2310,7 @@ _MANAGED_WEB_SEARCH_SUPPORTED_REGIONS = frozenset({"us-east-1", "eu-west-1", "ap
 _MANAGED_WEB_SEARCH_DESCRIPTION = "AWS-managed Web Search Tool with source citations"
 _MANAGED_WEB_SEARCH_PHYSICAL_ID_PREFIX = "managed-web-search-target"
 _MAX_GATEWAY_TARGET_PAGES = 100
-_GATEWAY_TARGET_TERMINAL_FAILURES = frozenset({"FAILED", "UPDATE_UNSUCCESSFUL", "SYNCHRONIZE_UNSUCCESSFUL", "DELETING"})
+_GATEWAY_TARGET_TERMINAL_FAILURES = frozenset({"FAILED", "UPDATE_UNSUCCESSFUL", "DELETING"})
 
 
 def _managed_web_search_stack_region(event: dict) -> str:
@@ -2515,12 +2518,17 @@ def _await_managed_target_ready(
     target_id: str,
     event: dict,
     deadline: float,
-    *,
-    require_synchronization: bool = False,
-    prior_synchronized_at=None,
 ) -> dict:
+    """Require exact pinned connector read-back and READY status.
+
+    AgentCore managed ``connector`` targets publish their tool automatically and
+    reject ``SynchronizeGatewayTargets`` with ``ValidationException``. Their
+    control-plane gate is therefore exact configuration/version/ownership
+    read-back plus READY; the deployed Gateway's MCP ``tools/list`` remains the
+    served-plane proof.
+    """
+
     last_status = ""
-    last_synchronized_at = None
     while True:
         detail = _get_gateway_target(ctrl, gateway_id, target_id)
         if detail is not None:
@@ -2530,49 +2538,16 @@ def _await_managed_target_ready(
                     "managed Web Search target read-back does not match the pinned contract: " + ", ".join(problems)
                 )
             last_status = str(detail.get("status") or "")
-            last_synchronized_at = detail.get("lastSynchronizedAt")
-            synchronization_ready = not require_synchronization or (
-                last_synchronized_at is not None and last_synchronized_at != prior_synchronized_at
-            )
-            if last_status == "READY" and synchronization_ready:
+            if last_status == "READY":
                 return detail
             if last_status in _GATEWAY_TARGET_TERMINAL_FAILURES:
                 raise ProviderError(f"managed Web Search target {target_id} reached terminal status {last_status}")
         if deadline - time.monotonic() <= 5.0:
-            synchronization_detail = (
-                "; synchronization receipt did not advance"
-                if require_synchronization and last_synchronized_at == prior_synchronized_at
-                else ""
-            )
             raise ProviderError(
                 f"managed Web Search target {target_id} did not reach READY within the time available "
-                f"(last status: {last_status or 'could not be read'}{synchronization_detail})"
+                f"(last status: {last_status or 'could not be read'})"
             )
         time.sleep(5)
-
-
-def _synchronize_managed_target(ctrl, gateway_id: str, target_id: str, event: dict, deadline: float) -> dict:
-    """Synchronize only this target and prove the operation completed."""
-
-    before = _get_gateway_target(ctrl, gateway_id, target_id)
-    prior_synchronized_at = before.get("lastSynchronizedAt") if before else None
-    response = ctrl.synchronize_gateway_targets(gatewayIdentifier=gateway_id, targetIdList=[target_id])
-    targets = response.get("targets", [])
-    if not isinstance(targets, list):
-        raise ProviderError("SynchronizeGatewayTargets returned a non-list target collection")
-    response_ids = {str(target.get("targetId") or "") for target in targets if isinstance(target, dict)}
-    if response_ids and response_ids != {target_id}:
-        raise ProviderError("SynchronizeGatewayTargets returned a target outside the requested target id")
-
-    return _await_managed_target_ready(
-        ctrl,
-        gateway_id,
-        target_id,
-        event,
-        deadline,
-        require_synchronization=True,
-        prior_synchronized_at=prior_synchronized_at,
-    )
 
 
 def _handle_managed_web_search_create(event: dict, context) -> tuple[dict, str]:
@@ -2606,7 +2581,6 @@ def _handle_managed_web_search_create(event: dict, context) -> tuple[dict, str]:
     if not target_id:
         raise ProviderError("AgentCore accepted the managed Web Search target but returned no target id")
     _await_managed_target_ready(ctrl, gateway_id, target_id, event, deadline)
-    _synchronize_managed_target(ctrl, gateway_id, target_id, event, deadline)
     return {
         "TargetId": target_id,
         "TargetName": _MANAGED_WEB_SEARCH_TARGET_NAME,
@@ -2643,7 +2617,6 @@ def _handle_managed_web_search_update(event: dict, context) -> tuple[dict, str]:
         raise ProviderError("UpdateGatewayTarget returned a different target id")
     deadline = _deadline(context)
     _await_managed_target_ready(ctrl, gateway_id, target_id, event, deadline)
-    _synchronize_managed_target(ctrl, gateway_id, target_id, event, deadline)
     return {
         "TargetId": target_id,
         "TargetName": _MANAGED_WEB_SEARCH_TARGET_NAME,

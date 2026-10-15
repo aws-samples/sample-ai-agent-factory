@@ -238,11 +238,13 @@ before creating evaluation sessions. It restores the exact prior destination and
 indexing percentage after the run, treats an already-restored or still-settling
 target as an idempotent recovery state, and retains a validated 0600 recovery
 file until cleanup is proven. Failure auto-cleanup may delete every external AWS
-resource before the full teardown runs; when the deployment already owns an
-immutable version, it records `delete_retained` until the version/slot/name-claim
-transaction succeeds. An idempotent DELETE also reconciles historical `deleted`
-tombstones that still carry a version ID, and never reports success while that
-claim remains. The standalone `mcp-server-runtime` is model-free:
+resource before a Runtime exists; after it proves every recorded resource absent,
+it invokes the same owner/version/slot/trigger-fenced atomic name-claim release as
+an explicit DELETE and re-reads the exact version row and slot pointers before
+publishing `deleted`. Any unproven identity, surviving resource, release conflict,
+or ambiguous read-back remains `delete_retained`. An idempotent DELETE also
+reconciles historical `deleted` tombstones that still carry a version ID, and
+never reports success while that claim remains. The standalone `mcp-server-runtime` is model-free:
 it receives neither this model-evaluation gate nor an injected Bedrock Guardrail;
 its production gate is authenticated MCP protocol and complete tool execution.
 
@@ -345,8 +347,12 @@ semantic response oracle. Demo customer tools advertise only non-PII customer ID
 not return or echo email addresses, so the production PII Guardrail remains strict
 without erasing useful customer data. Full web search is provided by the Amazon
 Bedrock AgentCore Gateway Web Search Tool (`connectorId: web-search`), pinned to
-version `1.2.0`. Queries stay within AWS, and result handling preserves source
-titles and HTTP(S) links as citations. The `duckduckgo_search` identifier is
+version `1.2.0`. AgentCore managed connector targets publish automatically and
+reject `SynchronizeGatewayTargets`; the platform therefore requires exact pinned
+configuration/version read-back plus `READY`, then proves the published
+`AmazonWebSearch___WebSearch` tool through the Gateway MCP `tools/list` plane.
+Queries stay within AWS, and result handling preserves source titles and HTTP(S)
+links as citations. The `duckduckgo_search` identifier is
 accepted only as a saved-canvas migration alias and is removed before Lambda
 schema construction; no DuckDuckGo HTML/Lite scraper ships in generated agents,
 Gateway tool Lambdas, standalone MCP runtimes, or CloudFormation bundles. Evaluation

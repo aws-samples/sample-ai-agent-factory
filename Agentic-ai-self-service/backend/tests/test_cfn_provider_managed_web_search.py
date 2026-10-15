@@ -3,7 +3,7 @@
 The provider is exercised with a stateful AgentCore control-plane stand-in so
 failure-only paths are deterministic. Real service creation/invocation/deletion
 is covered by the release live matrix; these tests pin idempotency, exact request
-shape, ownership, synchronization scope, and rollback cleanup.
+shape, ownership, explicit connector synchronization exclusion, and rollback cleanup.
 """
 
 import sys
@@ -55,14 +55,10 @@ class FakeGatewayControl:
         event: dict,
         *,
         create_raises=None,
-        sync_target_id: str = TARGET_ID,
-        advance_sync: bool = True,
     ):
         self.exceptions = _Exceptions
         self.event = event
         self.create_raises = create_raises
-        self.sync_target_id = sync_target_id
-        self.advance_sync = advance_sync
         self.calls: list[tuple[str, dict]] = []
         self.target: dict | None = None
         self.list_pages: list[dict] | None = None
@@ -109,13 +105,7 @@ class FakeGatewayControl:
 
     def synchronize_gateway_targets(self, **kwargs):
         self.calls.append(("sync", kwargs))
-        if self.target is not None:
-            self.target["status"] = "READY"
-            if self.advance_sync:
-                self.target["lastSynchronizedAt"] = "2026-10-14T00:00:01Z"
-        returned = dict(self.target or {})
-        returned["targetId"] = self.sync_target_id
-        return {"targets": [returned]}
+        raise AssertionError("managed CONNECTOR targets must never be synchronized")
 
     def update_gateway_target(self, **kwargs):
         self.calls.append(("update", kwargs))
@@ -167,7 +157,7 @@ def _no_sleep(monkeypatch):
 
 
 class TestManagedWebSearchCreate:
-    def test_create_pins_exact_connector_and_synchronizes_only_its_target(self, monkeypatch):
+    def test_create_pins_exact_connector_and_never_synchronizes_it(self, monkeypatch):
         event = _event()
         ctrl = FakeGatewayControl(event)
         monkeypatch.setattr(provider.boto3, "client", lambda *_a, **_k: ctrl)
@@ -187,10 +177,7 @@ class TestManagedWebSearchCreate:
         }
         assert create["credentialProviderConfigurations"] == [{"credentialProviderType": "GATEWAY_IAM_ROLE"}]
         assert len(create["clientToken"]) == 64
-        assert next(kwargs for call, kwargs in ctrl.calls if call == "sync") == {
-            "gatewayIdentifier": GATEWAY_ID,
-            "targetIdList": [TARGET_ID],
-        }
+        assert not any(call == "sync" for call, _kwargs in ctrl.calls)
         assert data["ConnectorVersion"] == "1.2.0"
         assert physical_id == f"managed-web-search-target/{GATEWAY_ID}/{TARGET_ID}"
 
@@ -218,7 +205,7 @@ class TestManagedWebSearchCreate:
         assert data["TargetId"] == TARGET_ID
         assert physical_id.endswith(f"/{TARGET_ID}")
         assert [name for name, _kwargs in ctrl.calls].count("list") == 1
-        assert any(name == "sync" for name, _kwargs in ctrl.calls)
+        assert not any(name == "sync" for name, _kwargs in ctrl.calls)
 
     @pytest.mark.parametrize("mutation", ["owner", "version"])
     def test_conflict_refuses_foreign_or_drifted_target(self, monkeypatch, mutation):
@@ -234,21 +221,16 @@ class TestManagedWebSearchCreate:
         with pytest.raises(provider.ProviderError):
             provider._handle_managed_web_search_create(event, _Context())
 
-    def test_wrong_target_in_synchronize_response_fails_closed(self, monkeypatch):
+    def test_non_ready_connector_fails_closed_without_synchronization(self, monkeypatch):
         event = _event()
-        ctrl = FakeGatewayControl(event, sync_target_id="target_outside-1234567890")
+        ctrl = FakeGatewayControl(event)
+        ctrl.target = ctrl.exact_target(status="CREATING", synchronized=False)
+        ctrl.create_gateway_target = lambda **kwargs: {"targetId": TARGET_ID, "status": "CREATING"}
         monkeypatch.setattr(provider.boto3, "client", lambda *_a, **_k: ctrl)
 
-        with pytest.raises(provider.ProviderError, match="outside the requested target id"):
-            provider._handle_managed_web_search_create(event, _Context())
-
-    def test_stale_synchronization_receipt_fails_closed(self, monkeypatch):
-        event = _event()
-        ctrl = FakeGatewayControl(event, advance_sync=False)
-        monkeypatch.setattr(provider.boto3, "client", lambda *_a, **_k: ctrl)
-
-        with pytest.raises(provider.ProviderError, match="receipt did not advance"):
+        with pytest.raises(provider.ProviderError, match="did not reach READY"):
             provider._handle_managed_web_search_create(event, _ExpiredContext())
+        assert not any(call == "sync" for call, _kwargs in ctrl.calls)
 
     def test_unsupported_region_fails_before_any_aws_client(self, monkeypatch):
         event = _event(
@@ -279,7 +261,7 @@ class TestManagedWebSearchCreate:
 
 
 class TestManagedWebSearchUpdateAndDelete:
-    def test_update_reapplies_exact_contract_and_resynchronizes(self, monkeypatch):
+    def test_update_reapplies_exact_contract_without_synchronization(self, monkeypatch):
         event = _event("Update")
         ctrl = FakeGatewayControl(event)
         ctrl.target = ctrl.exact_target()
@@ -294,7 +276,7 @@ class TestManagedWebSearchUpdateAndDelete:
             "connectorId": "web-search",
             "version": "1.2.0",
         }
-        assert any(call == "sync" for call, _kwargs in ctrl.calls)
+        assert not any(call == "sync" for call, _kwargs in ctrl.calls)
         assert data["ConnectorVersion"] == "1.2.0"
         assert physical_id == event["PhysicalResourceId"]
 

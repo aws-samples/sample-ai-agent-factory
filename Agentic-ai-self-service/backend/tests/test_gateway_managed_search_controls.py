@@ -169,7 +169,7 @@ def _target(name: str, target_id: str, family: str, *, synced=None) -> dict:
     return detail
 
 
-def test_resolver_synchronizes_exact_non_lambda_target_ids(monkeypatch):
+def test_resolver_synchronizes_only_supported_crawled_target_ids(monkeypatch):
     client = MagicMock()
     summaries = {
         "items": [
@@ -204,7 +204,7 @@ def test_resolver_synchronizes_exact_non_lambda_target_ids(monkeypatch):
 
     client.synchronize_gateway_targets.assert_called_once_with(
         gatewayIdentifier="gateway-id",
-        targetIdList=["openapi-id", "search-id"],
+        targetIdList=["openapi-id"],
     )
     assert actions == ["Inline___Inline_tool"]
     assert expected == 1

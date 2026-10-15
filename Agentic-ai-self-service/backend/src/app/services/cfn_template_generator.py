@@ -20,10 +20,12 @@ Lambda in ``cfn_provider/handler.py``, because no native CFN type covers them:
   Runtime. Emitted only on the MCP-server path.
 - ``Custom::AgentCorePolicy`` — creates the Cedar policy attached to a
   PolicyEngine. Emitted only when a policy is configured.
-- ``Custom::ManagedWebSearchTarget`` — creates and synchronizes the managed
-  Web Search connector at the exact certified version. CloudFormation's native
-  GatewayTarget connector surface does not expose ``version``. Emitted only
-  when managed Web Search is requested.
+- ``Custom::ManagedWebSearchTarget`` — creates and verifies the managed Web
+  Search connector at the exact certified version. Managed connector targets
+  publish automatically and reject ``SynchronizeGatewayTargets``; the provider
+  requires exact READY read-back instead. CloudFormation's native GatewayTarget
+  connector surface does not expose ``version``. Emitted only when managed Web
+  Search is requested.
 
 Keep this list in sync with the handler dispatch in
 ``cfn_provider/handler.py`` and with the architecture note in the generated
@@ -5812,13 +5814,12 @@ class CfnTemplateGenerator:
                                     "bedrock-agentcore:ListGatewayTargets",
                                     "bedrock-agentcore:UpdateGatewayTarget",
                                     "bedrock-agentcore:DeleteGatewayTarget",
-                                    "bedrock-agentcore:SynchronizeGatewayTargets",
                                 ],
                                 # The service-authorization reference assigns all
-                                # six actions to the parent gateway resource type.
-                                # The target id is not an IAM resource, so this is
-                                # both the exact supported scope and the narrowest
-                                # one the provider can receive.
+                                # five supported connector lifecycle actions to
+                                # the parent gateway resource type. Managed
+                                # connector targets reject SynchronizeGatewayTargets
+                                # and therefore receive no such permission.
                                 "Resource": {"Fn::GetAtt": ["AgentCoreGateway", "GatewayArn"]},
                             }
                         ],
@@ -11244,9 +11245,11 @@ The two digests are distinct parameters so the two bundles version independently
             custom_resources.append(
                 "- `Custom::ManagedWebSearchTarget` — creates the AWS-managed Web Search "
                 "connector as target `AmazonWebSearch`, pins connector version `1.2.0`, "
-                "synchronizes only that target id, and verifies the exact configuration "
-                "before reporting success. The native GatewayTarget connector surface "
-                "does not expose a version property. The target cannot carry tags, so its "
+                "and verifies the exact configuration plus `READY` status before reporting "
+                "success. Managed connector targets publish automatically and reject "
+                "`SynchronizeGatewayTargets`; the live Gateway `tools/list` check proves the "
+                "served tool. The native GatewayTarget connector surface does not expose a "
+                "version property. The target cannot carry tags, so its "
                 "owning `AWS::BedrockAgentCore::Gateway` carries the effective governance tags."
             )
         if has_mcp_server:
