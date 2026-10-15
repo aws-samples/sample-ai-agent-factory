@@ -154,6 +154,23 @@ must present a fresh JWT; expiry and caller binding are checked at the API and t
 Gateway independently validates its JWT authorizer contract. IdP revocation behavior follows the provider's access-token semantics,
 so use short access-token lifetimes where immediate revocation is required.
 
+## Long-running browser invocation
+
+Direct non-OBO Runtime turns use an authenticated asynchronous transport so model
+and tool work is never constrained by API Gateway's 30-second integration limit.
+The browser sends exactly one `POST /api/test-runtime-async`, polls the returned
+caller-bound test ID with `GET`, and removes the scratch result with `DELETE` after
+consumption. The worker revalidates the deployment owner and HTTP protocol before
+Runtime dispatch, applies the same policy promotion and invocation-budget reservation
+as the synchronous path, and uses a 540-second AgentCore read bound inside the
+Deployment Lambda's 600-second timeout. A timeout or lost poll response never causes
+the browser to replay the model/tool turn. Results retain session IDs and tamper-
+resistant tool receipts; bearer tokens are not placed in the async event or DynamoDB.
+Scratch rows carry a one-day recovery TTL, and poll/delete return an indistinguishable
+404 for absent and cross-tenant IDs. OBO agents continue to use the immutable
+production-slot endpoint because their request-local workforce token is never queued
+or persisted.
+
 ## Production safety and promotion gate
 
 Dev-like environments (`dev`, `development`, `test`, `sandbox`, `preview`, and
@@ -364,7 +381,8 @@ a test failure, never accepted as an evaluation pass.
 ## Atomic invocation authorization
 
 The Cost panel can create monthly owner, agent, or tag limits. In production,
-every platform-mediated slot, direct test, buffered stream, Function URL stream,
+every platform-mediated slot, direct test, authenticated async browser turn,
+buffered stream, Function URL stream,
 MCP, and durable-trigger invocation operation requires at least one applicable
 limit. A bounded MCP handshake and tool call are one operation. The platform strongly reads applicable definitions and uses one DynamoDB
 transaction to condition-check their current owner and value, increment every

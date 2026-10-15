@@ -87,7 +87,7 @@ describe('listMyAgents', () => {
 });
 
 describe('streamInvoke', () => {
-  it('throws a status-carrying 401 and does NOT retry the non-streaming path', async () => {
+  it('throws a status-carrying 401 and does not create or poll a second turn', async () => {
     const calls: string[] = [];
     globals.__authFetch = vi.fn(async (url: unknown) => {
       calls.push(String(url));
@@ -96,43 +96,45 @@ describe('streamInvoke', () => {
     const err = await streamInvoke({ runtimeId: 'rt-1', input: 'hi' }, () => {}).catch((e) => e);
     expect((err as { status: number }).status).toBe(401);
     expect(getErrorMessage(err)).toBe(SESSION_EXPIRED_MESSAGE);
-    // One request, not two. An auth failure is not "SSE unavailable", and the
-    // second call would have been guaranteed to fail the same way while
-    // discarding the status into "Invocation failed".
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain('/api/test-runtime-stream');
+    expect(calls[0]).toContain('/api/test-runtime-async');
   });
 
-  it('treats a 403 the same way', async () => {
+  it('treats a start-time 403 the same way', async () => {
     globals.__authFetch = vi.fn(async () => json(403, { detail: 'Missing required scope' }));
     const err = await streamInvoke({ runtimeId: 'rt-1', input: 'hi' }, () => {}).catch((e) => e);
     expect((err as { status: number }).status).toBe(403);
     expect(getErrorMessage(err)).toBe('Missing required scope');
   });
 
-  it('surfaces the status when the fallback invoke fails at the HTTP level', async () => {
-    // `r2.ok` was never checked, so a 500 became "Invocation failed" with the
-    // status thrown away. The stream call returns a non-SSE 200 to reach the
-    // fallback at all.
-    let n = 0;
-    globals.__authFetch = vi.fn(async () => {
-      n += 1;
-      return n === 1 ? json(200, { not: 'sse' }) : json(500, { detail: 'runtime exploded' });
+  it('surfaces a status-carrying poll failure and attempts scratch cleanup', async () => {
+    const methods: string[] = [];
+    globals.__authFetch = vi.fn(async (...args: unknown[]) => {
+      const init = args[1] as RequestInit | undefined;
+      const method = init?.method || 'GET';
+      methods.push(method);
+      if (method === 'POST') return json(202, { testId: 'runtime-test-abc123def456', status: 'running' });
+      if (method === 'DELETE') return json(200, { deleted: true });
+      return json(500, { detail: 'runtime exploded' });
     });
     const err = await streamInvoke({ runtimeId: 'rt-1', input: 'hi' }, () => {}).catch((e) => e);
     expect(isApiError(err)).toBe(true);
     expect((err as { status: number }).status).toBe(500);
     expect(getErrorMessage(err)).toBe('runtime exploded');
+    expect(methods).toEqual(['POST', 'GET', 'DELETE']);
   });
 
-  it('still reports a body-level failure from a 200 fallback', async () => {
-    // The pre-existing `data.success` check must survive: a 200 carrying
-    // `{success: false}` is an application failure, not an HTTP one.
-    let n = 0;
-    globals.__authFetch = vi.fn(async () => {
-      n += 1;
-      return n === 1 ? json(200, { not: 'sse' }) : json(200, { success: false, error: 'agent refused' });
+  it('still reports a completed body-level failure and cleans its row', async () => {
+    const methods: string[] = [];
+    globals.__authFetch = vi.fn(async (...args: unknown[]) => {
+      const init = args[1] as RequestInit | undefined;
+      const method = init?.method || 'GET';
+      methods.push(method);
+      if (method === 'POST') return json(202, { testId: 'runtime-test-abc123def456', status: 'running' });
+      if (method === 'DELETE') return json(200, { deleted: true });
+      return json(200, { status: 'completed', success: false, error: 'agent refused' });
     });
     await expect(streamInvoke({ runtimeId: 'rt-1', input: 'hi' }, () => {})).rejects.toThrow('agent refused');
+    expect(methods).toEqual(['POST', 'GET', 'DELETE']);
   });
 });

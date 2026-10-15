@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -810,17 +811,45 @@ def _invoke_http(
     invocation: ToolInvocation | None = None,
 ) -> str:
     response = api_session.post(
-        f"{api_session.base_url}/api/test-runtime",
+        f"{api_session.base_url}/api/test-runtime-async",
         json={
             "endpoint": status["runtime_endpoint"],
             "input": prompt,
             "runtimeId": status["runtime_id"],
             "sessionId": session_id,
         },
-        timeout=180,
+        timeout=60,
     )
-    response.raise_for_status()
-    body = response.json()
+    assert response.status_code == 202, (
+        f"{case.template_id}: {label} async invocation did not start: {response.status_code} {response.text}"
+    )
+    started = response.json()
+    test_id = started.get("testId")
+    assert isinstance(test_id, str) and test_id, f"{case.template_id}: {label} returned no testId"
+    poll_url = f"{api_session.base_url}/api/test-runtime-async/{test_id}"
+    deadline = time.monotonic() + 9 * 60
+    body: dict[str, Any] = {}
+    try:
+        while time.monotonic() < deadline:
+            polled = api_session.get(poll_url, timeout=30)
+            polled.raise_for_status()
+            candidate = polled.json()
+            assert isinstance(candidate, dict), f"{case.template_id}: {label} poll returned a non-object"
+            if candidate.get("status") == "completed":
+                body = candidate
+                break
+            assert candidate.get("status") == "running", (
+                f"{case.template_id}: {label} returned invalid async state: {candidate}"
+            )
+            time.sleep(2)
+        else:
+            raise AssertionError(f"{case.template_id}: {label} exceeded the 9 minute async limit")
+    finally:
+        cleaned = api_session.delete(poll_url, timeout=30)
+        assert cleaned.status_code in {200, 404}, (
+            f"{case.template_id}: {label} async-result cleanup failed: {cleaned.status_code} {cleaned.text}"
+        )
+
     assert body.get("success") is True, f"{case.template_id}: {label} invocation failed: {body.get('error') or body}"
     returned_session = body.get("sessionId")
     if returned_session is not None:

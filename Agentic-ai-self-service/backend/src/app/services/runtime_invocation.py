@@ -397,8 +397,16 @@ def invoke_verified_http_runtime(
     start_harness_warmup: Callable[[dict, str, str], None] | None = None,
     on_dispatch: Callable[[], None] | None = None,
     evaluation_capture: bool = False,
+    read_timeout_seconds: int = 25,
 ) -> TestResponse:
     """Invoke one exact, owner-checked target without re-resolving authority."""
+
+    if (
+        not isinstance(read_timeout_seconds, int)
+        or isinstance(read_timeout_seconds, bool)
+        or not 1 <= read_timeout_seconds <= 540
+    ):
+        raise ValueError("read_timeout_seconds must be an integer in 1..540")
 
     protocol = str(deployment_state.get("runtime_protocol") or "HTTP").upper()
     if protocol != "HTTP":
@@ -509,7 +517,7 @@ def invoke_verified_http_runtime(
                 "bedrock-agentcore",
                 region_name=region,
                 config=BotoConfig(
-                    read_timeout=25,
+                    read_timeout=read_timeout_seconds,
                     connect_timeout=5,
                     retries={"max_attempts": 0},
                 ),
@@ -528,7 +536,7 @@ def invoke_verified_http_runtime(
                 "bedrock-agentcore",
                 region_name=region,
                 config=BotoConfig(
-                    read_timeout=25,
+                    read_timeout=read_timeout_seconds,
                     connect_timeout=5,
                     retries={"max_attempts": 0},
                 ),

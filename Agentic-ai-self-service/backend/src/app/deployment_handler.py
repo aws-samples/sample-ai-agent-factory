@@ -5,7 +5,8 @@ API endpoints:
 
 - POST /api/deploy          → start Step Functions execution
 - GET  /api/deploy/{id}     → query deployment state
-- POST /api/test-runtime    → invoke a deployed runtime
+- POST /api/test-runtime    → invoke a deployed runtime synchronously
+- POST /api/test-runtime-async → invoke a deployed runtime through bounded start/poll
 - DELETE /api/runtime/{id}  → delete runtime and clean up resources
 
 Requirements: 3.1, 3.7, 9.1, 9.2, 9.3, 9.4
@@ -2878,6 +2879,160 @@ async def handle_test_runtime(request: TestRequest, raw_request: Request) -> Tes
             success=False,
             error="An internal error occurred. Check server logs for details.",
         )
+
+
+ASYNC_RUNTIME_TEST_TIMEOUT_SECONDS = 540
+ASYNC_RUNTIME_TEST_MAX_EVENT_BYTES = 128 * 1024
+
+
+def _require_async_runtime_deployment(runtime_id: str, caller_sub: str) -> dict:
+    """Resolve one exact caller-owned HTTP Runtime for an async invocation."""
+    if not runtime_id or not re.fullmatch(r"[a-zA-Z0-9_-]+", runtime_id) or len(runtime_id) > 128:
+        raise HTTPException(status_code=400, detail="Invalid runtime_id format")
+    try:
+        deployment_state = _scan_for_runtime(_get_state_store()._table, runtime_id)
+    except Exception as exc:
+        logger.warning("Async Runtime lookup failed for runtime_id=%s", runtime_id, exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="Could not verify this runtime right now. Try again shortly.",
+        ) from exc
+    owner = (deployment_state or {}).get("user_id")
+    if not deployment_state or not owner or owner != caller_sub:
+        raise HTTPException(status_code=404, detail="Runtime not found")
+    if str(deployment_state.get("runtime_protocol") or "HTTP").upper() != "HTTP":
+        raise HTTPException(status_code=409, detail="This Runtime requires its protocol-specific invocation endpoint.")
+    if deployment_requires_obo(deployment_state):
+        raise HTTPException(
+            status_code=409,
+            detail="OBO invocation requires the authenticated production-slot endpoint.",
+        )
+    return deployment_state
+
+
+@deployment_app.post(
+    "/api/test-runtime-async",
+    status_code=202,
+    dependencies=[Depends(require_scopes("invoke"))],
+)
+async def handle_start_async_runtime_test(request: TestRequest, raw_request: Request) -> dict:
+    """Start one long Runtime turn outside API Gateway's 30-second window."""
+    caller_sub = (_get_user_id(raw_request) or "").strip()
+    if not caller_sub:
+        raise HTTPException(status_code=401, detail="Caller identity not available")
+    runtime_id = request.runtime_id or ""
+    _require_async_runtime_deployment(runtime_id, caller_sub)
+    test_id = f"runtime-test-{uuid.uuid4().hex[:12]}"
+    event = {
+        "_async_runtime_test": True,
+        "caller_sub": caller_sub,
+        "request": request.model_dump(by_alias=True, exclude_none=True),
+        "test_id": test_id,
+    }
+    encoded = json.dumps(event, separators=(",", ":")).encode()
+    if len(encoded) > ASYNC_RUNTIME_TEST_MAX_EVENT_BYTES:
+        raise HTTPException(status_code=413, detail="Runtime invocation request is too large")
+    function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "").strip()
+    if not function_name:
+        raise HTTPException(status_code=503, detail="Async Runtime invocation is unavailable")
+    table = _get_deploy_table()
+    table.put_item(
+        Item={
+            "deployment_id": test_id,
+            "status": "queued",
+            "ttl": _scratch_row_ttl(),
+            "user_id": caller_sub,
+        },
+        ConditionExpression="attribute_not_exists(deployment_id)",
+    )
+    try:
+        response = boto3.client("lambda", region_name=config.aws_region).invoke(
+            FunctionName=function_name,
+            InvocationType="Event",
+            Payload=encoded,
+        )
+        if response.get("StatusCode") != 202:
+            raise RuntimeError("Lambda did not accept the async Runtime invocation")
+    except Exception as exc:
+        logger.exception("Could not dispatch async Runtime invocation")
+        try:
+            table.delete_item(
+                Key={"deployment_id": test_id},
+                ConditionExpression="#u = :u",
+                ExpressionAttributeNames={"#u": "user_id"},
+                ExpressionAttributeValues={":u": caller_sub},
+            )
+        except Exception:
+            logger.warning("Could not remove undispatched async Runtime row %s", test_id, exc_info=True)
+        raise HTTPException(status_code=503, detail="Async Runtime invocation is unavailable") from exc
+    return {"testId": test_id, "status": "running"}
+
+
+@deployment_app.get(
+    "/api/test-runtime-async/{test_id}",
+    dependencies=[Depends(require_scopes("invoke"))],
+)
+async def handle_get_async_runtime_test(test_id: str, raw_request: Request) -> dict:
+    """Poll one caller-owned long Runtime turn."""
+    if not re.fullmatch(r"runtime-test-[a-f0-9]{12}", test_id):
+        raise HTTPException(status_code=400, detail="Invalid test_id format")
+    item = (
+        _get_deploy_table()
+        .get_item(
+            Key={"deployment_id": test_id},
+            ConsistentRead=True,
+        )
+        .get("Item")
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Runtime test not found")
+    _assert_may_read_scratch_row(item, raw_request, "Runtime test not found")
+    if item.get("status") in {"queued", "invoking"}:
+        return {"testId": test_id, "status": "running"}
+    if item.get("status") != "completed":
+        raise HTTPException(status_code=503, detail="Runtime test state is unavailable")
+    try:
+        result = json.loads(item.get("result_json") or "{}")
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=503, detail="Runtime test result is unavailable") from exc
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=503, detail="Runtime test result is unavailable")
+    return {"testId": test_id, "status": "completed", **result}
+
+
+@deployment_app.delete(
+    "/api/test-runtime-async/{test_id}",
+    dependencies=[Depends(require_scopes("invoke"))],
+)
+async def handle_delete_async_runtime_test(test_id: str, raw_request: Request) -> dict:
+    """Remove one caller-owned async result after it has been consumed."""
+    if not re.fullmatch(r"runtime-test-[a-f0-9]{12}", test_id):
+        raise HTTPException(status_code=400, detail="Invalid test_id format")
+    caller_sub = (_get_user_id(raw_request) or "").strip()
+    if not caller_sub:
+        raise HTTPException(status_code=404, detail="Runtime test not found")
+    table = _get_deploy_table()
+    item = table.get_item(
+        Key={"deployment_id": test_id},
+        ConsistentRead=True,
+    ).get("Item")
+    if not item:
+        raise HTTPException(status_code=404, detail="Runtime test not found")
+    _assert_may_read_scratch_row(item, raw_request, "Runtime test not found")
+    if item.get("status") != "completed":
+        raise HTTPException(status_code=409, detail="Runtime test is still running")
+    try:
+        table.delete_item(
+            Key={"deployment_id": test_id},
+            ConditionExpression="#u = :u AND #s = :completed",
+            ExpressionAttributeNames={"#s": "status", "#u": "user_id"},
+            ExpressionAttributeValues={":completed": "completed", ":u": caller_sub},
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            raise HTTPException(status_code=409, detail="Runtime test changed while being cleaned") from exc
+        raise
+    return {"testId": test_id, "deleted": True}
 
 
 # ---------------------------------------------------------------------------
@@ -7574,6 +7729,8 @@ def handler(event, context):
             from app.services.trigger_runtime import dispatch_sqs_batch
 
             return dispatch_sqs_batch(event)
+        if event.get("_async_runtime_test"):
+            return _handle_async_runtime_test(event)
         if event.get("_async_test"):
             return _handle_async_test(event)
         if event.get("_async_harness_warmup"):
@@ -7651,6 +7808,124 @@ def _handle_async_harness_warmup(event: dict) -> dict:
     warmed = bool(result.get("success"))
     logger.info("Harness warm-up %s", "completed" if warmed else "failed")
     return {"warmed": warmed}
+
+
+def _handle_async_runtime_test(event: dict) -> dict:
+    """Run one owner-checked Runtime turn outside API Gateway and persist its result."""
+    test_id = str(event.get("test_id") or "")
+    caller_sub = str(event.get("caller_sub") or "").strip()
+    if not re.fullmatch(r"runtime-test-[a-f0-9]{12}", test_id) or not caller_sub:
+        raise ValueError("Invalid async Runtime event identity")
+    table = _get_deploy_table()
+    try:
+        table.update_item(
+            Key={"deployment_id": test_id},
+            UpdateExpression="SET #s = :invoking, #ttl = :ttl",
+            ConditionExpression="#u = :u AND #s = :queued",
+            ExpressionAttributeNames={"#s": "status", "#ttl": "ttl", "#u": "user_id"},
+            ExpressionAttributeValues={
+                ":invoking": "invoking",
+                ":queued": "queued",
+                ":ttl": _scratch_row_ttl(),
+                ":u": caller_sub,
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            logger.info("Async Runtime job %s is already claimed or completed; not replaying", test_id)
+            return {"completed": False, "duplicateDelivery": True, "testId": test_id}
+        raise
+    result = TestResponse(success=False, error="Runtime invocation failed.")
+    reservation = None
+    dispatched = False
+    try:
+        request = TestRequest.model_validate(event.get("request") or {})
+        runtime_id = request.runtime_id or ""
+        deployment_state = _require_async_runtime_deployment(runtime_id, caller_sub)
+        from app.services import step_clients
+
+        target_event = _deployment_target_event(deployment_state, config.aws_region)
+        region = target_event["target_region"]
+        target_session = step_clients.session_for_event(target_event)
+        runtime_arn = str(deployment_state.get("runtime_arn") or "")
+        if deployment_state.get("deployment_mode") != "harness" and not runtime_arn:
+            account_id = target_session.client("sts", region_name=region).get_caller_identity()["Account"]
+            runtime_arn = f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/{runtime_id}"
+        budget_runtime_name = str(
+            deployment_state.get("friendly_runtime_name")
+            or deployment_state.get("agentcore_runtime_name")
+            or runtime_id
+        )
+        reservation = reserve_invocation_budget(
+            owner_sub=caller_sub,
+            runtime_name=budget_runtime_name,
+            resource_tags=deployment_state.get("resource_tags") or {},
+        )
+
+        def mark_dispatched() -> None:
+            nonlocal dispatched
+            dispatched = True
+
+        result = invoke_verified_http_runtime(
+            request,
+            caller_sub=caller_sub,
+            deployment_state=deployment_state,
+            runtime_id=runtime_id,
+            runtime_arn=runtime_arn,
+            region=region,
+            target_session=target_session,
+            promote_policy=_maybe_promote_policy,
+            invoke_harness=invoke_harness,
+            resolve_memory_identity=memory_invocation_identity,
+            gateway_session=gateway_aws_session,
+            get_gateway_token=get_cognito_token,
+            start_harness_warmup=_start_harness_warmup,
+            on_dispatch=mark_dispatched,
+            read_timeout_seconds=ASYNC_RUNTIME_TEST_TIMEOUT_SECONDS,
+        )
+    except HTTPException as exc:
+        logger.warning("Async Runtime invocation refused with status %s", exc.status_code)
+        result = TestResponse(success=False, error="Runtime invocation unavailable.")
+    except Exception:
+        logger.exception("Async Runtime invocation failed")
+        result = TestResponse(success=False, error="Runtime invocation failed.")
+    finally:
+        if reservation is not None:
+            try:
+                settle_invocation_budget(reservation, dispatched=dispatched)
+            except Exception:
+                logger.exception("Async Runtime budget settlement failed")
+                result = TestResponse(success=False, error="Runtime invocation failed.")
+
+    result_json = json.dumps(result.model_dump(by_alias=True), separators=(",", ":"))
+    if len(result_json.encode()) > 300 * 1024:
+        result_json = json.dumps(
+            TestResponse(success=False, error="Runtime response exceeded the async result limit.").model_dump(
+                by_alias=True
+            ),
+            separators=(",", ":"),
+        )
+    try:
+        table.update_item(
+            Key={"deployment_id": test_id},
+            UpdateExpression="SET #s = :completed, result_json = :result, #ttl = :ttl",
+            ConditionExpression="#u = :u AND #s = :invoking",
+            ExpressionAttributeNames={"#s": "status", "#ttl": "ttl", "#u": "user_id"},
+            ExpressionAttributeValues={
+                ":completed": "completed",
+                ":invoking": "invoking",
+                ":result": result_json,
+                ":ttl": _scratch_row_ttl(),
+                ":u": caller_sub,
+            },
+        )
+    except Exception:
+        # The model/tool turn may already have side effects. Raising would ask
+        # Lambda's async delivery service to replay the event, so fail closed
+        # toward a stranded bounded-TTL row rather than duplicate execution.
+        logger.exception("Async Runtime result could not be persisted; refusing replay")
+        return {"completed": False, "resultPersisted": False, "testId": test_id}
+    return {"completed": True, "resultPersisted": True, "success": result.success, "testId": test_id}
 
 
 def _handle_async_test(event: dict):

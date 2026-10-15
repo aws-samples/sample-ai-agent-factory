@@ -27,7 +27,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev,deploy]"
 cp .env.example .env
-python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 # Frontend
 cd frontend

@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — tool-heavy browser turns escape the 30-second API limit
+
+- Non-OBO Runtime chat now starts one authenticated, owner-bound asynchronous
+  invocation, polls its result, and deletes the scratch row instead of sending a
+  buffered API Gateway request that times out while the agent continues running.
+- The async worker revalidates ownership and protocol, preserves policy promotion,
+  invocation-budget accounting, session IDs, and exact tool receipts, and caps the
+  AgentCore read at 540 seconds inside the Deployment Lambda's 600-second timeout.
+- Cross-tenant and missing job IDs remain indistinguishable, oversized queue payloads
+  fail before writes, OBO tokens are never queued, failures are generic, and every
+  result row carries a bounded recovery TTL. The live gallery harness uses this same
+  browser transport so managed Web Search's cold first turn is tested without a
+  duplicate retry.
+
 ### Fixed — managed Web Search replaces unsupported HTML scraping
 
 - `web-search-agent` and `strands-gateway-agent` now use the Amazon Bedrock
