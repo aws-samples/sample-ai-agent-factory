@@ -171,6 +171,20 @@ def build_api_gateway(
         authorizer=jwt_authorizer,
         authorization_scopes=["aws.cognito.signin.user.admin"],
     )
+    api.add_routes(
+        path="/api/test-runtime-async",
+        methods=[apigwv2.HttpMethod.POST],
+        integration=deployment_integration,
+        authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
+    )
+    api.add_routes(
+        path="/api/test-runtime-async/{test_id}",
+        methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.DELETE],
+        integration=deployment_integration,
+        authorizer=jwt_authorizer,
+        authorization_scopes=["aws.cognito.signin.user.admin"],
+    )
     # Standalone MCP-server product explorer — routers/runtime_mcp.py mounts
     # POST /api/test-mcp-runtime/tools (discover) and POST /api/test-mcp-runtime/call
     # (invoke a tool) on the deployment Lambda. Both sub-paths are single
