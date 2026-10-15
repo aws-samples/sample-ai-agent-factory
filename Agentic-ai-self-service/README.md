@@ -407,7 +407,10 @@ evidence where applicable. The executable
 plan pins each required kind to exact suite commands, committed test selectors, and
 named live scenarios; finalization requires every mapped suite/scenario. This includes
 tracked-file secret scanning, high-severity npm dependency audit, and the isolated
-cfn-lint/Checkov/Terraform/ShellCheck gate over customer-exported artifacts. The dated
+cfn-lint/Checkov/Terraform/ShellCheck gate over customer-exported artifacts. The
+infrastructure nag gate reads each stack's CLI-consumed `additionalMetadataFile`
+directly rather than depending on import-order-sensitive jsii conversion through
+overlapping generated CDK schema distributions. The dated
 [`release/emea-agentcore-regions.json`](release/emea-agentcore-regions.json) matrix
 requires an independent core scenario in every documented EMEA AgentCore Region;
 feature-specific scenarios run only where AWS documents that feature as available.
