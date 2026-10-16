@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from unittest.mock import MagicMock
 
+import app.services.agent_versions_store as agent_versions_store
 import boto3
 import pytest
 from app.services.agent_versions_store import (
+    _DIGEST_FLOAT_TAG,
     AgentVersion,
     AgentVersionsStore,
     PromotionEvidenceConflict,
+    _decode_digest_floats,
+    _encode_digest_floats,
 )
 from app.services.promotion_evidence import (
     PromotionEvidenceError,
     PromotionEvidencePending,
     PromotionPolicyConfigurationError,
+    _sha256,
     load_promotion_policy,
     require_promotion_evidence,
     start_batch_evaluation,
@@ -56,6 +62,26 @@ def _integer_numbers_to_floats(value):
     if isinstance(value, list):
         return [_integer_numbers_to_floats(item) for item in value]
     return value
+
+
+def _normalize_like_live_dynamodb(value):
+    """Model the live service's observed removal of trailing-zero exponents."""
+
+    if isinstance(value, Decimal):
+        return Decimal(int(value)) if value == value.to_integral_value() else value
+    if isinstance(value, dict):
+        return {key: _normalize_like_live_dynamodb(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_like_live_dynamodb(item) for item in value]
+    return value
+
+
+def _integral_score_evidence(policy: dict) -> dict:
+    evidence = _evidence(policy)
+    for summary in evidence["evaluator_summaries"]:
+        summary["average_score"] = 1.0
+    evidence["evidence_digest"] = _sha256({key: value for key, value in evidence.items() if key != "evidence_digest"})
+    return evidence
 
 
 def _scenarios(count: int = 5) -> list[dict]:
@@ -153,6 +179,86 @@ def test_all_floats_deserialization_mutation_breaks_policy_and_evidence_digests(
             deployment_id=DEPLOYMENT_ID,
             runtime_id=RUNTIME_ID,
             policy=policy,
+            now_epoch=int(NOW.timestamp()),
+        )
+
+
+def test_digest_bound_float_tags_survive_live_dynamodb_number_normalization(monkeypatch):
+    policy = _policy(monkeypatch)
+    evidence = _integral_score_evidence(policy)
+    version = AgentVersion(
+        runtime_name=RUNTIME_NAME,
+        version_id=VERSION_ID,
+        owner_sub="owner-1",
+        created_at=(CREATED - timedelta(minutes=1)).isoformat(),
+        deployment_id=DEPLOYMENT_ID,
+        agentcore_runtime_name=AGENTCORE_RUNTIME_NAME,
+        runtime_id=RUNTIME_ID,
+        runtime_arn=RUNTIME_ARN,
+        status="succeeded",
+        production_gate_required=True,
+        promotion_policy=policy,
+        promotion_evidence=evidence,
+    )
+
+    stored = _normalize_like_live_dynamodb(version.to_item())
+    raw_score = stored["promotion_evidence"]["evaluator_summaries"][0]["average_score"]
+    assert raw_score == {_DIGEST_FLOAT_TAG: (1.0).hex()}
+    reloaded = AgentVersion.from_item(stored)
+    assert type(reloaded.promotion_evidence["evaluator_summaries"][0]["average_score"]) is float
+    assert (
+        require_promotion_evidence(
+            reloaded.promotion_evidence,
+            runtime_name=RUNTIME_NAME,
+            version_id=VERSION_ID,
+            deployment_id=DEPLOYMENT_ID,
+            runtime_id=RUNTIME_ID,
+            policy=reloaded.promotion_policy,
+            now_epoch=int(NOW.timestamp()),
+        )
+        == evidence
+    )
+
+
+def test_digest_float_tags_reject_reserved_or_malformed_documents():
+    with pytest.raises(ValueError, match="reserved float tag"):
+        _encode_digest_floats({_DIGEST_FLOAT_TAG: (1.0).hex()})
+    with pytest.raises(ValueError, match="malformed float tag"):
+        _decode_digest_floats({_DIGEST_FLOAT_TAG: (1.0).hex(), "extra": True})
+    with pytest.raises(ValueError, match="non-canonical float tag"):
+        _decode_digest_floats({_DIGEST_FLOAT_TAG: "0x1.00p+0"})
+
+
+def test_removing_float_tags_reproduces_live_promotion_digest_failure(monkeypatch):
+    policy = _policy(monkeypatch)
+    evidence = _integral_score_evidence(policy)
+    version = AgentVersion(
+        runtime_name=RUNTIME_NAME,
+        version_id=VERSION_ID,
+        owner_sub="owner-1",
+        created_at=(CREATED - timedelta(minutes=1)).isoformat(),
+        deployment_id=DEPLOYMENT_ID,
+        agentcore_runtime_name=AGENTCORE_RUNTIME_NAME,
+        runtime_id=RUNTIME_ID,
+        runtime_arn=RUNTIME_ARN,
+        status="succeeded",
+        production_gate_required=True,
+        promotion_policy=policy,
+        promotion_evidence=evidence,
+    )
+    monkeypatch.setattr(agent_versions_store, "_encode_digest_floats", lambda value: value)
+
+    normalized = _normalize_like_live_dynamodb(version.to_item())
+    reloaded = AgentVersion.from_item(normalized)
+    assert type(reloaded.promotion_evidence["evaluator_summaries"][0]["average_score"]) is int
+    with pytest.raises(PromotionEvidenceError, match="digest is invalid"):
+        require_promotion_evidence(
+            reloaded.promotion_evidence,
+            runtime_name=RUNTIME_NAME,
+            version_id=VERSION_ID,
+            deployment_id=DEPLOYMENT_ID,
+            runtime_id=RUNTIME_ID,
+            policy=reloaded.promotion_policy,
             now_epoch=int(NOW.timestamp()),
         )
 

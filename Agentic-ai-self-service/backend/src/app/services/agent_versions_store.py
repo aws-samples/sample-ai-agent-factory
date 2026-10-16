@@ -20,6 +20,7 @@ fresh tables) are also treated as inaccessible — same 404-on-mismatch rule.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import secrets
@@ -184,6 +185,51 @@ def short_version_suffix(version_id: str) -> str:
 # Decimal/Python-number helpers shared with deployment_state_store
 # ---------------------------------------------------------------------------
 
+# DynamoDB canonicalizes trailing-zero numbers: a live write of Decimal("5.0")
+# reads back as Decimal("5"), unlike Moto. Promotion policy/evidence SHA-256
+# digests distinguish JSON ``5`` from ``5.0``, so those two controlled documents
+# tag floats before generic DynamoDB conversion instead of trusting an exponent
+# the service does not preserve. Digest, verdict, policy digest, and expiry stay
+# ordinary map fields so the production-slot transaction can condition on them.
+_DIGEST_FLOAT_TAG = "__agent_factory_digest_float_v1__"
+_DIGEST_BOUND_FIELDS = frozenset({"promotion_policy", "promotion_evidence"})
+
+
+def _encode_digest_floats(obj):
+    """Encode exact float types in one digest-bound internal document."""
+
+    if isinstance(obj, float):
+        if not math.isfinite(obj):
+            raise ValueError("digest-bound documents cannot contain non-finite floats")
+        return {_DIGEST_FLOAT_TAG: obj.hex()}
+    if isinstance(obj, dict):
+        if _DIGEST_FLOAT_TAG in obj:
+            raise ValueError("digest-bound document uses a reserved float tag")
+        return {k: _encode_digest_floats(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_encode_digest_floats(v) for v in obj]
+    return obj
+
+
+def _decode_digest_floats(obj):
+    """Decode exact float tags, rejecting ambiguous or non-canonical tags."""
+
+    if isinstance(obj, dict):
+        if _DIGEST_FLOAT_TAG in obj:
+            if set(obj) != {_DIGEST_FLOAT_TAG} or not isinstance(obj[_DIGEST_FLOAT_TAG], str):
+                raise ValueError("digest-bound document contains a malformed float tag")
+            try:
+                value = float.fromhex(obj[_DIGEST_FLOAT_TAG])
+            except ValueError as exc:
+                raise ValueError("digest-bound document contains an invalid float tag") from exc
+            if not math.isfinite(value) or value.hex() != obj[_DIGEST_FLOAT_TAG]:
+                raise ValueError("digest-bound document contains a non-canonical float tag")
+            return value
+        return {k: _decode_digest_floats(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_decode_digest_floats(v) for v in obj]
+    return obj
+
 
 def _floats_to_decimals(obj):
     if isinstance(obj, float):
@@ -198,14 +244,7 @@ def _floats_to_decimals(obj):
 
 
 def _decimals_to_numbers(obj):
-    """Restore the Python number type encoded by DynamoDB's decimal exponent.
-
-    Boto3 deserializes every DynamoDB ``N`` as ``Decimal``. Integer inputs are
-    encoded without a fractional exponent (``5``), while floats produced by
-    ``_floats_to_decimals`` retain one (``5.0``). Converting both to float changes
-    canonical JSON from ``5`` to ``5.0`` and invalidates persisted policy/evidence
-    digests, even though Python equality hides the type drift.
-    """
+    """Restore ordinary DynamoDB numbers; digest-bound floats use explicit tags."""
 
     if isinstance(obj, Decimal):
         return int(obj) if obj.as_tuple().exponent >= 0 else float(obj)
@@ -275,12 +314,15 @@ class AgentVersion:
         ):
             val = getattr(self, fld)
             if val is not None:
-                item[fld] = val
+                item[fld] = _encode_digest_floats(val) if fld in _DIGEST_BOUND_FIELDS else val
         return _floats_to_decimals(item)
 
     @classmethod
     def from_item(cls, item: dict) -> AgentVersion:
         item = _decimals_to_numbers(dict(item))
+        for field in _DIGEST_BOUND_FIELDS:
+            if field in item:
+                item[field] = _decode_digest_floats(item[field])
         return cls(
             runtime_name=item["runtime_name"],
             version_id=item["version_id"],
@@ -708,7 +750,7 @@ class AgentVersionsStore:
                     "#status": "status",
                 },
                 ExpressionAttributeValues={
-                    ":evidence": _floats_to_decimals(evidence),
+                    ":evidence": _floats_to_decimals(_encode_digest_floats(evidence)),
                     ":owner": expected_owner_sub,
                     ":succeeded": PROMOTABLE_VERSION_STATUS,
                     ":deployment": expected_deployment_id,

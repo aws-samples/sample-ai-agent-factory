@@ -277,10 +277,13 @@ Promote a production-gated version from the **Versions** panel:
    condition-checked in the same DynamoDB transaction that moves the production pointer.
 
 Frozen policy and evidence documents preserve canonical numeric types across
-DynamoDB: integral counts, limits, schema versions, and epochs return as integers,
-while evaluator thresholds remain floating point. This distinction is part of the
-digest contract (`5` and `5.0` are different canonical JSON); promotion fails
-closed if persistence changes either representation.
+DynamoDB by type-tagging each finite floating-point value before persistence and
+decoding it before digest validation. This deliberately does not trust a DynamoDB
+number's decimal exponent: the live service canonicalizes trailing-zero values such
+as `5.0` to `5`. Integral counts, limits, schema versions, digest fields, and epochs
+remain ordinary DynamoDB values so the slot transaction can condition-check them.
+Malformed or reserved float tags fail closed, and `5` versus `5.0` remain distinct
+canonical JSON after decoding.
 
 The default policy requires five completed sessions, zero failed/ignored
 sessions, zero evaluator failures, and scores of at least `0.70` from
