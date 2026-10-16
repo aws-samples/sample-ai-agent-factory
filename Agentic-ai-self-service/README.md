@@ -290,6 +290,10 @@ remain ordinary DynamoDB values so the slot transaction can condition-check them
 Malformed or reserved float tags fail closed, and `5` versus `5.0` remain distinct
 canonical JSON after decoding.
 
+Live privacy and evaluation canaries use ordinary customer-style factual requests
+with semantic answer oracles. They never demand exact output phrasing, because the
+production prompt-attack Guardrail intentionally redacts instruction-shaped requests.
+
 The default policy requires five completed sessions, zero failed/ignored
 sessions, zero evaluator failures, and scores of at least `0.70` from
 `Builtin.GoalSuccessRate`, `Builtin.Correctness`, and `Builtin.Helpfulness`.

@@ -1171,9 +1171,15 @@ def _assert_production_content_is_redacted(
     service_name = f"{agentcore_runtime_name}.DEFAULT"
 
     session_id = f"trigger-production-privacy-{uuid.uuid4()}"
-    prompt_marker = "privacy check number 314159"
-    response_marker = "lavender compass"
-    prompt = f"Name the capital of France. This is {prompt_marker}. Finish the answer with the words {response_marker}."
+    prompt_marker = "which river runs through it"
+    response_marker = "seine"
+    prompt = "What is the capital of France, and which river runs through it?"
+    folded_prompt = prompt.casefold()
+
+    def contains_canary(message: str) -> bool:
+        folded = message.casefold()
+        return prompt_marker in folded or response_marker in folded or folded_prompt in folded
+
     response = api_session.post(
         f"{_base_url(api_session)}/api/runtimes/{runtime_name}/slots/production/invoke",
         json={"input": prompt, "sessionId": session_id},
@@ -1195,9 +1201,9 @@ def _assert_production_content_is_redacted(
     exact_trace_id = ""
     while time.monotonic() < deadline:
         messages = _filtered_log_messages(logs_client, f'"{session_id}"')
-        assert not any(
-            prompt_marker in message or response_marker in message or prompt in message for message in messages
-        ), "Production-slot prompt or response content reached the shared evaluation span group"
+        assert not any(contains_canary(message) for message in messages), (
+            "Production-slot prompt or response content reached the shared evaluation span group"
+        )
         for message in messages:
             try:
                 record = json.loads(message)
@@ -1241,9 +1247,9 @@ def _assert_production_content_is_redacted(
         logs_client,
         f'"{exact_trace_id}"',
     )
-    assert not any(
-        prompt_marker in message or response_marker in message or prompt in message for message in final_messages
-    ), "Production-slot prompt or response content reached a delayed or split-telemetry record"
+    assert not any(contains_canary(message) for message in final_messages), (
+        "Production-slot prompt or response content reached a delayed or split-telemetry record"
+    )
 
 
 @pytest.mark.integration

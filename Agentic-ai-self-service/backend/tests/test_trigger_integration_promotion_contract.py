@@ -339,7 +339,7 @@ class _ProductionPrivacySession:
                 "slot": "production",
                 "versionId": VERSION,
                 "sessionId": json["sessionId"],
-                "response": "The capital is Paris. lavender compass",
+                "response": "Paris is the capital of France, and the Seine runs through it.",
             }
         )
 
@@ -374,7 +374,7 @@ class _ProductionPrivacyLogs:
             }
         if value == self.trace_id:
             message = (
-                "split event leaked lavender compass"
+                "split event leaked Seine"
                 if self.leak_on_trace
                 else json.dumps({"traceId": self.trace_id, "body": {"redacted": True}})
             )
@@ -396,8 +396,31 @@ def test_production_privacy_canary_checks_session_and_trace_records(monkeypatch)
     )
 
     assert session.invocation_payload is not None
+    prompt = str(session.invocation_payload["input"]).casefold()
+    assert "capital of france" in prompt and "river" in prompt
+    assert "finish the answer" not in prompt and "return only" not in prompt
     assert any(value.startswith("trigger-production-privacy-") for value in logs.filters)
     assert logs.trace_id in logs.filters
+
+
+def test_production_privacy_canary_rejects_guardrail_redaction(monkeypatch) -> None:
+    class RedactedPrivacySession(_ProductionPrivacySession):
+        def post(self, url: str, *, json: dict[str, Any], **kwargs) -> _Response:
+            response = super().post(url, json=json, **kwargs)
+            response._body["response"] = "[Assistant output redacted.]"
+            return response
+
+    monkeypatch.setenv(matrix.EVALUATION_INDEX_SETTLE_ENV, "0")
+    monkeypatch.setattr(matrix.time, "sleep", lambda _seconds: None)
+    session = RedactedPrivacySession()
+
+    with pytest.raises(AssertionError, match="success.*response|response.*redacted|Paris|paris"):
+        matrix._assert_production_content_is_redacted(
+            session,
+            _ProductionPrivacyLogs(session),
+            runtime_name=RUNTIME,
+            version_id=VERSION,
+        )
 
 
 def test_production_privacy_canary_catches_split_trace_content(monkeypatch) -> None:
