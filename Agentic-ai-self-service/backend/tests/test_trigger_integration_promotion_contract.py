@@ -34,9 +34,16 @@ class _Response:
 class _Session:
     base_url = "https://agents.example.com"
 
-    def __init__(self, batch_states: list[str] | None = None, *, production_ready: bool = False):
+    def __init__(
+        self,
+        batch_states: list[str] | None = None,
+        *,
+        production_ready: bool = False,
+        slot_statuses: list[int] | None = None,
+    ):
         self.batch_states = list(batch_states or ["COMPLETED"])
         self.production_ready = production_ready
+        self.slot_statuses = list(slot_statuses or [200])
         self.budget_active = False
         self.calls: list[tuple[str, str]] = []
         self.evaluation_sessions: dict[str, tuple[str, str]] = {}
@@ -59,6 +66,9 @@ class _Session:
                 ]
             )
         if url.endswith("/slots"):
+            status = self.slot_statuses.pop(0) if len(self.slot_statuses) > 1 else self.slot_statuses[0]
+            if status != 200:
+                return _Response({"detail": "Not found" if status == 404 else "request failed"}, status)
             return _Response(
                 {
                     "production_version_id": VERSION if self.production_ready else None,
@@ -175,6 +185,56 @@ def test_staging_sessions_are_evaluated_attested_and_promoted(monkeypatch) -> No
     assert len(invoke_positions) == 2
     assert max(invoke_positions) < start < attest < promote
     assert session.production_ready is True
+
+
+def test_slot_publication_retries_only_404_until_exact_staging_exists(monkeypatch) -> None:
+    monkeypatch.setattr(matrix.time, "sleep", lambda _seconds: None)
+    session = _Session(slot_statuses=[404, 404, 200])
+
+    _run(session)
+
+    slot_positions = [
+        index for index, (method, url) in enumerate(session.calls) if method == "GET" and url.endswith("/slots")
+    ]
+    promote_position = next(
+        index for index, (method, url) in enumerate(session.calls) if method == "POST" and url.endswith("/promote")
+    )
+    assert len(slot_positions) == 4
+    assert slot_positions[2] < promote_position < slot_positions[3]
+    assert session.production_ready is True
+
+
+@pytest.mark.parametrize("status", [401, 403, 500])
+def test_slot_publication_does_not_retry_auth_or_server_errors(monkeypatch, status: int) -> None:
+    monkeypatch.setattr(matrix.time, "sleep", lambda _seconds: None)
+    session = _Session(slot_statuses=[status, 200])
+
+    with pytest.raises(RuntimeError, match=rf"HTTP {status}"):
+        _run(session)
+
+    slot_gets = [url for method, url in session.calls if method == "GET" and url.endswith("/slots")]
+    assert len(slot_gets) == 1
+
+
+def test_slot_publication_404_wait_is_bounded(monkeypatch) -> None:
+    original_timeout = matrix._integration_timeout
+    monkeypatch.setattr(
+        matrix,
+        "_integration_timeout",
+        lambda name, default: (
+            1 if name == "INTEGRATION_SLOT_PUBLICATION_TIMEOUT_SECONDS" else original_timeout(name, default)
+        ),
+    )
+    ticks = iter([0.0, 0.0, 1.0])
+    monkeypatch.setattr(matrix.time, "monotonic", lambda: next(ticks, 1.0))
+    monkeypatch.setattr(matrix.time, "sleep", lambda _seconds: None)
+    session = _Session(slot_statuses=[404])
+
+    with pytest.raises(AssertionError, match="within the bounded wait"):
+        _run(session)
+
+    slot_gets = [url for method, url in session.calls if method == "GET" and url.endswith("/slots")]
+    assert len(slot_gets) == 1
 
 
 def _span_message(

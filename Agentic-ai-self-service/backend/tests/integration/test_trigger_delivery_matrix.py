@@ -1008,6 +1008,35 @@ def _wait_for_evaluation_sessions(
         time.sleep(settle_seconds)
 
 
+def _wait_for_staging_slot(
+    api_session: requests.Session,
+    *,
+    runtime_name: str,
+    version_id: str,
+) -> dict[str, Any]:
+    """Wait only for the status-update step's bounded cross-table publication."""
+
+    url = f"{_base_url(api_session)}/api/runtimes/{runtime_name}/slots"
+    deadline = time.monotonic() + _integration_timeout(
+        "INTEGRATION_SLOT_PUBLICATION_TIMEOUT_SECONDS",
+        60,
+    )
+    attempts = 0
+    while time.monotonic() < deadline:
+        response = api_session.get(url, timeout=60)
+        attempts += 1
+        if response.status_code == 404:
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
+        response.raise_for_status()
+        slots = response.json()
+        assert isinstance(slots, dict), f"Slots publication returned a non-object: {slots!r}"
+        if slots.get("production_version_id") == version_id or slots.get("staging_version_id") == version_id:
+            return slots
+        raise AssertionError(f"Slots published the wrong version after {attempts} attempt(s): {slots}")
+    raise AssertionError(f"Slots did not publish version {version_id} within the bounded wait")
+
+
 def _promote_staging_version_for_triggers(
     api_session: requests.Session,
     logs_client: Any,
@@ -1022,12 +1051,11 @@ def _promote_staging_version_for_triggers(
     assert isinstance(version_id, str) and version_id
     assert isinstance(runtime_id, str) and runtime_id
 
-    slots_response = api_session.get(
-        f"{_base_url(api_session)}/api/runtimes/{runtime_name}/slots",
-        timeout=60,
+    slots = _wait_for_staging_slot(
+        api_session,
+        runtime_name=runtime_name,
+        version_id=version_id,
     )
-    slots_response.raise_for_status()
-    slots = slots_response.json()
     if slots.get("production_version_id") == version_id:
         return
     assert slots.get("staging_version_id") == version_id, slots

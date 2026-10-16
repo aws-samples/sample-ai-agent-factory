@@ -265,6 +265,11 @@ never reports success while that claim remains. The standalone `mcp-server-runti
 it receives neither this model-evaluation gate nor an injected Bedrock Guardrail;
 its production gate is authenticated MCP protocol and complete tool execution.
 
+A deployment's terminal record and its version-slot pointer are separate fenced
+DynamoDB writes. Clients that just observed `succeeded` may therefore boundedly
+retry a slots read only while it returns `404`; authentication errors, server
+errors, an incorrect pointer, or a missing pointer after 60 seconds fail closed.
+
 Promote a production-gated version from the **Versions** panel:
 
 1. Invoke the exact staging version for at least five representative sessions.
