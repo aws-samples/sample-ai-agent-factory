@@ -1,12 +1,17 @@
 """Canonical built-in web tool implementations (DEPLOYED-CODE TEMPLATE, not app code).
 
-Single source of truth for the DuckDuckGo search, Wikipedia search, Open-Meteo
-weather, and SSRF-guarded webpage-fetch tools plus the shared ``_http_get``
-retry helper, ``ToolUnavailable`` semantics, and the ``WMO_CODES`` table.
+Single source of truth for Wikipedia lookup, Open-Meteo weather, and the
+SSRF-guarded webpage-fetch tool plus the shared ``_http_get`` retry helper,
+``ToolUnavailable`` semantics, and the ``WMO_CODES`` table.
+
+Full web search is deliberately absent. Saved ``duckduckgo_search`` canvas IDs
+are migrated to the managed AgentCore Web Search Gateway connector before a
+Lambda schema is built; standalone MCP servers must use a user-supplied search
+implementation.
 
 This file is read as TEXT and embedded into:
   - the Gateway dynamic-tools Lambda (gateway_deployer)
-  - generated agent code (code_generator: web-search + mcp-server templates)
+  - generated standalone MCP code (code_generator)
   - downloadable CFN bundles (cfn_template_generator)
 
 Edit here once; every deploy surface picks it up.
@@ -81,26 +86,6 @@ def _http_get(url, timeout=10, retries=2):
             if attempt < retries:
                 time.sleep(1 * (attempt + 1))
     raise ToolUnavailable(str(last_err))
-
-
-def _do_duckduckgo_search(query):
-    url = "https://api.duckduckgo.com/?" + urllib.parse.urlencode({"q": query, "format": "json", "no_html": "1"})
-    data = json.loads(_http_get(url, timeout=12).decode())
-    results = []
-    if data.get("Abstract"):
-        results.append(
-            {"title": data.get("Heading", query), "snippet": data["Abstract"], "url": data.get("AbstractURL", "")}
-        )
-    for topic in data.get("RelatedTopics", [])[:5]:
-        if isinstance(topic, dict) and topic.get("Text"):
-            results.append(
-                {
-                    "title": topic.get("Text", "")[:80],
-                    "snippet": topic.get("Text", ""),
-                    "url": topic.get("FirstURL", ""),
-                }
-            )
-    return json.dumps(results) if results else json.dumps({"message": f"No results found for: {query}"})
 
 
 def _do_wikipedia_search(query):

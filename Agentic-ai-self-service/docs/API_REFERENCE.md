@@ -24,11 +24,29 @@ Every API endpoint the platform exposes, plus deploy-time configuration variable
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/deploy` | Start deployment (returns 202 with `deployment_id`, status, and message; the Step Functions execution ARN is operator-only state) |
-| `GET` | `/api/deploy/{deployment_id}` | Get deployment status from DynamoDB |
+| `GET` | `/api/deploy/{deployment_id}` | Get the caller-owned deployment status; includes derived public `runtime_name` and excludes internal authority/credential leaves |
+| `GET` | `/api/deployments` | List caller-owned deployments with the same public shape and derived `runtime_name` used by production-slot chat |
 | `POST` | `/api/test-runtime` | Test a deployed agent with a prompt (supports session_id for conversation context) |
 | `DELETE` | `/api/runtime/{id}` | Delete runtime + gateway + Cognito + Lambda (full cleanup) |
 | `POST` | `/api/generate-tool` | AI Tool Generator -- generate Lambda code from natural language via Claude Sonnet |
 | `POST` | `/api/generate-cfn-template` | Generate downloadable CloudFormation stack (template YAML + deploy scripts + code artifacts) |
+
+### Deployment targets
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/deploy-targets` | Read-only deployer catalog. Returns account/Region choices and `production_promotion_supported`; never returns IAM role or KMS key ARNs. |
+| `GET` | `/api/admin/deploy-targets` | Admin configuration including validated artifact bucket, execution-role, and `evaluation_kms_key_arn` authority. |
+| `POST` | `/api/admin/deploy-targets/regions` | Register a same-account Region. Requires `region`, `evaluation_kms_key_arn`, and an optional `artifact_bucket`. |
+| `POST` | `/api/admin/deploy-targets/accounts` | Register a cross-account target. Requires `account_id`, fixed deployment `role_arn`, `region`, and `evaluation_kms_key_arn`; execution roles and artifact bucket may be overridden. |
+
+Registration accepts only a full target-Region customer-managed KMS key ARN.
+The backend verifies account, Region, enabled state, symmetric
+`ENCRYPT_DECRYPT` usage, and the default key policy's target-account and scoped
+`bedrock-agentcore.amazonaws.com` grants. It reads metadata and policy only—no
+key material. Target rows created before this field existed remain visible to
+admins but are not deployable until re-registered. New deployment and version
+rows freeze the exact ARN; promotion refuses missing or disagreeing authority.
 
 #### CloudFormation export naming and tags
 
@@ -138,9 +156,11 @@ the IAM roles and parameters in the account where the customer deploys it.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/runtimes/{name}/versions` | List a runtime's version history (newest first) |
+| `POST` | `/api/runtimes/{name}/invoke` | Stable external client alias; invokes only the owner-checked production slot and rejects target/slot authority in the body |
+| `GET` | `/api/runtimes/{name}/versions` | List a runtime's version history (newest first), including its frozen release policy and attested evidence |
 | `GET` | `/api/runtimes/{name}/slots` | Get the production / staging slot pointers |
-| `POST` | `/api/runtimes/{name}/rollback` | Promote the previous production version back into production |
+| `POST` | `/api/runtimes/{name}/versions/{version_id}/promote` | Promote to staging, or to production only when required evidence is fresh and valid |
+| `POST` | `/api/runtimes/{name}/rollback` | Restore the exact previous production version (the emergency rollback path does not depend on a new evaluation) |
 
 ### Evaluation, Cost & Observability (runtime-scoped)
 
@@ -148,8 +168,31 @@ the IAM roles and parameters in the account where the customer deploys it.
 |--------|----------|-------------|
 | `GET` | `/api/runtimes/{name}/evaluation-config` | Registered Online Evaluation config (evaluator IDs + sampling rate) |
 | `GET` | `/api/runtimes/{name}/evaluations?hours=` | Per-evaluator score time-series from CloudWatch Logs Insights |
+| `POST` | `/api/runtimes/{name}/versions/{version_id}/promotion-evaluation/start` | Start an idempotent AgentCore batch evaluation from exact session IDs and ground truth; evaluator policy is server-owned |
+| `GET` | `/api/runtimes/{name}/versions/{version_id}/promotion-evaluation/{batch_id}` | Read bounded batch status after proving the batch source targets this version's runtime |
+| `POST` | `/api/runtimes/{name}/versions/{version_id}/promotion-evaluation/attest` | Verify a completed batch and conditionally record one immutable evidence document |
+| `GET` | `/api/runtimes/{name}/versions/{version_id}/promotion-evidence` | Read the frozen policy and current owner-checked release evidence |
 | `GET` | `/api/runtimes/{name}/dashboard-url` | Deep link to the auto-generated CloudWatch dashboard |
 | `GET` | `/api/runtimes/{name}/cost?from=&to=` | Token + estimated-cost rollup by model for the window |
+
+
+### Invocation authorization (owner/agent/tag scoped)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/cost/budgets` | List caller-visible monthly limit definitions |
+| `POST` | `/api/cost/budgets` | Create/update `{scope, key, limit_usd, warn_pct}`; owner scope is always rebound to the authenticated caller |
+| `DELETE` | `/api/cost/budgets/{scope}/{key}` | Delete an owned definition; a foreign row remains indistinguishable from missing (`404`) |
+
+Production-mediated invocation operations require at least one applicable definition.
+A bounded MCP handshake and tool call consume one operation. Owner, agent, and matching tag limits are condition-checked and reserved in one
+DynamoDB transaction. Exhausted capacity returns `429` with
+`Retry-After: 3600`; unavailable storage returns `503` before dispatch. The cost
+response's `owner_budget` includes `authorized`, `reserved`, `committed`,
+`remaining_authorization`, `reservation_unit`,
+`authorization_scope="platform-mediated-invocation-operation"`, and
+`is_actual_cost_cap=false`. Those USD-denominated values authorize dispatches;
+they are not reconciled AWS charges or an account-level spending guarantee.
 
 ### Triggers (runtime-scoped)
 
@@ -161,9 +204,16 @@ the IAM roles and parameters in the account where the customer deploys it.
 
 Cron, EventBridge, and S3 triggers create stack-tagged EventBridge rules that
 send version-pinned invocation envelopes through the platform's durable SQS
-queue and DLQ. Webhooks use a static HMAC-authenticated route and return `202`
-after durable enqueue. Optional result callbacks are HTTPS-only, network
-filtered, DNS-rebinding resistant, and do not follow redirects. S3 triggers
+queue and DLQ. Webhooks use a static HMAC-authenticated route. A first delivery
+returns `202` with `duplicate=false` after SQS acceptance; the same valid delivery
+ID returns `202` with `duplicate=true` without another enqueue. The marker binds
+the ID to the request-body SHA-256; reusing it for different authenticated bytes
+returns `409`. A concurrent
+in-flight request returns `409` plus `Retry-After: 1`; a crashed ingress lease can
+be taken over after 60 seconds. Queued ingress markers and completed worker
+markers expire after seven days, and worker-side transactional dedup remains the
+safety net for an ambiguous SQS send. Optional result callbacks are HTTPS-only,
+network filtered, DNS-rebinding resistant, and do not follow redirects. S3 triggers
 require EventBridge notifications to be enabled on each source bucket.
 
 ### Agent Registry
@@ -249,6 +299,21 @@ cannot be read, deploys referencing an integration return `503`.
 | `GET` | `/api/workspaces` | List workspace-visible workflows with effective role |
 | `POST` | `/api/workflows/{id}/git-token` | Store a Git PAT (owner-scoped Secrets Manager) |
 | `POST` | `/api/workflows/{id}/git-sync` | Pull a workflow spec from Git (SSRF-guarded) |
+
+### JIT permission requests
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/permissions/requests` | Request an exact action/resource widening on a non-shared `AgentCore*` role |
+| `GET` | `/api/permissions/requests/pending` | Admin queue including recoverable `PENDING` and `APPLYING` rows |
+| `POST` | `/api/permissions/requests/{id}/approve` | Claim a five-minute `APPLYING` lease, idempotently apply `JIT-{id}`, then finalize `APPROVED` |
+| `POST` | `/api/permissions/requests/{id}/reject` | Conditionally reject only a `PENDING` request |
+
+An active approval lease makes concurrent approve/reject return `409`. Definitive
+IAM refusal returns the row to `PENDING`; an ambiguous IAM outcome returns `502`
+with `Retry-After: 300` and leaves `APPLYING`, preventing a false rejection until
+an admin reclaims and retries the same deterministic policy. Gateway/target/Cedar
+control-plane mutation actions are refused even when hidden behind an action wildcard.
 
 ### NL Agent Generation & Code Export
 

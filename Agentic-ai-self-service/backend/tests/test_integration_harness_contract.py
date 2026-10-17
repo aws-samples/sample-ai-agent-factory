@@ -184,12 +184,12 @@ def test_every_conversational_template_has_a_semantic_oracle() -> None:
 def test_the_live_matrix_exercises_every_advertised_executable_tool() -> None:
     expected = {
         "web-search-agent": (
-            "duckduckgo_search",
+            "WebSearch",
             "get_weather",
             "fetch_webpage",
         ),
         "strands-gateway-agent": (
-            "duckduckgo_search",
+            "WebSearch",
             "wikipedia_search",
             "get_weather",
             "fetch_webpage",
@@ -220,7 +220,6 @@ def test_the_live_matrix_exercises_every_advertised_executable_tool() -> None:
         # _invoke_standalone_mcp rather than through model prompts.
         "mcp-server-runtime": (
             "get_weather",
-            "search_web",
             "fetch_url",
         ),
     }
@@ -231,12 +230,11 @@ def test_the_live_matrix_exercises_every_advertised_executable_tool() -> None:
     }
     actual["mcp-server-runtime"] = (
         "get_weather",
-        "search_web",
         "fetch_url",
     )
 
     assert actual == expected
-    assert sum(len(tools) for tools in actual.values()) == 26
+    assert sum(len(tools) for tools in actual.values()) == 25
 
 
 def test_exactly_the_two_memory_gallery_templates_require_live_recall() -> None:
@@ -250,7 +248,7 @@ def test_live_requests_match_the_frontend_composition_boundary() -> None:
     payloads = {case.template_id: matrix._template_request_payload(case, "deadbeef") for case in matrix.TEMPLATE_CASES}
 
     expected_connected = {
-        "web-search-agent": [],
+        "web-search-agent": ["gateway", "identity"],
         "strands-gateway-agent": ["gateway", "identity"],
         "customer-support-assistant": [
             "gateway",
@@ -263,7 +261,7 @@ def test_live_requests_match_the_frontend_composition_boundary() -> None:
         "mcp-server-runtime": [],
     }
     expected_gateway_names = {
-        "web-search-agent": None,
+        "web-search-agent": "web_search_gateway",
         "strands-gateway-agent": "agent_gateway",
         "customer-support-assistant": "support_gateway",
         "customer-support-blueprint": "support_gateway",
@@ -295,7 +293,7 @@ def test_live_requests_match_the_frontend_composition_boundary() -> None:
     assert payloads["mcp-server-gateway-target"]["gatewayTools"] == []
     assert payloads["mcp-server-runtime"]["gatewayTools"] == []
 
-    for template_id in ("strands-gateway-agent", "customer-support-assistant"):
+    for template_id in ("web-search-agent", "strands-gateway-agent", "customer-support-assistant"):
         assert payloads[template_id]["identityConfig"] == {
             "mode": "shared",
             "provider": "cognito",
@@ -340,6 +338,38 @@ def test_json_oracle_parser_handles_model_wrappers_and_double_encoding() -> None
     assert expected in list(matrix._json_values(wrapped))
 
 
+def _lambda_proxy_model_response(payload: object, *, status_code: int = 200) -> str:
+    envelope = {"statusCode": status_code, "body": json.dumps(payload)}
+    return "Here's the tool result:\n```json\n" + json.dumps(envelope) + "\n```\nDone."
+
+
+def test_json_oracle_parser_unwraps_lambda_proxy_body_inside_model_fence() -> None:
+    expected = {"url": "https://example.com", "content": "<title>Example Domain</title>"}
+    assert expected in list(matrix._json_values(_lambda_proxy_model_response(expected)))
+
+
+def test_a_structured_error_inside_lambda_proxy_body_cannot_be_hidden() -> None:
+    valid = {"url": "https://example.com", "content": "<title>Example Domain</title>"}
+    text = "\n".join(
+        (
+            _lambda_proxy_model_response({"error": "upstream timed out"}, status_code=502),
+            json.dumps(valid),
+        )
+    )
+
+    with pytest.raises(AssertionError, match="structured tool error"):
+        matrix._require_json_oracle(text, oracle=matrix._is_fetched_page_payload, label="page")
+
+
+def test_removing_lambda_proxy_unwrap_reproduces_the_live_oracle_failure(monkeypatch) -> None:
+    expected = {"url": "https://example.com", "content": "<title>Example Domain</title>"}
+    text = _lambda_proxy_model_response(expected)
+    monkeypatch.setattr(matrix, "_nested_json_envelope_strings", lambda _value: ())
+
+    with pytest.raises(AssertionError, match="required structured tool result"):
+        matrix._require_json_oracle(text, oracle=matrix._is_fetched_page_payload, label="page")
+
+
 def test_a_structured_tool_error_cannot_be_hidden_beside_a_valid_candidate() -> None:
     text = "\n".join(
         (
@@ -377,8 +407,9 @@ def test_a_structured_tool_error_cannot_be_hidden_beside_a_valid_candidate() -> 
             [
                 {
                     "title": "Amazon Bedrock AgentCore",
-                    "snippet": "Build and deploy agents.",
+                    "text": "Build and deploy agents.",
                     "url": "https://example.com/agentcore",
+                    "publishedDate": "2026-10-14",
                 }
             ],
         ),
@@ -428,7 +459,6 @@ def test_a_structured_tool_error_cannot_be_hidden_beside_a_valid_candidate() -> 
             {
                 "customer_id": "CUST-001",
                 "name": "John Doe",
-                "email": "john@example.com",
                 "total_orders": 3,
                 "total_spent": 354.97,
             },
@@ -469,7 +499,6 @@ def test_a_structured_tool_error_cannot_be_hidden_beside_a_valid_candidate() -> 
             {
                 "customer_id": "CUST-001",
                 "name": "John Smith",
-                "email": "john@example.com",
                 "membership_tier": "Gold",
             },
         ),
@@ -648,6 +677,40 @@ def test_tracker_recovers_an_eventually_consistent_deploy_by_exact_node_id() -> 
     ]
 
 
+def test_runtime_budget_authorizes_and_proves_deletion() -> None:
+    session = FakeSession(
+        post_responses=[_response(200, scope="agent", key="runtime-a", limit_usd=100.0, warn_pct=100)],
+        delete_responses=[_response(200, deleted={"scope": "agent", "key": "runtime-a"})],
+        get_responses=[_response(200, body=[])],
+    )
+    tracker = harness.RuntimeBudgetTracker(session)  # type: ignore[arg-type]
+
+    tracker.authorize("runtime-a")
+    assert tracker.keys == ("runtime-a",)
+    tracker.release("runtime-a")
+
+    assert tracker.keys == ()
+    assert session.post_calls == ["https://product.example.test/api/cost/budgets"]
+    assert session.delete_calls == ["https://product.example.test/api/cost/budgets/agent/runtime-a"]
+    assert session.get_calls == ["https://product.example.test/api/cost/budgets"]
+
+
+def test_lost_budget_create_response_is_still_cleaned_by_unique_key() -> None:
+    session = FakeSession(
+        post_responses=[requests.Timeout("budget response lost")],
+        delete_responses=[_response(200, deleted={"scope": "agent", "key": "runtime-lost"})],
+        get_responses=[_response(200, body=[])],
+    )
+    tracker = harness.RuntimeBudgetTracker(session)  # type: ignore[arg-type]
+
+    with pytest.raises(requests.Timeout, match="budget response lost"):
+        tracker.authorize("runtime-lost")
+    assert tracker.keys == ("runtime-lost",)
+
+    tracker.cleanup()
+    assert tracker.keys == ()
+
+
 def test_lost_deploy_response_still_registers_the_row_for_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -712,6 +775,62 @@ def test_failed_deployment_cleanup_accepts_only_a_proven_deleted_verdict() -> No
     assert record.last_status["delete_status"] == "deleted"
 
 
+def test_integration_cleanup_purges_only_bound_runtime_logs_and_proves_absence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_id = "it_web_exact-1234567890"  # pragma: allowlist secret
+    first = f"/aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT"
+    second = f"/aws/bedrock-agentcore/runtimes/{runtime_id}-production"
+    foreign = f"/aws/bedrock-agentcore/runtimes/{runtime_id}x-DEFAULT"
+
+    class PagedLogs:
+        def __init__(self):
+            self.groups = {first, second, foreign}
+            self.deleted: list[str] = []
+            self.describe_calls: list[dict[str, Any]] = []
+
+        def describe_log_groups(self, **kwargs):
+            self.describe_calls.append(kwargs)
+            prefix = kwargs["logGroupNamePrefix"]
+            matches = sorted(name for name in self.groups if name.startswith(prefix))
+            if kwargs.get("nextToken") == "page-2":
+                return {"logGroups": [{"logGroupName": name} for name in matches[1:]]}
+            page = {"logGroups": [{"logGroupName": name} for name in matches[:1]]}
+            if len(matches) > 1:
+                page["nextToken"] = "page-2"
+            return page
+
+        def delete_log_group(self, *, logGroupName):
+            self.deleted.append(logGroupName)
+            self.groups.discard(logGroupName)
+
+    session = FakeSession(
+        get_responses=[
+            _response(
+                200,
+                status="failed",
+                delete_status="deleted",
+                runtime_id=runtime_id,
+            )
+        ]
+    )
+    logs = PagedLogs()
+    tracker = harness.DeploymentCleanupTracker(session, logs_client=logs)  # type: ignore[arg-type]
+    record = tracker.track("deployment-with-logs")
+    record.runtime_id = runtime_id
+    record.deleted = True
+    record.last_status = {"delete_status": "deleted", "runtime_id": runtime_id}
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    tracker.cleanup(record)
+
+    assert set(logs.deleted) == {first, second}
+    assert logs.groups == {foreign}
+    assert record.runtime_logs_deleted is True
+    assert any(call.get("nextToken") == "page-2" for call in logs.describe_calls)
+    assert len(logs.describe_calls) >= 4, "one empty read is not a quiescence proof"
+
+
 def test_customer_facing_docs_describe_six_templates_and_real_mcp() -> None:
     development = (_REPO / "docs/DEVELOPMENT.md").read_text()
     internals = (_REPO / "docs/DEPLOYMENT_INTERNALS.md").read_text()
@@ -724,11 +843,12 @@ def test_customer_facing_docs_describe_six_templates_and_real_mcp() -> None:
     assert "all six built-in gallery templates" in internals
     assert "`FastMCP`" in internals
     assert "mcp-lean.zip" in internals
-    assert "eight `DynamicTools` operations" in internals
+    assert "seven `DynamicTools` operations" in internals
     assert all(
         tool_name in internals
         for tool_name in (
-            "duckduckgo_search",
+            "web_search",
+            "WebSearch",
             "wikipedia_search",
             "get_weather",
             "fetch_webpage",
@@ -771,6 +891,20 @@ def test_live_trigger_matrix_uses_real_sources_and_a_durable_completion_oracle()
     assert "EventBridge rule" in source
     assert "Webhook secret" in source
     assert "delete_status" in source
+    assert "budget_key = runtime_name" in source
+    assert "_create_integration_budget(api_session, budget_key)" in source
+    assert "_delete_integration_budget(api_session, budget_key)" in source
+    assert "Temporary trigger budget" in source
+    assert "_RELEASE_EVALUATION_CASES" in source
+    assert "Answer ordinary factual integration-test questions concisely" in source
+    assert "BATCH_EVALUATION_SPANS_LOG_GROUP" in source
+    assert "_is_evaluation_span" in source
+    assert "_filtered_log_messages" in source
+    assert "_assert_production_content_is_redacted" in source
+    assert "f'\"{exact_trace_id}\"'" in source
+    assert "integration_transaction_search" in source
+    assert "semantic oracle" in source
+    assert "Reply with exactly" not in source
     assert "unittest.mock" not in source
     assert "monkeypatch" not in source
 
@@ -854,9 +988,10 @@ def test_signed_webhook_uses_the_one_time_secret_and_no_bearer_token(
             "_one_time_signing_secret": secret,
         },
     )
-    captured: dict[str, Any] = {}
+    captured: dict[str, Any] = {"post_count": 0}
 
     def post(url: str, *, data: bytes, headers: dict[str, str], timeout: int):
+        captured["post_count"] += 1
         captured.update(
             {
                 "url": url,
@@ -865,9 +1000,15 @@ def test_signed_webhook_uses_the_one_time_secret_and_no_bearer_token(
                 "timeout": timeout,
             }
         )
+        if captured["post_count"] == 3:
+            return _response(
+                409,
+                detail="Webhook delivery ID was already used for a different payload",
+            )
         return _response(
             202,
             accepted=True,
+            duplicate=captured["post_count"] > 1,
             trigger_id="trigger-2",
             delivery_id=headers["X-AgentCore-Delivery-Id"],
         )
@@ -893,6 +1034,7 @@ def test_signed_webhook_uses_the_one_time_secret_and_no_bearer_token(
     )
     assert headers["X-AgentCore-Signature"] == expected
     assert "Authorization" not in headers
+    assert captured["post_count"] == 3
     assert captured["url"] == ("https://product.example.test/hooks/orders_agent/trigger-2")
 
 
@@ -1026,6 +1168,15 @@ def test_trigger_matrix_operator_contract_is_documented() -> None:
     assert "test_trigger_delivery_matrix.py" in development
     assert "`trigger:read`" in development
     assert "`trigger:write`" in development
+    assert "`g-admins-cost`" in development
+    assert "writer's `owner_sub`" in development
+    assert "`INTEGRATION_MANAGE_TRANSACTION_SEARCH=true`" in development
+    assert "`INTEGRATION_TRANSACTION_SEARCH_STATE_FILE`" in development
+    assert "`INTEGRATION_RESTORE_TRANSACTION_SEARCH_STATE=true`" in development
+    assert "restore_from_state" in (_REPO / "backend/tests/integration/transaction_search.py").read_text()
+    assert "shared `aws/spans`" in development
+    assert "production canary" in development
+    assert "<AgentCoreRuntimeName>.DEFAULT" in development
     assert "completed DynamoDB delivery row" in development
     assert "signed webhook" in development
 

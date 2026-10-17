@@ -30,6 +30,7 @@ from app.services.policy_lifecycle import (
     refuse_incompatible_coresidency,
     refuse_shared_parent_engine,
 )
+from app.services.production_safety import enforce_production_policy_baseline
 from app.services.resource_ownership import (
     ResourceDeletionRefused,
     assert_agentcore_resource_owned,
@@ -233,12 +234,20 @@ def handler(event: dict, context) -> dict:
         store = _get_deployment_store()
         store.update_step(deployment_id, DeploymentStepName.POLICY, DeploymentStatusEnum.IN_PROGRESS)
 
-        policy_config = event.get("policy_config") or {}
+        raw_policy_config = event.get("policy_config") or {}
         region = event.get("target_region") or _get_env(
             "APP_AWS_REGION",
             _get_env("AWS_REGION", "us-east-1"),
         )
         gateway_result = event.get("gateway_result") or {}
+        policy_config = (
+            enforce_production_policy_baseline(
+                raw_policy_config,
+                tool_gateway_required=bool(gateway_result.get("gateway_url") or gateway_result.get("gateway_id")),
+                gateway_provider=str(gateway_result.get("gateway_provider") or "agentcore"),
+            )
+            or {}
+        )
 
         if not policy_config.get("enabled", True):
             return {
@@ -1010,6 +1019,7 @@ def handler(event: dict, context) -> dict:
                 # UI/caller can show "policy auditing only" instead of silently
                 # implying full enforcement.
                 "requested_mode": policy_config.get("mode", "ENFORCE"),
+                "baseline_profile": policy_config.get("baselineProfile") or policy_config.get("baseline_profile"),
                 "downgraded_to_log_only": downgrade_to_log_only,
                 # P-PLAT-027: True when the engine attached in ENFORCE with the
                 # permit still pending — all tools are denied (fail-closed)

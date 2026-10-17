@@ -118,6 +118,62 @@ def test_successful_failure_cleanup_marks_the_row_deleted(mock_store):
     )
 
 
+def test_failure_cleanup_releases_and_verifies_its_version_claim(mock_store):
+    from app.step_handlers.status_update_step import _auto_cleanup_on_failure
+
+    state = mock_store.get.return_value.model_dump.return_value
+    state["version_id"] = "01a135161780b6d678d8ce7afe0aab25"
+    state["friendly_runtime_name"] = "it_lifecycle_states_13a363a5"
+    with (
+        patch("app.step_handlers.status_update_step._cleanup_resource"),
+        patch(
+            "app.step_handlers.status_update_step._release_failed_deployment_metadata",
+            return_value=(True, ["Verified this deployment's version row and slot pointers are absent"]),
+        ) as release,
+    ):
+        _auto_cleanup_on_failure(mock_store, "test-deploy-123", {})
+
+    release.assert_called_once_with(state, {})
+    final = mock_store.update_delete_status.call_args_list[-1]
+    assert final.args[:2] == ("test-deploy-123", "deleted")
+    assert "Verified this deployment's version row and slot pointers are absent" in final.args[2]
+    assert "still require full teardown" not in final.args[2]
+
+
+def test_failure_cleanup_retains_an_unverified_version_claim(mock_store):
+    from app.step_handlers.status_update_step import _auto_cleanup_on_failure
+
+    state = mock_store.get.return_value.model_dump.return_value
+    state["version_id"] = "01a135161780b6d678d8ce7afe0aab25"
+    state["friendly_runtime_name"] = "it_lifecycle_states_13a363a5"
+    with (
+        patch("app.step_handlers.status_update_step._cleanup_resource"),
+        patch(
+            "app.step_handlers.status_update_step._release_failed_deployment_metadata",
+            return_value=(False, ["Version/name metadata release could not be verified"]),
+        ),
+    ):
+        _auto_cleanup_on_failure(mock_store, "test-deploy-123", {})
+
+    final = mock_store.update_delete_status.call_args_list[-1]
+    assert final.args[:2] == ("test-deploy-123", "delete_retained")
+    assert "Version/name metadata release could not be verified" in final.args[2]
+    assert "Version and runtime-name metadata still require full teardown" in final.args[2]
+
+    # Removal mutation: without the release control, the adversarial outcome is
+    # retained rather than falsely reported deleted.
+    state.pop("version_id")
+    state.pop("friendly_runtime_name")
+    mock_store.reset_mock()
+    with (
+        patch("app.step_handlers.status_update_step._cleanup_resource"),
+        patch("app.step_handlers.status_update_step._release_failed_deployment_metadata") as release,
+    ):
+        _auto_cleanup_on_failure(mock_store, "test-deploy-123", {})
+    release.assert_not_called()
+    assert mock_store.update_delete_status.call_args_list[-1].args[1] == "deleted"
+
+
 def test_failed_failure_cleanup_keeps_a_durable_retry_row(mock_store):
     from app.step_handlers.status_update_step import _auto_cleanup_on_failure
 
@@ -1267,3 +1323,104 @@ def test_the_failure_path_does_not_report_a_config_deleted_while_it_still_reads(
             {"type": "online_evaluation_config", "id": "cfg-1", "region": "us-east-1"}, "us-east-1", {}
         )
     logs.delete_log_group.assert_not_called()
+
+
+def test_failed_metadata_release_requires_atomic_release_and_absent_readback(monkeypatch):
+    from types import SimpleNamespace
+
+    from app import deployment_handler
+    from app.step_handlers import status_update_step
+
+    record = {
+        "deployment_id": "dep-before-runtime",
+        "user_id": "owner-1",
+        "version_id": "01a135161780b6d678d8ce7afe0aab25",
+        "friendly_runtime_name": "managed_search_agent",
+    }
+    release_calls = []
+
+    def release(actual, owner, **kwargs):
+        release_calls.append((actual, owner, kwargs))
+        kwargs["outcome"].update(released=True, kept_locked=False)
+        return ["Released runtime name 'managed_search_agent' (versions; slot already absent)"]
+
+    versions = MagicMock()
+    versions.snapshot_for_name_release.return_value = SimpleNamespace(versions=())
+    slots = MagicMock()
+    slots.get.return_value = None
+    monkeypatch.setattr(
+        deployment_handler, "_resolve_friendly_runtime_name", lambda _record: ("managed_search_agent", True)
+    )
+    monkeypatch.setattr(deployment_handler, "_release_runtime_name_claim", release)
+    monkeypatch.setattr(status_update_step, "get_versions_store", lambda: versions)
+    monkeypatch.setattr(status_update_step, "get_slots_store", lambda: slots)
+
+    released, messages = status_update_step._release_failed_deployment_metadata(record, {})
+
+    assert released is True
+    assert release_calls == [
+        (
+            record,
+            "owner-1",
+            {
+                "runtime_may_still_live": False,
+                "trigger_cleanup_unconfirmed": False,
+                "outcome": {"released": True, "kept_locked": False},
+            },
+        )
+    ]
+    assert messages[-1] == "Verified this deployment's version row and slot pointers are absent"
+    versions.snapshot_for_name_release.assert_called_once_with("managed_search_agent")
+    slots.get.assert_called_once_with("managed_search_agent", consistent=True)
+
+
+def test_failed_metadata_release_refuses_a_surviving_version_row(monkeypatch):
+    from types import SimpleNamespace
+
+    from app import deployment_handler
+    from app.step_handlers import status_update_step
+
+    record = {
+        "deployment_id": "dep-before-runtime",
+        "user_id": "owner-1",
+        "version_id": "01a135161780b6d678d8ce7afe0aab25",
+        "friendly_runtime_name": "managed_search_agent",
+    }
+    row = SimpleNamespace(deployment_id=record["deployment_id"], version_id=record["version_id"])
+    versions = MagicMock()
+    versions.snapshot_for_name_release.return_value = SimpleNamespace(versions=(row,))
+    slots = MagicMock()
+    slots.get.return_value = None
+
+    def release(_record, _owner, **kwargs):
+        kwargs["outcome"].update(released=True, kept_locked=False)
+        return []
+
+    monkeypatch.setattr(
+        deployment_handler, "_resolve_friendly_runtime_name", lambda _record: ("managed_search_agent", True)
+    )
+    monkeypatch.setattr(deployment_handler, "_release_runtime_name_claim", release)
+    monkeypatch.setattr(status_update_step, "get_versions_store", lambda: versions)
+    monkeypatch.setattr(status_update_step, "get_slots_store", lambda: slots)
+
+    released, messages = status_update_step._release_failed_deployment_metadata(record, {})
+
+    assert released is False
+    assert "did not verify" in messages[-1]
+
+
+def test_failed_metadata_release_never_unlocks_a_recorded_runtime_consumer(monkeypatch):
+    from app.step_handlers import status_update_step
+
+    record = {
+        "deployment_id": "dep-with-runtime",
+        "user_id": "owner-1",
+        "version_id": "01a135161780b6d678d8ce7afe0aab25",
+        "friendly_runtime_name": "managed_search_agent",
+        "runtime_id": "runtime-still-recorded",
+    }
+
+    released, messages = status_update_step._release_failed_deployment_metadata(record, {})
+
+    assert released is False
+    assert messages == ["Version/name metadata stays locked because a runtime consumer is still recorded"]

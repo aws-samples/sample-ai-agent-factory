@@ -1,6 +1,7 @@
 """Per-step IAM roles (1:1) + step Lambda functions for the deploy pipeline."""
 
 import aws_cdk as cdk
+import cdk_nag
 from aws_cdk import Duration, RemovalPolicy
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_iam as iam
@@ -1622,6 +1623,7 @@ def _create_step_role(
     # generated (ARN carries the id, not the name), so guardrail/* in this
     # account+region is the tightest pre-creation pattern.
     if step_name == "guardrails":
+        guardrail_arns = [f"arn:aws:bedrock:*:{stack.account}:guardrail/*"]
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
@@ -1631,7 +1633,32 @@ def _create_step_role(
                     "bedrock:DeleteGuardrail",
                     "bedrock:CreateGuardrailVersion",
                 ],
-                resources=[f"arn:aws:bedrock:*:{stack.account}:guardrail/*"],
+                resources=guardrail_arns,
+            )
+        )
+        # CreateGuardrail authorizes its tags as a separate TagResource action.
+        # This was proven live in eu-west-1: the create failed atomically with
+        # AccessDenied naming bedrock:TagResource while the create action itself
+        # was already granted. IDs do not exist before the call, so the ARN must
+        # stay globbed; pin both ownership values and the exact tag-key namespaces
+        # instead of granting an unconditioned relabel primitive.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:TagResource"],
+                resources=guardrail_arns,
+                conditions={
+                    "StringEquals": {
+                        "aws:RequestTag/ManagedBy": "agentcore-flows",
+                        "aws:RequestTag/AgentCoreStack": (f"{cfg.project}-{cfg.env}-${{aws:RequestedRegion}}"),
+                    },
+                    "ForAllValues:StringLike": {
+                        "aws:TagKeys": [
+                            "ManagedBy",
+                            "AgentCoreStack",
+                            *governance_tag_key_globs(),
+                        ]
+                    },
+                },
             )
         )
         # ListGuardrails (account-level listing) — no resource-level scoping.
@@ -2327,13 +2354,49 @@ def _create_step_role(
         )
         role.add_to_policy(
             iam.PolicyStatement(
-                # The guardrail arm. Guardrail ids are service-generated (the ARN
-                # carries the id, not the name), so guardrail/* in this account+region
-                # is the tightest pattern — same scoping as the guardrails step that
-                # creates them.
+                # The destructive call remains in the existing role policy so
+                # adding ownership reads does not repack unrelated overflow
+                # policies. The two new reads are isolated below.
                 actions=["bedrock:DeleteGuardrail"],
                 resources=[f"arn:aws:bedrock:*:{stack.account}:guardrail/*"],
             )
+        )
+        guardrail_ownership_read_policy = iam.Policy(
+            stack,
+            "StepStatusUpdateGuardrailOwnershipReadPolicy",
+            statements=[
+                iam.PolicyStatement(
+                    actions=[
+                        "bedrock:GetGuardrail",
+                        "bedrock:ListTagsForResource",
+                    ],
+                    resources=[f"arn:aws:bedrock:*:{stack.account}:guardrail/*"],
+                )
+            ],
+        )
+        guardrail_ownership_read_policy.attach_to_role(role)
+        cdk_nag.NagSuppressions.add_resource_suppressions(
+            guardrail_ownership_read_policy,
+            [
+                cdk_nag.NagPackSuppression(
+                    id="AwsSolutions-IAM5",
+                    reason=(
+                        "Bedrock assigns the Guardrail id after creation, so failed-deployment "
+                        "cleanup cannot name a concrete ARN. This dedicated policy grants only "
+                        "the two ownership reads on Guardrails in this account; deletion stays "
+                        "separate and requires live ManagedBy and AgentCoreStack tags."
+                    ),
+                    applies_to=[
+                        {
+                            "regex": (
+                                r"/^Resource::arn:.*:bedrock:\*:<AWS::AccountId>:"
+                                r"guardrail\/\*$/g"
+                            )
+                        }
+                    ],
+                )
+            ],
+            apply_to_children=True,
         )
         role.add_to_policy(
             iam.PolicyStatement(
@@ -2477,6 +2540,8 @@ def build_step_lambdas(
     role_boundary: iam.ManagedPolicy,
     gateway_auth_pool: cognito.IUserPool | None = None,
     gateway_auth_domain: str = "",
+    workforce_user_pool: cognito.IUserPool | None = None,
+    workforce_user_pool_client: cognito.IUserPoolClient | None = None,
 ) -> dict[str, _lambda.Function]:
     """Create individual Lambda functions for each Step Functions step.
 
@@ -2673,6 +2738,11 @@ def build_step_lambdas(
                 # infra/tests/test_governance_tag_namespace_grant.py.
                 GOVERNANCE_TAG_KEY_PREFIXES_ENV: governance_tag_key_prefixes_env_value(),
                 "APP_AWS_REGION": stack.region,
+                "WORKFORCE_USER_POOL_ID": (workforce_user_pool.user_pool_id if workforce_user_pool is not None else ""),
+                "WORKFORCE_CLIENT_ID": (
+                    workforce_user_pool_client.user_pool_client_id if workforce_user_pool_client is not None else ""
+                ),
+                "WORKFORCE_REGION": stack.region,
                 "PYTHONPATH": "/var/task/src:/var/task:/var/task/lib",
                 # Shared runtime execution role — pre-created at stack
                 # init to avoid the per-deploy IAM-propagation race.

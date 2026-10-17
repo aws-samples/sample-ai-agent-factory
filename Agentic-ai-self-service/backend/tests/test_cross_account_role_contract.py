@@ -129,6 +129,8 @@ def _deployment_role_statements() -> list[dict]:
                 "bedrock-agentcore:UpdateOnlineEvaluationConfig",
                 "bedrock-agentcore:DeleteOnlineEvaluationConfig",
                 "bedrock-agentcore:ListOnlineEvaluationConfigs",
+                "bedrock-agentcore:StartBatchEvaluation",
+                "bedrock-agentcore:GetBatchEvaluation",
                 "logs:DescribeIndexPolicies",
                 "logs:PutIndexPolicy",
                 "xray:GetIndexingRules",
@@ -166,6 +168,7 @@ def _deployment_role_statements() -> list[dict]:
                 "bedrock:DeleteGuardrail",
                 "bedrock:ListGuardrails",
                 "bedrock:CreateGuardrailVersion",
+                "bedrock:TagResource",
             },
         ),
         (

@@ -358,3 +358,20 @@ def test_a_project_named_aws_does_not_produce_a_prefix_cognito_rejects():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_deployment_paths_receive_the_api_workforce_identity(template):
+    fns = _resources(template, "AWS::Lambda::Function")
+    deployment_paths = {
+        lid: resource for lid, resource in fns.items() if lid.startswith("DeploymentLambda") or lid.startswith("Step")
+    }
+    assert deployment_paths
+    for lid, resource in deployment_paths.items():
+        env = (resource["Properties"].get("Environment") or {}).get("Variables") or {}
+        assert isinstance(env.get("WORKFORCE_USER_POOL_ID"), dict), (
+            f"{lid} must receive the API Cognito pool by CloudFormation reference"
+        )
+        assert isinstance(env.get("WORKFORCE_CLIENT_ID"), dict), (
+            f"{lid} must receive the API Cognito client by CloudFormation reference"
+        )
+        assert env.get("WORKFORCE_REGION") == REGION

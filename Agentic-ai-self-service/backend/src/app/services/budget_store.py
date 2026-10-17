@@ -1,21 +1,23 @@
-"""Cost budgets + FinOps controls (Phase 4 — Loom-inspired).
+"""Cost reporting plus atomic invocation-authorization controls.
 
-Upgrades the read-only cost reporting (services/cost_tracking.py) into spend
-governance: per-owner / per-agent / per-tag monthly budgets with warn + hard
-thresholds, and a breach evaluator that compares a budget to actual spend.
+Per-owner / per-agent / per-tag monthly rows serve two separate views:
+actual estimated spend from the existing ``gen_ai.usage`` pipeline, and an atomic
+USD-denominated authorization ceiling for platform-mediated Runtime dispatches.
+The authorization unit is configured by ``BUDGET_RESERVATION_USD``; it is not an
+exact bill estimate or an AWS account spending cap.
 
 Table (single-table, mirrors tag_policy_store):
-  PK ``org_id``, SK ``BUDGET#<scope>#<key>`` where scope ∈ {owner, agent, tag}
-  and key is the owner_sub / runtime_name / "tagKey=tagValue".
+  * ``BUDGET#<scope>#<key>`` definitions
+  * ``SPEND#<scope>#<key>#<month>`` authorization counters
+  * ``RESERVATION#<id>`` append/settlement ledger rows
 
-A budget carries ``limit_usd`` (hard cap), ``warn_pct`` (0-100 soft threshold),
-and ``period`` (currently "monthly"). ``evaluate`` returns the spend, the
-fraction of the limit used, and a status (ok | warn | over) — the API/poller
-uses this to surface badges and (optionally) fire an alarm.
-
-Spend is sourced from the existing cost pipeline (summarize_from_logs), so
-budgets need NO new metering — they read the same gen_ai.usage cost rollup the
-cost dashboard already shows.
+A budget carries ``limit_usd`` (shared display/authorization limit), ``warn_pct``
+(0-100 soft actual-spend threshold), and ``period`` (currently ``monthly``).
+``evaluate_budget`` compares the separately reconciled spend estimate with that
+limit. Atomic transactions condition-check owner and limit, reserve every applicable
+counter together, and create one correlated reservation row before Runtime dispatch.
+Only calls proven not dispatched release capacity; uncertain or dispatched calls
+commit conservatively.
 
 F-12 — a budget belongs to the caller who wrote it. ``agent`` and ``tag`` keys are
 caller-supplied (a runtime name, a tag pair), and the row used to carry no owner, so any
@@ -35,6 +37,8 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -42,17 +46,48 @@ from typing import Literal
 
 import boto3
 from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_ORG_ID = "default"
 _BUDGET_PREFIX = "BUDGET#"
+_SPEND_PREFIX = "SPEND#"
+_RESERVATION_PREFIX = "RESERVATION#"
+_MICRO_USD = 1_000_000
+_MAX_APPLICABLE_BUDGETS = 20
+_RESERVATION_STATUS_INDEX = "reservation-status-expires-index"
+_RESERVATION_TTL_SECONDS = 3600
+_RESERVATION_LIMIT_CONDITION = "owner_sub = :owner AND authorized_microusd <= :remaining"
 BudgetScope = Literal["owner", "agent", "tag"]
 
 
 class BudgetOwnedByAnother(Exception):
     """The budget row exists and is owned by someone other than the caller (or by nobody)."""
+
+
+class BudgetExceeded(Exception):
+    """The atomic reservation would exceed at least one applicable authorization ceiling."""
+
+
+class BudgetReservationError(RuntimeError):
+    """Budget authorization could not be completed safely."""
+
+
+@dataclass(frozen=True)
+class BudgetReservation:
+    org_id: str
+    reservation_id: str
+    owner_sub: str
+    runtime_name: str
+    month: str
+    amount_microusd: int
+    counter_sks: tuple[str, ...]
+
+    @property
+    def sk(self) -> str:
+        return f"{_RESERVATION_PREFIX}{self.reservation_id}"
 
 
 @dataclass
@@ -137,11 +172,43 @@ def month_window(now_epoch: int) -> tuple[int, int]:
     return int(start.timestamp()), int(nxt.timestamp())
 
 
+def invocation_reservation_usd() -> float:
+    """Return the platform's conservative per-invocation authorization unit."""
+
+    raw = os.environ.get("BUDGET_RESERVATION_USD", "1.0").strip()
+    try:
+        amount = Decimal(raw)
+    except Exception as exc:  # noqa: BLE001
+        raise BudgetReservationError("BUDGET_RESERVATION_USD must be a decimal number") from exc
+    if not amount.is_finite() or amount < Decimal("0.000001") or amount > Decimal("1000"):
+        raise BudgetReservationError("BUDGET_RESERVATION_USD must be in 0.000001..1000")
+    return float(amount)
+
+
+def budget_month_key(now_epoch: int) -> str:
+    return datetime.fromtimestamp(now_epoch, tz=timezone.utc).strftime("%Y-%m")
+
+
+def _to_microusd(amount_usd: float) -> int:
+    amount = Decimal(str(amount_usd))
+    if not amount.is_finite() or amount <= 0:
+        raise BudgetReservationError("reservation amount must be positive")
+    value = int((amount * _MICRO_USD).to_integral_value())
+    if value <= 0:
+        raise BudgetReservationError("reservation amount is below one micro-USD")
+    return value
+
+
 class BudgetStore:
     """CRUD for cost budgets."""
 
     def __init__(self, table_name: str, region: str) -> None:
         self._table = boto3.resource("dynamodb", region_name=region).Table(table_name)
+        self._client = boto3.client("dynamodb", region_name=region)
+        self._serializer = TypeSerializer()
+
+    def _serialize(self, values: dict) -> dict:
+        return {key: self._serializer.serialize(value) for key, value in values.items()}
 
     def put(self, budget: Budget) -> Budget:
         now = datetime.now(timezone.utc).isoformat()
@@ -225,9 +292,12 @@ class BudgetStore:
             return budgets
         return [b for b in budgets if (b.key == caller_sub if b.scope == "owner" else b.owner_sub == caller_sub)]
 
-    def list_all(self, org_id: str) -> list[Budget]:
+    def list_all(self, org_id: str, *, consistent: bool = False) -> list[Budget]:
         items: list[dict] = []
-        kwargs: dict = {"KeyConditionExpression": Key("org_id").eq(org_id) & Key("sk").begins_with(_BUDGET_PREFIX)}
+        kwargs: dict = {
+            "KeyConditionExpression": Key("org_id").eq(org_id) & Key("sk").begins_with(_BUDGET_PREFIX),
+            "ConsistentRead": consistent,
+        }
         while True:
             resp = self._table.query(**kwargs)
             items.extend(resp.get("Items", []))
@@ -235,6 +305,289 @@ class BudgetStore:
                 break
             kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
         return [Budget.from_item(i) for i in items]
+
+    @staticmethod
+    def _counter_sk(budget: Budget, month: str) -> str:
+        return f"{_SPEND_PREFIX}{budget.scope}#{budget.key}#{month}"
+
+    def _applicable_budgets(
+        self,
+        org_id: str,
+        *,
+        owner_sub: str,
+        runtime_name: str,
+        resource_tags: dict[str, str] | None,
+    ) -> list[Budget]:
+        tags = resource_tags or {}
+        applicable: list[Budget] = []
+        for budget in self.list_all(org_id, consistent=True):
+            if budget.owner_sub != owner_sub:
+                continue
+            if budget.scope == "owner" and budget.key == owner_sub:
+                applicable.append(budget)
+            elif budget.scope == "agent" and budget.key == runtime_name:
+                applicable.append(budget)
+            elif budget.scope == "tag" and "=" in budget.key:
+                key, value = budget.key.split("=", 1)
+                if tags.get(key) == value:
+                    applicable.append(budget)
+        applicable.sort(key=lambda budget: budget.sk)
+        if len(applicable) > _MAX_APPLICABLE_BUDGETS:
+            raise BudgetReservationError(
+                f"An invocation matches more than {_MAX_APPLICABLE_BUDGETS} budgets; narrow the tag budget set"
+            )
+        return applicable
+
+    def _ensure_counter(self, budget: Budget, month: str) -> str:
+        counter_sk = self._counter_sk(budget, month)
+        try:
+            self._table.put_item(
+                Item={
+                    "org_id": budget.org_id,
+                    "sk": counter_sk,
+                    "scope": budget.scope,
+                    "key": budget.key,
+                    "month": month,
+                    "owner_sub": budget.owner_sub,
+                    "authorized_microusd": 0,
+                    "reserved_microusd": 0,
+                    "committed_microusd": 0,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "ttl": int(time.time()) + 400 * 24 * 3600,
+                },
+                ConditionExpression="attribute_not_exists(org_id) AND attribute_not_exists(sk)",
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
+        return counter_sk
+
+    def reserve_invocation(
+        self,
+        org_id: str,
+        *,
+        owner_sub: str,
+        runtime_name: str,
+        resource_tags: dict[str, str] | None = None,
+        amount_usd: float | None = None,
+        now_epoch: int | None = None,
+        required: bool = False,
+    ) -> BudgetReservation | None:
+        """Atomically reserve one authorization unit across all matching budgets."""
+
+        if not owner_sub or not runtime_name:
+            raise BudgetReservationError("budget authorization requires owner and runtime identity")
+        now_epoch = int(time.time()) if now_epoch is None else int(now_epoch)
+        self.commit_expired_reservations(org_id, now_epoch=now_epoch, limit=10)
+        budgets = self._applicable_budgets(
+            org_id,
+            owner_sub=owner_sub,
+            runtime_name=runtime_name,
+            resource_tags=resource_tags,
+        )
+        if not budgets:
+            if required:
+                raise BudgetExceeded("Production invocation requires at least one applicable authorization limit")
+            return None
+
+        amount_microusd = _to_microusd(invocation_reservation_usd() if amount_usd is None else amount_usd)
+        month = budget_month_key(now_epoch)
+        reservation = BudgetReservation(
+            org_id=org_id,
+            reservation_id=uuid.uuid4().hex,
+            owner_sub=owner_sub,
+            runtime_name=runtime_name,
+            month=month,
+            amount_microusd=amount_microusd,
+            counter_sks=tuple(self._ensure_counter(budget, month) for budget in budgets),
+        )
+        now_iso = datetime.fromtimestamp(now_epoch, tz=timezone.utc).isoformat()
+        transaction: list[dict] = []
+        for budget, counter_sk in zip(budgets, reservation.counter_sks, strict=True):
+            limit_microusd = _to_microusd(budget.limit_usd)
+            transaction.append(
+                {
+                    "ConditionCheck": {
+                        "TableName": self._table.name,
+                        "Key": self._serialize({"org_id": org_id, "sk": budget.sk}),
+                        "ConditionExpression": "owner_sub = :owner AND limit_usd = :limit",
+                        "ExpressionAttributeValues": self._serialize(
+                            {
+                                ":owner": owner_sub,
+                                ":limit": Decimal(str(budget.limit_usd)),
+                            }
+                        ),
+                    }
+                }
+            )
+            transaction.append(
+                {
+                    "Update": {
+                        "TableName": self._table.name,
+                        "Key": self._serialize({"org_id": org_id, "sk": counter_sk}),
+                        "UpdateExpression": (
+                            "SET updated_at = :updated ADD reserved_microusd :amount, authorized_microusd :amount"
+                        ),
+                        "ConditionExpression": _RESERVATION_LIMIT_CONDITION,
+                        "ExpressionAttributeValues": self._serialize(
+                            {
+                                ":updated": now_iso,
+                                ":amount": amount_microusd,
+                                ":owner": owner_sub,
+                                ":remaining": limit_microusd - amount_microusd,
+                            }
+                        ),
+                    }
+                }
+            )
+        reservation_item = {
+            "org_id": org_id,
+            "sk": reservation.sk,
+            "reservation_id": reservation.reservation_id,
+            "owner_sub": owner_sub,
+            "runtime_name": runtime_name,
+            "month": month,
+            "amount_microusd": amount_microusd,
+            "counter_sks": list(reservation.counter_sks),
+            "state": "RESERVED",
+            "reservation_status": f"{org_id}#RESERVED",
+            "created_at": now_iso,
+            "expires_epoch": now_epoch + _RESERVATION_TTL_SECONDS,
+        }
+        transaction.append(
+            {
+                "Put": {
+                    "TableName": self._table.name,
+                    "Item": self._serialize(reservation_item),
+                    "ConditionExpression": "attribute_not_exists(org_id) AND attribute_not_exists(sk)",
+                }
+            }
+        )
+        try:
+            self._client.transact_write_items(
+                TransactItems=transaction,
+                ClientRequestToken=reservation.reservation_id,
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in {
+                "TransactionCanceledException",
+                "ConditionalCheckFailedException",
+            }:
+                raise BudgetExceeded("Invocation would exceed an applicable authorization limit") from exc
+            raise BudgetReservationError("Budget reservation is temporarily unavailable") from exc
+        return reservation
+
+    def settle_reservation(
+        self,
+        reservation: BudgetReservation,
+        *,
+        success: bool,
+        now_epoch: int | None = None,
+    ) -> None:
+        """Commit a dispatched unit or release a call proven not dispatched."""
+
+        now_epoch = int(time.time()) if now_epoch is None else int(now_epoch)
+        now_iso = datetime.fromtimestamp(now_epoch, tz=timezone.utc).isoformat()
+        negative = -reservation.amount_microusd
+        transaction: list[dict] = []
+        for counter_sk in reservation.counter_sks:
+            if success:
+                update_expression = (
+                    "SET updated_at = :updated ADD reserved_microusd :negative, committed_microusd :amount"
+                )
+            else:
+                update_expression = (
+                    "SET updated_at = :updated ADD reserved_microusd :negative, authorized_microusd :negative"
+                )
+            transaction.append(
+                {
+                    "Update": {
+                        "TableName": self._table.name,
+                        "Key": self._serialize({"org_id": reservation.org_id, "sk": counter_sk}),
+                        "UpdateExpression": update_expression,
+                        "ConditionExpression": "owner_sub = :owner AND reserved_microusd >= :amount",
+                        "ExpressionAttributeValues": self._serialize(
+                            {
+                                ":updated": now_iso,
+                                ":negative": negative,
+                                ":amount": reservation.amount_microusd,
+                                ":owner": reservation.owner_sub,
+                            }
+                        ),
+                    }
+                }
+            )
+        transaction.append(
+            {
+                "Update": {
+                    "TableName": self._table.name,
+                    "Key": self._serialize({"org_id": reservation.org_id, "sk": reservation.sk}),
+                    "UpdateExpression": (
+                        "SET #state = :state, reservation_status = :reservation_status, "
+                        "settled_at = :settled, #ttl = :ttl"
+                    ),
+                    "ConditionExpression": "#state = :reserved",
+                    "ExpressionAttributeNames": {"#state": "state", "#ttl": "ttl"},
+                    "ExpressionAttributeValues": self._serialize(
+                        {
+                            ":state": "COMMITTED" if success else "RELEASED",
+                            ":reservation_status": (
+                                f"{reservation.org_id}#COMMITTED" if success else f"{reservation.org_id}#RELEASED"
+                            ),
+                            ":settled": now_iso,
+                            ":ttl": now_epoch + 90 * 24 * 3600,
+                            ":reserved": "RESERVED",
+                        }
+                    ),
+                }
+            }
+        )
+        try:
+            self._client.transact_write_items(TransactItems=transaction)
+        except ClientError as exc:
+            raise BudgetReservationError("Budget reservation could not be settled") from exc
+
+    def commit_expired_reservations(
+        self,
+        org_id: str,
+        *,
+        now_epoch: int | None = None,
+        limit: int = 100,
+    ) -> int:
+        """Commit bounded stale reservations whose dispatch outcome is unknown."""
+
+        now_epoch = int(time.time()) if now_epoch is None else int(now_epoch)
+        response = self._table.query(
+            IndexName=_RESERVATION_STATUS_INDEX,
+            KeyConditionExpression=(
+                Key("reservation_status").eq(f"{org_id}#RESERVED") & Key("expires_epoch").lte(now_epoch)
+            ),
+            Limit=max(1, min(limit, 100)),
+        )
+        committed = 0
+        for item in response.get("Items", []):
+            reservation = BudgetReservation(
+                org_id=org_id,
+                reservation_id=str(item["reservation_id"]),
+                owner_sub=str(item["owner_sub"]),
+                runtime_name=str(item["runtime_name"]),
+                month=str(item["month"]),
+                amount_microusd=int(item["amount_microusd"]),
+                counter_sks=tuple(str(value) for value in item.get("counter_sks", [])),
+            )
+            try:
+                self.settle_reservation(reservation, success=True, now_epoch=now_epoch)
+                committed += 1
+            except BudgetReservationError:
+                logger.warning("Could not commit stale budget reservation %s", reservation.reservation_id)
+        return committed
+
+    def counter_snapshot(self, org_id: str, scope: BudgetScope, key: str, month: str) -> dict:
+        response = self._table.get_item(
+            Key={"org_id": org_id, "sk": f"{_SPEND_PREFIX}{scope}#{key}#{month}"},
+            ConsistentRead=True,
+        )
+        return response.get("Item") or {}
 
 
 _store: BudgetStore | None = None

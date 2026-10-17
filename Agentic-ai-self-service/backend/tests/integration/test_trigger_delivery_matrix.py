@@ -24,6 +24,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -47,8 +48,66 @@ TRIGGER_TYPES_UNDER_TEST = (
     "webhook",
 )
 DELIVERY_PARTITION_PREFIX = "!delivery#"
+
+# Production Guardrails deliberately flag prompt-injection-shaped commands and
+# credential-like random tokens. Release evaluation therefore uses ordinary,
+# low-entropy factual questions with semantic answer oracles; session IDs, not
+# model output, provide per-run correlation.
+_RELEASE_EVALUATION_CASES: tuple[dict[str, Any], ...] = (
+    {
+        "prompt": "What is two plus two?",
+        "expected_response": "Four.",
+        "accepted_answers": ("4", "four"),
+        "assertion": "The response correctly states that two plus two equals four.",
+    },
+    {
+        "prompt": "What color is a clear daytime sky?",
+        "expected_response": "Blue.",
+        "accepted_answers": ("blue",),
+        "assertion": "The response correctly identifies blue as the usual color of a clear daytime sky.",
+    },
+    {
+        "prompt": "How many days are in one week?",
+        "expected_response": "Seven.",
+        "accepted_answers": ("7", "seven"),
+        "assertion": "The response correctly states that one week has seven days.",
+    },
+    {
+        "prompt": "What is the opposite of hot?",
+        "expected_response": "Cold.",
+        "accepted_answers": ("cold",),
+        "assertion": "The response correctly identifies cold as the opposite of hot.",
+    },
+    {
+        "prompt": "Which planet do humans live on?",
+        "expected_response": "Earth.",
+        "accepted_answers": ("earth",),
+        "assertion": "The response correctly identifies Earth as the planet humans live on.",
+    },
+    {
+        "prompt": "How many months are in one year?",
+        "expected_response": "Twelve.",
+        "accepted_answers": ("12", "twelve"),
+        "assertion": "The response correctly states that one year has twelve months.",
+    },
+    {
+        "prompt": "What shape has three sides?",
+        "expected_response": "A triangle.",
+        "accepted_answers": ("triangle",),
+        "assertion": "The response correctly identifies a triangle as a three-sided shape.",
+    },
+    {
+        "prompt": "Which animal is known for barking?",
+        "expected_response": "A dog.",
+        "accepted_answers": ("dog",),
+        "assertion": "The response correctly identifies a dog as an animal known for barking.",
+    },
+)
 EVENT_BUS_NAME = "default"
 TRIGGERS_TABLE_ENV = "INTEGRATION_TRIGGERS_TABLE_NAME"
+BATCH_EVALUATION_SPANS_LOG_GROUP = "aws/spans"
+EVALUATION_INDEX_SETTLE_ENV = "INTEGRATION_EVALUATION_INDEX_SETTLE_SECONDS"
+DEFAULT_EVALUATION_INDEX_SETTLE_SECONDS = 180
 DELIVERY_TIMEOUT_ENV = "INTEGRATION_TRIGGER_TIMEOUT_SECONDS"
 DEFAULT_DELIVERY_TIMEOUT_SECONDS = 12 * 60
 DELETE_TIMEOUT_SECONDS = 12 * 60
@@ -122,7 +181,9 @@ def _start_http_runtime(
                     "us.anthropic.claude-sonnet-5",
                 )
             },
-            "systemPrompt": ("Acknowledge automated integration-test events concisely. Do not call external tools."),
+            "systemPrompt": (
+                "Answer ordinary factual integration-test questions concisely. Do not call external tools."
+            ),
             "deploymentType": "direct_code_deploy",
             "pythonRuntime": "PYTHON_3_13",
             "protocol": "HTTP",
@@ -458,24 +519,67 @@ def _fire_signed_webhook(
     )
     # Deliberately use an unsigned session. The public route authenticates the
     # body HMAC, not the browser's Cognito bearer token.
+    headers = {
+        "Content-Type": "application/json",
+        "X-AgentCore-Timestamp": timestamp,
+        "X-AgentCore-Delivery-Id": delivery_id,
+        "X-AgentCore-Signature": signature,
+    }
     response = requests.post(
         f"{_base_url(api_session)}{path}",
         data=body,
-        headers={
-            "Content-Type": "application/json",
-            "X-AgentCore-Timestamp": timestamp,
-            "X-AgentCore-Delivery-Id": delivery_id,
-            "X-AgentCore-Signature": signature,
-        },
+        headers=headers,
         timeout=60,
     )
     assert response.status_code == 202, f"Signed webhook returned {response.status_code}: {response.text}"
     result = response.json()
     assert result == {
         "accepted": True,
+        "duplicate": False,
         "trigger_id": trigger.trigger_id,
         "delivery_id": delivery_id,
     }
+
+    replay = requests.post(
+        f"{_base_url(api_session)}{path}",
+        data=body,
+        headers=headers,
+        timeout=60,
+    )
+    assert replay.status_code == 202, f"Signed webhook replay returned {replay.status_code}: {replay.text}"
+    assert replay.json() == {
+        "accepted": True,
+        "duplicate": True,
+        "trigger_id": trigger.trigger_id,
+        "delivery_id": delivery_id,
+    }
+
+    conflict_body = json.dumps(
+        {"nonce": nonce + "-conflict", "source": "integration-test"},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    conflict_message = timestamp.encode("ascii") + b"." + delivery_id.encode("utf-8") + b"." + conflict_body
+    conflict_headers = {
+        **headers,
+        "X-AgentCore-Signature": (
+            "v1="
+            + hmac.new(
+                secret.encode("ascii"),
+                conflict_message,
+                hashlib.sha256,
+            ).hexdigest()
+        ),
+    }
+    conflict = requests.post(
+        f"{_base_url(api_session)}{path}",
+        data=conflict_body,
+        headers=conflict_headers,
+        timeout=60,
+    )
+    assert conflict.status_code == 409, (
+        f"Signed delivery-id/body conflict returned {conflict.status_code}: {conflict.text}"
+    )
+    assert conflict.json().get("detail") == ("Webhook delivery ID was already used for a different payload")
     return delivery_id
 
 
@@ -638,25 +742,539 @@ def _delete_trigger_and_verify(
         _wait_for_secret_inactive(secrets_client, secret_ref)
 
 
+def _create_integration_budget(
+    api_session: requests.Session,
+    runtime_name: str,
+) -> str:
+    """Create bounded authorization capacity for this one synthetic runtime."""
+
+    response = api_session.post(
+        f"{_base_url(api_session)}/api/cost/budgets",
+        json={
+            "scope": "agent",
+            "key": runtime_name,
+            "limit_usd": 100.0,
+            "warn_pct": 100,
+        },
+        timeout=60,
+    )
+    assert response.status_code == 200, (
+        f"Creating temporary trigger budget returned {response.status_code}: {response.text}"
+    )
+    body = response.json()
+    assert body.get("scope") == "agent"
+    assert body.get("key") == runtime_name
+    assert float(body.get("limit_usd") or 0) == 100.0
+    return runtime_name
+
+
+def _delete_integration_budget(
+    api_session: requests.Session,
+    budget_key: str,
+) -> None:
+    """Delete the matrix's runtime-specific budget definition idempotently."""
+
+    response = api_session.delete(
+        f"{_base_url(api_session)}/api/cost/budgets/agent/{budget_key}",
+        timeout=60,
+    )
+    assert response.status_code == 200, (
+        f"Deleting temporary trigger budget returned {response.status_code}: {response.text}"
+    )
+    assert response.json().get("deleted") == {
+        "scope": "agent",
+        "key": budget_key,
+    }
+
+    listed = api_session.get(
+        f"{_base_url(api_session)}/api/cost/budgets",
+        timeout=60,
+    )
+    assert listed.status_code == 200, (
+        f"Listing budgets after temporary-budget deletion returned {listed.status_code}: {listed.text}"
+    )
+    listed_body = listed.json()
+    assert isinstance(listed_body, list), f"Budget inventory returned a non-list body: {listed_body!r}"
+    assert not any(
+        item.get("scope") == "agent" and item.get("key") == budget_key for item in listed_body if isinstance(item, dict)
+    ), f"Temporary trigger budget agent/{budget_key} is still visible after deletion"
+
+
+def _integration_timeout(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError:
+        pytest.fail(f"{name} must be an integer", pytrace=False)
+    if value < 60:
+        pytest.fail(f"{name} must be at least 60 seconds", pytrace=False)
+    return value
+
+
+def _release_scenarios(
+    api_session: requests.Session,
+    *,
+    runtime_name: str,
+    version_id: str,
+    count: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Create deterministic real staging sessions for production evaluation."""
+
+    scenarios: list[dict[str, Any]] = []
+    session_ids: list[str] = []
+    assert count <= len(_RELEASE_EVALUATION_CASES), (
+        f"Promotion policy requires {count} sessions but the trigger matrix has only "
+        f"{len(_RELEASE_EVALUATION_CASES)} Guardrail-safe evaluation cases"
+    )
+    scenario_token = uuid.uuid4().hex[:12]
+    for index, case in enumerate(_RELEASE_EVALUATION_CASES[:count]):
+        session_id = f"trigger-eval-{uuid.uuid4()}"
+        prompt = str(case["prompt"])
+        response = api_session.post(
+            f"{_base_url(api_session)}/api/runtimes/{runtime_name}/slots/staging/invoke",
+            json={"input": prompt, "sessionId": session_id},
+            timeout=180,
+        )
+        assert response.status_code == 200, (
+            f"Staging evaluation session {index + 1} returned {response.status_code}: {response.text}"
+        )
+        body = response.json()
+        assert body.get("success") is True, body
+        assert body.get("slot") == "staging"
+        assert body.get("versionId") == version_id
+        assert body.get("sessionId") == session_id
+        model_response = str(body.get("response") or "").strip()
+        accepted_answers = tuple(str(answer).casefold() for answer in case["accepted_answers"])
+        assert any(answer in model_response.casefold() for answer in accepted_answers), (
+            f"Staging evaluation session {index + 1} did not satisfy its semantic oracle: "
+            f"expected one of {accepted_answers!r}, got {model_response!r}"
+        )
+        session_ids.append(session_id)
+        scenarios.append(
+            {
+                "sessionId": session_id,
+                "testScenarioId": f"trigger-release-{scenario_token}-{index + 1}",
+                "assertions": [str(case["assertion"]), "The response uses no external tools."],
+                "expectedToolNames": [],
+                "turns": [
+                    {
+                        "prompt": prompt,
+                        "expectedResponse": str(case["expected_response"]),
+                    }
+                ],
+            }
+        )
+    return scenarios, session_ids
+
+
+def _evaluation_settle_seconds() -> int:
+    raw = os.environ.get(
+        EVALUATION_INDEX_SETTLE_ENV,
+        str(DEFAULT_EVALUATION_INDEX_SETTLE_SECONDS),
+    )
+    try:
+        seconds = int(raw)
+    except ValueError:
+        pytest.fail(f"{EVALUATION_INDEX_SETTLE_ENV} must be an integer", pytrace=False)
+    if not 0 <= seconds <= 600:
+        pytest.fail(
+            f"{EVALUATION_INDEX_SETTLE_ENV} must be in 0..600 seconds",
+            pytrace=False,
+        )
+    return seconds
+
+
+def _filtered_log_messages(logs_client: Any, filter_pattern: str) -> list[str]:
+    """Read every bounded page for one exact span correlation key."""
+
+    messages: list[str] = []
+    request: dict[str, Any] = {
+        "logGroupName": BATCH_EVALUATION_SPANS_LOG_GROUP,
+        "filterPattern": filter_pattern,
+        "limit": 100,
+    }
+    seen_tokens: set[str] = set()
+    for _page in range(20):
+        response = logs_client.filter_log_events(**request)
+        messages.extend(str(event.get("message") or "") for event in response.get("events", []))
+        token = response.get("nextToken")
+        if not token or token in seen_tokens:
+            return messages
+        seen_tokens.add(token)
+        request["nextToken"] = token
+    raise AssertionError(f"Span query exceeded 20 pages for filter {filter_pattern!r}; refusing partial evidence")
+
+
+def _is_evaluation_span(
+    message: str,
+    *,
+    session_id: str,
+    service_name: str,
+    prompt: str,
+    accepted_answers: tuple[str, ...],
+) -> bool:
+    """Whether one record is the exact content-bearing staging evaluator span."""
+
+    try:
+        record = json.loads(message)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(record, dict):
+        return False
+    attributes = record.get("attributes") or {}
+    resource = record.get("resource") or {}
+    resource_attributes = resource.get("attributes") if isinstance(resource, dict) else {}
+    if not isinstance(attributes, dict) or not isinstance(resource_attributes, dict):
+        return False
+    observed_session = attributes.get("session.id") or record.get("attributes.session.id")
+    observed_service = resource_attributes.get("service.name") or record.get("resource.attributes.service.name")
+    trace_id = str(record.get("traceId") or "")
+    span_id = str(record.get("spanId") or "")
+    observed_prompt = str(
+        attributes.get("gen_ai.task.input") or attributes.get("agentcore.invocation.user_prompt") or ""
+    )
+    observed_response = str(
+        attributes.get("gen_ai.task.output") or attributes.get("agentcore.invocation.agent_response") or ""
+    ).casefold()
+    return (
+        attributes.get("gen_ai.operation.name") == "invoke_agent"
+        and observed_session == session_id
+        and observed_service == service_name
+        and observed_prompt == prompt
+        and any(answer in observed_response for answer in accepted_answers)
+        and re.fullmatch(r"[0-9a-f]{32}", trace_id) is not None
+        and re.fullmatch(r"[0-9a-f]{16}", span_id) is not None
+    )
+
+
+def _wait_for_evaluation_sessions(
+    logs_client: Any,
+    *,
+    agentcore_runtime_name: str,
+    session_ids: list[str],
+) -> None:
+    """Wait until every staging session has an exact AgentCore evaluation span."""
+
+    service_name = f"{agentcore_runtime_name}.DEFAULT"
+    pending = set(session_ids)
+    expected_by_session = {session_id: _RELEASE_EVALUATION_CASES[index] for index, session_id in enumerate(session_ids)}
+    deadline = time.monotonic() + _integration_timeout(
+        "INTEGRATION_EVALUATION_LOG_TIMEOUT_SECONDS",
+        10 * 60,
+    )
+    while pending and time.monotonic() < deadline:
+        for session_id in list(pending):
+            try:
+                messages = _filtered_log_messages(
+                    logs_client,
+                    f'"{session_id}"',
+                )
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+                    continue
+                raise
+            case = expected_by_session[session_id]
+            prompt = str(case["prompt"])
+            accepted_answers = tuple(str(answer).casefold() for answer in case["accepted_answers"])
+            # Content is permitted only on this explicitly marked staging
+            # session. A prompt from any other release scenario is cross-session
+            # leakage and must fail even if the expected span also exists.
+            assert not any(
+                str(other["prompt"]) in message
+                for other in _RELEASE_EVALUATION_CASES
+                if str(other["prompt"]) != prompt
+                for message in messages
+            ), f"Another staging prompt leaked into evaluation session {session_id}"
+            if any(
+                _is_evaluation_span(
+                    message,
+                    session_id=session_id,
+                    service_name=service_name,
+                    prompt=prompt,
+                    accepted_answers=accepted_answers,
+                )
+                for message in messages
+            ):
+                pending.remove(session_id)
+        if pending:
+            time.sleep(POLL_INTERVAL_SECONDS)
+    assert not pending, (
+        f"Staging sessions have no exact content-bearing {service_name} evaluation spans in "
+        f"{BATCH_EVALUATION_SPANS_LOG_GROUP}: {sorted(pending)}"
+    )
+
+    settle_seconds = _evaluation_settle_seconds()
+    if settle_seconds:
+        time.sleep(settle_seconds)
+
+
+def _wait_for_staging_slot(
+    api_session: requests.Session,
+    *,
+    runtime_name: str,
+    version_id: str,
+) -> dict[str, Any]:
+    """Wait only for the status-update step's bounded cross-table publication."""
+
+    url = f"{_base_url(api_session)}/api/runtimes/{runtime_name}/slots"
+    deadline = time.monotonic() + _integration_timeout(
+        "INTEGRATION_SLOT_PUBLICATION_TIMEOUT_SECONDS",
+        60,
+    )
+    attempts = 0
+    while time.monotonic() < deadline:
+        response = api_session.get(url, timeout=60)
+        attempts += 1
+        if response.status_code == 404:
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
+        response.raise_for_status()
+        slots = response.json()
+        assert isinstance(slots, dict), f"Slots publication returned a non-object: {slots!r}"
+        if slots.get("production_version_id") == version_id or slots.get("staging_version_id") == version_id:
+            return slots
+        raise AssertionError(f"Slots published the wrong version after {attempts} attempt(s): {slots}")
+    raise AssertionError(f"Slots did not publish version {version_id} within the bounded wait")
+
+
+def _promote_staging_version_for_triggers(
+    api_session: requests.Session,
+    logs_client: Any,
+    *,
+    runtime_name: str,
+    status: dict[str, Any],
+) -> None:
+    """Make the exact succeeded version production-ready through the real gate."""
+
+    version_id = status.get("version_id")
+    runtime_id = status.get("runtime_id")
+    assert isinstance(version_id, str) and version_id
+    assert isinstance(runtime_id, str) and runtime_id
+
+    slots = _wait_for_staging_slot(
+        api_session,
+        runtime_name=runtime_name,
+        version_id=version_id,
+    )
+    if slots.get("production_version_id") == version_id:
+        return
+    assert slots.get("staging_version_id") == version_id, slots
+
+    versions_response = api_session.get(
+        f"{_base_url(api_session)}/api/runtimes/{runtime_name}/versions",
+        timeout=60,
+    )
+    versions_response.raise_for_status()
+    version_record = next(
+        (item for item in versions_response.json() if isinstance(item, dict) and item.get("version_id") == version_id),
+        None,
+    )
+    assert version_record is not None, f"Version {version_id} is missing from {runtime_name}"
+    agentcore_runtime_name = version_record.get("agentcore_runtime_name")
+    assert isinstance(agentcore_runtime_name, str) and agentcore_runtime_name
+
+    evidence_response = api_session.get(
+        f"{_base_url(api_session)}/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evidence",
+        timeout=60,
+    )
+    evidence_response.raise_for_status()
+    evidence = evidence_response.json()
+    if evidence.get("production_gate_required"):
+        policy = evidence.get("promotion_policy") or {}
+        minimum_sessions = int(policy.get("minimum_sessions") or 0)
+        assert minimum_sessions >= 1, policy
+        scenarios, session_ids = _release_scenarios(
+            api_session,
+            runtime_name=runtime_name,
+            version_id=version_id,
+            count=minimum_sessions,
+        )
+        _wait_for_evaluation_sessions(
+            logs_client,
+            agentcore_runtime_name=agentcore_runtime_name,
+            session_ids=session_ids,
+        )
+        start = api_session.post(
+            f"{_base_url(api_session)}/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/start",
+            json={"scenarios": scenarios},
+            timeout=90,
+        )
+        assert start.status_code == 200, f"Starting production evaluation returned {start.status_code}: {start.text}"
+        batch_id = start.json().get("batch_evaluation_id")
+        assert isinstance(batch_id, str) and batch_id
+
+        deadline = time.monotonic() + _integration_timeout(
+            "INTEGRATION_PROMOTION_TIMEOUT_SECONDS",
+            30 * 60,
+        )
+        last_status = ""
+        while time.monotonic() < deadline:
+            batch = api_session.get(
+                f"{_base_url(api_session)}/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/{batch_id}",
+                timeout=60,
+            )
+            batch.raise_for_status()
+            last_status = str(batch.json().get("status") or "")
+            if last_status == "COMPLETED":
+                break
+            assert last_status in {"PENDING", "IN_PROGRESS", "STOPPING"}, batch.json()
+            time.sleep(POLL_INTERVAL_SECONDS)
+        assert last_status == "COMPLETED", f"Batch evaluation ended/timed out in {last_status or 'UNKNOWN'}"
+
+        attest = api_session.post(
+            f"{_base_url(api_session)}/api/runtimes/{runtime_name}/versions/{version_id}/promotion-evaluation/attest",
+            json={"batchEvaluationId": batch_id},
+            timeout=90,
+        )
+        assert attest.status_code == 200, (
+            f"Attesting production evaluation returned {attest.status_code}: {attest.text}"
+        )
+        assert (attest.json().get("promotion_evidence") or {}).get("verdict") == "pass"
+
+    promote = api_session.post(
+        f"{_base_url(api_session)}/api/runtimes/{runtime_name}/versions/{version_id}/promote",
+        json={"slot": "production"},
+        timeout=90,
+    )
+    assert promote.status_code == 200, f"Promoting trigger runtime returned {promote.status_code}: {promote.text}"
+    assert promote.json().get("promoted_version_id") == version_id
+
+    final_slots = api_session.get(
+        f"{_base_url(api_session)}/api/runtimes/{runtime_name}/slots",
+        timeout=60,
+    )
+    final_slots.raise_for_status()
+    assert final_slots.json().get("production_version_id") == version_id
+
+
+def _assert_production_content_is_redacted(
+    api_session: requests.Session,
+    logs_client: Any,
+    *,
+    runtime_name: str,
+    version_id: str,
+) -> None:
+    """Invoke production and prove its safe canary never becomes span content."""
+
+    versions_response = api_session.get(
+        f"{_base_url(api_session)}/api/runtimes/{runtime_name}/versions",
+        timeout=60,
+    )
+    versions_response.raise_for_status()
+    version = next(
+        (item for item in versions_response.json() if isinstance(item, dict) and item.get("version_id") == version_id),
+        None,
+    )
+    assert version is not None, f"Version {version_id} disappeared before the privacy canary"
+    agentcore_runtime_name = version.get("agentcore_runtime_name")
+    assert isinstance(agentcore_runtime_name, str) and agentcore_runtime_name
+    service_name = f"{agentcore_runtime_name}.DEFAULT"
+
+    session_id = f"trigger-production-privacy-{uuid.uuid4()}"
+    prompt_marker = "which river runs through it"
+    response_marker = "seine"
+    prompt = "What is the capital of France, and which river runs through it?"
+    folded_prompt = prompt.casefold()
+
+    def contains_canary(message: str) -> bool:
+        folded = message.casefold()
+        return prompt_marker in folded or response_marker in folded or folded_prompt in folded
+
+    response = api_session.post(
+        f"{_base_url(api_session)}/api/runtimes/{runtime_name}/slots/production/invoke",
+        json={"input": prompt, "sessionId": session_id},
+        timeout=180,
+    )
+    assert response.status_code == 200, f"Production privacy canary returned {response.status_code}: {response.text}"
+    body = response.json()
+    assert body.get("success") is True, body
+    assert body.get("slot") == "production"
+    assert body.get("versionId") == version_id
+    model_response = str(body.get("response") or "").casefold()
+    assert "paris" in model_response, body
+    assert response_marker in model_response, body
+
+    deadline = time.monotonic() + _integration_timeout(
+        "INTEGRATION_EVALUATION_LOG_TIMEOUT_SECONDS",
+        10 * 60,
+    )
+    exact_trace_id = ""
+    while time.monotonic() < deadline:
+        messages = _filtered_log_messages(logs_client, f'"{session_id}"')
+        assert not any(contains_canary(message) for message in messages), (
+            "Production-slot prompt or response content reached the shared evaluation span group"
+        )
+        for message in messages:
+            try:
+                record = json.loads(message)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            attributes = record.get("attributes") or {}
+            resource = record.get("resource") or {}
+            resource_attributes = resource.get("attributes") if isinstance(resource, dict) else {}
+            if not isinstance(attributes, dict) or not isinstance(resource_attributes, dict):
+                continue
+            trace_id = str(record.get("traceId") or "")
+            span_id = str(record.get("spanId") or "")
+            if (
+                (attributes.get("session.id") or record.get("attributes.session.id")) == session_id
+                and (resource_attributes.get("service.name") or record.get("resource.attributes.service.name"))
+                == service_name
+                and re.fullmatch(r"[0-9a-f]{32}", trace_id)
+                and re.fullmatch(r"[0-9a-f]{16}", span_id)
+            ):
+                exact_trace_id = trace_id
+                break
+        if exact_trace_id:
+            break
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+    assert exact_trace_id, (
+        f"Production privacy canary has no exact {service_name} metadata span in {BATCH_EVALUATION_SPANS_LOG_GROUP}"
+    )
+    # Split telemetry can put content in a correlated event record that has the
+    # trace id but not the session id. Wait the documented indexing window, then
+    # inspect every bounded page under BOTH keys before passing the privacy gate.
+    settle_seconds = _evaluation_settle_seconds()
+    if settle_seconds:
+        time.sleep(settle_seconds)
+    final_messages = _filtered_log_messages(
+        logs_client,
+        f'"{session_id}"',
+    ) + _filtered_log_messages(
+        logs_client,
+        f'"{exact_trace_id}"',
+    )
+    assert not any(contains_canary(message) for message in final_messages), (
+        "Production-slot prompt or response content reached a delayed or split-telemetry record"
+    )
+
+
 @pytest.mark.integration
 def test_all_four_trigger_sources_invoke_and_cleanup(
     api_session: requests.Session,
     aws_region: str,
+    integration_transaction_search,
     integration_triggers_table_name: str,
     deployment_cleanup: DeploymentCleanupTracker,
     wait_for_deployment,
 ) -> None:
     """Exercise cron, EventBridge, S3, and webhook through production paths."""
 
+    assert integration_transaction_search is not None
     table = boto3.resource(
         "dynamodb",
         region_name=aws_region,
     ).Table(integration_triggers_table_name)
     events_client = boto3.client("events", region_name=aws_region)
+    logs_client = boto3.client("logs", region_name=aws_region)
     secrets_client = boto3.client("secretsmanager", region_name=aws_region)
     s3_client, bucket_name, object_prefix = _create_source_bucket(aws_region)
 
     active_triggers: list[CreatedTrigger] = []
+    budget_key: str | None = None
     primary_error: BaseException | None = None
     try:
         record, runtime_name, status = _start_http_runtime(
@@ -665,6 +1283,20 @@ def test_all_four_trigger_sources_invoke_and_cleanup(
             wait_for_deployment,
         )
         runtime_arn = status["runtime_arn"]
+        budget_key = runtime_name
+        _create_integration_budget(api_session, budget_key)
+        _promote_staging_version_for_triggers(
+            api_session,
+            logs_client,
+            runtime_name=runtime_name,
+            status=status,
+        )
+        _assert_production_content_is_redacted(
+            api_session,
+            logs_client,
+            runtime_name=runtime_name,
+            version_id=status["version_id"],
+        )
         nonce = uuid.uuid4().hex
         event_source = f"integration.agentcore.{nonce}"
         event_detail_type = f"AgentCore integration {nonce}"
@@ -835,6 +1467,12 @@ def test_all_four_trigger_sources_invoke_and_cleanup(
             _remove_source_bucket(s3_client, bucket_name)
         except Exception as exc:  # noqa: BLE001 - teardown is production evidence
             cleanup_errors.append(f"S3/{bucket_name}: {type(exc).__name__}: {exc}")
+        if budget_key is not None:
+            try:
+                _delete_integration_budget(api_session, budget_key)
+                budget_key = None
+            except Exception as exc:  # noqa: BLE001 - teardown is production evidence
+                cleanup_errors.append(f"budget/agent/{budget_key}: {type(exc).__name__}: {exc}")
 
         if cleanup_errors:
             detail = "Trigger integration cleanup was not proven:\n  - " + ("\n  - ".join(cleanup_errors))

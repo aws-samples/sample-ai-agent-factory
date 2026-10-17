@@ -149,7 +149,8 @@ def handler(event: dict, context) -> dict:
             else get_platform_observability_defaults()
         )
         observability_enabled = bool(
-            platform_observability_defaults
+            event.get("production_gate_required")
+            or platform_observability_defaults
             or (isinstance(obs_cfg, dict) and obs_cfg.get("enabled", True) and obs_cfg.get("provider"))
             or "observability" in connected_tools
             or getattr(config, "enable_otel", False)

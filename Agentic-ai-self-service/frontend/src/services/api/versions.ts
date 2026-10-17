@@ -3,6 +3,7 @@
  */
 
 import { apiRequest } from './client';
+import type { PromotionEvidence, PromotionPolicy } from './evaluations';
 
 // ============================================================================
 // Types
@@ -20,6 +21,9 @@ export interface AgentVersionSummary {
   parent_version_id?: string | null;
   status: 'pending' | 'succeeded' | 'failed' | 'superseded';
   description?: string | null;
+  production_gate_required?: boolean | null;
+  promotion_policy?: PromotionPolicy | null;
+  promotion_evidence?: PromotionEvidence | null;
 }
 
 export interface RuntimeSlotsSummary {

@@ -18,6 +18,7 @@ from __future__ import annotations
 GATEWAY_TEMPLATE_IDS = frozenset(
     {
         "strands-gateway-agent",
+        "web-search-agent",
         "mcp-server-gateway-target",
         "customer-support-assistant",
         "customer-support-blueprint",
@@ -29,7 +30,6 @@ _CUSTOMER_SUPPORT_TEMPLATE_IDS = frozenset({"customer-support-assistant", "custo
 COMPOSABLE_CAPABILITIES = frozenset({"memory", "gateway", "browser", "code_interpreter", "knowledge_base"})
 
 _STANDALONE_TEMPLATE_SHAPES = {
-    "web-search-agent": "a LangChain web-search agent with its own search tool",
     "mcp-server-runtime": "an MCP server that exposes tools rather than an agent that calls them",
 }
 

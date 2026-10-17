@@ -36,6 +36,10 @@ from app.services.resource_ownership import (
     assert_this_deployment_may_mutate,
 )
 from app.services.resource_tagging import governed_tag_list, governed_tags
+from app.services.runtime_policy_safety import (
+    assert_runtime_policy_is_data_plane_only,
+    runtime_control_plane_deny_statement,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -387,7 +391,9 @@ def create_harness_iam_role(
             ],
         },
     ]
+    statements.append(runtime_control_plane_deny_statement())
     policy = {"Version": "2012-10-17", "Statement": statements}
+    assert_runtime_policy_is_data_plane_only(policy)
     iam_client.put_role_policy(
         RoleName=role_name,
         PolicyName="HarnessExecutionPolicy",

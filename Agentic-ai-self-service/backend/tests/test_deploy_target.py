@@ -19,6 +19,12 @@ moto = pytest.importorskip("moto")
 from app.services import deploy_target as dt  # noqa: E402
 from moto import mock_aws  # noqa: E402
 
+EVALUATION_KEY_ARN = "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-1234567890ab"
+
+
+def _evaluation_key_arn(region: str) -> str:
+    return f"arn:aws:kms:{region}:123456789012:key/12345678-1234-1234-1234-1234567890ab"
+
 
 def _create_table() -> None:
     ddb = boto3.client("dynamodb", region_name="us-east-1")
@@ -319,9 +325,11 @@ def test_admin_registration_does_not_persist_a_target_that_fails_validation(monk
         MagicMock(side_effect=dt.TargetError("missing harness role")),
     )
     monkeypatch.setattr(dt, "add_account", add_account)
+    monkeypatch.setattr(dt, "validate_evaluation_kms_key", lambda *_args, **_kwargs: EVALUATION_KEY_ARN)
 
     body = admin.AccountTargetRequest(
         account_id="123456789012",
+        evaluation_kms_key_arn=EVALUATION_KEY_ARN,
         role_arn="arn:aws:iam::123456789012:role/AgentCoreFlowsDeploymentRole",
         region="us-east-1",
     )
@@ -352,9 +360,11 @@ def test_admin_registration_does_not_persist_a_target_with_an_invalid_bucket(mon
         MagicMock(side_effect=dt.TargetError("bucket is in another region")),
     )
     monkeypatch.setattr(dt, "add_account", add_account)
+    monkeypatch.setattr(dt, "validate_evaluation_kms_key", lambda *_args, **_kwargs: EVALUATION_KEY_ARN)
 
     body = admin.AccountTargetRequest(
         account_id="123456789012",
+        evaluation_kms_key_arn=EVALUATION_KEY_ARN,
         role_arn="arn:aws:iam::123456789012:role/AgentCoreFlowsDeploymentRole",
         region="us-east-1",
     )
@@ -388,9 +398,11 @@ def test_admin_registration_persists_only_validated_prerequisites(monkeypatch):
         validate_artifact_bucket,
     )
     monkeypatch.setattr(dt, "add_account", add_account)
+    monkeypatch.setattr(dt, "validate_evaluation_kms_key", lambda *_args, **_kwargs: EVALUATION_KEY_ARN)
 
     body = admin.AccountTargetRequest(
         account_id=account_id,
+        evaluation_kms_key_arn=EVALUATION_KEY_ARN,
         role_arn=f"arn:aws:iam::{account_id}:role/AgentCoreFlowsDeploymentRole",
         artifact_bucket=artifact_bucket,
         region="us-east-1",
@@ -405,6 +417,7 @@ def test_admin_registration_persists_only_validated_prerequisites(monkeypatch):
         mcp_runtime_role_arn=mcp_runtime_arn,
         harness_role_arn=harness_arn,
         artifact_bucket=artifact_bucket,
+        evaluation_kms_key_arn=EVALUATION_KEY_ARN,
     )
     validate_artifact_bucket.assert_called_once_with(
         session,
@@ -430,6 +443,7 @@ def test_live_resolution_uses_the_accounts_registered_region_and_revalidates(
         account_id,
         f"arn:aws:iam::{account_id}:role/AgentCoreFlowsDeploymentRole",
         region,
+        evaluation_kms_key_arn=_evaluation_key_arn(region),
     )
     session = MagicMock()
     session_for_target = MagicMock(return_value=session)
@@ -445,11 +459,14 @@ def test_live_resolution_uses_the_accounts_registered_region_and_revalidates(
     artifact_bucket = dt.default_artifact_bucket_name(account_id, region)
     validate_bucket = MagicMock(return_value=artifact_bucket)
     monkeypatch.setattr(dt, "validate_artifact_bucket", validate_bucket)
+    validate_key = MagicMock(return_value=_evaluation_key_arn(region))
+    monkeypatch.setattr(dt, "validate_evaluation_kms_key", validate_key)
 
     resolved = dt.resolve_registered_account_target(account_id)
 
     assert resolved["region"] == region
     assert resolved["artifact_bucket"] == artifact_bucket
+    assert resolved["evaluation_kms_key_arn"] == _evaluation_key_arn(region)
     session_for_target.assert_called_once_with(
         account_id=account_id,
         region=region,
@@ -467,6 +484,13 @@ def test_live_resolution_uses_the_accounts_registered_region_and_revalidates(
         account_id=account_id,
         region=region,
         artifact_bucket=artifact_bucket,
+    )
+    validate_key.assert_called_once_with(
+        session,
+        account_id=account_id,
+        region=region,
+        key_arn=_evaluation_key_arn(region),
+        deployment_role_arn=f"arn:aws:iam::{account_id}:role/AgentCoreFlowsDeploymentRole",
     )
 
 

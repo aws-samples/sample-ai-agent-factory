@@ -254,6 +254,18 @@ class TestAccountGlobalNames:
         assert not any(OTHER_REGION in n for n in table_names)
 
 
+def test_external_widget_cors_is_token_only_and_exposes_retry_after(other_template):
+    policy = _only(other_template, "AWS::CloudFront::ResponseHeadersPolicy")
+    cors = policy["Properties"]["ResponseHeadersPolicyConfig"]["CorsConfig"]
+    assert cors["AccessControlAllowCredentials"] is False
+    assert cors["AccessControlAllowOrigins"]["Items"] == ["*"]
+    assert cors["AccessControlAllowMethods"]["Items"] == ["ALL"]
+    assert "Authorization" in cors["AccessControlAllowHeaders"]["Items"]
+    assert "Content-Type" in cors["AccessControlAllowHeaders"]["Items"]
+    assert cors["AccessControlExposeHeaders"]["Items"] == ["Retry-After"]
+    assert cors["OriginOverride"] is True
+
+
 # ---------------------------------------------------------------
 # Region threading
 # ---------------------------------------------------------------

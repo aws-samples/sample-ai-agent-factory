@@ -123,18 +123,21 @@ def a_version(version_id: str = V1, **over) -> AgentVersion:
     return AgentVersion(**fields)
 
 
-def a_fence(version: AgentVersion, slot: str = "production") -> VersionFence:
+def a_fence(version: AgentVersion, slot: str = "production", **over) -> VersionFence:
     """The fence a caller builds from a version row it just read."""
-    return VersionFence(
-        version_id=version.version_id,
-        owner_sub=version.owner_sub,
-        status=version.status,
-        created_at=version.created_at or None,
-        slot=slot,
-        deployment_id=version.deployment_id,
-        runtime_id=version.runtime_id,
-        runtime_arn=version.runtime_arn,
-    )
+    fields = {
+        "version_id": version.version_id,
+        "owner_sub": version.owner_sub,
+        "status": version.status,
+        "created_at": version.created_at or None,
+        "slot": slot,
+        "deployment_id": version.deployment_id,
+        "runtime_id": version.runtime_id,
+        "runtime_arn": version.runtime_arn,
+        "production_gate_required": version.production_gate_required,
+    }
+    fields.update(over)
+    return VersionFence(**fields)
 
 
 def raw_slot(name: str = NAME) -> dict | None:
@@ -887,3 +890,111 @@ def test_no_production_code_path_calls_upsert():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_a_gated_production_pointer_refuses_deployment_authority(stores):
+    vstore, _ = stores
+    version = a_version(production_gate_required=True, promotion_policy={"policy_digest": "a" * 64})
+    vstore.put(version)
+
+    with pytest.raises(ValueError, match="server-verified evaluation evidence"):
+        set_slot_pointers_atomically(
+            NAME,
+            expected=None,
+            new=RuntimeSlots(runtime_name=NAME, owner_sub=OWNER, production_version_id=V1),
+            require_version=a_fence(version, promotion_authority="deployment"),
+        )
+
+
+def test_a_gated_production_pointer_condition_checks_exact_evidence(stores):
+    vstore, sstore = stores
+    evidence = {
+        "verdict": "pass",
+        "evidence_digest": "b" * 64,
+        "policy_digest": "a" * 64,
+        "expires_at_epoch": 2_000_000_000,
+    }
+    version = a_version(
+        production_gate_required=True,
+        promotion_policy={"policy_digest": "a" * 64},
+        promotion_evidence=evidence,
+    )
+    vstore.put(version)
+
+    set_slot_pointers_atomically(
+        NAME,
+        expected=None,
+        new=RuntimeSlots(runtime_name=NAME, owner_sub=OWNER, production_version_id=V1),
+        require_version=a_fence(
+            version,
+            promotion_authority="evaluation",
+            promotion_evidence_digest="b" * 64,
+            promotion_policy_digest="a" * 64,
+            minimum_promotion_evidence_expiry_epoch=1_900_000_000,
+        ),
+    )
+    assert sstore.get(NAME, consistent=True).production_version_id == V1
+
+
+def test_a_gated_production_pointer_rejects_a_changed_evidence_digest(stores):
+    vstore, sstore = stores
+    evidence = {
+        "verdict": "pass",
+        "evidence_digest": "b" * 64,
+        "policy_digest": "a" * 64,
+        "expires_at_epoch": 2_000_000_000,
+    }
+    version = a_version(production_gate_required=True, promotion_evidence=evidence)
+    vstore.put(version)
+
+    with pytest.raises(SlotWriteConflict):
+        set_slot_pointers_atomically(
+            NAME,
+            expected=None,
+            new=RuntimeSlots(runtime_name=NAME, owner_sub=OWNER, production_version_id=V1),
+            require_version=a_fence(
+                version,
+                promotion_authority="evaluation",
+                promotion_evidence_digest="c" * 64,
+                promotion_policy_digest="a" * 64,
+                minimum_promotion_evidence_expiry_epoch=1_900_000_000,
+            ),
+        )
+    assert sstore.get(NAME, consistent=True) is None
+
+
+def test_a_gated_rollback_can_restore_only_the_exact_previous_production(stores):
+    vstore, sstore = stores
+    previous = a_version(V1, production_gate_required=True)
+    current = a_version(V2, created_at=LATER, production_gate_required=True)
+    vstore.put(previous)
+    vstore.put(current)
+    sstore.upsert(
+        RuntimeSlots(
+            runtime_name=NAME,
+            owner_sub=OWNER,
+            production_version_id=V2,
+            previous_production_version_id=V1,
+        )
+    )
+    expected = sstore.get(NAME, consistent=True)
+    updated = replace(
+        expected,
+        production_version_id=V1,
+        previous_production_version_id=V2,
+    )
+    set_slot_pointers_atomically(
+        NAME,
+        expected=expected,
+        new=updated,
+        require_version=a_fence(previous, promotion_authority="rollback"),
+    )
+    assert sstore.get(NAME, consistent=True).production_version_id == V1
+
+    with pytest.raises(ValueError, match="exact previous production"):
+        set_slot_pointers_atomically(
+            NAME,
+            expected=sstore.get(NAME, consistent=True),
+            new=replace(sstore.get(NAME, consistent=True), production_version_id=V1),
+            require_version=a_fence(previous, promotion_authority="rollback"),
+        )

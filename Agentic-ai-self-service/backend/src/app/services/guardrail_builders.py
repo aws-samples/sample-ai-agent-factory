@@ -61,6 +61,57 @@ _GROUNDING_MAX = 0.99
 # Bedrock caps a regex filter ``name`` at 100 characters.
 _REGEX_NAME_MAX = 100
 
+# ``CreateGuardrail.sensitiveInformationPolicyConfig.piiEntitiesConfig[].type``
+# values from the pinned botocore Bedrock model. Keep this set model-verified in
+# tests so an SDK upgrade cannot silently make this request contract stale.
+BEDROCK_PII_TYPES = frozenset(
+    {
+        "ADDRESS",
+        "AGE",
+        "AWS_ACCESS_KEY",
+        "AWS_SECRET_KEY",
+        "CA_HEALTH_NUMBER",
+        "CA_SOCIAL_INSURANCE_NUMBER",
+        "CREDIT_DEBIT_CARD_CVV",
+        "CREDIT_DEBIT_CARD_EXPIRY",
+        "CREDIT_DEBIT_CARD_NUMBER",
+        "DRIVER_ID",
+        "EMAIL",
+        "INTERNATIONAL_BANK_ACCOUNT_NUMBER",
+        "IP_ADDRESS",
+        "LICENSE_PLATE",
+        "MAC_ADDRESS",
+        "NAME",
+        "PASSWORD",
+        "PHONE",
+        "PIN",
+        "SWIFT_CODE",
+        "UK_NATIONAL_HEALTH_SERVICE_NUMBER",
+        "UK_NATIONAL_INSURANCE_NUMBER",
+        "UK_UNIQUE_TAXPAYER_REFERENCE_NUMBER",
+        "URL",
+        "USERNAME",
+        "US_BANK_ACCOUNT_NUMBER",
+        "US_BANK_ROUTING_NUMBER",
+        "US_INDIVIDUAL_TAX_IDENTIFICATION_NUMBER",
+        "US_PASSPORT_NUMBER",
+        "US_SOCIAL_SECURITY_NUMBER",
+        "VEHICLE_IDENTIFICATION_NUMBER",
+    }
+)
+
+# Preserve the historical UI/API shorthand while emitting only service-model
+# values. Bedrock rejects the shorthand itself with ValidationException.
+_PII_TYPE_ALIASES = {"SSN": "US_SOCIAL_SECURITY_NUMBER"}
+
+
+def normalize_pii_type(value: Any) -> str:
+    """Return an uppercase Bedrock PII type, canonicalizing supported aliases."""
+
+    candidate = str(value or "").strip().upper()
+    return _PII_TYPE_ALIASES.get(candidate, candidate)
+
+
 # Allowed regex-filter actions. ANONYMIZE is the safe default (redact rather
 # than hard-block) and matches the PII-filter default in guardrails_step.
 _REGEX_ACTIONS = ("BLOCK", "ANONYMIZE")

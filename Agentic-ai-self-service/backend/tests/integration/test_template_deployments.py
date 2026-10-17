@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -55,16 +56,19 @@ class TemplateCase:
 
 
 def _is_web_search_payload(value: Any) -> bool:
+    results = value.get("results") if isinstance(value, dict) else value
     return bool(
-        isinstance(value, list)
-        and value
+        isinstance(results, list)
+        and results
         and any(
             isinstance(item, dict)
             and isinstance(item.get("title"), str)
             and item.get("title")
             and isinstance(item.get("url"), str)
             and item.get("url", "").startswith("http")
-            for item in value
+            and isinstance(item.get("text"), str)
+            and item.get("text")
+            for item in results
         )
     )
 
@@ -123,7 +127,7 @@ def _is_customer_payload(value: Any) -> bool:
         isinstance(value, dict)
         and value.get("customer_id") == "CUST-001"
         and value.get("name") == "John Doe"
-        and value.get("email") == "john@example.com"
+        and "email" not in value
         and value.get("total_orders") == 3
         and value.get("total_spent") == 354.97
     )
@@ -166,7 +170,7 @@ def _is_legacy_customer_payload(value: Any) -> bool:
         isinstance(value, dict)
         and value.get("customer_id") == "CUST-001"
         and value.get("name") == "John Smith"
-        and value.get("email") == "john@example.com"
+        and "email" not in value
         and value.get("membership_tier") == "Gold"
     )
 
@@ -200,10 +204,7 @@ def _tool_call(
 ) -> ToolInvocation:
     return ToolInvocation(
         tool_name=tool_name,
-        prompt=(
-            f"Call {tool_name} with {arguments}. Return only the exact JSON value "
-            "returned by the tool, with no commentary or markdown."
-        ),
+        prompt=(f"Please use {tool_name} with {arguments}, then present the tool result as JSON."),
         response_label=response_label,
         response_oracle=response_oracle,
     )
@@ -238,9 +239,9 @@ _CANONICAL_SUPPORT_INVOCATIONS = (
 
 _DYNAMIC_WEB_INVOCATIONS = (
     _tool_call(
-        "duckduckgo_search",
-        "query Amazon Bedrock AgentCore",
-        "DuckDuckGo search tool",
+        "WebSearch",
+        "query Amazon Bedrock AgentCore and maxResults 5",
+        "Amazon managed Web Search tool",
         _is_web_search_payload,
     ),
     _tool_call(
@@ -272,7 +273,7 @@ _LEGACY_SUPPORT_INVOCATIONS = (
     ),
     _tool_call(
         "lookup_customer",
-        "email john@example.com",
+        "customer_id CUST-001",
         "legacy lookup_customer tool",
         _is_legacy_customer_payload,
     ),
@@ -345,10 +346,10 @@ TEMPLATE_CASES: tuple[TemplateCase, ...] = (
 
 
 _WEB_SEARCH_PROMPT = (
-    "You are a helpful web search assistant. Use the DuckDuckGo search tool to find "
-    "relevant URLs, then use the fetch_webpage tool to retrieve the actual page "
-    "content for up-to-date information. Always fetch page content rather than "
-    "relying on search snippets alone. Cite your sources."
+    "You are a helpful web search assistant. Use the managed WebSearch tool to find "
+    "current information and preserve result titles and source URLs as citations. "
+    "When more detail is needed, use fetch_webpage on a result URL to retrieve bounded "
+    "page content rather than relying on a search excerpt alone. Cite every source you use."
 )
 _STRANDS_GATEWAY_PROMPT = (
     "You are a helpful assistant with access to tools through the MCP Gateway. "
@@ -484,7 +485,15 @@ def _template_request_payload(
         "templateId": case.template_id,
     }
 
-    if case.template_id == "strands-gateway-agent":
+    if case.template_id == "web-search-agent":
+        payload.update(
+            {
+                "connectedTools": ["gateway", "identity"],
+                "gatewayConfig": _gateway_config("web_search_gateway"),
+                "identityConfig": _shared_cognito_identity(),
+            }
+        )
+    elif case.template_id == "strands-gateway-agent":
         payload.update(
             {
                 "connectedTools": ["gateway", "identity"],
@@ -632,6 +641,28 @@ def _deploy_template(
     return record, payload
 
 
+def _nested_json_envelope_strings(value: Any) -> Iterable[str]:
+    """Yield bounded JSON strings from recognizable structured envelopes."""
+
+    pending: list[Any] = [value]
+    visited = 0
+    while pending:
+        current = pending.pop()
+        visited += 1
+        if visited > 256:
+            return
+        if isinstance(current, dict):
+            status_code = current.get("statusCode")
+            body = current.get("body")
+            if type(status_code) is int and isinstance(body, str):
+                candidate = body.strip()
+                if candidate and len(candidate) <= 256 * 1024:
+                    yield candidate
+            pending.extend(nested for nested in current.values() if isinstance(nested, dict | list))
+        elif isinstance(current, list):
+            pending.extend(nested for nested in current if isinstance(nested, dict | list))
+
+
 def _json_values(text: str) -> Iterable[Any]:
     """Yield JSON values from plain, fenced, or lightly-prefixed model output."""
 
@@ -661,6 +692,8 @@ def _json_values(text: str) -> Iterable[Any]:
             yield value
             if isinstance(value, str):
                 pending.append(value.strip())
+            else:
+                pending.extend(_nested_json_envelope_strings(value))
 
         for index, character in enumerate(candidate):
             if character not in "[{":
@@ -672,6 +705,8 @@ def _json_values(text: str) -> Iterable[Any]:
             yield value
             if isinstance(value, str):
                 pending.append(value.strip())
+            else:
+                pending.extend(_nested_json_envelope_strings(value))
 
 
 def _require_json_oracle(
@@ -714,6 +749,83 @@ def _structured_error(value: Any) -> str | None:
     return None
 
 
+_EXPECTED_TOOL_ARGUMENTS: dict[str, tuple[dict[str, Any], ...]] = {
+    "WebSearch": ({"query": "Amazon Bedrock AgentCore", "maxResults": 5},),
+    "wikipedia_search": ({"query": "Python programming language"},),
+    "get_weather": ({"location": "Dublin"},),
+    "fetch_webpage": ({"url": "https://example.com"},),
+    "get_order": ({"order_id": "ORD-12345"},),
+    "get_customer": ({"customer_id": "CUST-001"},),
+    "list_orders": ({"customer_id": "CUST-001", "limit": 10},),
+    "process_refund": (
+        {"order_id": "ORD-12345", "amount": 10, "reason": "integration verification"},
+        {"order_id": "ORD-12345", "amount": 10.0, "reason": "integration verification"},
+    ),
+    "check_order_status": ({"order_id": "ORD-12345"},),
+    "lookup_customer": ({"customer_id": "CUST-001"},),
+    "search_knowledge_base": ({"query": "refund"},),
+    "get_return_policy": ({"product_category": "electronics"},),
+}
+
+
+def _receipt_digest(value: Any) -> str:
+    import hashlib
+
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _receipt_tool_name_matches(published_name: Any, requested_name: str) -> bool:
+    """Match a direct tool name or the exact leaf of a Gateway-published name."""
+    if not isinstance(published_name, str) or not published_name or len(published_name) > 256:
+        return False
+    if published_name == requested_name:
+        return True
+    segments = published_name.split("___")
+    return (
+        len(segments) >= 2
+        and segments[-1] == requested_name
+        and all(re.fullmatch(r"[A-Za-z0-9_-]+", segment) for segment in segments)
+    )
+
+
+def _require_exact_tool_receipt(body: dict[str, Any], invocation: ToolInvocation) -> None:
+    receipts = body.get("toolReceipts")
+    if receipts is None:
+        receipts = body.get("tool_receipts")
+    assert isinstance(receipts, list), f"{invocation.response_label} returned no verifiable tool receipts: {body}"
+    accepted_arguments = _EXPECTED_TOOL_ARGUMENTS[invocation.tool_name]
+    expected = {
+        (
+            _receipt_digest(arguments),
+            tuple(sorted((key, _receipt_digest(value)) for key, value in arguments.items())),
+        )
+        for arguments in accepted_arguments
+    }
+    observed = {
+        (
+            str(receipt.get("input_sha256") or ""),
+            tuple(sorted((receipt.get("argument_sha256") or {}).items())),
+        )
+        for receipt in receipts
+        if isinstance(receipt, dict)
+        and _receipt_tool_name_matches(receipt.get("name"), invocation.tool_name)
+        and receipt.get("status") == "success"
+        and isinstance(receipt.get("argument_sha256"), dict)
+    }
+    assert expected & observed, (
+        f"{invocation.response_label} lacks a successful exact-argument receipt; "
+        f"expected one of {sorted(expected)}, observed {sorted(observed)}"
+    )
+
+
 def _invoke_http(
     api_session,
     *,
@@ -722,25 +834,56 @@ def _invoke_http(
     prompt: str,
     session_id: str,
     label: str,
+    invocation: ToolInvocation | None = None,
 ) -> str:
     response = api_session.post(
-        f"{api_session.base_url}/api/test-runtime",
+        f"{api_session.base_url}/api/test-runtime-async",
         json={
             "endpoint": status["runtime_endpoint"],
             "input": prompt,
             "runtimeId": status["runtime_id"],
             "sessionId": session_id,
         },
-        timeout=180,
+        timeout=60,
     )
-    response.raise_for_status()
-    body = response.json()
+    assert response.status_code == 202, (
+        f"{case.template_id}: {label} async invocation did not start: {response.status_code} {response.text}"
+    )
+    started = response.json()
+    test_id = started.get("testId")
+    assert isinstance(test_id, str) and test_id, f"{case.template_id}: {label} returned no testId"
+    poll_url = f"{api_session.base_url}/api/test-runtime-async/{test_id}"
+    deadline = time.monotonic() + 9 * 60
+    body: dict[str, Any] = {}
+    try:
+        while time.monotonic() < deadline:
+            polled = api_session.get(poll_url, timeout=30)
+            polled.raise_for_status()
+            candidate = polled.json()
+            assert isinstance(candidate, dict), f"{case.template_id}: {label} poll returned a non-object"
+            if candidate.get("status") == "completed":
+                body = candidate
+                break
+            assert candidate.get("status") == "running", (
+                f"{case.template_id}: {label} returned invalid async state: {candidate}"
+            )
+            time.sleep(2)
+        else:
+            raise AssertionError(f"{case.template_id}: {label} exceeded the 9 minute async limit")
+    finally:
+        cleaned = api_session.delete(poll_url, timeout=30)
+        assert cleaned.status_code in {200, 404}, (
+            f"{case.template_id}: {label} async-result cleanup failed: {cleaned.status_code} {cleaned.text}"
+        )
+
     assert body.get("success") is True, f"{case.template_id}: {label} invocation failed: {body.get('error') or body}"
     returned_session = body.get("sessionId")
     if returned_session is not None:
         assert returned_session == session_id, (
             f"{case.template_id}: {label} changed session {session_id!r} to {returned_session!r}"
         )
+    if invocation is not None:
+        _require_exact_tool_receipt(body, invocation)
     text = body.get("response")
     assert isinstance(text, str) and text.strip(), f"{case.template_id}: {label} returned no response text"
     return text
@@ -753,16 +896,20 @@ def _invoke_http_template(
     status: dict[str, Any],
 ) -> None:
     assert case.invocations
-    session_id = f"integration-{uuid.uuid4().hex}"
 
+    # Each tool oracle is an independent wiring check. Reusing one model
+    # conversation lets an earlier response change whether the model calls a
+    # later requested tool, which tests conversation drift rather than wiring.
     for invocation in case.invocations:
+        tool_session_id = f"integration-tool-{case.name_token}-{uuid.uuid4().hex}"
         text = _invoke_http(
             api_session,
             case=case,
             status=status,
             prompt=invocation.prompt,
-            session_id=session_id,
+            session_id=tool_session_id,
             label=invocation.response_label,
+            invocation=invocation,
         )
         _require_json_oracle(
             text,
@@ -773,31 +920,33 @@ def _invoke_http_template(
     if not case.verify_memory_recall:
         return
 
-    nonce = f"MEM-{uuid.uuid4().hex}"
+    # Memory itself remains a same-session, two-turn customer journey. Use a
+    # normal support preference rather than a secret-like nonce that the
+    # production PII Guardrail correctly anonymizes as a password.
+    memory_session_id = f"integration-memory-{case.name_token}-{uuid.uuid4().hex}"
+    memory_fact = "text message"
     _invoke_http(
         api_session,
         case=case,
         status=status,
-        prompt=(f"Remember this verification nonce exactly for this conversation: {nonce}. Reply only STORED."),
-        session_id=session_id,
+        prompt="The customer prefers to receive delivery updates by text message in this support conversation.",
+        session_id=memory_session_id,
         label="memory write",
     )
     recall = _invoke_http(
         api_session,
         case=case,
         status=status,
-        prompt=(
-            "What exact verification nonce did I ask you to remember in this conversation? Return only that nonce."
-        ),
-        session_id=session_id,
+        prompt="How does the customer prefer to receive delivery updates in this support conversation?",
+        session_id=memory_session_id,
         label="memory recall",
     )
     recall_errors = [error for value in _json_values(recall) if (error := _structured_error(value))]
     assert not recall_errors, (
         f"{case.template_id}: memory recall returned structured errors {recall_errors}: {recall[:1200]!r}"
     )
-    assert nonce in recall, (
-        f"{case.template_id}: same-session memory did not recall {nonce!r}. Actual response: {recall[:1200]!r}"
+    assert memory_fact in recall.casefold(), (
+        f"{case.template_id}: same-session memory did not recall {memory_fact!r}. Actual response: {recall[:1200]!r}"
     )
 
 
@@ -858,7 +1007,6 @@ def _invoke_standalone_mcp(
     assert discovery.get("protocolVersion") == MCP_PROTOCOL_VERSION
     assert {tool.get("name") for tool in discovery.get("tools", []) if isinstance(tool, dict)} == {
         "get_weather",
-        "search_web",
         "fetch_url",
     }
     assert all(
@@ -881,23 +1029,6 @@ def _invoke_standalone_mcp(
         _mcp_text(weather),
         oracle=_is_weather_payload,
         label="standalone MCP get_weather",
-    )
-
-    search = _call_mcp_tool(
-        api_session,
-        deployment_id=deployment_id,
-        tool_name="search_web",
-        arguments={"query": "Python programming language"},
-        session_id=session_id,
-    )
-    _require_json_oracle(
-        _mcp_text(search),
-        oracle=lambda value: bool(
-            isinstance(value, list)
-            and value
-            and any(isinstance(item, dict) and isinstance(item.get("url"), str) and item.get("url") for item in value)
-        ),
-        label="standalone MCP search_web",
     )
 
     fetched = _call_mcp_tool(
@@ -988,6 +1119,7 @@ def test_gallery_template_deploy_invoke_and_verified_cleanup(
     case: TemplateCase,
     api_session,
     deployment_cleanup: DeploymentCleanupTracker,
+    runtime_budget,
     wait_for_deployment,
 ) -> None:
     record, request_payload = _deploy_template(
@@ -1014,18 +1146,28 @@ def test_gallery_template_deploy_invoke_and_verified_cleanup(
 
     if case.protocol == "MCP":
         assert request_payload["config"]["protocol"] == "MCP"
-        _invoke_standalone_mcp(
-            api_session,
-            deployment_id=record.deployment_id,
-            runtime_name=request_payload["config"]["name"],
-            status=status,
-        )
+        runtime_name = request_payload["config"]["name"]
+        runtime_budget.authorize(runtime_name)
+        try:
+            _invoke_standalone_mcp(
+                api_session,
+                deployment_id=record.deployment_id,
+                runtime_name=runtime_name,
+                status=status,
+            )
+        finally:
+            runtime_budget.release(runtime_name)
     else:
-        _invoke_http_template(
-            api_session,
-            case=case,
-            status=status,
-        )
+        runtime_name = request_payload["config"]["name"]
+        runtime_budget.authorize(runtime_name)
+        try:
+            _invoke_http_template(
+                api_session,
+                case=case,
+                status=status,
+            )
+        finally:
+            runtime_budget.release(runtime_name)
 
     tombstone = deployment_cleanup.delete_and_verify(record)
     assert tombstone.get("delete_status") == "deleted"

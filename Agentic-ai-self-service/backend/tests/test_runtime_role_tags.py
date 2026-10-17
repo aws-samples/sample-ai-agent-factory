@@ -193,3 +193,67 @@ def test_owner_tag_carries_the_region_not_just_project_and_env():
     tags = {t["Key"]: t["Value"] for t in iam.list_role_tags(RoleName="agentcore-tagtest-role5")["Tags"]}
     assert tags["AgentCoreStack"].endswith("-eu-central-1")
     assert tags["AgentCoreStack"] != stack_id("us-east-1")
+
+
+@mock_aws
+def test_dynamic_runtime_trace_export_requires_explicit_instrumentation(monkeypatch):
+    from app.services import runtime_deployer
+
+    monkeypatch.setattr(runtime_deployer.time, "sleep", lambda _seconds: None)
+    iam = boto3.client("iam", region_name="us-east-1")
+    expected_actions = {
+        "xray:PutTraceSegments",
+        "xray:PutTelemetryRecords",
+        "xray:GetSamplingRules",
+        "xray:GetSamplingTargets",
+    }
+
+    for role_name, enabled in (
+        ("agentcore-uninstrumented-role", False),
+        ("agentcore-instrumented-role", True),
+    ):
+        create_runtime_iam_role(
+            iam_client=iam,
+            role_name=role_name,
+            account_id="123456789012",
+            region="us-east-1",
+            trace_export_enabled=enabled,
+        )
+        policy = iam.get_role_policy(
+            RoleName=role_name,
+            PolicyName="AgentCoreRuntimePolicy",
+        )["PolicyDocument"]
+        matching = [
+            statement
+            for statement in policy["Statement"]
+            if statement.get("Sid") == "AgentCoreObservabilityTraceExport"
+        ]
+        if enabled:
+            assert len(matching) == 1
+            assert set(matching[0]["Action"]) == expected_actions
+            assert matching[0]["Resource"] == "*"
+        else:
+            assert matching == []
+
+
+@mock_aws
+def test_model_free_dynamic_runtime_never_receives_trace_export(monkeypatch):
+    from app.services import runtime_deployer
+
+    monkeypatch.setattr(runtime_deployer.time, "sleep", lambda _seconds: None)
+    iam = boto3.client("iam", region_name="us-east-1")
+    role_name = "agentcore-model-free-role"
+    create_runtime_iam_role(
+        iam_client=iam,
+        role_name=role_name,
+        account_id="123456789012",
+        region="us-east-1",
+        model_free=True,
+        trace_export_enabled=True,
+    )
+    policy = iam.get_role_policy(
+        RoleName=role_name,
+        PolicyName="AgentCoreRuntimePolicy",
+    )["PolicyDocument"]
+    sids = {statement.get("Sid") for statement in policy["Statement"]}
+    assert "AgentCoreObservabilityTraceExport" not in sids

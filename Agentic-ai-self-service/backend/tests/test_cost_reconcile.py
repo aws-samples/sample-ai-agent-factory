@@ -14,13 +14,16 @@ from app.step_handlers import cost_reconcile_step as crs  # noqa: E402
 NOW = 1_752_624_000
 
 
-def _patch(monkeypatch, *, budgets, owner_runtimes=None, agent_runtime=None, spends=None):
+def _patch(monkeypatch, *, budgets, owner_runtimes=None, agent_runtime=None, spends=None, committed_stale=0):
     """Wire fake stores/summarize so the handler runs without AWS."""
     owner_runtimes = owner_runtimes or {}
     spends = spends or {}
     emitted: list[tuple[str, str]] = []
 
     class _FakeBudgetStore:
+        def commit_expired_reservations(self, org_id, *, now_epoch, limit):  # noqa: ARG002
+            return committed_stale
+
         def list_all(self, org_id):  # noqa: ARG002
             return budgets
 
@@ -43,7 +46,13 @@ def test_owner_budget_over_emits_breach(monkeypatch):
         spends={"rt-1": 7.0, "rt-2": 5.0},  # $12 > $10 → over
     )
     out = crs.handler({"now_epoch": NOW})
-    assert out == {"reconciled": 1, "breached": 1, "skipped": 0, "failed": 0}
+    assert out == {
+        "reconciled": 1,
+        "breached": 1,
+        "skipped": 0,
+        "failed": 0,
+        "committed_stale_reservations": 0,
+    }
     assert emitted == [("owner", "over")]
 
 
@@ -101,7 +110,13 @@ def test_tag_budget_is_skipped(monkeypatch):
     b = Budget(org_id="default", scope="tag", key="team=data", limit_usd=5.0, warn_pct=80)
     emitted = _patch(monkeypatch, budgets=[b])
     out = crs.handler({"now_epoch": NOW})
-    assert out == {"reconciled": 0, "breached": 0, "skipped": 1, "failed": 0}
+    assert out == {
+        "reconciled": 0,
+        "breached": 0,
+        "skipped": 1,
+        "failed": 0,
+        "committed_stale_reservations": 0,
+    }
     assert emitted == []
 
 
@@ -114,3 +129,11 @@ def test_list_failure_returns_error_not_raise(monkeypatch):
     monkeypatch.setattr("app.services.budget_store.get_budget_store", lambda: _Boom())
     out = crs.handler({"now_epoch": NOW})
     assert out["error"] == "list_failed" and out["reconciled"] == 0
+
+
+def test_reconcile_commits_stale_unknown_reservations(monkeypatch):
+    _patch(monkeypatch, budgets=[], committed_stale=3)
+
+    out = crs.handler({"now_epoch": NOW})
+
+    assert out["committed_stale_reservations"] == 3

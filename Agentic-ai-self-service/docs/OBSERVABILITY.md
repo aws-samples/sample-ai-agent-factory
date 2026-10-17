@@ -16,7 +16,7 @@ Platform-level config takes precedence over per-canvas: the endpoint, secret ARN
 
 - `backend/src/app/services/_otel_platform.py` — module-load OTel SDK setup imported as the first import of every Lambda handler. Resolves `OTEL_AUTH_SECRET_ARN` from Secrets Manager into `OTEL_EXPORTER_OTLP_HEADERS`, sets up `BatchSpanProcessor` + `OTLPSpanExporter` (HTTP), instruments boto3.
 - `backend/src/app/services/observability.py::get_platform_observability_defaults()` — reads SSM at module load, cached via `lru_cache`.
-- `backend/src/app/services/code_generator.py::_inject_otel()` — post-processes generated agent code to bootstrap Strands `StrandsTelemetry` + force-flush spans on shutdown.
+- `backend/src/app/services/code_generator.py::_inject_otel()` — post-processes generated agent code to initialize the packaged AWS ADOT distro in-process, bootstrap Strands `StrandsTelemetry`, and force-flush spans on shutdown. Python direct-code keeps `agent.py` as its sole Runtime entrypoint; the `opentelemetry-instrument` prefix is AgentCore's Node.js package contract and is not used for Python ZIPs. A required production-evaluation traces endpoint fails Runtime startup closed if ADOT does not install a real SDK provider.
 
 Verified live against Langfuse Cloud — both platform Lambda traces and deployed-agent traces appear under the same project.
 

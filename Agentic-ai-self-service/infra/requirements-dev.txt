@@ -15,4 +15,4 @@
 # two pytest majors.
 pytest>=8.3.0
 # the Cognito provisioner handler tests import botocore (was supplied silently by the system site)
-boto3>=1.43.66
+boto3==1.43.109

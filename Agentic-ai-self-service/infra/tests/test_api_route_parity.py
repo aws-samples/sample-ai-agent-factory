@@ -150,6 +150,15 @@ def test_the_mcp_runtime_route_actually_covers_both_mounted_subpaths(route_keys)
         assert any(_covers(gm, gp, "POST", path) for gm, gp in route_keys), path
 
 
+def test_the_async_runtime_routes_reach_all_three_mounted_operations(route_keys):
+    expected = {
+        ("POST", "/api/test-runtime-async"),
+        ("GET", "/api/test-runtime-async/{test_id}"),
+        ("DELETE", "/api/test-runtime-async/{test_id}"),
+    }
+    assert expected <= set(route_keys)
+
+
 def test_every_mounted_route_is_reachable_through_api_gateway(route_keys, apps):
     uncovered = sorted(
         f"{method} {path}"

@@ -97,11 +97,11 @@ export const PALETTE_ITEMS: PaletteItem[] = [
   // ── Tools ──────────────────────────────────────────────────────────────
   {
     type: 'tool',
-    label: 'DuckDuckGo Search',
-    description: 'Web search via DuckDuckGo API - returns top results',
-    customIcon: '🦆',
+    label: 'Amazon Web Search',
+    description: 'Managed AgentCore Gateway web search with source citations',
+    customIcon: '🔍',
     category: 'tools',
-    toolId: 'duckduckgo_search',
+    toolId: 'web_search',
   },
   {
     type: 'tool',

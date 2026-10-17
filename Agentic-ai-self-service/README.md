@@ -24,16 +24,19 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 ## Key Features
 
 - **Visual Canvas** — Drag-and-drop AgentCore components (Runtime, Gateway, Memory, Knowledge Base, Browser, Identity, Observability, Policy, Connectors) and wire them together with real-time validation.
-- **Two authoring paths, one deploy pipeline** — Build agents on the canvas (code-generated AgentCore **Runtime**) or as a config-driven **AgentCore Harness** (`deploymentMode: "runtime" | "harness"`); both share the same Gateway, Memory, connector, test, and teardown surfaces.
+- **Two authoring paths, one deploy pipeline** — Build agents on the canvas (code-generated AgentCore **Runtime**) or as a config-driven **AgentCore Harness** (`deploymentMode: "runtime" | "harness"`); both share Gateway, Memory, connector, test, and teardown surfaces in development. Production admission requires the Runtime path because current Harness hooks cannot redact model output or retract a completed unsafe tool result.
 - **Real SaaS connectors** — Jira, Asana, Slack, GitHub, Salesforce, or any OpenAPI spec as Gateway targets with API-key or OAuth2 outbound auth; credentials live only in Secrets Manager.
-- **Template Gallery + CloudFormation Export** — Six one-click templates, plus a downloadable self-contained CloudFormation bundle (`template.yaml`, `deploy.sh`, `teardown.sh`, `build-dependency-bundle.sh`, code artifacts, README) that an external recipient deploys with no access to the platform — `deploy.sh` builds and stages the dependency bundle itself. Four custom resources, all served by one bundled Lambda, cover what no native `AWS::BedrockAgentCore::*` type does yet; data-holding resources carry configurable `DeletionPolicy`/`UpdateReplacePolicy` (retained by default); a LiteLLM-provider gateway exports as a direct proxy connection whose virtual key is passed as a Secrets Manager ARN, never as a parameter value; and the stack wraps cleanly in Terraform's `aws_cloudformation_stack` via `template_url`. See [CloudFormation Export](docs/DEPLOYMENT_INTERNALS.md#cloudformation-export).
+- **External browser delivery** — A versioned, dependency-free `AgentCoreClient` and `<agentcore-chat>` Web Component ship from CloudFront with TypeScript declarations. Hosts provide a request-local Cognito access-token callback; the client invokes only the owner-checked production alias, never retries POSTs, stores no token, and renders model output as inert text. See [Embeddable Chat](docs/EMBEDDABLE_CHAT.md).
+- **Template Gallery + CloudFormation Export** — Six one-click templates, plus a downloadable self-contained CloudFormation bundle (`template.yaml`, `deploy.sh`, `teardown.sh`, `build-dependency-bundle.sh`, code artifacts, README) that an external recipient deploys with no access to the platform — `deploy.sh` builds and stages the dependency bundle itself. Five custom resource types, all served by the bundled provider code, cover what no pin-capable native `AWS::BedrockAgentCore::*` type does yet; managed Web Search uses a dedicated provider function so update rollback cannot restore older shared-provider code before deleting its target. Data-holding resources carry configurable `DeletionPolicy`/`UpdateReplacePolicy` (retained by default); a LiteLLM-provider gateway exports as a direct proxy connection whose virtual key is passed as a Secrets Manager ARN, never as a parameter value; and the stack wraps cleanly in Terraform's `aws_cloudformation_stack` via `template_url`. See [CloudFormation Export](docs/DEPLOYMENT_INTERNALS.md#cloudformation-export).
+- **Shared-account-safe gallery defaults** — An untouched gallery Gateway name is paired server-side with the ownership-fenced Runtime name, while explicit custom Gateway names are preserved. Live tool-wiring checks use an isolated customer session per tool, accept only direct or syntactically valid Gateway-qualified receipt names with exact successful argument digests, and keep the Memory proof as a separate same-session customer-support journey.
+- **Read-after-write release control** — Runtime slot reads are strongly consistent, so a deployment reported as succeeded cannot transiently return `404` while its newly written staging pointer is still converging.
 - **AI generation** — Describe a tool or a whole agent in natural language; Claude on Bedrock generates a deployable Lambda tool or a validated canvas spec.
 - **Multi-target gateways** — One gateway can carry multiple targets of different families at once (Lambda tools, external MCP servers from a curated catalog or a custom endpoint, OpenAPI specs, Smithy models), each with the right outbound auth.
-- **Dynamic Gateway tool pipeline** — Selected tools deploy as a single Lambda behind an MCP Gateway with Cognito OAuth2; agents discover them at runtime via `tools/list`.
+- **Dynamic Gateway tool pipeline** — Managed search deploys as a pinned AWS connector target; selected Wikipedia, weather, fetch, and demo tools deploy behind scoped Lambda targets. Agents discover both through the MCP Gateway with Cognito OAuth2.
 - **Bring your own LiteLLM** — Point an agent at a LiteLLM MCP proxy *instead of* AgentCore Gateway, or carry it *inside* one as an MCP target, and/or make a LiteLLM proxy the authoritative agent catalog. All opt-in and additive; the AgentCore Gateway and the built-in registry remain the defaults. See [Bring your own LiteLLM](#bring-your-own-litellm).
 - **13 model providers & multi-agent patterns** — Bedrock (default), OpenAI, Anthropic, Gemini, Mistral, Ollama, Groq, DeepSeek, Together, LiteLLM, SageMaker, Writer, LlamaAPI; Graph / Swarm / Workflow orchestration via Strands Agents SDK.
 - **Knowledge Base (RAG)** — 5 data source types, 3 vector stores (S3 Vectors, OpenSearch Serverless auto-provisioned, Aurora PostgreSQL), configurable parsing/chunking, plus agentic retrieval strategies. Customer-owned AWS resources require an explicit `AgentCoreFlowsAccess=allow` opt-in before the platform can grant a Knowledge Base role access.
-- **Enterprise governance** — Scope-based RBAC/ABAC, Cedar policy enforcement, agent registry with approval workflow, versioning & rollback, cost budgets, audit analytics, HITL approvals, VPC-egress runtimes, OIDC federation. See [Enterprise Capabilities](docs/ENTERPRISE_CAPABILITIES.md).
+- **Enterprise governance** — Scope-based RBAC/ABAC, Cedar policy enforcement, agent registry with approval workflow, versioning with AgentCore batch-evaluation-gated production promotion and emergency rollback, cost budgets, audit analytics, HITL approvals, VPC-egress runtimes, OIDC federation. See [Enterprise Capabilities](docs/ENTERPRISE_CAPABILITIES.md).
 - **Manifest-driven teardown with live ownership proof** — Every deploy records the sub-resources it creates; delete re-validates live ownership, confirms asynchronous removal, and reports retained or failed resources instead of claiming they were removed.
 
 ## Prerequisites
@@ -60,6 +63,34 @@ COGNITO_USERS="user@example.com" AWS_REGION=eu-central-1 ./scripts/deploy.sh
 
 The deploy script validates prerequisites and AWS credentials, installs backend/Lambda Python dependencies, builds the AgentCore dependency bundles, runs `cdk deploy` via `npx` (API Gateway, Lambda, Step Functions, DynamoDB, S3, CloudFront), then builds and uploads the frontend and prints the URLs. Lambda code is packaged automatically by CDK — no Docker build or ECR push required. A first-time deploy takes roughly 15–20 minutes.
 
+The CDK safety gate strictly synthesizes once, records the template and every asset
+payload, diffs that same assembly, and re-verifies its receipts immediately before
+deployment. A nonzero `cdk deploy` status is explicitly returned even when a wrapper
+calls the helper from a shell `if` condition; the script never prints success or
+continues to frontend publication after a failed or rolled-back stack update.
+
+Fresh deployments also verify that a missing stack is genuinely absent before deciding
+there are no Cognito users to carry forward. Both AWS CLI v2 missing-stack formats are
+supported, including the current `aws: [ERROR]:` prefix; every nonexact error still
+fails closed before synthesis so an unreadable existing stack cannot lose users.
+
+Dependency builds are a release gate, not a best-effort optimization. The AgentCore
+bundle lock covers every distribution across the baseline and all provider deltas;
+the packager rejects an absent or mismatched pin and writes fixed-metadata, sorted,
+path-neutral ZIPs. Lambda dependencies are compiled from `requirements-lambda.in`
+into a target-specific `requirements-lambda.txt` with hashes, installed with
+`--require-hashes`, and stripped of path-dependent console scripts/RECORD files.
+The source distribution explicitly excludes the generated `backend/lib/` Lambda tree
+while retaining the locked Runtime ZIPs, so its contents do not depend on build order.
+Two builds of one commit must therefore produce identical Runtime ZIPs, Lambda tree,
+wheel, source distribution, CDK template, and asset manifest.
+
+Upgrade dependencies deliberately: update the direct input or rebuild the complete
+AgentCore graph, regenerate the corresponding lock, then run bundle integrity/import,
+clean-clone, strict synth, and live AgentCore invocation gates. In particular,
+`websockets==16.1.1` and `tenacity==9.1.2` are the shared versions accepted by the
+Strands baseline and `google-genai`; an incompatible update fails before CDK.
+
 To also export OTLP traces from every platform Lambda and deployed agent to a backend like Langfuse, see the platform-level OTEL deploy mode in [Observability](docs/OBSERVABILITY.md).
 
 ### Deploying to another region
@@ -84,6 +115,354 @@ are published under *country* prefixes (`jp.` in `ap-northeast-1`, `au.` in
 `ap-southeast-2`) or as `global.`, so an APAC deployment may need its model ID set
 explicitly. `us-*` and `eu-*` regions need no such adjustment.
 
+## Workforce OBO invocation contract
+
+A connector with `delegationMode: "obo"` changes the complete invocation chain;
+it is not a credential-provider-only switch. The Gateway trusts the same workforce
+Cognito issuer/client that protects the API and requires the exact deployment-owner
+`sub` claim. End-user chat invokes
+`POST /api/runtimes/{name}/slots/production/invoke`; the server resolves the
+production slot to its immutable version/deployment/Runtime ARN and recorded
+endpoint qualifier, revalidates the workforce token, reserves invocation capacity,
+and invokes Runtime with target-account SigV4. The request carries the token only in
+AgentCore's signed, allowlisted
+`X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token` header. Runtime has no
+custom-JWT authorizer, so a user bearer cannot invoke it directly and bypass platform
+admission or budget authorization.
+
+Both `GET /api/deploy/{deployment_id}` and `GET /api/deployments` expose the same
+`runtime_name`: the sanitized tenant-facing slot key used by chat and the external
+client. It is derived from the internal friendly-name authority (with AgentCore
+name/id fallback), classified explicitly as public, and never persisted as a second
+source of truth. Internal teardown authority and credential leaves remain excluded.
+
+Generated agents create a fresh MCP client per request, present that request-local JWT
+to the owner-bound Gateway, and close the client after every success or failure path.
+The Gateway target's `grantType=TOKEN_EXCHANGE` performs the configured RFC 8693 or
+RFC 7523 exchange. Missing, expired, Basic, SigV4, malformed, or wrong-target
+credentials fail before Runtime dispatch; no client-credentials fallback exists.
+Non-OBO agents retain their existing cached M2M/static authentication path.
+
+Tokens are never stored in deployment state, Runtime payloads, logs, Memory,
+tool receipts, or returned evidence. Responses may include non-credential
+`identityEvidence` (issuer, subject, expiry, trace correlation, and an optional
+downstream principal). The deploy cannot probe an OBO tool plane without a real
+user token, so `delegated_identity_live_gate=first_authenticated_user_tool_call`
+remains the explicit live gate: the downstream tool's `whoami`-style response
+must attest the expected principal before production promotion. A new request
+must present a fresh JWT; expiry and caller binding are checked at the API and the
+Gateway independently validates its JWT authorizer contract. IdP revocation behavior follows the provider's access-token semantics,
+so use short access-token lifetimes where immediate revocation is required.
+
+## Long-running browser invocation
+
+Direct non-OBO Runtime turns use an authenticated asynchronous transport so model
+and tool work is never constrained by API Gateway's 30-second integration limit.
+The browser sends exactly one `POST /api/test-runtime-async`, polls the returned
+caller-bound test ID with `GET`, and removes the scratch result with `DELETE` after
+consumption. The worker revalidates the deployment owner and HTTP protocol before
+Runtime dispatch, applies the same policy promotion and invocation-budget reservation
+as the synchronous path, and uses a 540-second AgentCore read bound inside the
+Deployment Lambda's 600-second timeout. A timeout or lost poll response never causes
+the browser to replay the model/tool turn. Results retain session IDs and tamper-
+resistant tool receipts; bearer tokens are not placed in the async event or DynamoDB.
+Scratch rows carry a one-day recovery TTL, and poll/delete return an indistinguishable
+404 for absent and cross-tenant IDs. OBO agents continue to use the immutable
+production-slot endpoint because their request-local workforce token is never queued
+or persisted.
+
+## Production safety and promotion gate
+
+Dev-like environments (`dev`, `development`, `test`, `sandbox`, `preview`, and
+`local`) preserve optional Guardrails and the direct-production iteration loop.
+Every other environment enforces the platform-managed `production-v1` Guardrail
+baseline before any row, secret, execution, or AWS resource is created. Guardrail
+creation always applies the platform's governed ownership tags, so both the
+in-account `StepGuardrailsRole` and the documented cross-account deployment role
+include a separate, request-tag-conditioned `bedrock:TagResource` grant on
+`guardrail/*`; granting `CreateGuardrail` alone is insufficient when `tags` are
+present. Missing Guardrail configuration is injected automatically;
+caller-supplied content filters are raised to `HIGH`, and credential/common-PII
+filters are retained at `ANONYMIZE` or stronger. The compatibility input `SSN`
+is canonicalized to Bedrock's `US_SOCIAL_SECURITY_NUMBER`, alias/canonical
+entries are deduplicated with `BLOCK` winning, and every emitted PII type is
+checked against the pinned botocore `CreateGuardrail` enum. Custom denied
+topics and word/regex filters remain.
+Production rejects `existing` mode because READY status alone cannot attest that
+an externally mutable Guardrail still meets this baseline. Guardrail trace is
+disabled in generated Strands models because trace output can retain original
+matched PII, regex content, or blocked model output even when the served response
+is masked. Generated Runtime agents also call `ApplyGuardrail` around every tool
+boundary: Strands `BeforeToolCallEvent` cancels blocked arguments before execution,
+and `AfterToolCallEvent` replaces blocked results before they reach the model. The two
+direct Converse tool paths use the same wrapper. Oversized content, malformed service
+responses, hook import failure, and ApplyGuardrail outage all fail closed without
+logging content. Guardrail screening runs before HITL so blocked sensitive arguments
+are not copied into approval records. Managed Harness remains development-only: its
+current `CreateHarness` model has no native model Guardrail field, an after-tool deny
+retains the completed result, and an after-invocation hook cannot retract streamed
+output. Any production deployment with a tool Gateway also receives the
+platform-managed `production-v1` Cedar profile: `enabled=true`, `mode=ENFORCE`,
+and `on_enforce_failure=fail_closed`. Missing Policy configuration is injected;
+`disabled`, `LOG_ONLY`, and fail-open caller settings are overridden before side
+effects and again inside the Policy step. Production tool planes therefore
+require AgentCore Gateway; LiteLLM tool Gateway deployments remain available in
+development but are outside this production support envelope because they cannot
+attach AgentCore Policy. Model-only agents do not create an unnecessary policy
+engine. Runtime and Harness execution roles never receive Gateway/Policy control-plane
+mutation authority. Every dynamic, per-agent, shared, and CloudFormation-exported
+execution role carries an explicit `Deny` for Gateway/target/Policy create, update,
+delete, and synchronization actions; policy builders also reject exact or wildcard
+`Allow` patterns that would match those actions before IAM publication. JIT
+permission requests cannot grant the same control-plane mutations. Approval first
+claims the row as `APPLYING`; rejection is then impossible until the deterministic
+IAM write is finalized `APPROVED` or a definitive no-side-effect refusal releases it.
+Ambiguous IAM outcomes remain leased and retryable rather than being recorded rejected.
+
+Production-like environments also default new versions to **staging** and reject
+an explicit direct production deploy before side effects. The
+`production_evaluation_gate` context may enable the gate in development but may
+not disable it in production; a false or malformed production value fails
+synthesis and deploy admission. The server-authored gate bit is required on the
+prepared Step Functions input and is consumed unchanged by code generation, IAM,
+and Runtime configuration; the prepared-payload validator refuses a missing or
+non-boolean value before execution. Gated Python Runtime code keeps
+`agent.py` as the sole direct-code entrypoint and initializes the packaged AWS
+ADOT distro in-process before Strands binds its tracer provider, even if canvas
+observability is off. The `opentelemetry-instrument` entrypoint prefix is not
+used: AgentCore validates that prefix as the Node.js package contract and rejects
+a Python ZIP with `CREATE_FAILED`, even when the Python console script is present.
+The production environment disables ADOT's prefork-worker deferral because
+`BedrockAgentCoreApp` runs in the direct-code process; failure to install a real
+SDK provider for the required X-Ray traces endpoint fails Runtime startup closed.
+Its framework spans remain content-redacted. The injected evaluation/force-flush
+wrapper is re-registered through `BedrockAgentCoreApp.entrypoint`; rebinding only
+the module variable is insufficient because the SDK stores the original handler
+when the decorator runs. Executable removal-mutation coverage proves that dropping
+this second registration bypasses marker stripping, span capture, and flush. Only
+the owner-checked staging slot of an immutable production-gated version can add an
+internal marker, which generated code strips before execution. Every instrumented
+invocation emits one metadata-only `invoke_agent` correlation span with
+`session.id` under service name `<AgentCoreRuntimeName>.DEFAULT` in shared
+`aws/spans`. Only an owner-authorized staging invocation adds the documented
+`gen_ai.task.input/output` fields to that span. The production slot cannot accept
+the marker, and the live matrix invokes a post-promotion canary, requires its
+metadata span, and proves its prompt and expected response phrase never appear in
+any record correlated by either session ID or trace ID. CloudWatch Transaction
+Search must be active in each target account and Region; the live integration
+harness can lease this setting temporarily. After first enabling the destination
+or indexing rule, it waits AWS's documented ten-minute search-readiness window
+before creating evaluation sessions. It restores the exact prior destination and
+indexing percentage after the run, treats an already-restored or still-settling
+target as an idempotent recovery state, and retains a validated 0600 recovery
+file until cleanup is proven. Failure auto-cleanup may delete every external AWS
+resource before a Runtime exists; after it proves every recorded resource absent,
+it invokes the same owner/version/slot/trigger-fenced atomic name-claim release as
+an explicit DELETE and re-reads the exact version row and slot pointers before
+publishing `deleted`. Any unproven identity, surviving resource, release conflict,
+or ambiguous read-back remains `delete_retained`. An idempotent DELETE also
+reconciles historical `deleted` tombstones that still carry a version ID, and
+never reports success while that claim remains. The standalone `mcp-server-runtime` is model-free:
+it receives neither this model-evaluation gate nor an injected Bedrock Guardrail;
+its production gate is authenticated MCP protocol and complete tool execution.
+
+A deployment's terminal record and its version-slot pointer are separate fenced
+DynamoDB writes. Clients that just observed `succeeded` may therefore boundedly
+retry a slots read only while it returns `404`; authentication errors, server
+errors, an incorrect pointer, or a missing pointer after 60 seconds fail closed.
+
+Promote a production-gated version from the **Versions** panel:
+
+1. Invoke the exact staging version for at least five representative sessions.
+2. Supply each session ID with assertions, expected tool trajectory, or expected turns.
+3. Start the AgentCore Batch Evaluation. The platform—not the browser—chooses the
+   evaluator IDs and thresholds from the policy frozen onto the version.
+4. Check and attest the completed job. Partial, failed, ignored, stale,
+   low-scoring, wrong-runtime, wrong-account, or wrong-Region results are refused.
+5. Promote. The version row's evidence digest, policy digest, and expiry are
+   condition-checked in the same DynamoDB transaction that moves the production pointer.
+
+Frozen policy and evidence documents preserve canonical numeric types across
+DynamoDB by type-tagging each finite floating-point value before persistence and
+decoding it before digest validation. This deliberately does not trust a DynamoDB
+number's decimal exponent: the live service canonicalizes trailing-zero values such
+as `5.0` to `5`. Integral counts, limits, schema versions, digest fields, and epochs
+remain ordinary DynamoDB values so the slot transaction can condition-check them.
+Malformed or reserved float tags fail closed, and `5` versus `5.0` remain distinct
+canonical JSON after decoding.
+
+Live privacy and evaluation canaries use ordinary customer-style factual requests
+with semantic answer oracles. They never demand exact output phrasing, because the
+production prompt-attack Guardrail intentionally redacts instruction-shaped requests.
+
+The default policy requires five completed sessions, zero failed/ignored
+sessions, zero evaluator failures, and scores of at least `0.70` from
+`Builtin.GoalSuccessRate`, `Builtin.Correctness`, and `Builtin.Helpfulness`.
+Operators can raise or otherwise version this policy with CDK context
+`production_evaluation_policy_json`; invalid JSON or fields fail closed. Release
+evidence expires after 24 hours by default.
+
+### Target-Region production evaluation keys
+
+Every cross-account or same-account cross-Region target registration requires a
+full customer-managed KMS **key ARN** (aliases are refused). The admin API uses
+the target session to call only `DescribeKey` and `GetKeyPolicy`: the key must
+belong to the registered account and Region, be enabled, use
+`SYMMETRIC_DEFAULT` with `ENCRYPT_DECRYPT`, and have the scoped AgentCore service
+statement shown in `docs/cross-account-deploy-role.json`. No key material is
+read or returned. The exact ARN is stored on the target row and then frozen on
+both the deployment and version authority rows.
+
+Promotion batch startup reads that immutable authority. It uses the stack key
+only for a home-Region version; target versions use their registered target key.
+A missing legacy value, a changed target row, or disagreement between the
+version and deployment records fails closed before `StartBatchEvaluation`.
+Re-register legacy targets and redeploy a new version to enable production
+promotion; existing version authority is intentionally never backfilled.
+
+Batch inputs/results are encrypted with the stack's dedicated rotating KMS key.
+The key policy scopes the deployment Lambda and
+`bedrock-agentcore.amazonaws.com` to this account's `batch-evaluate/*` ARN and
+encryption context. In production-like environments the key uses
+`RetainExceptOnCreate`: failed first-stack creation cleans it up, while later stack
+deletes and replacements retain evidence independently from the UI. Dev/test/sandbox
+and other throwaway environments destroy it with the stack. This prevents both orphaned
+failed-create keys and accidental production evidence loss. A cross-account or same-account
+cross-Region target must provide a target-Region evaluation key before it can
+inherit production-promotion support; a home-Region key is never reused across
+that boundary.
+
+Emergency rollback remains available, but only as an atomic swap to the exact
+previous production version. It cannot select an arbitrary unevaluated version.
+
+## Append-only production audit
+
+Both API Lambdas classify every write route and append correlated audit evidence.
+Authenticated API writes use the shared middleware; public webhook deliveries
+append only after HMAC/replay validation so unauthenticated traffic cannot create
+audit rows. Production records an `attempt` before route execution; if that conditional
+`PutItem` fails, the route returns 503 before application side effects. Outcomes
+are separate immutable rows. The platform roles can append/query but are
+explicitly denied update, delete, and batch-write access to the audit table.
+Every row has a canonical SHA-256 digest verified on read, and incomplete
+attempts are highlighted in the admin UI. Production events omit the `ttl`
+attribute and the table is retained/deletion-protected; DynamoDB TTL processing
+stays enabled so pre-upgrade and development rows carrying `ttl` still expire.
+
+This is an append-only, tamper-evident projection inside the platform IAM
+boundary, **not** an Object Lock/WORM compliance attestation against account
+administrators. See [`docs/DATA_RETENTION.md`](docs/DATA_RETENTION.md) for the
+pseudonymous-identifier and retention responsibilities.
+
+## Production-slot runtime triggers
+
+Cron, EventBridge, S3, and signed-webhook triggers bind to the exact production
+version and never target staging implicitly. The Triggers panel checks the slot
+first: a staging-only deployment is directed to the Versions tab to run the
+required evaluation and promotion, rather than exposing controls that cannot be
+used yet. Trigger delivery remains owner-scoped and version-pinned after later
+promotions. The real delivery matrix gives its synthetic `g-users-default`
+identity the orthogonal `g-admins-cost` group only for the run: agent budgets are
+bound to the writer's `owner_sub`, while the cost group grants no trigger scope
+and therefore cannot mask trigger RBAC. The matrix creates one unique agent-scoped
+invocation budget before staging evaluation, then deletes and absence-checks it
+in `finally`, so no reusable budget definition is left behind. The lifecycle and
+gallery integration cases use the same register-before-write tracker around every
+Runtime invocation, including MCP discovery and tool calls; each unique Runtime
+receives an owner-bound temporary budget that is deleted and absence-checked on
+success or failure. Conversational gallery cases use customer-style requests that
+pass the unchanged `HIGH` prompt-attack filter, then require a successful runtime-
+generated tool receipt with exact SHA-256 argument digests before accepting the
+semantic response oracle. The oracle accepts plain, fenced, and double-encoded
+JSON plus a bounded Lambda proxy envelope whose integer `statusCode` accompanies
+a string `body`; it does not recursively interpret arbitrary webpage content,
+and any structured error found in the recognized envelope fails the run.
+Demo customer tools advertise only non-PII customer IDs and do
+not return or echo email addresses, so the production PII Guardrail remains strict
+without erasing useful customer data. Full web search is provided by the Amazon
+Bedrock AgentCore Gateway Web Search Tool (`connectorId: web-search`), pinned to
+version `1.2.0`. AgentCore managed connector targets publish automatically and
+reject `SynchronizeGatewayTargets`; the platform therefore requires exact pinned
+configuration/version read-back plus `READY`, then proves the published
+`AmazonWebSearch___WebSearch` tool through the Gateway MCP `tools/list` plane.
+Queries stay within AWS, and result handling preserves source titles and HTTP(S)
+links as citations. The `duckduckgo_search` identifier is
+accepted only as a saved-canvas migration alias and is removed before Lambda
+schema construction; no DuckDuckGo HTML/Lite scraper ships in generated agents,
+Gateway tool Lambdas, standalone MCP runtimes, or CloudFormation bundles. Evaluation
+uses ordinary low-entropy factual questions with
+semantic answer oracles rather than prompt-injection-shaped “reply exactly”
+commands or random credential-like markers; a Guardrail redaction placeholder is
+a test failure, never accepted as an evaluation pass.
+
+## Atomic invocation authorization
+
+The Cost panel can create monthly owner, agent, or tag limits. In production,
+every platform-mediated slot, direct test, authenticated async browser turn,
+buffered stream, Function URL stream,
+MCP, and durable-trigger invocation operation requires at least one applicable
+limit. A bounded MCP handshake and tool call are one operation. The platform strongly reads applicable definitions and uses one DynamoDB
+transaction to condition-check their current owner and value, increment every
+matching monthly counter, and create a correlated reservation row. Concurrent
+reserved plus committed units cannot exceed any matching limit.
+
+The unit is configured with CDK context `budget_reservation_usd` (default `1.0`)
+and passed as `BUDGET_RESERVATION_USD`. It is USD-denominated **invocation
+authorization capacity**, not predicted or reconciled AWS cost. Once network
+dispatch begins, both successful and failed Runtime responses commit the unit
+because either can incur charges. Calls proven not dispatched release it. A
+crashed or otherwise unknown reservation commits conservatively after one hour;
+it is never released on uncertainty. Exhaustion returns HTTP `429` with
+`Retry-After: 3600`; missing or unreadable production storage returns `503`
+before Runtime dispatch.
+
+This is deliberately not advertised as an AWS bill cap. It excludes downstream
+tool/vendor charges, direct calls made with separately granted service credentials,
+and variance between the configured unit and actual model/Runtime pricing. Production
+A2A is refused because inbound and nested peer Runtime calls do not yet propagate a
+reservation. OBO Runtime closes the direct bearer bypass: only the platform's SigV4
+principal invokes it, after reservation, while the workforce JWT travels in a signed
+custom header for request-local Gateway token exchange. Cost Explorer/Budgets and
+service quotas remain necessary account-level controls.
+
+Budget definitions and monthly counters contain pseudonymous owner IDs and aggregate
+authorization values, not prompts or tokens. Settled reservation rows expire after 90
+days; monthly counters expire after 400 days; definitions remain until deleted. See
+[`docs/COSTS.md`](docs/COSTS.md), [`docs/DATA_RETENTION.md`](docs/DATA_RETENTION.md),
+and [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md).
+
+## Exact-commit release evidence
+
+Production readiness is a measured release gate, not a repository-wide claim. The
+machine-readable contract in [`release/production-readiness-controls.json`](release/production-readiness-controls.json)
+requires positive, adversarial, and control-removal mutation evidence for every
+material control, plus real live, CloudFront UI, rollback, and zero-residual teardown
+evidence where applicable. The executable
+[`release/production-readiness-traceability.json`](release/production-readiness-traceability.json)
+plan pins each required kind to exact suite commands, committed test selectors, and
+named live scenarios; finalization requires every mapped suite/scenario. This includes
+tracked-file secret scanning, high-severity npm dependency audit, and the isolated
+cfn-lint/Checkov/Terraform/ShellCheck gate over customer-exported artifacts. The
+infrastructure nag gate reads each stack's CLI-consumed `additionalMetadataFile`
+directly rather than depending on import-order-sensitive jsii conversion through
+overlapping generated CDK schema distributions. The dated
+[`release/emea-agentcore-regions.json`](release/emea-agentcore-regions.json) matrix
+requires an independent core scenario in every documented EMEA AgentCore Region;
+feature-specific scenarios run only where AWS documents that feature as available.
+
+[`scripts/release_evidence.py`](scripts/release_evidence.py) starts only from a clean
+Git commit, appends bounded digest-only events tied to mapped suites/scenarios, keeps
+failures open until explicitly superseded, refuses generic or incomplete finalization,
+and verifies the sealed event set from a separate detached clean clone. It stores no
+command line, environment, credential, token, or raw AWS response. A final digest
+proves exact source and evidence coverage; it does not fabricate live success or
+constitute third-party/WORM attestation.
+See [`release/README.md`](release/README.md) for the workflow and support matrix.
+
+No candidate is production-ready until its current-commit run finalizes and verifies.
+Passing unit tests, synthesis, a prior revision's AWS run, or one Region alone is
+insufficient.
+
 ## Accessing the Platform
 
 After deployment completes, the script prints two URLs:
@@ -102,9 +481,15 @@ aws cloudformation describe-stacks --stack-name agentcore-workflow-dev \
 Substitute the region you deployed to. The stack, the user pool and the
 distribution all live in that one region.
 
+Every JWT-protected API route requires Cognito's
+`aws.cognito.signin.user.admin` authorization scope. Use the Cognito **access
+token** as the API bearer token; an ID token is rejected by API Gateway before
+Lambda. `GET /health` and the HMAC-authenticated webhook ingress are the only
+intentional exceptions.
+
 ### First sign-in — assign a persona
 
-`COGNITO_USERS` pre-creates Cognito **users** and puts each one in `g-users-default` + `t-user`: a standard user who can build, deploy and invoke their own agents and browse & clone the registry. The API enforces scopes by default (`RBAC_ENFORCE=true`), so a user in **no** group (for example one created in the Cognito console) gets `403` on every call until you assign one. Admin personas are always a manual grant:
+`COGNITO_USERS` pre-creates Cognito **users** and puts each one in `g-users-default` + `t-user`: a standard user who can build, deploy, invoke, and schedule their own agents and browse & clone the registry. The API enforces scopes by default (`RBAC_ENFORCE=true`), so a user in **no** group (for example one created in the Cognito console) gets `403` on every call until you assign one. Admin personas are always a manual grant:
 
 > **Always pass `--region <the region you deployed to>`** — `us-east-1` below, but
 > use `eu-central-1` if that is where you deployed. Without it the AWS CLI falls
@@ -326,6 +711,15 @@ platform created (runtimes, gateways, memories, KBs, vector stores, Cognito
 pools, secrets, IAM roles), empties the S3 buckets, runs `cdk destroy` on the
 stack, and verifies all resources are removed.
 
+Registered target evaluation keys are customer-owned prerequisites, not
+platform-created resources. `cleanup.sh` does not schedule or delete them.
+Before deleting a target key, retire every version that names its ARN and retain
+the key for as long as its encrypted batch-evaluation evidence must remain
+readable. If registration fails, check the key account/Region/state/spec first,
+then compare its default policy and the target deployment-role policy with
+`docs/cross-account-deploy-role.json`; do not work around the check with an alias
+or the home-Region key.
+
 ### Safe to run with more than one deployment in the account
 
 Deploying and deleting repeatedly is expected, and so is running two deployments
@@ -389,7 +783,8 @@ Integration tests run against a real deployed stack — see [Development](docs/D
 
 | Doc | Contents |
 |-----|----------|
-| [Enterprise Capabilities](docs/ENTERPRISE_CAPABILITIES.md) | Versioning & rollback, Cedar policy enforcement, evaluation, cost analytics, registry, prompt library, trigger definitions (preview), connectors, HITL, governance & FinOps |
+| [Embeddable Chat](docs/EMBEDDABLE_CHAT.md) | Versioned browser SDK/Web Component, token-provider contract, CORS/CSP, events, testing and cleanup |
+| [Enterprise Capabilities](docs/ENTERPRISE_CAPABILITIES.md) | Versioning & rollback, Cedar policy enforcement, evaluation, cost analytics, registry, prompt library, durable triggers, connectors, HITL, governance & FinOps |
 | [Security & Hardening](docs/SECURITY_HARDENING.md) | Infrastructure hardening, CDK-NAG, tenant isolation, SSRF guards, pre-commit hooks |
 | [Observability](docs/OBSERVABILITY.md) | Per-canvas and platform-level OTEL modes, OTEL deploy configuration |
 | [Deployment Internals](docs/DEPLOYMENT_INTERNALS.md) | Infrastructure & agent deploy flows, gateway tool pipeline, code architecture, CFN export, packaging, templates, project structure |

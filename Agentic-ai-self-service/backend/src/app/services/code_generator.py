@@ -57,13 +57,9 @@ class CodeGenerationUnsupportedError(ValueError):
     """The requested canvas cannot be represented without changing its meaning."""
 
 
-_BEDROCK_ONLY_TEMPLATES = {
-    # These generators call the Bedrock Converse API directly rather than
-    # constructing a Strands model. Until they are rewritten around Strands,
-    # accepting another provider would silently deploy Bedrock with that
-    # provider's model id.
-    "web-search-agent",
-}
+# Templates in this set call Bedrock Converse directly. Web Search now uses
+# the provider-aware Strands MCP Gateway path, so no gallery template remains.
+_BEDROCK_ONLY_TEMPLATES: set[str] = set()
 
 _MODEL_FREE_TEMPLATES = {"mcp-server-runtime"}
 
@@ -430,156 +426,6 @@ def _extract_gateway_credentials(gateway_config: dict | None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _generate_langchain_web_search(system_prompt: str, model_id: str, region: str) -> str:
-    """Generate Web Search agent using BedrockAgentCoreApp + boto3 Converse API.
-
-    Uses DuckDuckGo + Open-Meteo weather via stdlib urllib (zero extra deps beyond boto3).
-    Tool implementations come from the canonical ``codegen_templates`` package and
-    are spliced in AFTER f-string evaluation (see ``_TOOL_IMPL_BLOCK``).
-    """
-    code = f'''"""AgentCore Runtime - Web Search Agent
-
-Uses BedrockAgentCoreApp SDK for AgentCore Runtime protocol.
-Lightweight tool-calling loop via boto3 Converse API.
-"""
-from bedrock_agentcore.runtime import BedrockAgentCoreApp
-import boto3
-import json
-import os
-import re
-import time
-import urllib.request
-import urllib.parse
-
-app = BedrockAgentCoreApp()
-
-SYSTEM_PROMPT = """{system_prompt}"""
-MODEL_ID = os.environ.get("MODEL_ID", "{model_id}")
-REGION = os.environ.get("AWS_REGION", "{region}")
-
-TOOL_CONFIG = {{
-    "tools": [
-        {{
-            "toolSpec": {{
-                "name": "duckduckgo_search",
-                "description": "Search the web using DuckDuckGo. Returns top 5 results with title, URL, and snippet.",
-                "inputSchema": {{
-                    "json": {{
-                        "type": "object",
-                        "properties": {{
-                            "query": {{"type": "string", "description": "The search query"}}
-                        }},
-                        "required": ["query"]
-                    }}
-                }}
-            }}
-        }},
-        {{
-            "toolSpec": {{
-                "name": "get_weather",
-                "description": "Get current weather for a city or location. Returns temperature, humidity, wind speed, and conditions. Use this tool whenever the user asks about weather.",
-                "inputSchema": {{
-                    "json": {{
-                        "type": "object",
-                        "properties": {{
-                            "location": {{"type": "string", "description": "City or location name (e.g. 'Chicago', 'London', 'Tokyo')"}}
-                        }},
-                        "required": ["location"]
-                    }}
-                }}
-            }}
-        }},
-        {{
-            "toolSpec": {{
-                "name": "fetch_webpage",
-                "description": "Fetch and extract text content from a webpage URL. Use after searching to get actual page content.",
-                "inputSchema": {{
-                    "json": {{
-                        "type": "object",
-                        "properties": {{
-                            "url": {{"type": "string", "description": "The URL to fetch"}}
-                        }},
-                        "required": ["url"]
-                    }}
-                }}
-            }}
-        }}
-    ]
-}}
-
-
-__TOOL_IMPL__
-
-__TOOL_RECEIPTS__
-
-TOOL_HANDLERS = {{
-    "duckduckgo_search": lambda args: _tool_safe(_do_duckduckgo_search, args.get("query", "")),
-    "get_weather": lambda args: _tool_safe(_do_weather, args.get("location", "")),
-    "fetch_webpage": lambda args: _tool_safe(_do_fetch_webpage, args.get("url", "")),
-}}
-
-_bedrock = None
-
-def _get_bedrock():
-    global _bedrock
-    if _bedrock is None:
-        _bedrock = boto3.client("bedrock-runtime", region_name=REGION)
-    return _bedrock
-
-
-def _converse_loop(prompt: str, max_turns: int = 10):
-    """Run a multi-turn Converse API loop with tool use; return (text, tool receipts)."""
-    messages = [{{"role": "user", "content": [{{"text": prompt}}]}}]
-    statuses = dict()
-
-    for _ in range(max_turns):
-        resp = _get_bedrock().converse(
-            modelId=MODEL_ID,
-            system=[{{"text": SYSTEM_PROMPT}}],
-            messages=messages,
-            toolConfig=TOOL_CONFIG,
-        )
-        output = resp["output"]["message"]
-        messages.append(output)
-
-        if resp["stopReason"] == "tool_use":
-            tool_results = []
-            for block in output["content"]:
-                if "toolUse" in block:
-                    tu = block["toolUse"]
-                    handler = TOOL_HANDLERS.get(tu["name"])
-                    result = handler(tu["input"]) if handler else "Unknown tool"
-                    statuses[tu["toolUseId"]] = _tool_result_status(handler is not None, result)
-                    tool_results.append({{
-                        "toolResult": {{
-                            "toolUseId": tu["toolUseId"],
-                            "content": [{{"text": result}}],
-                        }}
-                    }})
-            messages.append({{"role": "user", "content": tool_results}})
-        else:
-            receipts = _tool_receipts(messages, statuses=statuses)
-            for block in output["content"]:
-                if "text" in block:
-                    return block["text"], receipts
-            return str(output["content"]), receipts
-
-    return "Max tool-use turns reached.", _tool_receipts(messages, statuses=statuses)
-
-
-@app.entrypoint
-def invoke(payload):
-    """Process user prompt through the web search agent."""
-    message = payload.get("prompt", "Hello")
-    response_text, tool_receipts = _converse_loop(message)
-    return {{"response": response_text, "tool_receipts": tool_receipts}}
-
-if __name__ == "__main__":
-    app.run()
-'''
-    return code.replace(_TOOL_IMPL_MARKER, _TOOL_IMPL_BLOCK).replace(_TOOL_RECEIPTS_MARKER, _TOOL_RECEIPTS_BLOCK)
-
-
 def _generate_strands_gateway(
     system_prompt: str,
     model_id: str,
@@ -653,6 +499,7 @@ GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
 # "oauth2" (AgentCore Gateway, the default) exchanges client credentials for a
 # token. "static_bearer" (a LiteLLM MCP Gateway) sends a long-lived virtual key.
 GATEWAY_AUTH_MODE = os.environ.get("GATEWAY_AUTH_MODE", "oauth2")
+WORKFORCE_TOKEN_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token"
 GATEWAY_API_KEY = os.environ.get("GATEWAY_API_KEY", "")
 # The CloudFormation export passes the virtual key BY REFERENCE. See
 # _resolve_gateway_key below for why that is not the same as passing the value.
@@ -954,7 +801,12 @@ def _fit_tool_names_for_bedrock(client, tools, _limit=64):
 
 # ── Lazy init: boto3/MCP clients may not have valid creds at module load ──
 
-def _create_transport():
+def _create_transport(subject_token=""):
+    if GATEWAY_AUTH_MODE == "obo":
+        if not subject_token:
+            raise RuntimeError("OBO invocation is missing its authenticated workforce token")
+        headers = dict(Authorization="Bearer " + subject_token)
+        return streamablehttp_client(GATEWAY_URL, headers=headers)
     token = _get_gateway_token()
     if GATEWAY_AUTH_MODE == "static_bearer":
         # LiteLLM reads its virtual key from its own header, and scopes the
@@ -1058,16 +910,84 @@ __TOOL_RECEIPTS__
 
 
 @app.entrypoint
-def invoke(payload):
+def invoke(payload, context=None):
     """Strands Agent with MCP Gateway tools."""
     message = payload.get("prompt", "Hello")
-    agent = _get_agent()
-    seen = _tool_use_ids(getattr(agent, "messages", None))
-    result = agent(message)
-    return {{
-        "response": str(result),
-        "tool_receipts": _tool_receipts(getattr(agent, "messages", None), exclude=seen, names=_TOOL_NAME_ALIASES),
-    }}
+    request_headers = getattr(context, "request_headers", {{}}) if context is not None else {{}}
+    workforce_token_header = globals().get(
+        "WORKFORCE_TOKEN_HEADER",
+        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token",
+    )
+    subject_token = str(
+        request_headers.get(workforce_token_header)
+        or request_headers.get(workforce_token_header.lower())
+        or ""
+    ).strip()
+    obo_client = None
+    delegated_evidence = None
+    try:
+        if globals().get("GATEWAY_AUTH_MODE", "") == "obo":
+            if (
+                not isinstance(subject_token, str)
+                or any(ch.isspace() for ch in subject_token)
+                or subject_token.count(".") != 2
+            ):
+                raise RuntimeError("OBO invocation requires one authenticated workforce JWT")
+            try:
+                _segment = subject_token.split(".")[1]
+                _segment += "=" * (-len(_segment) % 4)
+                _claims = json.loads(__import__("base64").urlsafe_b64decode(_segment.encode("ascii")))
+                _subject = _claims.get("sub")
+                _issuer = _claims.get("iss")
+                _expiry = _claims.get("exp")
+                if (
+                    not isinstance(_subject, str)
+                    or not _subject
+                    or not isinstance(_issuer, str)
+                    or not _issuer
+                    or isinstance(_expiry, bool)
+                    or not isinstance(_expiry, (int, float))
+                ):
+                    raise ValueError("invalid delegated identity claims")
+                delegated_evidence = dict(
+                    subject=_subject,
+                    issuer=_issuer,
+                    expires_at=_expiry,
+                    correlation_id=str(
+                        request_headers.get("X-Amzn-Trace-Id")
+                        or request_headers.get("x-amzn-trace-id")
+                        or ""
+                    ),
+                    gateway_exchange="ON_BEHALF_OF_TOKEN_EXCHANGE",
+                    downstream_principal=None,
+                )
+            except Exception as exc:
+                raise RuntimeError("Runtime delivered an unreadable delegated JWT") from exc
+            {model_init}
+            obo_client = MCPClient(lambda: _create_transport(subject_token))
+            obo_client.start()
+            tools = get_full_tools_list(obo_client)
+            if not tools:
+                raise RuntimeError("OBO Gateway returned no tools for the authenticated user")
+            local_tools = [{local_tool_expr}]
+            agent = Agent(model=model, tools=tools + local_tools, system_prompt=SYSTEM_PROMPT)
+        else:
+            agent = _get_agent()
+        seen = _tool_use_ids(getattr(agent, "messages", None))
+        result = agent(message)
+        response_body = {{
+            "response": str(result),
+            "tool_receipts": _tool_receipts(getattr(agent, "messages", None), exclude=seen, names=_TOOL_NAME_ALIASES),
+        }}
+        if delegated_evidence is not None:
+            response_body["identity_evidence"] = delegated_evidence
+        return response_body
+    finally:
+        if obo_client is not None:
+            try:
+                obo_client.stop(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
 
 # Eager warm at CONTAINER INIT — in a BACKGROUND thread so the HTTP server starts
 # immediately and passes AgentCore's /ping health check, while gateway tool discovery
@@ -1076,7 +996,7 @@ def invoke(payload):
 # returns 503 on the first call if discovery runs lazily inside invoke. Warming in the
 # background means _get_agent() (called from invoke) blocks on the already-in-progress
 # warm instead of starting a fresh cold discovery under the 30s ceiling.
-if GATEWAY_URL:
+if GATEWAY_URL and GATEWAY_AUTH_MODE != "obo":
     import threading as _thr
     def _bg_warm():
         try:
@@ -1765,8 +1685,9 @@ def _generate_mcp_server_runtime(system_prompt: str, model_id: str, region: str)
 
     code = '''"""Standalone AgentCore MCP Runtime.
 
-Exposes weather, web-search, and SSRF-guarded URL-fetch tools directly over
-MCP. It is a tool server, not a conversational model loop.
+Exposes weather and SSRF-guarded URL-fetch tools directly over MCP. It is a
+tool server, not a conversational model loop. Full-web search requires the
+managed AgentCore Gateway connector and is not implemented by scraping.
 """
 import os
 from mcp.server.fastmcp import FastMCP
@@ -1774,7 +1695,7 @@ from mcp.server.fastmcp import FastMCP
 PORT = int(os.environ.get("PORT", "8000"))
 mcp = FastMCP(
     name="Agentic AI Self Service Tools",
-    instructions="Use the advertised schemas to call weather, search, and URL-fetch tools.",
+    instructions="Use the advertised schemas to call weather and URL-fetch tools.",
     host="0.0.0.0",
     port=PORT,
     stateless_http=True,
@@ -1787,12 +1708,6 @@ __TOOL_IMPL__
 def get_weather(city: str) -> str:
     """Get current weather for a city."""
     return _tool_safe(_do_weather, city)
-
-
-@mcp.tool()
-def search_web(query: str) -> str:
-    """Search the web using DuckDuckGo."""
-    return _tool_safe(_do_duckduckgo_search, query)
 
 
 @mcp.tool()
@@ -1835,6 +1750,7 @@ GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
 # "oauth2" (AgentCore Gateway, the default) exchanges client credentials for a
 # token. "static_bearer" (a LiteLLM MCP Gateway) sends a long-lived virtual key.
 GATEWAY_AUTH_MODE = os.environ.get("GATEWAY_AUTH_MODE", "oauth2")
+WORKFORCE_TOKEN_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token"
 GATEWAY_API_KEY = os.environ.get("GATEWAY_API_KEY", "")
 # The CloudFormation export passes the virtual key BY REFERENCE. See
 # _resolve_gateway_key below for why that is not the same as passing the value.
@@ -2132,7 +2048,12 @@ def _fit_tool_names_for_bedrock(client, tools, _limit=64):
     return tools
 
 
-def _create_transport():
+def _create_transport(subject_token=""):
+    if GATEWAY_AUTH_MODE == "obo":
+        if not subject_token:
+            raise RuntimeError("OBO invocation is missing its authenticated workforce token")
+        headers = dict(Authorization="Bearer " + subject_token)
+        return streamablehttp_client(GATEWAY_URL, headers=headers)
     token = _get_gateway_token()
     if GATEWAY_AUTH_MODE == "static_bearer":
         # LiteLLM reads its virtual key from its own header, and scopes the
@@ -2264,6 +2185,7 @@ SYSTEM_PROMPT = """{system_prompt}"""
 MODEL_ID = os.environ.get("MODEL_ID", "{model_id}")
 REGION = os.environ.get("AWS_REGION", "{region}")
 MEMORY_ID = os.environ.get("MEMORY_ID", "")
+OBO_GATEWAY = os.environ.get("GATEWAY_AUTH_MODE", "") == "obo"
 {gateway_env}
 {gateway_functions}
 {gateway_init}
@@ -2275,11 +2197,15 @@ _agent = None
 
 def _get_agent(**extra_kwargs):
     global _model, _agent
-    if _agent is None or extra_kwargs:
-        if _model is None:
-            {model_init}
-            _model = model
-        _agent = Agent(model=_model, {agent_tools}system_prompt=SYSTEM_PROMPT, **extra_kwargs)
+    if _model is None:
+        {model_init}
+        _model = model
+    if extra_kwargs:
+        # Request-scoped tools (OBO) must never replace the cached machine-auth
+        # agent or survive into another user's invocation.
+        return Agent(model=_model, system_prompt=SYSTEM_PROMPT, **extra_kwargs)
+    if _agent is None:
+        _agent = Agent(model=_model, {agent_tools}system_prompt=SYSTEM_PROMPT)
     return _agent
 
 # Memory client (lazy init)
@@ -2388,7 +2314,7 @@ __TOOL_RECEIPTS__
 
 
 @app.entrypoint
-def invoke(payload):
+def invoke(payload, context=None):
     """Process user prompt with memory context and optional Gateway tools."""
     message = payload.get("prompt", "Hello")
     session_id = payload.get("session_id") or ""
@@ -2430,21 +2356,91 @@ def invoke(payload):
         joined = "\\n\\n".join(context_parts)
         enriched_prompt = f"{{joined}}\\n\\nCurrent message: {{message}}"
 
-    # Strands Agent handles tool discovery + calling via MCPClient automatically
-    agent = _get_agent()
-    seen = _tool_use_ids(getattr(agent, "messages", None))
-    result = agent(enriched_prompt)
-    response_text = str(result)
+    # Strands Agent handles tool discovery + calling via MCPClient automatically.
+    # OBO credentials are request-scoped: never place the bearer, transport,
+    # tools, or Agent in a module cache shared by warm Runtime invocations.
+    request_headers = getattr(context, "request_headers", {{}}) if context is not None else {{}}
+    workforce_token_header = globals().get(
+        "WORKFORCE_TOKEN_HEADER",
+        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Workforce-Token",
+    )
+    subject_token = str(
+        request_headers.get(workforce_token_header)
+        or request_headers.get(workforce_token_header.lower())
+        or ""
+    ).strip()
+    obo_client = None
+    delegated_evidence = None
+    try:
+        if globals().get("OBO_GATEWAY", False):
+            if (
+                not isinstance(subject_token, str)
+                or any(ch.isspace() for ch in subject_token)
+                or subject_token.count(".") != 2
+            ):
+                raise RuntimeError("OBO invocation requires one authenticated workforce JWT")
+            try:
+                _segment = subject_token.split(".")[1]
+                _segment += "=" * (-len(_segment) % 4)
+                _claims = json.loads(__import__("base64").urlsafe_b64decode(_segment.encode("ascii")))
+                _subject = _claims.get("sub")
+                _issuer = _claims.get("iss")
+                _expiry = _claims.get("exp")
+                if (
+                    not isinstance(_subject, str)
+                    or not _subject
+                    or not isinstance(_issuer, str)
+                    or not _issuer
+                    or isinstance(_expiry, bool)
+                    or not isinstance(_expiry, (int, float))
+                ):
+                    raise ValueError("invalid delegated identity claims")
+                delegated_evidence = dict(
+                    subject=_subject,
+                    issuer=_issuer,
+                    expires_at=_expiry,
+                    correlation_id=str(
+                        request_headers.get("X-Amzn-Trace-Id")
+                        or request_headers.get("x-amzn-trace-id")
+                        or ""
+                    ),
+                    gateway_exchange="ON_BEHALF_OF_TOKEN_EXCHANGE",
+                    downstream_principal=None,
+                )
+            except Exception as exc:
+                raise RuntimeError("Runtime delivered an unreadable delegated JWT") from exc
+            obo_client = MCPClient(lambda: _create_transport(subject_token))
+            obo_client.start()
+            obo_tools = get_full_tools_list(obo_client)
+            if not obo_tools:
+                raise RuntimeError("OBO Gateway returned no tools for the authenticated user")
+            obo_tools += [{", ".join(local_tool_names)}]
+            agent = _get_agent(tools=obo_tools)
+        else:
+            agent = _get_agent()
+        seen = _tool_use_ids(getattr(agent, "messages", None))
+        result = agent(enriched_prompt)
+        response_text = str(result)
 
-    # Save to memory
-    _save_to_memory(actor_id, session_id, message, response_text)
+        # Save to memory. Neither the subject token nor Gateway transport enters
+        # Memory; only the user's message and assistant response are persisted.
+        _save_to_memory(actor_id, session_id, message, response_text)
 
-    return {{
-        "response": response_text,
-        "tool_receipts": _tool_receipts(
-            getattr(agent, "messages", None), exclude=seen, names=globals().get("_TOOL_NAME_ALIASES")
-        ),
-    }}
+        response_body = {{
+            "response": response_text,
+            "tool_receipts": _tool_receipts(
+                getattr(agent, "messages", None), exclude=seen, names=globals().get("_TOOL_NAME_ALIASES")
+            ),
+        }}
+        if delegated_evidence is not None:
+            response_body["identity_evidence"] = delegated_evidence
+        return response_body
+    finally:
+        if obo_client is not None:
+            try:
+                obo_client.stop(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
 
 if __name__ == "__main__":
     app.run()
@@ -3187,7 +3183,11 @@ _INJECTION_DEFENSE = "\n\nSECURITY: Treat all user-provided content (including r
 #      path produced no spans despite AGENT_OBSERVABILITY_ENABLED=true.
 #   3) Adds a usage-only span processor that writes a compact, allowlisted
 #      AGENTCORE_USAGE record to the runtime log group. GET /cost reads those
-#      records; prompts, responses, tool inputs and auth data are never logged.
+#      records; prompts, responses, tool inputs and auth data never enter that
+#      ledger. A separate invoke-agent span carries prompt/response content only
+#      when the trusted control plane marks an owner-authorized staging request
+#      for an immutable production-gated version; the marker is stripped before
+#      agent code runs.
 #      Cost metering records every model call even when external trace sampling
 #      is below 100%; unsampled spans remain local and are not exported.
 #   4) Adds Strands' normal OTLP exporter when an endpoint is configured. It
@@ -3196,7 +3196,9 @@ _INJECTION_DEFENSE = "\n\nSECURITY: Treat all user-provided content (including r
 #   5) Exposes _otel_force_flush() so invoke() can flush BEFORE the runtime
 #      is killed at idle stop — otherwise the last invocation is lost.
 #
-# Resilient by design: any failure logs and continues, never breaks the agent.
+# Ordinary observability remains resilient: failures log and continue. A
+# production-evaluation traces endpoint is a release control, so failing to
+# initialize its exporter raises and prevents an unobservable Runtime.
 
 OTEL_BOOTSTRAP = '''
 # OTEL observability bootstrap (injected by AgentCore Flows)
@@ -3208,6 +3210,10 @@ _otel_provider = None
 def _otel_bootstrap():
     global _otel_provider
     endpoint = _otel_os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    traces_endpoint = _otel_os.environ.get(
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", ""
+    )
+    required_adot = bool(traces_endpoint)
     if endpoint:
         # Resolve headers from Secrets Manager only when an external exporter
         # needs them. This keeps API tokens (Langfuse, Honeycomb, etc.) out of
@@ -3236,7 +3242,11 @@ def _otel_bootstrap():
         import json as _otel_json
 
         from strands.telemetry import StrandsTelemetry
-        from opentelemetry.sdk.trace import SpanProcessor as _OtelSpanProcessor
+        from opentelemetry import trace as _otel_trace_api
+        from opentelemetry.sdk.trace import (
+            SpanProcessor as _OtelSpanProcessor,
+            TracerProvider as _OtelSdkTracerProvider,
+        )
         from opentelemetry.sdk.trace.export import (
             SpanExporter as _OtelSpanExporter,
             SpanExportResult as _OtelSpanExportResult,
@@ -3245,6 +3255,113 @@ def _otel_bootstrap():
             Decision as _OtelDecision,
             SamplingResult as _OtelSamplingResult,
         )
+
+        existing_provider = _otel_trace_api.get_tracer_provider()
+        adot_configured = isinstance(existing_provider, _OtelSdkTracerProvider)
+        if traces_endpoint and not adot_configured:
+            # CloudWatch's traces OTLP endpoint requires SigV4. The stock Python
+            # OTLP exporter does not sign direct requests (AWS documents a local
+            # Collector + sigv4auth as the usual bridge), and AgentCore Runtime
+            # provides no collector sidecar. A stock exporter therefore reaches
+            # xray.<region>.amazonaws.com and receives HTTP 400 for every batch.
+            # Attach a refreshable botocore signer to the exporter's requests
+            # Session instead; credentials are resolved per request so a warm
+            # runtime survives role credential rotation.
+            import requests as _otel_requests
+            import time as _otel_time
+            from requests.auth import AuthBase as _OtelRequestsAuthBase
+            from botocore.auth import SigV4Auth as _OtelBotocoreSigV4Auth
+            from botocore.awsrequest import AWSRequest as _OtelAwsRequest
+            from botocore.session import Session as _OtelBotocoreSession
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                OTLPSpanExporter as _OtelHttpSpanExporter,
+            )
+            from opentelemetry.sdk.resources import (
+                SERVICE_NAME as _OtelServiceName,
+                Resource as _OtelResource,
+            )
+            from opentelemetry.sdk.trace.export import (
+                BatchSpanProcessor as _OtelBatchSpanProcessor,
+            )
+            from opentelemetry.sdk.trace.id_generator import (
+                RandomIdGenerator as _OtelRandomIdGenerator,
+            )
+
+            signing_region = _otel_os.environ.get("AWS_REGION", "")
+            if not signing_region:
+                raise RuntimeError("AWS_REGION is required for X-Ray OTLP SigV4 signing")
+
+            class _XRaySigV4Auth(_OtelRequestsAuthBase):
+                def __init__(self, region):
+                    self._region = region
+                    self._session = _OtelBotocoreSession()
+
+                def __call__(self, prepared_request):
+                    credentials = self._session.get_credentials()
+                    if credentials is None:
+                        raise RuntimeError("AWS credentials are required for X-Ray OTLP export")
+                    aws_request = _OtelAwsRequest(
+                        method=prepared_request.method,
+                        url=prepared_request.url,
+                        data=prepared_request.body,
+                        headers=dict(prepared_request.headers),
+                    )
+                    _OtelBotocoreSigV4Auth(
+                        credentials.get_frozen_credentials(),
+                        "xray",
+                        self._region,
+                    ).add_auth(aws_request)
+                    prepared_request.headers.update(dict(aws_request.headers.items()))
+                    return prepared_request
+
+            class _XRayIdGenerator(_OtelRandomIdGenerator):
+                """X-Ray trace IDs: 32-bit epoch seconds plus 96 random bits."""
+
+                def generate_trace_id(self):
+                    random_bits = super().generate_trace_id() & ((1 << 96) - 1)
+                    return (int(_otel_time.time()) << 96) | random_bits
+
+            signed_session = _otel_requests.Session()
+            signed_session.auth = _XRaySigV4Auth(signing_region)
+            signed_exporter = _OtelHttpSpanExporter(
+                endpoint=traces_endpoint,
+                session=signed_session,
+            )
+            existing_provider = _OtelSdkTracerProvider(
+                resource=_OtelResource.create(
+                    {
+                        _OtelServiceName: _otel_os.environ.get(
+                            "OTEL_SERVICE_NAME", "agentcore-runtime"
+                        )
+                    }
+                ),
+                id_generator=_XRayIdGenerator(),
+            )
+            existing_provider.add_span_processor(
+                _OtelBatchSpanProcessor(signed_exporter)
+            )
+            _otel_trace_api.set_tracer_provider(existing_provider)
+            adot_configured = True
+        elif endpoint and not adot_configured:
+            # External collectors (Langfuse, Honeycomb, and custom OTLP) use
+            # their configured bearer/basic headers and the normal distro path.
+            # Do not SigV4-sign those third-party requests.
+            _otel_os.environ.setdefault(
+                "OTEL_AWS_PYTHON_DEFER_TO_WORKERS_ENABLED", "false"
+            )
+            from opentelemetry.instrumentation.auto_instrumentation import (
+                initialize as _otel_auto_initialize,
+            )
+
+            _otel_auto_initialize(swallow_exceptions=False)
+            existing_provider = _otel_trace_api.get_tracer_provider()
+            adot_configured = isinstance(
+                existing_provider, _OtelSdkTracerProvider
+            )
+            if not adot_configured:
+                raise RuntimeError(
+                    "ADOT initialization did not install a tracer provider"
+                )
 
         class _UsagePreservingSampler:
             """Record every span locally while preserving external sampling."""
@@ -3351,12 +3468,14 @@ def _otel_bootstrap():
             def force_flush(self, timeout_millis=30000):
                 return True
 
-        telemetry = StrandsTelemetry()
+        telemetry = StrandsTelemetry(
+            tracer_provider=existing_provider if adot_configured else None
+        )
         telemetry.tracer_provider.sampler = _UsagePreservingSampler(
             telemetry.tracer_provider.sampler
         )
         telemetry.tracer_provider.add_span_processor(_UsageLogProcessor())
-        if endpoint:
+        if endpoint and not adot_configured:
             telemetry.setup_otlp_exporter()
         _otel_provider = telemetry.tracer_provider
         # Use WARNING so the message is visible in AgentCore Runtime logs;
@@ -3369,6 +3488,10 @@ def _otel_bootstrap():
             "OTEL bootstrap failed; continuing without tracing (%s)",
             type(e).__name__,
         )
+        if required_adot:
+            raise RuntimeError(
+                "Required production evaluation tracing failed to initialize"
+            ) from e
 
 
 def _otel_force_flush():
@@ -3380,6 +3503,93 @@ def _otel_force_flush():
         _otel_provider.force_flush(timeout_millis=3000)
     except Exception as e:
         _otel_log.debug("OTEL flush failed (%s)", type(e).__name__)
+
+
+_OTEL_EVALUATION_CAPTURE_KEY = "_agentcore_evaluation_capture"
+_OTEL_EVALUATION_TEXT_LIMIT = 12000
+
+
+def _otel_evaluation_text(value):
+    """Normalize one bounded staging value for standard string attributes."""
+    if isinstance(value, dict) and "response" in value:
+        value = value.get("response")
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list, tuple)):
+        try:
+            import json as _otel_eval_json
+            value = _otel_eval_json.dumps(
+                value, separators=(",", ":"), ensure_ascii=True
+            )
+        except (TypeError, ValueError):
+            value = str(value)
+    else:
+        value = str(value)
+    return value[:_OTEL_EVALUATION_TEXT_LIMIT]
+
+
+def _otel_invoke_with_evaluation_span(invoke_fn, *args, **kwargs):
+    """Emit invocation metadata, with content only for authorized staging.
+
+    The public API request model forbids the private capture marker. The
+    owner-checked slot router reconstructs the Runtime payload and adds it only
+    for ``staging``; production-slot and stable-client payloads never carry it.
+    Strip it before user-generated agent code runs so it cannot alter model or
+    tool behavior. Every instrumented invocation emits a correlation span with
+    ``session.id``; only an authorized staging invocation adds prompt/response
+    attributes.
+    """
+    positional = list(args)
+    call_kwargs = dict(kwargs)
+    payload = positional[0] if positional else call_kwargs.get("payload")
+    if not isinstance(payload, dict):
+        return invoke_fn(*args, **kwargs)
+
+    clean_payload = dict(payload)
+    capture = clean_payload.pop(_OTEL_EVALUATION_CAPTURE_KEY, None) is True
+    if positional:
+        positional[0] = clean_payload
+    else:
+        call_kwargs["payload"] = clean_payload
+    call_args = tuple(positional)
+
+    if _otel_provider is None:
+        return invoke_fn(*call_args, **call_kwargs)
+
+    session_id = _otel_evaluation_text(clean_payload.get("session_id"))
+    attributes = {"gen_ai.operation.name": "invoke_agent"}
+    if session_id:
+        attributes["session.id"] = session_id
+    if capture:
+        attributes["gen_ai.task.input"] = _otel_evaluation_text(
+            clean_payload.get("prompt")
+        )
+
+    try:
+        tracer = _otel_provider.get_tracer(
+            "opentelemetry.instrumentation.agentcore.evaluation"
+        )
+        span_context = tracer.start_as_current_span(
+            "invoke_agent", attributes=attributes
+        )
+    except Exception as e:
+        _otel_log.warning(
+            "Could not start invocation metadata span (%s)", type(e).__name__
+        )
+        return invoke_fn(*call_args, **call_kwargs)
+
+    with span_context as span:
+        result = invoke_fn(*call_args, **call_kwargs)
+        if capture:
+            response = _otel_evaluation_text(result)
+            try:
+                span.set_attribute("gen_ai.task.output", response)
+            except Exception as e:
+                _otel_log.warning(
+                    "Could not complete staging evaluation span (%s)",
+                    type(e).__name__,
+                )
+        return result
 
 
 _otel_bootstrap()
@@ -3402,19 +3612,22 @@ def _inject_otel(code: str) -> str:
             code = code[: eol + 1] + OTEL_BOOTSTRAP + code[eol + 1 :]
 
     # Wrap the @app.entrypoint invoke() body with force_flush in finally.
-    # Strategy: find each `def invoke(payload):` block and append a flush call
-    # via a try/finally around the existing return. We do this conservatively
-    # by appending a top-level decorator that wraps the invoke function.
+    # Strategy: find each `def invoke(payload):` block and install a wrapper by
+    # re-registering it through the app's public entrypoint decorator. Rebinding a
+    # module variable alone is insufficient because BedrockAgentCoreApp stores the
+    # original handler when the first decorator runs.
     if "@app.entrypoint" in code and "_otel_invoke_wrap" not in code:
         wrap_block = """
 # Wrap invoke() so spans flush before AgentCore idle-stop kills the runtime.
 _otel_inner_invoke = invoke
-def _otel_invoke_wrap(payload):
+def _otel_invoke_wrap(*args, **kwargs):
     try:
-        return _otel_inner_invoke(payload)
+        return _otel_invoke_with_evaluation_span(
+            _otel_inner_invoke, *args, **kwargs
+        )
     finally:
         _otel_force_flush()
-invoke = _otel_invoke_wrap
+invoke = app.entrypoint(_otel_invoke_wrap)
 """
         # Append after the file's existing __main__ block check, or at end.
         if 'if __name__ == "__main__":' in code:
@@ -3522,7 +3735,14 @@ def _maybe_inject_hitl(code: str) -> str:
         # Register the GUARANTEED approval hook (2.1) on every Agent. Idempotent;
         # only add when not already present. _APPROVAL_HOOKS is [] when strands
         # hooks are unavailable, so this is a safe no-op there.
-        if "hooks=" not in new_args:
+        guardrail_hooks = 'hooks=globals().get("_GUARDRAIL_HOOKS", [])'
+        if guardrail_hooks in new_args and "_APPROVAL_HOOKS" not in new_args:
+            new_args = new_args.replace(
+                guardrail_hooks,
+                guardrail_hooks + " + _APPROVAL_HOOKS",
+                1,
+            )
+        elif "hooks=" not in new_args:
             new_args = "hooks=_APPROVAL_HOOKS, " + new_args
         out.append(new_args + ")")
         i = j
@@ -3610,8 +3830,11 @@ def _hitl_record_pending(tool_name, tool_input):
 # human_approval*. This is the enforcement the voluntary tool above can't give.
 try:
     import fnmatch as _hitl_fnmatch
-    from strands.experimental.hooks import BeforeToolInvocationEvent as _BeforeToolEvent
-    from strands.hooks import HookProvider as _HookProvider, HookRegistry as _HookRegistry
+    from strands.hooks import (
+        BeforeToolCallEvent as _BeforeToolEvent,
+        HookProvider as _HookProvider,
+        HookRegistry as _HookRegistry,
+    )
 
     def _hitl_load_policies():
         raw = _hitl_os.environ.get("LOOM_APPROVAL_POLICIES", "")
@@ -3638,6 +3861,8 @@ try:
             registry.add_callback(_BeforeToolEvent, self._before_tool)
 
         def _before_tool(self, event):
+            if getattr(event, "cancel_tool", False):
+                return
             policies = _hitl_load_policies()
             if not policies:
                 return
@@ -3696,12 +3921,132 @@ _HITL_TOOLS = [human_approval]
 # splat it into the constructor (``**_GUARDRAIL_KWARGS``) so a no-guardrail deploy
 # is a no-op. ``guardrail_redact_output`` defaults to False in Strands, so we set
 # it True explicitly for OUTPUT redaction; input redaction already defaults True.
+# Trace is disabled because Bedrock trace can contain the original matched PII,
+# regex content, or blocked model output even when the served response is masked.
 _GUARDRAIL_KWARGS_ASSIGN = (
     '_GUARDRAIL_KWARGS = {"guardrail_id": GUARDRAIL_ID, '
     '"guardrail_version": GUARDRAIL_VERSION or "DRAFT", '
-    '"guardrail_trace": "enabled", '
+    '"guardrail_trace": "disabled", '
     '"guardrail_redact_output": True} if GUARDRAIL_ID else {}'
 )
+
+
+_GUARDRAIL_TOOL_CORE_SRC = r"""
+# Guard every tool boundary independently of model input/output Guardrails.
+import json as _guardrail_json
+import logging as _guardrail_logging
+import boto3 as _guardrail_boto3
+
+_guardrail_log = _guardrail_logging.getLogger("agentcore.guardrail.tools")
+_guardrail_runtime_client = None
+_GUARDRAIL_TOOL_CONTENT_LIMIT = 64 * 1024
+
+
+def _guardrail_client():
+    global _guardrail_runtime_client
+    if _guardrail_runtime_client is None:
+        _guardrail_runtime_client = _guardrail_boto3.client(
+            "bedrock-runtime",
+            region_name=REGION,
+        )
+    return _guardrail_runtime_client
+
+
+def _guardrail_text(value):
+    try:
+        text = _guardrail_json.dumps(
+            value,
+            separators=(",", ":"),
+            sort_keys=True,
+            default=str,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if len(text.encode("utf-8")) > _GUARDRAIL_TOOL_CONTENT_LIMIT:
+        return None
+    return text
+
+
+def _guardrail_allows(value, source):
+    if not GUARDRAIL_ID:
+        return True
+    text = _guardrail_text(value)
+    if text is None or source not in ("INPUT", "OUTPUT"):
+        return False
+    try:
+        response = _guardrail_client().apply_guardrail(
+            guardrailIdentifier=GUARDRAIL_ID,
+            guardrailVersion=GUARDRAIL_VERSION or "DRAFT",
+            source=source,
+            content=[{"text": {"text": text}}],
+        )
+    except Exception as exc:  # noqa: BLE001
+        _guardrail_log.warning(
+            "Tool %s screening failed closed (%s)",
+            source.lower(),
+            type(exc).__name__,
+        )
+        return False
+    return response.get("action") == "NONE"
+
+
+def _guardrail_error_result(tool_use_id, stage):
+    return {
+        "toolUseId": str(tool_use_id or ""),
+        "status": "error",
+        "content": [{"text": "Tool %s blocked by the safety guardrail." % stage}],
+    }
+
+
+def _guardrail_invoke_tool(handler, tool_use):
+    tool_input = (tool_use or {}).get("input") or {}
+    tool_use_id = (tool_use or {}).get("toolUseId", "")
+    if not _guardrail_allows(tool_input, "INPUT"):
+        return _guardrail_json.dumps({"error": "Tool input blocked by the safety guardrail."})
+    result = handler(tool_input)
+    if not _guardrail_allows(result, "OUTPUT"):
+        return _guardrail_json.dumps({"error": "Tool result blocked by the safety guardrail."})
+    return result
+"""
+
+
+_GUARDRAIL_STRANDS_HOOK_SRC = r"""
+try:
+    from strands.hooks import (
+        AfterToolCallEvent as _GuardrailAfterToolEvent,
+        BeforeToolCallEvent as _GuardrailBeforeToolEvent,
+        HookProvider as _GuardrailHookProvider,
+    )
+
+    class _ToolGuardrailHook(_GuardrailHookProvider):
+        def register_hooks(self, registry, **kwargs):
+            registry.add_callback(_GuardrailBeforeToolEvent, self._before_tool)
+            registry.add_callback(_GuardrailAfterToolEvent, self._after_tool)
+
+        def _before_tool(self, event):
+            if getattr(event, "cancel_tool", False):
+                return
+            tool_input = (getattr(event, "tool_use", None) or {}).get("input") or {}
+            if not _guardrail_allows(tool_input, "INPUT"):
+                event.cancel_tool = "Tool input blocked by the safety guardrail."
+
+        def _after_tool(self, event):
+            if not _guardrail_allows(getattr(event, "result", None), "OUTPUT"):
+                tool_use_id = (getattr(event, "tool_use", None) or {}).get("toolUseId", "")
+                event.result = _guardrail_error_result(tool_use_id, "result")
+
+    _GUARDRAIL_HOOKS = [_ToolGuardrailHook()]
+except Exception as _guardrail_hook_error:  # noqa: BLE001
+    _guardrail_hook_import_error = _guardrail_hook_error
+
+    class _UnavailableToolGuardrailHook:
+        def register_hooks(self, registry, **kwargs):
+            raise RuntimeError(
+                "Tool Guardrail hooks are unavailable; refusing an unguarded agent"
+            ) from _guardrail_hook_import_error
+
+    _GUARDRAIL_HOOKS = [_UnavailableToolGuardrailHook()]
+"""
 
 
 def _strip_env_block(code: str) -> str:
@@ -3778,10 +4123,17 @@ def _inject_guardrails(code: str) -> str:
 
     The injection is string-based to keep generation functions simple.
     """
+    guardrail_support = _GUARDRAIL_TOOL_CORE_SRC
+    if "from strands import" in code:
+        guardrail_support += _GUARDRAIL_STRANDS_HOOK_SRC
     guardrail_env_block = (
         "\n# Guardrails configuration (injected by AgentCore Flows)\n"
         'GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID", "")\n'
-        'GUARDRAIL_VERSION = os.environ.get("GUARDRAIL_VERSION", "")\n' + _GUARDRAIL_KWARGS_ASSIGN + "\n"
+        'GUARDRAIL_VERSION = os.environ.get("GUARDRAIL_VERSION", "")\n'
+        + _GUARDRAIL_KWARGS_ASSIGN
+        + "\n"
+        + guardrail_support
+        + "\n"
     )
 
     # Inject env vars after the last top-level import or constant.
@@ -3858,6 +4210,25 @@ def _inject_guardrails(code: str) -> str:
                 'inferenceConfig={"maxTokens": 2048},',
                 'inferenceConfig={"maxTokens": 2048},' + guardrail_splat,
             )
+
+    if "from strands import" in code and "Agent(" in code:
+        code = _append_kwarg_to_calls(
+            code,
+            "Agent(",
+            'hooks=globals().get("_GUARDRAIL_HOOKS", [])',
+        )
+
+    code = code.replace(
+        'result = handler(tu["input"]) if handler else "Unknown tool"',
+        'result = _guardrail_invoke_tool(handler, tu) if handler else "Unknown tool"',
+    )
+    code = code.replace(
+        "stdout = execute_python(code)  # real sandbox execution",
+        "stdout = _guardrail_invoke_tool(\n"
+        '                lambda _args: execute_python(_args.get("code", "")),\n'
+        '                block["toolUse"],\n'
+        "            )  # real sandbox execution behind Guardrail tool screening",
+    )
 
     return code
 
@@ -3976,6 +4347,7 @@ def generate_agent_code(
     _TOOL_USE_TEMPLATES = {
         "mcp-server-gateway-target",
         "strands-gateway-agent",
+        "web-search-agent",
         "customer-support-assistant",
         "customer-support-blueprint",
     }
@@ -4035,9 +4407,6 @@ def generate_agent_code(
     # other connected capability above. The gateway templates are the unified gateway
     # agent, so they fall through with their Gateway implied and compose with whatever
     # else is connected; an early return here silently dropped it (26 combinations).
-    if template_id == "web-search-agent":
-        return _maybe_inject_guardrails(_generate_langchain_web_search(system_prompt, model_id, region))
-
     if template_id == "mcp-server-runtime":
         if protocol != "MCP":
             raise CodeGenerationUnsupportedError(

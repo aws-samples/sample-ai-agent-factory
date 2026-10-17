@@ -41,6 +41,9 @@ const RegistryModal = lazy(() => import('./components/modals/RegistryModal').the
 const HitlInboxModal = lazy(() => import('./components/modals/HitlInboxModal').then(
   (module) => ({ default: module.HitlInboxModal }),
 ));
+const AuditDashboardModal = lazy(() => import('./components/modals/AuditDashboardModal').then(
+  (module) => ({ default: module.AuditDashboardModal }),
+));
 
 function App() {
   const {
@@ -116,6 +119,7 @@ function App() {
   // Phase 2 Gap 2A — agent registry (browse/clone). Phase 2 Gap 2D — HITL inbox.
   const [showRegistry, setShowRegistry] = useState(false);
   const [showHitlInbox, setShowHitlInbox] = useState(false);
+  const [showAuditDashboard, setShowAuditDashboard] = useState(false);
   const [restoredDeployment, setRestoredDeployment] = useState<{
     deploymentId: string;
     runtimeId: string;
@@ -648,10 +652,12 @@ function App() {
           onOpenRegistry={() => setShowRegistry(true)}
           onPreviewAsEndUser={() => setPreviewAsEndUser(true)}
           onOpenHitlInbox={() => setShowHitlInbox(true)}
+          onOpenAudit={() => setShowAuditDashboard(true)}
           canDeploy={!!canDeploy && hasScope('agent:write')}
           canOpenRegistry={hasScope('registry:read')}
           showAdminControls={isTypeAdmin}
           canOpenHitlInbox={isTypeAdmin && hasScope('hitl:read')}
+          canOpenAudit={isTypeAdmin && hasScope('admin')}
         />
         <main className="flex-1 min-h-0 flex">
           {/* Keep every tab's aria-controls target in the accessibility tree's DOM
@@ -704,10 +710,12 @@ function App() {
           onOpenRegistry={() => setShowRegistry(true)}
           onPreviewAsEndUser={() => setPreviewAsEndUser(true)}
           onOpenHitlInbox={() => setShowHitlInbox(true)}
+          onOpenAudit={() => setShowAuditDashboard(true)}
           canDeploy={!!canDeploy && hasScope('agent:write')}
           canOpenRegistry={hasScope('registry:read')}
           showAdminControls={isTypeAdmin}
           canOpenHitlInbox={isTypeAdmin && hasScope('hitl:read')}
+          canOpenAudit={isTypeAdmin && hasScope('admin')}
         />
 
         <main className="flex-1 min-h-0 flex">
@@ -818,6 +826,12 @@ function App() {
         <HitlInboxModal
           isOpen={showHitlInbox}
           onClose={() => setShowHitlInbox(false)}
+        />
+
+        {/* Production append-only audit evidence (admin scope). */}
+        <AuditDashboardModal
+          isOpen={showAuditDashboard}
+          onClose={() => setShowAuditDashboard(false)}
         />
       </Suspense>
     </div>

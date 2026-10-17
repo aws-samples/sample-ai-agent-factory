@@ -157,6 +157,11 @@ class PlatformStack(cdk.Stack):
         # See gateway_auth_pool.py for the measurement and the failure it fixes.
         self.gateway_auth_pool, self.gateway_auth_domain = build_gateway_auth_pool(self, cfg)
 
+        # Workforce identity protects the public API and is also the sole JWT
+        # issuer accepted by OBO Runtime/Gateway paths. Build it before Lambdas
+        # so those paths receive construct-bound identifiers, never request data.
+        self.user_pool, self.user_pool_client = build_cognito(self, cfg)
+
         # --- Shared AgentCore runtime execution role ---
         # Created once at stack-deploy time so AgentCore's IAM cache has
         # fully propagated by the time any user-deploy runs. Eliminates the
@@ -193,6 +198,7 @@ class PlatformStack(cdk.Stack):
             backend_code=self.backend_code,
             workflows_table=tables.workflows,
             flows_table=tables.flows,
+            audit_table=tables.audit,
         )
         # Where a generated tool gets executed. Its own isolated VPC: no internet
         # gateway, no NAT gateway, and outbound only to a CloudWatch Logs interface
@@ -221,6 +227,8 @@ class PlatformStack(cdk.Stack):
             trigger_rule_prefix=self.trigger_rule_prefix,
             gateway_auth_pool=self.gateway_auth_pool,
             gateway_auth_domain=self.gateway_auth_domain,
+            workforce_user_pool=self.user_pool,
+            workforce_user_pool_client=self.user_pool_client,
         )
         self.step_lambdas = build_step_lambdas(
             self,
@@ -234,6 +242,8 @@ class PlatformStack(cdk.Stack):
             role_boundary=self.role_boundary,
             gateway_auth_pool=self.gateway_auth_pool,
             gateway_auth_domain=self.gateway_auth_domain,
+            workforce_user_pool=self.user_pool,
+            workforce_user_pool_client=self.user_pool_client,
         )
 
         # --- Step Functions ---
@@ -243,7 +253,6 @@ class PlatformStack(cdk.Stack):
         self.state_machine.grant_start_execution(self.deployment_lambda)
 
         # --- API Gateway ---
-        self.user_pool, self.user_pool_client = build_cognito(self, cfg)
         self.api = build_api_gateway(
             self,
             cfg,
@@ -265,6 +274,7 @@ class PlatformStack(cdk.Stack):
             otel,
             backend_code=self.backend_code,
             deployments_table=tables.deployments,
+            budget_table=tables.budget,
             user_pool=self.user_pool,
             user_pool_client=self.user_pool_client,
         )

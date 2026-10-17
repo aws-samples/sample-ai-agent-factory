@@ -32,7 +32,7 @@ identity + group assignment is an AWS/IdP responsibility; the platform only
 | `g-admins-security` | `settings:read/write`, `observability:read`, `tag:read/write` | Security / settings and tag-governance admin |
 | `g-admins-cost` | `cost:read/write` | FinOps admin |
 | `registry-developer` | `registry:read`, `registry:write` | Registry publisher — publish and maintain own entries; cannot approve/reject |
-| `g-users-default` | `invoke`, `agent:read`, `agent:write`, `cost:read`, `prompt:read`, `registry:read`, `tag:read` | **Standard user** — build/deploy/invoke own agents, select governed tags, browse + **clone** the registry |
+| `g-users-default` | `invoke`, `agent:read/write`, `cost:read`, `eval:read/write`, `prompt:read`, `registry:read`, `tag:read`, `trigger:read/write` | **Standard user** — build/deploy/invoke and schedule own agents, select governed tags, browse + **clone** the registry |
 | `editor` (legacy) | invoke + all read/write | generic editor |
 | `viewer` (legacy) | invoke + all read | generic read-only |
 

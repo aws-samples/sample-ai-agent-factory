@@ -348,6 +348,9 @@ class DeploymentState(BaseModel):
     # for operator/audit continuity; codegen receives the same frozen value on
     # the SFN event rather than reconstructing a convention later.
     target_artifact_bucket: str | None = None
+    # Exact CMK validated at target registration and frozen at deployment admission.
+    # Internal authority only; callers never choose it on evaluation requests.
+    evaluation_kms_key_arn: str | None = None
     # Async (slow-class) teardown tracking. KB-backed deletes exceed API
     # Gateway's 29s integration cap, so DELETE /api/runtime/{id} dispatches
     # them to a background self-invoke and the caller polls
@@ -400,9 +403,15 @@ INTERNAL_ONLY_STATE_FIELDS: frozenset[str] = frozenset(
         "resource_manifest_version",
         "target_role_arn",
         "target_artifact_bucket",
+        "evaluation_kms_key_arn",
         "delete_claim_expires_at",
     }
 )
+
+# Fields intentionally derived at the response boundary rather than persisted as a
+# second source of truth. ``runtime_name`` is the tenant's safe public key for slot
+# invocation; ``friendly_runtime_name`` remains internal authority for teardown.
+DERIVED_PUBLIC_STATE_FIELDS: frozenset[str] = frozenset({"runtime_name"})
 
 
 # ============================================================================
@@ -776,11 +785,12 @@ class DeployRequest(BaseModel):
     guardrails_config: dict | None = Field(alias="guardrailsConfig", default=None)
     observability_config: dict | None = Field(alias="observabilityConfig", default=None)
     a2a_config: dict | None = Field(alias="a2aConfig", default=None)
-    # Phase 1 Gap 1A — versioning. Caller can pin the slot this deploy lands
-    # on; default is "production". Version_id is server-minted (we never trust
-    # client-supplied ids) but ``description`` is captured for the version
-    # history UI.
-    deployment_slot: Literal["staging", "production"] | None = Field(alias="deploymentSlot", default="production")
+    # Phase 1 Gap 1A — versioning. An explicit slot is honored only when the
+    # environment policy permits it. Absence is resolved at admission: dev-like
+    # environments retain direct production for fast iteration; staging/prod-like
+    # environments land in staging and require server-verified evaluation before
+    # the production pointer can move.
+    deployment_slot: Literal["staging", "production"] | None = Field(alias="deploymentSlot", default=None)
     version_description: str | None = Field(alias="versionDescription", default=None, max_length=500)
     # Phase 2 (Loom) governance tagging. Caller supplies ad-hoc tag values
     # and/or selects a named tag profile; the deploy handler resolves them
@@ -949,11 +959,6 @@ class DeployRequest(BaseModel):
             return self
         if provider == "bedrock":
             return self
-        if self.template_id == "web-search-agent":
-            raise ValueError(
-                f"templateId '{self.template_id}' currently requires modelProvider='bedrock'; "
-                f"it cannot honour modelProvider='{provider}' and will not silently substitute Bedrock"
-            )
         tools = set(self.connected_tools or [])
         if self.guardrails_config or "guardrails" in tools:
             raise ValueError(
@@ -1044,6 +1049,23 @@ class DeployRequest(BaseModel):
                 f"server and cannot honour: {names}. Remove those settings or "
                 "use a conversational/Gateway template; none will be silently omitted."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_managed_web_search_region(self) -> "DeployRequest":
+        """Reject an explicit unsupported target Region before any AWS side effect."""
+
+        if (self.deployment_mode or "runtime") == "harness":
+            return self
+        from ..services.managed_web_search import (
+            managed_web_search_requested,
+            require_managed_web_search_region,
+        )
+
+        if managed_web_search_requested(self.template_id, self.gateway_tools):
+            requested_region = self.target_region
+            if requested_region:
+                require_managed_web_search_region(requested_region)
         return self
 
     @model_validator(mode="after")
@@ -1180,6 +1202,7 @@ class TestResponse(BaseModel):
     # Tool calls the agent's own loop executed this turn (name, status, argument
     # digests); None when the runtime reported none. runtime_invocation.parse_tool_receipts.
     tool_receipts: list[dict[str, Any]] | None = Field(alias="toolReceipts", default=None)
+    identity_evidence: dict[str, Any] | None = Field(alias="identityEvidence", default=None)
 
 
 class DeleteResponse(BaseModel):

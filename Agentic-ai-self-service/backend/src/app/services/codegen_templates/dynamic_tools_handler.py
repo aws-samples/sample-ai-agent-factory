@@ -16,7 +16,6 @@ from app.services.codegen_templates.customer_support_impl import (
 )
 from app.services.codegen_templates.dynamic_tools_impl import (
     ToolUnavailable,
-    _do_duckduckgo_search,
     _do_fetch_webpage,
     _do_weather,
     _do_wikipedia_search,
@@ -28,9 +27,7 @@ from app.services.codegen_templates.dynamic_tools_impl import (
 def lambda_handler(event, context):
     tool_name = context.client_context.custom.get("bedrockAgentCoreToolName", "unknown")
     try:
-        if "duckduckgo_search" in tool_name:
-            return {"statusCode": 200, "body": _do_duckduckgo_search(event.get("query", ""))}
-        elif "wikipedia_search" in tool_name:
+        if "wikipedia_search" in tool_name:
             return {"statusCode": 200, "body": _do_wikipedia_search(event.get("query", ""))}
         elif "weather_api" in tool_name or "get_weather" in tool_name:
             return {"statusCode": 200, "body": _do_weather(event.get("location", ""))}
