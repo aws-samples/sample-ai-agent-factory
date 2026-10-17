@@ -241,13 +241,14 @@ the module variable is insufficient because the SDK stores the original handler
 when the decorator runs. Executable removal-mutation coverage proves that dropping
 this second registration bypasses marker stripping, span capture, and flush. Only
 the owner-checked staging slot of an immutable production-gated version can add an
-internal marker, which generated code strips before execution
-and converts into one evaluator `invoke_agent` span carrying the documented
-`gen_ai.task.input/output` fields under service name
-`<AgentCoreRuntimeName>.DEFAULT` in shared `aws/spans`. The production slot
-cannot accept that marker, and the live matrix invokes a post-promotion canary
-and proves its prompt and expected response phrase never appear in correlated
-spans. CloudWatch Transaction
+internal marker, which generated code strips before execution. Every instrumented
+invocation emits one metadata-only `invoke_agent` correlation span with
+`session.id` under service name `<AgentCoreRuntimeName>.DEFAULT` in shared
+`aws/spans`. Only an owner-authorized staging invocation adds the documented
+`gen_ai.task.input/output` fields to that span. The production slot cannot accept
+the marker, and the live matrix invokes a post-promotion canary, requires its
+metadata span, and proves its prompt and expected response phrase never appear in
+any record correlated by either session ID or trace ID. CloudWatch Transaction
 Search must be active in each target account and Region; the live integration
 harness can lease this setting temporarily. After first enabling the destination
 or indexing rule, it waits AWS's documented ten-minute search-readiness window

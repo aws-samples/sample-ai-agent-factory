@@ -565,7 +565,7 @@ _otel_force_flush()
     assert "TOKEN-MUST-NOT-LEAK" not in combined
 
 
-def test_evaluation_span_captures_only_marked_staging_content():
+def test_evaluation_span_captures_content_only_for_marked_staging_and_metadata_for_production():
     script = (
         "from opentelemetry import trace\n"
         "from opentelemetry.sdk.trace import TracerProvider\n"
@@ -596,15 +596,21 @@ _otel_invoke_with_evaluation_span(
 )
 _otel_force_flush()
 spans = [span for span in exporter.get_finished_spans() if span.name == "invoke_agent"]
-assert len(spans) == 1, spans
-attrs = dict(spans[0].attributes)
-assert attrs["gen_ai.operation.name"] == "invoke_agent"
-assert attrs["session.id"] == "staging-session"
-assert attrs["gen_ai.task.input"] == "What is two plus two?"
-assert attrs["gen_ai.task.output"] == "The answer is 4."
-assert "agentcore.invocation.user_prompt" not in attrs
-assert "agentcore.invocation.agent_response" not in attrs
-assert "PRODUCTION-MUST-STAY-REDACTED" not in repr(attrs)
+assert len(spans) == 2, spans
+by_session = {span.attributes["session.id"]: dict(span.attributes) for span in spans}
+production = by_session["prod-session"]
+assert production == {
+    "gen_ai.operation.name": "invoke_agent",
+    "session.id": "prod-session",
+}
+assert "PRODUCTION-MUST-STAY-REDACTED" not in repr(production)
+assert "The answer is 4." not in repr(production)
+staging = by_session["staging-session"]
+assert staging["gen_ai.operation.name"] == "invoke_agent"
+assert staging["gen_ai.task.input"] == "What is two plus two?"
+assert staging["gen_ai.task.output"] == "The answer is 4."
+assert "agentcore.invocation.user_prompt" not in staging
+assert "agentcore.invocation.agent_response" not in staging
 assert all("_agentcore_evaluation_capture" not in payload for payload in seen)
 assert len(_otel_evaluation_text("x" * 40000)) == 12000
 """
@@ -620,6 +626,48 @@ assert len(_otel_evaluation_text("x" * 40000)) == 12000
         timeout=30,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_removing_production_metadata_span_reproduces_privacy_failure():
+    mutant = OTEL_BOOTSTRAP.replace(
+        "if _otel_provider is None:",
+        "if not capture or _otel_provider is None:",
+        1,
+    )
+    assert mutant != OTEL_BOOTSTRAP
+    script = (
+        "from opentelemetry import trace\n"
+        "from opentelemetry.sdk.trace import TracerProvider\n"
+        "from opentelemetry.sdk.trace.export import SimpleSpanProcessor\n"
+        "from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter\n"
+        "exporter = InMemorySpanExporter()\n"
+        "provider = TracerProvider()\n"
+        "provider.add_span_processor(SimpleSpanProcessor(exporter))\n"
+        "trace.set_tracer_provider(provider)\n"
+        + mutant
+        + """
+def invoke(payload):
+    return {"response": "private response"}
+_otel_invoke_with_evaluation_span(
+    invoke,
+    {"prompt": "private prompt", "session_id": "prod-session"},
+)
+_otel_force_flush()
+spans = [span for span in exporter.get_finished_spans() if span.name == "invoke_agent"]
+assert any(span.attributes.get("session.id") == "prod-session" for span in spans), spans
+"""
+    )
+    env = os.environ.copy()
+    env.pop("OTEL_EXPORTER_OTLP_ENDPOINT", None)
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert completed.returncode != 0, "Removing production metadata spans escaped detection"
 
 
 def test_inject_otel_resilient_when_no_app_marker():

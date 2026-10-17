@@ -3529,12 +3529,15 @@ def _otel_evaluation_text(value):
 
 
 def _otel_invoke_with_evaluation_span(invoke_fn, *args, **kwargs):
-    """Capture content only for a control-plane-authorized staging request.
+    """Emit invocation metadata, with content only for authorized staging.
 
-    The public API request model forbids this private marker. The owner-checked
-    slot router reconstructs the Runtime payload and adds it only for ``staging``;
-    production-slot and stable-client payloads never carry it. Strip it before
-    user-generated agent code runs so it cannot alter model or tool behavior.
+    The public API request model forbids the private capture marker. The
+    owner-checked slot router reconstructs the Runtime payload and adds it only
+    for ``staging``; production-slot and stable-client payloads never carry it.
+    Strip it before user-generated agent code runs so it cannot alter model or
+    tool behavior. Every instrumented invocation emits a correlation span with
+    ``session.id``; only an authorized staging invocation adds prompt/response
+    attributes.
     """
     positional = list(args)
     call_kwargs = dict(kwargs)
@@ -3550,17 +3553,17 @@ def _otel_invoke_with_evaluation_span(invoke_fn, *args, **kwargs):
         call_kwargs["payload"] = clean_payload
     call_args = tuple(positional)
 
-    if not capture or _otel_provider is None:
+    if _otel_provider is None:
         return invoke_fn(*call_args, **call_kwargs)
 
-    prompt = _otel_evaluation_text(clean_payload.get("prompt"))
     session_id = _otel_evaluation_text(clean_payload.get("session_id"))
-    attributes = {
-        "gen_ai.operation.name": "invoke_agent",
-        "gen_ai.task.input": prompt,
-    }
+    attributes = {"gen_ai.operation.name": "invoke_agent"}
     if session_id:
         attributes["session.id"] = session_id
+    if capture:
+        attributes["gen_ai.task.input"] = _otel_evaluation_text(
+            clean_payload.get("prompt")
+        )
 
     try:
         tracer = _otel_provider.get_tracer(
@@ -3571,20 +3574,21 @@ def _otel_invoke_with_evaluation_span(invoke_fn, *args, **kwargs):
         )
     except Exception as e:
         _otel_log.warning(
-            "Could not start staging evaluation span (%s)", type(e).__name__
+            "Could not start invocation metadata span (%s)", type(e).__name__
         )
         return invoke_fn(*call_args, **call_kwargs)
 
     with span_context as span:
         result = invoke_fn(*call_args, **call_kwargs)
-        response = _otel_evaluation_text(result)
-        try:
-            span.set_attribute("gen_ai.task.output", response)
-        except Exception as e:
-            _otel_log.warning(
-                "Could not complete staging evaluation span (%s)",
-                type(e).__name__,
-            )
+        if capture:
+            response = _otel_evaluation_text(result)
+            try:
+                span.set_attribute("gen_ai.task.output", response)
+            except Exception as e:
+                _otel_log.warning(
+                    "Could not complete staging evaluation span (%s)",
+                    type(e).__name__,
+                )
         return result
 
 
