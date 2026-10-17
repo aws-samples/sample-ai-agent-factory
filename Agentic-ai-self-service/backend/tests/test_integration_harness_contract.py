@@ -338,6 +338,38 @@ def test_json_oracle_parser_handles_model_wrappers_and_double_encoding() -> None
     assert expected in list(matrix._json_values(wrapped))
 
 
+def _lambda_proxy_model_response(payload: object, *, status_code: int = 200) -> str:
+    envelope = {"statusCode": status_code, "body": json.dumps(payload)}
+    return "Here's the tool result:\n```json\n" + json.dumps(envelope) + "\n```\nDone."
+
+
+def test_json_oracle_parser_unwraps_lambda_proxy_body_inside_model_fence() -> None:
+    expected = {"url": "https://example.com", "content": "<title>Example Domain</title>"}
+    assert expected in list(matrix._json_values(_lambda_proxy_model_response(expected)))
+
+
+def test_a_structured_error_inside_lambda_proxy_body_cannot_be_hidden() -> None:
+    valid = {"url": "https://example.com", "content": "<title>Example Domain</title>"}
+    text = "\n".join(
+        (
+            _lambda_proxy_model_response({"error": "upstream timed out"}, status_code=502),
+            json.dumps(valid),
+        )
+    )
+
+    with pytest.raises(AssertionError, match="structured tool error"):
+        matrix._require_json_oracle(text, oracle=matrix._is_fetched_page_payload, label="page")
+
+
+def test_removing_lambda_proxy_unwrap_reproduces_the_live_oracle_failure(monkeypatch) -> None:
+    expected = {"url": "https://example.com", "content": "<title>Example Domain</title>"}
+    text = _lambda_proxy_model_response(expected)
+    monkeypatch.setattr(matrix, "_nested_json_envelope_strings", lambda _value: ())
+
+    with pytest.raises(AssertionError, match="required structured tool result"):
+        matrix._require_json_oracle(text, oracle=matrix._is_fetched_page_payload, label="page")
+
+
 def test_a_structured_tool_error_cannot_be_hidden_beside_a_valid_candidate() -> None:
     text = "\n".join(
         (

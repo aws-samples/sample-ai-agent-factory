@@ -641,6 +641,28 @@ def _deploy_template(
     return record, payload
 
 
+def _nested_json_envelope_strings(value: Any) -> Iterable[str]:
+    """Yield bounded JSON strings from recognizable structured envelopes."""
+
+    pending: list[Any] = [value]
+    visited = 0
+    while pending:
+        current = pending.pop()
+        visited += 1
+        if visited > 256:
+            return
+        if isinstance(current, dict):
+            status_code = current.get("statusCode")
+            body = current.get("body")
+            if type(status_code) is int and isinstance(body, str):
+                candidate = body.strip()
+                if candidate and len(candidate) <= 256 * 1024:
+                    yield candidate
+            pending.extend(nested for nested in current.values() if isinstance(nested, dict | list))
+        elif isinstance(current, list):
+            pending.extend(nested for nested in current if isinstance(nested, dict | list))
+
+
 def _json_values(text: str) -> Iterable[Any]:
     """Yield JSON values from plain, fenced, or lightly-prefixed model output."""
 
@@ -670,6 +692,8 @@ def _json_values(text: str) -> Iterable[Any]:
             yield value
             if isinstance(value, str):
                 pending.append(value.strip())
+            else:
+                pending.extend(_nested_json_envelope_strings(value))
 
         for index, character in enumerate(candidate):
             if character not in "[{":
@@ -681,6 +705,8 @@ def _json_values(text: str) -> Iterable[Any]:
             yield value
             if isinstance(value, str):
                 pending.append(value.strip())
+            else:
+                pending.extend(_nested_json_envelope_strings(value))
 
 
 def _require_json_oracle(

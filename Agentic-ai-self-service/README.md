@@ -372,7 +372,11 @@ receives an owner-bound temporary budget that is deleted and absence-checked on
 success or failure. Conversational gallery cases use customer-style requests that
 pass the unchanged `HIGH` prompt-attack filter, then require a successful runtime-
 generated tool receipt with exact SHA-256 argument digests before accepting the
-semantic response oracle. Demo customer tools advertise only non-PII customer IDs and do
+semantic response oracle. The oracle accepts plain, fenced, and double-encoded
+JSON plus a bounded Lambda proxy envelope whose integer `statusCode` accompanies
+a string `body`; it does not recursively interpret arbitrary webpage content,
+and any structured error found in the recognized envelope fails the run.
+Demo customer tools advertise only non-PII customer IDs and do
 not return or echo email addresses, so the production PII Guardrail remains strict
 without erasing useful customer data. Full web search is provided by the Amazon
 Bedrock AgentCore Gateway Web Search Tool (`connectorId: web-search`), pinned to
