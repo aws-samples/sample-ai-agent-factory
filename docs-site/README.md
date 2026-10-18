@@ -136,6 +136,8 @@ Every page is built from a small set of shared primitives in `src/components/`, 
 
 ## Validation
 
+Repository fact sources are fail-closed: every `source.quote` in `src/content/` must be a 20-120 character verbatim substring of its cited repository file. When source documentation changes, update both the displayed fact and its quote rather than weakening or removing the provenance test.
+
 Before committing:
 
 ```bash

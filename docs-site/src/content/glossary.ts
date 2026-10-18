@@ -77,11 +77,11 @@ export const glossary: GlossaryTerm[] = [
       {
         projectId: 'self-service',
         meaning:
-          'Either an AgentCore Gateway the platform creates for the selected tools (the default, with Cognito OAuth2) or a customer-run LiteLLM MCP Gateway chosen per agent on the canvas.',
+          'Either an AgentCore Gateway with a pinned managed-search connector and scoped Lambda targets (the default, with Cognito OAuth2) or a customer-run LiteLLM MCP Gateway chosen per agent on the canvas.',
         source: {
           file: SELF_SERVICE_README,
           heading: 'Key Features',
-          quote: 'Selected tools deploy as a single Lambda behind an MCP Gateway with Cognito OAuth2',
+          quote: 'Managed search deploys as a pinned AWS connector target',
         },
       },
       {
@@ -209,7 +209,7 @@ export const glossary: GlossaryTerm[] = [
         source: {
           file: SELF_SERVICE_README,
           heading: 'Key Features',
-          quote: 'agent registry with approval workflow, versioning & rollback',
+          quote: 'agent registry with approval workflow',
         },
       },
       {

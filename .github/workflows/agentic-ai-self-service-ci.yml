@@ -131,6 +131,11 @@ jobs:
           cache-dependency-path: Agentic-ai-self-service/backend/pyproject.toml
       - name: Install backend with dev extras
         run: pip install -e './backend[dev]'
+      # Two reproducibility tests execute a real sdist build and intentionally fail
+      # when uv is absent. Pin the same version used by the certified local release
+      # environment so CI exercises that contract instead of skipping or drifting.
+      - name: Install uv at the certified version
+        run: python -m pip install 'uv==0.10.8'
       # "not integration" matches `make test-backend`: the integration marker is for
       # tests that make real AWS calls, which have no credentials here.
       #
