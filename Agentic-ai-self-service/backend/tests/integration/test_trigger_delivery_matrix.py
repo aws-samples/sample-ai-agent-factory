@@ -27,6 +27,7 @@ import os
 import re
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -112,6 +113,8 @@ DELIVERY_TIMEOUT_ENV = "INTEGRATION_TRIGGER_TIMEOUT_SECONDS"
 DEFAULT_DELIVERY_TIMEOUT_SECONDS = 12 * 60
 DELETE_TIMEOUT_SECONDS = 12 * 60
 POLL_INTERVAL_SECONDS = 10
+S3_SOURCE_REFIRE_INTERVAL_SECONDS = 60
+S3_SOURCE_MAX_ATTEMPTS = 15
 EXPECTED_DELIVERY_RETENTION_SECONDS = 7 * 24 * 60 * 60
 
 
@@ -121,6 +124,42 @@ class CreatedTrigger:
     trigger_id: str
     row: dict[str, Any]
     expected_delivery_id: str | None = None
+
+
+@dataclass
+class S3SourceRefire:
+    """Re-emit real S3 writes while new-bucket EventBridge activation settles."""
+
+    client: Any
+    bucket_name: str
+    object_prefix: str
+    nonce: str
+    trigger_id: str
+    interval_seconds: int = S3_SOURCE_REFIRE_INTERVAL_SECONDS
+    max_attempts: int = S3_SOURCE_MAX_ATTEMPTS
+    clock: Callable[[], float] = time.monotonic
+    attempts: int = 0
+    next_attempt_at: float = 0.0
+
+    def __call__(self, pending_trigger_ids: frozenset[str]) -> None:
+        if self.trigger_id not in pending_trigger_ids or self.attempts >= self.max_attempts:
+            return
+        now = self.clock()
+        if now < self.next_attempt_at:
+            return
+        self.attempts += 1
+        self.client.put_object(
+            Bucket=self.bucket_name,
+            Key=f"{self.object_prefix}{self.nonce}-{self.attempts:02d}.json",
+            Body=json.dumps(
+                {"attempt": self.attempts, "nonce": self.nonce},
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8"),
+            ContentType="application/json",
+            ServerSideEncryption="AES256",
+        )
+        self.next_attempt_at = now + self.interval_seconds
 
 
 @pytest.fixture(scope="session")
@@ -441,6 +480,7 @@ def _wait_for_all_deliveries(
     triggers: list[CreatedTrigger],
     *,
     runtime_name: str,
+    on_pending: Callable[[frozenset[str]], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
     deadline = time.monotonic() + _delivery_timeout()
     pending = {trigger.trigger_id: trigger for trigger in triggers}
@@ -455,6 +495,8 @@ def _wait_for_all_deliveries(
             if item is not None:
                 completed[trigger_id] = item
                 pending.pop(trigger_id)
+        if pending and on_pending is not None:
+            on_pending(frozenset(pending))
         if pending:
             time.sleep(POLL_INTERVAL_SECONDS)
 
@@ -1389,12 +1431,12 @@ def test_all_four_trigger_sources_invoke_and_cleanup(
             detail_type=event_detail_type,
             nonce=nonce,
         )
-        s3_client.put_object(
-            Bucket=bucket_name,
-            Key=f"{object_prefix}{nonce}.json",
-            Body=json.dumps({"nonce": nonce}).encode("utf-8"),
-            ContentType="application/json",
-            ServerSideEncryption="AES256",
+        s3_source_refire = S3SourceRefire(
+            client=s3_client,
+            bucket_name=bucket_name,
+            object_prefix=object_prefix,
+            nonce=nonce,
+            trigger_id=s3_trigger.trigger_id,
         )
         webhook_delivery_id = _fire_signed_webhook(
             api_session,
@@ -1419,8 +1461,10 @@ def test_all_four_trigger_sources_invoke_and_cleanup(
             table,
             active_triggers,
             runtime_name=runtime_name,
+            on_pending=s3_source_refire,
         )
         assert len(completed) == len(TRIGGER_TYPES_UNDER_TEST)
+        assert 1 <= s3_source_refire.attempts <= S3_SOURCE_MAX_ATTEMPTS
 
         for trigger in list(reversed(active_triggers)):
             _delete_trigger_and_verify(

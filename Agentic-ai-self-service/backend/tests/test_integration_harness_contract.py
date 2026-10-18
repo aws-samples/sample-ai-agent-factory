@@ -884,7 +884,10 @@ def test_live_trigger_matrix_uses_real_sources_and_a_durable_completion_oracle()
     source = (_REPO / "backend/tests/integration/test_trigger_delivery_matrix.py").read_text()
 
     assert "events_client.put_events(" in source
-    assert "s3_client.put_object(" in source
+    assert "self.client.put_object(" in source
+    assert "S3SourceRefire(" in source
+    assert "on_pending=s3_source_refire" in source
+    assert "S3_SOURCE_MAX_ATTEMPTS" in source
     assert "response = requests.post(" in source
     assert 'item.get("delivery_status") != "completed"' in source
     assert "ConsistentRead=True" in source
@@ -974,6 +977,136 @@ def test_trigger_delivery_oracle_requires_completed_state_and_bounded_ttl() -> N
         )
         == table.item
     )
+
+
+class _S3Calls:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def put_object(self, **kwargs) -> None:
+        self.calls.append(kwargs)
+
+
+def test_s3_source_refire_is_scoped_bounded_and_uniquely_keyed() -> None:
+    s3 = _S3Calls()
+    ticks = iter((0.0, 30.0, 60.0, 120.0))
+    refire = trigger_matrix.S3SourceRefire(
+        client=s3,
+        bucket_name="agentcore-trigger-it-123456789012-example",
+        object_prefix="events/example/",
+        nonce="nonce",
+        trigger_id="s3-trigger",
+        interval_seconds=60,
+        max_attempts=2,
+        clock=lambda: next(ticks),
+    )
+
+    refire(frozenset({"unrelated-trigger"}))
+    refire(frozenset({"s3-trigger"}))
+    refire(frozenset({"s3-trigger"}))
+    refire(frozenset({"s3-trigger"}))
+    refire(frozenset({"s3-trigger"}))
+
+    assert len(s3.calls) == 2
+    assert [call["Key"] for call in s3.calls] == [
+        "events/example/nonce-01.json",
+        "events/example/nonce-02.json",
+    ]
+    assert [json.loads(call["Body"]) for call in s3.calls] == [
+        {"attempt": 1, "nonce": "nonce"},
+        {"attempt": 2, "nonce": "nonce"},
+    ]
+    assert all(call["ServerSideEncryption"] == "AES256" for call in s3.calls)
+
+
+def _completed_s3_item() -> dict[str, Any]:
+    completed_at = 100
+    return {
+        "item_kind": "trigger_delivery",
+        "source_runtime_name": "orders_agent",
+        "source_trigger_id": "s3-trigger",
+        "delivery_status": "completed",
+        "completed_at": completed_at,
+        "ttl": completed_at + trigger_matrix.EXPECTED_DELIVERY_RETENTION_SECONDS,
+    }
+
+
+def test_pending_source_refire_recovers_after_initial_s3_activation_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = {"value": 0.0}
+    s3 = _S3Calls()
+    trigger = trigger_matrix.CreatedTrigger(
+        trigger_type="s3",
+        trigger_id="s3-trigger",
+        row={},
+    )
+    refire = trigger_matrix.S3SourceRefire(
+        client=s3,
+        bucket_name="agentcore-trigger-it-123456789012-example",
+        object_prefix="events/example/",
+        nonce="nonce",
+        trigger_id=trigger.trigger_id,
+        interval_seconds=10,
+        max_attempts=2,
+        clock=lambda: now["value"],
+    )
+
+    class Table:
+        def query(self, **kwargs):
+            assert kwargs["ConsistentRead"] is True
+            if len(s3.calls) == 2:
+                return {"Items": [_completed_s3_item()]}
+            return {"Items": []}
+
+    monkeypatch.setattr(trigger_matrix, "_delivery_timeout", lambda: 30)
+    monkeypatch.setattr(trigger_matrix.time, "monotonic", lambda: now["value"])
+    monkeypatch.setattr(
+        trigger_matrix.time,
+        "sleep",
+        lambda seconds: now.__setitem__("value", now["value"] + seconds),
+    )
+
+    completed = trigger_matrix._wait_for_all_deliveries(
+        Table(),
+        [trigger],
+        runtime_name="orders_agent",
+        on_pending=refire,
+    )
+
+    assert completed[trigger.trigger_id] == _completed_s3_item()
+    assert refire.attempts == 2
+
+
+def test_removing_pending_source_refire_reproduces_s3_activation_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = {"value": 0.0}
+    trigger = trigger_matrix.CreatedTrigger(
+        trigger_type="s3",
+        trigger_id="s3-trigger",
+        row={},
+    )
+
+    class Table:
+        def query(self, **_kwargs):
+            return {"Items": []}
+
+    monkeypatch.setattr(trigger_matrix, "_delivery_timeout", lambda: 20)
+    monkeypatch.setattr(trigger_matrix.time, "monotonic", lambda: now["value"])
+    monkeypatch.setattr(
+        trigger_matrix.time,
+        "sleep",
+        lambda seconds: now.__setitem__("value", now["value"] + seconds),
+    )
+
+    with pytest.raises(AssertionError, match="s3"):
+        trigger_matrix._wait_for_all_deliveries(
+            Table(),
+            [trigger],
+            runtime_name="orders_agent",
+            on_pending=None,
+        )
 
 
 def test_signed_webhook_uses_the_one_time_secret_and_no_bearer_token(

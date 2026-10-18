@@ -366,7 +366,14 @@ identity the orthogonal `g-admins-cost` group only for the run: agent budgets ar
 bound to the writer's `owner_sub`, while the cost group grants no trigger scope
 and therefore cannot mask trigger RBAC. The matrix creates one unique agent-scoped
 invocation budget before staging evaluation, then deletes and absence-checks it
-in `finally`, so no reusable budget definition is left behind. The lifecycle and
+in `finally`, so no reusable budget definition is left behind. A newly enabled
+S3-to-EventBridge notification can take around five minutes to activate, and an
+object uploaded before activation is not replayed later. The real delivery matrix
+therefore writes uniquely keyed, AES256-encrypted probe objects once per minute
+only while its exact S3 trigger is still pending, capped at 15 attempts. It never
+substitutes `PutEvents` for the S3 source and still requires the product's
+completed, seven-day-TTL delivery row; removing the bounded refire reproduces
+the activation-loss failure. The lifecycle and
 gallery integration cases use the same register-before-write tracker around every
 Runtime invocation, including MCP discovery and tool calls; each unique Runtime
 receives an owner-bound temporary budget that is deleted and absence-checked on
