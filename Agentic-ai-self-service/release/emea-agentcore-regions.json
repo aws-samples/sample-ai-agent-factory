@@ -7,6 +7,7 @@
       "region": "eu-central-1",
       "name": "Europe (Frankfurt)",
       "core": true,
+      "production_release": false,
       "memory": true,
       "agent_registry": false,
       "web_search": false
@@ -15,6 +16,7 @@
       "region": "eu-west-1",
       "name": "Europe (Ireland)",
       "core": true,
+      "production_release": true,
       "memory": true,
       "agent_registry": true,
       "web_search": true
@@ -23,6 +25,7 @@
       "region": "eu-west-2",
       "name": "Europe (London)",
       "core": true,
+      "production_release": false,
       "memory": true,
       "agent_registry": false,
       "web_search": false
@@ -31,6 +34,7 @@
       "region": "eu-south-1",
       "name": "Europe (Milan)",
       "core": true,
+      "production_release": false,
       "memory": false,
       "agent_registry": false,
       "web_search": false
@@ -39,6 +43,7 @@
       "region": "eu-west-3",
       "name": "Europe (Paris)",
       "core": true,
+      "production_release": false,
       "memory": true,
       "agent_registry": false,
       "web_search": false
@@ -47,6 +52,7 @@
       "region": "eu-south-2",
       "name": "Europe (Spain)",
       "core": true,
+      "production_release": false,
       "memory": false,
       "agent_registry": false,
       "web_search": false
@@ -55,6 +61,7 @@
       "region": "eu-north-1",
       "name": "Europe (Stockholm)",
       "core": true,
+      "production_release": false,
       "memory": true,
       "agent_registry": false,
       "web_search": false
@@ -74,6 +81,7 @@
     "a2a": false,
     "gateway_provider": "agentcore",
     "notes": [
+      "Production release support is limited to Europe (Ireland), eu-west-1; other Region rows are capability data for future reviewed expansion.",
       "Managed Harness is development-only until model/tool output can be retracted after Guardrail denial.",
       "Production A2A is disabled until nested and inbound invocation reservations propagate.",
       "Memory scenarios run only where memory=true.",

@@ -454,8 +454,9 @@ infrastructure nag gate reads each stack's CLI-consumed `additionalMetadataFile`
 directly rather than depending on import-order-sensitive jsii conversion through
 overlapping generated CDK schema distributions. The dated
 [`release/emea-agentcore-regions.json`](release/emea-agentcore-regions.json) matrix
-requires an independent core scenario in every documented EMEA AgentCore Region;
-feature-specific scenarios run only where AWS documents that feature as available.
+retains AWS capability facts for seven EMEA AgentCore Regions while limiting this
+production release and its independent core scenario to Europe (Ireland), `eu-west-1`;
+future Region expansion requires a reviewed matrix change and fresh evidence.
 
 [`scripts/release_evidence.py`](scripts/release_evidence.py) starts only from a clean
 Git commit, appends bounded digest-only events tied to mapped suites/scenarios, keeps
@@ -467,8 +468,8 @@ constitute third-party/WORM attestation.
 See [`release/README.md`](release/README.md) for the workflow and support matrix.
 
 No candidate is production-ready until its current-commit run finalizes and verifies.
-Passing unit tests, synthesis, a prior revision's AWS run, or one Region alone is
-insufficient.
+Passing unit tests, synthesis, a prior revision's AWS run, or evidence outside
+the declared production release envelope is insufficient.
 
 ## Accessing the Platform
 

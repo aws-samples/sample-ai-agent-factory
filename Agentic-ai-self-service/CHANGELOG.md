@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed — production release support is Ireland only
+
+- The dated EMEA matrix continues to record AWS capability facts for seven Regions, but
+  `production_release` selects only Europe (Ireland), `eu-west-1`, for this release.
+- Release finalization requires independent regional evidence only for selected production
+  Regions. Expanding support requires a reviewed matrix change and fresh exact-commit evidence.
+
 ### Fixed — tool-heavy browser turns escape the 30-second API limit
 
 - Non-OBO Runtime chat now starts one authenticated, owner-bound asynchronous

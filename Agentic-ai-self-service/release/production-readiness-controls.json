@@ -86,10 +86,10 @@
     },
     {
       "id": "regional.emea_core",
-      "description": "Core Runtime/Gateway/Identity/Policy/Evaluation behavior is independently verified in every documented EMEA core Region.",
+      "description": "Core Runtime/Gateway/Identity/Policy/Evaluation behavior is independently verified in every Region selected for the bounded production release.",
       "required_kinds": ["offline_positive", "offline_adversarial", "offline_mutation"],
       "required_region_kind": "live_region",
-      "region_selector": "core"
+      "region_selector": "production_release"
     }
   ],
   "global_required_kinds": ["clean_clone", "exact_commit", "ui_cloudfront", "rollback", "teardown_zero"]

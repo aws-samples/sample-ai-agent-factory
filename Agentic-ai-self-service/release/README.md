@@ -15,7 +15,7 @@ A finalized run proves that:
 
 * every event names a declared control, required evidence kind, and exact mapped suite or scenario;
 * every suite mapped to an offline kind passes; one generic pass cannot stand in for missing backend, infrastructure, frontend, static, package, or synthesis gates;
-* every named live scenario passes, including all seven documented EMEA core Regions for `live_region`;
+* every named live scenario passes, including every Region selected by the bounded production envelope for `live_region` (currently Ireland only);
 * failures and blockers remain open until a later event explicitly supersedes the same control/kind/Region/account/suite/scenario tuple;
 * artifacts are represented only by labels, byte counts, and SHA-256 digests;
 * the run, every event, the complete event set, and the final result are digest-bound;
@@ -94,16 +94,16 @@ Repository paths and branch names may differ in the second clone. Verification b
 
 ## EMEA support envelope
 
-The dated matrix cites the official [AgentCore supported Regions](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html) page. The core Runtime deployment scenario must pass independently in:
+The dated matrix cites the official [AgentCore supported Regions](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html) page. The production release is supported and certified only in Europe (Ireland), `eu-west-1`. The other rows retain dated AWS capability facts for future, separately reviewed release expansion; they are not current deployment targets.
 
-| Region | Core | Memory scenario | Agent Registry scenario | Web Search scenario |
-|---|---:|---:|---:|---:|
-| Europe (Frankfurt), `eu-central-1` | Yes | Yes | No | No |
-| Europe (Ireland), `eu-west-1` | Yes | Yes | Yes | Yes |
-| Europe (London), `eu-west-2` | Yes | Yes | No | No |
-| Europe (Milan), `eu-south-1` | Yes | No | No | No |
-| Europe (Paris), `eu-west-3` | Yes | Yes | No | No |
-| Europe (Spain), `eu-south-2` | Yes | No | No | No |
-| Europe (Stockholm), `eu-north-1` | Yes | Yes | No | No |
+| Region | Core capability | Current release | Memory capability | Agent Registry capability | Web Search capability |
+|---|---:|---:|---:|---:|---:|
+| Europe (Frankfurt), `eu-central-1` | Yes | No | Yes | No | No |
+| Europe (Ireland), `eu-west-1` | Yes | **Yes** | Yes | Yes | Yes |
+| Europe (London), `eu-west-2` | Yes | No | Yes | No | No |
+| Europe (Milan), `eu-south-1` | Yes | No | No | No | No |
+| Europe (Paris), `eu-west-3` | Yes | No | Yes | No | No |
+| Europe (Spain), `eu-south-2` | Yes | No | No | No | No |
+| Europe (Stockholm), `eu-north-1` | Yes | No | Yes | No | No |
 
-Feature-specific scenarios run only where their matrix flag is true. Managed Harness and production A2A remain outside the production envelope for the reasons recorded in the matrix. A matrix update is a reviewed source change: it invalidates an in-progress run and requires fresh evidence.
+Feature-specific scenarios run only in a selected release Region where their capability flag is true. Managed Harness and production A2A remain outside the production envelope for the reasons recorded in the matrix. A matrix update is a reviewed source change: it invalidates an in-progress run and requires fresh evidence.

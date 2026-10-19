@@ -221,6 +221,10 @@ def test_emea_matrix_matches_documented_feature_boundaries():
         "eu-north-1",
     }
     assert all(entry["core"] for entry in by_region.values())
+    assert {region for region, entry in by_region.items() if entry["production_release"]} == {"eu-west-1"}
+    controls = json.loads(CONTROLS_PATH.read_text(encoding="utf-8"))
+    regional_control = next(item for item in controls["controls"] if item["id"] == "regional.emea_core")
+    assert regional_control["region_selector"] == "production_release"
     assert {region for region, entry in by_region.items() if entry["memory"]} == {
         "eu-central-1",
         "eu-west-1",
@@ -379,7 +383,7 @@ def test_live_region_requires_a_selected_matrix_region(evidence_project: dict):
             kind="live_region",
             status="pass",
             scenario_id="core-runtime-gateway-identity-policy-evaluation",
-            region="us-west-2",
+            region="eu-central-1",
             account_id=TEST_ACCOUNT_ID,
         )
     with pytest.raises(release_evidence.EvidenceError, match="12-digit AWS account ID"):
@@ -409,6 +413,16 @@ def test_live_region_requires_a_selected_matrix_region(evidence_project: dict):
             status="pass",
             scenario_id="core-runtime-gateway-identity-policy-evaluation",
         )
+    accepted = release_evidence.record_event(
+        run_dir,
+        control_id="regional.emea_core",
+        kind="live_region",
+        status="pass",
+        scenario_id="core-runtime-gateway-identity-policy-evaluation",
+        region="eu-west-1",
+        account_id=TEST_ACCOUNT_ID,
+    )
+    assert accepted["region"] == "eu-west-1"
 
 
 def test_unmapped_suite_and_scenario_are_rejected(evidence_project: dict):
@@ -497,20 +511,20 @@ def test_complete_run_seals_verifies_and_is_portable_to_clean_clone(
 
     mutation_run = _copy_run(run_dir, evidence_project["tmp_path"] / "region-mutation")
     (mutation_run / "final.json").unlink()
-    paris_event = next(
+    ireland_event = next(
         event
         for event in events
         if event["control_id"] == "regional.emea_core"
         and event["kind"] == "live_region"
-        and event["region"] == "eu-west-3"
+        and event["region"] == "eu-west-1"
     )
-    (mutation_run / "events" / f"{paris_event['event_id']}.json").unlink()
+    (mutation_run / "events" / f"{ireland_event['event_id']}.json").unlink()
     mutated_status = release_evidence.status_run(mutation_run)
     assert {
         "scope": "region",
         "control_id": "regional.emea_core",
         "kind": "live_region",
-        "region": "eu-west-3",
+        "region": "eu-west-1",
         "suite_id": None,
         "scenario_id": "core-runtime-gateway-identity-policy-evaluation",
     } in mutated_status["coverage"]["missing"]
@@ -684,8 +698,8 @@ def test_contract_validator_rejects_missing_region_selector():
     controls = json.loads(CONTROLS_PATH.read_text(encoding="utf-8"))
     regions = json.loads(REGIONS_PATH.read_text(encoding="utf-8"))
     broken = deepcopy(regions)
-    broken["regions"][0].pop("core")
-    with pytest.raises(release_evidence.EvidenceError, match="lacks boolean selector core"):
+    broken["regions"][0].pop("production_release")
+    with pytest.raises(release_evidence.EvidenceError, match="lacks boolean selector production_release"):
         release_evidence._validate_contracts(controls, broken)
 
 
