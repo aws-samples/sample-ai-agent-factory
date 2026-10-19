@@ -93,9 +93,12 @@
       "id": "strict-synth",
       "working_directory": "infra",
       "selector_type": "command",
-      "check_ids": ["production-eu-west-1-cdk-nag"],
+      "check_ids": ["production-supported-emea-regions-cdk-nag"],
       "commands": [
-        ["{cdk}", "synth", "--strict", "--quiet", "-c", "environment_name=production", "-c", "aws_region=eu-west-1", "-c", "project_name=acf"]
+        ["{cdk}", "synth", "--strict", "--quiet", "--output", "{artifact_dir}/cdk-eu-central-1", "-c", "environment_name=production", "-c", "aws_region=eu-central-1", "-c", "project_name=acf"],
+        ["{cdk}", "synth", "--strict", "--quiet", "--output", "{artifact_dir}/cdk-eu-west-1", "-c", "environment_name=production", "-c", "aws_region=eu-west-1", "-c", "project_name=acf"],
+        ["{cdk}", "synth", "--strict", "--quiet", "--output", "{artifact_dir}/cdk-eu-west-2", "-c", "environment_name=production", "-c", "aws_region=eu-west-2", "-c", "project_name=acf"],
+        ["{cdk}", "synth", "--strict", "--quiet", "--output", "{artifact_dir}/cdk-eu-west-3", "-c", "environment_name=production", "-c", "aws_region=eu-west-3", "-c", "project_name=acf"]
       ],
       "required_environment": ["CDK_PYTHON", "CDK_HOME", "TMPDIR"],
       "timeout_seconds": 3600
@@ -113,7 +116,7 @@
           {"suite": "secret-scan", "selector": "tracked-files-against-baseline"},
           {"suite": "export-gate", "selector": "customer-export-contract-policy"},
           {"suite": "backend-package", "selector": "wheel-and-sdist"},
-          {"suite": "strict-synth", "selector": "production-eu-west-1-cdk-nag"}
+          {"suite": "strict-synth", "selector": "production-supported-emea-regions-cdk-nag"}
         ],
         "offline_adversarial": [
           {"suite": "backend", "selector": "backend/tests/test_release_evidence_recorder.py::test_start_rejects_dirty_source"}
@@ -344,7 +347,7 @@
         "offline_positive": [
           {"suite": "backend", "selector": "backend/tests/test_release_evidence_recorder.py::test_emea_matrix_matches_documented_feature_boundaries"},
           {"suite": "infra", "selector": "infra/tests/test_same_account_non_home_region_iam.py::test_target_resource_grants_reach_any_region_but_only_this_account"},
-          {"suite": "strict-synth", "selector": "production-eu-west-1-cdk-nag"}
+          {"suite": "strict-synth", "selector": "production-supported-emea-regions-cdk-nag"}
         ],
         "offline_adversarial": [
           {"suite": "backend", "selector": "backend/tests/test_release_evidence_recorder.py::test_live_region_requires_a_selected_matrix_region"}

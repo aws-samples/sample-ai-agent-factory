@@ -28,6 +28,7 @@ from aws_cdk import aws_ssm as ssm
 from .buckets import deny_writes_to_agentcore_deps
 from .config import (
     ATTACHABLE_MANAGED_POLICIES,
+    AWS_AGENT_REGISTRY_SUPPORTED_REGIONS,
     DEPLOYMENT_STATE_MACHINE_TIMEOUT_MINUTES,
     GOVERNANCE_TAG_KEY_PREFIXES_ENV,
     PENDING_CLAIM_SLACK_SECONDS,
@@ -1643,51 +1644,52 @@ def build_deployment_lambda(
             resources=[f"arn:aws:bedrock-agentcore:*:{stack.account}:gateway/*"],
         )
     )
-    # Phase 6 (Loom) — AWS Agent Registry federation (opt-in).
-    # SEPARATE STATEMENT, DIFFERENT ACTION PREFIX. Agent Registry graduated out
-    # of AgentCore into its own AWS service at GA: the boto3 clients are
-    # `agent-registry-control` / `agent-registry`, and BOTH planes authorize
-    # under a single `agent-registry:` prefix (the control-plane model's
-    # signingName is `agent-registry`, not `agent-registry-control`). Leaving
-    # these as `bedrock-agentcore:*Registry*` silently AccessDenies every
-    # federation call — and because the deploy-path auto-register is
-    # best-effort, the denial shows up only as a skipped log line.
-    # The data-plane search was also RENAMED: SearchRegistryRecords ->
-    # SearchDiscoverableRegistryRecords.
-    role.add_to_policy(
-        iam.PolicyStatement(
-            actions=[
-                # control plane (agent-registry-control)
-                "agent-registry:CreateRegistry",
-                "agent-registry:GetRegistry",
-                "agent-registry:UpdateRegistry",
-                "agent-registry:DeleteRegistry",
-                "agent-registry:ListRegistries",
-                "agent-registry:CreateRegistryRecord",
-                "agent-registry:GetRegistryRecord",
-                "agent-registry:ListRegistryRecords",
-                "agent-registry:UpdateRegistryRecord",
-                "agent-registry:UpdateRegistryRecordStatus",
-                "agent-registry:SubmitRegistryRecordForApproval",
-                "agent-registry:DeleteRegistryRecord",
-                # data plane (agent-registry) — discovery/search over APPROVED
-                # records. Note the GA operation names.
-                "agent-registry:SearchDiscoverableRegistryRecords",
-                "agent-registry:ListDiscoverableRegistryRecords",
-                "agent-registry:BatchGetDiscoverableRegistryRecord",
-                # tagging: registries/records created by the platform are tagged
-                # for cost attribution and teardown discovery.
-                "agent-registry:TagResource",
-                "agent-registry:UntagResource",
-                "agent-registry:ListTagsForResource",
-            ],
-            # The registryId is supplied by an admin at runtime (opt-in feature),
-            # so the registry/record ARNs are unknowable at synth time. Scoped by
-            # the exact action list instead of the resource, matching the
-            # AgentCore statement above.
-            resources=["*"],
+    if stack.region in AWS_AGENT_REGISTRY_SUPPORTED_REGIONS:
+        # Phase 6 (Loom) — AWS Agent Registry federation (opt-in).
+        # SEPARATE STATEMENT, DIFFERENT ACTION PREFIX. Agent Registry graduated out
+        # of AgentCore into its own AWS service at GA: the boto3 clients are
+        # `agent-registry-control` / `agent-registry`, and BOTH planes authorize
+        # under a single `agent-registry:` prefix (the control-plane model's
+        # signingName is `agent-registry`, not `agent-registry-control`). Leaving
+        # these as `bedrock-agentcore:*Registry*` silently AccessDenies every
+        # federation call — and because the deploy-path auto-register is
+        # best-effort, the denial shows up only as a skipped log line.
+        # The data-plane search was also RENAMED: SearchRegistryRecords ->
+        # SearchDiscoverableRegistryRecords.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    # control plane (agent-registry-control)
+                    "agent-registry:CreateRegistry",
+                    "agent-registry:GetRegistry",
+                    "agent-registry:UpdateRegistry",
+                    "agent-registry:DeleteRegistry",
+                    "agent-registry:ListRegistries",
+                    "agent-registry:CreateRegistryRecord",
+                    "agent-registry:GetRegistryRecord",
+                    "agent-registry:ListRegistryRecords",
+                    "agent-registry:UpdateRegistryRecord",
+                    "agent-registry:UpdateRegistryRecordStatus",
+                    "agent-registry:SubmitRegistryRecordForApproval",
+                    "agent-registry:DeleteRegistryRecord",
+                    # data plane (agent-registry) — discovery/search over APPROVED
+                    # records. Note the GA operation names.
+                    "agent-registry:SearchDiscoverableRegistryRecords",
+                    "agent-registry:ListDiscoverableRegistryRecords",
+                    "agent-registry:BatchGetDiscoverableRegistryRecord",
+                    # tagging: registries/records created by the platform are tagged
+                    # for cost attribution and teardown discovery.
+                    "agent-registry:TagResource",
+                    "agent-registry:UntagResource",
+                    "agent-registry:ListTagsForResource",
+                ],
+                # The registryId is supplied by an admin at runtime (opt-in feature),
+                # so the registry/record ARNs are unknowable at synth time. Scoped by
+                # the exact action list instead of the resource, matching the
+                # AgentCore statement above.
+                resources=["*"],
+            )
         )
-    )
     # Phase 1 Gap 1C — CloudWatch Logs Insights query for evaluator scores.
     role.add_to_policy(
         iam.PolicyStatement(

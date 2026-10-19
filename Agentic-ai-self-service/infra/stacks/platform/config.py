@@ -15,6 +15,19 @@ from aws_cdk import RemovalPolicy
 #     does not rename — and thus replace — anything already running.
 HOME_REGION = "us-east-1"
 
+# AWS Agent Registry is an optional federation plane, not the built-in DynamoDB
+# registry. Grant its IAM actions only where AWS currently offers the service;
+# reduced EMEA profiles must not carry unusable federation permissions.
+AWS_AGENT_REGISTRY_SUPPORTED_REGIONS = frozenset(
+    {
+        "ap-northeast-1",
+        "ap-southeast-2",
+        "eu-west-1",
+        "us-east-1",
+        "us-west-2",
+    }
+)
+
 # The complete set of AWS-managed policies this platform ever attaches to a role
 # it creates, and therefore the only ones `iam:AttachRolePolicy` is granted for.
 #

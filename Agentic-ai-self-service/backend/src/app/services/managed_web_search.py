@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from app.services.region_capabilities import MANAGED_WEB_SEARCH_SUPPORTED_REGIONS
+
 MANAGED_WEB_SEARCH_CONNECTOR_ID = "web-search"
 MANAGED_WEB_SEARCH_CONNECTOR_VERSION = "1.2.0"
 MANAGED_WEB_SEARCH_TARGET_NAME = "AmazonWebSearch"
@@ -19,7 +21,6 @@ MANAGED_WEB_SEARCH_TOOL_ID = "web_search"
 LEGACY_DUCKDUCKGO_TOOL_ID = "duckduckgo_search"
 MANAGED_WEB_SEARCH_TOOL_IDS = frozenset({MANAGED_WEB_SEARCH_TOOL_ID, LEGACY_DUCKDUCKGO_TOOL_ID})
 MANAGED_WEB_SEARCH_TEMPLATE_IDS = frozenset({"web-search-agent", "strands-gateway-agent"})
-MANAGED_WEB_SEARCH_SUPPORTED_REGIONS = frozenset({"us-east-1", "eu-west-1", "ap-northeast-1"})
 
 
 def managed_web_search_requested(

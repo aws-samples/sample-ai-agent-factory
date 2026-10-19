@@ -221,7 +221,12 @@ def test_emea_matrix_matches_documented_feature_boundaries():
         "eu-north-1",
     }
     assert all(entry["core"] for entry in by_region.values())
-    assert {region for region, entry in by_region.items() if entry["production_release"]} == {"eu-west-1"}
+    assert {region for region, entry in by_region.items() if entry["production_release"]} == {
+        "eu-central-1",
+        "eu-west-1",
+        "eu-west-2",
+        "eu-west-3",
+    }
     controls = json.loads(CONTROLS_PATH.read_text(encoding="utf-8"))
     regional_control = next(item for item in controls["controls"] if item["id"] == "regional.emea_core")
     assert regional_control["region_selector"] == "production_release"
@@ -383,7 +388,7 @@ def test_live_region_requires_a_selected_matrix_region(evidence_project: dict):
             kind="live_region",
             status="pass",
             scenario_id="core-runtime-gateway-identity-policy-evaluation",
-            region="eu-central-1",
+            region="eu-north-1",
             account_id=TEST_ACCOUNT_ID,
         )
     with pytest.raises(release_evidence.EvidenceError, match="12-digit AWS account ID"):
@@ -413,16 +418,19 @@ def test_live_region_requires_a_selected_matrix_region(evidence_project: dict):
             status="pass",
             scenario_id="core-runtime-gateway-identity-policy-evaluation",
         )
-    accepted = release_evidence.record_event(
-        run_dir,
-        control_id="regional.emea_core",
-        kind="live_region",
-        status="pass",
-        scenario_id="core-runtime-gateway-identity-policy-evaluation",
-        region="eu-west-1",
-        account_id=TEST_ACCOUNT_ID,
-    )
-    assert accepted["region"] == "eu-west-1"
+    accepted = {
+        release_evidence.record_event(
+            run_dir,
+            control_id="regional.emea_core",
+            kind="live_region",
+            status="pass",
+            scenario_id="core-runtime-gateway-identity-policy-evaluation",
+            region=region,
+            account_id=TEST_ACCOUNT_ID,
+        )["region"]
+        for region in ("eu-central-1", "eu-west-1", "eu-west-2", "eu-west-3")
+    }
+    assert accepted == {"eu-central-1", "eu-west-1", "eu-west-2", "eu-west-3"}
 
 
 def test_unmapped_suite_and_scenario_are_rejected(evidence_project: dict):

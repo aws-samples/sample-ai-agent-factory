@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -38,6 +39,11 @@ _RAISES = object()
 
 # Default control-plane view: agrees with what search() returns.
 _TRUTH_AGREES = [{"recordId": "aaaaaaaaaaaa", "name": "found", "status": "APPROVED"}]
+
+
+@pytest.fixture(autouse=True)
+def _supported_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_AWS_REGION", "eu-west-1")
 
 
 class _FakeReg:
@@ -84,7 +90,29 @@ def test_config_reports_not_configured(monkeypatch):
         "available": False,
         "sdk_supported": True,
         "status": None,
+        "region": "eu-west-1",
+        "region_supported": True,
+        "unavailable_reason": None,
     }
+
+
+def test_config_reports_region_unavailable_without_constructing_an_adapter(monkeypatch):
+    monkeypatch.setenv("APP_AWS_REGION", "eu-central-1")
+    monkeypatch.setattr(ar, "get_configured_registry_id", lambda: None)
+    monkeypatch.setattr(ar, "agent_registry_supported", lambda: True)
+    monkeypatch.setattr(
+        ar,
+        "get_registry",
+        lambda: (_ for _ in ()).throw(AssertionError("adapter must not be constructed")),
+    )
+
+    body = _client().get("/api/registry/aws-config").json()
+
+    assert body["region"] == "eu-central-1"
+    assert body["region_supported"] is False
+    assert body["available"] is False
+    assert "Frankfurt" in body["unavailable_reason"]
+    assert "DynamoDB agent registry remains available" in body["unavailable_reason"]
 
 
 def test_config_reports_connected(monkeypatch):
@@ -125,6 +153,26 @@ def test_enable_rejects_non_admin(monkeypatch):
     monkeypatch.setattr(ar, "agent_registry_supported", lambda: True)
     resp = _client(admin=False).post("/api/registry/aws-config", json={"registry_id": "reg1"})
     assert resp.status_code == 403
+
+
+def test_enable_rejects_an_unsupported_region_before_any_registry_call(monkeypatch):
+    monkeypatch.setenv("APP_AWS_REGION", "eu-west-2")
+    monkeypatch.setattr(
+        ar,
+        "agent_registry_supported",
+        lambda: (_ for _ in ()).throw(AssertionError("SDK probe must not run")),
+    )
+    monkeypatch.setattr(
+        ar,
+        "set_configured_registry_id",
+        lambda _rid: (_ for _ in ()).throw(AssertionError("unsupported config must not persist")),
+    )
+
+    resp = _client().post("/api/registry/aws-config", json={"registry_id": "reg1"})
+
+    assert resp.status_code == 400
+    assert "London" in resp.json()["detail"]
+    assert "DynamoDB agent registry remains available" in resp.json()["detail"]
 
 
 def test_enable_blames_the_sdk_not_the_registry_id(monkeypatch):
@@ -199,6 +247,23 @@ def test_config_status_is_none_when_the_registry_cannot_be_read(monkeypatch):
 
 
 # -- GET /aws-search ---------------------------------------------------------
+
+
+def test_search_returns_region_unavailable_without_querying_registry(monkeypatch):
+    monkeypatch.setenv("APP_AWS_REGION", "eu-west-3")
+    monkeypatch.setattr(
+        ar,
+        "get_registry",
+        lambda: (_ for _ in ()).throw(AssertionError("registry search must not run")),
+    )
+
+    body = _client().get("/api/registry/aws-search?q=bot").json()
+
+    assert body["enabled"] is False
+    assert body["results"] == []
+    assert body["region"] == "eu-west-3"
+    assert body["region_supported"] is False
+    assert "Paris" in body["unavailable_reason"]
 
 
 def test_search_returns_disabled_when_unconfigured(monkeypatch):

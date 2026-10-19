@@ -13,6 +13,7 @@ from .buckets import deny_writes_to_agentcore_deps
 from .cognito_client_secret_grant import grant_client_secret_read
 from .config import (
     ATTACHABLE_MANAGED_POLICIES,
+    AWS_AGENT_REGISTRY_SUPPORTED_REGIONS,
     GOVERNANCE_TAG_KEY_PREFIXES_ENV,
     PlatformConfig,
     governance_tag_key_globs,
@@ -2117,7 +2118,7 @@ def _create_step_role(
     # `agent-registry`), and both planes authorize under the control model's
     # signingName, which is `agent-registry`. Hence a separate statement rather
     # than an entry in the agentcore_steps map above.
-    if step_name == "status_update":
+    if step_name == "status_update" and stack.region in AWS_AGENT_REGISTRY_SUPPORTED_REGIONS:
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=[

@@ -8,6 +8,7 @@ import type { AgentCoreComponentType } from '../../types/workflow';
 import { FlowSidebar } from '../flow-sidebar';
 import { COMPONENT_ICONS } from '../icons/componentIcons';
 import { accentFor } from '../nodes/nodeColors';
+import { getDeploymentRegion, paletteToolUnavailableReason } from '../../utils/awsRegion';
 
 // ============================================================================
 // Palette Item Definition
@@ -20,6 +21,7 @@ export interface PaletteItem {
   category: 'compute' | 'integration' | 'security' | 'tools' | 'connectors';
   toolId?: string;
   customIcon?: string; // For tool-specific icons like 🦆, 📄, etc.
+  unavailableReason?: string;
 }
 
 // ============================================================================
@@ -343,6 +345,11 @@ function PaletteItemComponent({
       <div className="flex-1 min-w-0">
         <div className="no-darkmap font-medium text-[13px] transition-colors" style={{ color: 'var(--color-text-primary)' }}>{item.label}</div>
         <div className="no-darkmap text-[11px] mt-0.5 line-clamp-2 leading-relaxed" style={{ color: 'var(--color-text-secondary)' }}>{item.description}</div>
+        {item.unavailableReason && (
+          <div role="note" className="mt-1 text-[10px] leading-snug text-amber-700">
+            {item.unavailableReason}
+          </div>
+        )}
       </div>
       {onAddComponent && (
         <button
@@ -384,6 +391,14 @@ export function ComponentPalette({
   authoringDisabledReason = null,
 }: ComponentPaletteProps) {
   const authoringDisabled = authoringDisabledReason !== null;
+  const deploymentRegion = getDeploymentRegion();
+  const regionalItems = useMemo(
+    () => PALETTE_ITEMS.map((item) => {
+      const unavailableReason = paletteToolUnavailableReason(item.toolId, deploymentRegion);
+      return unavailableReason ? { ...item, unavailableReason } : item;
+    }),
+    [deploymentRegion],
+  );
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(
     new Set(['compute', 'integration', 'security', 'tools', 'connectors'])
   );
@@ -393,15 +408,15 @@ export function ComponentPalette({
   // whitespace should never change search results); Property 41 checks the
   // trimmed semantics.
   const filteredItems = useMemo(() => {
-    if (!searchQuery.trim()) return PALETTE_ITEMS;
+    if (!searchQuery.trim()) return regionalItems;
 
     const query = searchQuery.trim().toLowerCase();
-    return PALETTE_ITEMS.filter(
+    return regionalItems.filter(
       (item) =>
         item.label.toLowerCase().includes(query) ||
         item.description.toLowerCase().includes(query)
     );
-  }, [searchQuery]);
+  }, [regionalItems, searchQuery]);
 
   // Group items by category
   const itemsByCategory = useMemo(() => {
@@ -450,7 +465,8 @@ export function ComponentPalette({
           </svg>
         </button>
         <div className="space-y-1.5">
-          {PALETTE_ITEMS.map((item) => {
+          {regionalItems.map((item) => {
+            const itemDisabled = authoringDisabled || Boolean(item.unavailableReason);
             const collapsedIcon = item.customIcon ? (
               <span className="text-base">{item.customIcon}</span>
             ) : (
@@ -462,10 +478,10 @@ export function ComponentPalette({
             return (
               <div
                 key={item.toolId || item.type}
-                draggable={!authoringDisabled}
-                aria-disabled={authoringDisabled || undefined}
+                draggable={!itemDisabled}
+                aria-disabled={itemDisabled || undefined}
                 onDragStart={(e) => {
-                  if (authoringDisabled) {
+                  if (itemDisabled) {
                     e.preventDefault();
                     return;
                   }
@@ -478,13 +494,13 @@ export function ComponentPalette({
                 }}
                 onDragEnd={onDragEnd}
                 className="w-9 h-9 rounded-md bg-[#f2f3f3] hover:bg-[#0972d3]/10 flex items-center justify-center cursor-grab active:cursor-grabbing transition-colors"
-                title={item.label}
+                title={item.unavailableReason ?? item.label}
               >
                 {onAddComponent ? (
                   <button
                     type="button"
                     onClick={() => onAddComponent(item.type, item.toolId)}
-                    disabled={authoringDisabled}
+                    disabled={itemDisabled}
                     className="flex h-full w-full items-center justify-center rounded-md focus:outline-none focus:ring-2 focus:ring-[#0972d3] disabled:cursor-not-allowed disabled:opacity-60"
                     aria-label={`Add ${item.label} to canvas`}
                   >
@@ -608,7 +624,7 @@ export function ComponentPalette({
                       onDragStart={onDragStart}
                       onDragEnd={onDragEnd}
                       onAddComponent={onAddComponent}
-                      disabled={authoringDisabled}
+                      disabled={authoringDisabled || Boolean(item.unavailableReason)}
                     />
                   ))}
                 </div>

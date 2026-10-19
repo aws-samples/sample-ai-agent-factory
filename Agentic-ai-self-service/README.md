@@ -454,9 +454,12 @@ infrastructure nag gate reads each stack's CLI-consumed `additionalMetadataFile`
 directly rather than depending on import-order-sensitive jsii conversion through
 overlapping generated CDK schema distributions. The dated
 [`release/emea-agentcore-regions.json`](release/emea-agentcore-regions.json) matrix
-retains AWS capability facts for seven EMEA AgentCore Regions while limiting this
-production release and its independent core scenario to Europe (Ireland), `eu-west-1`;
-future Region expansion requires a reviewed matrix change and fresh evidence.
+retains AWS capability facts for seven EMEA AgentCore Regions and supports one
+home-Region deployment in Frankfurt (`eu-central-1`), Ireland (`eu-west-1`), London
+(`eu-west-2`), or Paris (`eu-west-3`). Ireland has the full feature profile. The
+other three explicitly exclude managed Web Search and AWS Agent Registry federation
+until AWS makes those services available there; the built-in DynamoDB registry remains
+supported. Every selected core profile requires independent live evidence.
 
 [`scripts/release_evidence.py`](scripts/release_evidence.py) starts only from a clean
 Git commit, appends bounded digest-only events tied to mapped suites/scenarios, keeps

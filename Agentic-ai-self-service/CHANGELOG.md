@@ -6,12 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-### Changed — production release support is Ireland only
+### Changed — four explicit EMEA single-Region profiles
 
-- The dated EMEA matrix continues to record AWS capability facts for seven Regions, but
-  `production_release` selects only Europe (Ireland), `eu-west-1`, for this release.
-- Release finalization requires independent regional evidence only for selected production
-  Regions. Expanding support requires a reviewed matrix change and fresh exact-commit evidence.
+- One installation can use Frankfurt, Ireland, London, or Paris as its home Region. Ireland
+  has the full profile; the other three visibly disable managed Web Search and AWS Agent
+  Registry federation while retaining the built-in DynamoDB registry and core AgentCore path.
+- Release finalization requires independent core evidence in all four selected Regions.
+  Expanding a reduced profile requires AWS availability, a reviewed matrix change, and fresh
+  exact-commit evidence; no neighboring-Region capability is inferred.
 
 ### Fixed — tool-heavy browser turns escape the 30-second API limit
 
