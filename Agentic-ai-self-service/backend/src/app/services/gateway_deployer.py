@@ -6551,8 +6551,9 @@ def deploy_gateway(
                 # adjacent weather and bounded page-fetch Lambda tools.
                 schemas = [GATEWAY_TOOL_SCHEMAS[tid] for tid in ("weather_api", "web_page_fetcher")]
             else:
-                # strands-gateway-agent: managed WebSearch plus the seven
-                # executable Lambda-backed encyclopedia/weather/fetch/order tools.
+                # strands-gateway-agent: seven core Lambda-backed
+                # encyclopedia/weather/fetch/order tools. Managed Web Search is
+                # a dedicated template or an explicit tool request.
                 schemas = [
                     GATEWAY_TOOL_SCHEMAS[tid]
                     for tid in (

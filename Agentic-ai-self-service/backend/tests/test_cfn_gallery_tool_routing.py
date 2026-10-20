@@ -181,11 +181,8 @@ def _assert_managed_search_contract(template: dict[str, Any]) -> None:
     }
 
 
-@pytest.mark.parametrize("template_id", ["web-search-agent", "strands-gateway-agent"])
-def test_exported_search_templates_use_the_managed_connector_with_exact_iam_and_cedar(
-    template_id: str,
-) -> None:
-    _bundle, template = _export(template_id)
+def test_exported_search_template_uses_the_managed_connector_with_exact_iam_and_cedar() -> None:
+    _bundle, template = _export("web-search-agent")
     _assert_managed_search_contract(template)
 
 
@@ -214,8 +211,9 @@ def test_managed_search_removal_mutations_break_the_export_contract(mutation: st
         _assert_managed_search_contract(template)
 
 
-def test_non_search_template_gets_no_managed_connector_or_permission() -> None:
-    _bundle, template = _export("customer-support-blueprint")
+@pytest.mark.parametrize("template_id", ["strands-gateway-agent", "customer-support-blueprint"])
+def test_non_search_template_gets_no_managed_connector_or_permission(template_id: str) -> None:
+    _bundle, template = _export(template_id)
 
     assert "ManagedWebSearchTarget" not in template["Resources"]
     assert "ManagedWebSearchProviderLambda" not in template["Resources"]

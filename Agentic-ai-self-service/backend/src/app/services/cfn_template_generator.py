@@ -7152,8 +7152,9 @@ class CfnTemplateGenerator:
         - customer-support-assistant -> the 4 LEGACY customer-support tools
           (CustomerSupportTools); these are a distinct contract, NOT the canonical
           order tools, so the shipped legacy Lambda actually answers them
-        - strands-gateway-agent -> the 4 web tools PLUS the 4 canonical order
-          tools (8 total), all executed by the DynamicTools Lambda
+        - strands-gateway-agent -> the 3 Lambda-backed web-adjacent tools PLUS
+          the 4 canonical order tools (7 core tools total); managed Web Search is
+          available only through its dedicated template or an explicit tool ID
         """
         if template_id == "web-search-agent":
             return ["weather_api", "web_page_fetcher"]

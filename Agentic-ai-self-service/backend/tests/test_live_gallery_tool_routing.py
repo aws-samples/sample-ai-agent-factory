@@ -169,7 +169,6 @@ def test_live_gateway_advertises_exact_gallery_contract_and_uses_matching_lambda
     ("template_id", "gateway_tools", "inline_tools"),
     (
         ("web-search-agent", [], ("get_weather", "fetch_webpage")),
-        ("strands-gateway-agent", [], LAMBDA_WEB_TOOLS + CANONICAL_TOOLS),
         (None, ["web_search"], ()),
         (None, ["duckduckgo_search"], ()),
     ),

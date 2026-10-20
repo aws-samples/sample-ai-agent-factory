@@ -20,7 +20,11 @@ MANAGED_WEB_SEARCH_TOOL_NAME = "WebSearch"
 MANAGED_WEB_SEARCH_TOOL_ID = "web_search"
 LEGACY_DUCKDUCKGO_TOOL_ID = "duckduckgo_search"
 MANAGED_WEB_SEARCH_TOOL_IDS = frozenset({MANAGED_WEB_SEARCH_TOOL_ID, LEGACY_DUCKDUCKGO_TOOL_ID})
-MANAGED_WEB_SEARCH_TEMPLATE_IDS = frozenset({"web-search-agent", "strands-gateway-agent"})
+# Only the dedicated Web Search gallery template implies the regional connector.
+# The generic Strands Gateway template is part of the core regional profile and
+# remains deployable where the optional connector is unavailable. Users can add
+# Web Search explicitly through either accepted tool ID in a supported Region.
+MANAGED_WEB_SEARCH_TEMPLATE_IDS = frozenset({"web-search-agent"})
 
 
 def managed_web_search_requested(

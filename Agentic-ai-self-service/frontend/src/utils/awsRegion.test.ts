@@ -123,9 +123,9 @@ describe('regional feature profiles', () => {
     ]);
   });
 
-  it('blocks managed-search templates and palette tools outside Ireland', () => {
+  it('blocks only dedicated managed-search templates and tools outside Ireland', () => {
     expect(templateUnavailableReason('web-search-agent', 'eu-central-1')).toMatch(/Frankfurt/);
-    expect(templateUnavailableReason('strands-gateway-agent', 'eu-west-2')).toMatch(/London/);
+    expect(templateUnavailableReason('strands-gateway-agent', 'eu-west-2')).toBeNull();
     expect(templateUnavailableReason('customer-support-assistant', 'eu-west-3')).toBeNull();
     expect(paletteToolUnavailableReason('web_search', 'eu-west-3')).toMatch(/Paris/);
     expect(paletteToolUnavailableReason('weather_api', 'eu-west-3')).toBeNull();

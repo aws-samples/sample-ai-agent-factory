@@ -231,7 +231,7 @@ describe('regional feature availability', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Web Search');
     expect(screen.getByRole('status')).toHaveTextContent('AWS Agent Registry');
     const unavailable = screen.getAllByRole('button', { name: 'Unavailable in this Region' });
-    expect(unavailable).toHaveLength(2);
+    expect(unavailable).toHaveLength(1);
     unavailable.forEach((button) => expect(button).toBeDisabled());
     fireEvent.click(unavailable[0]);
     expect(onSelectTemplate).not.toHaveBeenCalled();

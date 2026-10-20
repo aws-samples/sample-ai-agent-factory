@@ -459,7 +459,10 @@ home-Region deployment in Frankfurt (`eu-central-1`), Ireland (`eu-west-1`), Lon
 (`eu-west-2`), or Paris (`eu-west-3`). Ireland has the full feature profile. The
 other three explicitly exclude managed Web Search and AWS Agent Registry federation
 until AWS makes those services available there; the built-in DynamoDB registry remains
-supported. Every selected core profile requires independent live evidence.
+supported. The generic Strands Gateway template remains core-only and deployable in all
+four release Regions; only the dedicated Web Search template or an explicit Web Search
+tool request needs the optional connector. Every selected core profile requires
+independent live evidence.
 
 [`scripts/release_evidence.py`](scripts/release_evidence.py) starts only from a clean
 Git commit, appends bounded digest-only events tied to mapped suites/scenarios, keeps

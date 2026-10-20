@@ -28,12 +28,26 @@ def test_target_request_is_pinned_and_accepted_by_the_installed_sdk_model() -> N
     assert params["credentialProviderConfigurations"] == [{"credentialProviderType": "GATEWAY_IAM_ROLE"}]
 
 
-def test_managed_search_is_implied_by_gallery_templates_and_explicit_tool_ids() -> None:
+def test_managed_search_is_implied_only_by_its_template_and_explicit_tool_ids() -> None:
     assert search.managed_web_search_requested("web-search-agent", [])
-    assert search.managed_web_search_requested("strands-gateway-agent", [])
+    assert not search.managed_web_search_requested("strands-gateway-agent", [])
     assert search.managed_web_search_requested(None, ["web_search"])
     assert search.managed_web_search_requested(None, ["duckduckgo_search"])
     assert not search.managed_web_search_requested(None, ["weather_api"])
+
+
+def test_generic_gateway_portability_control_removal_is_detected(monkeypatch) -> None:
+    def assert_core_only() -> None:
+        assert not search.managed_web_search_requested("strands-gateway-agent", [])
+
+    assert_core_only()
+    monkeypatch.setattr(
+        search,
+        "MANAGED_WEB_SEARCH_TEMPLATE_IDS",
+        frozenset({"web-search-agent", "strands-gateway-agent"}),
+    )
+    with pytest.raises(AssertionError):
+        assert_core_only()
 
 
 def test_legacy_duckduckgo_id_migrates_to_managed_search_not_a_lambda_tool() -> None:

@@ -1132,6 +1132,15 @@ def _create_step_role(
             )
         )
     if step_name == "status_update":
+        # Failure cleanup must strongly query the exact runtime-name partition before
+        # it atomically releases version/slot metadata. This is intentionally Query
+        # only on the trigger table: status_update never writes or scans trigger rows.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["dynamodb:Query"],
+                resources=[tables.triggers.table_arn],
+            )
+        )
         # The failure-path teardown's name hold (F-66f): acquire, abandon and release
         # are conditional UpdateItems; the erase of a confirmed-deleted gateway's claim
         # is a conditional DeleteItem. No read, no put.
@@ -2709,6 +2718,10 @@ def build_step_lambdas(
                 "DEPLOYMENTS_TABLE_NAME": tables.deployments.table_name,
                 "DEPLOYMENT_TABLE_NAME": tables.deployments.table_name,
                 "GATEWAY_NAME_CLAIMS_TABLE_NAME": tables.gateway_name_claims.table_name,
+                # Failure cleanup in status_update calls trigger_store.list_for_runtime
+                # before releasing a runtime-name/version claim. Other steps receive no
+                # trigger-table binding because they do not query that partition.
+                **({"TRIGGERS_TABLE_NAME": tables.triggers.table_name} if step_name == "status_update" else {}),
                 "WORKFLOWS_TABLE_NAME": tables.workflows.table_name,
                 # Phase 1 Gap 1A — versioning tables; status_update_step
                 # writes the AgentVersion + RuntimeSlots rows on success.

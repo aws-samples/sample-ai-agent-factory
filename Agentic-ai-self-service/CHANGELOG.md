@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed — reduced-region core Gateway and failure cleanup
+
+- `strands-gateway-agent` now remains a core Runtime/Gateway/Identity template in every
+  supported release Region. Only the dedicated `web-search-agent` template or an explicit
+  `web_search`/legacy `duckduckgo_search` tool ID requests the optional managed connector;
+  reduced-region UI and API paths continue to block those explicit requests loudly.
+- The status-update Lambda now receives the deployed triggers table name and exactly
+  `dynamodb:Query` on that table. Failed-deployment cleanup can therefore prove a trigger
+  partition empty and atomically release version/slot/name metadata instead of querying a
+  nonexistent literal `Triggers` table and leaving a resource-free deployment
+  `delete_retained`.
+
 ### Changed — four explicit EMEA single-Region profiles
 
 - One installation can use Frankfurt, Ireland, London, or Paris as its home Region. Ireland
@@ -31,9 +43,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed — managed Web Search replaces unsupported HTML scraping
 
-- `web-search-agent` and `strands-gateway-agent` now use the Amazon Bedrock
-  AgentCore Gateway Web Search Tool (`connectorId=web-search`) pinned to version
-  `1.2.0`. The managed target advertises `AmazonWebSearch___WebSearch`; live
+- `web-search-agent` now uses the Amazon Bedrock AgentCore Gateway Web Search
+  Tool (`connectorId=web-search`) pinned to version `1.2.0`. Explicit
+  `web_search` requests use the same target; the generic `strands-gateway-agent`
+  remains connector-independent so the core template works in reduced Regions.
+  The managed target advertises `AmazonWebSearch___WebSearch`; live
   response oracles require structured `title`, `text`, and HTTP(S) `url` fields,
   and gallery prompts require source titles and links to remain as citations.
 - Live deployment and CloudFormation export both fail before side effects outside

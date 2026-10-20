@@ -51,10 +51,7 @@ const REGION_DISPLAY_NAMES: Record<string, string> = {
   "eu-west-3": "Europe (Paris)",
 };
 
-const MANAGED_WEB_SEARCH_TEMPLATE_IDS = new Set([
-  "web-search-agent",
-  "strands-gateway-agent",
-]);
+const MANAGED_WEB_SEARCH_TEMPLATE_IDS = new Set(["web-search-agent"]);
 const MANAGED_WEB_SEARCH_TOOL_IDS = new Set([
   "web_search",
   "duckduckgo_search",
