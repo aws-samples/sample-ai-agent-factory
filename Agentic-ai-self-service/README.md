@@ -83,7 +83,9 @@ into a target-specific `requirements-lambda.txt` with hashes, installed with
 The source distribution explicitly excludes the generated `backend/lib/` Lambda tree
 while retaining the locked Runtime ZIPs, so its contents do not depend on build order.
 Two builds of one commit must therefore produce identical Runtime ZIPs, Lambda tree,
-wheel, source distribution, CDK template, and asset manifest.
+wheel, source distribution, CDK template, and asset manifest. The frontend build tool is
+pinned to an audited Vite release; a newly published high-severity advisory invalidates
+prior frontend evidence and requires fix-forward exact-commit certification.
 
 Upgrade dependencies deliberately: update the direct input or rebuild the complete
 AgentCore graph, regenerate the corresponding lock, then run bundle integrity/import,

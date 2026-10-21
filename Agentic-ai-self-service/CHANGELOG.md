@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security — frontend build tool
+
+- Pin Vite to 7.3.7, the first release outside the affected ranges for
+  GHSA-698v-4r3x-3vcv, GHSA-r825-w8mm-5pxw, and GHSA-587h-7wmj-h5pm. The
+  high-severity npm audit finding invalidates earlier frontend evidence, so release
+  certification must be repeated from this fix-forward commit.
+
 ### Fixed — reduced-region core Gateway and failure cleanup
 
 - `strands-gateway-agent` now remains a core Runtime/Gateway/Identity template in every
