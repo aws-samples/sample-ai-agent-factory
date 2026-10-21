@@ -826,10 +826,12 @@ def _release_failed_deployment_metadata(record: dict, event: dict) -> tuple[bool
             trigger_cleanup_unconfirmed=False,
             outcome=outcome,
         )
-        snapshot = get_versions_store().snapshot_for_name_release(friendly)
+        versions_store = get_versions_store()
+        rows = versions_store.list_for_runtime(friendly, consistent=True)
+        claim_exists = versions_store.name_claim_exists(friendly, consistent=True)
         own_rows = [
             version
-            for version in snapshot.versions
+            for version in rows
             if str(version.deployment_id or "") == deployment_id or str(version.version_id or "") == version_id
         ]
         slot = get_slots_store().get(friendly, consistent=True)
@@ -838,9 +840,22 @@ def _release_failed_deployment_metadata(record: dict, event: dict) -> tuple[bool
             for field, value in (slot_pointer_pairs(slot) if slot is not None else ())
             if value and str(value) == version_id
         ]
-        released = outcome.get("released") is True and not own_rows and not own_pointers
+        # A surviving sentinel is correct only when another version still holds
+        # the name. Calling snapshot_for_name_release here used to recreate an
+        # already-deleted sentinel before this readback and then ignore it,
+        # allowing failed pre-Runtime deploys to report deleted with a permanent
+        # !name-claim row.
+        claim_released_or_still_needed = bool(rows) or not claim_exists
+        released = (
+            outcome.get("released") is True and not own_rows and not own_pointers and claim_released_or_still_needed
+        )
         if released:
             return True, [*messages, "Verified this deployment's version row and slot pointers are absent"]
+        if claim_exists and not rows:
+            return False, [
+                *messages,
+                "Version/name metadata release left an unowned name-claim sentinel behind",
+            ]
         return False, [
             *messages,
             "Version/name metadata release did not verify this deployment's row and slot pointers absent",

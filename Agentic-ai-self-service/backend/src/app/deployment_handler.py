@@ -1329,6 +1329,30 @@ def _reject_cfn_only_naming_profile(request: DeployRequest, operation: str) -> N
         )
 
 
+def _reject_unsupported_managed_web_search_region(request: DeployRequest) -> None:
+    """Reject Web Search outside its effective live-deployment Region.
+
+    ``DeployRequest`` is also used by the export routes, where an omitted
+    targetRegion does not mean the platform's home Region. Keep that shared
+    model's explicit-region validation, and resolve the omitted value here for
+    the live route only, before any deployment/version row or AWS resource.
+    """
+    if (request.deployment_mode or "runtime") == "harness":
+        return
+    from app.services.managed_web_search import (
+        managed_web_search_requested,
+        require_managed_web_search_region,
+    )
+
+    if not managed_web_search_requested(request.template_id, request.gateway_tools):
+        return
+    effective_region = request.target_region or config.aws_region
+    try:
+        require_managed_web_search_region(effective_region)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _reject_missing_provider_credential(request: DeployRequest) -> None:
     """Reject a live runtime whose first model call would be unauthenticated."""
     if (
@@ -1745,6 +1769,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     _reject_unowned_flow(request.flow_id, user_id)
 
     _reject_cfn_only_naming_profile(request, "a live platform deployment")
+    _reject_unsupported_managed_web_search_region(request)
     _reject_missing_provider_credential(request)
     _reject_mcp_inheriting_platform_otel(request)
 

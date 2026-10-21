@@ -1326,8 +1326,6 @@ def test_the_failure_path_does_not_report_a_config_deleted_while_it_still_reads(
 
 
 def test_failed_metadata_release_requires_atomic_release_and_absent_readback(monkeypatch):
-    from types import SimpleNamespace
-
     from app import deployment_handler
     from app.step_handlers import status_update_step
 
@@ -1345,7 +1343,8 @@ def test_failed_metadata_release_requires_atomic_release_and_absent_readback(mon
         return ["Released runtime name 'managed_search_agent' (versions; slot already absent)"]
 
     versions = MagicMock()
-    versions.snapshot_for_name_release.return_value = SimpleNamespace(versions=())
+    versions.list_for_runtime.return_value = []
+    versions.name_claim_exists.return_value = False
     slots = MagicMock()
     slots.get.return_value = None
     monkeypatch.setattr(
@@ -1370,7 +1369,8 @@ def test_failed_metadata_release_requires_atomic_release_and_absent_readback(mon
         )
     ]
     assert messages[-1] == "Verified this deployment's version row and slot pointers are absent"
-    versions.snapshot_for_name_release.assert_called_once_with("managed_search_agent")
+    versions.list_for_runtime.assert_called_once_with("managed_search_agent", consistent=True)
+    versions.name_claim_exists.assert_called_once_with("managed_search_agent", consistent=True)
     slots.get.assert_called_once_with("managed_search_agent", consistent=True)
 
 
@@ -1388,7 +1388,8 @@ def test_failed_metadata_release_refuses_a_surviving_version_row(monkeypatch):
     }
     row = SimpleNamespace(deployment_id=record["deployment_id"], version_id=record["version_id"])
     versions = MagicMock()
-    versions.snapshot_for_name_release.return_value = SimpleNamespace(versions=(row,))
+    versions.list_for_runtime.return_value = [row]
+    versions.name_claim_exists.return_value = True
     slots = MagicMock()
     slots.get.return_value = None
 
@@ -1407,6 +1408,39 @@ def test_failed_metadata_release_refuses_a_surviving_version_row(monkeypatch):
 
     assert released is False
     assert "did not verify" in messages[-1]
+
+
+def test_failed_metadata_release_refuses_a_recreated_sentinel(monkeypatch):
+    from app import deployment_handler
+    from app.step_handlers import status_update_step
+
+    record = {
+        "deployment_id": "dep-before-runtime",
+        "user_id": "owner-1",
+        "version_id": "01a135161780b6d678d8ce7afe0aab25",
+        "friendly_runtime_name": "managed_search_agent",
+    }
+    versions = MagicMock()
+    versions.list_for_runtime.return_value = []
+    versions.name_claim_exists.return_value = True
+    slots = MagicMock()
+    slots.get.return_value = None
+
+    def release(_record, _owner, **kwargs):
+        kwargs["outcome"].update(released=True, kept_locked=False)
+        return ["Released runtime name 'managed_search_agent' (versions; slot already absent)"]
+
+    monkeypatch.setattr(
+        deployment_handler, "_resolve_friendly_runtime_name", lambda _record: ("managed_search_agent", True)
+    )
+    monkeypatch.setattr(deployment_handler, "_release_runtime_name_claim", release)
+    monkeypatch.setattr(status_update_step, "get_versions_store", lambda: versions)
+    monkeypatch.setattr(status_update_step, "get_slots_store", lambda: slots)
+
+    released, messages = status_update_step._release_failed_deployment_metadata(record, {})
+
+    assert released is False
+    assert messages[-1] == "Version/name metadata release left an unowned name-claim sentinel behind"
 
 
 def test_failed_metadata_release_never_unlocks_a_recorded_runtime_consumer(monkeypatch):

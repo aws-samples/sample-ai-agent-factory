@@ -260,11 +260,13 @@ target as an idempotent recovery state, and retains a validated 0600 recovery
 file until cleanup is proven. Failure auto-cleanup may delete every external AWS
 resource before a Runtime exists; after it proves every recorded resource absent,
 it invokes the same owner/version/slot/trigger-fenced atomic name-claim release as
-an explicit DELETE and re-reads the exact version row and slot pointers before
-publishing `deleted`. Any unproven identity, surviving resource, release conflict,
-or ambiguous read-back remains `delete_retained`. An idempotent DELETE also
-reconciles historical `deleted` tombstones that still carry a version ID, and
-never reports success while that claim remains. The standalone `mcp-server-runtime` is model-free:
+an explicit DELETE and re-reads the exact version row, slot pointers, and name-claim
+sentinel without recreating a missing sentinel before publishing `deleted`. A sentinel
+may remain only while another live version still holds that name. Any unproven identity,
+surviving resource, release conflict, ambiguous read-back, or unowned sentinel remains
+`delete_retained`. An idempotent DELETE also reconciles historical `deleted` tombstones
+that still carry a version ID, and never reports success while that claim remains. The
+standalone `mcp-server-runtime` is model-free:
 it receives neither this model-evaluation gate nor an injected Bedrock Guardrail;
 its production gate is authenticated MCP protocol and complete tool execution.
 
@@ -463,8 +465,10 @@ other three explicitly exclude managed Web Search and AWS Agent Registry federat
 until AWS makes those services available there; the built-in DynamoDB registry remains
 supported. The generic Strands Gateway template remains core-only and deployable in all
 four release Regions; only the dedicated Web Search template or an explicit Web Search
-tool request needs the optional connector. Every selected core profile requires
-independent live evidence.
+tool request needs the optional connector. When `targetRegion` is omitted, admission
+validates that request against the platform's effective home Region before persisting a
+deployment or creating a Guardrail; an omitted field never means “skip regional
+validation.” Every selected core profile requires independent live evidence.
 
 [`scripts/release_evidence.py`](scripts/release_evidence.py) starts only from a clean
 Git commit, appends bounded digest-only events tied to mapped suites/scenarios, keeps

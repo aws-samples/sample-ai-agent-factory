@@ -490,6 +490,28 @@ class AgentVersionsStore:
             raise NameClaimConflict(f"runtime name {runtime_name} has an invalid owner fence")
         return epoch, generation, claim_owner_sub
 
+    def name_claim_exists(self, runtime_name: str, *, consistent: bool = False) -> bool:
+        """Return whether the name-claim sentinel exists without creating it.
+
+        ``snapshot_for_name_release`` intentionally bootstraps a missing
+        sentinel before taking its generation-fenced snapshot, so it must never
+        be used to verify that a completed release deleted the sentinel.
+        """
+        if not runtime_name:
+            raise ValueError("runtime_name is required")
+        response = self._table.get_item(
+            Key=self._claim_key(runtime_name),
+            ConsistentRead=consistent,
+            ProjectionExpression="#record_type",
+            ExpressionAttributeNames={"#record_type": "record_type"},
+        )
+        item = response.get("Item")
+        if not item:
+            return False
+        if item.get("record_type") != NAME_CLAIM_RECORD_TYPE:
+            raise NameClaimConflict(f"runtime name {runtime_name} has an incompatible name-claim record")
+        return True
+
     def snapshot_for_name_release(self, runtime_name: str) -> NameClaimSnapshot:
         """Return a stable partition snapshot suitable for a bounded release.
 

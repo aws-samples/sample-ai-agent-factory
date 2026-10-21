@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import inspect
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+from app import deployment_handler
+from app.models.deployment_models import DeployRequest
 from app.services import managed_web_search as search
 from botocore.session import Session
 from botocore.validate import validate_parameters
+from fastapi import HTTPException
+from pydantic import ValidationError
 
 
 def test_target_request_is_pinned_and_accepted_by_the_installed_sdk_model() -> None:
@@ -48,6 +54,68 @@ def test_generic_gateway_portability_control_removal_is_detected(monkeypatch) ->
     )
     with pytest.raises(AssertionError):
         assert_core_only()
+
+
+def _deploy_request(template_id: str, **extra) -> DeployRequest:
+    return DeployRequest(
+        nodeId="managed-search-region",
+        templateId=template_id,
+        config={"name": "managed_search_agent", "model": {"modelId": "us.anthropic.claude-sonnet-5"}},
+        **extra,
+    )
+
+
+def test_shared_request_model_keeps_omitted_region_for_export_callers() -> None:
+    request = _deploy_request("web-search-agent")
+
+    assert request.target_region is None
+
+
+def test_live_deploy_uses_the_home_region_when_target_region_is_omitted(monkeypatch) -> None:
+    monkeypatch.setattr(
+        deployment_handler,
+        "config",
+        replace(deployment_handler.config, aws_region="eu-central-1"),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        deployment_handler._reject_unsupported_managed_web_search_region(_deploy_request("web-search-agent"))
+
+    assert error.value.status_code == 400
+    assert "Web Search is not available" in str(error.value.detail)
+    assert "eu-central-1" in str(error.value.detail)
+
+
+def test_generic_gateway_remains_admitted_in_a_reduced_home_region(monkeypatch) -> None:
+    monkeypatch.setattr(
+        deployment_handler,
+        "config",
+        replace(deployment_handler.config, aws_region="eu-central-1"),
+    )
+
+    deployment_handler._reject_unsupported_managed_web_search_region(_deploy_request("strands-gateway-agent"))
+
+
+def test_explicit_supported_target_region_overrides_the_home_region(monkeypatch) -> None:
+    monkeypatch.setattr(
+        deployment_handler,
+        "config",
+        replace(deployment_handler.config, aws_region="eu-central-1"),
+    )
+    request = _deploy_request("web-search-agent", targetRegion="eu-west-1")
+
+    deployment_handler._reject_unsupported_managed_web_search_region(request)
+
+
+def test_explicit_unsupported_target_region_still_fails_model_admission() -> None:
+    with pytest.raises(ValidationError, match="Web Search is not available.*eu-central-1"):
+        _deploy_request("web-search-agent", targetRegion="eu-central-1")
+
+
+def test_live_region_gate_precedes_deployment_state_persistence() -> None:
+    source = inspect.getsource(deployment_handler.handle_deploy)
+
+    assert source.index("_reject_unsupported_managed_web_search_region(request)") < source.index("store.create(state)")
 
 
 def test_legacy_duckduckgo_id_migrates_to_managed_search_not_a_lambda_tool() -> None:
