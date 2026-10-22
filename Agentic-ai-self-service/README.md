@@ -270,10 +270,15 @@ standalone `mcp-server-runtime` is model-free:
 it receives neither this model-evaluation gate nor an injected Bedrock Guardrail;
 its production gate is authenticated MCP protocol and complete tool execution.
 
-A deployment's terminal record and its version-slot pointer are separate fenced
-DynamoDB writes. Clients that just observed `succeeded` may therefore boundedly
-retry a slots read only while it returns `404`; authentication errors, server
-errors, an incorrect pointer, or a missing pointer after 60 seconds fail closed.
+The deployment finalizer persists its complete teardown inputs while the deployment
+remains nonterminal, then publishes the fenced version and slot pointers before it
+commits `succeeded`. A caller that observes `succeeded` must therefore read the exact
+new pointer on its first strongly consistent slots request; `404` is retryable only
+while the deployment itself is still nonterminal. Authentication errors, server errors,
+a stale or incorrect pointer, or a missing pointer after terminal success fail closed.
+A version/slot publication error marks the deployment failed and starts ownership-
+checked automatic cleanup instead of returning a successful deployment with an old
+pointer.
 
 Promote a production-gated version from the **Versions** panel:
 

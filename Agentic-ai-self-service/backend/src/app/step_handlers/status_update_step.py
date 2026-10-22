@@ -2237,6 +2237,14 @@ def _auto_register_in_aws_registry(
     )
 
 
+def _stored_deployment_status(state) -> str | DeploymentStatusEnum | None:  # noqa: ANN001
+    """Read status from the store's model or compatibility mapping shape."""
+
+    if isinstance(state, Mapping):
+        return state.get("status")
+    return getattr(state, "status", None)
+
+
 def handler(event: dict, context) -> dict:
     """Lambda handler for the final status update step.
 
@@ -2258,27 +2266,31 @@ def handler(event: dict, context) -> dict:
     # last-resort FAILED write.
     store = None
     finalizer_token: str | None = None
+    entry_was_succeeded = False
 
     try:
         store = _get_deployment_store()
         # THE DEPLOY-VS-DELETE BARRIER, taken before any status write.
         #
-        # Everything below the terminal SUCCEEDED commit -- the version row, the
-        # slot pointer, the registry record, the last manifest appends -- happens
-        # after this deployment already looks finished to a reader. A teardown
-        # starting in that window snapshotted `created_resources`, this handler
-        # appended one more row, and the teardown wrote the FINAL `deleted` over a
-        # row no deleter had ever seen: a permanent leak that DELETE reported as
-        # success. `_claim_delete_status` now refuses while this lease is live.
+        # The lease still covers every finalizer write, including the version,
+        # slot, optional registry and final terminal-status publications. This
+        # prevents teardown from snapshotting a partial manifest. Terminal
+        # ``succeeded`` is now written last as an additional reader-visible
+        # barrier: a caller cannot observe success before its exact slot exists.
         #
         # Acquired FIRST, so a finalizer that has already lost the race to a
         # teardown does no work at all: the refusal arrives as
         # DeploymentLifecycleConflict and lands in the cancellation branch below.
         finalizer_token = store.acquire_finalizer_lease(deployment_id)
+        entry_state = store.get(deployment_id)
+        entry_was_succeeded = (
+            entry_state is not None and _stored_deployment_status(entry_state) == DeploymentStatusEnum.SUCCEEDED
+        )
+        entry_status = DeploymentStatusEnum.SUCCEEDED if entry_was_succeeded else DeploymentStatusEnum.IN_PROGRESS
         store.update_step(
             deployment_id,
             DeploymentStepName.STATUS_UPDATE,
-            DeploymentStatusEnum.IN_PROGRESS,
+            entry_status,
             finalizer_token=finalizer_token,
         )
 
@@ -2397,8 +2409,9 @@ def handler(event: dict, context) -> dict:
                 "version_id": version_id,
             }
 
+        prepublication_state = store.get(deployment_id)
         manifest_errors = _manifest_completion_errors(
-            store.get(deployment_id),
+            prepublication_state,
             event,
         )
         if manifest_errors:
@@ -2439,10 +2452,20 @@ def handler(event: dict, context) -> dict:
                 "version_id": event.get("version_id"),
             }
 
+        # Persist every teardown input before version/slot publication, but keep
+        # the deployment nonterminal. A caller that observes ``succeeded`` must
+        # be able to strongly read the exact published slot immediately; the
+        # live rollback gate caught the old ordering returning the previous
+        # staging pointer after the second deployment had reported success.
+        prepublication_status = (
+            DeploymentStatusEnum.SUCCEEDED
+            if prepublication_state is not None
+            and _stored_deployment_status(prepublication_state) == DeploymentStatusEnum.SUCCEEDED
+            else DeploymentStatusEnum.IN_PROGRESS
+        )
         store.update_status(
             deployment_id,
-            DeploymentStatusEnum.SUCCEEDED,
-            completed_at=now,
+            prepublication_status,
             runtime_endpoint=runtime_endpoint,
             runtime_id=runtime_id,
             runtime_arn=runtime_arn,
@@ -2500,6 +2523,7 @@ def handler(event: dict, context) -> dict:
                     friendly_runtime_name,
                     version_id,
                 )
+                raise
             # F-83 — the slot upsert is GATED on that write, and this is the whole point of the
             # gate: ``update_status`` now refuses when the version row is absent, which is exactly
             # what a completed teardown looks like. A late finalizer that ran anyway used to
@@ -2605,26 +2629,24 @@ def handler(event: dict, context) -> dict:
                             ),
                         )
                 except SlotWriteConflict:
-                    # A LOST RACE, not an error, and explicitly NOT retried. Nothing was written.
-                    # Retrying would mean re-reading a row that another writer (a promote, a rollback,
-                    # a trigger create, or a teardown) just moved and writing over it with this
-                    # deploy's pointers -- which is the clobber the compare-and-set exists to refuse.
-                    # The deployment record is already succeeded and the version row already says so,
-                    # so the deploy's outcome is recorded; only the slot pointer did not move, and the
-                    # owner can promote explicitly. Logged without a traceback because there is no
-                    # defect here to read one for.
+                    # A lost race means this version was not published to the
+                    # requested slot. The deployment may not become visible as
+                    # succeeded with a stale pointer; the outer failure path
+                    # records the error and tears down this deployment's graph.
                     logger.warning(
                         "RuntimeSlots for %s/%s was not moved: the slot or its version changed while "
-                        "this finalizer was running. Nothing was written and this is not retried.",
+                        "this finalizer was running. Nothing was written.",
                         friendly_runtime_name,
                         version_id,
                     )
+                    raise
                 except Exception:
                     logger.exception(
                         "Failed to update RuntimeSlots for %s/%s",
                         friendly_runtime_name,
                         version_id,
                     )
+                    raise
 
         # Loom-study 0.4 — auto-register the deployed agent into the AWS Agent
         # Registry as a DRAFT record when the federation feature is enabled. Was
@@ -2655,6 +2677,16 @@ def handler(event: dict, context) -> dict:
                 "AWS Agent Registry auto-register skipped (best-effort): %s",
                 str(_reg_exc)[:200],
             )
+
+        # Terminal success is the publication barrier. Everything a caller is
+        # entitled to infer from ``succeeded``—especially the strongly read
+        # version and slot pointers—has completed before this write.
+        store.update_status(
+            deployment_id,
+            DeploymentStatusEnum.SUCCEEDED,
+            completed_at=now,
+            finalizer_token=finalizer_token,
+        )
 
         return {
             "deployment_id": deployment_id,
@@ -2715,6 +2747,13 @@ def handler(event: dict, context) -> dict:
         }
 
     except Exception as exc:
+        if entry_was_succeeded:
+            # This is an idempotent replay after terminal publication. Its
+            # serving version is already committed; a transient reconciliation
+            # error must leave that success intact and escape so Step Functions
+            # can retry, never downgrade or auto-delete it.
+            logger.exception("Successful finalizer replay failed for deployment %s", deployment_id)
+            raise
         logger.exception("Status update step failed for deployment %s", deployment_id)
         # Last-resort: try to mark as failed
         try:
@@ -2735,6 +2774,18 @@ def handler(event: dict, context) -> dict:
             )
         except Exception:
             logger.exception("Failed to write error state for deployment %s", deployment_id)
+        try:
+            _auto_cleanup_on_failure(
+                store,
+                deployment_id,
+                event,
+                finalizer_token=finalizer_token,
+            )
+        except Exception:
+            # The cleanup helper is best-effort and normally retains its own
+            # failures. Preserve the failed deployment and durable manifest if
+            # even entering that recovery path fails.
+            logger.exception("Failed to run automatic cleanup for deployment %s", deployment_id)
 
         return {
             "deployment_id": deployment_id,

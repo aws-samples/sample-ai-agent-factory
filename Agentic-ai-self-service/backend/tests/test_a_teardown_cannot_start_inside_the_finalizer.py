@@ -761,7 +761,7 @@ def test_the_handler_holds_the_lease_for_the_whole_of_its_work(store, monkeypatc
     seen: dict = {}
 
     def register_probe(**kw):
-        # Runs where the real registry write does: after the terminal status commit.
+        # Runs during finalizer post-work, before terminal success publication.
         seen["lease_live_during_post_work"] = FINALIZER_LEASE_ATTR in raw(store)
         with pytest.raises(dh.ActiveFinalizerConflict):
             dh._claim_delete_status(DEPLOYMENT)
@@ -778,3 +778,120 @@ def test_the_handler_holds_the_lease_for_the_whole_of_its_work(store, monkeypatc
     assert result["status"] == DeploymentStatusEnum.SUCCEEDED.value, result
     assert seen == {"lease_live_during_post_work": True}
     assert FINALIZER_LEASE_ATTR not in raw(store)
+
+
+# ---------------------------------------------------------------------------
+# Terminal publication. A strongly consistent slot read must never observe the
+# previous pointer after the deployment endpoint has returned ``succeeded``.
+# ---------------------------------------------------------------------------
+
+
+def _version_row_for_publication():
+    row = MagicMock()
+    row.owner_sub = OWNER
+    row.status = "succeeded"
+    row.created_at = "2026-10-23T00:00:00+00:00"
+    row.deployment_id = DEPLOYMENT
+    row.runtime_id = RUNTIME
+    row.runtime_arn = f"arn:aws:bedrock-agentcore:{REGION}:123456789012:runtime/{RUNTIME}"
+    row.production_gate_required = True
+    return row
+
+
+def _publication_event() -> dict:
+    return {
+        "runtime_id": RUNTIME,
+        "runtime_arn": f"arn:aws:bedrock-agentcore:{REGION}:123456789012:runtime/{RUNTIME}",
+        "runtime_endpoint": "https://rt.example",
+        "version_id": "version-1",
+        "friendly_runtime_name": "agent_barrier",
+        "owner_sub": OWNER,
+        "deployment_slot": "staging",
+    }
+
+
+def test_success_is_not_visible_until_version_slot_and_registry_publication_complete(store, monkeypatch):
+    order: list[str] = []
+    versions = MagicMock()
+    versions.update_status.side_effect = lambda **_kwargs: order.append("version")
+    versions.get.return_value = _version_row_for_publication()
+    slots = MagicMock()
+    slots.get.return_value = None
+    real_update_status = store.update_status
+
+    def observed_update_status(deployment_id, status, **kwargs):
+        if status == DeploymentStatusEnum.SUCCEEDED:
+            order.append("deployment-succeeded")
+        return real_update_status(deployment_id, status, **kwargs)
+
+    monkeypatch.setattr(store, "update_status", observed_update_status)
+    monkeypatch.setattr(sus, "_get_deployment_store", lambda: store)
+    monkeypatch.setattr(sus, "get_versions_store", lambda: versions)
+    monkeypatch.setattr(sus, "get_slots_store", lambda: slots)
+    monkeypatch.setattr(sus, "set_slot_pointers_atomically", lambda *_a, **_kw: order.append("slot"))
+    monkeypatch.setattr(sus, "_auto_register_in_aws_registry", lambda **_kw: order.append("registry"))
+    monkeypatch.setattr(sus, "_auto_cleanup_on_failure", lambda *_a, **_kw: None)
+
+    result = sus.handler({"deployment_id": DEPLOYMENT, **_publication_event()}, None)
+
+    assert result["status"] == DeploymentStatusEnum.SUCCEEDED.value
+    assert order == ["version", "slot", "registry", "deployment-succeeded"]
+    assert raw(store)["status"] == DeploymentStatusEnum.SUCCEEDED.value
+
+
+def test_version_publication_failure_never_returns_success_and_auto_cleans(store, monkeypatch):
+    versions = MagicMock()
+    versions.update_status.side_effect = RuntimeError("version publication unavailable")
+    cleanup = MagicMock()
+    monkeypatch.setattr(sus, "_get_deployment_store", lambda: store)
+    monkeypatch.setattr(sus, "get_versions_store", lambda: versions)
+    monkeypatch.setattr(sus, "get_slots_store", lambda: MagicMock())
+    monkeypatch.setattr(sus, "_auto_register_in_aws_registry", lambda **_kw: None)
+    monkeypatch.setattr(sus, "_auto_cleanup_on_failure", cleanup)
+
+    result = sus.handler({"deployment_id": DEPLOYMENT, **_publication_event()}, None)
+
+    assert result["status"] == DeploymentStatusEnum.FAILED.value
+    assert raw(store)["status"] == DeploymentStatusEnum.FAILED.value
+    cleanup.assert_called_once()
+
+
+def test_idempotent_finalizer_retry_never_regresses_existing_terminal_success(store, monkeypatch):
+    store.update_status(DEPLOYMENT, DeploymentStatusEnum.SUCCEEDED)
+    observed: list[str] = []
+
+    def register_probe(**_kwargs):
+        observed.append(raw(store)["status"])
+
+    monkeypatch.setattr(sus, "_get_deployment_store", lambda: store)
+    monkeypatch.setattr(sus, "get_versions_store", lambda: MagicMock())
+    monkeypatch.setattr(sus, "get_slots_store", lambda: MagicMock())
+    monkeypatch.setattr(sus, "_auto_register_in_aws_registry", register_probe)
+    monkeypatch.setattr(sus, "_auto_cleanup_on_failure", lambda *_a, **_kw: None)
+
+    result = sus.handler(
+        {"deployment_id": DEPLOYMENT, "runtime_id": RUNTIME, "runtime_endpoint": "https://rt.example"},
+        None,
+    )
+
+    assert result["status"] == DeploymentStatusEnum.SUCCEEDED.value
+    assert observed == [DeploymentStatusEnum.SUCCEEDED.value]
+    assert raw(store)["status"] == DeploymentStatusEnum.SUCCEEDED.value
+
+
+def test_idempotent_success_replay_failure_preserves_serving_deployment(store, monkeypatch):
+    store.update_status(DEPLOYMENT, DeploymentStatusEnum.SUCCEEDED)
+    versions = MagicMock()
+    versions.update_status.side_effect = RuntimeError("transient version read failure")
+    cleanup = MagicMock()
+    monkeypatch.setattr(sus, "_get_deployment_store", lambda: store)
+    monkeypatch.setattr(sus, "get_versions_store", lambda: versions)
+    monkeypatch.setattr(sus, "get_slots_store", lambda: MagicMock())
+    monkeypatch.setattr(sus, "_auto_register_in_aws_registry", lambda **_kw: None)
+    monkeypatch.setattr(sus, "_auto_cleanup_on_failure", cleanup)
+
+    with pytest.raises(RuntimeError, match="transient version read failure"):
+        sus.handler({"deployment_id": DEPLOYMENT, **_publication_event()}, None)
+
+    assert raw(store)["status"] == DeploymentStatusEnum.SUCCEEDED.value
+    cleanup.assert_not_called()
