@@ -145,15 +145,34 @@ def test_agentcore_installer_uses_only_the_validated_deterministic_packager() ->
     assert '-path "*.dist-info/RECORD" -delete' in script
 
 
-SDIST_EXCLUSION = '[tool.hatch.build.targets.sdist]\n# backend/lib is regenerated from the hash lock for deployment; shipping it in an\n# sdist makes package bytes depend on whether that deployment step ran first.\nexclude = ["/lib"]\n'
+SDIST_EXCLUSION = """[tool.hatch.build.targets.sdist]
+# These paths are regenerated locally. Shipping them makes package bytes depend on
+# whether deployment, tests, or linters ran before the build.
+exclude = [
+    "/lib",
+    "/.hypothesis",
+    "/.pytest_cache",
+    "/.ruff_cache",
+]
+"""
+
+
+_GENERATED_BUILD_ORDER_FILES = {
+    "lib/generated-lambda-only.txt": "generated deployment dependency\n",
+    ".hypothesis/constants/example": "hypothesis cache\n",
+    ".pytest_cache/v/cache/nodeids": "[]\n",
+    ".ruff_cache/example": "ruff cache\n",
+}
 
 
 def _build_sdist_fixture(tmp_path: Path, *, remove_exclusion: bool) -> set[str]:
     fixture = tmp_path / ("mutated" if remove_exclusion else "protected")
     (fixture / "src" / "app").mkdir(parents=True)
     (fixture / "src" / "app" / "__init__.py").write_text("")
-    (fixture / "lib").mkdir()
-    (fixture / "lib" / "generated-lambda-only.txt").write_text("generated deployment dependency\n")
+    for relative_path, content in _GENERATED_BUILD_ORDER_FILES.items():
+        generated = fixture / relative_path
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_text(content)
     (fixture / "agentcore-deps").mkdir()
     (fixture / "agentcore-deps" / "base.zip").write_bytes(b"locked runtime bundle")
 
@@ -182,14 +201,25 @@ def _build_sdist_fixture(tmp_path: Path, *, remove_exclusion: bool) -> set[str]:
         return {"/".join(Path(name).parts[1:]) for name in archive.getnames()}
 
 
-def test_sdist_excludes_generated_lambda_tree_but_keeps_runtime_bundles(tmp_path: Path) -> None:
+def test_sdist_excludes_generated_build_order_state_but_keeps_runtime_bundles(tmp_path: Path) -> None:
     members = _build_sdist_fixture(tmp_path, remove_exclusion=False)
 
-    assert "lib/generated-lambda-only.txt" not in members
+    assert not (_GENERATED_BUILD_ORDER_FILES.keys() & members)
     assert "agentcore-deps/base.zip" in members
+
+
+_MANIFEST_PROTECTED_BUILD_ORDER_FILES = {
+    "lib/generated-lambda-only.txt",
+    ".hypothesis/constants/example",
+}
+_HATCH_DEFAULT_IGNORED_FILES = {
+    ".pytest_cache/v/cache/nodeids",
+    ".ruff_cache/example",
+}
 
 
 def test_removing_sdist_exclusion_reintroduces_build_order_dependency(tmp_path: Path) -> None:
     members = _build_sdist_fixture(tmp_path, remove_exclusion=True)
 
-    assert "lib/generated-lambda-only.txt" in members
+    assert _MANIFEST_PROTECTED_BUILD_ORDER_FILES <= members
+    assert not (_HATCH_DEFAULT_IGNORED_FILES & members)

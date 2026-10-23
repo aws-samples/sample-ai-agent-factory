@@ -805,6 +805,11 @@ oversized JSON, and unscreened deployments do not enter this passthrough path. T
 managed connector contracts such as AgentCore Web Search's required `results[].text`
 field deterministic while preserving the existing exact-input tool receipts.
 
+Backend source distributions retain the 11 required `agentcore-deps/` Runtime bundles,
+but exclude generated `lib/`, `.hypothesis/`, `.pytest_cache/`, and `.ruff_cache/`
+trees. Running deployment generation, tests, or lint before packaging therefore cannot
+change release bytes.
+
 ## Running Tests
 
 ```bash

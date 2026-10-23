@@ -125,9 +125,14 @@ markers = [
 ]
 
 [tool.hatch.build.targets.sdist]
-# backend/lib is regenerated from the hash lock for deployment; shipping it in an
-# sdist makes package bytes depend on whether that deployment step ran first.
-exclude = ["/lib"]
+# These paths are regenerated locally. Shipping them makes package bytes depend on
+# whether deployment, tests, or linters ran before the build.
+exclude = [
+    "/lib",
+    "/.hypothesis",
+    "/.pytest_cache",
+    "/.ruff_cache",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/app"]
