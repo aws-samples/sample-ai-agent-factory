@@ -975,9 +975,15 @@ def invoke(payload, context=None):
             agent = _get_agent()
         seen = _tool_use_ids(getattr(agent, "messages", None))
         result = agent(message)
+        messages = getattr(agent, "messages", None)
+        structured_response = (
+            _current_structured_tool_response(message, messages, exclude=seen)
+            if globals().get("_GUARDRAIL_HOOKS")
+            else None
+        )
         response_body = {{
-            "response": str(result),
-            "tool_receipts": _tool_receipts(getattr(agent, "messages", None), exclude=seen, names=_TOOL_NAME_ALIASES),
+            "response": structured_response if structured_response is not None else str(result),
+            "tool_receipts": _tool_receipts(messages, exclude=seen, names=_TOOL_NAME_ALIASES),
         }}
         if delegated_evidence is not None:
             response_body["identity_evidence"] = delegated_evidence

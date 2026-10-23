@@ -462,3 +462,214 @@ def test_the_function_url_stream_relays_validated_receipts(monkeypatch):
     done = _done(b"".join(written).decode())
     assert done["full_response"] == "ok"
     assert done["tool_receipts"] == GOOD
+
+
+# ---------------------------------------------------------------------------
+# Guarded explicit-JSON result preservation
+# ---------------------------------------------------------------------------
+
+
+_MANAGED_WEB_SEARCH_PAYLOAD = {
+    "id": "d9e512e2",
+    "results": [
+        {
+            "title": "Amazon Bedrock AgentCore",
+            "url": "https://aws.amazon.com/bedrock/agentcore/",
+            "text": "The platform for production AI agents.",
+        }
+    ],
+}
+
+
+def _json_result(use_id: str, value, *, status: str = "success") -> dict:
+    return {
+        "role": "user",
+        "content": [
+            {
+                "toolResult": {
+                    "toolUseId": use_id,
+                    "status": status,
+                    "content": [{"text": json.dumps(value)}],
+                }
+            }
+        ],
+    }
+
+
+def test_explicit_json_result_is_current_turn_exact_id_bound_and_field_preserving():
+    helpers = _helpers()
+    stale = [_use("stale", "AmazonWebSearch___WebSearch", {"query": "old"}), _json_result("stale", {})]
+    seen = helpers["_tool_use_ids"](stale)
+    messages = stale + [
+        _use(
+            "current",
+            "AmazonWebSearch___WebSearch",
+            {"query": "Amazon Bedrock AgentCore", "maxResults": 5},
+        ),
+        _json_result("current", _MANAGED_WEB_SEARCH_PAYLOAD),
+    ]
+
+    response = helpers["_current_structured_tool_response"](
+        "Present the tool result as JSON.",
+        messages,
+        exclude=seen,
+    )
+
+    assert json.loads(response) == _MANAGED_WEB_SEARCH_PAYLOAD
+    assert '"text"' in response
+    assert '"summary"' not in response
+    assert helpers["_current_structured_tool_response"]("Summarize it.", messages, exclude=seen) is None
+
+
+def test_explicit_json_result_fails_closed_on_error_ambiguity_malformed_and_oversized_content():
+    helpers = _helpers()
+    use = _use("one", "AmazonWebSearch___WebSearch", {"query": "q"})
+    invoke = helpers["_current_structured_tool_response"]
+
+    assert invoke("as JSON", [use, _json_result("one", {"error": "blocked"})]) is None
+    assert invoke("as JSON", [use, _json_result("one", {}, status="error")]) is None
+    assert invoke("as JSON", [use, _result("one")]) == "{}"
+    assert (
+        invoke(
+            "as JSON",
+            [
+                use,
+                {"role": "user", "content": [{"toolResult": {"toolUseId": "one", "content": [{"text": "not-json"}]}}]},
+            ],
+        )
+        is None
+    )
+    assert (
+        invoke(
+            "as JSON",
+            [use, _json_result("one", {"text": "x" * (64 * 1024)})],
+        )
+        is None
+    )
+    assert (
+        invoke(
+            "as JSON",
+            [use, _json_result("one", {}), _use("two", "other", {}), _json_result("two", {})],
+        )
+        is None
+    )
+
+
+class _ManagedSearchAgent:
+    def __init__(self) -> None:
+        self.messages = [_use("stale", "old_tool", {}), _result("stale")]
+
+    def __call__(self, _prompt):
+        self.messages += [
+            _use(
+                "web-current",
+                "AmazonWebSearch___WebSearch",
+                {"query": "Amazon Bedrock AgentCore", "maxResults": 5},
+            ),
+            _json_result("web-current", _MANAGED_WEB_SEARCH_PAYLOAD),
+        ]
+        return "model-renamed-the-result"
+
+
+def _assert_generated_web_search_preserves_official_schema(source: str, *, guarded: bool = True) -> dict:
+    agent = _ManagedSearchAgent()
+    namespace = _lift(
+        source,
+        {"invoke"},
+        {
+            **_helpers(),
+            "app": _App,
+            "_get_agent": lambda: agent,
+            "_TOOL_NAME_ALIASES": {},
+            "_GUARDRAIL_HOOKS": [object()] if guarded else [],
+        },
+    )
+    body = namespace["invoke"]({"prompt": "Use WebSearch and present its tool result as JSON."})
+    try:
+        parsed = json.loads(body["response"])
+    except (TypeError, json.JSONDecodeError):
+        parsed = None
+    assert parsed == _MANAGED_WEB_SEARCH_PAYLOAD, "managed WebSearch schema was not preserved"
+    return body
+
+
+def test_generated_guarded_web_search_preserves_official_structured_result():
+    source = generate_agent_code(
+        _config(),
+        tools=["guardrails"],
+        template_id="web-search-agent",
+        portable=True,
+    )
+
+    body = _assert_generated_web_search_preserves_official_schema(source)
+
+    assert body["tool_receipts"] == [
+        _receipt(
+            "AmazonWebSearch___WebSearch",
+            {"query": "Amazon Bedrock AgentCore", "maxResults": 5},
+        )
+    ]
+
+
+def test_generated_web_search_never_passthroughs_an_unscreened_result():
+    source = generate_agent_code(_config(), template_id="web-search-agent", portable=True)
+    agent = _ManagedSearchAgent()
+    namespace = _lift(
+        source,
+        {"invoke"},
+        {
+            **_helpers(),
+            "app": _App,
+            "_get_agent": lambda: agent,
+            "_TOOL_NAME_ALIASES": {},
+            "_GUARDRAIL_HOOKS": [],
+        },
+    )
+
+    assert namespace["invoke"]({"prompt": "Return JSON."})["response"] == "model-renamed-the-result"
+
+
+def test_removing_structured_response_selection_mutation_is_detected():
+    source = generate_agent_code(
+        _config(),
+        tools=["guardrails"],
+        template_id="web-search-agent",
+        portable=True,
+    )
+    mutant = source.replace(
+        '"response": structured_response if structured_response is not None else str(result),',
+        '"response": str(result),',
+    )
+    assert mutant != source
+
+    with pytest.raises(AssertionError, match="managed WebSearch schema was not preserved"):
+        _assert_generated_web_search_preserves_official_schema(mutant)
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected"),
+    [
+        ("Present the tool result as JSON.", True),
+        ("Return JSON", True),
+        ("Respond in JSON format", True),
+        ("Provide a JSON object", True),
+        ("JSON-formatted response", True),
+        ("Output a JSON representation", True),
+        ("Do not return JSON", False),
+        ("Don't return JSON", False),
+        ("Don’t return JSON", False),
+        ("Use WebSearch without JSON", False),
+        ("Avoid JSON output", False),
+        ("Explain what JSON means", False),
+        ("JSON is a data format", False),
+        ("Return JSON or JSON", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_explicit_json_intent_requires_one_affirmative_non_negated_request(prompt, expected):
+    assert _helpers()["_explicit_json_requested"](prompt) is expected
+
+
+def test_oversized_prompt_cannot_select_structured_passthrough():
+    assert not _helpers()["_explicit_json_requested"]("Return JSON " + "x" * (64 * 1024))

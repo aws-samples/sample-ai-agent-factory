@@ -794,6 +794,17 @@ untagged — runs the real sweep, and asserts only its own are gone. It removes
 everything it plants. Run it in a scratch account, not production; it executes the
 real teardown sweep.
 
+## Structured Gateway tool results
+
+Generated Gateway agents keep natural-language model synthesis as the default. When an
+authenticated caller explicitly asks for JSON, and the current turn contains exactly one
+successful tool call, a Guardrail-enabled Runtime returns that tool's post-Guardrail JSON
+without renaming connector-owned fields. The result is joined to its invocation by the
+exact `toolUseId`; stale conversation results, multiple calls, errors, malformed or
+oversized JSON, and unscreened deployments do not enter this passthrough path. This keeps
+managed connector contracts such as AgentCore Web Search's required `results[].text`
+field deterministic while preserving the existing exact-input tool receipts.
+
 ## Running Tests
 
 ```bash
