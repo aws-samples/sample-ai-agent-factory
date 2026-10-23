@@ -803,7 +803,10 @@ without renaming connector-owned fields. The result is joined to its invocation 
 exact `toolUseId`; stale conversation results, multiple calls, errors, malformed or
 oversized JSON, and unscreened deployments do not enter this passthrough path. This keeps
 managed connector contracts such as AgentCore Web Search's required `results[].text`
-field deterministic while preserving the existing exact-input tool receipts.
+field deterministic while preserving the existing exact-input tool receipts. The generic
+Strands Gateway template keeps only region-portable DynamicTools by default; managed
+`web_search` is explicit opt-in in supported Regions, while the dedicated Web Search
+template includes it automatically.
 
 Backend source distributions retain the 11 required `agentcore-deps/` Runtime bundles,
 but exclude generated `lib/`, `.hypothesis/`, `.pytest_cache/`, and `.ruff_cache/`

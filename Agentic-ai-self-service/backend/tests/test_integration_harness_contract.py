@@ -189,7 +189,6 @@ def test_the_live_matrix_exercises_every_advertised_executable_tool() -> None:
             "fetch_webpage",
         ),
         "strands-gateway-agent": (
-            "WebSearch",
             "wikipedia_search",
             "get_weather",
             "fetch_webpage",
@@ -234,7 +233,7 @@ def test_the_live_matrix_exercises_every_advertised_executable_tool() -> None:
     )
 
     assert actual == expected
-    assert sum(len(tools) for tools in actual.values()) == 25
+    assert sum(len(tools) for tools in actual.values()) == 24
 
 
 def test_exactly_the_two_memory_gallery_templates_require_live_recall() -> None:

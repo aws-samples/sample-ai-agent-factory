@@ -768,9 +768,12 @@ All Lambda functions include `PYTHONPATH=/var/task/src:/var/task:/var/task/lib` 
 
 ### Template 2: Strands Agent + Gateway (Intermediate)
 - Agent: BedrockAgentCoreApp + Strands Agent + MCP Gateway tools
-- Tools: managed `WebSearch` plus seven `DynamicTools` operations discovered through the MCP Gateway:
+- Tools: seven `DynamicTools` operations (all region-portable) discovered through the MCP Gateway:
   Wikipedia lookup, weather, webpage fetch, order lookup, customer lookup,
   order listing, and refund processing
+- Managed Web Search: intentionally not implied, so this generic template remains deployable
+  in reduced-profile Regions. Add `web_search` explicitly in a supported Region, or use
+  Template 1 when managed Web Search is required.
 - Auth: Cognito OAuth2 (client_credentials grant)
 - Components: Runtime + Gateway + Identity (16 CFN resources)
 

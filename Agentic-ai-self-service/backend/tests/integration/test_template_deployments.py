@@ -307,7 +307,7 @@ TEMPLATE_CASES: tuple[TemplateCase, ...] = (
         template_id="strands-gateway-agent",
         name_token="gateway",
         protocol="HTTP",
-        invocations=(*_DYNAMIC_WEB_INVOCATIONS, *_CANONICAL_SUPPORT_INVOCATIONS),
+        invocations=(*_DYNAMIC_WEB_INVOCATIONS[1:], *_CANONICAL_SUPPORT_INVOCATIONS),
         expected_status_fields=("gateway_url",),
     ),
     TemplateCase(

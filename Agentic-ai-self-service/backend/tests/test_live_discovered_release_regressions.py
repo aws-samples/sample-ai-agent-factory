@@ -239,3 +239,14 @@ def test_slots_route_uses_a_strong_read(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert response.staging_version_id == "version-1"
     assert calls == [("runtime_1", True)]
+
+
+def test_generic_gateway_live_contract_excludes_optional_managed_web_search() -> None:
+    cases = {case.template_id: case for case in gallery.TEMPLATE_CASES}
+    generic_tools = {invocation.tool_name for invocation in cases["strands-gateway-agent"].invocations}
+    dedicated_tools = {invocation.tool_name for invocation in cases["web-search-agent"].invocations}
+
+    assert "WebSearch" not in generic_tools
+    assert {"wikipedia_search", "get_weather", "fetch_webpage"} <= generic_tools
+    assert {"get_order", "get_customer", "list_orders", "process_refund"} <= generic_tools
+    assert "WebSearch" in dedicated_tools
