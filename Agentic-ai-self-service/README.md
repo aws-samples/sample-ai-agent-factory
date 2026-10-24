@@ -85,7 +85,9 @@ while retaining the locked Runtime ZIPs, so its contents do not depend on build 
 Two builds of one commit must therefore produce identical Runtime ZIPs, Lambda tree,
 wheel, source distribution, CDK template, and asset manifest. The frontend build tool is
 pinned to an audited Vite release; Vitest is exact-pinned, and exact `overrides` keep
-transitive Zod and Undici releases above their audited minimums. A newly published
+transitive Zod and Undici releases above their audited minimums. Frontend certification
+waits for asynchronous governance state to become ready before asserting export actions,
+so clean-clone results do not depend on worker timing. A newly published
 high-severity advisory invalidates prior frontend evidence and requires fix-forward
 exact-commit certification.
 
