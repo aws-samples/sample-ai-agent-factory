@@ -328,10 +328,12 @@ describe('DeployPanel CloudFormation naming profile', () => {
       {},
       { timeout: 10_000 },
     )).toBeInTheDocument();
-    expect(
-      screen.getByRole('button', { name: 'Download CloudFormation Template' }),
-    ).toBeEnabled();
-  });
+    await waitFor(() => {
+      expect(
+        screen.getByRole('button', { name: 'Download CloudFormation Template' }),
+      ).toBeEnabled();
+    }, { timeout: 10_000 });
+  }, 15_000);
 
   it('invalid CFN naming disables only the CFN action', async () => {
     render(

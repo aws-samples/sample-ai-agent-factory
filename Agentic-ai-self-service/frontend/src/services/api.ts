@@ -76,9 +76,19 @@ export {
 export {
   getEvaluationConfig,
   listEvaluationResults,
+  getPromotionEvidence,
+  startPromotionEvaluation,
+  getPromotionEvaluation,
+  attestPromotionEvaluation,
   type EvaluationConfigSummary,
   type EvaluationResultRow,
   type EvaluationResultsSummary,
+  type PromotionPolicy,
+  type PromotionEvidence,
+  type PromotionEvidenceSummary,
+  type PromotionEvaluationScenario,
+  type PromotionEvaluationStart,
+  type PromotionEvaluationStatus,
 } from './api/evaluations';
 
 // ============================================================================
@@ -303,6 +313,10 @@ import type {
 import type {
   EvaluationConfigSummary,
   EvaluationResultsSummary,
+  PromotionEvidenceSummary,
+  PromotionEvaluationScenario,
+  PromotionEvaluationStart,
+  PromotionEvaluationStatus,
 } from './api/evaluations';
 import type {
   DashboardUrlSummary,
@@ -419,6 +433,22 @@ export class ApiClient {
     return apiRequest<EvaluationResultsSummary>(`/api/runtimes/${encodeURIComponent(runtimeName)}/evaluations?hours=${hours}`, {}, this.baseUrl);
   }
 
+  async getPromotionEvidence(runtimeName: string, versionId: string): Promise<PromotionEvidenceSummary> {
+    return apiRequest<PromotionEvidenceSummary>(`/api/runtimes/${encodeURIComponent(runtimeName)}/versions/${encodeURIComponent(versionId)}/promotion-evidence`, {}, this.baseUrl);
+  }
+
+  async startPromotionEvaluation(runtimeName: string, versionId: string, scenarios: PromotionEvaluationScenario[]): Promise<PromotionEvaluationStart> {
+    return apiRequest<PromotionEvaluationStart>(`/api/runtimes/${encodeURIComponent(runtimeName)}/versions/${encodeURIComponent(versionId)}/promotion-evaluation/start`, { method: 'POST', body: JSON.stringify({ scenarios }) }, this.baseUrl);
+  }
+
+  async getPromotionEvaluation(runtimeName: string, versionId: string, batchEvaluationId: string): Promise<PromotionEvaluationStatus> {
+    return apiRequest<PromotionEvaluationStatus>(`/api/runtimes/${encodeURIComponent(runtimeName)}/versions/${encodeURIComponent(versionId)}/promotion-evaluation/${encodeURIComponent(batchEvaluationId)}`, {}, this.baseUrl);
+  }
+
+  async attestPromotionEvaluation(runtimeName: string, versionId: string, batchEvaluationId: string): Promise<PromotionEvidenceSummary> {
+    return apiRequest<PromotionEvidenceSummary>(`/api/runtimes/${encodeURIComponent(runtimeName)}/versions/${encodeURIComponent(versionId)}/promotion-evaluation/attest`, { method: 'POST', body: JSON.stringify({ batchEvaluationId }) }, this.baseUrl);
+  }
+
   // Observability
   async getDashboardUrl(runtimeName: string): Promise<DashboardUrlSummary> {
     return apiRequest<DashboardUrlSummary>(`/api/runtimes/${encodeURIComponent(runtimeName)}/dashboard-url`, {}, this.baseUrl);
@@ -430,6 +460,23 @@ export class ApiClient {
     if (opts?.to) qs.set('to', String(opts.to));
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiRequest<CostSummary>(`/api/runtimes/${encodeURIComponent(runtimeName)}/cost${suffix}`, {}, this.baseUrl);
+  }
+
+  async upsertOwnerBudget(limitUsd: number, warnPct = 80): Promise<{
+    scope: string;
+    key: string;
+    limit_usd: number;
+    warn_pct: number;
+  }> {
+    return apiRequest('/api/cost/budgets', {
+      method: 'POST',
+      body: JSON.stringify({
+        scope: 'owner',
+        key: 'self',
+        limit_usd: limitUsd,
+        warn_pct: warnPct,
+      }),
+    }, this.baseUrl);
   }
 
   async getTraces(runtimeName: string, opts?: { from?: number; to?: number; traceId?: string }): Promise<TraceWaterfall> {
@@ -520,6 +567,7 @@ export class ApiClient {
       region: string;
       account_id?: string | null;
       artifact_bucket?: string | null;
+      evaluation_kms_key_arn?: string | null;
     }>;
     accounts: Array<{
       account_id: string;
@@ -528,6 +576,7 @@ export class ApiClient {
       mcp_runtime_role_arn: string;
       harness_role_arn: string;
       artifact_bucket: string;
+      evaluation_kms_key_arn: string;
       region: string;
     }>;
   }> {
@@ -540,11 +589,13 @@ export class ApiClient {
 
   async addDeployRegion(
     region: string,
+    evaluationKmsKeyArn: string,
     artifactBucket?: string,
   ): Promise<{
     region: string;
     account_id: string;
     artifact_bucket: string;
+    evaluation_kms_key_arn: string;
     validated: boolean;
     regions: string[];
   }> {
@@ -552,6 +603,7 @@ export class ApiClient {
       method: 'POST',
       body: JSON.stringify({
         region,
+        evaluation_kms_key_arn: evaluationKmsKeyArn,
         ...(artifactBucket ? { artifact_bucket: artifactBucket } : {}),
       }),
     }, this.baseUrl);
@@ -561,6 +613,7 @@ export class ApiClient {
     accountId: string,
     roleArn: string,
     region: string,
+    evaluationKmsKeyArn: string,
     runtimeRoleArn?: string,
     mcpRuntimeRoleArn?: string,
     harnessRoleArn?: string,
@@ -571,6 +624,7 @@ export class ApiClient {
     mcp_runtime_role_arn: string;
     harness_role_arn: string;
     artifact_bucket: string;
+    evaluation_kms_key_arn: string;
     validated: boolean;
   }> {
     return apiRequest(`/api/admin/deploy-targets/accounts`, {
@@ -579,6 +633,7 @@ export class ApiClient {
         account_id: accountId,
         role_arn: roleArn,
         region,
+        evaluation_kms_key_arn: evaluationKmsKeyArn,
         ...(runtimeRoleArn ? { runtime_role_arn: runtimeRoleArn } : {}),
         ...(mcpRuntimeRoleArn
           ? { mcp_runtime_role_arn: mcpRuntimeRoleArn }

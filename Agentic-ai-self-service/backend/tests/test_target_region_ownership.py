@@ -351,6 +351,7 @@ def test_runtime_configure_uses_target_region_for_model_and_manifest(monkeypatch
     result = runtime_configure_step.handler(
         {
             "deployment_id": "dep-target-region",
+            "production_gate_required": True,
             "target_region": TARGET_REGION,
             "config": {
                 "name": "audit",
@@ -364,6 +365,14 @@ def test_runtime_configure_uses_target_region_for_model_and_manifest(monkeypatch
     )
 
     assert create_call["env_vars"]["MODEL_ID"].startswith("eu.")
+    assert create_call["instrument_observability"] is True
+    assert create_call["env_vars"]["AGENT_OBSERVABILITY_ENABLED"] == "true"
+    assert create_call["env_vars"]["UNIFIED_TRACES_DESTINATION_ENABLED"] == "false"
+    assert create_call["env_vars"]["OTEL_SERVICE_NAME"] == "audit.DEFAULT"
+    assert create_call["env_vars"]["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] == (
+        f"https://xray.{TARGET_REGION}.amazonaws.com/v1/traces"
+    )
+    assert create_call["env_vars"]["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"] == "false"
     assert store.record_resource.call_args_list[0].args[1]["region"] == TARGET_REGION
     assert governance_call == {
         "logs_client": logs,
@@ -468,6 +477,45 @@ def test_iam_step_passes_target_region_to_runtime_role_creator(monkeypatch):
     )
 
     assert create_call["region"] == TARGET_REGION
+    assert create_call["trace_export_enabled"] is False
+    assert result["role_arn"].endswith("/AgentCoreRuntime-audit")
+
+
+def test_iam_step_enables_trace_export_for_production_gated_runtime(monkeypatch):
+    from app.step_handlers import iam_step
+
+    store = MagicMock()
+    create_call: dict = {}
+
+    def _create_role(**kwargs):
+        create_call.update(kwargs)
+        return "arn:aws:iam::123456789012:role/AgentCoreRuntime-audit"
+
+    monkeypatch.delenv("SHARED_RUNTIME_ROLE_ARN", raising=False)
+    monkeypatch.setattr(iam_step, "_get_deployment_store", lambda: store)
+    monkeypatch.setattr(iam_step, "create_runtime_iam_role", _create_role)
+    monkeypatch.setattr(iam_step.step_clients, "client", lambda *_args, **_kwargs: MagicMock())
+    monkeypatch.setattr(
+        iam_step.step_clients,
+        "account_id_for_event",
+        lambda _event: "123456789012",
+    )
+    monkeypatch.setattr(iam_step, "get_platform_observability_defaults", lambda: None)
+
+    result = iam_step.handler(
+        {
+            "deployment_id": "dep-production-evaluation",
+            "target_region": TARGET_REGION,
+            "production_gate_required": True,
+            "config": {
+                "name": "audit",
+                "model": {"modelId": "us.anthropic.claude-sonnet-5"},
+            },
+        },
+        None,
+    )
+
+    assert create_call["trace_export_enabled"] is True
     assert result["role_arn"].endswith("/AgentCoreRuntime-audit")
 
 

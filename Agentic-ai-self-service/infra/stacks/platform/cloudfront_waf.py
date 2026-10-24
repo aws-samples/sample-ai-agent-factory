@@ -253,6 +253,24 @@ def build_cloudfront_distribution(
         stack,
         "SecurityHeadersPolicy",
         response_headers_policy_name=cfg.global_resource_name(stack, "security-headers"),
+        cors_behavior=cloudfront.ResponseHeadersCorsBehavior(
+            access_control_allow_credentials=False,
+            access_control_allow_headers=[
+                "Authorization",
+                "Content-Type",
+                "X-Amz-Date",
+                "X-Api-Key",
+                "X-AgentCore-Timestamp",
+                "X-AgentCore-Delivery-Id",
+                "X-AgentCore-Signature",
+                "X-Session-Id",
+            ],
+            access_control_allow_methods=["ALL"],
+            access_control_allow_origins=["*"],
+            access_control_expose_headers=["Retry-After"],
+            access_control_max_age=Duration.minutes(5),
+            origin_override=True,
+        ),
         security_headers_behavior=cloudfront.ResponseSecurityHeadersBehavior(
             content_type_options=cloudfront.ResponseHeadersContentTypeOptions(override=True),
             frame_options=cloudfront.ResponseHeadersFrameOptions(

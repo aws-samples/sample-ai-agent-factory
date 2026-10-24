@@ -28,6 +28,8 @@ const baseProps = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllEnvs();
+  vi.stubEnv('VITE_AWS_REGION', 'us-east-1');
 });
 
 describe('dismissing the gallery from the keyboard', () => {
@@ -208,5 +210,42 @@ describe('replacing an existing workflow', () => {
 
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe('regional feature availability', () => {
+  it('keeps unsupported templates visible but disabled in Frankfurt', () => {
+    vi.stubEnv('VITE_AWS_REGION', 'eu-central-1');
+    const onSelectTemplate = vi.fn();
+    render(
+      <TemplateGallery
+        isOpen
+        onClose={vi.fn()}
+        onSelectTemplate={onSelectTemplate}
+        hasExistingNodes={false}
+      />,
+    );
+
+    expect(screen.getByRole('status')).toHaveTextContent('Europe (Frankfurt)');
+    expect(screen.getByRole('status')).toHaveTextContent('Web Search');
+    expect(screen.getByRole('status')).toHaveTextContent('AWS Agent Registry');
+    const unavailable = screen.getAllByRole('button', { name: 'Unavailable in this Region' });
+    expect(unavailable).toHaveLength(1);
+    unavailable.forEach((button) => expect(button).toBeDisabled());
+    fireEvent.click(unavailable[0]);
+    expect(onSelectTemplate).not.toHaveBeenCalled();
+    expect(screen.getAllByRole('button', { name: 'Use Template' }).length).toBeGreaterThan(0);
+  });
+
+  it('keeps every template selectable under the full Ireland profile', () => {
+    vi.stubEnv('VITE_AWS_REGION', 'eu-west-1');
+    render(<TemplateGallery {...baseProps} isOpen onClose={vi.fn()} />);
+
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Unavailable in this Region' })).toBeNull();
+    screen.getAllByRole('button', { name: 'Use Template' }).forEach((button) => {
+      expect(button).toBeEnabled();
+    });
   });
 });

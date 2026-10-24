@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "source_url": "https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html",
+  "accessed_at": "2026-10-19",
+  "regions": [
+    {
+      "region": "eu-central-1",
+      "name": "Europe (Frankfurt)",
+      "core": true,
+      "production_release": true,
+      "memory": true,
+      "agent_registry": false,
+      "web_search": false
+    },
+    {
+      "region": "eu-west-1",
+      "name": "Europe (Ireland)",
+      "core": true,
+      "production_release": true,
+      "memory": true,
+      "agent_registry": true,
+      "web_search": true
+    },
+    {
+      "region": "eu-west-2",
+      "name": "Europe (London)",
+      "core": true,
+      "production_release": true,
+      "memory": true,
+      "agent_registry": false,
+      "web_search": false
+    },
+    {
+      "region": "eu-south-1",
+      "name": "Europe (Milan)",
+      "core": true,
+      "production_release": false,
+      "memory": false,
+      "agent_registry": false,
+      "web_search": false
+    },
+    {
+      "region": "eu-west-3",
+      "name": "Europe (Paris)",
+      "core": true,
+      "production_release": true,
+      "memory": true,
+      "agent_registry": false,
+      "web_search": false
+    },
+    {
+      "region": "eu-south-2",
+      "name": "Europe (Spain)",
+      "core": true,
+      "production_release": false,
+      "memory": false,
+      "agent_registry": false,
+      "web_search": false
+    },
+    {
+      "region": "eu-north-1",
+      "name": "Europe (Stockholm)",
+      "core": true,
+      "production_release": false,
+      "memory": true,
+      "agent_registry": false,
+      "web_search": false
+    }
+  ],
+  "core_features": [
+    "runtime_microvm",
+    "gateway",
+    "identity",
+    "policy",
+    "evaluations",
+    "built_in_tools",
+    "observability"
+  ],
+  "production_envelope": {
+    "deployment_mode": "runtime",
+    "a2a": false,
+    "gateway_provider": "agentcore",
+    "notes": [
+      "Production release supports one independently deployed home Region chosen from Frankfurt, Ireland, London, or Paris; Web Search and AWS Agent Registry federation remain Ireland-only until AWS expands those services.",
+      "Managed Harness is development-only until model/tool output can be retracted after Guardrail denial.",
+      "Production A2A is disabled until nested and inbound invocation reservations propagate.",
+      "Memory scenarios run only where memory=true.",
+      "AWS Agent Registry scenarios run only where agent_registry=true.",
+      "Managed Web Search scenarios run only where web_search=true."
+    ]
+  }
+}

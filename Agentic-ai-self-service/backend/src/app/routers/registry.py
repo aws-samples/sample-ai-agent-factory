@@ -463,43 +463,44 @@ class AwsRegistryEnableRequest(BaseModel):
 
 @router.get("/aws-config", dependencies=[Depends(require_scopes("registry:read"))])
 async def aws_registry_config(caller_sub: str = Depends(get_caller_sub)) -> dict:
-    """Return whether AWS Agent Registry federation is enabled + reachable.
+    """Return AWS Agent Registry federation and Region availability.
 
-    ``sdk_supported`` distinguishes the two very different reasons federation can
-    be unreachable: a bad registryId / missing IAM (fixable in the console) vs a
-    Lambda bundle whose boto3 predates the GA ``agent-registry`` service models
-    (fixable only by redeploying with boto3 >= 1.43.66). Without it the UI can
-    only say "unreachable", which sends admins hunting the wrong problem.
-    ``status`` covers the third case: a valid, permitted registry that is not yet
-    READY. It is None when the registry could not be read at all.
+    Region support is separate from SDK support and registry lifecycle. An
+    unsupported Region never constructs an AWS Registry client, and the response
+    names the built-in DynamoDB registry as the supported fallback.
     """
     from app.services.aws_agent_registry import (
         REGISTRY_STATUS_READY,
+        agent_registry_region,
+        agent_registry_region_supported,
+        agent_registry_region_unavailable_reason,
         agent_registry_supported,
         get_configured_registry_id,
         get_registry,
     )
 
+    region = agent_registry_region()
+    region_ok = agent_registry_region_supported(region)
+    reason = agent_registry_region_unavailable_reason(region)
     sdk_ok = agent_registry_supported()
     rid = get_configured_registry_id()
-    if not rid:
-        return {
-            "enabled": False,
-            "registry_id": None,
-            "available": False,
-            "sdk_supported": sdk_ok,
-            "status": None,
-        }
+    base = {
+        "enabled": bool(rid),
+        "registry_id": rid,
+        "available": False,
+        "sdk_supported": sdk_ok,
+        "status": None,
+        "region": region,
+        "region_supported": region_ok,
+        "unavailable_reason": reason,
+    }
+    if not region_ok or not rid:
+        return base
     reg = get_registry()
-    # `status` splits the third reason federation can look broken: the registry is
-    # real and permitted but not READY (CREATING/UPDATING/DELETING). available()
-    # alone renders that identically to a bad registryId.
     status = reg.registry_status() if reg else None
     return {
-        "enabled": True,
-        "registry_id": rid,
+        **base,
         "available": status == REGISTRY_STATUS_READY,
-        "sdk_supported": sdk_ok,
         "status": status,
     }
 
@@ -517,9 +518,19 @@ async def aws_registry_enable(
         MIN_BOTO3,
         REGISTRY_STATUS_READY,
         AwsAgentRegistry,
+        agent_registry_region,
+        agent_registry_region_supported,
+        agent_registry_region_unavailable_reason,
         agent_registry_supported,
         set_configured_registry_id,
     )
+
+    region = agent_registry_region()
+    if not agent_registry_region_supported(region):
+        raise HTTPException(
+            status_code=400,
+            detail=agent_registry_region_unavailable_reason(region),
+        )
 
     # An old bundle has no agent-registry client at all, so available() would be
     # False for a perfectly valid registryId. Say so, rather than blaming the id.
@@ -551,7 +562,14 @@ async def aws_registry_enable(
             ),
         )
     set_configured_registry_id(body.registry_id)
-    return {"enabled": True, "registry_id": body.registry_id, "available": True}
+    return {
+        "enabled": True,
+        "registry_id": body.registry_id,
+        "available": True,
+        "region": region,
+        "region_supported": True,
+        "unavailable_reason": None,
+    }
 
 
 @router.get("/aws-search", dependencies=[Depends(require_scopes("registry:read"))])
@@ -573,7 +591,23 @@ async def aws_registry_search(
     "unknown" is honest and the other two options are respectively useless and
     misleading. ``status_authoritative`` tells the UI which case it got.
     """
-    from app.services.aws_agent_registry import RegistryQueryFailed, get_registry
+    from app.services.aws_agent_registry import (
+        RegistryQueryFailed,
+        agent_registry_region,
+        agent_registry_region_supported,
+        agent_registry_region_unavailable_reason,
+        get_registry,
+    )
+
+    region = agent_registry_region()
+    if not agent_registry_region_supported(region):
+        return {
+            "enabled": False,
+            "results": [],
+            "region": region,
+            "region_supported": False,
+            "unavailable_reason": agent_registry_region_unavailable_reason(region),
+        }
 
     reg = get_registry()
     if reg is None:

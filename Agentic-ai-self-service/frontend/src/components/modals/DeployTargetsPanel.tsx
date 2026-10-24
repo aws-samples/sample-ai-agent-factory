@@ -20,6 +20,7 @@ type AccountTarget = {
   mcp_runtime_role_arn: string;
   harness_role_arn: string;
   artifact_bucket: string;
+  evaluation_kms_key_arn: string;
   region: string;
 };
 
@@ -27,6 +28,7 @@ type RegionTarget = {
   region: string;
   account_id?: string | null;
   artifact_bucket?: string | null;
+  evaluation_kms_key_arn?: string | null;
 };
 
 const REGIONAL_ARTIFACT_BUCKET_PATTERN =
@@ -49,6 +51,7 @@ export function DeployTargetsPanel() {
   const [accounts, setAccounts] = useState<AccountTarget[]>([]);
   const [newRegion, setNewRegion] = useState('');
   const [newRegionArtifactBucket, setNewRegionArtifactBucket] = useState('');
+  const [newRegionEvaluationKeyArn, setNewRegionEvaluationKeyArn] = useState('');
   const [acct, setAcct] = useState({
     account_id: '',
     role_arn: '',
@@ -56,6 +59,7 @@ export function DeployTargetsPanel() {
     mcp_runtime_role_arn: '',
     harness_role_arn: '',
     artifact_bucket: '',
+    evaluation_kms_key_arn: '',
     region: '',
   });
   const [busy, setBusy] = useState(false);
@@ -123,6 +127,11 @@ export function DeployTargetsPanel() {
                         ? `Regional artifacts: s3://${target.artifact_bucket}`
                         : 'Regional artifacts: validation required — re-register this region'}
                     </div>
+                    <div className="text-[10px] text-gray-500 break-all">
+                      {target?.evaluation_kms_key_arn
+                        ? `Promotion key: ${target.evaluation_kms_key_arn}`
+                        : 'Promotion key: validation required — re-register this region'}
+                    </div>
                   </div>
                 );
               })}
@@ -145,6 +154,13 @@ export function DeployTargetsPanel() {
                 onChange={(e) => setNewRegionArtifactBucket(e.target.value)}
               />
             </div>
+            <input
+              className="w-full mt-2 rounded bg-black/20 border border-white/10 px-2 py-1 text-sm"
+              placeholder="arn:aws:kms:<region>:<account>:key/<key-id>"
+              value={newRegionEvaluationKeyArn}
+              aria-label="Regional production evaluation KMS key ARN"
+              onChange={(e) => setNewRegionEvaluationKeyArn(e.target.value)}
+            />
             {!regionArtifactBucketIsValid && (
               <p role="alert" className="text-[10px] text-red-400 mt-1">
                 Use agentcore-flows-artifacts-&lt;12-digit platform account&gt;-&lt;suffix&gt;,
@@ -154,13 +170,15 @@ export function DeployTargetsPanel() {
             <div className="mt-2">
               <button
                 type="button"
-                disabled={busy || !newRegion.trim() || !regionArtifactBucketIsValid}
+                disabled={busy || !newRegion.trim() || !newRegionEvaluationKeyArn.trim() || !regionArtifactBucketIsValid}
                 onClick={() => void run(async () => {
                   await getApiClient().addDeployRegion(
                     newRegion.trim(),
+                    newRegionEvaluationKeyArn.trim(),
                     newRegionArtifactBucket.trim() || undefined,
                   );
                   setNewRegion('');
+                  setNewRegionEvaluationKeyArn('');
                   setNewRegionArtifactBucket('');
                 })}
                 className="text-xs px-3 py-1 rounded border border-white/10 disabled:opacity-50"
@@ -170,7 +188,9 @@ export function DeployTargetsPanel() {
               Every non-home region needs an S3 code bucket in the platform account
               and that same region. Leave the bucket blank (recommended) to validate
               <code> agentcore-flows-artifacts-&lt;account&gt;-&lt;region&gt;</code>.
-              An override must remain inside the
+              The promotion key is required and must be an enabled symmetric customer-managed
+              key in the same account and Region with the documented AgentCore key policy.
+              An artifact override must remain inside the
               <code> agentcore-flows-artifacts-&lt;platform-account&gt;-*</code> namespace;
               the server verifies the exact platform account.
             </p>
@@ -192,6 +212,9 @@ export function DeployTargetsPanel() {
                 </div>
                 <div className="text-[10px] text-gray-500 break-all">
                   Artifacts: s3://{a.artifact_bucket}
+                </div>
+                <div className="text-[10px] text-gray-500 break-all">
+                  Promotion key: {a.evaluation_kms_key_arn}
                 </div>
               </div>
             ))}
@@ -231,13 +254,19 @@ export function DeployTargetsPanel() {
               value={acct.artifact_bucket}
               aria-label="Target runtime artifact bucket name"
               onChange={(e) => setAcct({ ...acct, artifact_bucket: e.target.value })} />
+            <input className="w-full mt-2 rounded bg-black/20 border border-white/10 px-2 py-1 text-xs"
+              placeholder="arn:aws:kms:<region>:<account>:key/<key-id>"
+              value={acct.evaluation_kms_key_arn}
+              aria-label="Target production evaluation KMS key ARN"
+              onChange={(e) => setAcct({ ...acct, evaluation_kms_key_arn: e.target.value })} />
             <button
-              type="button" disabled={busy || !acct.account_id || !acct.role_arn || !acct.region}
+              type="button" disabled={busy || !acct.account_id || !acct.role_arn || !acct.region || !acct.evaluation_kms_key_arn}
               onClick={() => void run(async () => {
                 await getApiClient().addDeployAccount(
                   acct.account_id,
                   acct.role_arn,
                   acct.region,
+                  acct.evaluation_kms_key_arn,
                   acct.runtime_role_arn || undefined,
                   acct.mcp_runtime_role_arn || undefined,
                   acct.harness_role_arn || undefined,
@@ -250,6 +279,7 @@ export function DeployTargetsPanel() {
                   mcp_runtime_role_arn: '',
                   harness_role_arn: '',
                   artifact_bucket: '',
+                  evaluation_kms_key_arn: '',
                   region: '',
                 });
               })}
@@ -259,7 +289,8 @@ export function DeployTargetsPanel() {
               The target needs the fixed, pathless deployment role{' '}
               <code>AgentCoreFlowsDeploymentRole</code>, plus separate pre-warmed
               model-capable Runtime, model-free MCP Runtime, and Harness execution
-              roles and a regional S3 code bucket. Defaults are{' '}
+              roles, a regional S3 code bucket, and an enabled symmetric customer-managed
+              evaluation key in the target account and Region. Defaults are{' '}
               <code>AgentCoreFlowsRuntimeRole</code>,{' '}
               <code>AgentCoreFlowsMCPRuntimeRole</code>,{' '}
               <code>AgentCoreFlowsHarnessRole</code>, and{' '}

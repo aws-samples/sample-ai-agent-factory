@@ -172,6 +172,8 @@ _PREPARED_TOP_LEVEL_FIELDS = frozenset(
         "target_mcp_runtime_role_arn",
         "target_harness_role_arn",
         "target_artifact_bucket",
+        "evaluation_kms_key_arn",
+        "production_gate_required",
         "version_id",
         "friendly_runtime_name",
         "agentcore_runtime_name",
@@ -1305,6 +1307,15 @@ def validate_deployment_payload(
                         "this payload was not produced by the deployment API",
                     )
                 )
+        production_gate_required = payload.get("production_gate_required")
+        if not isinstance(production_gate_required, bool):
+            errors.append(
+                PayloadError(
+                    "$.production_gate_required",
+                    "missing_server_field",
+                    "is a required server-authored boolean consumed by code generation, IAM, and Runtime configuration",
+                )
+            )
         for key in sorted(k for k in payload if k in _VALIDATOR_OUTPUT_FIELDS):
             errors.append(
                 PayloadError(
@@ -1477,6 +1488,20 @@ def validate_deployment_payload(
                 account_policy="required",
                 expect_account=expected_account,
             )
+
+    evaluation_key = payload.get("evaluation_kms_key_arn")
+    if evaluation_key is not None:
+        _check_arn(
+            errors,
+            "$.evaluation_kms_key_arn",
+            evaluation_key,
+            expect_service="kms",
+            expect_resource_prefix="key/",
+            region_policy="required",
+            expect_region=expected_region,
+            account_policy="required",
+            expect_account=expected_account,
+        )
 
     # Staged secrets are created BY this deployment, in the target account and region
     # (deployment_handler.py:391-422 binds them through a session for the target event), so

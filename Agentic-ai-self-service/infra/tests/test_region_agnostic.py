@@ -15,6 +15,7 @@ these tests exist specifically to pin that.
 
 import aws_cdk as cdk
 import pytest
+from stacks.platform.config import AWS_AGENT_REGISTRY_SUPPORTED_REGIONS
 from stacks.platform_stack import PlatformStack
 
 HOME_REGION = "us-east-1"
@@ -254,6 +255,18 @@ class TestAccountGlobalNames:
         assert not any(OTHER_REGION in n for n in table_names)
 
 
+def test_external_widget_cors_is_token_only_and_exposes_retry_after(other_template):
+    policy = _only(other_template, "AWS::CloudFront::ResponseHeadersPolicy")
+    cors = policy["Properties"]["ResponseHeadersPolicyConfig"]["CorsConfig"]
+    assert cors["AccessControlAllowCredentials"] is False
+    assert cors["AccessControlAllowOrigins"]["Items"] == ["*"]
+    assert cors["AccessControlAllowMethods"]["Items"] == ["ALL"]
+    assert "Authorization" in cors["AccessControlAllowHeaders"]["Items"]
+    assert "Content-Type" in cors["AccessControlAllowHeaders"]["Items"]
+    assert cors["AccessControlExposeHeaders"]["Items"] == ["Retry-After"]
+    assert cors["OriginOverride"] is True
+
+
 # ---------------------------------------------------------------
 # Region threading
 # ---------------------------------------------------------------
@@ -284,3 +297,43 @@ class TestRegionThreading:
         ]
         assert f"https://cognito-idp.{OTHER_REGION}.amazonaws.com" in csp
         assert f"cognito-idp.{HOME_REGION}.amazonaws.com" not in csp
+
+
+# ---------------------------------------------------------------
+# Optional regional services — permissions follow availability
+# ---------------------------------------------------------------
+
+
+def _all_iam_actions(template: dict) -> set[str]:
+    actions: set[str] = set()
+    for resource in template["Resources"].values():
+        documents: list[dict] = []
+        if resource["Type"] == "AWS::IAM::Policy":
+            documents.append(resource["Properties"]["PolicyDocument"])
+        if resource["Type"] == "AWS::IAM::Role":
+            documents.extend(policy["PolicyDocument"] for policy in resource["Properties"].get("Policies", []))
+        for document in documents:
+            for statement in document.get("Statement", []):
+                raw = statement.get("Action", [])
+                actions.update([raw] if isinstance(raw, str) else raw)
+    return actions
+
+
+class TestOptionalRegionalServicePermissions:
+    def test_the_reviewed_agent_registry_region_set_is_exact(self):
+        assert AWS_AGENT_REGISTRY_SUPPORTED_REGIONS == {
+            "ap-northeast-1",
+            "ap-southeast-2",
+            "eu-west-1",
+            "us-east-1",
+            "us-west-2",
+        }
+
+    def test_supported_region_retains_agent_registry_permissions(self, home_template):
+        actions = _all_iam_actions(home_template)
+        assert "agent-registry:GetRegistry" in actions
+        assert "agent-registry:CreateRegistryRecord" in actions
+
+    def test_reduced_region_has_no_agent_registry_permissions(self, other_template):
+        actions = _all_iam_actions(other_template)
+        assert not any(action.startswith("agent-registry:") for action in actions)

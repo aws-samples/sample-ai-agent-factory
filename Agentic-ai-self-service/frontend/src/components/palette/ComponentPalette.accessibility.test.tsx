@@ -1,6 +1,15 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ComponentPalette } from './ComponentPalette';
+
+beforeEach(() => {
+  vi.unstubAllEnvs();
+  vi.stubEnv('VITE_AWS_REGION', 'us-east-1');
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe('ComponentPalette prompt library access', () => {
   it('offers a named prompt-library control and invokes its callback', () => {
@@ -137,5 +146,25 @@ describe('ComponentPalette prompt library access', () => {
     expect(
       screen.getByRole('button', { name: 'Generate Agent (AI)' }),
     ).toHaveClass('bg-[#5b21b6]', 'text-white');
+  });
+});
+
+
+describe('ComponentPalette regional feature availability', () => {
+  it('disables only managed Web Search in a reduced Region and explains why', () => {
+    vi.stubEnv('VITE_AWS_REGION', 'eu-west-3');
+    const onAddComponent = vi.fn();
+    render(<ComponentPalette onAddComponent={onAddComponent} />);
+
+    const webSearch = screen.getByRole('button', {
+      name: 'Add Amazon Web Search to canvas',
+    });
+    expect(webSearch).toBeDisabled();
+    expect(webSearch.parentElement).toHaveAttribute('draggable', 'false');
+    expect(screen.getByRole('note')).toHaveTextContent('Europe (Paris)');
+    expect(screen.getByRole('button', { name: 'Add Weather API to canvas' })).toBeEnabled();
+
+    fireEvent.click(webSearch);
+    expect(onAddComponent).not.toHaveBeenCalled();
   });
 });

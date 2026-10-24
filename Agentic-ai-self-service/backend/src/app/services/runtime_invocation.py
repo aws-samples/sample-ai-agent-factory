@@ -20,6 +20,11 @@ from fastapi import HTTPException
 
 from app.models.deployment_models import DeploymentStatusEnum, TestRequest, TestResponse
 from app.services import step_clients
+from app.services.delegated_identity import (
+    RUNTIME_WORKFORCE_TOKEN_HEADER,
+    delegated_bearer_identity,
+    deployment_requires_obo,
+)
 from app.services.invocation_identity import InvocationIdentity, InvocationIdentityError
 
 logger = logging.getLogger(__name__)
@@ -35,13 +40,80 @@ def _close_response_body(body: Any) -> None:
         logger.debug("Could not close the runtime response body", exc_info=True)
 
 
+def _runtime_endpoint_qualifier(deployment_state: dict, runtime_arn: str) -> str:
+    """Return the exact endpoint qualifier durably bound to this deployment."""
+
+    endpoint_arn = str(deployment_state.get("runtime_endpoint") or "")
+    prefix = runtime_arn + "/runtime-endpoint/"
+    if not endpoint_arn.startswith(prefix):
+        raise ValueError("The delegated Runtime endpoint is not bound to this deployment")
+    qualifier = endpoint_arn[len(prefix) :]
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,47}|DEFAULT", qualifier):
+        raise ValueError("The delegated Runtime endpoint qualifier is invalid")
+    return qualifier
+
+
+def invoke_agent_runtime_with_workforce_token(
+    *,
+    agentcore_client: Any,
+    runtime_arn: str,
+    deployment_state: dict,
+    payload: dict[str, Any],
+    bearer_token: str,
+    session_id: str | None,
+    on_dispatch: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Invoke an IAM-only Runtime with one request-local workforce token header.
+
+    AgentCore's SDK model has no arbitrary-header input, so the documented
+    ``before-sign`` event adds the allowlisted custom header before SigV4 signing.
+    The handler is removed in ``finally`` and the token never enters the payload,
+    client cache, deployment record, or response.
+    """
+
+    if not bearer_token or any(character.isspace() for character in bearer_token):
+        raise ValueError("The delegated workforce token is malformed")
+    qualifier = _runtime_endpoint_qualifier(deployment_state, runtime_arn)
+    invoke_params: dict[str, Any] = {
+        "agentRuntimeArn": runtime_arn,
+        "qualifier": qualifier,
+        "payload": json.dumps(payload),
+    }
+    if session_id:
+        invoke_params["runtimeSessionId"] = session_id
+
+    event_name = "before-sign.bedrock-agentcore.InvokeAgentRuntime"
+
+    def _add_workforce_header(request: Any, **_kwargs: Any) -> None:
+        request.headers.add_header(
+            RUNTIME_WORKFORCE_TOKEN_HEADER,
+            bearer_token,
+        )
+
+    events = agentcore_client.meta.events
+    events.register_first(event_name, _add_workforce_header)
+    try:
+        if on_dispatch is not None:
+            on_dispatch()
+        return agentcore_client.invoke_agent_runtime(**invoke_params)
+    finally:
+        events.unregister(event_name, handler=_add_workforce_header)
+
+
 def runtime_payload(
     prompt: str,
     session_id: str | None,
     memory_identity: InvocationIdentity | None,
     warmup: bool = False,
+    evaluation_capture: bool = False,
 ) -> dict[str, str | bool]:
-    """Build the exact payload consumed by generated HTTP agents."""
+    """Build the exact payload consumed by generated HTTP agents.
+
+    ``evaluation_capture`` is an internal control-plane bit. Public request
+    models forbid extra fields, and only the owner-checked staging-slot route
+    for an immutable production-gated version enables it; production-slot,
+    ungated staging, and direct client invocations remain redacted.
+    """
 
     payload: dict[str, str | bool] = {"prompt": prompt}
     if session_id:
@@ -50,6 +122,8 @@ def runtime_payload(
         payload["actor_id"] = memory_identity.actor_id
     if warmup:
         payload["warmup"] = True
+    if evaluation_capture:
+        payload["_agentcore_evaluation_capture"] = True
     return payload
 
 
@@ -169,6 +243,67 @@ def parse_response_body(body: Any) -> str:
     return body
 
 
+_IDENTITY_EVIDENCE_KEYS = frozenset(
+    {
+        "subject",
+        "issuer",
+        "expires_at",
+        "correlation_id",
+        "gateway_exchange",
+        "downstream_principal",
+    }
+)
+
+
+def parse_identity_evidence(
+    body: Any,
+    *,
+    expected_subject: str | None = None,
+    expected_issuer: str | None = None,
+    expected_expiry: float | None = None,
+) -> dict[str, Any] | None:
+    """Return only caller-bound, non-credential identity evidence from Runtime."""
+
+    try:
+        data = json.loads(_body_text(body))
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    evidence = data.get("identity_evidence") if isinstance(data, dict) else None
+    if not isinstance(evidence, dict) or set(evidence) != _IDENTITY_EVIDENCE_KEYS:
+        return None
+    if evidence.get("gateway_exchange") != "ON_BEHALF_OF_TOKEN_EXCHANGE":
+        return None
+    for key in ("subject", "issuer"):
+        value = evidence.get(key)
+        if not isinstance(value, str) or not value or len(value) > 1024 or any(ord(ch) < 0x20 for ch in value):
+            return None
+    correlation_id = evidence.get("correlation_id")
+    if (
+        not isinstance(correlation_id, str)
+        or len(correlation_id) > 1024
+        or any(ord(ch) < 0x20 for ch in correlation_id)
+    ):
+        return None
+    expiry = evidence.get("expires_at")
+    if isinstance(expiry, bool) or not isinstance(expiry, (int, float)):
+        return None
+    if expected_subject is not None and evidence["subject"] != expected_subject:
+        return None
+    if expected_issuer is not None and evidence["issuer"] != expected_issuer:
+        return None
+    if expected_expiry is not None and float(expiry) != float(expected_expiry):
+        return None
+    downstream = evidence.get("downstream_principal")
+    if downstream is not None and (
+        not isinstance(downstream, str)
+        or not downstream
+        or len(downstream) > 1024
+        or any(ord(ch) < 0x20 for ch in downstream)
+    ):
+        return None
+    return dict(evidence)
+
+
 def promote_pending_policy(
     deployment_state: dict,
     fallback_region: str,
@@ -258,9 +393,20 @@ def invoke_verified_http_runtime(
     resolve_memory_identity: Callable[[dict, str | None, str], InvocationIdentity | None],
     gateway_session: Callable[[Any], AbstractContextManager],
     get_gateway_token: Callable[[dict], str],
+    user_bearer_token: str | None = None,
     start_harness_warmup: Callable[[dict, str, str], None] | None = None,
+    on_dispatch: Callable[[], None] | None = None,
+    evaluation_capture: bool = False,
+    read_timeout_seconds: int = 25,
 ) -> TestResponse:
     """Invoke one exact, owner-checked target without re-resolving authority."""
+
+    if (
+        not isinstance(read_timeout_seconds, int)
+        or isinstance(read_timeout_seconds, bool)
+        or not 1 <= read_timeout_seconds <= 540
+    ):
+        raise ValueError("read_timeout_seconds must be an integer in 1..540")
 
     protocol = str(deployment_state.get("runtime_protocol") or "HTTP").upper()
     if protocol != "HTTP":
@@ -293,12 +439,16 @@ def invoke_verified_http_runtime(
             # turn in the session named after the harness. It now runs in the background on a session
             # of its own, and the route answers at once.
             try:
+                if on_dispatch is not None:
+                    on_dispatch()
                 start_harness_warmup(deployment_state, region, harness_arn)
             except Exception as exc:  # noqa: BLE001 -- a warm-up that cannot start is reported, not raised
                 logger.warning("Harness warm-up could not be started (%s)", type(exc).__name__)
                 return TestResponse(success=False, error="Harness warm-up could not be started", arn=harness_arn)
             return TestResponse(success=True, response="", arn=harness_arn)
         session_id = request.session_id or runtime_id
+        if on_dispatch is not None:
+            on_dispatch()
         result = invoke_harness(
             region,
             harness_arn,
@@ -337,9 +487,11 @@ def invoke_verified_http_runtime(
             detail="Could not verify this runtime right now. Try again shortly.",
         )
 
+    obo_required = deployment_requires_obo(deployment_state)
+    expected_identity: tuple[str, str, float] | None = None
     gateway_result = deployment_state.get("gateway_result") or {}
     client_info = gateway_result.get("client_info")
-    if client_info:
+    if client_info and not obo_required:
         try:
             with gateway_session(target_session):
                 get_gateway_token(client_info)
@@ -347,30 +499,57 @@ def invoke_verified_http_runtime(
             logger.warning("Could not get Cognito token for gateway auth validation")
 
     try:
-        agentcore_client = target_session.client(
-            "bedrock-agentcore",
-            region_name=region,
-            config=BotoConfig(
-                read_timeout=25,
-                connect_timeout=5,
-                retries={"max_attempts": 0},
-            ),
+        payload = runtime_payload(
+            prompt,
+            session_id,
+            memory_identity,
+            warmup=request.warmup,
+            evaluation_capture=evaluation_capture,
         )
-        invoke_params: dict[str, Any] = {
-            "agentRuntimeArn": runtime_arn,
-            "payload": json.dumps(
-                runtime_payload(
-                    prompt,
-                    session_id,
-                    memory_identity,
-                    warmup=request.warmup,
+        if obo_required:
+            if not user_bearer_token:
+                return TestResponse(
+                    success=False,
+                    error="OBO was requested but no authenticated user bearer token was supplied",
                 )
-            ),
-        }
-        if session_id:
-            invoke_params["runtimeSessionId"] = session_id
-
-        response = agentcore_client.invoke_agent_runtime(**invoke_params)
+            expected_identity = delegated_bearer_identity(user_bearer_token)
+            agentcore_client = target_session.client(
+                "bedrock-agentcore",
+                region_name=region,
+                config=BotoConfig(
+                    read_timeout=read_timeout_seconds,
+                    connect_timeout=5,
+                    retries={"max_attempts": 0},
+                ),
+            )
+            response = invoke_agent_runtime_with_workforce_token(
+                agentcore_client=agentcore_client,
+                runtime_arn=runtime_arn,
+                deployment_state=deployment_state,
+                payload=payload,
+                bearer_token=user_bearer_token,
+                session_id=session_id,
+                on_dispatch=on_dispatch,
+            )
+        else:
+            agentcore_client = target_session.client(
+                "bedrock-agentcore",
+                region_name=region,
+                config=BotoConfig(
+                    read_timeout=read_timeout_seconds,
+                    connect_timeout=5,
+                    retries={"max_attempts": 0},
+                ),
+            )
+            invoke_params: dict[str, Any] = {
+                "agentRuntimeArn": runtime_arn,
+                "payload": json.dumps(payload),
+            }
+            if session_id:
+                invoke_params["runtimeSessionId"] = session_id
+            if on_dispatch is not None:
+                on_dispatch()
+            response = agentcore_client.invoke_agent_runtime(**invoke_params)
         status_code = response.get("statusCode")
         status_is_valid = status_code is None or (
             isinstance(status_code, int) and not isinstance(status_code, bool) and 200 <= status_code < 300
@@ -406,6 +585,12 @@ def invoke_verified_http_runtime(
             session_id=session_id,
             arn=runtime_arn,
             tool_receipts=parse_tool_receipts(raw_response),
+            identity_evidence=parse_identity_evidence(
+                raw_response,
+                expected_subject=expected_identity[0] if expected_identity else None,
+                expected_issuer=expected_identity[1] if expected_identity else None,
+                expected_expiry=expected_identity[2] if expected_identity else None,
+            ),
         )
     except Exception as exc:  # noqa: BLE001
         error_msg = str(exc)

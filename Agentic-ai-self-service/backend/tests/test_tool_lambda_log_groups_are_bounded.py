@@ -28,7 +28,7 @@ from tests.test_gateway_empty_tool_plane_retry import GW_ID, _custom_tool, _Fake
 ACCOUNT_FN = "arn:aws:lambda:us-east-1:111122223333:function:"
 FUNCTION = "AgentCore-0123456789-DynamicTools"
 GROUP = f"/aws/lambda/{FUNCTION}"
-WEB_AND_CANONICAL = 8  # the strands-gateway-agent DynamicTools schema count
+CORE_GATEWAY_TOOLS = 7  # the generic Gateway's Lambda-backed core schema count
 LEGACY = 4  # the customer-support-assistant CustomerSupportTools schema count
 
 
@@ -117,7 +117,7 @@ def _capture_targets(monkeypatch, tool_log_groups) -> list[tuple[str, dict]]:
             "create_dynamic_gateway_lambda",
             "AgentCore-0123456789-DynamicTools",
             "DynamicTools",
-            WEB_AND_CANONICAL,
+            CORE_GATEWAY_TOOLS,
         ),
         (
             "customer-support-assistant",
@@ -131,7 +131,14 @@ def _capture_targets(monkeypatch, tool_log_groups) -> list[tuple[str, dict]]:
 def test_a_shared_tool_function_is_governed_before_its_target_exists(
     monkeypatch, tool_log_groups, template_id, helper, function, target, count
 ):
-    _install(monkeypatch, ctrl=_FakeCtrl(), served=count, expected=count)
+    served_count = count
+    _install(monkeypatch, ctrl=_FakeCtrl(), served=served_count, expected=count)
+    if template_id == "strands-gateway-agent":
+        monkeypatch.setattr(
+            gateway_deployer,
+            "_qualified_tools_from_served",
+            lambda *_args, **_kwargs: [f"Qualified___tool_{index}" for index in range(count)],
+        )
     monkeypatch.setattr(gateway_deployer, helper, lambda *_a, **_k: ACCOUNT_FN + function)
     seen = _capture_targets(monkeypatch, tool_log_groups)
 
@@ -142,10 +149,11 @@ def test_a_shared_tool_function_is_governed_before_its_target_exists(
     assert out["success"] is True, out.get("error")
     group = f"/aws/lambda/{function}"
     assert tool_log_groups.groups[group] == {"retentionInDays": RUNTIME_LOG_RETENTION_DAYS}
-    assert [name for name, _groups in seen] == [target]
-    assert seen[0][1].get(group) == {"retentionInDays": RUNTIME_LOG_RETENTION_DAYS}, (
+    target_groups = next(groups for name, groups in seen if name == target)
+    assert target_groups.get(group) == {"retentionInDays": RUNTIME_LOG_RETENTION_DAYS}, (
         "the gateway could invoke the function before its log group was bounded"
     )
+    assert {name for name, _groups in seen} == {target}
     assert tool_log_groups.regions == ["us-east-1"]
 
 

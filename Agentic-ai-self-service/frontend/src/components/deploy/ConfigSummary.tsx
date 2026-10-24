@@ -111,7 +111,7 @@ export function ConfigSummary({
             ))}
             {gatewayTools.map(toolId => (
               <span key={toolId} className="px-2.5 py-1 bg-yellow-100 text-yellow-700 rounded-full text-xs font-medium flex items-center gap-1">
-                {toolId === 'duckduckgo_search' && '🦆'}
+                {(toolId === 'web_search' || toolId === 'duckduckgo_search') && '🔍'}
                 {toolId === 'web_page_fetcher' && '📄'}
                 {toolId === 'wikipedia_search' && '📚'}
                 {toolId === 'weather_api' && '🌤️'}

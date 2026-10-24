@@ -160,10 +160,29 @@ def test_the_shared_names_are_read_from_the_environment_when_they_do_not_carry_t
 class _Store:
     def __init__(self, row):
         self.row = row
+        self.claimed: list[tuple] = []
         self.decided: list[tuple] = []
 
-    def get(self, org_id, request_id):
+    def claim_approval(self, org_id, request_id, *, decided_by, reason="", lease_seconds=300):
+        self.claimed.append((request_id, decided_by, lease_seconds))
+        self.row.status = "APPLYING"
+        self.row.approval_token = "approval-token"
         return self.row
+
+    def complete_approval(
+        self,
+        org_id,
+        request_id,
+        *,
+        approval_token,
+        status,
+        decided_by,
+        reason="",
+    ):
+        assert approval_token == "approval-token"
+        self.decided.append((request_id, status, decided_by))
+        self.row.status = status
+        return SimpleNamespace(status=status)
 
     def decide(self, org_id, request_id, *, status, decided_by, reason=""):
         self.decided.append((request_id, status, decided_by))
@@ -213,6 +232,7 @@ def test_a_valid_row_is_applied_with_exactly_its_resources_then_approved(monkeyp
             },
         )
     ]
+    assert store.claimed == [("req-1", "admin-1", 300)]
     assert store.decided == [("req-1", "APPROVED", "admin-1")]
 
 
@@ -231,4 +251,5 @@ def test_a_tampered_row_is_refused_at_approval_and_never_reaches_iam(monkeypatch
     response = client.post("/api/permissions/requests/req-1/approve", json={"reason": "ok"})
     assert response.status_code == 400, response.text
     assert puts == []
-    assert store.decided == []
+    assert store.claimed == [("req-1", "admin-1", 300)]
+    assert store.decided == [("req-1", "REJECTED", "admin-1")]

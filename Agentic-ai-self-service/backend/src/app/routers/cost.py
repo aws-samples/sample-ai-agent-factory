@@ -165,11 +165,34 @@ async def get_runtime_cost(
     # status (if set), so the cost panel can render a spend-vs-budget bar without
     # a second round-trip. Best-effort: never fail the cost read on a budget error.
     try:
-        from app.services.budget_store import evaluate_budget, get_budget_store
+        from app.services.budget_store import (
+            budget_month_key,
+            evaluate_budget,
+            get_budget_store,
+            invocation_reservation_usd,
+        )
 
-        b = get_budget_store().get("default", "owner", caller_sub)
+        budget_store = get_budget_store()
+        b = budget_store.get("default", "owner", caller_sub)
         if b is not None:
             ob = evaluate_budget(b.limit_usd, b.warn_pct, float(summary.get("total_cost", 0.0)))
+            month = budget_month_key(int(time.time()))
+            counter = budget_store.counter_snapshot("default", "owner", caller_sub, month)
+            authorized = int(counter.get("authorized_microusd", 0)) / 1_000_000
+            reserved = int(counter.get("reserved_microusd", 0)) / 1_000_000
+            committed = int(counter.get("committed_microusd", 0)) / 1_000_000
+            ob.update(
+                {
+                    "month": month,
+                    "authorized": authorized,
+                    "reserved": reserved,
+                    "committed": committed,
+                    "remaining_authorization": max(float(b.limit_usd) - authorized, 0.0),
+                    "reservation_unit": invocation_reservation_usd(),
+                    "authorization_scope": "platform-mediated-invocation-operation",
+                    "is_actual_cost_cap": False,
+                }
+            )
             summary["owner_budget"] = ob
             # Phase B hardening — emit a CloudWatch metric when a budget is at
             # warn/over so an ops alarm can fire WITHOUT a scheduled poller

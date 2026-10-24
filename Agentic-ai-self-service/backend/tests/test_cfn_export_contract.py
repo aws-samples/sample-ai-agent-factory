@@ -546,7 +546,10 @@ class TestLiteLLMExport:
         template = yaml.safe_load(_generate(gateway_config=_litellm(), connected_tools=connected).template_yaml)
         role = template["Resources"]["RuntimeExecutionRole"]
         actions = [
-            a for s in role["Properties"]["Policies"][0]["PolicyDocument"]["Statement"] for a in _as_list(s["Action"])
+            action
+            for statement in role["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
+            if statement.get("Effect") == "Allow"
+            for action in _as_list(statement["Action"])
         ]
         assert not [a for a in actions if a.startswith("bedrock-agentcore:") and "Gateway" in a]
         # The stronger statement: nothing in this role may reference a resource the
@@ -1371,6 +1374,11 @@ class TestDependencyBundleIntegrity:
         assert "touch -t 198001010000" in script, "member mtimes are still whatever the build ran at"
         assert "find . -print | sort | zip" in script, "member order is left to filesystem traversal"
         assert "zip -r -q " not in script, "a non-deterministic zip -r survived"
+        assert 'rm -rf "${BUILD_DIR:?}/bin"' in script, "other console scripts must be removed"
+        assert 'bin/opentelemetry-instrument"' in script
+        assert "#!/usr/bin/env python3" in script
+        assert '>"${BUILD_DIR:?}/opentelemetry-instrument"' in script
+        assert "*.dist-info/RECORD" in script, "RECORD retains hashes of path-dependent console scripts"
 
     def test_the_digest_is_omitted_rather_than_sent_as_none(self):
         """`cloudformation deploy` keeps a parameter it is not given (UsePreviousValue),
@@ -2312,6 +2320,8 @@ class TestLeastPrivilegeResources:
                 continue
             for policy in _inline_policies(resource):
                 for statement in policy["PolicyDocument"]["Statement"]:
+                    if statement.get("Effect") != "Allow":
+                        continue
                     target = statement.get("Resource")
                     if target == "*" or (isinstance(target, list) and "*" in target):
                         found.add((logical_id, statement.get("Sid", "<unnamed>")))
@@ -5644,8 +5654,10 @@ class TestCustomResources:
     which is very likely what prompted the question. These tests make the three
     statements impossible to drift apart again.
 
-    There are four now: ``Custom::RuntimeLogGroup`` was added for the log groups
-    AgentCore creates for the runtime itself, which no declared resource can reach.
+    There are five now: ``Custom::RuntimeLogGroup`` governs the log groups
+    AgentCore creates for the runtime itself, and
+    ``Custom::ManagedWebSearchTarget`` pins a connector version the native target
+    surface cannot express.
     """
 
     EXPECTED = {
@@ -5653,11 +5665,19 @@ class TestCustomResources:
         "Custom::OAuth2CredentialProvider",
         "Custom::AgentCorePolicy",
         "Custom::RuntimeLogGroup",
+        "Custom::ManagedWebSearchTarget",
+    }
+    COMBINATIONS = {
+        **COMPONENT_COMBINATIONS,
+        "managed-search": {
+            "template_id": "web-search-agent",
+            "gateway_config": AGENTCORE_GATEWAY,
+        },
     }
 
     def test_the_generator_emits_no_custom_resource_type_the_handler_cannot_serve(self):
         emitted = set()
-        for combo in COMPONENT_COMBINATIONS.values():
+        for combo in self.COMBINATIONS.values():
             emitted |= {r["Type"] for r in _template(**combo)["Resources"].values() if r["Type"].startswith("Custom::")}
         assert emitted <= self.EXPECTED, f"generator emits unserved types: {emitted - self.EXPECTED}"
 
@@ -5671,20 +5691,24 @@ class TestCustomResources:
         handler = _import_cfn_provider_handler()
         assert handler.SUPPORTED_RESOURCE_TYPES == self.EXPECTED
 
-    def test_all_four_are_reachable_from_some_canvas(self):
-        """A type in the allowlist that nothing emits is dead code; a type
-        something emits that is not in the allowlist now fails closed."""
+    def test_all_five_are_reachable_from_some_canvas(self):
+        """A served type must be emitted by at least one supported canvas."""
         emitted = set()
-        for combo in COMPONENT_COMBINATIONS.values():
+        for combo in self.COMBINATIONS.values():
             emitted |= {r["Type"] for r in _template(**combo)["Resources"].values() if r["Type"].startswith("Custom::")}
         assert emitted == self.EXPECTED, f"never emitted by any combination: {self.EXPECTED - emitted}"
 
-    def test_readme_lists_the_custom_resources_this_bundle_contains(self):
-        """The generated README is customer-facing and shipped inside the zip;
-        it is the artifact that told people there was only one."""
-        readme = _generate(**COMPONENT_COMBINATIONS["everything"]).readme
-        for resource_type in self.EXPECTED:
-            assert resource_type in readme, f"README does not mention {resource_type}"
+    def test_readme_lists_each_custom_resource_when_its_bundle_contains_it(self):
+        """Customer-facing bundle docs and emitted resources must agree."""
+        for name, combo in self.COMBINATIONS.items():
+            bundle = _generate(**combo)
+            emitted = {
+                r["Type"]
+                for r in yaml.safe_load(bundle.template_yaml)["Resources"].values()
+                if r["Type"].startswith("Custom::")
+            }
+            for resource_type in emitted:
+                assert resource_type in bundle.readme, f"{name}: README does not mention {resource_type}"
 
     def test_readme_does_not_claim_a_single_custom_resource(self):
         for name, combo in COMPONENT_COMBINATIONS.items():
@@ -5700,6 +5724,7 @@ class TestCustomResources:
         assert "Custom::RuntimeLogGroup" in readme
         assert "Custom::AgentCorePolicy" not in readme, "README lists a custom resource this bundle has no use for"
         assert "Custom::OAuth2CredentialProvider" not in readme
+        assert "Custom::ManagedWebSearchTarget" not in readme
 
     @ALL_COMBINATIONS
     def test_the_provider_lambda_keeps_its_asynchronous_retries(self, combo):

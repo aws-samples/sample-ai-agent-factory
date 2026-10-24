@@ -5,7 +5,8 @@ API endpoints:
 
 - POST /api/deploy          → start Step Functions execution
 - GET  /api/deploy/{id}     → query deployment state
-- POST /api/test-runtime    → invoke a deployed runtime
+- POST /api/test-runtime    → invoke a deployed runtime synchronously
+- POST /api/test-runtime-async → invoke a deployed runtime through bounded start/poll
 - DELETE /api/runtime/{id}  → delete runtime and clean up resources
 
 Requirements: 3.1, 3.7, 9.1, 9.2, 9.3, 9.4
@@ -53,10 +54,17 @@ from app.models.tool_generation_models import (
     ToolGenerateResponse,
     ToolTestRequest,
 )
+from app.services.audit_middleware import audit_http_request
 from app.services.aws_errors import is_error
 from app.services.aws_pagination import list_all
 from app.services.config import load_config
 from app.services.credential_scrub import strip_credential_leaves
+from app.services.delegated_identity import (
+    DelegatedIdentityError,
+    deployment_requires_obo,
+    extract_user_bearer,
+    workforce_token_expectations,
+)
 from app.services.deletion_confirmation import (
     ConfirmationBudgetExhausted,
     DeletionFailedAfterAccept,
@@ -123,12 +131,29 @@ from app.services.gateway_name_claim import (
 )
 from app.services.gateway_update import NO_CLIENT_ALLOWED, preserving_gateway_update
 from app.services.harness_deployer import destroy_harness, invoke_harness
+from app.services.invocation_budget import (
+    reserve_invocation_budget,
+    settle_invocation_budget,
+)
 from app.services.invocation_identity import (
     InvocationIdentity,
     InvocationIdentityError,
     memory_invocation_identity,
 )
+from app.services.litellm_gateway_deployer import resolve_gateway_provider
 from app.services.policy_lifecycle import delete_policy_confirmed
+from app.services.production_safety import (
+    ProductionSafetyConfigurationError,
+    enforce_production_execution_mode,
+    enforce_production_guardrail_baseline,
+    enforce_production_invocation_budget_envelope,
+    enforce_production_policy_baseline,
+)
+from app.services.promotion_evidence import (
+    PromotionPolicyConfigurationError,
+    load_promotion_policy,
+    production_evaluation_gate_required,
+)
 from app.services.rbac import require_scopes
 from app.services.resource_ownership import (
     OwnershipConfigurationError,
@@ -314,6 +339,37 @@ def _gateway_implied(
     itself — this mirrors that so BOTH paths behave identically.
     """
     return bool(gateway_tools or connectors or external_mcp_servers or "gateway" in (connected_tools or []))
+
+
+_TEMPLATE_DEFAULT_GATEWAY_NAMES = {
+    "strands-gateway-agent": "agent_gateway",
+    "customer-support-assistant": "support_gateway",
+    "customer-support-blueprint": "support_gateway",
+    "mcp-server-gateway-target": "mcp_server_gateway",
+}
+
+
+def _pair_template_default_gateway_name(
+    gateway_config: dict | None,
+    *,
+    template_id: str | None,
+    friendly_runtime_name: str,
+) -> dict | None:
+    """Make an untouched gallery Gateway follow its ownership-fenced Runtime name.
+
+    Gallery documents are static, so their built-in Gateway names are static too.
+    Preserving one of those defaults in a shared account lets the first tenant's
+    live deployment block every later tenant even when each Runtime name is unique.
+    Pair only the exact known defaults; a user-supplied custom name remains an
+    explicit request and is never rewritten.
+    """
+    if gateway_config is None:
+        return None
+    prepared = copy.deepcopy(gateway_config)
+    default_name = _TEMPLATE_DEFAULT_GATEWAY_NAMES.get(template_id or "")
+    if default_name and prepared.get("name") == default_name:
+        prepared["name"] = friendly_runtime_name
+    return prepared
 
 
 def _reject_unsupported_cross_account_features(request: DeployRequest) -> None:
@@ -1028,47 +1084,11 @@ deployment_app.add_middleware(
 )
 
 
-# Phase 5 (Loom) audit trail — record WRITE-ish control-plane actions to the
-# audit store for the admin dashboard. Fixed action vocabulary (audit_store.
-# classify_action); reads are ignored. Best-effort: an audit failure NEVER
-# affects the underlying response (wrapped, logged, swallowed).
+# Shared append-only audit contract. Production write requests persist an intent
+# before route execution; both production and development append the outcome.
 @deployment_app.middleware("http")
 async def _audit_middleware(request, call_next):
-    response = await call_next(request)
-    try:
-        from app.services.audit_store import (
-            AuditEvent,
-            classify_action,
-            get_audit_store,
-        )
-
-        action = classify_action(request.method, request.url.path)
-        if action is not None:
-            from app.services.auth import get_caller_sub as _gcs
-
-            try:
-                actor = _gcs(request)
-            except Exception:  # noqa: BLE001
-                actor = "unknown"
-            # Loom-study 0.5: populate session_uuid from the per-browser-session
-            # id the frontend sends as X-Session-Id (was always empty). Lets admin
-            # analytics distinguish activity streams on a shared account and build
-            # a per-session timeline. Bounded to avoid unbounded header abuse.
-            _sid = (request.headers.get("x-session-id") or "")[:128] or None
-            get_audit_store().record(
-                AuditEvent(
-                    org_id="default",
-                    actor_sub=actor,
-                    action=action,
-                    method=request.method,
-                    path=request.url.path,
-                    status_code=getattr(response, "status_code", 0),
-                    session_uuid=_sid,
-                )
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("audit middleware skipped: %s", exc)
-    return response
+    return await audit_http_request(request, call_next)
 
 
 # Phase 1 Gap 1A — version + slot management endpoints. Mounted on the
@@ -1307,6 +1327,30 @@ def _reject_cfn_only_naming_profile(request: DeployRequest, operation: str) -> N
                 "bundle to control retention of the Knowledge Base, Cognito pools and Memory."
             ),
         )
+
+
+def _reject_unsupported_managed_web_search_region(request: DeployRequest) -> None:
+    """Reject Web Search outside its effective live-deployment Region.
+
+    ``DeployRequest`` is also used by the export routes, where an omitted
+    targetRegion does not mean the platform's home Region. Keep that shared
+    model's explicit-region validation, and resolve the omitted value here for
+    the live route only, before any deployment/version row or AWS resource.
+    """
+    if (request.deployment_mode or "runtime") == "harness":
+        return
+    from app.services.managed_web_search import (
+        managed_web_search_requested,
+        require_managed_web_search_region,
+    )
+
+    if not managed_web_search_requested(request.template_id, request.gateway_tools):
+        return
+    effective_region = request.target_region or config.aws_region
+    try:
+        require_managed_web_search_region(effective_region)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _reject_missing_provider_credential(request: DeployRequest) -> None:
@@ -1652,6 +1696,68 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
             detail=("Authentication is required to deploy. No resource was created."),
         )
 
+    model_free_mcp_runtime = (
+        request.template_id == "mcp-server-runtime"
+        and (request.deployment_mode or "runtime") == "runtime"
+        and request.config.protocol == "MCP"
+    )
+    try:
+        if model_free_mcp_runtime:
+            # A standalone FastMCP server exposes deterministic tools and has no
+            # model loop. The request model already rejects caller-supplied
+            # Guardrails, model fields, agent observability, and agent features;
+            # injecting those controls here would create resources the artifact
+            # cannot use and then fail after side effects. Its executable live
+            # gate is MCP protocol/tool verification, not model evaluation.
+            production_gate_required = False
+            promotion_policy = {}
+        else:
+            production_gate_required = production_evaluation_gate_required()
+            promotion_policy = load_promotion_policy()
+    except PromotionPolicyConfigurationError as exc:
+        logger.error("Deploy refused: production evaluation policy is invalid (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="Production evaluation policy is invalid, so deployment was refused before anything was created.",
+        ) from exc
+    effective_deployment_slot = request.deployment_slot or ("staging" if production_gate_required else "production")
+    if production_gate_required and effective_deployment_slot == "production":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Direct production deployment is disabled in this environment. Deploy to staging, "
+                "run and attest the required AgentCore batch evaluation, then promote the version."
+            ),
+        )
+
+    # Production Guardrails are an admission invariant, not an optional canvas
+    # hint. Resolve the managed baseline before every read/write boundary below so
+    # a refusal costs zero rows, secrets, executions, or AWS resources.
+    try:
+        enforce_production_execution_mode(request.deployment_mode)
+        request.guardrails_config = (
+            None if model_free_mcp_runtime else enforce_production_guardrail_baseline(request.guardrails_config)
+        )
+        tool_gateway_required = bool(request.gateway_config) or _gateway_implied(
+            request.gateway_tools,
+            request.connectors,
+            request.connected_tools,
+            request.external_mcp_servers,
+        )
+        gateway_provider = resolve_gateway_provider(request.gateway_config) if tool_gateway_required else "agentcore"
+        request.policy_config = enforce_production_policy_baseline(
+            request.policy_config,
+            tool_gateway_required=tool_gateway_required,
+            gateway_provider=gateway_provider,
+        )
+        enforce_production_invocation_budget_envelope(
+            runtime_protocol=request.config.protocol,
+            a2a_config=request.a2a_config,
+            connected_tools=request.connected_tools,
+        )
+    except (ProductionSafetyConfigurationError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     # THIRD, still before any side effect: if the caller named a flow, it must be a flow that
     # exists and that THEY own. ``flow_id`` is caller-supplied and becomes part of the persisted
     # deployment record, so accepting it unchecked would let one tenant file their deployments
@@ -1663,6 +1769,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     _reject_unowned_flow(request.flow_id, user_id)
 
     _reject_cfn_only_naming_profile(request, "a live platform deployment")
+    _reject_unsupported_managed_web_search_region(request)
     _reject_missing_provider_credential(request)
     _reject_mcp_inheriting_platform_otel(request)
 
@@ -1901,6 +2008,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     target_mcp_runtime_role_arn: str | None = None
     target_harness_role_arn: str | None = None
     target_artifact_bucket: str | None = None
+    evaluation_kms_key_arn = os.environ.get("EVALUATION_EVIDENCE_KMS_KEY_ARN", "").strip() or None
     if request.target_account_id or request.target_region:
         from app.services.deploy_target import (
             TargetError,
@@ -1927,13 +2035,23 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
                 target_mcp_runtime_role_arn = target["mcp_runtime_role_arn"]
                 target_harness_role_arn = target["harness_role_arn"]
                 target_artifact_bucket = target["artifact_bucket"]
+                evaluation_kms_key_arn = target["evaluation_kms_key_arn"]
                 _reject_unsupported_cross_account_features(request)
             else:
                 target = resolve_registered_region_target(request.target_region)
                 target_region = target["region"]
                 target_artifact_bucket = target["artifact_bucket"]
+                evaluation_kms_key_arn = target["evaluation_kms_key_arn"]
         except TargetError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if model_free_mcp_runtime:
+        evaluation_kms_key_arn = None
+    if production_gate_required and not evaluation_kms_key_arn:
+        raise HTTPException(
+            status_code=503,
+            detail="Production evaluation encryption is unavailable for this deployment target",
+        )
 
     # Phase 2 (Loom) governance tagging — resolve the org's tag policies against
     # the caller's supplied tags / selected profile BEFORE starting the deploy.
@@ -1965,7 +2083,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         started_at=now,
         version_id=version_id,
         parent_version_id=parent_version_id,
-        deployment_slot=request.deployment_slot or "production",
+        deployment_slot=effective_deployment_slot,
         agentcore_runtime_name=agentcore_runtime_name,
         # F-81: the exact partition key of the versions/slots rows this deploy is about to
         # create. The delete path has always read this field and it has never been written, so
@@ -1987,6 +2105,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         target_region=target_region,
         target_role_arn=target_role_arn,
         target_artifact_bucket=target_artifact_bucket,
+        evaluation_kms_key_arn=evaluation_kms_key_arn,
         # Persist the validated invocation protocol so restored/listed deployments and the
         # product MCP explorer know how to talk to this runtime rather than trusting a
         # browser claim. Legacy rows default to HTTP (see DeploymentState.runtime_protocol).
@@ -2013,6 +2132,9 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
                 parent_version_id=parent_version_id,
                 description=request.version_description,
                 status="pending",
+                production_gate_required=production_gate_required,
+                promotion_policy=promotion_policy,
+                evaluation_kms_key_arn=evaluation_kms_key_arn,
             )
         )
     except NameClaimConflict as exc:
@@ -2103,7 +2225,11 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     if "memory" in template_implied and not prepared_memory_config:
         prepared_memory_config = {"enabled": True}
 
-    prepared_gateway_config = copy.deepcopy(request.gateway_config) if request.gateway_config else None
+    prepared_gateway_config = _pair_template_default_gateway_name(
+        request.gateway_config,
+        template_id=request.template_id,
+        friendly_runtime_name=friendly_runtime_name,
+    )
     if prepared_gateway_config is None and _gateway_implied(
         request.gateway_tools,
         request.connectors,
@@ -2316,13 +2442,19 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         "target_mcp_runtime_role_arn": target_mcp_runtime_role_arn,
         "target_harness_role_arn": target_harness_role_arn,
         "target_artifact_bucket": target_artifact_bucket,
+        "evaluation_kms_key_arn": evaluation_kms_key_arn,
+        # Required server-authored control bit. Codegen, IAM, and RuntimeConfigure
+        # all consume this exact value; omitting it silently launched a plain
+        # agent.py process with no evaluation spans while the version row still
+        # claimed that production evaluation was mandatory.
+        "production_gate_required": production_gate_required,
         # Phase 1 Gap 1A — every step handler keys S3 paths and AgentCore
         # runtime names off the version. friendly_runtime_name is the user's
         # input; agentcore_runtime_name is what we actually pass to AgentCore.
         "version_id": version_id,
         "friendly_runtime_name": friendly_runtime_name,
         "agentcore_runtime_name": agentcore_runtime_name,
-        "deployment_slot": request.deployment_slot or "production",
+        "deployment_slot": effective_deployment_slot,
         "parent_version_id": parent_version_id,
         "owner_sub": user_id or "",
         # Phase B (Bug 9) — deployment_mode MUST reach the SFN path so the state
@@ -2494,6 +2626,13 @@ def _update_execution_arn(store: DeploymentStateStore, deployment_id: str, execu
     )
 
 
+def _public_deployment_state(state: DeploymentState) -> dict:
+    """Serialize one tenant-owned deployment with explicit derived public fields."""
+    public = state.model_dump(mode="json", exclude=INTERNAL_ONLY_STATE_FIELDS)
+    public["runtime_name"] = state.friendly_runtime_name or state.agentcore_runtime_name or state.runtime_id
+    return strip_credential_leaves(public)
+
+
 # ---------------------------------------------------------------------------
 # GET /api/deploy/{deployment_id}
 # ---------------------------------------------------------------------------
@@ -2523,7 +2662,7 @@ async def handle_deploy_status(deployment_id: str, raw_request: Request) -> dict
     if owner and owner != _get_user_id(raw_request):
         raise HTTPException(status_code=404, detail=f"Deployment '{deployment_id}' not found")
 
-    result = state.model_dump(mode="json", exclude=INTERNAL_ONLY_STATE_FIELDS)
+    result = _public_deployment_state(state)
     # Bug 181: the status poll is a natural post-deploy touchpoint to lazy-promote
     # a pending Cedar engine to ENFORCE (the gateway's policy plane converges a few
     # minutes after deploy). _maybe_promote_policy mutates the dict's policy_result
@@ -2573,8 +2712,8 @@ async def handle_list_deployments(
         states = [s for s in store.query_by_workflow(flow_id, status_filter=status) if s.user_id == user_id]
     else:
         states = store.query_by_user(user_id, status_filter=status)
-    # F-02: same read-side redaction as the status route; see the comment there.
-    return [strip_credential_leaves(s.model_dump(mode="json", exclude=INTERNAL_ONLY_STATE_FIELDS)) for s in states]
+    # F-02: same read-side redaction and derived public fields as the status route.
+    return [_public_deployment_state(state) for state in states]
 
 
 # ---------------------------------------------------------------------------
@@ -2694,21 +2833,58 @@ async def handle_test_runtime(request: TestRequest, raw_request: Request) -> Tes
                     detail=f"Cannot resolve runtime ARN for runtime_id={runtime_id}. Check logs for details.",
                 ) from e
 
-        return invoke_verified_http_runtime(
-            request,
-            caller_sub=caller_sub or "",
-            deployment_state=deployment_state,
-            runtime_id=runtime_id,
-            runtime_arn=runtime_arn,
-            region=region,
-            target_session=target_session,
-            promote_policy=_maybe_promote_policy,
-            invoke_harness=invoke_harness,
-            resolve_memory_identity=memory_invocation_identity,
-            gateway_session=gateway_aws_session,
-            get_gateway_token=get_cognito_token,
-            start_harness_warmup=_start_harness_warmup,
+        user_bearer_token = None
+        if deployment_requires_obo(deployment_state):
+            try:
+                expected_issuer, expected_client_id = workforce_token_expectations(region)
+                user_bearer_token = extract_user_bearer(
+                    raw_request.headers,
+                    expected_subject=caller_sub or "",
+                    expected_issuer=expected_issuer,
+                    expected_client_id=expected_client_id,
+                )
+            except DelegatedIdentityError as exc:
+                raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+        budget_runtime_name = str(
+            deployment_state.get("friendly_runtime_name")
+            or deployment_state.get("agentcore_runtime_name")
+            or runtime_id
         )
+        reservation = reserve_invocation_budget(
+            owner_sub=caller_sub or "",
+            runtime_name=budget_runtime_name,
+            resource_tags=deployment_state.get("resource_tags") or {},
+        )
+        dispatched = False
+
+        def _mark_dispatched() -> None:
+            nonlocal dispatched
+            dispatched = True
+
+        try:
+            result = invoke_verified_http_runtime(
+                request,
+                caller_sub=caller_sub or "",
+                deployment_state=deployment_state,
+                runtime_id=runtime_id,
+                runtime_arn=runtime_arn,
+                region=region,
+                target_session=target_session,
+                promote_policy=_maybe_promote_policy,
+                invoke_harness=invoke_harness,
+                resolve_memory_identity=memory_invocation_identity,
+                gateway_session=gateway_aws_session,
+                get_gateway_token=get_cognito_token,
+                user_bearer_token=user_bearer_token,
+                start_harness_warmup=_start_harness_warmup,
+                on_dispatch=_mark_dispatched,
+            )
+        except Exception:
+            settle_invocation_budget(reservation, dispatched=dispatched)
+            raise
+        settle_invocation_budget(reservation, dispatched=dispatched)
+        return result
 
     except HTTPException:
         # HTTPException IS an Exception, so the broad handler below used to catch this
@@ -2728,6 +2904,160 @@ async def handle_test_runtime(request: TestRequest, raw_request: Request) -> Tes
             success=False,
             error="An internal error occurred. Check server logs for details.",
         )
+
+
+ASYNC_RUNTIME_TEST_TIMEOUT_SECONDS = 540
+ASYNC_RUNTIME_TEST_MAX_EVENT_BYTES = 128 * 1024
+
+
+def _require_async_runtime_deployment(runtime_id: str, caller_sub: str) -> dict:
+    """Resolve one exact caller-owned HTTP Runtime for an async invocation."""
+    if not runtime_id or not re.fullmatch(r"[a-zA-Z0-9_-]+", runtime_id) or len(runtime_id) > 128:
+        raise HTTPException(status_code=400, detail="Invalid runtime_id format")
+    try:
+        deployment_state = _scan_for_runtime(_get_state_store()._table, runtime_id)
+    except Exception as exc:
+        logger.warning("Async Runtime lookup failed for runtime_id=%s", runtime_id, exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="Could not verify this runtime right now. Try again shortly.",
+        ) from exc
+    owner = (deployment_state or {}).get("user_id")
+    if not deployment_state or not owner or owner != caller_sub:
+        raise HTTPException(status_code=404, detail="Runtime not found")
+    if str(deployment_state.get("runtime_protocol") or "HTTP").upper() != "HTTP":
+        raise HTTPException(status_code=409, detail="This Runtime requires its protocol-specific invocation endpoint.")
+    if deployment_requires_obo(deployment_state):
+        raise HTTPException(
+            status_code=409,
+            detail="OBO invocation requires the authenticated production-slot endpoint.",
+        )
+    return deployment_state
+
+
+@deployment_app.post(
+    "/api/test-runtime-async",
+    status_code=202,
+    dependencies=[Depends(require_scopes("invoke"))],
+)
+async def handle_start_async_runtime_test(request: TestRequest, raw_request: Request) -> dict:
+    """Start one long Runtime turn outside API Gateway's 30-second window."""
+    caller_sub = (_get_user_id(raw_request) or "").strip()
+    if not caller_sub:
+        raise HTTPException(status_code=401, detail="Caller identity not available")
+    runtime_id = request.runtime_id or ""
+    _require_async_runtime_deployment(runtime_id, caller_sub)
+    test_id = f"runtime-test-{uuid.uuid4().hex[:12]}"
+    event = {
+        "_async_runtime_test": True,
+        "caller_sub": caller_sub,
+        "request": request.model_dump(by_alias=True, exclude_none=True),
+        "test_id": test_id,
+    }
+    encoded = json.dumps(event, separators=(",", ":")).encode()
+    if len(encoded) > ASYNC_RUNTIME_TEST_MAX_EVENT_BYTES:
+        raise HTTPException(status_code=413, detail="Runtime invocation request is too large")
+    function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "").strip()
+    if not function_name:
+        raise HTTPException(status_code=503, detail="Async Runtime invocation is unavailable")
+    table = _get_deploy_table()
+    table.put_item(
+        Item={
+            "deployment_id": test_id,
+            "status": "queued",
+            "ttl": _scratch_row_ttl(),
+            "user_id": caller_sub,
+        },
+        ConditionExpression="attribute_not_exists(deployment_id)",
+    )
+    try:
+        response = boto3.client("lambda", region_name=config.aws_region).invoke(
+            FunctionName=function_name,
+            InvocationType="Event",
+            Payload=encoded,
+        )
+        if response.get("StatusCode") != 202:
+            raise RuntimeError("Lambda did not accept the async Runtime invocation")
+    except Exception as exc:
+        logger.exception("Could not dispatch async Runtime invocation")
+        try:
+            table.delete_item(
+                Key={"deployment_id": test_id},
+                ConditionExpression="#u = :u",
+                ExpressionAttributeNames={"#u": "user_id"},
+                ExpressionAttributeValues={":u": caller_sub},
+            )
+        except Exception:
+            logger.warning("Could not remove undispatched async Runtime row %s", test_id, exc_info=True)
+        raise HTTPException(status_code=503, detail="Async Runtime invocation is unavailable") from exc
+    return {"testId": test_id, "status": "running"}
+
+
+@deployment_app.get(
+    "/api/test-runtime-async/{test_id}",
+    dependencies=[Depends(require_scopes("invoke"))],
+)
+async def handle_get_async_runtime_test(test_id: str, raw_request: Request) -> dict:
+    """Poll one caller-owned long Runtime turn."""
+    if not re.fullmatch(r"runtime-test-[a-f0-9]{12}", test_id):
+        raise HTTPException(status_code=400, detail="Invalid test_id format")
+    item = (
+        _get_deploy_table()
+        .get_item(
+            Key={"deployment_id": test_id},
+            ConsistentRead=True,
+        )
+        .get("Item")
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Runtime test not found")
+    _assert_may_read_scratch_row(item, raw_request, "Runtime test not found")
+    if item.get("status") in {"queued", "invoking"}:
+        return {"testId": test_id, "status": "running"}
+    if item.get("status") != "completed":
+        raise HTTPException(status_code=503, detail="Runtime test state is unavailable")
+    try:
+        result = json.loads(item.get("result_json") or "{}")
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=503, detail="Runtime test result is unavailable") from exc
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=503, detail="Runtime test result is unavailable")
+    return {"testId": test_id, "status": "completed", **result}
+
+
+@deployment_app.delete(
+    "/api/test-runtime-async/{test_id}",
+    dependencies=[Depends(require_scopes("invoke"))],
+)
+async def handle_delete_async_runtime_test(test_id: str, raw_request: Request) -> dict:
+    """Remove one caller-owned async result after it has been consumed."""
+    if not re.fullmatch(r"runtime-test-[a-f0-9]{12}", test_id):
+        raise HTTPException(status_code=400, detail="Invalid test_id format")
+    caller_sub = (_get_user_id(raw_request) or "").strip()
+    if not caller_sub:
+        raise HTTPException(status_code=404, detail="Runtime test not found")
+    table = _get_deploy_table()
+    item = table.get_item(
+        Key={"deployment_id": test_id},
+        ConsistentRead=True,
+    ).get("Item")
+    if not item:
+        raise HTTPException(status_code=404, detail="Runtime test not found")
+    _assert_may_read_scratch_row(item, raw_request, "Runtime test not found")
+    if item.get("status") != "completed":
+        raise HTTPException(status_code=409, detail="Runtime test is still running")
+    try:
+        table.delete_item(
+            Key={"deployment_id": test_id},
+            ConditionExpression="#u = :u AND #s = :completed",
+            ExpressionAttributeNames={"#s": "status", "#u": "user_id"},
+            ExpressionAttributeValues={":completed": "completed", ":u": caller_sub},
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            raise HTTPException(status_code=409, detail="Runtime test changed while being cleaned") from exc
+        raise
+    return {"testId": test_id, "deleted": True}
 
 
 # ---------------------------------------------------------------------------
@@ -2840,6 +3170,14 @@ async def handle_test_runtime_stream(request: TestRequest, raw_request: Request)
             media_type="text/event-stream",
         )
 
+    if deployment_requires_obo(deployment_state):
+        from fastapi.responses import PlainTextResponse
+
+        return PlainTextResponse(
+            f"data: {json.dumps({'type': 'error', 'error': 'OBO invocation requires the authenticated production-slot endpoint'})}\n\n",
+            media_type="text/event-stream",
+        )
+
     from app.services import step_clients
 
     target_event = _deployment_target_event(deployment_state, region)
@@ -2867,16 +3205,31 @@ async def handle_test_runtime_stream(request: TestRequest, raw_request: Request)
                 f"data: {json.dumps({'type': 'error', 'error': 'Harness ARN not found for this deployment'})}\n\n",
                 media_type="text/event-stream",
             )
-        result = invoke_harness(
-            region,
-            harness_arn,
-            prompt,
-            request.session_id or runtime_id,
-            agentcore_data_client=target_session.client(
-                "bedrock-agentcore",
-                region_name=region,
-            ),
+        budget_runtime_name = str(
+            deployment_state.get("friendly_runtime_name")
+            or deployment_state.get("agentcore_runtime_name")
+            or runtime_id
         )
+        reservation = reserve_invocation_budget(
+            owner_sub=caller_sub or "",
+            runtime_name=budget_runtime_name,
+            resource_tags=deployment_state.get("resource_tags") or {},
+        )
+        dispatched = False
+        try:
+            dispatched = True
+            result = invoke_harness(
+                region,
+                harness_arn,
+                prompt,
+                request.session_id or runtime_id,
+                agentcore_data_client=target_session.client(
+                    "bedrock-agentcore",
+                    region_name=region,
+                ),
+            )
+        finally:
+            settle_invocation_budget(reservation, dispatched=dispatched)
         if not result.get("success"):
             # SECURITY (CodeQL py/stack-trace-exposure): invoke_harness surfaces
             # raw exception text in `error`; never return that to the external
@@ -2926,6 +3279,15 @@ async def handle_test_runtime_stream(request: TestRequest, raw_request: Request)
                 media_type="text/event-stream",
             )
 
+    budget_runtime_name = str(
+        deployment_state.get("friendly_runtime_name") or deployment_state.get("agentcore_runtime_name") or runtime_id
+    )
+    reservation = reserve_invocation_budget(
+        owner_sub=caller_sub or "",
+        runtime_name=budget_runtime_name,
+        resource_tags=deployment_state.get("resource_tags") or {},
+    )
+    dispatched = False
     try:
         from botocore.config import Config as _BotoConfig
 
@@ -2945,6 +3307,7 @@ async def handle_test_runtime_stream(request: TestRequest, raw_request: Request)
         if session_id:
             invoke_params["runtimeSessionId"] = session_id
 
+        dispatched = True
         resp = agentcore_client.invoke_agent_runtime(**invoke_params)
         if not memory_identity:
             session_id = resp.get("runtimeSessionId") or resp.get("sessionId")
@@ -2981,6 +3344,8 @@ async def handle_test_runtime_stream(request: TestRequest, raw_request: Request)
             f"data: {json.dumps({'type': 'error', 'error': 'Internal error'})}\n\n",
             media_type="text/event-stream",
         )
+    finally:
+        settle_invocation_budget(reservation, dispatched=dispatched)
 
 
 def _runtime_payload(
@@ -4289,6 +4654,47 @@ def _claim_delete_status(deployment_id: str) -> bool:
     return False
 
 
+def _reconcile_deleted_version_claim(deployment_record: dict, caller_sub: str | None) -> bool:
+    """Release version/name metadata before reporting an old tombstone final.
+
+    Failure auto-cleanup historically marked external-resource deletion final
+    without running the version/slot transaction. A later DELETE then returned
+    early forever. Rows without a version id predate or never entered that
+    lifecycle and need no reconciliation.
+    """
+
+    if not deployment_record.get("version_id"):
+        return True
+    friendly, proven = _resolve_friendly_runtime_name(deployment_record)
+    if not friendly or not proven:
+        logger.warning(
+            "Deleted deployment %s still has a version id but no proven runtime name",
+            deployment_record.get("deployment_id"),
+        )
+        return False
+    outcome: dict[str, bool] = {}
+    messages = _release_runtime_name_claim(
+        deployment_record,
+        caller_sub,
+        runtime_may_still_live=False,
+        trigger_cleanup_unconfirmed=False,
+        outcome=outcome,
+    )
+    if outcome.get("released") is True:
+        logger.info(
+            "Reconciled deleted deployment %s version/name metadata: %s",
+            deployment_record.get("deployment_id"),
+            "; ".join(messages) or "already absent",
+        )
+        return True
+    logger.warning(
+        "Deleted deployment %s version/name metadata remains: %s",
+        deployment_record.get("deployment_id"),
+        "; ".join(messages) or "release was not proven",
+    )
+    return False
+
+
 @deployment_app.delete(
     "/api/runtime/{runtime_id}",
     response_model=DeleteResponse,
@@ -4344,10 +4750,17 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
         if existing_delete_status == "deleted":
             verdict = _deleted_is_final(dep_id)
             if verdict == DELETED_FINAL:
-                return DeleteResponse(
-                    success=True,
-                    message="This deployment has already been deleted.",
+                if _reconcile_deleted_version_claim(deployment_record, caller_sub):
+                    return DeleteResponse(
+                        success=True,
+                        message="This deployment has already been deleted.",
+                    )
+                message = (
+                    "AWS resources are deleted, but version and runtime-name metadata "
+                    "could not be released yet. Try again shortly."
                 )
+                _set_delete_status(dep_id, "delete_failed", message)
+                return DeleteResponse(success=False, message=message)
             if verdict == DELETED_UNVERIFIED:
                 return DeleteResponse(success=False, message=_DELETED_UNVERIFIED_MESSAGE)
             # Reopened: the claim below takes it, and the teardown runs again.
@@ -4686,10 +5099,14 @@ def _handle_stack_cleanup_delete(event: dict) -> dict:
     if observed_status == "deleted":
         verdict = _deleted_is_final(deployment_id)
         if verdict == DELETED_FINAL:
-            return {
-                "success": True,
-                "message": "Deployment was already deleted.",
-            }
+            if _reconcile_deleted_version_claim(record, record.get("user_id")):
+                return {
+                    "success": True,
+                    "message": "Deployment was already deleted.",
+                }
+            message = "AWS resources are deleted, but version and runtime-name metadata could not be released yet."
+            _set_delete_status(deployment_id, "delete_failed", message)
+            return {"success": False, "retryable": True, "message": message}
         if verdict == DELETED_UNVERIFIED:
             return {"success": False, "retryable": True, "message": _DELETED_UNVERIFIED_MESSAGE}
         # Reopened: the claim below takes it, and the teardown runs again.
@@ -7337,6 +7754,8 @@ def handler(event, context):
             from app.services.trigger_runtime import dispatch_sqs_batch
 
             return dispatch_sqs_batch(event)
+        if event.get("_async_runtime_test"):
+            return _handle_async_runtime_test(event)
         if event.get("_async_test"):
             return _handle_async_test(event)
         if event.get("_async_harness_warmup"):
@@ -7414,6 +7833,124 @@ def _handle_async_harness_warmup(event: dict) -> dict:
     warmed = bool(result.get("success"))
     logger.info("Harness warm-up %s", "completed" if warmed else "failed")
     return {"warmed": warmed}
+
+
+def _handle_async_runtime_test(event: dict) -> dict:
+    """Run one owner-checked Runtime turn outside API Gateway and persist its result."""
+    test_id = str(event.get("test_id") or "")
+    caller_sub = str(event.get("caller_sub") or "").strip()
+    if not re.fullmatch(r"runtime-test-[a-f0-9]{12}", test_id) or not caller_sub:
+        raise ValueError("Invalid async Runtime event identity")
+    table = _get_deploy_table()
+    try:
+        table.update_item(
+            Key={"deployment_id": test_id},
+            UpdateExpression="SET #s = :invoking, #ttl = :ttl",
+            ConditionExpression="#u = :u AND #s = :queued",
+            ExpressionAttributeNames={"#s": "status", "#ttl": "ttl", "#u": "user_id"},
+            ExpressionAttributeValues={
+                ":invoking": "invoking",
+                ":queued": "queued",
+                ":ttl": _scratch_row_ttl(),
+                ":u": caller_sub,
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            logger.info("Async Runtime job %s is already claimed or completed; not replaying", test_id)
+            return {"completed": False, "duplicateDelivery": True, "testId": test_id}
+        raise
+    result = TestResponse(success=False, error="Runtime invocation failed.")
+    reservation = None
+    dispatched = False
+    try:
+        request = TestRequest.model_validate(event.get("request") or {})
+        runtime_id = request.runtime_id or ""
+        deployment_state = _require_async_runtime_deployment(runtime_id, caller_sub)
+        from app.services import step_clients
+
+        target_event = _deployment_target_event(deployment_state, config.aws_region)
+        region = target_event["target_region"]
+        target_session = step_clients.session_for_event(target_event)
+        runtime_arn = str(deployment_state.get("runtime_arn") or "")
+        if deployment_state.get("deployment_mode") != "harness" and not runtime_arn:
+            account_id = target_session.client("sts", region_name=region).get_caller_identity()["Account"]
+            runtime_arn = f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/{runtime_id}"
+        budget_runtime_name = str(
+            deployment_state.get("friendly_runtime_name")
+            or deployment_state.get("agentcore_runtime_name")
+            or runtime_id
+        )
+        reservation = reserve_invocation_budget(
+            owner_sub=caller_sub,
+            runtime_name=budget_runtime_name,
+            resource_tags=deployment_state.get("resource_tags") or {},
+        )
+
+        def mark_dispatched() -> None:
+            nonlocal dispatched
+            dispatched = True
+
+        result = invoke_verified_http_runtime(
+            request,
+            caller_sub=caller_sub,
+            deployment_state=deployment_state,
+            runtime_id=runtime_id,
+            runtime_arn=runtime_arn,
+            region=region,
+            target_session=target_session,
+            promote_policy=_maybe_promote_policy,
+            invoke_harness=invoke_harness,
+            resolve_memory_identity=memory_invocation_identity,
+            gateway_session=gateway_aws_session,
+            get_gateway_token=get_cognito_token,
+            start_harness_warmup=_start_harness_warmup,
+            on_dispatch=mark_dispatched,
+            read_timeout_seconds=ASYNC_RUNTIME_TEST_TIMEOUT_SECONDS,
+        )
+    except HTTPException as exc:
+        logger.warning("Async Runtime invocation refused with status %s", exc.status_code)
+        result = TestResponse(success=False, error="Runtime invocation unavailable.")
+    except Exception:
+        logger.exception("Async Runtime invocation failed")
+        result = TestResponse(success=False, error="Runtime invocation failed.")
+    finally:
+        if reservation is not None:
+            try:
+                settle_invocation_budget(reservation, dispatched=dispatched)
+            except Exception:
+                logger.exception("Async Runtime budget settlement failed")
+                result = TestResponse(success=False, error="Runtime invocation failed.")
+
+    result_json = json.dumps(result.model_dump(by_alias=True), separators=(",", ":"))
+    if len(result_json.encode()) > 300 * 1024:
+        result_json = json.dumps(
+            TestResponse(success=False, error="Runtime response exceeded the async result limit.").model_dump(
+                by_alias=True
+            ),
+            separators=(",", ":"),
+        )
+    try:
+        table.update_item(
+            Key={"deployment_id": test_id},
+            UpdateExpression="SET #s = :completed, result_json = :result, #ttl = :ttl",
+            ConditionExpression="#u = :u AND #s = :invoking",
+            ExpressionAttributeNames={"#s": "status", "#ttl": "ttl", "#u": "user_id"},
+            ExpressionAttributeValues={
+                ":completed": "completed",
+                ":invoking": "invoking",
+                ":result": result_json,
+                ":ttl": _scratch_row_ttl(),
+                ":u": caller_sub,
+            },
+        )
+    except Exception:
+        # The model/tool turn may already have side effects. Raising would ask
+        # Lambda's async delivery service to replay the event, so fail closed
+        # toward a stranded bounded-TTL row rather than duplicate execution.
+        logger.exception("Async Runtime result could not be persisted; refusing replay")
+        return {"completed": False, "resultPersisted": False, "testId": test_id}
+    return {"completed": True, "resultPersisted": True, "success": result.success, "testId": test_id}
 
 
 def _handle_async_test(event: dict):

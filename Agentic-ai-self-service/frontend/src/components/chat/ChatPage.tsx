@@ -43,7 +43,7 @@ export function ChatPage({ previewBanner }: ChatPageProps) {
   useEffect(() => {
     listMyAgentsApi()
       .then((list) => {
-        const ready = list.filter((a) => a.runtime_id && a.status === 'succeeded');
+        const ready = list.filter((a) => a.runtime_id && a.runtime_name && a.status === 'succeeded');
         setAgents(ready);
         if (ready.length && !selected) setSelected(ready[0]);
       })
@@ -67,7 +67,7 @@ export function ChatPage({ previewBanner }: ChatPageProps) {
 
   async function send() {
     const text = input.trim();
-    if (!text || !selected?.runtime_id || sending) return;
+    if (!text || !selected?.runtime_name || sending) return;
     setInput('');
     const userMsg: Msg = { id: `u-${Date.now()}`, role: 'user', content: text };
     const asstId = `a-${Date.now()}`;
@@ -75,7 +75,7 @@ export function ChatPage({ previewBanner }: ChatPageProps) {
     setSending(true);
     try {
       const { sessionId: sid } = await streamInvokeApi(
-        { runtimeId: selected.runtime_id, input: text, sessionId },
+        { runtimeName: selected.runtime_name, input: text, sessionId },
         (tok) =>
           setMessages((prev) =>
             prev.map((m) => (m.id === asstId ? { ...m, content: m.content + tok } : m)),

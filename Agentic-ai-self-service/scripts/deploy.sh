@@ -153,6 +153,28 @@ check_prerequisites() {
 
 # ── Step 2: Validate AWS credentials ─────────────────────────────────
 
+report_emea_feature_profile() {
+  case "${AWS_REGION}" in
+    eu-west-1)
+      log_success "EMEA feature profile: full (Europe/Ireland, eu-west-1)."
+      log_info "  * Managed Web Search and AWS Agent Registry federation are available."
+      ;;
+    eu-central-1|eu-west-2|eu-west-3)
+      log_warning "EMEA feature profile: reduced core platform (${AWS_REGION})."
+      log_warning "  * NOT SUPPORTED: Amazon Bedrock AgentCore managed Web Search."
+      log_warning "  * NOT SUPPORTED: AWS Agent Registry federation."
+      log_info "  * The built-in DynamoDB agent registry remains available."
+      log_info "  * Runtime microVMs, Gateway, Identity, Memory, Policy, Evaluations,"
+      log_info "    Harness, and Observability remain in the supported profile."
+      ;;
+    eu-*)
+      log_error "AWS_REGION='${AWS_REGION}' is outside this release's EMEA support envelope."
+      log_error "Supported EMEA single-Region deployments: eu-central-1, eu-west-1, eu-west-2, eu-west-3."
+      return 1
+      ;;
+  esac
+}
+
 check_aws_credentials() {
   log_info "Checking AWS credentials..."
   # The stack is region-agnostic, but two things differ outside us-east-1 and
@@ -172,6 +194,7 @@ check_aws_credentials() {
     log_error "AWS_REGION='${AWS_REGION}' is not a valid AWS region name."
     exit 1
   fi
+  report_emea_feature_profile
   if [[ "${AWS_REGION}" != "us-east-1" ]]; then
     log_info "Deploying to '${AWS_REGION}' (not us-east-1)."
     log_info "  * CloudFront will have NO WebACL; the WAF rule set is applied to"
@@ -435,11 +458,16 @@ preserve_existing_cognito_users() {
     rc=$?
   fi
   if (( rc != 0 )); then
-    # Exact absent-stack classification: the AWS error code AND the exact GetTemplate message for THIS stack, as one
-    # whole line. Any other ValidationError (or any other text) is unknown and fails closed.
-    local stack_re
-    stack_re="$(printf '%s' "${STACK_NAME}" | sed 's/[][\.*^$\\/+?(){}|]/\\&/g')"
-    if grep -Eq "^An error occurred \(ValidationError\) when calling the GetTemplate operation: Stack with id ${stack_re} does not exist\$" "${err}"; then
+    # Exact absent-stack classification: require one nonblank stderr line containing the
+    # ValidationError and THIS stack's exact GetTemplate message. AWS CLI 2.33 prefixes
+    # service errors with `aws: [ERROR]:`; older CLI 2 releases do not. Those are the only
+    # accepted forms. Any second diagnostic, different code/operation/stack, or extra text
+    # remains unknown and fails closed.
+    local missing_stack_error expected_missing_stack_error
+    missing_stack_error="$(sed '/^[[:space:]]*$/d' "${err}")"
+    expected_missing_stack_error="An error occurred (ValidationError) when calling the GetTemplate operation: Stack with id ${STACK_NAME} does not exist"
+    if [[ "${missing_stack_error}" == "${expected_missing_stack_error}" ||
+          "${missing_stack_error}" == "aws: [ERROR]: ${expected_missing_stack_error}" ]]; then
       log_info "Stack '${STACK_NAME}' is absent (exact ValidationError + message): no users to carry forward."
       rm -f "${err}"
       return
@@ -1092,15 +1120,22 @@ cdk_diff_pinned() {
 cdk_deploy_pinned() {
   local gate_asm="${PROJECT_ROOT}/infra/cdk.out.preflight"
   local gate_log_dir="${PROJECT_ROOT}/.cdk-gate"
+  local deploy_rc
   cd "${PROJECT_ROOT}/infra"
   verify_pinned_assembly pre-deploy
   log_info "CDK safety gate 3/3: deploying the reviewed assembly (no re-synth)..."
-  "${CDK_BIN}" deploy "${STACK_NAME}" \
+  if "${CDK_BIN}" deploy "${STACK_NAME}" \
     --app "${gate_asm}" \
     --exclusively \
-    --require-approval never
-  cd "${PROJECT_ROOT}"
-  log_success "CDK stack deployed."
+    --require-approval never; then
+    cd "${PROJECT_ROOT}"
+    log_success "CDK stack deployed."
+  else
+    deploy_rc=$?
+    cd "${PROJECT_ROOT}"
+    log_error "CDK deployment failed with exit ${deploy_rc}; the stack did not reach the requested state."
+    return "${deploy_rc}"
+  fi
 }
 
 run_cdk_deploy() {

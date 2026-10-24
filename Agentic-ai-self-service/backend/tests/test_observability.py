@@ -215,6 +215,148 @@ def test_langfuse_default_with_extra_headers_uses_default_endpoint():
     assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == ("https://cloud.langfuse.com/api/public/otel")
 
 
+def test_production_evaluation_forces_native_adot_even_when_canvas_disables_otel():
+    env = build_otel_env_vars(
+        {"enableOtel": False},
+        runtime_name="release_bot_deadbeef",
+        deployment_id="dep-release",
+        production_evaluation_required=True,
+        target_region="eu-west-1",
+    )
+
+    assert env["AGENT_OBSERVABILITY_ENABLED"] == "true"
+    assert env["UNIFIED_TRACES_DESTINATION_ENABLED"] == "false"
+    assert env["OTEL_PYTHON_DISTRO"] == "aws_distro"
+    assert env["OTEL_PYTHON_CONFIGURATOR"] == "aws_configurator"
+    assert env["OTEL_AWS_PYTHON_DEFER_TO_WORKERS_ENABLED"] == "false"
+    assert env["OTEL_TRACES_EXPORTER"] == "otlp"
+    assert env["OTEL_LOGS_EXPORTER"] == "none"
+    assert env["OTEL_METRICS_EXPORTER"] == "none"
+    assert env["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] == "http/protobuf"
+    assert env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] == ("https://xray.eu-west-1.amazonaws.com/v1/traces")
+    assert env["OTEL_SERVICE_NAME"] == "release_bot_deadbeef.DEFAULT"
+    assert env["OTEL_TRACES_SAMPLER"] == "always_on"
+    assert env["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"] == "false"
+    assert env["AWS_GENAI_CONTENT_EXTRACTION_OPT_OUT"] == "true"
+    assert env["OTEL_SEMCONV_STABILITY_OPT_IN"].endswith("gen_ai_unredacted_attributes=")
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in env
+
+
+def test_required_traces_endpoint_sigv4_signs_a_real_otlp_http_request():
+    setup = """
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+seen = {}
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        seen["path"] = self.path
+        seen["authorization"] = self.headers.get("Authorization", "")
+        seen["token"] = self.headers.get("X-Amz-Security-Token", "")
+        seen["content_type"] = self.headers.get("Content-Type", "")
+        seen["body"] = self.rfile.read(length)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-protobuf")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *_args):
+        pass
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+os.environ["AWS_REGION"] = "eu-west-1"
+os.environ["AWS_ACCESS_KEY_ID"] = "AKIDEXAMPLE"  # pragma: allowlist secret
+os.environ["AWS_SECRET_ACCESS_KEY"] = "secret-example"  # pragma: allowlist secret
+os.environ["AWS_SESSION_TOKEN"] = "session-example"  # pragma: allowlist secret
+os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = (
+    f"http://127.0.0.1:{server.server_port}/v1/traces"
+)
+os.environ["OTEL_SERVICE_NAME"] = "signed-probe.DEFAULT"
+os.environ["OTEL_TRACES_SAMPLER"] = "always_on"
+"""
+    assertion = """
+from opentelemetry import trace
+import time
+with trace.get_tracer("sigv4-test").start_as_current_span("signed-probe") as probe_span:
+    trace_hex = format(probe_span.get_span_context().trace_id, "032x")
+_otel_force_flush()
+server.shutdown()
+server.server_close()
+thread.join(timeout=2)
+assert seen["path"] == "/v1/traces", seen
+assert seen["content_type"] == "application/x-protobuf", seen
+assert seen["body"], seen
+assert len(trace_hex) == 32
+assert abs(int(trace_hex[:8], 16) - int(time.time())) < 60, trace_hex
+assert seen["token"] == "session-example", seen
+assert seen["authorization"].startswith("AWS4-HMAC-SHA256 "), seen
+assert "Credential=AKIDEXAMPLE/" in seen["authorization"], seen
+assert "/eu-west-1/xray/aws4_request" in seen["authorization"], seen
+"""
+    env = os.environ.copy()
+    for key in (
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_AUTH_SECRET_ARN",
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
+    ):
+        env.pop(key, None)
+
+    positive = subprocess.run(
+        [sys.executable, "-c", setup + OTEL_BOOTSTRAP + assertion],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert positive.returncode == 0, positive.stdout + positive.stderr
+
+    signer = "signed_session.auth = _XRaySigV4Auth(signing_region)"
+    assert OTEL_BOOTSTRAP.count(signer) == 1
+    mutant = OTEL_BOOTSTRAP.replace(signer, "signed_session.auth = None", 1)
+    removed = subprocess.run(
+        [sys.executable, "-c", setup + mutant + assertion],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert removed.returncode != 0, "Removing X-Ray SigV4 authentication escaped detection"
+
+
+def test_production_evaluation_trace_endpoint_overrides_external_trace_routing():
+    env = build_otel_env_vars(
+        {
+            "enabled": True,
+            "provider": "custom",
+            "otlp_endpoint": "https://otel.example/v1",
+        },
+        runtime_name="release_bot_deadbeef",
+        production_evaluation_required=True,
+        target_region="eu-west-1",
+    )
+
+    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "https://otel.example/v1"
+    assert env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] == ("https://xray.eu-west-1.amazonaws.com/v1/traces")
+    assert env["OTEL_SERVICE_NAME"] == "release_bot_deadbeef.DEFAULT"
+
+
+def test_production_evaluation_rejects_an_invalid_target_region():
+    with pytest.raises(ValueError, match="valid AWS Region"):
+        build_otel_env_vars(
+            None,
+            runtime_name="release_bot_deadbeef",
+            production_evaluation_required=True,
+            target_region="not-a-region",
+        )
+
+
 def test_inject_otel_adds_bootstrap_after_app_init():
     src = '''"""Test"""
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
@@ -238,6 +380,68 @@ if __name__ == "__main__":
     # invoke wrapped so spans flush before idle stop
     assert "_otel_invoke_wrap" in out
     assert "_otel_force_flush()" in out
+    assert "invoke = app.entrypoint(_otel_invoke_wrap)" in out
+
+
+def test_registered_agentcore_entrypoint_uses_evaluation_wrapper_and_removal_mutant_fails():
+    source = """class BedrockAgentCoreApp:
+    def __init__(self):
+        self.handlers = {}
+
+    def entrypoint(self, function):
+        self.handlers["main"] = function
+        return function
+
+app = BedrockAgentCoreApp()
+
+@app.entrypoint
+def invoke(payload):
+    return dict(payload)
+"""
+    generated = _inject_otel(source)
+    registration = "invoke = app.entrypoint(_otel_invoke_wrap)"
+    assert generated.count(registration) == 1
+    assertion = """
+payload = {
+    "prompt": "What is two plus two?",
+    "session_id": "staging-session",
+    "_agentcore_evaluation_capture": True,
+}
+result = app.handlers["main"](payload)
+assert app.handlers["main"] is invoke
+assert "_agentcore_evaluation_capture" not in result
+assert result["prompt"] == "What is two plus two?"
+"""
+    env = os.environ.copy()
+    for key in (
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "OTEL_AUTH_SECRET_ARN",
+    ):
+        env.pop(key, None)
+    env["AGENT_OBSERVABILITY_ENABLED"] = "true"
+
+    positive = subprocess.run(
+        [sys.executable, "-c", generated + assertion],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert positive.returncode == 0, positive.stdout + positive.stderr
+
+    mutant = generated.replace(registration, "invoke = _otel_invoke_wrap", 1)
+    removed = subprocess.run(
+        [sys.executable, "-c", mutant + assertion],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert removed.returncode != 0, "Removing public entrypoint registration escaped detection"
 
 
 def test_no_endpoint_bootstrap_emits_allowlisted_usage_without_sensitive_span_data():
@@ -361,11 +565,134 @@ _otel_force_flush()
     assert "TOKEN-MUST-NOT-LEAK" not in combined
 
 
+def test_evaluation_span_captures_content_only_for_marked_staging_and_metadata_for_production():
+    script = (
+        "from opentelemetry import trace\n"
+        "from opentelemetry.sdk.trace import TracerProvider\n"
+        "from opentelemetry.sdk.trace.export import SimpleSpanProcessor\n"
+        "from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter\n"
+        "exporter = InMemorySpanExporter()\n"
+        "provider = TracerProvider()\n"
+        "provider.add_span_processor(SimpleSpanProcessor(exporter))\n"
+        "trace.set_tracer_provider(provider)\n"
+        + OTEL_BOOTSTRAP
+        + """
+seen = []
+def invoke(payload):
+    seen.append(dict(payload))
+    return {"response": "The answer is 4."}
+
+_otel_invoke_with_evaluation_span(
+    invoke,
+    {"prompt": "PRODUCTION-MUST-STAY-REDACTED", "session_id": "prod-session"},
+)
+_otel_invoke_with_evaluation_span(
+    invoke,
+    {
+        "prompt": "What is two plus two?",
+        "session_id": "staging-session",
+        "_agentcore_evaluation_capture": True,
+    },
+)
+_otel_force_flush()
+spans = [span for span in exporter.get_finished_spans() if span.name == "invoke_agent"]
+assert len(spans) == 2, spans
+by_session = {span.attributes["session.id"]: dict(span.attributes) for span in spans}
+production = by_session["prod-session"]
+assert production == {
+    "gen_ai.operation.name": "invoke_agent",
+    "session.id": "prod-session",
+}
+assert "PRODUCTION-MUST-STAY-REDACTED" not in repr(production)
+assert "The answer is 4." not in repr(production)
+staging = by_session["staging-session"]
+assert staging["gen_ai.operation.name"] == "invoke_agent"
+assert staging["gen_ai.task.input"] == "What is two plus two?"
+assert staging["gen_ai.task.output"] == "The answer is 4."
+assert "agentcore.invocation.user_prompt" not in staging
+assert "agentcore.invocation.agent_response" not in staging
+assert all("_agentcore_evaluation_capture" not in payload for payload in seen)
+assert len(_otel_evaluation_text("x" * 40000)) == 12000
+"""
+    )
+    env = os.environ.copy()
+    env.pop("OTEL_EXPORTER_OTLP_ENDPOINT", None)
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_removing_production_metadata_span_reproduces_privacy_failure():
+    mutant = OTEL_BOOTSTRAP.replace(
+        "if _otel_provider is None:",
+        "if not capture or _otel_provider is None:",
+        1,
+    )
+    assert mutant != OTEL_BOOTSTRAP
+    script = (
+        "from opentelemetry import trace\n"
+        "from opentelemetry.sdk.trace import TracerProvider\n"
+        "from opentelemetry.sdk.trace.export import SimpleSpanProcessor\n"
+        "from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter\n"
+        "exporter = InMemorySpanExporter()\n"
+        "provider = TracerProvider()\n"
+        "provider.add_span_processor(SimpleSpanProcessor(exporter))\n"
+        "trace.set_tracer_provider(provider)\n"
+        + mutant
+        + """
+def invoke(payload):
+    return {"response": "private response"}
+_otel_invoke_with_evaluation_span(
+    invoke,
+    {"prompt": "private prompt", "session_id": "prod-session"},
+)
+_otel_force_flush()
+spans = [span for span in exporter.get_finished_spans() if span.name == "invoke_agent"]
+assert any(span.attributes.get("session.id") == "prod-session" for span in spans), spans
+"""
+    )
+    env = os.environ.copy()
+    env.pop("OTEL_EXPORTER_OTLP_ENDPOINT", None)
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert completed.returncode != 0, "Removing production metadata spans escaped detection"
+
+
 def test_inject_otel_resilient_when_no_app_marker():
     """Should still produce valid Python even if the marker isn't present."""
     out = _inject_otel("print('no app here')\n")
     # Doesn't crash and doesn't leave the file empty.
     assert "print" in out
+
+
+def test_bootstrap_reuses_a_preconfigured_sdk_tracer_provider():
+    script = (
+        "from opentelemetry import trace\n"
+        "from opentelemetry.sdk.trace import TracerProvider\n"
+        "provider = TracerProvider()\n"
+        "trace.set_tracer_provider(provider)\n" + OTEL_BOOTSTRAP + "\nassert _otel_provider is provider\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Overriding of current TracerProvider is not allowed" not in result.stderr
 
 
 # ---------------------------------------------------------------------------

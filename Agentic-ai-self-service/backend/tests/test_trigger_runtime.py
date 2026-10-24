@@ -32,6 +32,8 @@ from app.services.trigger_store import (  # noqa: E402
     TriggerDeliveryClaim,
     TriggerDeliveryInactive,
     TriggerStore,
+    WebhookIngressBusy,
+    WebhookIngressConflict,
 )
 from moto import mock_aws  # noqa: E402
 
@@ -46,6 +48,14 @@ RUNTIME_ID = "orders_bot_abcd1234-XyZ1234567"
 RUNTIME_ARN = f"arn:aws:bedrock-agentcore:{REGION}:{ACCOUNT}:runtime/{RUNTIME_ID}"
 QUEUE_ARN = f"arn:aws:sqs:{REGION}:{ACCOUNT}:agentcore-trigger-dispatch"
 QUEUE_URL = f"https://sqs.{REGION}.amazonaws.com/{ACCOUNT}/agentcore-trigger-dispatch"
+
+
+@pytest.fixture(autouse=True)
+def invocation_budget(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    budget = MagicMock()
+    budget.reserve_invocation.return_value = None
+    monkeypatch.setattr(runtime, "get_budget_store", lambda: budget)
+    return budget
 
 
 @pytest.fixture
@@ -244,6 +254,113 @@ def test_delete_fences_an_in_flight_provisioner(store: TriggerStore):
         trigger_id=row.trigger_id,
         delete_token="delete-token",
     )
+
+
+def test_webhook_ingress_claim_is_durable_and_suppresses_queued_duplicate(store: TriggerStore):
+    row = persist(store, make_trigger(trigger_type=TYPE_WEBHOOK))
+    claim = store.acquire_webhook_ingress(
+        trigger=row,
+        delivery_id=DELIVERY_ID,
+        payload_sha256="a" * 64,
+        lease_seconds=60,
+        retention_seconds=86_400,
+        now=100,
+    )
+    assert claim is not None
+
+    with pytest.raises(WebhookIngressBusy):
+        store.acquire_webhook_ingress(
+            trigger=row,
+            delivery_id=DELIVERY_ID,
+            payload_sha256="a" * 64,
+            lease_seconds=60,
+            retention_seconds=86_400,
+            now=101,
+        )
+
+    assert store.complete_webhook_ingress(claim, retention_seconds=86_400, now=102)
+    assert (
+        store.acquire_webhook_ingress(
+            trigger=row,
+            delivery_id=DELIVERY_ID,
+            payload_sha256="a" * 64,
+            lease_seconds=60,
+            retention_seconds=86_400,
+            now=103,
+        )
+        is None
+    )
+    item = store._table.get_item(  # noqa: SLF001
+        Key={
+            "runtime_name": f"!delivery#{RUNTIME_NAME}#{TRIGGER_ID}",
+            "trigger_id": f"!webhook#{DELIVERY_ID}",
+        },
+        ConsistentRead=True,
+    )["Item"]
+    assert item["ingress_status"] == "QUEUED"
+    assert item["delivery_id"] == DELIVERY_ID
+    assert "claim_token" not in item and "claim_expires_at" not in item
+    assert item["ttl"] == 86_502
+    with pytest.raises(WebhookIngressConflict, match="different payload"):
+        store.acquire_webhook_ingress(
+            trigger=row,
+            delivery_id=DELIVERY_ID,
+            payload_sha256="b" * 64,
+            lease_seconds=60,
+            retention_seconds=86_400,
+            now=104,
+        )
+    assert store.purge_deliveries(RUNTIME_NAME, TRIGGER_ID) == 1
+    assert (
+        store._table.get_item(  # noqa: SLF001
+            Key={
+                "runtime_name": f"!delivery#{RUNTIME_NAME}#{TRIGGER_ID}",
+                "trigger_id": f"!webhook#{DELIVERY_ID}",
+            },
+            ConsistentRead=True,
+        ).get("Item")
+        is None
+    )
+
+
+def test_webhook_ingress_expired_lease_is_recoverable_and_trigger_state_is_fenced(store: TriggerStore):
+    row = persist(store, make_trigger(trigger_type=TYPE_WEBHOOK))
+    abandoned = store.acquire_webhook_ingress(
+        trigger=row,
+        delivery_id=DELIVERY_ID,
+        payload_sha256="a" * 64,
+        lease_seconds=60,
+        retention_seconds=86_400,
+        now=100,
+    )
+    assert abandoned is not None
+    takeover = store.acquire_webhook_ingress(
+        trigger=row,
+        delivery_id=DELIVERY_ID,
+        payload_sha256="a" * 64,
+        lease_seconds=60,
+        retention_seconds=86_400,
+        now=160,
+    )
+    assert takeover is not None and takeover.token != abandoned.token
+    assert store.release_webhook_ingress(abandoned) is False
+    assert store.release_webhook_ingress(takeover) is True
+
+    stale = row
+    store.update_status(
+        runtime_name=row.runtime_name,
+        trigger_id=row.trigger_id,
+        status=STATUS_DELETING,
+    )
+    with pytest.raises(TriggerDeliveryInactive):
+        store.acquire_webhook_ingress(
+            trigger=stale,
+            delivery_id="evt-after-delete",
+            payload_sha256="a" * 64,
+            lease_seconds=60,
+            retention_seconds=86_400,
+            now=200,
+        )
 
 
 def test_delivery_claim_serializes_and_suppresses_duplicates(store: TriggerStore):
@@ -1206,6 +1323,7 @@ def test_deployment_authority_refuses_every_binding_mismatch(
 
 def test_invoke_uses_stable_delivery_session_and_parses_response(
     monkeypatch: pytest.MonkeyPatch,
+    invocation_budget: MagicMock,
 ):
     trigger = make_trigger()
     agentcore = MagicMock()
@@ -1224,6 +1342,8 @@ def test_invoke_uses_stable_delivery_session_and_parses_response(
         "_deployment_for_trigger",
         lambda _trigger: (deployment, match, session),
     )
+    reservation = object()
+    invocation_budget.reserve_invocation.return_value = reservation
 
     result = runtime.invoke_trigger(trigger, delivery_event())
 
@@ -1236,6 +1356,41 @@ def test_invoke_uses_stable_delivery_session_and_parses_response(
     payload = json.loads(kwargs["payload"])
     assert payload["session_id"] == result.session_id
     assert DELIVERY_ID in payload["prompt"]
+    invocation_budget.reserve_invocation.assert_called_once_with(
+        "default",
+        owner_sub=trigger.owner_sub,
+        runtime_name=trigger.runtime_name,
+        resource_tags={},
+        required=False,
+    )
+    invocation_budget.settle_reservation.assert_called_once_with(reservation, success=True)
+
+
+def test_trigger_hard_budget_denial_never_dispatches(
+    monkeypatch: pytest.MonkeyPatch,
+    invocation_budget: MagicMock,
+):
+    trigger = make_trigger()
+    session = MagicMock()
+    deployment = {
+        "deployment_id": DEPLOYMENT_ID,
+        "user_id": trigger.owner_sub,
+        "memory_result": None,
+    }
+    match = runtime._RUNTIME_ARN_RE.fullmatch(RUNTIME_ARN)  # noqa: SLF001
+    assert match is not None
+    monkeypatch.setattr(
+        runtime,
+        "_deployment_for_trigger",
+        lambda _trigger: (deployment, match, session),
+    )
+    invocation_budget.reserve_invocation.side_effect = runtime.BudgetExceeded("exhausted")
+
+    with pytest.raises(runtime.TriggerDispatchError, match="authorization limit"):
+        runtime.invoke_trigger(trigger, delivery_event())
+
+    session.client.assert_not_called()
+    invocation_budget.settle_reservation.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

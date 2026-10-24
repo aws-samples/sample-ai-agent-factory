@@ -69,7 +69,7 @@ Multi-module workshop composing AgentCore with an LLM Gateway (LiteLLM), MCP Gat
 
 ### Self-Service — Build Agents Fast
 
-Visual workflow builder for AgentCore: drag-and-drop canvas, template gallery, CloudFormation export, versioning/rollback, Cedar policy, and cost analytics.
+Visual workflow builder for AgentCore: drag-and-drop canvas, template gallery, CloudFormation export, versioning with batch-evaluation-gated production promotion and emergency rollback, Cedar policy, and cost analytics.
 
 **Prerequisites:** AWS CLI v2, Node.js 20+, Python 3.12+. See README for supported regions.
 

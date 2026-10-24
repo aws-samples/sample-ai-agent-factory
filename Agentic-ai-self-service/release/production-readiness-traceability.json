@@ -1,0 +1,362 @@
+{
+  "schema_version": 1,
+  "suites": [
+    {
+      "id": "static",
+      "working_directory": ".",
+      "selector_type": "command",
+      "check_ids": ["all-python-lint-format"],
+      "commands": [
+        ["{backend_python}", "-m", "ruff", "check", "."],
+        ["{backend_python}", "-m", "ruff", "format", "--check", "."]
+      ],
+      "timeout_seconds": 900
+    },
+    {
+      "id": "secret-scan",
+      "working_directory": ".",
+      "selector_type": "command",
+      "check_ids": ["tracked-files-against-baseline"],
+      "commands": [
+        ["{backend_python}", "scripts/verify_secret_baseline.py"]
+      ],
+      "required_tools": {"detect-secrets-hook": "1.5.0"},
+      "timeout_seconds": 900
+    },
+    {
+      "id": "backend",
+      "working_directory": "backend",
+      "selector_type": "pytest",
+      "commands": [
+        ["{backend_python}", "-m", "pytest", "-m", "not integration and not policy_scan and not terraform_scan and not shell_scan", "-q"]
+      ],
+      "timeout_seconds": 7200
+    },
+    {
+      "id": "export-gate",
+      "working_directory": "backend",
+      "selector_type": "command",
+      "check_ids": ["customer-export-contract-policy"],
+      "commands": [
+        ["{backend_python}", "-m", "pytest", "tests/test_cfn_export_contract.py", "tests/test_the_exported_template_can_actually_deploy.py", "tests/test_litellm_secret_region_is_enforced_in_the_template.py", "-q"]
+      ],
+      "required_tools": {
+        "cfn-lint": "1.57.0",
+        "checkov": "3.3.1",
+        "terraform": "1.14.6",
+        "shellcheck": "0.11.0"
+      },
+      "required_environment": ["CI"],
+      "timeout_seconds": 7200
+    },
+    {
+      "id": "infra",
+      "working_directory": "infra",
+      "selector_type": "pytest",
+      "check_ids": ["all-infrastructure-tests"],
+      "commands": [
+        ["{infra_python}", "-m", "pytest", "tests/", "-q"]
+      ],
+      "timeout_seconds": 3600
+    },
+    {
+      "id": "frontend",
+      "working_directory": "frontend",
+      "selector_type": "javascript",
+      "check_ids": ["lint-test-build-verify"],
+      "commands": [
+        ["{npm}", "audit", "--audit-level=high"],
+        ["{npm}", "run", "lint"],
+        ["{npm}", "run", "test"],
+        ["{npm}", "run", "build"],
+        ["{npm}", "run", "verify:production-build"]
+      ],
+      "required_environment": [
+        "VITE_API_BASE_URL",
+        "VITE_AWS_REGION",
+        "VITE_COGNITO_USER_POOL_ID",
+        "VITE_COGNITO_CLIENT_ID"
+      ],
+      "timeout_seconds": 3600
+    },
+    {
+      "id": "backend-package",
+      "working_directory": "backend",
+      "selector_type": "command",
+      "check_ids": ["wheel-and-sdist"],
+      "commands": [
+        ["{uv}", "build", "--out-dir", "{artifact_dir}/backend-dist"]
+      ],
+      "timeout_seconds": 900
+    },
+    {
+      "id": "strict-synth",
+      "working_directory": "infra",
+      "selector_type": "command",
+      "check_ids": ["production-supported-emea-regions-cdk-nag"],
+      "commands": [
+        ["{cdk}", "synth", "--strict", "--quiet", "--output", "{artifact_dir}/cdk-eu-central-1", "-c", "environment_name=production", "-c", "aws_region=eu-central-1", "-c", "project_name=acf"],
+        ["{cdk}", "synth", "--strict", "--quiet", "--output", "{artifact_dir}/cdk-eu-west-1", "-c", "environment_name=production", "-c", "aws_region=eu-west-1", "-c", "project_name=acf"],
+        ["{cdk}", "synth", "--strict", "--quiet", "--output", "{artifact_dir}/cdk-eu-west-2", "-c", "environment_name=production", "-c", "aws_region=eu-west-2", "-c", "project_name=acf"],
+        ["{cdk}", "synth", "--strict", "--quiet", "--output", "{artifact_dir}/cdk-eu-west-3", "-c", "environment_name=production", "-c", "aws_region=eu-west-3", "-c", "project_name=acf"]
+      ],
+      "required_environment": ["CDK_PYTHON", "CDK_HOME", "TMPDIR"],
+      "timeout_seconds": 3600
+    }
+  ],
+  "controls": [
+    {
+      "id": "release.integrity",
+      "evidence": {
+        "offline_positive": [
+          {"suite": "backend", "selector": "backend/tests/test_release_evidence_recorder.py::test_complete_run_seals_verifies_and_is_portable_to_clean_clone"},
+          {"suite": "infra", "selector": "all-infrastructure-tests"},
+          {"suite": "frontend", "selector": "lint-test-build-verify"},
+          {"suite": "static", "selector": "all-python-lint-format"},
+          {"suite": "secret-scan", "selector": "tracked-files-against-baseline"},
+          {"suite": "export-gate", "selector": "customer-export-contract-policy"},
+          {"suite": "backend-package", "selector": "wheel-and-sdist"},
+          {"suite": "strict-synth", "selector": "production-supported-emea-regions-cdk-nag"}
+        ],
+        "offline_adversarial": [
+          {"suite": "backend", "selector": "backend/tests/test_release_evidence_recorder.py::test_start_rejects_dirty_source"}
+        ],
+        "offline_mutation": [
+          {"suite": "backend", "selector": "backend/tests/test_release_evidence_recorder.py::test_contract_byte_drift_is_rejected_even_if_git_status_hides_it"}
+        ],
+        "clean_clone": ["independent-detached-clone-full-gates"],
+        "exact_commit": ["source-commit-tree-and-contract-digests-match"]
+      }
+    },
+    {
+      "id": "release.evaluation_promotion",
+      "evidence": {
+        "offline_positive": [
+          {"suite": "backend", "selector": "backend/tests/test_production_promotion_evidence.py::test_complete_passing_result_produces_self_verifying_evidence"}
+        ],
+        "offline_adversarial": [
+          {"suite": "backend", "selector": "backend/tests/test_production_promotion_evidence.py::test_low_score_is_an_exact_release_denial"}
+        ],
+        "offline_mutation": [
+          {"suite": "backend", "selector": "backend/tests/test_production_promotion_evidence.py::test_tampering_with_stored_evidence_breaks_its_digest"}
+        ],
+        "live_positive": ["batch-evaluation-pass-and-production-promotion"],
+        "live_adversarial": ["degraded-result-denied", "forged-or-stale-evidence-denied"]
+      }
+    },
+    {
+      "id": "crypto.target_kms",
+      "evidence": {
+        "offline_positive": [
+          {"suite": "backend", "selector": "backend/tests/test_evaluation_target_kms.py::test_valid_target_evaluation_key_is_verified_without_key_material"}
+        ],
+        "offline_adversarial": [
+          {"suite": "backend", "selector": "backend/tests/test_evaluation_target_kms.py::test_target_evaluation_key_rejects_wrong_account_or_region"}
+        ],
+        "offline_mutation": [
+          {"suite": "backend", "selector": "backend/tests/test_evaluation_target_kms.py::test_adversarial_target_row_mutation_cannot_replace_version_key"}
+        ],
+        "live_positive": ["target-cmk-encrypts-batch-evaluation"],
+        "live_adversarial": ["wrong-account-key-denied", "wrong-region-key-denied"]
+      }
+    },
+    {
+      "id": "identity.delegated_obo",
+      "evidence": {
+        "offline_positive": [
+          {"suite": "backend", "selector": "backend/tests/test_delegated_identity_contract.py::test_obo_runtime_invoke_is_sigv4_with_request_local_token_header"}
+        ],
+        "offline_adversarial": [
+          {"suite": "backend", "selector": "backend/tests/test_delegated_identity_contract.py::test_substituted_identity_claims_are_rejected"}
+        ],
+        "offline_mutation": [
+          {"suite": "backend", "selector": "backend/tests/test_delegated_identity_contract.py::test_mutated_runtime_endpoint_never_receives_the_user_token"}
+        ],
+        "live_positive": ["workforce-token-exchange-whoami"],
+        "live_adversarial": ["substituted-subject-denied", "direct-runtime-bypass-denied"]
+      }
+    },
+    {
+      "id": "safety.guardrails",
+      "evidence": {
+        "offline_positive": [
+          {"suite": "backend", "selector": "backend/tests/test_guardrail_tool_boundary.py::test_direct_tool_wrapper_screens_input_and_output"}
+        ],
+        "offline_adversarial": [
+          {"suite": "backend", "selector": "backend/tests/test_guardrail_tool_boundary.py::test_input_intervention_prevents_tool_execution"}
+        ],
+        "offline_mutation": [
+          {"suite": "backend", "selector": "backend/tests/test_guardrail_tool_boundary.py::test_mutation_removing_tool_hooks_is_detected"}
+        ],
+        "live_positive": ["model-and-tool-content-allowed"],
+        "live_adversarial": ["prompt-attack-blocked", "tool-argument-blocked", "tool-result-blocked", "guardrail-outage-fails-closed"]
+      }
+    },
+    {
+      "id": "policy.cedar_enforce",
+      "evidence": {
+        "offline_positive": [
+          {"suite": "backend", "selector": "backend/tests/test_deploy_gate_ordering.py::test_production_gateway_injects_fail_closed_cedar_before_execution"}
+        ],
+        "offline_adversarial": [
+          {"suite": "backend", "selector": "backend/tests/test_runtime_policy_mutation_boundary.py::test_dynamic_runtime_role_has_explicit_deny_and_no_policy_mutation"}
+        ],
+        "offline_mutation": [
+          {"suite": "backend", "selector": "backend/tests/test_runtime_policy_mutation_boundary.py::test_mutation_wildcard_agentcore_allow_is_rejected"}
+        ],
+        "live_positive": ["cedar-authorized-tool-call"],
+        "live_adversarial": ["cedar-unauthorized-tool-call-denied", "runtime-role-update-gateway-denied"]
+      }
+    },
+    {
+      "id": "audit.append_only",
+      "evidence": {
+        "offline_positive": [
+          {"suite": "backend", "selector": "backend/tests/test_audit_production_contract.py::test_production_write_appends_correlated_attempt_and_outcome"},
+          {"suite": "infra", "selector": "infra/tests/test_audit_append_only_infra.py::test_api_roles_can_append_but_never_mutate_audit"},
+          {"suite": "frontend", "selector": "frontend/src/components/observability/AuditDashboard.test.tsx::shows incomplete attempts even when there are no completed outcomes"}
+        ],
+        "offline_adversarial": [
+          {"suite": "backend", "selector": "backend/tests/test_audit_production_contract.py::test_production_audit_outage_blocks_route_before_mutation"}
+        ],
+        "offline_mutation": [
+          {"suite": "backend", "selector": "backend/tests/test_audit_production_contract.py::test_tampered_record_fails_integrity_verification"}
+        ],
+        "live_positive": ["mutation-intent-and-outcome-visible"],
+        "live_adversarial": ["audit-store-outage-blocks-mutation", "tampered-row-read-denied"]
+      }
+    },
+    {
+      "id": "cost.invocation_authorization",
+      "evidence": {
+        "offline_positive": [
+          {"suite": "backend", "selector": "backend/tests/test_budget.py::test_reservation_applies_atomically_to_owner_agent_and_tag_budgets"},
+          {"suite": "infra", "selector": "infra/tests/test_budget_reservation_infra.py::test_deployment_role_can_transact_only_against_budget_table"},
+          {"suite": "frontend", "selector": "frontend/src/components/deploy/CostPanel.test.tsx::lets a user set the required owner budget before any usage exists"}
+        ],
+        "offline_adversarial": [
+          {"suite": "backend", "selector": "backend/tests/test_budget.py::test_hard_limit_blocks_next_reservation_without_partial_budget_debit"}
+        ],
+        "offline_mutation": [
+          {"suite": "backend", "selector": "backend/tests/test_budget.py::test_mutation_removing_limit_condition_reopens_oversubscription"}
+        ],
+        "live_positive": ["concurrent-transaction-reservations-stay-within-limit"],
+        "live_adversarial": ["exhausted-budget-denies-before-dispatch", "budget-store-outage-denies-before-dispatch"]
+      }
+    },
+    {
+      "id": "trigger.webhook_idempotency",
+      "evidence": {
+        "offline_positive": [
+          {"suite": "backend", "selector": "backend/tests/test_webhook_ingress_dedup.py::test_same_signed_delivery_is_queued_once_across_requests"}
+        ],
+        "offline_adversarial": [
+          {"suite": "backend", "selector": "backend/tests/test_webhook_ingress_dedup.py::test_same_delivery_id_with_different_body_is_exact_conflict"}
+        ],
+        "offline_mutation": [
+          {"suite": "backend", "selector": "backend/tests/test_webhook_ingress_dedup.py::test_mutation_without_durable_ingress_claim_queues_duplicate"}
+        ],
+        "live_positive": ["signed-delivery-executes-once", "identical-replay-is-idempotent"],
+        "live_adversarial": ["changed-body-same-id-conflicts", "concurrent-claim-conflicts-and-recovers"]
+      }
+    },
+    {
+      "id": "iam.jit_approval",
+      "evidence": {
+        "offline_positive": [
+          {"suite": "backend", "selector": "backend/tests/test_permission_requests.py::test_router_approval_lease_blocks_concurrent_reject_and_finishes_approved"}
+        ],
+        "offline_adversarial": [
+          {"suite": "backend", "selector": "backend/tests/test_permission_requests.py::test_applying_approval_cannot_be_rejected_and_expired_lease_is_recoverable"}
+        ],
+        "offline_mutation": [
+          {"suite": "backend", "selector": "backend/tests/test_permission_requests.py::test_mutation_old_apply_then_decide_sequence_can_record_rejected_permission"}
+        ],
+        "live_positive": ["leased-approval-applies-exact-policy"],
+        "live_adversarial": ["concurrent-rejection-cannot-win", "gateway-policy-mutation-request-denied"]
+      }
+    },
+    {
+      "id": "delivery.browser_client",
+      "evidence": {
+        "offline_positive": [
+          {"suite": "backend", "selector": "backend/tests/test_runtime_slot_invocation.py::test_stable_client_alias_invokes_exact_production_slot"},
+          {"suite": "frontend", "selector": "frontend/src/embed/agentcore-chat-v1.test.js::invokes only the stable production alias with a request-local bearer"}
+        ],
+        "offline_adversarial": [
+          {"suite": "backend", "selector": "backend/tests/test_runtime_slot_invocation.py::test_stable_client_alias_refuses_slot_or_target_injection"},
+          {"suite": "frontend", "selector": "frontend/src/embed/agentcore-chat-v1.test.js::does not treat an access-token attribute as authentication"}
+        ],
+        "offline_mutation": [
+          {"suite": "frontend", "selector": "frontend/scripts/verify-production-build.test.mjs::rejects a production build without the external client artifact"}
+        ],
+        "live_positive": ["cloudfront-widget-invokes-production-alias"],
+        "live_adversarial": ["widget-target-injection-denied", "widget-token-attribute-ignored", "widget-model-output-renders-inert"],
+        "ui_cloudfront": ["real-browser-cloudfront-widget-flow"]
+      }
+    },
+    {
+      "id": "connector.gateway_framework",
+      "evidence": {
+        "offline_positive": [
+          {"suite": "backend", "selector": "backend/tests/test_connectors.py::test_deploy_connector_target_api_key_builds_correct_shapes"}
+        ],
+        "offline_adversarial": [
+          {"suite": "backend", "selector": "backend/tests/test_mcp_catalog.py::test_deploy_external_mcp_fails_when_the_target_never_connects"}
+        ],
+        "offline_mutation": [
+          {"suite": "backend", "selector": "backend/tests/test_connectors.py::test_deploy_connector_rollback_on_midloop_failure"}
+        ],
+        "live_positive": ["connector-tools-list-and-authorized-call"],
+        "live_adversarial": ["connector-cedar-denial", "connector-tool-guardrail-denial"]
+      }
+    },
+    {
+      "id": "lifecycle.rollback",
+      "evidence": {
+        "offline_positive": [
+          {"suite": "backend", "selector": "backend/tests/test_runtime_slot_invocation.py::test_promote_then_rollback_changes_the_actual_invoked_arn"}
+        ],
+        "offline_adversarial": [
+          {"suite": "backend", "selector": "backend/tests/test_slot_pointer_write_is_a_compare_and_set.py::test_a_gated_rollback_can_restore_only_the_exact_previous_production"}
+        ],
+        "offline_mutation": [
+          {"suite": "backend", "selector": "backend/tests/test_promote_route_reports_409_on_slot_conflict.py::test_rollback_reports_409_when_the_slot_write_loses_the_race"}
+        ],
+        "rollback": ["production-serves-exact-previous-version", "arbitrary-version-rollback-denied"]
+      }
+    },
+    {
+      "id": "lifecycle.zero_residual",
+      "evidence": {
+        "offline_positive": [
+          {"suite": "infra", "selector": "infra/tests/test_cleanup_ownership_gate.py::test_ownership_check_accepts_only_the_exact_stack_tag"}
+        ],
+        "offline_adversarial": [
+          {"suite": "infra", "selector": "infra/tests/test_cleanup_ownership_gate.py::test_no_environment_escape_hatch_can_authorize_untagged_resources"}
+        ],
+        "offline_mutation": [
+          {"suite": "infra", "selector": "infra/tests/test_cleanup_ownership_gate.py::test_retained_gateway_auth_delete_refuses_a_changed_domain"}
+        ],
+        "teardown_zero": ["direct-service-inventories-zero", "aliasless-kms-and-log-groups-zero", "foreign-decoys-preserved"]
+      }
+    },
+    {
+      "id": "regional.emea_core",
+      "evidence": {
+        "offline_positive": [
+          {"suite": "backend", "selector": "backend/tests/test_release_evidence_recorder.py::test_emea_matrix_matches_documented_feature_boundaries"},
+          {"suite": "infra", "selector": "infra/tests/test_same_account_non_home_region_iam.py::test_target_resource_grants_reach_any_region_but_only_this_account"},
+          {"suite": "strict-synth", "selector": "production-supported-emea-regions-cdk-nag"}
+        ],
+        "offline_adversarial": [
+          {"suite": "backend", "selector": "backend/tests/test_release_evidence_recorder.py::test_live_region_requires_a_selected_matrix_region"}
+        ],
+        "offline_mutation": [
+          {"suite": "backend", "selector": "backend/tests/test_release_evidence_recorder.py::test_contract_validator_rejects_missing_region_selector"}
+        ],
+        "live_region": ["core-runtime-gateway-identity-policy-evaluation"]
+      }
+    }
+  ]
+}

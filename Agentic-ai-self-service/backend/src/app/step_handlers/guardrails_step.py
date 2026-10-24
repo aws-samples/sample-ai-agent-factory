@@ -20,8 +20,10 @@ from app.services import step_clients
 from app.services.aws_pagination import list_all
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.guardrail_builders import (
+    BEDROCK_PII_TYPES,
     build_contextual_grounding_config,
     build_regex_filters,
+    normalize_pii_type,
 )
 from app.services.resource_ownership import assert_guardrail_owned
 from app.services.resource_tagging import governed_lower_tag_list
@@ -45,41 +47,6 @@ def _get_deployment_store() -> DeploymentStateStore:
 
 # Content filter strength mapping
 _FILTER_STRENGTHS = {"NONE", "LOW", "MEDIUM", "HIGH"}
-
-# PII entity types supported by Bedrock Guardrails
-_PII_TYPES = {
-    "ADDRESS",
-    "AGE",
-    "AWS_ACCESS_KEY",
-    "AWS_SECRET_KEY",
-    "CA_HEALTH_NUMBER",
-    "CA_SOCIAL_INSURANCE_NUMBER",
-    "CREDIT_DEBIT_CARD_CVV",
-    "CREDIT_DEBIT_CARD_EXPIRY",
-    "CREDIT_DEBIT_CARD_NUMBER",
-    "DRIVER_ID",
-    "EMAIL",
-    "INTERNATIONAL_BANK_ACCOUNT_NUMBER",
-    "IP_ADDRESS",
-    "LICENSE_PLATE",
-    "MAC_ADDRESS",
-    "NAME",
-    "PASSWORD",
-    "PHONE",
-    "PIN",
-    "SSN",
-    "URL",
-    "UK_NATIONAL_HEALTH_SERVICE_NUMBER",
-    "UK_NATIONAL_INSURANCE_NUMBER",
-    "UK_UNIQUE_TAXPAYER_REFERENCE_NUMBER",
-    "US_BANK_ACCOUNT_NUMBER",
-    "US_BANK_ROUTING_NUMBER",
-    "US_INDIVIDUAL_TAX_IDENTIFICATION_NUMBER",
-    "US_PASSPORT_NUMBER",
-    "US_SOCIAL_SECURITY_NUMBER",
-    "VEHICLE_IDENTIFICATION_NUMBER",
-    "USERNAME",
-}
 
 
 def _build_content_filter_config(content_filters) -> dict:
@@ -134,18 +101,19 @@ def _build_content_filter_config(content_filters) -> dict:
 
 def _build_pii_config(pii_filters: list) -> dict:
     """Build sensitiveInformationPolicyConfig from PII filter list."""
-    pii_entities = []
+    pii_actions: dict[str, str] = {}
     for pii in pii_filters:
-        pii_type = str(pii.get("type", "")).upper()
+        pii_type = normalize_pii_type(pii.get("type", ""))
         action = str(pii.get("action", "ANONYMIZE")).upper()
-        if pii_type not in _PII_TYPES:
+        if pii_type not in BEDROCK_PII_TYPES:
             continue
         if action not in ("BLOCK", "ANONYMIZE"):
             action = "ANONYMIZE"
-        pii_entities.append({"type": pii_type, "action": action})
-    if not pii_entities:
+        if pii_type not in pii_actions or action == "BLOCK":
+            pii_actions[pii_type] = action
+    if not pii_actions:
         return {}
-    return {"piiEntitiesConfig": pii_entities}
+    return {"piiEntitiesConfig": [{"type": pii_type, "action": action} for pii_type, action in pii_actions.items()]}
 
 
 def _build_topic_config(denied_topics: list) -> dict:
@@ -244,6 +212,8 @@ def handler(event: dict, context) -> dict:
                     "guardrail_id": guardrail_id,
                     "guardrail_version": guardrail_version,
                     "created_by_flow": False,
+                    "baseline_profile": guardrails_config.get("baselineProfile")
+                    or guardrails_config.get("baseline_profile"),
                 },
             }
 
@@ -422,6 +392,8 @@ def handler(event: dict, context) -> dict:
                 "guardrail_id": guardrail_id,
                 "guardrail_version": guardrail_version,
                 "created_by_flow": True,
+                "baseline_profile": guardrails_config.get("baselineProfile")
+                or guardrails_config.get("baseline_profile"),
             },
         }
 
