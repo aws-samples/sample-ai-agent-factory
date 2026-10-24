@@ -84,8 +84,10 @@ The source distribution explicitly excludes the generated `backend/lib/` Lambda 
 while retaining the locked Runtime ZIPs, so its contents do not depend on build order.
 Two builds of one commit must therefore produce identical Runtime ZIPs, Lambda tree,
 wheel, source distribution, CDK template, and asset manifest. The frontend build tool is
-pinned to an audited Vite release; a newly published high-severity advisory invalidates
-prior frontend evidence and requires fix-forward exact-commit certification.
+pinned to an audited Vite release; Vitest is exact-pinned, and exact `overrides` keep
+transitive Zod and Undici releases above their audited minimums. A newly published
+high-severity advisory invalidates prior frontend evidence and requires fix-forward
+exact-commit certification.
 
 Upgrade dependencies deliberately: update the direct input or rebuild the complete
 AgentCore graph, regenerate the corresponding lock, then run bundle integrity/import,
