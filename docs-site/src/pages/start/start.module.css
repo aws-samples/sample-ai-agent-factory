@@ -82,6 +82,36 @@
   color: var(--color-text-secondary);
 }
 
+/* The same caveat behind a disclosure (comparison table), mirroring StatTile's "Why this figure". */
+.factDetails {
+  margin-top: var(--space-1);
+}
+
+.factSummary {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--target-min);
+  font-size: 0.8125rem;
+  color: var(--color-link);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.factSummary:hover {
+  color: var(--color-link-hover);
+}
+
+.factSummary:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.factDetails[open] .factSummary {
+  margin-bottom: var(--space-1);
+}
+
 /* Compact row of related links under a quickstart */
 .linkRow {
   display: flex;

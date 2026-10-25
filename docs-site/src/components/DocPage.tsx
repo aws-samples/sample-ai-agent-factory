@@ -92,8 +92,8 @@ export function DocPage({ entry, mod }: DocPageProps) {
   const pageTitle = entry.kind === 'readme' ? `${title} (README)` : title;
 
   const description = project
-    ? `${title}. Rendered from ${entry.sourcePath} in the ${project.shortName} project of the AI Agent Factory repository.`
-    : `${title}. Rendered from ${entry.sourcePath} in the AI Agent Factory repository.`;
+    ? `${title}. Rendered from ${entry.sourcePath} in the ${project.shortName} project of the Agentic AI Factory repository.`
+    : `${title}. Rendered from ${entry.sourcePath} in the Agentic AI Factory repository.`;
 
   const actions = (
     <>

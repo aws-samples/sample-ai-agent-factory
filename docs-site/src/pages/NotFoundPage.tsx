@@ -23,7 +23,7 @@ export function NotFoundPage() {
     <div className={styles.page}>
       <PageMeta
         title="Page not found"
-        description="The page you requested does not exist on the AI Agent Factory site."
+        description="The page you requested does not exist on the Agentic AI Factory site."
         status={404}
       />
       <PageHeader

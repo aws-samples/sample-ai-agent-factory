@@ -1,6 +1,6 @@
-# AI Agent Factory documentation site
+# Agentic AI Factory documentation site
 
-Static, prerendered React + TypeScript + Vite site for the AI Agent Factory repository. It renders the sub-project READMEs and docs from this repository at build time (MDX), ships no backend, makes no runtime network requests and bundles every asset from this repo.
+Static, prerendered React + TypeScript + Vite site for the Agentic AI Factory repository. It renders the sub-project READMEs and docs from this repository at build time (MDX), ships no backend, makes no runtime network requests and bundles every asset from this repo.
 
 ## Prerequisites
 

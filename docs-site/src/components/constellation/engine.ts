@@ -19,14 +19,16 @@ export const LOW_POWER_FACTOR = 0.6;
 /** Node drift speed range at 1x, in CSS pixels per second. */
 export const SPEED_MIN = 6;
 export const SPEED_MAX = 10;
-export const RADIUS_MIN = 1.5;
-export const RADIUS_MAX = 3;
-export const NODE_ALPHA_MIN = 0.35;
-export const NODE_ALPHA_MAX = 0.6;
-/** Radius of the faint glow drawn under every node. */
-export const GLOW_RADIUS = 8;
+export const RADIUS_MIN = 1.75;
+export const RADIUS_MAX = 3.25;
+export const NODE_ALPHA_MIN = 0.7;
+export const NODE_ALPHA_MAX = 1;
+/** Radius of the glow disc drawn under every node; the halo is drawn at twice this radius. */
+export const GLOW_RADIUS = 10;
+/** Peak alpha of the glow disc; the outer halo uses a third of it. */
+export const GLOW_ALPHA = 0.45;
 /** Peak alpha of an edge (two nodes touching). */
-export const EDGE_ALPHA_MAX = 0.22;
+export const EDGE_ALPHA_MAX = 0.55;
 /** Pulses are spawned this many seconds apart. */
 export const PULSE_GAP_MIN = 2;
 export const PULSE_GAP_MAX = 4;
@@ -36,6 +38,9 @@ export const PULSE_DURATION = 0.9;
 export const PULSE_TAIL = 0.18;
 /** Everything drawn inside the copy region is dimmed by this factor so the hero text stays readable. */
 export const COPY_DIM = 0.25;
+/** Colour and alpha of the hot centre drawn on top of every node core, so each node reads as a lit neon point. */
+export const CORE_HIGHLIGHT = '#FFFFFF';
+export const CORE_HIGHLIGHT_ALPHA = 0.7;
 /** Number of stage colours (learn, build, govern, scale). */
 export const STAGE_COUNT = 4;
 

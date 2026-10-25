@@ -60,9 +60,11 @@
   outline-offset: 2px;
 }
 
+/* From 640 px the control lines up with the right edge of the content container rather than the
+   viewport edge, so on wide screens it reads as part of the hero, not a stray chip at the window edge. */
 @media (min-width: 640px) {
   .toggle {
-    right: var(--space-4);
+    right: max(var(--space-4), calc((100% - var(--max-width)) / 2 + var(--page-padding-x)));
     bottom: var(--space-3);
     min-height: 32px;
   }

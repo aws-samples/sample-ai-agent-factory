@@ -31,7 +31,7 @@ const ssrDir = path.join(siteRoot, 'dist-ssr');
 const SITE_ORIGIN = 'https://aws-samples.github.io';
 const BASE_PATH = '/sample-ai-agent-factory/';
 const SITE_URL = `${SITE_ORIGIN}${BASE_PATH}`;
-const SITE_NAME = 'AI Agent Factory';
+const SITE_NAME = 'Agentic AI Factory';
 const SOCIAL_CARD_SOURCE = path.join(siteRoot, 'src', 'assets', 'social-card.png');
 const ROOT_MARKER = '<div id="root"></div>';
 const SAVED_TEMPLATE = path.join(ssrDir, 'template.html');

@@ -17,6 +17,10 @@ export interface FigureProps {
   /** Defaults to lazy; pass "eager" for the hero figure of a page. */
   loading?: ImageLoading;
   fetchPriority?: ImageFetchPriority;
+  /** Default true: the image sits on a white panel, which keeps raster diagrams with white
+   *  interiors framed in the dark theme. Pass false for screenshots that are dark themselves,
+   *  so they sit directly on the surface instead of inside a bright frame. */
+  panel?: boolean;
   className?: string;
 }
 
@@ -28,7 +32,18 @@ export interface FigureProps {
  * carry it open; body scroll is locked while it is open and focus returns to the
  * opener on close.
  */
-export function Figure({ src, alt, caption, width, height, download, loading, fetchPriority, className }: FigureProps) {
+export function Figure({
+  src,
+  alt,
+  caption,
+  width,
+  height,
+  download,
+  loading,
+  fetchPriority,
+  panel = true,
+  className,
+}: FigureProps) {
   const captionId = useId();
   const dialogRef = useRef<HTMLDialogElement>(null);
   /* `Button` does not forward refs; the opener is found inside this wrapper when focus returns. */
@@ -74,7 +89,7 @@ export function Figure({ src, alt, caption, width, height, download, loading, fe
   );
 
   return (
-    <figure className={[styles.figure, className].filter(Boolean).join(' ')} data-figure>
+    <figure className={[styles.figure, className].filter(Boolean).join(' ')} data-figure data-panel={panel ? 'light' : 'plain'}>
       <div className={styles.panel}>
         <DocImage src={src} alt={alt} width={width} height={height} loading={loading} fetchPriority={fetchPriority} />
       </div>

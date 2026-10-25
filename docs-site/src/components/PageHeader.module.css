@@ -6,6 +6,23 @@
   padding: var(--section-padding-y) 0;
 }
 
+/* The page's stage colour, for the eyebrow rule; resolves to the on-dark set inside the band. */
+.header[data-stage='learn'] {
+  --stage-color: var(--stage-learn);
+}
+
+.header[data-stage='build'] {
+  --stage-color: var(--stage-build);
+}
+
+.header[data-stage='govern'] {
+  --stage-color: var(--stage-govern);
+}
+
+.header[data-stage='scale'] {
+  --stage-color: var(--stage-scale);
+}
+
 /* Compact band for document pages: tighter padding, smaller title. */
 .header[data-variant='compact'] {
   padding: var(--space-8) 0;
@@ -72,13 +89,30 @@
   min-width: 0;
 }
 
+/* Eyebrow with the same short accent rule as SectionHeading, in the page's stage colour. */
 .eyebrow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   margin: 0 0 var(--space-2);
   font-size: var(--text-sm);
   font-weight: 600;
-  letter-spacing: var(--label-tracking);
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--color-text-inverse-muted);
+}
+
+.eyebrow::before {
+  content: '';
+  flex-shrink: 0;
+  width: 1.25rem;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--stage-color, var(--color-link));
+}
+
+.header[data-align='center'] .eyebrow {
+  justify-content: center;
 }
 
 .badge {

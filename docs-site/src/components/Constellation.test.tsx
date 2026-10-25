@@ -87,10 +87,11 @@ describe('constellation engine', () => {
       const speed = Math.hypot(node.vx, node.vy);
       expect(speed).toBeGreaterThanOrEqual(6);
       expect(speed).toBeLessThanOrEqual(10);
-      expect(node.radius).toBeGreaterThanOrEqual(1.5);
-      expect(node.radius).toBeLessThanOrEqual(3);
-      expect(node.alpha).toBeGreaterThanOrEqual(0.35);
-      expect(node.alpha).toBeLessThanOrEqual(0.6);
+      expect(node.radius).toBeGreaterThanOrEqual(1.75);
+      expect(node.radius).toBeLessThanOrEqual(3.25);
+      // Neon nodes: bright cores, so the alpha range sits in the upper part of the scale.
+      expect(node.alpha).toBeGreaterThanOrEqual(0.7);
+      expect(node.alpha).toBeLessThanOrEqual(1);
       expect([0, 1, 2, 3]).toContain(node.stage);
     }
   });
@@ -178,7 +179,7 @@ describe('constellation engine', () => {
 });
 
 describe('constellation renderer', () => {
-  it('draws every node as a glow and a core, edges as lines, and keeps alpha within [0, 1]', () => {
+  it('draws every node as a halo, a glow, a core and a hot centre, edges as lines, and keeps alpha within [0, 1]', () => {
     const state = createEngine({ width: 600, height: 300, nodeCount: 30, seed: 12 });
     const ctx = stubContext();
     const alphas: number[] = [];
@@ -191,7 +192,7 @@ describe('constellation renderer', () => {
     drawFrame(tracked, state, PALETTE, { dpr: 2, copyRegion: null });
     expect(ctx.setTransform).toHaveBeenCalledWith(2, 0, 0, 2, 0, 0);
     expect(ctx.clearRect).toHaveBeenCalledWith(0, 0, 600, 300);
-    expect(ctx.arc).toHaveBeenCalledTimes(state.nodes.length * 2);
+    expect(ctx.arc).toHaveBeenCalledTimes(state.nodes.length * 4);
     expect(ctx.stroke).toHaveBeenCalledTimes(edgesOf(state).length);
     for (const alpha of alphas) {
       expect(alpha).toBeGreaterThanOrEqual(0);

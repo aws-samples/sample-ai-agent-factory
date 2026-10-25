@@ -20,7 +20,7 @@ export function CostsAndCleanupPage() {
     <>
       <PageMeta
         title="Costs and cleanup"
-        description="What each AI Agent Factory project costs to run, as far as its README says, and how to remove everything afterwards, with source links."
+        description="What each Agentic AI Factory project costs to run, as far as its README says, and how to remove everything afterwards, with source links."
       />
       <PageHeader
         eyebrow="Start"

@@ -15,7 +15,7 @@ export function PrerequisitesPage() {
     <>
       <PageMeta
         title="Prerequisites"
-        description="What each AI Agent Factory project needs before its first deploy, at README parity, with the infrastructure tooling and validated regions it was tested in."
+        description="What each Agentic AI Factory project needs before its first deploy, at README parity, with the infrastructure tooling and validated regions it was tested in."
       />
       <PageHeader
         eyebrow="Start"

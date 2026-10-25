@@ -15,19 +15,39 @@ import styles from './start.module.css';
  * and, when the fact carries one, its note in muted text. The link's accessible
  * name names the fact and, when given, the project as written ("source for cost,
  * Self-Service") so repeated links stay distinguishable. Facts marked
- * `notDocumented` render the shared label as a muted pill.
+ * `notDocumented` render the shared label as a muted pill. `noteMode="collapsed"` puts the
+ * note behind a native disclosure so dense table cells show the value and its source first.
  */
-export function FactValue({ fact, label, project }: { fact: Fact; label: string; project?: string }) {
+export function FactValue({
+  fact,
+  label,
+  project,
+  noteMode = 'inline',
+}: {
+  fact: Fact;
+  label: string;
+  project?: string;
+  noteMode?: 'inline' | 'collapsed';
+}) {
+  const context = `${label.toLowerCase()}${project ? `, ${project}` : ''}`;
   return (
     <>
       {fact.notDocumented ? <em className={styles.notDocumented}>{factText(fact)}</em> : factText(fact)}
       {fact.source && (
         <>
           {' '}
-          <SharedSmallSource source={fact.source} context={`${label.toLowerCase()}${project ? `, ${project}` : ''}`} />
+          <SharedSmallSource source={fact.source} context={context} />
         </>
       )}
-      {fact.note && <span className={styles.factNote}>{fact.note}</span>}
+      {fact.note && noteMode === 'inline' && <span className={styles.factNote}>{fact.note}</span>}
+      {fact.note && noteMode === 'collapsed' && (
+        <details className={styles.factDetails}>
+          <summary className={styles.factSummary}>
+            Why this figure<span className="visually-hidden"> ({context})</span>
+          </summary>
+          <p className={styles.factNote}>{fact.note}</p>
+        </details>
+      )}
     </>
   );
 }

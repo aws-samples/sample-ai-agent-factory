@@ -48,7 +48,12 @@
   margin-right: var(--space-1);
 }
 
+/* Liquid-metal pill: a tint gradient that is lighter at the top, an inset highlight along the top
+   edge, and (pointer devices, motion allowed) a shine that sweeps across on hover. */
 .pill {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
@@ -56,19 +61,51 @@
   padding: var(--space-1) var(--space-3) var(--space-1) var(--space-2);
   border: 1px solid var(--stage-tint);
   border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--stage-tint) 12%, transparent);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--stage-tint) 22%, transparent),
+    color-mix(in srgb, var(--stage-tint) 8%, transparent)
+  );
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-text-primary) 18%, transparent);
   color: var(--color-text-primary);
   text-decoration: none;
   transition:
     border-color var(--transition-fast),
-    background-color var(--transition-fast);
+    box-shadow var(--transition-fast);
+}
+
+.pill::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(
+    115deg,
+    transparent 30%,
+    color-mix(in srgb, var(--color-text-primary) 16%, transparent) 50%,
+    transparent 70%
+  );
+  translate: -120% 0;
 }
 
 .pill:hover {
   text-decoration: none;
   color: var(--color-text-primary);
-  background: color-mix(in srgb, var(--stage-tint) 24%, transparent);
   border-color: var(--stage-color);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--color-text-primary) 28%, transparent),
+    0 0 18px -6px var(--stage-color);
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .pill::before {
+    transition: translate 600ms ease;
+  }
+
+  .pill:hover::before,
+  .pill:focus-visible::before {
+    translate: 120% 0;
+  }
 }
 
 .pill:focus-visible {

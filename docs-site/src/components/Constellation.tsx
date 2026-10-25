@@ -20,9 +20,9 @@ let sessionChoice: Choice = null;
 const FRAME_MS = 1000 / 30;
 const RESIZE_DEBOUNCE_MS = 150;
 const MAX_DPR = 2;
-const STAGE_VARIABLES = ['--stage-learn-on-dark', '--stage-build-on-dark', '--stage-govern-on-dark', '--stage-scale-on-dark'];
+const STAGE_VARIABLES = ['--constellation-learn', '--constellation-build', '--constellation-govern', '--constellation-scale'];
 /** Same values as tokens.css, used only if a custom property cannot be read. */
-const STAGE_FALLBACK = ['#FDBA74', '#86EFAC', '#C4B5FD', '#93C5FD'];
+const STAGE_FALLBACK = ['#FFB341', '#3DF58F', '#C084FC', '#38D6FF'];
 
 function readPalette(): Palette {
   const computed = getComputedStyle(document.documentElement);

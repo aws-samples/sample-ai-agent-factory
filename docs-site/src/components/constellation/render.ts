@@ -1,4 +1,15 @@
-import { COPY_DIM, GLOW_RADIUS, PULSE_TAIL, edgesOf, inRect, type EngineState, type Rect } from './engine';
+import {
+  COPY_DIM,
+  CORE_HIGHLIGHT,
+  CORE_HIGHLIGHT_ALPHA,
+  GLOW_ALPHA,
+  GLOW_RADIUS,
+  PULSE_TAIL,
+  edgesOf,
+  inRect,
+  type EngineState,
+  type Rect,
+} from './engine';
 
 /**
  * The subset of CanvasRenderingContext2D the renderer uses. Typed structurally so unit tests can
@@ -44,7 +55,7 @@ export function drawFrame(ctx: Canvas2D, state: EngineState, palette: Palette, {
   ctx.lineCap = 'round';
 
   // Edges: colour of the lower-index node, alpha by distance, dimmed under the copy.
-  ctx.lineWidth = 1;
+  ctx.lineWidth = 1.5;
   for (const edge of edgesOf(state)) {
     const a = nodes[edge.a];
     const b = nodes[edge.b];
@@ -58,18 +69,27 @@ export function drawFrame(ctx: Canvas2D, state: EngineState, palette: Palette, {
     ctx.stroke();
   }
 
-  // Nodes: a faint glow disc and a small solid core.
+  // Nodes: a wide soft halo, a glow disc, a solid core and a hot white centre, so each point reads as a neon light.
   for (const node of nodes) {
     const dim = dimFor(copyRegion, node.x, node.y);
     const colour = palette.stages[node.stage % palette.stages.length];
     ctx.fillStyle = colour;
-    ctx.globalAlpha = node.alpha * 0.12 * dim;
+    ctx.globalAlpha = node.alpha * (GLOW_ALPHA / 3) * dim;
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, GLOW_RADIUS * 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = node.alpha * GLOW_ALPHA * dim;
     ctx.beginPath();
     ctx.arc(node.x, node.y, GLOW_RADIUS, 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = node.alpha * dim;
     ctx.beginPath();
     ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = CORE_HIGHLIGHT;
+    ctx.globalAlpha = node.alpha * CORE_HIGHLIGHT_ALPHA * dim;
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, node.radius * 0.45, 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -87,15 +107,19 @@ export function drawFrame(ctx: Canvas2D, state: EngineState, palette: Palette, {
     const colour = palette.stages[from.stage % palette.stages.length];
     ctx.strokeStyle = colour;
     ctx.fillStyle = colour;
-    ctx.lineWidth = 1.5;
-    ctx.globalAlpha = 0.45 * dim;
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.6 * dim;
     ctx.beginPath();
     ctx.moveTo(tailX, tailY);
     ctx.lineTo(headX, headY);
     ctx.stroke();
-    ctx.globalAlpha = 0.9 * dim;
+    ctx.globalAlpha = 0.35 * dim;
     ctx.beginPath();
-    ctx.arc(headX, headY, 2, 0, Math.PI * 2);
+    ctx.arc(headX, headY, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1 * dim;
+    ctx.beginPath();
+    ctx.arc(headX, headY, 2.5, 0, Math.PI * 2);
     ctx.fill();
   }
 

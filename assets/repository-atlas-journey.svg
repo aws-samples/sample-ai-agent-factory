@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 700" role="img" aria-labelledby="atlas-title atlas-desc">
-  <title id="atlas-title">AI Agent Factory Atlas Journey</title>
-  <desc id="atlas-desc">A map of the four projects in the AI Agent Factory arranged around a shared capabilities hub: LLM Gateway, Tool Gateway, Identity and Registry, Policy and Observability. Stage 1, Learn: Workshop, hands-on platform patterns, folder workshop-building-agentic-ai-platform. Stage 2, Build: Visual Workflow Platform, drag-and-drop agent builder, folder Agentic-ai-self-service. Stage 3, Govern: MCP Governance Gateway, per-tool-call authorization, folder enterprise-mcp-governance-gateway. Stage 4, Scale: Enterprise Blueprint, multi-account reference blueprint, folder enterprise-agentic-ai-platform-blueprint. Solid arrows show the sequential journey from Learn to Build to Govern to Scale. A dashed arrow shows skipping ahead from Learn to Scale. Dotted lines connect every project to the shared capabilities. Each project is self-contained; start anywhere based on your role and goals.</desc>
+  <title id="atlas-title">Agentic AI Factory Atlas Journey</title>
+  <desc id="atlas-desc">A map of the four projects in the Agentic AI Factory arranged around a shared capabilities hub: LLM Gateway, Tool Gateway, Identity and Registry, Policy and Observability. Stage 1, Learn: Workshop, hands-on platform patterns, folder workshop-building-agentic-ai-platform. Stage 2, Build: Visual Workflow Platform, drag-and-drop agent builder, folder Agentic-ai-self-service. Stage 3, Govern: MCP Governance Gateway, per-tool-call authorization, folder enterprise-mcp-governance-gateway. Stage 4, Scale: Enterprise Blueprint, multi-account reference blueprint, folder enterprise-agentic-ai-platform-blueprint. Solid arrows show the sequential journey from Learn to Build to Govern to Scale. A dashed arrow shows skipping ahead from Learn to Scale. Dotted lines connect every project to the shared capabilities. Each project is self-contained; start anywhere based on your role and goals.</desc>
 
   <defs>
     <!-- Palette. Dark: midnight #0B1220, panel #0f1a2e, hub #1a2744. Light text: cloud #F5F7FB, mist #D7DEE8, muted #94a3b8. -->
@@ -60,7 +60,7 @@
 
     <!-- Title area -->
     <g class="a-fade">
-    <text x="600" y="54" text-anchor="middle" fill="#F5F7FB" font-size="28" font-weight="600">AI Agent Factory Atlas</text>
+    <text x="600" y="54" text-anchor="middle" fill="#F5F7FB" font-size="28" font-weight="600">Agentic AI Factory Atlas</text>
     <text x="600" y="86" text-anchor="middle" fill="#D7DEE8" font-size="18">Four complementary projects for enterprise agentic AI on AWS</text>
     </g>
 
