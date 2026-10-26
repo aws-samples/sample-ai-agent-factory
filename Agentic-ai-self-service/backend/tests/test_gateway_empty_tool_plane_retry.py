@@ -898,7 +898,8 @@ def test_hosted_mcp_target_uses_served_tools_for_cedar_actions(monkeypatch, inli
 def test_two_openapi_config_targets_each_require_a_served_tool(monkeypatch):
     """Two targets of one family are two obligations, not one set member."""
     ctrl = _FakeCtrl()
-    _install(monkeypatch, ctrl=ctrl, served=3, expected=2)
+    # Two inline actions plus one operationId from each static OpenAPI schema.
+    _install(monkeypatch, ctrl=ctrl, served=3, expected=4)
     monkeypatch.setattr(gateway_deployer, "_deploy_config_targets", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         gateway_deployer,
@@ -920,6 +921,84 @@ def test_two_openapi_config_targets_each_require_a_served_tool(monkeypatch):
 
     assert out["success"] is False
     assert "served 3/4 tools" in out["error"]
+
+
+def test_obo_static_actions_defer_tools_list_to_the_authenticated_user_gate(monkeypatch):
+    ctrl = _FakeCtrl()
+    _install(monkeypatch, ctrl=ctrl, served=0, expected=1)
+    monkeypatch.setattr(
+        gateway_deployer,
+        "workforce_gateway_identity",
+        lambda region, owner_sub: {
+            "authorizer_config": {
+                "customJWTAuthorizer": {
+                    "discoveryUrl": "https://issuer.example/.well-known/openid-configuration",
+                    "allowedClients": ["workforce-client"],
+                    "customClaims": [
+                        {
+                            "inboundTokenClaimName": "sub",
+                            "inboundTokenClaimValueType": "STRING",
+                            "authorizingClaimMatchValue": {
+                                "claimMatchValue": {"matchValueString": owner_sub},
+                                "claimMatchOperator": "EQUALS",
+                            },
+                        }
+                    ],
+                }
+            },
+            "client_info": {"provider": "workforce_jwt", "delegation_mode": "obo"},
+            "resource_server_created": False,
+        },
+    )
+    probes: list[tuple] = []
+    monkeypatch.setattr(
+        gateway_deployer,
+        "_wait_for_gateway_to_serve_tools",
+        lambda *args, **kwargs: probes.append((args, kwargs)),
+    )
+
+    out = gateway_deployer.deploy_gateway(
+        {"name": "agent-gateway"},
+        "us-east-1",
+        deployment_id="d-obo-static",
+        owner_sub="owner-sub",
+        connectors=[{"delegation_mode": "obo"}],
+    )
+
+    assert out["success"] is True, out.get("error")
+    assert out["qualified_tools"] == ["DynamicTools___t0"]
+    assert out["expected_tool_count"] == 1
+    assert out["tool_plane_verified"] is False
+    assert out["obo_required"] is True
+    assert out["delegated_identity_live_gate"] == "first_authenticated_user_tool_call"
+    assert probes == [], "an OBO gateway has no deployment-time machine token; the authenticated user is the live gate"
+
+
+def test_obo_mixed_with_served_only_targets_fails_before_partial_cedar(monkeypatch):
+    ctrl = _FakeCtrl()
+    _install(monkeypatch, ctrl=ctrl, served=0, expected=1)
+    monkeypatch.setattr(
+        gateway_deployer,
+        "workforce_gateway_identity",
+        lambda region, owner_sub: {
+            "authorizer_config": {"customJWTAuthorizer": {}},
+            "client_info": {"provider": "workforce_jwt", "delegation_mode": "obo"},
+            "resource_server_created": False,
+        },
+    )
+
+    out = gateway_deployer.deploy_gateway(
+        {"name": "agent-gateway"},
+        "us-east-1",
+        deployment_id="d-obo-mixed",
+        owner_sub="owner-sub",
+        connectors=[{"delegation_mode": "obo"}],
+        external_mcp_servers=[{"name": "dynamic"}],
+    )
+
+    assert out["success"] is False
+    assert "cannot combine static schema-bound tools" in out["error"]
+    assert "separate gateway" in out["error"]
 
 
 def test_mixed_inline_and_crawled_plane_requires_both_contributions(monkeypatch):

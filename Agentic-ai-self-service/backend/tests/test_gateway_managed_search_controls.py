@@ -1,6 +1,8 @@
 """Least-privilege and synchronization controls for managed Gateway search."""
 
+import json
 from fnmatch import fnmatchcase
+from io import BytesIO
 from unittest.mock import MagicMock, call
 
 import pytest
@@ -158,6 +160,30 @@ def _target(name: str, target_id: str, family: str, *, synced=None) -> dict:
     mcp: dict = {family: {}}
     if family == "lambda":
         mcp[family] = {"toolSchema": {"inlinePayload": [{"name": f"{name}_tool"}]}}
+    elif family == "openApiSchema":
+        mcp[family] = {
+            "inlinePayload": json.dumps(
+                {
+                    "openapi": "3.0.1",
+                    "paths": {"/thing": {"get": {"operationId": "getThing"}}},
+                }
+            )
+        }
+    elif family == "smithyModel":
+        mcp[family] = {
+            "inlinePayload": json.dumps(
+                {
+                    "smithy": "2.0",
+                    "shapes": {
+                        "example#Service": {
+                            "type": "service",
+                            "operations": [{"target": "example#PutThing"}],
+                        },
+                        "example#PutThing": {"type": "operation"},
+                    },
+                }
+            )
+        }
     detail = {
         "name": name,
         "targetId": target_id,
@@ -212,8 +238,8 @@ def test_resolver_synchronizes_only_dynamic_mcp_target_ids(monkeypatch):
         gatewayIdentifier="gateway-id",
         targetIdList=["mcp-id"],
     )
-    assert actions == ["Inline___Inline_tool"]
-    assert expected == 1
+    assert actions == ["Inline___Inline_tool", "OpenApi___getThing", "Smithy___PutThing"]
+    assert expected == 3
     assert client.get_gateway_target.call_args_list == [
         call(gatewayIdentifier="gateway-id", targetId="lambda-id"),
         call(gatewayIdentifier="gateway-id", targetId="search-id"),
@@ -226,3 +252,235 @@ def test_resolver_synchronizes_only_dynamic_mcp_target_ids(monkeypatch):
         call(gatewayIdentifier="gateway-id", targetId="smithy-id"),
         call(gatewayIdentifier="gateway-id", targetId="mcp-id"),
     ]
+
+
+def test_static_openapi_missing_operation_id_fails_before_dynamic_sync(monkeypatch):
+    client = MagicMock()
+    client.list_gateway_targets.return_value = {
+        "items": [
+            {"name": "OpenApi", "targetId": "openapi-id"},
+            {"name": "ExternalMcp", "targetId": "mcp-id"},
+        ]
+    }
+    invalid = _target("OpenApi", "openapi-id", "openApiSchema")
+    invalid["targetConfiguration"]["mcp"]["openApiSchema"]["inlinePayload"] = json.dumps(
+        {"openapi": "3.0.1", "paths": {"/thing": {"get": {"responses": {}}}}}
+    )
+    client.get_gateway_target.return_value = invalid
+
+    with pytest.raises(RuntimeError, match="1 operation.*without operationId"):
+        gateway_deployer._resolve_gateway_tool_actions(client, "gateway-id", timeout=1)
+
+    client.synchronize_gateway_targets.assert_not_called()
+
+
+def test_static_action_derivation_removal_mutation_fails_closed(monkeypatch):
+    client = MagicMock()
+    client.list_gateway_targets.return_value = {"items": [{"name": "OpenApi", "targetId": "openapi-id"}]}
+    client.get_gateway_target.return_value = _target("OpenApi", "openapi-id", "openApiSchema")
+    monkeypatch.setattr(gateway_deployer, "_static_schema_tool_names", lambda *_args, **_kwargs: [])
+
+    with pytest.raises(RuntimeError, match="static target .* exposes no named tools"):
+        gateway_deployer._resolve_gateway_tool_actions(client, "gateway-id", timeout=1)
+
+    client.synchronize_gateway_targets.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {"openapi": "3.0.1", "paths": {}},
+            "exposes no named tools",
+        ),
+        (
+            {
+                "openapi": "3.0.1",
+                "paths": {
+                    "/one": {"get": {"operationId": "same"}},
+                    "/two": {"post": {"operationId": "same"}},
+                },
+            },
+            "duplicate tool names",
+        ),
+        (
+            {
+                "openapi": "3.0.1",
+                "paths": {"/one": {"get": {"operationId": "not/valid"}}},
+            },
+            "invalid tool name",
+        ),
+    ],
+    ids=["empty", "duplicate", "invalid-name"],
+)
+def test_static_openapi_action_manifest_rejects_unsafe_shapes(payload, message):
+    detail = {"targetConfiguration": {"mcp": {"openApiSchema": {"inlinePayload": json.dumps(payload)}}}}
+
+    with pytest.raises(RuntimeError, match=message):
+        gateway_deployer._static_schema_tool_names(detail, "OpenApi")
+
+
+def test_staged_openapi_action_manifest_is_owner_pinned(monkeypatch):
+    payload = json.dumps(
+        {
+            "openapi": "3.0.1",
+            "paths": {"/whoami": {"get": {"operationId": "whoami"}}},
+        }
+    ).encode()
+    s3 = MagicMock()
+    s3.get_object.return_value = {
+        "ContentLength": len(payload),
+        "Body": BytesIO(payload),
+    }
+    monkeypatch.setattr(gateway_deployer, "_aws_client", lambda service, **_kwargs: s3)
+    detail = {
+        "targetConfiguration": {
+            "mcp": {
+                "openApiSchema": {
+                    "s3": {
+                        "uri": "s3://agentcore-flows-artifacts-111122223333-eu-west-1/connector-specs/spec.json",
+                        "bucketOwnerAccountId": "111122223333",
+                    }
+                }
+            }
+        }
+    }
+
+    assert gateway_deployer._static_schema_tool_names(
+        detail,
+        "OpenApi",
+        region="eu-west-1",
+    ) == ["whoami"]
+    s3.get_object.assert_called_once_with(
+        Bucket="agentcore-flows-artifacts-111122223333-eu-west-1",
+        Key="connector-specs/spec.json",
+        ExpectedBucketOwner="111122223333",
+    )
+
+
+def test_static_schema_s3_without_an_owner_is_rejected_before_read(monkeypatch):
+    s3 = MagicMock()
+    monkeypatch.setattr(gateway_deployer, "_aws_client", lambda service, **_kwargs: s3)
+    detail = {
+        "targetConfiguration": {
+            "mcp": {"openApiSchema": {"s3": {"uri": "s3://agentcore-flows-artifacts-111122223333-eu-west-1/spec.json"}}}
+        }
+    }
+
+    with pytest.raises(RuntimeError, match="owner is absent or invalid"):
+        gateway_deployer._static_schema_tool_names(detail, "OpenApi", region="eu-west-1")
+
+    s3.get_object.assert_not_called()
+
+
+def test_static_openapi_yaml_operation_ids_are_supported():
+    detail = {
+        "targetConfiguration": {
+            "mcp": {
+                "openApiSchema": {
+                    "inlinePayload": """openapi: 3.0.1
+paths:
+  /whoami:
+    get:
+      operationId: whoami
+"""
+                }
+            }
+        }
+    }
+
+    assert gateway_deployer._static_schema_tool_names(detail, "OpenApi") == ["whoami"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"openapi":"3.0.1","paths":{},"paths":{}}',
+        "openapi: 3.0.1\npaths: {}\npaths: {}\n",
+    ],
+    ids=["json", "yaml"],
+)
+def test_static_schema_duplicate_mapping_keys_are_rejected(payload):
+    detail = {"targetConfiguration": {"mcp": {"openApiSchema": {"inlinePayload": payload}}}}
+
+    with pytest.raises(RuntimeError, match="duplicate key"):
+        gateway_deployer._static_schema_tool_names(detail, "OpenApi")
+
+
+def test_staged_schema_owner_falls_back_to_the_scoped_sts_identity(monkeypatch):
+    payload = b'{"openapi":"3.0.1","paths":{"/x":{"get":{"operationId":"getX"}}}}'
+    s3 = MagicMock()
+    s3.get_object.return_value = {"ContentLength": len(payload), "Body": BytesIO(payload)}
+    sts = MagicMock()
+    sts.get_caller_identity.return_value = {"Account": ACCOUNT}
+    monkeypatch.setattr(
+        gateway_deployer,
+        "_aws_client",
+        lambda service, **_kwargs: sts if service == "sts" else s3,
+    )
+    detail = {
+        "targetConfiguration": {
+            "mcp": {"openApiSchema": {"s3": {"uri": f"s3://agentcore-flows-artifacts-{ACCOUNT}-eu-west-1/spec.json"}}}
+        }
+    }
+
+    assert gateway_deployer._static_schema_tool_names(detail, "OpenApi", region=REGION) == ["getX"]
+    sts.get_caller_identity.assert_called_once_with()
+    s3.get_object.assert_called_once_with(
+        Bucket=f"agentcore-flows-artifacts-{ACCOUNT}-eu-west-1",
+        Key="spec.json",
+        ExpectedBucketOwner=ACCOUNT,
+    )
+
+
+def test_staged_schema_outside_the_bound_artifact_bucket_is_rejected(monkeypatch):
+    session = MagicMock()
+    detail = {
+        "targetConfiguration": {
+            "mcp": {
+                "openApiSchema": {
+                    "s3": {
+                        "uri": "s3://foreign-bucket/spec.json",
+                        "bucketOwnerAccountId": ACCOUNT,
+                    }
+                }
+            }
+        }
+    }
+
+    with gateway_deployer.gateway_aws_session(
+        session,
+        artifact_bucket=f"agentcore-flows-artifacts-{ACCOUNT}-eu-west-1",
+        expected_bucket_owner=ACCOUNT,
+    ):
+        with pytest.raises(RuntimeError, match="bucket differs"):
+            gateway_deployer._static_schema_tool_names(detail, "OpenApi", region=REGION)
+
+    session.client.assert_not_called()
+
+
+def test_staged_schema_over_ten_mib_is_rejected_before_body_read(monkeypatch):
+    body = MagicMock()
+    s3 = MagicMock()
+    s3.get_object.return_value = {
+        "ContentLength": gateway_deployer._STATIC_SCHEMA_MAX_BYTES + 1,
+        "Body": body,
+    }
+    monkeypatch.setattr(gateway_deployer, "_aws_client", lambda service, **_kwargs: s3)
+    detail = {
+        "targetConfiguration": {
+            "mcp": {
+                "openApiSchema": {
+                    "s3": {
+                        "uri": f"s3://agentcore-flows-artifacts-{ACCOUNT}-eu-west-1/spec.json",
+                        "bucketOwnerAccountId": ACCOUNT,
+                    }
+                }
+            }
+        }
+    }
+
+    with pytest.raises(RuntimeError, match="exceeds the 10 MiB read limit"):
+        gateway_deployer._static_schema_tool_names(detail, "OpenApi", region=REGION)
+
+    body.read.assert_not_called()
