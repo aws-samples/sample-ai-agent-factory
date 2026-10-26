@@ -169,13 +169,15 @@ def _target(name: str, target_id: str, family: str, *, synced=None) -> dict:
     return detail
 
 
-def test_resolver_synchronizes_only_supported_crawled_target_ids(monkeypatch):
+def test_resolver_synchronizes_only_dynamic_mcp_target_ids(monkeypatch):
     client = MagicMock()
     summaries = {
         "items": [
             {"name": "Inline", "targetId": "lambda-id"},
             {"name": "Search", "targetId": "search-id"},
             {"name": "OpenApi", "targetId": "openapi-id"},
+            {"name": "Smithy", "targetId": "smithy-id"},
+            {"name": "ExternalMcp", "targetId": "mcp-id"},
         ]
     }
     client.list_gateway_targets.side_effect = [summaries, summaries]
@@ -183,28 +185,32 @@ def test_resolver_synchronizes_only_supported_crawled_target_ids(monkeypatch):
         "lambda-id": _target("Inline", "lambda-id", "lambda"),
         "search-id": _target("Search", "search-id", "connector", synced="old-search"),
         "openapi-id": _target("OpenApi", "openapi-id", "openApiSchema", synced="old-openapi"),
+        "smithy-id": _target("Smithy", "smithy-id", "smithyModel", synced="old-smithy"),
+        "mcp-id": _target("ExternalMcp", "mcp-id", "mcpServer", synced="old-mcp"),
     }
     post = {
-        "lambda-id": _target("Inline", "lambda-id", "lambda"),
-        "search-id": _target("Search", "search-id", "connector", synced="new-search"),
-        "openapi-id": _target("OpenApi", "openapi-id", "openApiSchema", synced="new-openapi"),
+        **pre,
+        "mcp-id": _target("ExternalMcp", "mcp-id", "mcpServer", synced="new-mcp"),
     }
-    reads = [
+    client.get_gateway_target.side_effect = [
         pre["lambda-id"],
         pre["search-id"],
         pre["openapi-id"],
+        pre["smithy-id"],
+        pre["mcp-id"],
         post["lambda-id"],
         post["search-id"],
         post["openapi-id"],
+        post["smithy-id"],
+        post["mcp-id"],
     ]
-    client.get_gateway_target.side_effect = reads
     monkeypatch.setattr(gateway_deployer.time, "sleep", lambda _seconds: None)
 
     actions, expected = gateway_deployer._resolve_gateway_tool_actions(client, "gateway-id", timeout=1)
 
     client.synchronize_gateway_targets.assert_called_once_with(
         gatewayIdentifier="gateway-id",
-        targetIdList=["openapi-id"],
+        targetIdList=["mcp-id"],
     )
     assert actions == ["Inline___Inline_tool"]
     assert expected == 1
@@ -212,7 +218,11 @@ def test_resolver_synchronizes_only_supported_crawled_target_ids(monkeypatch):
         call(gatewayIdentifier="gateway-id", targetId="lambda-id"),
         call(gatewayIdentifier="gateway-id", targetId="search-id"),
         call(gatewayIdentifier="gateway-id", targetId="openapi-id"),
+        call(gatewayIdentifier="gateway-id", targetId="smithy-id"),
+        call(gatewayIdentifier="gateway-id", targetId="mcp-id"),
         call(gatewayIdentifier="gateway-id", targetId="lambda-id"),
         call(gatewayIdentifier="gateway-id", targetId="search-id"),
         call(gatewayIdentifier="gateway-id", targetId="openapi-id"),
+        call(gatewayIdentifier="gateway-id", targetId="smithy-id"),
+        call(gatewayIdentifier="gateway-id", targetId="mcp-id"),
     ]

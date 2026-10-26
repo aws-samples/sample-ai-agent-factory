@@ -458,9 +458,12 @@ def _resolve_gateway_tool_actions(agentcore_ctrl, gateway_id: str, timeout: int 
 
     * inline Lambda targets are ready when their exact read-back status is
       ``READY``; they never receive ``lastSynchronizedAt``;
-    * crawled OpenAPI, Smithy, and MCP-server targets require an exact-ID
+    * static OpenAPI and Smithy targets publish their supplied schema and are
+      ready after exact configuration read-back plus ``READY``/``ACTIVE`` status;
+      live AgentCore rejects synchronizing ``OPEN_API_SCHEMA`` targets;
+    * dynamic MCP-server targets require an exact-ID
       ``SynchronizeGatewayTargets`` call and a fresh synchronization receipt;
-    * AWS-managed ``connector`` targets explicitly do **not** support
+    * AWS-managed ``connector`` targets also explicitly do **not** support
       ``SynchronizeGatewayTargets`` (live AgentCore returns ``ValidationException:
       Target type CONNECTOR is not supported for synchronization``). They are
       ready after exact configuration read-back and ``READY``/``ACTIVE`` status,
@@ -496,8 +499,10 @@ def _resolve_gateway_tool_actions(agentcore_ctrl, gateway_id: str, timeout: int 
             return "inline"
         if "connector" in mcp:
             return "managed_connector"
-        if set(mcp) & {"openApiSchema", "smithyModel", "mcpServer"}:
-            return "crawled"
+        if set(mcp) & {"openApiSchema", "smithyModel"}:
+            return "static_schema"
+        if "mcpServer" in mcp:
+            return "dynamic_mcp"
         return "unknown"
 
     # Classify every target before mutating anything. A transient Get failure or
@@ -505,7 +510,7 @@ def _resolve_gateway_tool_actions(agentcore_ctrl, gateway_id: str, timeout: int 
     # is supported.
     pre_sync: dict[str, object] = {}
     target_families: dict[str, str] = {}
-    crawled_target_ids: list[str] = []
+    dynamic_target_ids: list[str] = []
     initial_ids = _list_target_ids()
     if not initial_ids:
         return [], 0
@@ -521,14 +526,14 @@ def _resolve_gateway_tool_actions(agentcore_ctrl, gateway_id: str, timeout: int 
         if family == "unknown":
             raise RuntimeError(f"Gateway target {target_id} has an unsupported target family")
         target_families[target_id] = family
-        if family == "crawled":
+        if family == "dynamic_mcp":
             pre_sync[target_id] = detail.get("lastSynchronizedAt")
-            crawled_target_ids.append(target_id)
+            dynamic_target_ids.append(target_id)
 
-    if crawled_target_ids:
+    if dynamic_target_ids:
         agentcore_ctrl.synchronize_gateway_targets(
             gatewayIdentifier=gateway_id,
-            targetIdList=sorted(set(crawled_target_ids)),
+            targetIdList=sorted(set(dynamic_target_ids)),
         )
 
     deadline = _t.time() + timeout
@@ -556,7 +561,7 @@ def _resolve_gateway_tool_actions(agentcore_ctrl, gateway_id: str, timeout: int 
             tools = _configured_tools(detail)
             expected += len(tools)
             status = (detail.get("status") or "").upper()
-            if family in {"inline", "managed_connector"}:
+            if family in {"inline", "managed_connector", "static_schema"}:
                 target_ready = status in {"READY", "ACTIVE"}
             else:
                 synchronized_at = detail.get("lastSynchronizedAt")
@@ -574,7 +579,7 @@ def _resolve_gateway_tool_actions(agentcore_ctrl, gateway_id: str, timeout: int 
                     actions.append(f"{target_name}___{name}")
         if ids and all_ready and len(actions) == expected:
             logger.warning(
-                "Gateway %s target control plane ready: %d inline tools; managed connectors verified without synchronization",
+                "Gateway %s target control plane ready: %d inline tools; static schemas and managed connectors verified without synchronization",
                 gateway_id,
                 expected,
             )
@@ -7057,11 +7062,11 @@ def deploy_gateway(
             )
 
         # Step 5 readiness is performed once, authoritatively, by
-        # _resolve_gateway_tool_actions below. It synchronizes only crawled
-        # OpenAPI/Smithy/MCP-server target IDs and requires fresh receipts.
-        # AWS-managed connector targets reject SynchronizeGatewayTargets, so
-        # their exact READY read-back is followed by the same served MCP
-        # tools/list proof used for every crawled-plane declaration.
+        # _resolve_gateway_tool_actions below. It synchronizes only dynamic
+        # MCP-server target IDs and requires fresh receipts. Static OpenAPI/Smithy
+        # schemas and AWS-managed connector targets reject synchronization, so
+        # their exact READY read-back is followed by the served MCP tools/list
+        # proof where deployment-time authentication permits it.
 
         # Bug 138: if the caller asked for tools (built-in and/or custom) but the
         # gateway ended up with ZERO targets, the agent would deploy against an
