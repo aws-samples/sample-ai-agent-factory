@@ -146,9 +146,14 @@ source of truth. Internal teardown authority and credential leaves remain exclud
 Generated agents create a fresh MCP client per request, present that request-local JWT
 to the owner-bound Gateway, and close the client after every success or failure path.
 The Gateway target's `grantType=TOKEN_EXCHANGE` performs the configured RFC 8693 or
-RFC 7523 exchange. Missing, expired, Basic, SigV4, malformed, or wrong-target
-credentials fail before Runtime dispatch; no client-credentials fallback exists.
-Non-OBO agents retain their existing cached M2M/static authentication path.
+RFC 7523 exchange. An OBO Gateway execution role receives the JWT-specific
+`bedrock-agentcore:GetWorkloadAccessTokenForJWT` action on only its default identity
+directory and gateway-name-scoped workload identity, in addition to the generic
+workload-token action; non-OBO Gateway roles do not receive that JWT grant. This is
+the required first leg before `GetResourceOauth2Token`. Missing, expired, Basic,
+SigV4, malformed, or wrong-target credentials fail before Runtime dispatch; no
+client-credentials fallback exists. Non-OBO agents retain their existing cached
+M2M/static authentication path.
 
 Tokens are never stored in deployment state, Runtime payloads, logs, Memory,
 tool receipts, or returned evidence. Responses may include non-credential

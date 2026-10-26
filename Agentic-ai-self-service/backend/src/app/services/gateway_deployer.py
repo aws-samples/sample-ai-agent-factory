@@ -5290,6 +5290,7 @@ def _build_gateway_role_policy(
     account_id: str,
     gateway_name: str,
     managed_web_search: bool = False,
+    obo_required: bool = False,
     owner_sub: str = "",
     partition: str = "aws",
 ) -> dict:
@@ -5316,6 +5317,11 @@ def _build_gateway_role_policy(
         workload_identity_arn,
     ]
     secret_prefix = connector_secret_owner_prefix(owner_sub)
+    workload_identity_actions = ["bedrock-agentcore:GetWorkloadAccessToken"]
+    if obo_required:
+        # Gateway automatically performs this JWT-specific first leg before
+        # GetResourceOauth2Token. The generic action does not authorize it.
+        workload_identity_actions.append("bedrock-agentcore:GetWorkloadAccessTokenForJWT")
 
     statements = [
         {
@@ -5337,7 +5343,7 @@ def _build_gateway_role_policy(
         {
             "Sid": "WorkloadIdentityToken",
             "Effect": "Allow",
-            "Action": ["bedrock-agentcore:GetWorkloadAccessToken"],
+            "Action": workload_identity_actions,
             "Resource": [identity_directory_arn, workload_identity_arn],
         },
         {
@@ -5381,6 +5387,7 @@ def _gateway_role_policy_for(
     gateway_name: str,
     managed_web_search: bool,
     owner_sub: str,
+    obo_required: bool = False,
 ) -> dict:
     parts = str(role_arn or "").split(":", 5)
     if len(parts) != 6 or parts[0] != "arn" or parts[2] != "iam" or not parts[4]:
@@ -5390,6 +5397,7 @@ def _gateway_role_policy_for(
         account_id=parts[4],
         gateway_name=gateway_name,
         managed_web_search=managed_web_search,
+        obo_required=obo_required,
         owner_sub=owner_sub,
         partition=parts[1],
     )
@@ -6427,6 +6435,7 @@ def deploy_gateway(
                 gateway_name=gateway_name,
                 managed_web_search=managed_web_search,
                 owner_sub=owner_sub,
+                obo_required=obo_required,
             )
             iam_client.put_role_policy(
                 RoleName=gw_role_name,
@@ -6462,6 +6471,7 @@ def deploy_gateway(
                 gateway_name=gateway_name,
                 managed_web_search=managed_web_search,
                 owner_sub=owner_sub,
+                obo_required=obo_required,
             )
             iam_client.put_role_policy(
                 RoleName=gw_role_name,

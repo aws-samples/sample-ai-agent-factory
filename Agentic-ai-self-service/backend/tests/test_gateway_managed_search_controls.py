@@ -32,7 +32,7 @@ def _resource_matches(statement: dict, resource: str) -> bool:
     return any(fnmatchcase(resource, pattern) for pattern in patterns)
 
 
-def _assert_managed_role_contract(policy: dict) -> None:
+def _assert_managed_role_contract(policy: dict, *, obo_required: bool = False) -> None:
     statements = _statements(policy)
     assert set(statements) == {
         "GatewayInvocation",
@@ -43,7 +43,7 @@ def _assert_managed_role_contract(policy: dict) -> None:
         "InvokeGatewayToolLambdas",
         "ManagedWebSearch",
     }
-    assert _actions(policy) == {
+    expected_actions = {
         "bedrock-agentcore:InvokeGateway",
         "bedrock-agentcore:GetPolicyEngine",
         "bedrock-agentcore:AuthorizeAction",
@@ -55,6 +55,9 @@ def _assert_managed_role_contract(policy: dict) -> None:
         "lambda:InvokeFunction",
         "bedrock-agentcore:InvokeWebSearch",
     }
+    if obo_required:
+        expected_actions.add("bedrock-agentcore:GetWorkloadAccessTokenForJWT")
+    assert _actions(policy) == expected_actions
     assert all(not action.endswith("*") for action in _actions(policy))
     assert statements["GatewayInvocation"]["Resource"] == (
         f"arn:aws:bedrock-agentcore:{REGION}:{ACCOUNT}:gateway/{GATEWAY_NAME}-*"
@@ -102,6 +105,36 @@ def test_gateway_role_has_only_exact_runtime_actions_and_managed_search_resource
     assert not _resource_matches(search, f"arn:aws:bedrock-agentcore:{REGION}:aws:tool/web-search.v2")
 
 
+def test_obo_gateway_role_grants_jwt_workload_token_only_for_obo():
+    standard = gateway_deployer._build_gateway_role_policy(
+        region=REGION,
+        account_id=ACCOUNT,
+        gateway_name=GATEWAY_NAME,
+        managed_web_search=True,
+        obo_required=False,
+        owner_sub=OWNER,
+    )
+    obo = gateway_deployer._build_gateway_role_policy(
+        region=REGION,
+        account_id=ACCOUNT,
+        gateway_name=GATEWAY_NAME,
+        managed_web_search=True,
+        obo_required=True,
+        owner_sub=OWNER,
+    )
+
+    assert _statements(standard)["WorkloadIdentityToken"]["Action"] == ["bedrock-agentcore:GetWorkloadAccessToken"]
+    assert _statements(obo)["WorkloadIdentityToken"]["Action"] == [
+        "bedrock-agentcore:GetWorkloadAccessToken",
+        "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
+    ]
+    assert (
+        _statements(obo)["WorkloadIdentityToken"]["Resource"]
+        == _statements(standard)["WorkloadIdentityToken"]["Resource"]
+    )
+    _assert_managed_role_contract(obo, obo_required=True)
+
+
 def test_non_search_gateway_has_no_invoke_web_search_grant():
     policy = gateway_deployer._build_gateway_role_policy(
         region=REGION,
@@ -133,13 +166,15 @@ def test_role_arn_wrapper_rejects_missing_account_instead_of_widening_policy():
         )
 
 
-@pytest.mark.parametrize("mutation", ["search", "workload", "oauth", "gateway"])
+@pytest.mark.parametrize("mutation", ["search", "workload", "workload_jwt", "oauth", "gateway"])
 def test_role_permission_removal_mutations_break_the_contract(mutation: str):
+    obo_required = mutation == "workload_jwt"
     policy = gateway_deployer._build_gateway_role_policy(
         region=REGION,
         account_id=ACCOUNT,
         gateway_name=GATEWAY_NAME,
         managed_web_search=True,
+        obo_required=obo_required,
         owner_sub=OWNER,
     )
     statements = _statements(policy)
@@ -147,13 +182,15 @@ def test_role_permission_removal_mutations_break_the_contract(mutation: str):
         policy["Statement"].remove(statements["ManagedWebSearch"])
     elif mutation == "workload":
         statements["WorkloadIdentityToken"]["Action"].remove("bedrock-agentcore:GetWorkloadAccessToken")
+    elif mutation == "workload_jwt":
+        statements["WorkloadIdentityToken"]["Action"].remove("bedrock-agentcore:GetWorkloadAccessTokenForJWT")
     elif mutation == "oauth":
         statements["OutboundCredentialTokens"]["Action"].remove("bedrock-agentcore:GetResourceOauth2Token")
     else:
         statements["GatewayInvocation"]["Action"].remove("bedrock-agentcore:InvokeGateway")
 
     with pytest.raises(AssertionError):
-        _assert_managed_role_contract(policy)
+        _assert_managed_role_contract(policy, obo_required=obo_required)
 
 
 def _target(name: str, target_id: str, family: str, *, synced=None) -> dict:

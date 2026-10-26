@@ -30,6 +30,7 @@ RuntimeError message and an SFN failure cause.
 """
 
 import contextlib
+import json
 import socket
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -53,10 +54,14 @@ class _FakeIamExceptions:
 class _FakeIam:
     exceptions = _FakeIamExceptions()
 
+    def __init__(self):
+        self.role_policies: list[dict] = []
+
     def create_role(self, **kw):
         return {"Role": {"Arn": f"arn:aws:iam::123456789012:role/{kw['RoleName']}"}}
 
     def put_role_policy(self, **kw):
+        self.role_policies.append(kw)
         return {}
 
 
@@ -926,6 +931,8 @@ def test_two_openapi_config_targets_each_require_a_served_tool(monkeypatch):
 def test_obo_static_actions_defer_tools_list_to_the_authenticated_user_gate(monkeypatch):
     ctrl = _FakeCtrl()
     _install(monkeypatch, ctrl=ctrl, served=0, expected=1)
+    iam = _FakeIam()
+    monkeypatch.setattr(gateway_deployer, "_create_iam_client", lambda: iam)
     monkeypatch.setattr(
         gateway_deployer,
         "workforce_gateway_identity",
@@ -971,6 +978,15 @@ def test_obo_static_actions_defer_tools_list_to_the_authenticated_user_gate(monk
     assert out["tool_plane_verified"] is False
     assert out["obo_required"] is True
     assert out["delegated_identity_live_gate"] == "first_authenticated_user_tool_call"
+    assert len(iam.role_policies) == 1
+    role_policy = json.loads(iam.role_policies[0]["PolicyDocument"])
+    workload_statement = next(
+        statement for statement in role_policy["Statement"] if statement["Sid"] == "WorkloadIdentityToken"
+    )
+    assert workload_statement["Action"] == [
+        "bedrock-agentcore:GetWorkloadAccessToken",
+        "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
+    ]
     assert probes == [], "an OBO gateway has no deployment-time machine token; the authenticated user is the live gate"
 
 
