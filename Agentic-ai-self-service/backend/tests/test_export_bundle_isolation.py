@@ -360,6 +360,10 @@ _BUCKET = "bucket-level call on an operator-registered bucket; addresses no obje
 _WRITE = "writes under deployments/ or connector-specs/ with a server-built key; never an export prefix"
 _KB = "reads the BUCKET's tags to authorize a caller-supplied KB source; addresses no object"
 _INTERNAL = "inside the DeploymentId-gated delete, on the key it was given"
+_STATIC_SCHEMA = (
+    "reads at most 10 MiB from the deployment-bound artifact bucket; the URI comes "
+    "from exact AgentCore target read-back and ExpectedBucketOwner is mandatory"
+)
 
 # One row per CALL SITE: (module, innermost function, op, the call's own arguments) -> (count, why).
 # The arguments are part of the key, so a new call inside an already-reviewed function is a
@@ -404,6 +408,9 @@ S3_CALL_INVENTORY = {
     ('services/gateway_deployer.py', '_build_openapi_schema', 'put_object',
      '**put_kwargs'):
         (1, _WRITE + "; key is connector-specs/<safe id>/<uuid12>.json, built in this function"),
+    ('services/gateway_deployer.py', '_read_static_schema_text', 'get_object',
+     'Bucket=parsed.netloc, Key=key, ExpectedBucketOwner=expected_owner'):
+        (1, _STATIC_SCHEMA),
     ('services/resource_ownership.py', '_exact_key_versions', 'list_object_versions',
      'Bucket=bucket, Prefix=key, **owner, **token'):
         (1, _TEARDOWN),
@@ -685,6 +692,7 @@ S3_HELPERS = {
     "validate_artifact_bucket": "services/deploy_target.py",
     "_authorize_s3_uri": "step_handlers/knowledge_base_step.py",
     "_build_openapi_schema": "services/gateway_deployer.py",
+    "_read_static_schema_text": "services/gateway_deployer.py",
     "_handle_code_package_create_update": "services/cfn_provider/handler.py",
     "_iter_versions": "services/cfn_provider/handler.py",
     "_delete_every_version": "services/cfn_provider/handler.py",
@@ -733,6 +741,12 @@ S3_HELPER_CALLER_INVENTORY = {
     ('services/gateway_deployer.py', '_deploy_connector_targets_inner', '_build_openapi_schema',
      "spec_inline, connector_id=connector_id or 'generic', region=region, deployment_id=deployment_id"):
         (1, _WRITE + "; the helper builds its own key"),
+    ('services/gateway_deployer.py', '_static_schema_tool_names', '_read_static_schema_text',
+     "mcp['openApiSchema'], region=region"):
+        (1, _STATIC_SCHEMA),
+    ('services/gateway_deployer.py', '_static_schema_tool_names', '_read_static_schema_text',
+     "mcp['smithyModel'], region=region"):
+        (1, _STATIC_SCHEMA),
     ('services/resource_ownership.py', 'delete_owned_s3_object', 'assert_s3_object_owned',
      'client, bucket, key, region=region, deployment_id=deployment_id, expected_bucket_owner=expected_bucket_owner, version_id=version_id'):
         (1, _INTERNAL),
