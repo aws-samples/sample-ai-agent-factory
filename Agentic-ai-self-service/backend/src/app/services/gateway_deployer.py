@@ -24,7 +24,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 import boto3
-import yaml
 
 from app.services import codegen_templates
 from app.services.aws_errors import error_code, is_error
@@ -526,6 +525,10 @@ def _load_static_schema_document(text: str, label: str) -> dict:
     try:
         document = json.loads(text, object_pairs_hook=_unique_json_object)
     except json.JSONDecodeError:
+        try:
+            import yaml
+        except ImportError as exc:
+            raise RuntimeError("Gateway YAML schema parsing requires the pinned PyYAML dependency") from exc
 
         class _UniqueSafeLoader(yaml.SafeLoader):
             pass

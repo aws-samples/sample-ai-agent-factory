@@ -484,3 +484,18 @@ def test_staged_schema_over_ten_mib_is_rejected_before_body_read(monkeypatch):
         gateway_deployer._static_schema_tool_names(detail, "OpenApi", region=REGION)
 
     body.read.assert_not_called()
+
+
+def test_yaml_parser_is_lazy_so_infra_only_imports_do_not_require_pyyaml():
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(gateway_deployer))
+    top_level_yaml_imports = [
+        node
+        for node in tree.body
+        if (isinstance(node, ast.Import) and any(alias.name == "yaml" for alias in node.names))
+        or (isinstance(node, ast.ImportFrom) and node.module == "yaml")
+    ]
+
+    assert top_level_yaml_imports == []
