@@ -729,7 +729,7 @@ def test_pip_check_diagnostics_redact_urls_and_credential_labels(tmp_path):
     fake_python.write_text(
         "#!/usr/bin/env bash\n"
         'if [ "$1" = "-m" ] && [ "$2" = "pip" ] && [ "$3" = "check" ]; then\n'
-        "  echo 'broken https://user:password@example.invalid/path token=top-secret' >&2\n"
+        "  echo 'broken https://user:password@example.invalid/path token=top-secret' >&2\n"  # pragma: allowlist secret
         "  exit 1\n"
         "fi\n"
         f'exec {shlex.quote(sys.executable)} "$@"\n',

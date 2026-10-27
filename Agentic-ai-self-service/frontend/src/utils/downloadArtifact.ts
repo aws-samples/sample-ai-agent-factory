@@ -221,22 +221,27 @@ function bytesToHex(bytes: ArrayBuffer): string {
   return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-async function verifyBytes(bytes: Uint8Array<ArrayBuffer>, metadata: ArtifactMetadata): Promise<ArrayBuffer> {
+async function verifyBytes(bytes: Uint8Array<ArrayBuffer>, metadata: ArtifactMetadata): Promise<Uint8Array<ArrayBuffer>> {
   if (bytes.byteLength !== metadata.archiveBytes || bytes.byteLength < 1 || bytes.byteLength > MAX_ARCHIVE_BYTES) {
     invalidArtifact();
   }
   const subtle = globalThis.crypto?.subtle;
   if (!subtle || typeof subtle.digest !== 'function') invalidArtifact();
-  const digest = await subtle.digest('SHA-256', bytes.buffer);
+  // Digest a fresh typed-array VIEW, not the backing ArrayBuffer. A buffer that was created
+  // in another realm (a DOM response body under a test runtime, an iframe) fails WebIDL's
+  // BufferSource check in some engines even though the bytes are fine; a view constructed
+  // here is always this realm's, and the copy also severs any alias the caller still holds.
+  const view = new Uint8Array(bytes);
+  const digest = await subtle.digest('SHA-256', view);
   if (bytesToHex(digest) !== metadata.archiveSha256) invalidArtifact();
-  return bytes.buffer;
+  return view;
 }
 
-function saveBytes(buffer: ArrayBuffer, filename: string): void {
+function saveBytes(bytes: Uint8Array<ArrayBuffer>, filename: string): void {
   let objectUrl: string | null = null;
   let anchor: HTMLAnchorElement | null = null;
   try {
-    objectUrl = URL.createObjectURL(new Blob([buffer], { type: 'application/zip' }));
+    objectUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }));
     anchor = document.createElement('a');
     anchor.href = objectUrl;
     anchor.download = filename;
@@ -258,8 +263,8 @@ export async function downloadArtifact(value: unknown): Promise<void> {
     const bytes = metadata.source.kind === 'base64'
       ? decodeBase64(metadata.source.value)
       : await fetchS3Bytes(metadata.source.value, metadata.archiveBytes);
-    const verifiedBuffer = await verifyBytes(bytes, metadata);
-    saveBytes(verifiedBuffer, metadata.filename);
+    const verified = await verifyBytes(bytes, metadata);
+    saveBytes(verified, metadata.filename);
   } catch {
     throw new Error(ARTIFACT_INTEGRITY_ERROR);
   }

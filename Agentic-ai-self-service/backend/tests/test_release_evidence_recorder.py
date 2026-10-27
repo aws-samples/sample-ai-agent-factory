@@ -769,6 +769,8 @@ def test_complete_run_seals_verifies_and_is_portable_to_clean_clone(
     copied = _copy_run(run_dir, tmp_path / "portable")
     assert release_evidence.verify_run(copied)["final_digest"] == final["final_digest"]
     (project / "README.md").write_text("# changed\n")
+    _git(clone, "config", "user.name", "Evidence Test")
+    _git(clone, "config", "user.email", "evidence@example.invalid")
     _git(clone, "add", "-A")
     _git(clone, "commit", "-q", "-m", "drift")
     with pytest.raises(release_evidence.EvidenceError, match="Source identity changed"):

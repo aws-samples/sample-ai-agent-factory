@@ -243,14 +243,16 @@ def test_ci_cannot_skip_release_documentation_or_downloadable_contracts():
     assert "release/production-readiness-controls.json" in release_commands
     assert "release/production-readiness-traceability.json" in release_commands
     assert "release/agentcore-regions.json" in release_commands
-    assert "backend/tests/test_release_documentation_contract.py" in release_commands
+    assert "tests/test_release_documentation_contract.py" in release_commands
 
     export_job = jobs["export-gate"]
     export_commands = _workflow_steps(export_job)
     for relative in DOWNLOAD_SUITE_FILES:
         assert relative in export_commands
     assert "releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz" in export_commands
-    assert "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8" in export_commands
+    assert (
+        "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8" in export_commands
+    )  # pragma: allowlist secret
     assert "actionlint .github/workflows/agentic-ai-self-service-ci.yml" in export_commands
     assert "$RUNNER_TEMP/export-gate.xml" in export_commands
     assert "/tmp/export-gate.xml" not in export_commands

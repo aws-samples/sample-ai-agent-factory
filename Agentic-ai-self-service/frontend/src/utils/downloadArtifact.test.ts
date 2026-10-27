@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ARTIFACT_INTEGRITY_ERROR, downloadArtifact } from './downloadArtifact';
 
 const ARCHIVE = new TextEncoder().encode('test');
-const ARCHIVE_SHA256 = '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08';
+const ARCHIVE_SHA256 = '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08';  // pragma: allowlist secret
 const INLINE_RESPONSE = {
   archive_sha256: ARCHIVE_SHA256,
   archive_bytes: ARCHIVE.byteLength,

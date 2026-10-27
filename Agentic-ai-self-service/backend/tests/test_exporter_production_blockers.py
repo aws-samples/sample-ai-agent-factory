@@ -470,28 +470,38 @@ _BAD_REFERENCE_CASES = (
             "gatewayConfig": {
                 "gatewayProvider": "litellm",
                 "litellmBaseUrl": "https://proxy.example",
-                "litellmApiKey": "marker-raw-key",
+                "litellmApiKey": "marker-raw-key",  # pragma: allowlist secret
             }
         },
         "marker-raw-key",
     ),
     (
         "provider-namespace",
-        {"config": {"providerApiKeyRef": "arn:aws:secretsmanager:us-east-1:123456789012:secret:wrong/provider"}},
+        {
+            "config": {"providerApiKeyRef": "arn:aws:secretsmanager:us-east-1:123456789012:secret:wrong/provider"}
+        },  # pragma: allowlist secret
         "wrong/provider",
     ),
     (
         "account-shape",
-        {"config": {"providerApiKeyRef": "arn:aws:secretsmanager:us-east-1:not-account:secret:agentcore-provider/key"}},
+        {
+            "config": {
+                "providerApiKeyRef": "arn:aws:secretsmanager:us-east-1:not-account:secret:agentcore-provider/key"
+            }
+        },  # pragma: allowlist secret
         "not-account",
     ),
-    ("oauth-name", {"identityConfig": {"provider": "okta", "clientSecretRef": "bare-secret-name"}}, "bare-secret-name"),
+    (
+        "oauth-name",
+        {"identityConfig": {"provider": "okta", "clientSecretRef": "bare-secret-name"}},
+        "bare-secret-name",
+    ),  # pragma: allowlist secret
     (
         "otel-namespace",
         {
             "observabilityConfig": {
                 "enabled": True,
-                "authHeaderSecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:wrong/otel",
+                "authHeaderSecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:wrong/otel",  # pragma: allowlist secret
             }
         },
         "wrong/otel",
@@ -503,7 +513,7 @@ _BAD_REFERENCE_CASES = (
     ),
     (
         "url-userinfo",
-        {"config": {"providerBaseUrl": "https://user:marker-password@models.example/v1"}},
+        {"config": {"providerBaseUrl": "https://user:marker-password@models.example/v1"}},  # pragma: allowlist secret
         "marker-password",
     ),
     ("multiline", {"gatewayConfig": {"gatewayUrl": "https://gateway.example/marker-one\nmarker-two"}}, "marker-two"),
@@ -516,7 +526,9 @@ _BAD_REFERENCE_CASES = (
     # serialization-based scan. It must still be refused, by the typed attribute, on both routes.
     (
         "connector-typed-secret",
-        {"connectors": [{"connectorId": "asana", "authMethod": "api_key", "secretValue": "marker-connector-raw"}]},
+        {
+            "connectors": [{"connectorId": "asana", "authMethod": "api_key", "secretValue": "marker-connector-raw"}]
+        },  # pragma: allowlist secret
         "marker-connector-raw",
     ),
     (
@@ -561,10 +573,12 @@ def test_typed_write_only_connector_secret_is_refused_by_the_validator_itself_wi
     request = DeployRequest.model_validate(
         _merge_case(
             _body(),
-            {"connectors": [{"connectorId": "asana", "authMethod": "api_key", "secretValue": "marker-typed-secret"}]},
+            {
+                "connectors": [{"connectorId": "asana", "authMethod": "api_key", "secretValue": "marker-typed-secret"}]
+            },  # pragma: allowlist secret
         )
     )
-    assert request.connectors[0].secret_value == "marker-typed-secret"
+    assert request.connectors[0].secret_value == "marker-typed-secret"  # pragma: allowlist secret
     assert "secretValue" not in request.connectors[0].model_dump(by_alias=True), "control: the field is hidden"
     with pytest.raises(ExportReferenceValidationError) as excinfo:
         validate_export_references(request)
@@ -578,18 +592,18 @@ def test_valid_reference_namespaces_and_https_endpoints_pass_the_export_gate():
             _body("openai"),
             {
                 "config": {
-                    "providerApiKeyRef": "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-provider/openai-AbCdEf"
+                    "providerApiKeyRef": "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-provider/openai-AbCdEf"  # pragma: allowlist secret
                 },
                 "gatewayConfig": {
                     "gatewayProvider": "litellm",
                     "litellmBaseUrl": "https://proxy.example/v1",
-                    "litellmApiKeyRef": "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-connector/litellm-AbCdEf",
+                    "litellmApiKeyRef": "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-connector/litellm-AbCdEf",  # pragma: allowlist secret
                     "client_info": {"token_endpoint": "https://idp.example/oauth/token"},
                 },
                 "observabilityConfig": {
                     "enabled": True,
                     "otlpEndpoint": "https://otel.example/v1/traces",
-                    "authHeaderSecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-otel/team-AbCdEf",
+                    "authHeaderSecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-otel/team-AbCdEf",  # pragma: allowlist secret
                 },
             },
         )
@@ -598,7 +612,7 @@ def test_valid_reference_namespaces_and_https_endpoints_pass_the_export_gate():
 
 
 def test_cfn_non_bedrock_provider_reference_is_serialized_by_reference_only():
-    secret = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-provider/openai-AbCdEf"
+    secret = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentcore-provider/openai-AbCdEf"  # pragma: allowlist secret
     body = _merge_case(
         _body("openai"),
         {"config": {"providerApiKeyRef": secret, "providerBaseUrl": "https://models.example/v1"}},
